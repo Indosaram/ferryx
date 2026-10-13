@@ -1130,6 +1130,9 @@ export const RemoteHostConnection: React.FC<{
   const [chatOlderCursor, setChatOlderCursor] = useState<ReferenceHistoryCursor | null>(null);
   const [chatHasOlder, setChatHasOlder] = useState(false);
   const chatLoadedOlderRef = useRef(false);
+  // Where the newest page started when the older pages were joined to it: a later newest page
+  // that starts anywhere else no longer meets them, and they are dropped rather than left a gap.
+  const chatNewestStartRef = useRef<ReferenceHistoryCursor | null>(null);
   const [chatPrompt, setChatPrompt] = useState<ReferencePrompt | null>(null);
   const chatPromptIdRef = useRef<string | null>(null);
   const chatComposerRef = useRef<MobileChatComposerHandle | null>(null);
@@ -2664,14 +2667,34 @@ export const RemoteHostConnection: React.FC<{
       return;
     }
     const controller = new AbortController();
-    void readChatGatewayIdentity({ baseUrl: transportBaseUrl, token, signal: controller.signal })
-      .then((identity) => {
-        if (!controller.signal.aborted) setChatGateway(identity);
-      })
-      .catch(() => {
-        /* a transient capabilities failure keeps the identity this lane already had */
-      });
-    return () => controller.abort();
+    let retry: ReturnType<typeof setInterval> | null = null;
+    let warned = false;
+    // A transient capabilities failure answers null: it keeps the identity this lane already had,
+    // says so, and asks again on the history poll's cadence until the host answers.
+    const readIdentity = async () => {
+      const identity = await readChatGatewayIdentity({ baseUrl: transportBaseUrl, token, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      if (identity !== null) {
+        setChatGateway(identity);
+        if (retry !== null) clearInterval(retry);
+        retry = null;
+        if (warned) setChatWarnings((prev) => prev.filter((warning) => warning !== CHAT_UNAVAILABLE_WARNING));
+        warned = false;
+        return;
+      }
+      warned = true;
+      setChatWarnings((prev) => withChatWarning(prev, CHAT_UNAVAILABLE_WARNING));
+      if (retry === null) {
+        retry = setInterval(() => {
+          void readIdentity();
+        }, 3000);
+      }
+    };
+    void readIdentity();
+    return () => {
+      controller.abort();
+      if (retry !== null) clearInterval(retry);
+    };
   }, [token, transportBaseUrl]);
 
   // The pane's own facts, from the host's session list: its daemon incarnation and the provider
@@ -2747,6 +2770,7 @@ export const RemoteHostConnection: React.FC<{
     setChatOlderCursor(null);
     setChatHasOlder(false);
     chatLoadedOlderRef.current = false;
+    chatNewestStartRef.current = null;
     setChatPrompt(null);
     chatPromptIdRef.current = null;
     setChatScreenRevision(null);
@@ -2826,7 +2850,19 @@ export const RemoteHostConnection: React.FC<{
         if (liveTarget === null || !sameReferenceTarget(liveTarget, read.fence.target)) return;
         chatFenceRef.current = read.fence;
         setChatPage(read.page);
+        const start = read.page.cursor ?? null;
+        const anchor = chatNewestStartRef.current;
+        if (
+          chatLoadedOlderRef.current &&
+          (start === null || anchor === null || start.streamId !== anchor.streamId || start.offset !== anchor.offset)
+        ) {
+          chatLoadedOlderRef.current = false;
+          setChatLoadedOlder(false);
+          setChatOlderMessages([]);
+          setChatOlderFailed(false);
+        }
         if (!chatLoadedOlderRef.current) {
+          chatNewestStartRef.current = start;
           setChatOlderCursor(read.page.cursor ?? null);
           setChatHasOlder(read.page.hasMore && read.page.cursor != null);
         }

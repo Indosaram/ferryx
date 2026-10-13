@@ -323,6 +323,33 @@ describe("MobileChatWorkspace", () => {
     expect(stream.scrollTop).toBe(300);
   });
 
+  it("16b. leaves the reader's place alone when a turn is appended below them", () => {
+    const firstPage: MobileChatMessageProps[] = Array.from({ length: 4 }, (_, idx) => ({
+      id: `new-${idx}`,
+      role: idx % 2 === 0 ? "user" : "assistant",
+      content: `Newest ${idx}`,
+      timestamp: Date.now() + idx,
+    }));
+    const { rerender } = render(<MobileChatWorkspace messages={firstPage} onSendMessage={vi.fn()} />);
+
+    const stream = screen.getByTestId("chat-message-stream");
+    Object.defineProperty(stream, "clientHeight", { value: 300, configurable: true });
+    Object.defineProperty(stream, "scrollHeight", { value: 3000, configurable: true });
+    Object.defineProperty(stream, "scrollTop", { value: 2000, configurable: true, writable: true });
+    fireEvent.scroll(stream);
+
+    // a new turn lands at the bottom: content below the reader grows by 200px
+    Object.defineProperty(stream, "scrollHeight", { value: 3200, configurable: true });
+    rerender(
+      <MobileChatWorkspace
+        messages={[...firstPage, { id: "new-4", role: "assistant", content: "Appended", timestamp: Date.now() + 10 }]}
+        onSendMessage={vi.fn()}
+      />
+    );
+
+    expect(stream.scrollTop).toBe(2000);
+  });
+
   it("17. follows the bottom when the reader was already at the bottom", () => {
     const firstPage: MobileChatMessageProps[] = [{ id: "new-0", role: "assistant", content: "First", timestamp: Date.now() }];
     const { rerender } = render(<MobileChatWorkspace messages={firstPage} onSendMessage={vi.fn()} />);
