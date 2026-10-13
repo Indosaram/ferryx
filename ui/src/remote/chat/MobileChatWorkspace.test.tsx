@@ -351,5 +351,43 @@ describe("MobileChatWorkspace", () => {
     );
     expect(screen.queryByTestId("mobile-chat-header")).not.toBeInTheDocument();
   });
+
+  it("(a) empty state renders starter prompt chips", () => {
+    render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} />);
+
+    const starters = screen.getAllByTestId("chat-empty-starter");
+    expect(starters.length).toBeGreaterThanOrEqual(2);
+    expect(starters.length).toBeLessThanOrEqual(3);
+    expect(screen.getByText("Summarize the current state")).toBeInTheDocument();
+    expect(screen.getByText("What changed since my last message?")).toBeInTheDocument();
+    expect(screen.getByText("Run the tests")).toBeInTheDocument();
+  });
+
+  it("(b) tapping a chip fills the composer with that text, focuses it, and does not call onSendMessage", () => {
+    const handleSend = vi.fn();
+    render(<MobileChatWorkspace messages={[]} onSendMessage={handleSend} />);
+
+    const textarea = screen.getByTestId("chat-composer-textarea");
+    expect(textarea).toHaveValue("");
+
+    const chip = screen.getByRole("button", { name: "Summarize the current state" });
+    fireEvent.click(chip);
+
+    expect(textarea).toHaveValue("Summarize the current state");
+    expect(textarea).toHaveFocus();
+    expect(handleSend).not.toHaveBeenCalled();
+  });
+
+  it("(c) chips disappear once a message exists", () => {
+    const { rerender } = render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} />);
+    expect(screen.getAllByTestId("chat-empty-starter").length).toBeGreaterThan(0);
+
+    const messages: MobileChatMessageProps[] = [
+      { id: "msg-1", role: "user", content: "Hello", timestamp: Date.now() },
+    ];
+    rerender(<MobileChatWorkspace messages={messages} onSendMessage={vi.fn()} />);
+    expect(screen.queryByTestId("chat-empty-state")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("chat-empty-starter")).not.toBeInTheDocument();
+  });
 });
 

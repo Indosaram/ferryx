@@ -20,6 +20,7 @@ export type { ChatAttachment };
 
 export interface MobileChatComposerHandle {
   clearDraft: () => void;
+  focus: () => void;
 }
 
 /**
@@ -153,9 +154,14 @@ export const MobileChatComposer = React.forwardRef<
     onClearDraft?.();
   }, [setText, onClearDraft]);
 
+  const focus = useCallback(() => {
+    textareaRef.current?.focus();
+  }, []);
+
   useImperativeHandle(ref, () => ({
     clearDraft,
-  }), [clearDraft]);
+    focus,
+  }), [clearDraft, focus]);
 
   /** Where a mention goes: the caret the user left in the box. */
   const caret = useCallback((): number => {
