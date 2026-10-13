@@ -351,6 +351,8 @@ pub fn remote_browser_error_details(err: &RemoteBrowserError) -> Option<serde_js
 pub fn map_remote_browser_error(err: &RemoteBrowserError) -> (&'static str, bool, Option<u64>) {
     let msg = match err {
         RemoteBrowserError::ExecutionFailed(m)
+        | RemoteBrowserError::TargetNotFound(m)
+        | RemoteBrowserError::StaleFrame(m)
         | RemoteBrowserError::InvalidRequest(m)
         | RemoteBrowserError::Unavailable(m)
         | RemoteBrowserError::Forbidden(m)
@@ -380,6 +382,8 @@ pub fn map_remote_browser_error(err: &RemoteBrowserError) -> (&'static str, bool
         RemoteBrowserError::NotFound(_) => ("BROWSER_NOT_FOUND", false, None),
         RemoteBrowserError::InvalidRequest(_) => ("BROWSER_INVALID_REQUEST", false, None),
         RemoteBrowserError::ExecutionFailed(_) => ("BROWSER_EXECUTION_FAILED", false, None),
+        RemoteBrowserError::TargetNotFound(_) => ("BROWSER_TARGET_NOT_FOUND", false, None),
+        RemoteBrowserError::StaleFrame(_) => ("BROWSER_STALE_FRAME", false, None),
         RemoteBrowserError::InputRefused(_) => ("UNSUPPORTED", false, None),
     }
 }
@@ -1176,6 +1180,7 @@ impl BrowserWsSession {
                 }
                 self.is_driver = false;
                 self.lease_epoch = None;
+                crate::browser::remote_input::prune_ime_supersession(&self.browser_id, epoch);
                 let _ = tokio::select! {
                     _ = self.cancel_token.cancelled() => return Ok(()),
                     r = backend.release_driver(sub_id, epoch) => r,
@@ -1868,6 +1873,7 @@ impl BrowserWsSession {
             admission.unsubscribe(&self.browser_id, sub);
         }
         if let Some(epoch) = self.lease_epoch.take() {
+            crate::browser::remote_input::prune_ime_supersession(&self.browser_id, epoch);
             let s_id = sub_id.as_deref().unwrap_or("");
             admission.broker.release_driver(
                 &self.device_id,
@@ -1934,6 +1940,91 @@ pub mod tests {
         let dummy_binary = vec![0x62, 1, 1, 1];
         let res = session.handle_client_binary(&dummy_binary);
         assert!(res.is_err(), "Client binary must be rejected");
+    }
+
+    async fn subscribed_driver(browser_id: &str) -> (BrowserWsSession, Arc<dyn RemoteBrowserBackend>, AdmissionController) {
+        let now = Instant::now();
+        let mut session = BrowserWsSession::new(
+            format!("c-{browser_id}"),
+            format!("d-{browser_id}"),
+            browser_id.into(),
+            DevicePermission::Control,
+            now,
+        );
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
+        let admission = AdmissionController::new();
+        let sub_msg = ClientMessage::BrowserSubscribe {
+            request_id: "r1".into(),
+            viewer_instance_id: "v1".into(),
+            options: BrowserSubscribeOptions {
+                format: crate::remote::browser_protocol::BrowserImageFormat::Jpeg,
+                quality: None,
+                interval_ms: None,
+                max_edge: None,
+            },
+        };
+        session
+            .handle_client_message(sub_msg, &backend, &admission, now)
+            .await
+            .unwrap();
+        let claim_msg = ClientMessage::BrowserDriverClaim {
+            request_id: "r2".into(),
+            subscription_id: session.subscription_id.clone().unwrap(),
+            browser_id: browser_id.into(),
+        };
+        session
+            .handle_client_message(claim_msg, &backend, &admission, now)
+            .await
+            .unwrap();
+        assert!(session.is_driver);
+        (session, backend, admission)
+    }
+
+    fn ime_tracker_has(browser_id: &str, epoch: u64) -> bool {
+        crate::browser::remote_input::IME_SUPERSESSION_TRACKER
+            .lock()
+            .keys()
+            .any(|(b, e, _)| b == browser_id && *e == epoch)
+    }
+
+    #[tokio::test]
+    async fn ime_supersession_tracker_pruned_on_teardown() {
+        let browser_id = "b-ime-prune-teardown";
+        let (mut session, _backend, admission) = subscribed_driver(browser_id).await;
+        let epoch = session.lease_epoch.unwrap();
+        crate::browser::remote_input::IME_SUPERSESSION_TRACKER
+            .lock()
+            .insert((browser_id.to_string(), epoch, "#field".to_string()), 7);
+        session.teardown(&admission);
+        assert!(
+            !ime_tracker_has(browser_id, epoch),
+            "teardown must prune IME supersession entries for its browser/epoch"
+        );
+    }
+
+    #[tokio::test]
+    async fn ime_supersession_tracker_pruned_on_driver_release() {
+        let browser_id = "b-ime-prune-release";
+        let (mut session, backend, admission) = subscribed_driver(browser_id).await;
+        let epoch = session.lease_epoch.unwrap();
+        crate::browser::remote_input::IME_SUPERSESSION_TRACKER
+            .lock()
+            .insert((browser_id.to_string(), epoch, "active".to_string()), 3);
+        let release = ClientMessage::BrowserDriverRelease {
+            request_id: "r-rel".into(),
+            lease_epoch: epoch.to_string(),
+        };
+        let resp = session
+            .handle_client_message(release, &backend, &admission, Instant::now())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(resp, ServerMessage::BrowserDriverReleased { .. }));
+        assert!(
+            !ime_tracker_has(browser_id, epoch),
+            "driver release must prune IME supersession entries for its browser/epoch"
+        );
+        session.teardown(&admission);
     }
 
     #[tokio::test]

@@ -1110,6 +1110,12 @@ fn keep_or_discard_fresh_webview(session_exists: bool) -> Result<(), String> {
 
 static CREATED_SESSION_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// Drops a session whose webview creation failed.
+fn discard_failed_session(manager: &BrowserManager, browser_id: &str) {
+    manager.remove_session(browser_id);
+    CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
+}
+
 pub fn record_session_created(browser_id: &str) {
     let mut ids = CREATED_SESSION_IDS.lock();
     ids.retain(|id| id != browser_id);
@@ -1590,11 +1596,11 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                 match creation_result {
                     Ok(Ok(Ok(()))) => {}
                     Ok(Ok(Err(error))) => {
-                        manager.remove_session(&state.browser_id);
+                        discard_failed_session(manager, &state.browser_id);
                         return Err(BrowserError::CreateFailed(error).into());
                     }
                     Ok(Err(_)) | Err(_) => {
-                        manager.remove_session(&state.browser_id);
+                        discard_failed_session(manager, &state.browser_id);
                         return Err(BrowserError::CreateFailed(
                             "browser webview creation did not complete on the main thread".into(),
                         )
@@ -1603,7 +1609,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                 }
             }
             Err(error) => {
-                manager.remove_session(&state.browser_id);
+                discard_failed_session(manager, &state.browser_id);
                 return Err(BrowserError::CreateFailed(error.to_string()).into());
             }
         }
@@ -1745,7 +1751,26 @@ pub async fn navigate_browser_session<R: tauri::Runtime>(
     browser_id: &str,
     url: &str,
 ) -> Result<(), IpcError> {
-    let valid_url = manager.update_url(browser_id, url)?;
+    navigate_browser_session_with_context(
+        app,
+        manager,
+        browser_id,
+        url,
+        crate::browser::security::BrowserSecurityContext::Local,
+    )
+    .await
+}
+
+/// Navigates a session, validating the URL under `context`; remote executors pass
+/// `BrowserSecurityContext::Remote` so local-only schemes (file://) stay denied.
+pub async fn navigate_browser_session_with_context<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    browser_id: &str,
+    url: &str,
+    context: crate::browser::security::BrowserSecurityContext,
+) -> Result<(), IpcError> {
+    let valid_url = manager.update_url_with_context(browser_id, url, context)?;
     let state = manager.get_state(browser_id)?;
 
     if let Some(webview) = app.get_webview(&state.webview_label) {
@@ -3131,6 +3156,33 @@ mod tests {
     use super::{windows_open_request, WindowsOpenRequest};
 
     #[test]
+    fn failed_creation_prunes_created_session_id() {
+        let manager = BrowserManager::new();
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: Some("ws-prune".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        record_session_created(&state.browser_id);
+        discard_failed_session(&manager, &state.browser_id);
+        assert!(manager.get_state(&state.browser_id).is_err());
+        assert!(
+            !CREATED_SESSION_IDS
+                .lock()
+                .iter()
+                .any(|id| id == &state.browser_id),
+            "a session whose creation failed must not stay in CREATED_SESSION_IDS"
+        );
+    }
+
+    #[test]
     fn external_open_propagates_failure() {
         for failure in 0..=32 {
             assert!(super::shell_execute_result(failure).is_err());
@@ -4445,9 +4497,20 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         .ok_or_else(|| {
                             RemoteBrowserError::InvalidRequest("missing url param".into())
                         })?;
-                    navigate_browser_session(&self.app, &self.manager, &ctx.browser_id, url)
-                        .await
-                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    navigate_browser_session_with_context(
+                        &self.app,
+                        &self.manager,
+                        &ctx.browser_id,
+                        url,
+                        crate::browser::security::BrowserSecurityContext::Remote,
+                    )
+                    .await
+                    .map_err(|e| match e.code {
+                        IpcErrorCode::BrowserUrlSchemeDenied | IpcErrorCode::BrowserUrlInvalid => {
+                            RemoteBrowserError::Forbidden(e.message)
+                        }
+                        _ => RemoteBrowserError::ExecutionFailed(e.to_string()),
+                    })?;
                     let state = self
                         .manager
                         .get_state(&ctx.browser_id)
@@ -4511,7 +4574,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                     {
                         if let Ok(expected_vp) = vp_str.parse::<u64>() {
                             if expected_vp != current_vp_rev as u64 {
-                                return Err(RemoteBrowserError::InvalidRequest("BROWSER_STALE_FRAME: viewport revision changed since frame capture".into()));
+                                return Err(RemoteBrowserError::StaleFrame("viewport revision changed since frame capture".into()));
                             }
                         }
                     } else if let Some(expected_vp) = p
@@ -4520,7 +4583,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         .and_then(|v| v.as_u64())
                     {
                         if expected_vp != current_vp_rev as u64 {
-                            return Err(RemoteBrowserError::InvalidRequest("BROWSER_STALE_FRAME: viewport revision changed since frame capture".into()));
+                            return Err(RemoteBrowserError::StaleFrame("viewport revision changed since frame capture".into()));
                         }
                     }
 
@@ -4569,8 +4632,8 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                             .manager
                             .verify_remote_target(&ctx.browser_id, snap_id, map_rev, ref_str)
                             .map_err(|e| {
-                                RemoteBrowserError::NotFound(format!(
-                                    "BROWSER_TARGET_NOT_FOUND: target resolution failed: {e}"
+                                RemoteBrowserError::TargetNotFound(format!(
+                                    "target resolution failed: {e}"
                                 ))
                             })?;
                         let sel_json = serde_json::to_string(&selector).unwrap_or_default();
@@ -4648,9 +4711,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                                 RemoteBrowserError::InputRefused(input_err.explanation())
                             }
                             crate::browser::remote_input::ActionDecodeError::NotFound(message) => {
-                                RemoteBrowserError::NotFound(format!(
-                                    "BROWSER_TARGET_NOT_FOUND: {message}"
-                                ))
+                                RemoteBrowserError::TargetNotFound(message)
                             }
                             crate::browser::remote_input::ActionDecodeError::Malformed(message) => {
                                 RemoteBrowserError::ExecutionFailed(message)
@@ -4681,7 +4742,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
                     crate::browser::remote_input::decode_action_result(&res_str).map_err(|e| {
                         if e.contains("element not found") || e.contains("no active element") {
-                            RemoteBrowserError::NotFound(format!("BROWSER_TARGET_NOT_FOUND: {e}"))
+                            RemoteBrowserError::TargetNotFound(e)
                         } else {
                             RemoteBrowserError::ExecutionFailed(e)
                         }
@@ -4757,10 +4818,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                     .await
                     .map_err(|e| match e.code {
                         IpcErrorCode::BrowserAutomationTargetNotFound => {
-                            RemoteBrowserError::NotFound(format!(
-                                "BROWSER_TARGET_NOT_FOUND: {}",
-                                e.message
-                            ))
+                            RemoteBrowserError::TargetNotFound(e.message)
                         }
                         IpcErrorCode::InvalidArgument => {
                             RemoteBrowserError::InvalidRequest(e.message)
@@ -4974,9 +5032,7 @@ pub fn build_fill_script(
         let selector = mgr
             .verify_remote_target(browser_id, sid, map_rev, ref_str)
             .map_err(|e| {
-                RemoteBrowserError::NotFound(format!(
-                    "BROWSER_TARGET_NOT_FOUND: target resolution failed: {e}"
-                ))
+                RemoteBrowserError::TargetNotFound(format!("target resolution failed: {e}"))
             })?;
         let sel_json = serde_json::to_string(&selector).unwrap_or_default();
         Ok(format!(
@@ -5096,6 +5152,47 @@ mod r6_fill_tests {
             "Must compare tracked revision before mutation"
         );
         assert!(script.contains("fill superseded"), "Must abort on mismatch");
+    }
+
+    #[tokio::test]
+    async fn remote_executor_navigate_rejects_local_file_url() {
+        use crate::remote::browser_backend::{
+            BrowserCommandContext, BrowserCommandExecutor, RemoteBrowserError,
+        };
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-remote-nav".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        let executor = GuiBrowserCommandExecutor::new(app.handle().clone(), Arc::clone(&manager));
+        let res = executor
+            .execute(BrowserCommandContext {
+                browser_id: state.browser_id.clone(),
+                command: "navigate".into(),
+                params: Some(serde_json::json!({ "url": "file:///tmp/x.html" })),
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            matches!(res, Err(RemoteBrowserError::Forbidden(ref m)) if m.contains("file:///tmp/x.html")),
+            "remote navigate to a local file must be denied by the remote URL policy, got {res:?}"
+        );
+        assert_eq!(manager.get_state(&state.browser_id).unwrap().url, state.url);
+        // Local callers keep the local policy.
+        navigate_browser_session(app.handle(), &manager, &state.browser_id, "file:///tmp/x.html")
+            .await
+            .expect("local navigate keeps the local file policy");
     }
 
     #[tokio::test]

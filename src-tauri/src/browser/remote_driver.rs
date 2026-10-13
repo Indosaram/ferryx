@@ -118,6 +118,10 @@ impl RemoteDriverBroker {
         // Rate limiting: max 2 claims/sec per device
         {
             let mut history = self.claim_history.lock();
+            history.retain(|_, stamps| {
+                stamps.retain(|&t| now.duration_since(t) < Duration::from_secs(1));
+                !stamps.is_empty()
+            });
             let timestamps = history.entry(device_id.to_string()).or_default();
             timestamps.retain(|&t| now.duration_since(t) < Duration::from_secs(1));
             if timestamps.len() >= MAX_CLAIMS_PER_SECOND {
@@ -340,6 +344,25 @@ impl RemoteDriverBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_history_drops_devices_with_no_recent_claims() {
+        let broker = RemoteDriverBroker::new();
+        let stale = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("instant in the past");
+        broker
+            .claim_history
+            .lock()
+            .insert("dev-gone".to_string(), vec![stale]);
+        broker.claim("dev-new", "conn", "sub", "b1", true).unwrap();
+        let history = broker.claim_history.lock();
+        assert!(
+            !history.contains_key("dev-gone"),
+            "devices whose claim window emptied must not keep a history key"
+        );
+        assert!(history.contains_key("dev-new"));
+    }
 
     #[test]
     fn test_driver_lease_claim_and_expiry() {
