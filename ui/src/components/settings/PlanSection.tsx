@@ -150,8 +150,12 @@ export function PlanSection({
   const [busy, setBusy] = useState(false);
   const [members, setMembers] = useState<readonly OrgMember[] | null>(null);
   const [membersError, setMembersError] = useState<string | null>(null);
-  const [packsDraft, setPacksDraft] = useState(0);
-  const [seatsDraft, setSeatsDraft] = useState(TEAM_MIN_SEATS);
+  // Raw text drafts: clamping on every keystroke turns typing "10" into 20 and clearing into 2.
+  // The value is clamped when applied (and the field is normalized on blur).
+  const [packsText, setPacksText] = useState("0");
+  const [seatsText, setSeatsText] = useState(String(TEAM_MIN_SEATS));
+  const packsDraft = clampPacks(Number(packsText));
+  const seatsDraft = clampSeats(Number(seatsText));
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteSent, setInviteSent] = useState<OrgInvite | null>(null);
   const [pendingRemoveId, setPendingRemoveId] = useState<string | null>(null);
@@ -214,8 +218,8 @@ export function PlanSection({
 
   useEffect(() => {
     if (!entitlement) return;
-    setPacksDraft(entitlement.hostPacks);
-    if (entitlement.seats !== null) setSeatsDraft(entitlement.seats);
+    setPacksText(String(entitlement.hostPacks));
+    if (entitlement.seats !== null) setSeatsText(String(entitlement.seats));
   }, [entitlement]);
 
   const teamPlan = entitlement !== null && isTeamPlan(entitlement.plan);
@@ -286,6 +290,9 @@ export function PlanSection({
   };
 
   const handleQuantity = async (change: BillingQuantityChange, kind: RenewalChangeKind) => {
+    // Show the clamped value that is actually being sent.
+    if (change.seats !== undefined) setSeatsText(String(change.seats));
+    if (change.hostPacks !== undefined) setPacksText(String(change.hostPacks));
     const currentAccountGen = accountGenerationRef.current;
     setBusy(true);
     setActionError(null);
@@ -301,6 +308,14 @@ export function PlanSection({
       if (accountGenerationRef.current === currentAccountGen) {
         setBusy(false);
       }
+    }
+  };
+
+  const handleManageBilling = async (url: string) => {
+    try {
+      await openExternalUrl(url);
+    } catch (error) {
+      setActionError(toBillingApiError(error));
     }
   };
 
@@ -437,7 +452,7 @@ export function PlanSection({
                   variant="outline"
                   size="sm"
                   className="h-7 text-[11px]"
-                  onClick={() => void openExternalUrl(manageUrl)}
+                  onClick={() => void handleManageBilling(manageUrl)}
                 >
                   Manage billing
                   <ExternalLink className="size-3" />
@@ -562,8 +577,9 @@ export function PlanSection({
                       type="number"
                       inputMode="numeric"
                       min={TEAM_MIN_SEATS}
-                      value={seatsDraft}
-                      onChange={(event) => setSeatsDraft(clampSeats(Number(event.target.value)))}
+                      value={seatsText}
+                      onChange={(event) => setSeatsText(event.target.value)}
+                      onBlur={() => setSeatsText(String(seatsDraft))}
                       className="h-7 w-20 rounded-md px-2 text-[12px] md:text-[12px]"
                     />
                     {teamPlan ? (
@@ -607,8 +623,9 @@ export function PlanSection({
                         inputMode="numeric"
                         min={0}
                         max={MAX_PACKS}
-                        value={packsDraft}
-                        onChange={(event) => setPacksDraft(clampPacks(Number(event.target.value)))}
+                        value={packsText}
+                        onChange={(event) => setPacksText(event.target.value)}
+                        onBlur={() => setPacksText(String(packsDraft))}
                         className="h-7 w-20 rounded-md px-2 text-[12px] md:text-[12px]"
                       />
                       <Button
@@ -663,7 +680,9 @@ export function PlanSection({
                     className="divide-y divide-border rounded-lg border border-border bg-card shadow-none"
                   >
                     {members === null ? (
-                      <div className="p-4 text-center text-[12px] text-muted-foreground">Loading members</div>
+                      membersError ? null : (
+                        <div className="p-4 text-center text-[12px] text-muted-foreground">Loading members</div>
+                      )
                     ) : members.length === 0 ? (
                       <div className="p-4 text-center text-[12px] text-muted-foreground">
                         No members yet. Invite teammates so their machines join the team pool.

@@ -126,7 +126,8 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
   const [loadingSystemConfig, setLoadingSystemConfig] = useState(false);
   const [showSystemConfigView, setShowSystemConfigView] = useState(false);
   const [showRawConfig, setShowRawConfig] = useState(false);
-  const [importingHostId, setImportingHostId] = useState<string | null>(null);
+  const [importingHostIds, setImportingHostIds] = useState<ReadonlySet<string>>(new Set());
+  const [pendingDeleteHostId, setPendingDeleteHostId] = useState<string | null>(null);
 
   const [busyHostId, setBusyHostId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestState>>({});
@@ -325,7 +326,8 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
   };
 
   const handleImportSingleSystemHost = async (sysHost: SshHost) => {
-    setImportingHostId(sysHost.id);
+    if (importingHostIds.has(sysHost.id)) return;
+    setImportingHostIds((prev) => new Set(prev).add(sysHost.id));
     setActionError(null);
     try {
       await updateSshHost({
@@ -336,7 +338,11 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
     } catch (err) {
       setActionError(extractIpcErrorMessage(err, "Failed to import host."));
     } finally {
-      setImportingHostId(null);
+      setImportingHostIds((prev) => {
+        const next = new Set(prev);
+        next.delete(sysHost.id);
+        return next;
+      });
     }
   };
 
@@ -359,6 +365,7 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
     setActionError(null);
     try {
       await deleteSshHost(hostId);
+      setPendingDeleteHostId(null);
     } catch (err) {
       setActionError(extractIpcErrorMessage(err, "Failed to delete SSH machine."));
     } finally {
@@ -406,8 +413,9 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
           bundledVersion = updateState.bundledVersion ?? null;
           bundledPath = updateState.bundledPath ?? null;
           decision = updateState.decision ?? null;
-        } catch {
-          // Update state check is best-effort
+        } catch (updateErr) {
+          // The helper update check is best-effort for the test result, but the failure is shown.
+          setActionError(extractIpcErrorMessage(updateErr, "Helper update check failed."));
         }
       }
       setTestResults((prev) => ({
@@ -468,11 +476,12 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
             provisioning: false,
           },
         }));
-      } catch {
+      } catch (updateErr) {
         setTestResults((prev) => ({
           ...prev,
           [host.id]: { ...prev[host.id], provisioning: false },
         }));
+        setActionError(extractIpcErrorMessage(updateErr, "Helper installed, but its status could not be re-checked."));
       }
     } catch (error) {
       if (!isCurrentHost(host)) return;
@@ -712,11 +721,11 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
                         <Button
                           size="sm"
                           variant="secondary"
-                          disabled={importingHostId === sysHost.id}
+                          disabled={importingHostIds.has(sysHost.id)}
                           onClick={() => handleImportSingleSystemHost(sysHost)}
                           className="h-6 text-[11px] px-2 shrink-0"
                         >
-                          {importingHostId === sysHost.id ? (
+                          {importingHostIds.has(sysHost.id) ? (
                             <Loader2 className="size-3 animate-spin" />
                           ) : (
                             "+ Import"
@@ -856,6 +865,10 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
                   <SelectContent>
                     <SelectItem value="agent">SSH Agent</SelectItem>
                     <SelectItem value="key">Key File</SelectItem>
+                    {formData.authMethod === "password" ? (
+                      // Saved password hosts keep their method; the password itself is managed in Remote > Edit.
+                      <SelectItem value="password">Password</SelectItem>
+                    ) : null}
                   </SelectContent>
                 </Select>
               </div>
@@ -1088,7 +1101,7 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
                             <span>{test.helper === "installed" ? "Ready" : test.helper === "missing" ? "Setup needed" : "Not verified"}</span>
                             {test.remoteVersion && test.bundledVersion && test.decision === "upgrade" ? (
                               <span className="ml-1 text-amber-600 dark:text-amber-400">
-                                {" "}· 업데이트 가능 ({test.remoteVersion} → {test.bundledVersion})
+                                {" "}· Update available ({test.remoteVersion} → {test.bundledVersion})
                               </span>
                             ) : null}
                           </div>
@@ -1102,7 +1115,7 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
                             onClick={() => handleProvisionHelper(host, test.bundledPath!)}
                             aria-label={test.decision === "install" ? `Install helper on ${host.label}` : `Update helper on ${host.label}`}
                           >
-                            {test.provisioning ? (test.decision === "install" ? "설치 중…" : "업데이트 중…") : test.decision === "install" ? "설치 (Install helper)" : "업데이트 (Update helper)"}
+                            {test.provisioning ? (test.decision === "install" ? "Installing…" : "Updating…") : test.decision === "install" ? "Install helper" : "Update helper"}
                           </Button>
                         ) : null}
                         <Button
@@ -1167,12 +1180,35 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
                       size="sm"
                       variant="ghost"
                       disabled={isBusy || test?.testing}
-                      onClick={() => handleDeleteHost(host.id)}
+                      onClick={() => setPendingDeleteHostId(host.id)}
                       className="text-destructive hover:text-destructive hover:bg-destructive/10"
                       aria-label={`Delete ${host.label}`}
                     >
                       <Trash2 className="size-3.5" />
                     </Button>
+                    {pendingDeleteHostId === host.id ? (
+                      <div role="group" aria-label={`Confirm delete ${host.label}`} className="flex items-center gap-1.5">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="destructive"
+                          disabled={isBusy}
+                          onClick={() => void handleDeleteHost(host.id)}
+                          aria-label={`Confirm delete ${host.label}`}
+                        >
+                          Confirm delete
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setPendingDeleteHostId(null)}
+                          aria-label="Cancel delete"
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               );

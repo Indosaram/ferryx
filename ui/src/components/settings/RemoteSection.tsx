@@ -61,6 +61,7 @@ import {
   type AccountMachineView,
 } from "../../remote/accountSession";
 import { getOrCreateAttachKey } from "../../remote/accountAttach";
+import { toIpcError } from "../../lib/tauri";
 import { AccountSignIn } from "./AccountSignIn";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { AddMachineModal, type HostFormData } from "./AddMachineModal";
@@ -113,6 +114,15 @@ function sameConnection(left: SshHost, right: SshHost): boolean {
     left.authMethod === right.authMethod &&
     left.disabled === right.disabled
   );
+}
+
+function describeAccountError(err: unknown): string {
+  if (err instanceof AccountSessionError) return err.message;
+  if (err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string") {
+    const typed = err as { code: string; message?: string };
+    return typed.message || typed.code;
+  }
+  return err instanceof Error ? err.message : String(err);
 }
 
 interface SshTestState {
@@ -177,8 +187,22 @@ export function RemoteSection({
   const [issuedCode, setIssuedCode] = useState<string | null>(null);
   const [isIssuingCode, setIsIssuingCode] = useState(false);
   const [copiedEnrollCommand, setCopiedEnrollCommand] = useState(false);
+  const [copyEnrollFailed, setCopyEnrollFailed] = useState(false);
+  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      clearTimeout(copyResetTimerRef.current);
+    };
+  }, []);
+  // Monotonic id of the newest account-machine list request. A response is applied only while
+  // it is still the newest, so a sign-out or origin switch mid-request cannot repopulate the list.
+  const machinesRequestRef = useRef(0);
 
   useEffect(() => {
+    const requestId = ++machinesRequestRef.current;
     if (!accountToken) {
       setAccountMachines([]);
       return;
@@ -187,11 +211,11 @@ export function RemoteSection({
     setAccountMachinesLoading(true);
     listMachines(accountOrigin, accountToken)
       .then((machines) => {
-        if (!active) return;
+        if (!active || requestId !== machinesRequestRef.current) return;
         setAccountMachines(machines);
       })
       .catch((err: unknown) => {
-        if (!active) return;
+        if (!active || requestId !== machinesRequestRef.current) return;
         if (
           err instanceof AccountSessionError &&
           err.code === "UNAUTHORIZED"
@@ -221,6 +245,26 @@ export function RemoteSection({
       active = false;
     };
   }, [accountToken, accountOrigin]);
+
+  const refreshAccountMachines = async (
+    token: string,
+    origin: string,
+    describe: (message: string) => string = (message) => message,
+  ) => {
+    const requestId = ++machinesRequestRef.current;
+    try {
+      const machines = await listMachines(origin, token);
+      if (requestId === machinesRequestRef.current) setAccountMachines(machines);
+    } catch (err: unknown) {
+      if (requestId !== machinesRequestRef.current) return;
+      if (err instanceof AccountSessionError && err.code === "UNAUTHORIZED") {
+        clearStoredAccountSessionToken();
+        setAccountToken(null);
+        return;
+      }
+      setActionError(describe(describeAccountError(err)));
+    }
+  };
 
   const handleIssueEnrollmentCode = async () => {
     if (!accountToken || isIssuingCode) return;
@@ -320,6 +364,7 @@ export function RemoteSection({
 
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmDeleteSshId, setConfirmDeleteSshId] = useState<string | null>(null);
 
   // Namespaced row refs to avoid ID collisions
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
@@ -364,9 +409,7 @@ export function RemoteSection({
     if (isTauri()) void inventory.refresh();
     resetSshHostsCache();
     if (accountToken) {
-      void listMachines(accountOrigin, accountToken)
-        .then(setAccountMachines)
-        .catch(() => {});
+      void refreshAccountMachines(accountToken, accountOrigin);
     }
   };
 
@@ -427,15 +470,13 @@ export function RemoteSection({
       } finally {
         tunnel.close();
       }
-      await listMachines(accountOrigin, accountToken)
-        .then(setAccountMachines)
-        .catch((error: unknown) => {
-          // The grant itself succeeded; only the refresh failed, so say that rather than
-          // leaving a stale "Needs Grant" row with no explanation.
-          setActionError(
-            `Connected, but the machine list could not be refreshed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
+      // The grant itself succeeded; only the refresh failed, so say that rather than
+      // leaving a stale "Needs Grant" row with no explanation.
+      await refreshAccountMachines(
+        accountToken,
+        accountOrigin,
+        (message) => `Connected, but the machine list could not be refreshed: ${message}`,
+      );
     } catch (failure) {
       setActionError(failure instanceof Error ? failure.message : "ACCOUNT_GRANT_FAILED");
     } finally {
@@ -457,8 +498,11 @@ export function RemoteSection({
       if (current.authStatus !== "paired" || current.grantScope !== "machine") throw new Error("MACHINE_GRANT_REQUIRED");
       await negotiate(ctx);
     } catch (failure) {
-      const message = failure instanceof Error ? failure.message : "";
-      code = Object.prototype.hasOwnProperty.call(explanations, message) ? message : "PAIRED_HOST_UNAVAILABLE";
+      // Structured code first (PairedOperationError carries it); plain Errors thrown locally
+      // (stale generation, missing grant, unsupported capability) carry the code as message.
+      const ipc = toIpcError(failure);
+      code = [ipc.code, ipc.message].find((key) => Object.prototype.hasOwnProperty.call(explanations, key))
+        ?? "PAIRED_HOST_UNAVAILABLE";
     } finally {
       setBusy(false);
     }
@@ -555,6 +599,7 @@ export function RemoteSection({
     setActionError(null);
     try {
       await deleteSshHost(hostId);
+      setConfirmDeleteSshId(null);
     } catch (err) {
       setActionError(extractIpcErrorMessage(err, "Failed to delete SSH machine."));
     } finally {
@@ -789,6 +834,7 @@ export function RemoteSection({
                   variant="ghost"
                   size="sm"
                   className="size-6 p-0"
+                  aria-label="Dismiss enrollment code"
                   onClick={() => setIssuedCode(null)}
                 >
                   <X className="size-3.5" />
@@ -812,12 +858,23 @@ export function RemoteSection({
                   onClick={() => {
                     void copyTextToClipboard(
                       `ferryx-cli account enroll --code ${issuedCode} --origin ${accountOrigin}`,
-                    );
-                    setCopiedEnrollCommand(true);
-                    setTimeout(() => setCopiedEnrollCommand(false), 2000);
+                    ).then((copied) => {
+                      if (!mountedRef.current) return;
+                      setCopiedEnrollCommand(copied);
+                      setCopyEnrollFailed(!copied);
+                      clearTimeout(copyResetTimerRef.current);
+                      copyResetTimerRef.current = setTimeout(() => {
+                        setCopiedEnrollCommand(false);
+                        setCopyEnrollFailed(false);
+                      }, 2000);
+                    });
                   }}
                 >
-                  {copiedEnrollCommand ? (
+                  {copyEnrollFailed ? (
+                    <>
+                      <AlertCircle className="mr-1 size-3" /> Copy failed
+                    </>
+                  ) : copiedEnrollCommand ? (
                     <>
                       <Check className="mr-1 size-3" /> Copied
                     </>
@@ -1495,11 +1552,40 @@ export function RemoteSection({
                                   size="sm"
                                   aria-label={`Delete ${host.label}`}
                                   disabled={busy}
-                                  onClick={() => void handleDeleteSsh(host.id)}
+                                  onClick={() => setConfirmDeleteSshId(host.id)}
                                 >
                                   Delete
                                 </Button>
                               </div>
+                              {confirmDeleteSshId === host.id ? (
+                                <div role="group" aria-label="Confirm machine deletion" className="space-y-2 rounded border border-border/80 bg-accent/20 p-3">
+                                  <p className="text-xs text-status-warning">
+                                    Delete {host.label}? This removes the saved SSH machine from Ferryx.
+                                  </p>
+                                  <div className="flex gap-2">
+                                    <Button
+                                      type="button"
+                                      variant="destructive"
+                                      size="sm"
+                                      disabled={busy}
+                                      aria-label={`Confirm delete ${host.label}`}
+                                      onClick={() => void handleDeleteSsh(host.id)}
+                                    >
+                                      Confirm delete
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      disabled={busy}
+                                      aria-label="Cancel delete"
+                                      onClick={() => setConfirmDeleteSshId(null)}
+                                    >
+                                      Cancel
+                                    </Button>
+                                  </div>
+                                </div>
+                              ) : null}
                             </>
                           )}
                         </div>

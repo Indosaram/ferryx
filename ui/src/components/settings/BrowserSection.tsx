@@ -52,6 +52,8 @@ export function BrowserSection() {
   const [tabActionError, setTabActionError] = useState<string | null>(null);
   const [profileDraft, setProfileDraft] = useState("");
   const [importStatus, setImportStatus] = useState<Record<string, string>>({});
+  const [importingProfiles, setImportingProfiles] = useState<ReadonlySet<string>>(new Set());
+  const [pendingDeleteProfileId, setPendingDeleteProfileId] = useState<string | null>(null);
   const [activeBrowsers, setActiveBrowsers] = useState<BrowserSessionSummary[]>([]);
   // Section-level failures (listing tabs, applying the default zoom) have no field of their own, so
   // they surface once at the top of the section; per-row actions (Focus) report inside their row.
@@ -124,6 +126,7 @@ export function BrowserSection() {
 
   const deleteProfile = (profileId: string) => {
     if (isBuiltInBrowserProfileId(profileId)) return;
+    setPendingDeleteProfileId(null);
     const profiles = settings.profiles.filter((profile) => profile.id !== profileId);
     void update({
       profiles,
@@ -131,7 +134,19 @@ export function BrowserSection() {
     });
   };
 
+  const setImporting = (profileId: string, importing: boolean) => {
+    setImportingProfiles((prev) => {
+      if (prev.has(profileId) === importing) return prev;
+      const next = new Set(prev);
+      if (importing) next.add(profileId);
+      else next.delete(profileId);
+      return next;
+    });
+  };
+
   const importCookies = async (profileId: string) => {
+    if (importingProfiles.has(profileId)) return;
+    setImporting(profileId, true);
     try {
       const selected = await open({
         multiple: false,
@@ -150,10 +165,14 @@ export function BrowserSection() {
         ...prev,
         [profileId]: `Cookie import failed: ${formatBrowserCookieImportError(error)}`,
       }));
+    } finally {
+      setImporting(profileId, false);
     }
   };
 
   const importInstalledCookies = async (profileId: string, source: "chrome" | "edge") => {
+    if (importingProfiles.has(profileId)) return;
+    setImporting(profileId, true);
     try {
       setImportStatus((prev) => ({
         ...prev,
@@ -170,6 +189,8 @@ export function BrowserSection() {
         ...prev,
         [profileId]: `Cookie import failed: ${formatBrowserCookieImportError(error)}`,
       }));
+    } finally {
+      setImporting(profileId, false);
     }
   };
 
@@ -230,6 +251,8 @@ export function BrowserSection() {
                   }}
                   placeholder="https://example.com or blank"
                   aria-label="Default Home Page"
+                  aria-invalid={homeError ? true : undefined}
+                  aria-describedby={homeError ? "browser-home-error" : undefined}
                   className="h-8 min-w-0 flex-1 text-[11px]"
                 />
                 <Button
@@ -242,7 +265,7 @@ export function BrowserSection() {
                   Save
                 </Button>
               </div>
-              {homeError ? <div className="mt-1 text-[11px] text-destructive">{homeError}</div> : null}
+              {homeError ? <div id="browser-home-error" role="alert" className="mt-1 text-[11px] text-destructive">{homeError}</div> : null}
             </div>
           </SettingRow>
 
@@ -496,7 +519,14 @@ export function BrowserSection() {
                   defaultValue={profile.name}
                   disabled={isBuiltIn}
                   aria-label={`Profile name ${profile.id}`}
-                  onBlur={(event) => renameProfile(profile.id, event.target.value)}
+                  onBlur={(event) => {
+                    // A blank name is rejected; restore the visible text so it matches state.
+                    if (!event.target.value.trim()) {
+                      event.target.value = profile.name;
+                      return;
+                    }
+                    renameProfile(profile.id, event.target.value);
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") event.currentTarget.blur();
                   }}
@@ -522,6 +552,7 @@ export function BrowserSection() {
                 type="button"
                 variant="outline"
                 size="sm"
+                disabled={importingProfiles.has(profile.id)}
                 onClick={() => void importCookies(profile.id)}
                 className="h-7 gap-1 px-2 text-[11px]"
               >
@@ -534,6 +565,7 @@ export function BrowserSection() {
                       type="button"
                       variant="outline"
                       size="sm"
+                      disabled={importingProfiles.has(profile.id)}
                       onClick={() => void importInstalledCookies(profile.id, "chrome")}
                       className="h-7 px-2 text-[11px]"
                     >
@@ -543,6 +575,7 @@ export function BrowserSection() {
                       type="button"
                       variant="outline"
                       size="sm"
+                      disabled={importingProfiles.has(profile.id)}
                       onClick={() => void importInstalledCookies(profile.id, "edge")}
                       className="h-7 px-2 text-[11px]"
                     >
@@ -560,18 +593,42 @@ export function BrowserSection() {
                   Installed browser cookie import is unavailable on Windows (Chromium app-bound encryption)
                 </span>
               )}
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                disabled={isBuiltIn}
-                aria-label={`Delete profile ${profile.name}`}
-                onClick={() => deleteProfile(profile.id)}
-                title={isBuiltIn ? "Built-in profiles cannot be deleted" : "Delete profile"}
-                className="h-7 w-7 text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
-              >
-                <Trash2 className="size-3.5" />
-              </Button>
+              {pendingDeleteProfileId === profile.id ? (
+                <div role="group" aria-label={`Confirm delete profile ${profile.name}`} className="flex items-center gap-1.5">
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    size="sm"
+                    aria-label={`Confirm delete profile ${profile.name}`}
+                    onClick={() => deleteProfile(profile.id)}
+                    className="h-7 px-2 text-[11px]"
+                  >
+                    Confirm Delete
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPendingDeleteProfileId(null)}
+                    className="h-7 px-2 text-[11px]"
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  disabled={isBuiltIn}
+                  aria-label={`Delete profile ${profile.name}`}
+                  onClick={() => setPendingDeleteProfileId(profile.id)}
+                  title={isBuiltIn ? "Built-in profiles cannot be deleted" : "Delete profile"}
+                  className="h-7 w-7 text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+                >
+                  <Trash2 className="size-3.5" />
+                </Button>
+              )}
             </div>
           );
         })}

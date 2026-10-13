@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserSection } from "./BrowserSection";
 import * as browserTauri from "../../lib/browserTauri";
 import * as platform from "../../lib/platform";
+import { BROWSER_SETTINGS_STORAGE_KEY } from "../../lib/storageKeys";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -25,7 +26,8 @@ vi.mock("../../lib/browserTauri", async (importOriginal) => {
   };
 });
 
-vi.mock("../../lib/platform", () => ({
+vi.mock("../../lib/platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/platform")>()),
   getHostPlatform: vi.fn(() => "macos"),
   isInstalledBrowserCookieImportSupported: vi.fn(() => true),
   isMacHost: vi.fn(() => true),
@@ -195,5 +197,56 @@ describe("BrowserSection installed cookie import", () => {
     expect(
       screen.getAllByText("macOS will ask for Keychain access").length,
     ).toBeGreaterThan(0);
+  });
+});
+
+describe("BrowserSection review fixes", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(platform.isInstalledBrowserCookieImportSupported).mockReturnValue(true);
+    vi.mocked(platform.isMacHost).mockReturnValue(false);
+  });
+
+  it("disables a profile's import buttons while its import is running", async () => {
+    let finish!: (value: { importedCount: number; skippedCount: number }) => void;
+    vi.mocked(browserTauri.importInstalledBrowserCookies).mockReturnValueOnce(
+      new Promise((resolve) => { finish = resolve; }),
+    );
+    render(<BrowserSection />);
+    const chrome = screen.getAllByRole("button", { name: "Import from Chrome" })[0];
+    const edge = screen.getAllByRole("button", { name: "Import from Edge" })[0];
+    fireEvent.click(chrome);
+    await waitFor(() => expect(edge).toBeDisabled());
+    expect(chrome).toBeDisabled();
+    finish({ importedCount: 1, skippedCount: 0 });
+    await waitFor(() => expect(edge).toBeEnabled());
+  });
+
+  it("exposes an invalid home page as an alert linked to the input", () => {
+    render(<BrowserSection />);
+    const input = screen.getByLabelText("Default Home Page");
+    fireEvent.change(input, { target: { value: "ftp://example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    const alert = screen.getByRole("alert");
+    expect(input.getAttribute("aria-describedby")).toBe(alert.id);
+  });
+
+  it("requires confirmation before deleting a profile", () => {
+    localStorage.setItem(BROWSER_SETTINGS_STORAGE_KEY, JSON.stringify({ profiles: [{ id: "work", name: "Work" }] }));
+    render(<BrowserSection />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete profile Work" }));
+    expect(screen.getByLabelText("Profile name work")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm delete profile Work" }));
+    expect(screen.queryByLabelText("Profile name work")).toBeNull();
+  });
+
+  it("restores the visible name when a rename is blanked", () => {
+    localStorage.setItem(BROWSER_SETTINGS_STORAGE_KEY, JSON.stringify({ profiles: [{ id: "work", name: "Work" }] }));
+    render(<BrowserSection />);
+    const input = screen.getByLabelText("Profile name work") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "   " } });
+    fireEvent.blur(input);
+    expect(input.value).toBe("Work");
   });
 });

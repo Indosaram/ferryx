@@ -1003,4 +1003,42 @@ describe("PlanSection team management", () => {
 
     expect(await settle(opened)).toBe(CHECKOUT_URL);
   });
+
+  it("surfaces a rejected openExternalUrl instead of leaving an unhandled rejection", async () => {
+    stubFetch([], () =>
+      jsonResponse(wireEntitlement({ plan: "pro_monthly", machineLimit: 10, manageUrl: CHECKOUT_URL })),
+    );
+    browserNative.openExternalUrl.mockRejectedValue({ code: "OPEN_FAILED", message: "Could not open the browser" });
+
+    renderPlan();
+    await settledTestId("plan-summary");
+    fireEvent.click(screen.getByRole("button", { name: /Manage billing/ }));
+
+    expect(await settledTestId("plan-action-error")).toBeInTheDocument();
+  });
+
+  it("keeps raw seat and pack text while typing and clamps only on blur", async () => {
+    stubFetch([], () =>
+      jsonResponse(wireEntitlement({ plan: "pro_monthly", machineLimit: 10, hostPacks: 0 })),
+    );
+    renderPlan();
+    await settledTestId("plan-summary");
+
+    const seats = screen.getByLabelText("Team seats") as HTMLInputElement;
+    fireEvent.change(seats, { target: { value: "" } });
+    expect(seats.value).toBe("");
+    fireEvent.change(seats, { target: { value: "1" } });
+    expect(seats.value).toBe("1");
+    fireEvent.change(seats, { target: { value: "10" } });
+    expect(seats.value).toBe("10");
+    fireEvent.change(seats, { target: { value: "1" } });
+    fireEvent.blur(seats);
+    expect(seats.value).toBe("2");
+
+    const packs = screen.getByLabelText("Additional machine packs") as HTMLInputElement;
+    fireEvent.change(packs, { target: { value: "" } });
+    expect(packs.value).toBe("");
+    fireEvent.change(packs, { target: { value: "12" } });
+    expect(packs.value).toBe("12");
+  });
 });

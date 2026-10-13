@@ -402,6 +402,10 @@ describe("SshSection Settings Component", () => {
 
     fireEvent.click(deleteBtn);
 
+    // Deleting needs an explicit confirmation step.
+    expect(invokeMock).not.toHaveBeenCalledWith("cmd_ssh_delete_host", expect.anything());
+    fireEvent.click(screen.getByRole("button", { name: "Confirm delete Dev Server" }));
+
     expect(deleteBtn).toBeDisabled();
     expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_delete_host", { id: "host-1" });
 
@@ -594,6 +598,7 @@ describe("SshSection Settings Component", () => {
       invokeMock.mockReturnValueOnce(deleteDef.promise);
 
       fireEvent.click(screen.getByRole("button", { name: "Delete Dev Server" }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm delete Dev Server" }));
 
       await act(async () => {
         deleteDef.reject({
@@ -917,7 +922,7 @@ describe("SshSection Settings Component", () => {
       expect(screen.queryByText("Ready")).not.toBeInTheDocument();
     });
 
-    it("renders additive 업데이트 가능 state and invokes cmd_ssh_provision_helper when remote helper is stale", async () => {
+    it("renders additive update-available state and invokes cmd_ssh_provision_helper when remote helper is stale", async () => {
       const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
       const provisionCalls: unknown[] = [];
       invokeMock.mockImplementation(async (command: string, args?: unknown) => {
@@ -949,9 +954,10 @@ describe("SshSection Settings Component", () => {
 
       expect(screen.getByText("Terminal Helper:")).toBeInTheDocument();
       expect(screen.getByText("Ready")).toBeInTheDocument();
-      expect(screen.getByText(/업데이트 가능/)).toBeInTheDocument();
+      expect(screen.getByText(/Update available \(2026\.900\.0 → 2026\.908\.1\)/)).toBeInTheDocument();
 
-      const updateBtn = screen.getByRole("button", { name: /업데이트|Update helper/ });
+      const updateBtn = screen.getByRole("button", { name: "Update helper on Dev Server" });
+      expect(updateBtn).toHaveTextContent("Update helper");
       expect(updateBtn).toBeInTheDocument();
       await act(async () => {
         fireEvent.click(updateBtn);
@@ -986,8 +992,58 @@ describe("SshSection Settings Component", () => {
       });
 
       expect(screen.getByText("Ready")).toBeInTheDocument();
-      expect(screen.queryByText(/업데이트 가능/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Update available/)).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: /Update helper|Install helper/ })).not.toBeInTheDocument();
+    });
+
+    it("surfaces a failed helper update-state check instead of swallowing it", async () => {
+      const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "cmd_ssh_list_hosts") return [mockHost1];
+        if (command === "cmd_ssh_test_connection") return { host: mockHost1, reachable: true, checkedAt: 1, environment };
+        if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
+        if (command === "cmd_ssh_helper_update_state") throw { code: "HELPER_STATE_FAILED", message: "Helper state probe failed" };
+        throw new Error(`Unexpected command ${command}`);
+      });
+      await act(async () => { render(<SshSection />); });
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" })); });
+      expect(screen.getByRole("alert")).toHaveTextContent("Helper state probe failed");
+    });
+
+    it("keeps a saved password host's method visible in the edit form", async () => {
+      const passwordHost: SshHost = { ...mockHost1, authMethod: "password" };
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "cmd_ssh_list_hosts") return [passwordHost];
+        if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
+        throw new Error(`Unexpected command ${command}`);
+      });
+      await act(async () => { render(<SshSection />); });
+      fireEvent.click(screen.getByRole("button", { name: "Edit Dev Server" }));
+      expect(screen.getByRole("combobox", { name: "Authentication Method" })).toHaveTextContent("Password");
+    });
+
+    it("tracks concurrent system-host imports independently", async () => {
+      const sysA: SshHost = { ...mockHost1, id: "sys-a", label: "Sys A", source: "config" };
+      const sysB: SshHost = { ...mockHost1, id: "sys-b", label: "Sys B", source: "config" };
+      const pendingA = deferred<SshHost[]>();
+      const pendingB = deferred<SshHost[]>();
+      const updates: Array<ReturnType<typeof deferred<SshHost[]>>> = [pendingA, pendingB];
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "cmd_ssh_list_hosts") return [];
+        if (command === "cmd_ssh_read_system_config") return { path: "/c", exists: true, rawText: "x", hosts: [sysA, sysB] };
+        if (command === "cmd_ssh_update_host") return updates.shift()!.promise;
+        throw new Error(`Unexpected command ${command}`);
+      });
+      await act(async () => { render(<SshSection />); });
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: /Show Hosts/ })); });
+      const importButtons = screen.getAllByRole("button", { name: "+ Import" });
+      expect(importButtons).toHaveLength(2);
+      fireEvent.click(importButtons[0]);
+      fireEvent.click(importButtons[1]);
+      // Both rows were started; each stays disabled until its own request settles.
+      expect(invokeMock.mock.calls.filter(([c]) => c === "cmd_ssh_update_host")).toHaveLength(2);
+      const disabledCount = document.querySelectorAll("button:disabled .animate-spin").length;
+      expect(disabledCount).toBe(2);
     });
   });
 });
