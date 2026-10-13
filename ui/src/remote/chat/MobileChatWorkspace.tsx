@@ -11,7 +11,7 @@ import {
   ReferencePartRenderContext,
 } from "./MobileChatComponents";
 import { MobileChatMessage, MobileChatMessageProps } from "./MobileChatMessage";
-import { MobileChatComposer } from "./MobileChatComposer";
+import { MobileChatComposer, MobileChatComposerHandle } from "./MobileChatComposer";
 import type { HeldMessage } from "./referenceQueue";
 import type {
   ReferenceAbandonedBranch,
@@ -89,6 +89,12 @@ export interface MobileChatWorkspaceProps {
   readonly headerActions?: React.ReactNode;
 }
 
+const STARTER_PROMPTS = [
+  "Summarize the current state",
+  "What changed since my last message?",
+  "Run the tests",
+] as const;
+
 /**
  * Turns a `/tree` walked away from, composed for the page: the reference renders this once at
  * the top of the transcript, not on every turn that carries one.
@@ -155,6 +161,32 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<MobileChatComposerHandle>(null);
+
+  const [internalDraft, setInternalDraft] = useState("");
+  const isDraftControlled = draft !== undefined;
+  const activeDraft = isDraftControlled ? draft : internalDraft;
+
+  const handleDraftChange = useCallback(
+    (next: string) => {
+      if (!isDraftControlled) {
+        setInternalDraft(next);
+      }
+      onDraftChange?.(next);
+    },
+    [isDraftControlled, onDraftChange],
+  );
+
+  const handleSelectStarter = useCallback(
+    (promptText: string) => {
+      if (!isDraftControlled) {
+        setInternalDraft(promptText);
+      }
+      onDraftChange?.(promptText);
+      composerRef.current?.focus();
+    },
+    [isDraftControlled, onDraftChange],
+  );
 
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [showScrollPill, setShowScrollPill] = useState(false);
@@ -360,6 +392,20 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
                 Prompts run against the focused terminal.
               </p>
             </div>
+            <div className="mt-3 flex flex-col gap-2 w-full">
+              {STARTER_PROMPTS.map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  data-testid="chat-empty-starter"
+                  aria-label={prompt}
+                  onClick={() => handleSelectStarter(prompt)}
+                  className="flex items-center text-left min-h-[44px] w-full px-3 py-2.5 rounded-lg border border-chat-border bg-chat-surface hover:bg-chat-surface-hover active:bg-chat-surface-raised text-xs font-medium text-chat-foreground-secondary hover:text-chat-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
           <>
@@ -415,8 +461,9 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             </div>
           )}
           <MobileChatComposer
-            value={draft}
-            onValueChange={onDraftChange}
+            ref={composerRef}
+            value={activeDraft}
+            onValueChange={handleDraftChange}
             draftUnsaved={draftUnsaved}
             attachments={stagedFiles}
             onAttachFiles={onAttachFiles}
