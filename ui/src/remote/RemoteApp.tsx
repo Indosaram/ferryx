@@ -2757,13 +2757,7 @@ export const RemoteHostConnection: React.FC<{
         // and the generation it came from is recorded with it for the cursor check below.
         const liveTarget = chatTargetRef.current;
         if (liveTarget === null || !sameReferenceTarget(liveTarget, read.fence.target)) return;
-        // Skip state updates when the page generation is unchanged — avoids creating new
-        // objects every 3s that force downstream re-renders while nothing actually moved.
-        const prevFence = chatFenceRef.current;
-        const generationUnchanged = prevFence !== null && prevFence.generation === read.fence.generation
-          && prevFence.sessionId === read.fence.sessionId;
         chatFenceRef.current = read.fence;
-        if (generationUnchanged) { fetching = false; return; }
         setChatPage(read.page);
         if (!chatLoadedOlderRef.current) {
           setChatOlderCursor(read.page.cursor ?? null);
