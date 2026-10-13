@@ -147,7 +147,7 @@ describe("NativeTerminalPane remote file drop integration", () => {
   it("uploads dropped files to remote host and pastes remote paths on ssh session", async () => {
     const session = createSession("term-drop-ssh", "ssh:host-a");
 
-    tauriCoreMocks.invoke.mockImplementation(async (cmd: string, args: any) => {
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string, _args: any) => {
       if (cmd === "cmd_remote_upload_dropped_files") {
         return {
           platform: "posix",

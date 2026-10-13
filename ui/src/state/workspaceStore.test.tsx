@@ -133,7 +133,7 @@ function createServices({ autoConfirmExit = true }: { autoConfirmExit?: boolean 
           session: { sessionId: backend, cwd: await services.getTerminalCwd(backend),
             cols: 80, rows: 24, running: true, incarnation: `life:${backend}` },
         } : { state: "absent", canCreate: true } };
-    }),
+    }) as never,
     splitCreate: vi.fn(async (request) => {
       const sessionId = await services.spawnTerminal(request);
       created.set(request.clientRequestId!, sessionId);

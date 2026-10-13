@@ -7,8 +7,6 @@ import type { TerminalSession } from "../lib/types";
 import type { TerminalActivity } from "../lib/activity";
 import {
   resetNativeTerminalLifecycleForTest,
-  subscribeNativeTerminalPresentation,
-  type NativeTerminalPresentationReceipt,
 } from "../lib/nativeTerminalLifecycle";
 import { attachNativeTerminalRebind, terminalEventBus } from "../lib/terminalEvents";
 import { useShortcuts } from "../lib/shortcuts";
@@ -7648,7 +7646,7 @@ describe("terminal link UX (U1-U3)", () => {
     window.addEventListener("ferryx:open-file-preview", onOpen);
 
     const session = createSession("term-session-osc8", "daemon-osc8");
-    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+    tauriCoreMocks.invoke.mockImplementation(async (command, _args: any) => {
       if (command === "cmd_native_terminal_attach") {
         return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
       }
@@ -7708,7 +7706,7 @@ describe("terminal link UX (U1-U3)", () => {
     window.addEventListener("ferryx:open-file-preview", onOpen);
 
     const session = createSession("term-session-foreign", "daemon-foreign");
-    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+    tauriCoreMocks.invoke.mockImplementation(async (command, _args: any) => {
       if (command === "cmd_native_terminal_attach") {
         return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
       }
@@ -7768,7 +7766,7 @@ describe("terminal link UX (U1-U3)", () => {
       cwd: "/remote/cwd",
     };
 
-    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+    tauriCoreMocks.invoke.mockImplementation(async (command, _args: any) => {
       if (command === "cmd_native_terminal_attach") {
         return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
       }
@@ -7839,7 +7837,7 @@ describe("terminal link UX (U1-U3)", () => {
     const session = createSession("session-test-d", "session-test-d");
     setSessionMouseTracking("session-test-d", false);
 
-    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+    tauriCoreMocks.invoke.mockImplementation(async (command, _args: any) => {
       if (command === "cmd_native_terminal_attach") {
         return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
       }
@@ -7969,7 +7967,7 @@ describe("terminal link UX (U1-U3)", () => {
 
   it("shows hover hint when resolve exists:true and hides underline when exists:false", async () => {
     const session1 = createSession("hover-hint-session-1", "hover-hint-backend-1");
-    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+    tauriCoreMocks.invoke.mockImplementation(async (command, _args: any) => {
       if (command === "cmd_native_terminal_attach") {
         return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
       }
@@ -8006,7 +8004,7 @@ describe("terminal link UX (U1-U3)", () => {
 
     // Now test with exists: false
     const session2 = createSession("hover-hint-session-2", "hover-hint-backend-2");
-    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+    tauriCoreMocks.invoke.mockImplementation(async (command, _args: any) => {
       if (command === "cmd_native_terminal_attach") {
         return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
       }

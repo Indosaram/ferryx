@@ -202,7 +202,7 @@ function installFetch(options: {
       });
     }
     if (url.includes("/api/v1/sessions")) {
-      return jsonResponse({ sessions: (options.sessions ?? [() => ({ sessionId: SESSION_ID, daemonEpoch: DAEMON_EPOCH, running: true })])() });
+      return jsonResponse({ sessions: (options.sessions ?? (() => [{ sessionId: SESSION_ID, daemonEpoch: DAEMON_EPOCH, running: true }]))() });
     }
     if (url.includes("/reference-chat/") && url.includes("/history")) {
       if (options.historyStatus !== undefined) {

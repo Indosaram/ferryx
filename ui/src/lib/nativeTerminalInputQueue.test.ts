@@ -579,11 +579,7 @@ describe("NativeTerminalInputQueueManager", () => {
 
       // Enqueue a second item while head is blocked
       const secondDeferred = createDeferred<string>();
-      let secondReceivedRequestId = "";
-      const secondPromise = queue.enqueue("session-slow", 1, 10, async (reqId) => {
-        secondReceivedRequestId = reqId;
-        return secondDeferred.promise;
-      });
+      const secondPromise = queue.enqueue("session-slow", 1, 10, async () => secondDeferred.promise);
 
       expect(debugSpy).toHaveBeenCalledWith(
         "terminal.surface.input.in_flight_slow",

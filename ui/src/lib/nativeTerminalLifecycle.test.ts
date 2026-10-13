@@ -5,11 +5,8 @@ vi.mock("./switchDebug", () => ({ switchDebug: vi.fn() }));
 import {
   attachNativeTerminalLifecycle,
   detachNativeTerminalLifecycle,
-  emitNativeTerminalPresentation,
   presentNativeTerminalLifecycle,
-  subscribeNativeTerminalPresentation,
   emitNativeTerminalPresentation,
-  type NativeTerminalPresentationReceipt,
   resetNativeTerminalLifecycleForTest,
   registerDurableNativeBinding,
   getDurableNativeBinding,

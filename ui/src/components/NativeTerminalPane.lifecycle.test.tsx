@@ -247,7 +247,7 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
       incarnation: "inc-v1",
     };
 
-    const onRefreshSessionIdentity = vi.fn().mockImplementation(async (sessionId: string) => {
+    const onRefreshSessionIdentity = vi.fn().mockImplementation(async (_sessionId: string) => {
       return {
         ...initialSession,
         daemonEpoch: "epoch-v2",

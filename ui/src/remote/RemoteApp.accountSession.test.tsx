@@ -522,7 +522,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     const selectPostDeferred = deferred<Response>();
 
-    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+    const fetchMock = vi.fn<typeof fetch>(async (input, _init) => {
       const url = String(input instanceof Request ? input.url : input);
 
       if (url.includes("/api/v1/workspace/select")) {
