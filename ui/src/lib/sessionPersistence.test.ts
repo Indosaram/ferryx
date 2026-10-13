@@ -1683,6 +1683,22 @@ describe("sessionPersistence v3 serialization and migration", () => {
   });
 });
 
+describe("future session versions", () => {
+  it("treats a session version newer than this build as unreadable and refuses to overwrite it", () => {
+    const future = {
+      ...serializeWorkspaceState("default", "/workspace/main", workspaceState()),
+      version: WORKSPACE_SESSION_VERSION + 1,
+    };
+    const before = JSON.stringify(future);
+
+    expect(deserializeWorkspaceState("default", future)).toBeNull();
+    expect(() => serializeWorkspaceState("default", "/workspace/main", workspaceState(), future)).toThrow(
+      /Refusing to overwrite/,
+    );
+    expect(JSON.stringify(future)).toBe(before);
+  });
+});
+
 describe("sessionPersistenceKey", () => {
   function agentSessions(providerSessionId: string): WorkspaceState["sessions"] {
     const sessions = workspaceState().sessions;

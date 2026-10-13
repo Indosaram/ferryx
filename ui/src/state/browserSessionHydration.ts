@@ -6,7 +6,7 @@ import {
 } from "../lib/browserSettings";
 import { getBrowserScroll, recordBrowserScroll, type BrowserScrollPosition } from "../lib/browserHistory";
 import { ensureBrowser } from "../lib/browserTauri";
-import { isPrivateBrowserProfileId } from "../lib/sessionPersistence";
+import { isPrivateBrowserProfileId, readScrollPosition } from "../lib/sessionPersistence";
 import type { BrowserPaneState, BrowserTab, LayoutState } from "../lib/types";
 import type { WorkspaceState } from "./workspaceStore";
 
@@ -56,17 +56,8 @@ function addTarget(
 }
 
 function targetFromTab(tab: BrowserTab, defaultWorktreePath?: string): BrowserRestoreTarget {
-  const rawScrollPos = (tab as any).scrollPosition ?? (
-    typeof (tab as any).scrollX === "number" || typeof (tab as any).scrollY === "number"
-      ? { x: (tab as any).scrollX ?? 0, y: (tab as any).scrollY ?? 0 }
-      : getBrowserScroll(tab.browserId, tab.url)
-  );
-  const scrollPosition: BrowserScrollPosition | undefined = rawScrollPos
-    ? {
-        x: Math.max(0, Math.round(Number.isFinite(rawScrollPos.x) ? rawScrollPos.x : 0)),
-        y: Math.max(0, Math.round(Number.isFinite(rawScrollPos.y) ? rawScrollPos.y : 0)),
-      }
-    : undefined;
+  const scrollPosition: BrowserScrollPosition | undefined =
+    readScrollPosition(tab) ?? getBrowserScroll(tab.browserId, tab.url) ?? undefined;
 
   return {
     browserId: tab.browserId,
@@ -81,17 +72,8 @@ function targetFromTab(tab: BrowserTab, defaultWorktreePath?: string): BrowserRe
 }
 
 function targetFromPane(browser: BrowserPaneState, defaultWorktreePath?: string): BrowserRestoreTarget {
-  const rawScrollPos = (browser as any).scrollPosition ?? (
-    typeof (browser as any).scrollX === "number" || typeof (browser as any).scrollY === "number"
-      ? { x: (browser as any).scrollX ?? 0, y: (browser as any).scrollY ?? 0 }
-      : getBrowserScroll(browser.browserId, browser.url)
-  );
-  const scrollPosition: BrowserScrollPosition | undefined = rawScrollPos
-    ? {
-        x: Math.max(0, Math.round(Number.isFinite(rawScrollPos.x) ? rawScrollPos.x : 0)),
-        y: Math.max(0, Math.round(Number.isFinite(rawScrollPos.y) ? rawScrollPos.y : 0)),
-      }
-    : undefined;
+  const scrollPosition: BrowserScrollPosition | undefined =
+    readScrollPosition(browser) ?? getBrowserScroll(browser.browserId, browser.url) ?? undefined;
 
   return {
     browserId: browser.browserId,

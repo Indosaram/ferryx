@@ -130,8 +130,8 @@ export function useInactiveProjectWorktrees(
             if (!existing || existing.length === 0) return current;
             const host = remoteHostStore.getState().hosts[pairedTarget.hostId];
             const isOffline = host ? !host.online : true;
-            const cachedGen = lastAuthoritativeGenRef.current[workspaceId] ?? host?.generation ?? (existing[0] as any)?.freshness?.generation ?? null;
-            const cachedAt = (existing[0] as any)?.freshness?.cachedAt ?? Date.now();
+            const cachedGen = lastAuthoritativeGenRef.current[workspaceId] ?? host?.generation ?? existing[0]?.freshness?.generation ?? null;
+            const cachedAt = existing[0]?.freshness?.cachedAt ?? Date.now();
             const staleRows: Worktree[] = existing.map((row) => ({
               ...row,
               stale: true,
@@ -151,7 +151,7 @@ export function useInactiveProjectWorktrees(
               ttlTimersRef.current[workspaceId] = setTimeout(() => {
                 setWorktreesByProject((curr) => {
                   const r = curr[workspaceId];
-                  if (r && r.some((item) => (item as any).stale)) {
+                  if (r && r.some((item) => item.stale)) {
                     return { ...curr, [workspaceId]: [] };
                   }
                   return curr;
@@ -348,8 +348,8 @@ export function useInactiveProjectWorktrees(
             if (existing && existing.length > 0) {
               const host = remoteHostStore.getState().hosts[project.target.hostId];
               const isOffline = host ? !host.online : true;
-              const cachedGen = lastAuthoritativeGenRef.current[id] ?? host?.generation ?? (existing[0] as any)?.freshness?.generation ?? null;
-              const cachedAt = (existing[0] as any)?.freshness?.cachedAt ?? Date.now();
+              const cachedGen = lastAuthoritativeGenRef.current[id] ?? host?.generation ?? existing[0]?.freshness?.generation ?? null;
+              const cachedAt = existing[0]?.freshness?.cachedAt ?? Date.now();
               const staleRows: Worktree[] = existing.map(row => ({
                 ...row,
                 stale: true,
@@ -369,7 +369,7 @@ export function useInactiveProjectWorktrees(
                 ttlTimersRef.current[id] = setTimeout(() => {
                   setWorktreesByProject(curr => {
                     const r = curr[id];
-                    if (r && r.some(item => (item as any).stale)) {
+                    if (r && r.some(item => item.stale)) {
                       return { ...curr, [id]: [] };
                     }
                     return curr;

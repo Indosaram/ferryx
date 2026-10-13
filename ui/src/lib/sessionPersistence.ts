@@ -23,6 +23,7 @@ import {
   type BrowserPaneState,
   type BrowserTab,
   type LayoutState,
+  type LegacyScrollFields,
   type PaneContent,
   type PersistedLayout,
   type PersistedTab,
@@ -41,12 +42,22 @@ import {
 
 export const WORKSPACE_SESSION_VERSION = 3;
 
-declare module "./types" {
-  interface PersistedBrowserTabState {
-    scrollX?: number;
-    scrollY?: number;
-    scrollPosition?: BrowserScrollPosition;
-  }
+const clampScrollAxis = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+
+/**
+ * Reads a scroll position from a browser tab/pane/persisted record that may carry the current
+ * nested `scrollPosition`, the flat legacy `scrollX`/`scrollY` pair, or neither. Each axis prefers
+ * the flat value; missing or non-finite axes become 0. Returns undefined only when the record has no
+ * scroll data at all, so callers can fall back to the stored browser history position.
+ */
+export function readScrollPosition(raw: unknown): BrowserScrollPosition | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const fields = raw as LegacyScrollFields;
+  const x = fields.scrollX ?? fields.scrollPosition?.x;
+  const y = fields.scrollY ?? fields.scrollPosition?.y;
+  if (x === undefined && y === undefined) return undefined;
+  return { x: clampScrollAxis(x), y: clampScrollAxis(y) };
 }
 
 export function isPrivateBrowserProfileId(profileId: string | null | undefined): boolean {
@@ -76,6 +87,13 @@ export function serializeWorkspaceState(
   existingSession?: PersistedWorkspaceSession | null,
   project?: Pick<import("./types").RegisteredProject, "target" | "remoteWorkspaceId" | "gitRoot" | "gitRemote" | "gitCommonDir" | "gitBranch" | "gitHead" | "hostLabel">,
 ): PersistedWorkspaceSession {
+  // A session written by a newer build holds fields this build cannot interpret. Stamping it with
+  // our version would downgrade it on disk, so refuse to build a replacement and leave it untouched.
+  if (existingSession && existingSession.version > WORKSPACE_SESSION_VERSION) {
+    throw new Error(
+      `Refusing to overwrite workspace session version ${existingSession.version} (this build writes ${WORKSPACE_SESSION_VERSION})`,
+    );
+  }
   const browserSettings = loadBrowserSettings();
   const restoreBrowserTabs = browserSettings.restoreTabsOnLaunch;
 
@@ -94,17 +112,8 @@ export function serializeWorkspaceState(
       if (tab.kind === "browser") {
         if (!restoreBrowserTabs || isPrivateBrowserProfileId(tab.profileId)) continue;
         const worktreePath = tab.worktreePath || layoutWorktreePath || undefined;
-        const rawScrollPos = (tab as any).scrollPosition ?? (
-          typeof (tab as any).scrollX === "number" || typeof (tab as any).scrollY === "number"
-            ? { x: (tab as any).scrollX ?? 0, y: (tab as any).scrollY ?? 0 }
-            : getBrowserScroll(tab.browserId, tab.url)
-        );
-        const scrollPosition: BrowserScrollPosition | undefined = rawScrollPos
-          ? {
-              x: Math.max(0, Math.round(Number.isFinite(rawScrollPos.x) ? rawScrollPos.x : 0)),
-              y: Math.max(0, Math.round(Number.isFinite(rawScrollPos.y) ? rawScrollPos.y : 0)),
-            }
-          : undefined;
+        const scrollPosition: BrowserScrollPosition | undefined =
+          readScrollPosition(tab) ?? getBrowserScroll(tab.browserId, tab.url) ?? undefined;
         persistedTabs.push({
           id: tab.id,
           kind: "browser",
@@ -179,17 +188,8 @@ export function serializeWorkspaceState(
           if (content.kind === "browser") {
             const rawBrowser = content.browser ?? content;
             const worktreePath = rawBrowser.worktreePath || layoutWorktreePath || undefined;
-            const rawScrollPos = (rawBrowser as any).scrollPosition ?? (
-              typeof (rawBrowser as any).scrollX === "number" || typeof (rawBrowser as any).scrollY === "number"
-                ? { x: (rawBrowser as any).scrollX ?? 0, y: (rawBrowser as any).scrollY ?? 0 }
-                : getBrowserScroll(rawBrowser.browserId ?? "", rawBrowser.url ?? "")
-            );
-            const scrollPosition: BrowserScrollPosition | undefined = rawScrollPos
-              ? {
-                  x: Math.max(0, Math.round(Number.isFinite(rawScrollPos.x) ? rawScrollPos.x : 0)),
-                  y: Math.max(0, Math.round(Number.isFinite(rawScrollPos.y) ? rawScrollPos.y : 0)),
-                }
-              : undefined;
+            const scrollPosition: BrowserScrollPosition | undefined =
+              readScrollPosition(rawBrowser) ?? getBrowserScroll(rawBrowser.browserId ?? "", rawBrowser.url ?? "") ?? undefined;
             contentsByLeafId[leafId] = createBrowserPaneContent({
               browserId: rawBrowser.browserId ?? "",
               url: rawBrowser.url ?? "",
@@ -202,7 +202,7 @@ export function serializeWorkspaceState(
               worktreePath,
               worktreeLabel: rawBrowser.worktreeLabel,
               ...(scrollPosition ? { scrollPosition, scrollX: scrollPosition.x, scrollY: scrollPosition.y } : {}),
-            } as any);
+            });
             sessionIdsByLeafId[leafId] = "";
           } else if (content.kind === "dag") {
             const rawDag = content.dag ?? content;
@@ -400,6 +400,8 @@ export function deserializeWorkspaceState(
 ): WorkspaceState | null {
   const ws = persistedSession.workspaces?.[workspaceId];
   if (!ws) return null;
+  // Unknown future schema: unreadable here, not reinterpreted as v3 (the stored data is left as is).
+  if (persistedSession.version > WORKSPACE_SESSION_VERSION) return null;
   if ((workspaceId.startsWith("daemon:") || ws.target?.kind === "pairedDaemon") &&
     !hasValidProjectTarget({ ...ws, workspaceId })) return null;
   const isV2 = (persistedSession.version ?? 1) >= 2;
@@ -415,9 +417,9 @@ export function deserializeWorkspaceState(
   const hasLiveSessionQuery = liveBackendSessionIds !== null && liveBackendSessionIds !== undefined;
   let isAuthoritative = hasLiveSessionQuery;
   if (typeof liveBackendSessionIds === "object" && liveBackendSessionIds !== null) {
-    if ("authoritative" in liveBackendSessionIds && (liveBackendSessionIds as any).authoritative === false) {
+    if ("authoritative" in liveBackendSessionIds && liveBackendSessionIds.authoritative === false) {
       isAuthoritative = false;
-    } else if ("complete" in liveBackendSessionIds && (liveBackendSessionIds as any).complete === false) {
+    } else if ("complete" in liveBackendSessionIds && liveBackendSessionIds.complete === false) {
       isAuthoritative = false;
     }
   }
@@ -428,12 +430,13 @@ export function deserializeWorkspaceState(
       (typeof liveBackendSessionIds === "object" &&
         "has" in liveBackendSessionIds &&
         "get" in liveBackendSessionIds &&
-        typeof (liveBackendSessionIds as any).get === "function" &&
-        typeof (liveBackendSessionIds as any).entries === "function")
+        "entries" in liveBackendSessionIds &&
+        typeof liveBackendSessionIds.get === "function" &&
+        typeof liveBackendSessionIds.entries === "function")
     ) {
       for (const [key, value] of (liveBackendSessionIds as Map<any, any>).entries()) {
         const itemEpoch = typeof value === "object" && value !== null && value.daemonEpoch != null ? String(value.daemonEpoch) : globalLiveEpoch;
-        const isRunning = typeof value === "object" && value !== null && "running" in value ? (value as any).running !== false : value !== false;
+        const isRunning = typeof value === "object" && value !== null && "running" in value ? value.running !== false : value !== false;
         liveSessionMap.set(String(key), { daemonEpoch: itemEpoch, running: isRunning, incarnation: typeof value === "object" ? value?.incarnation : null });
       }
     } else if (
@@ -459,7 +462,7 @@ export function deserializeWorkspaceState(
           liveSessionMap.set(item, { daemonEpoch: globalLiveEpoch, running: true });
         } else if (item && typeof item === "object" && "sessionId" in item) {
           const itemEpoch = item.daemonEpoch != null ? String(item.daemonEpoch) : globalLiveEpoch;
-          const isRunning = (item as any).running !== false;
+          const isRunning = item.running !== false;
           liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch, running: isRunning, incarnation: item.incarnation });
         }
       }
@@ -690,15 +693,9 @@ export function deserializeWorkspaceState(
         const profileId = rawProfileId && knownProfiles.has(rawProfileId) ? rawProfileId : fallbackProfileId;
 
         // Backward-compatible scroll tolerance: missing/NaN/null positions default gracefully to { x: 0, y: 0 }
-        const rawScrollX = (browser as any)?.scrollX ?? (browser as any)?.scrollPosition?.x;
-        const rawScrollY = (browser as any)?.scrollY ?? (browser as any)?.scrollPosition?.y;
-        const historyScroll = rawScrollX === undefined && rawScrollY === undefined
-          ? getBrowserScroll(browser?.browserId ?? persistedTab.sessionId ?? "", url)
-          : null;
-        const scrollPosition: BrowserScrollPosition = historyScroll ?? {
-          x: typeof rawScrollX === "number" && Number.isFinite(rawScrollX) ? Math.max(0, Math.round(rawScrollX)) : 0,
-          y: typeof rawScrollY === "number" && Number.isFinite(rawScrollY) ? Math.max(0, Math.round(rawScrollY)) : 0,
-        };
+        const scrollPosition: BrowserScrollPosition = readScrollPosition(browser)
+          ?? getBrowserScroll(browser?.browserId ?? persistedTab.sessionId ?? "", url)
+          ?? { x: 0, y: 0 };
 
         const tab: BrowserTab = {
           id: persistedTab.id,
@@ -715,7 +712,9 @@ export function deserializeWorkspaceState(
           profileId,
           worktreePath: tabWorktreePath,
           worktreeLabel: browser?.worktreeLabel,
-          ...({ scrollPosition, scrollX: scrollPosition.x, scrollY: scrollPosition.y } as any),
+          scrollPosition,
+          scrollX: scrollPosition.x,
+          scrollY: scrollPosition.y,
         };
         tabs.push(tab);
         continue;
@@ -769,15 +768,9 @@ export function deserializeWorkspaceState(
 
         const profileId = rawProfileId && knownProfiles.has(rawProfileId) ? rawProfileId : fallbackProfileId;
         const leafId = `leaf-browser:${persistedTab.id}`;
-        const rawScrollX = (browser as any)?.scrollX ?? (browser as any)?.scrollPosition?.x;
-        const rawScrollY = (browser as any)?.scrollY ?? (browser as any)?.scrollPosition?.y;
-        const historyScroll = rawScrollX === undefined && rawScrollY === undefined
-          ? getBrowserScroll(browser?.browserId ?? persistedTab.sessionId ?? "", url)
-          : null;
-        const scrollPosition: BrowserScrollPosition = historyScroll ?? {
-          x: typeof rawScrollX === "number" && Number.isFinite(rawScrollX) ? Math.max(0, Math.round(rawScrollX)) : 0,
-          y: typeof rawScrollY === "number" && Number.isFinite(rawScrollY) ? Math.max(0, Math.round(rawScrollY)) : 0,
-        };
+        const scrollPosition: BrowserScrollPosition = readScrollPosition(browser)
+          ?? getBrowserScroll(browser?.browserId ?? persistedTab.sessionId ?? "", url)
+          ?? { x: 0, y: 0 };
 
         const browserState: BrowserPaneState = {
           browserId: browser?.browserId ?? persistedTab.sessionId ?? `restored-browser:${persistedTab.id}`,
@@ -790,7 +783,9 @@ export function deserializeWorkspaceState(
           profileId,
           worktreePath: tabWorktreePath,
           worktreeLabel: browser?.worktreeLabel,
-          ...({ scrollPosition, scrollX: scrollPosition.x, scrollY: scrollPosition.y } as any),
+          scrollPosition,
+          scrollX: scrollPosition.x,
+          scrollY: scrollPosition.y,
         };
         layoutsByTabId[persistedTab.id] = {
           root: createLeafNode(leafId),
@@ -888,15 +883,9 @@ export function deserializeWorkspaceState(
             }
 
             const profileId = rawProfileId && knownProfiles.has(rawProfileId) ? rawProfileId : fallbackProfileId;
-            const rawScrollX = (rawBrowser as any)?.scrollX ?? (rawBrowser as any)?.scrollPosition?.x;
-            const rawScrollY = (rawBrowser as any)?.scrollY ?? (rawBrowser as any)?.scrollPosition?.y;
-            const historyScroll = rawScrollX === undefined && rawScrollY === undefined
-              ? getBrowserScroll(rawBrowser.browserId ?? "", rawBrowser.url ?? "")
-              : null;
-            const scrollPosition: BrowserScrollPosition = historyScroll ?? {
-              x: typeof rawScrollX === "number" && Number.isFinite(rawScrollX) ? Math.max(0, Math.round(rawScrollX)) : 0,
-              y: typeof rawScrollY === "number" && Number.isFinite(rawScrollY) ? Math.max(0, Math.round(rawScrollY)) : 0,
-            };
+            const scrollPosition: BrowserScrollPosition = readScrollPosition(rawBrowser)
+              ?? getBrowserScroll(rawBrowser.browserId ?? "", rawBrowser.url ?? "")
+              ?? { x: 0, y: 0 };
 
             contentsByLeafId[leafId] = createBrowserPaneContent({
               browserId: rawBrowser.browserId || `restored-browser:${persistedTab.id}:${leafId}`,
@@ -909,7 +898,9 @@ export function deserializeWorkspaceState(
               profileId,
               worktreePath: paneWtPath,
               worktreeLabel: rawBrowser.worktreeLabel,
-              ...({ scrollPosition, scrollX: scrollPosition.x, scrollY: scrollPosition.y } as any),
+              scrollPosition,
+              scrollX: scrollPosition.x,
+              scrollY: scrollPosition.y,
             });
             sessionIdsByLeafId[leafId] = "";
           } else if (rawContent.kind === "dag") {

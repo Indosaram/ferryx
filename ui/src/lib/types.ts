@@ -1,4 +1,5 @@
 import type { PaneDirection, PaneNode } from "../state/paneTree";
+import type { BrowserScrollPosition } from "./browserHistory";
 
 export interface SplitIdentity {
   readonly requestId: string;
@@ -116,6 +117,11 @@ export type Worktree = {
   identity?: WorktreeIdentity | null;
   hostLabel?: string;
   hostSummary?: string;
+  /** Cached paired-host rows whose host stopped answering: still listed, but not actionable. */
+  stale?: boolean;
+  offline?: boolean;
+  disabled?: boolean;
+  freshness?: WorktreeFreshness;
   path: string;
   head: string;
   branch: string | null;
@@ -123,6 +129,22 @@ export type Worktree = {
   detached: boolean;
   locked: string | null;
   prunable: string | null;
+};
+
+export type WorktreeFreshness = {
+  stale: boolean;
+  offline: boolean;
+  /** Paired-host generation the rows were last authoritatively listed at; null when unknown. */
+  generation: string | null;
+  /** Epoch milliseconds when the cached rows were first marked stale. */
+  cachedAt: number;
+};
+
+/** Scroll fields written by older session formats: a nested position and/or flat scrollX/scrollY. */
+export type LegacyScrollFields = {
+  scrollPosition?: { x?: unknown; y?: unknown } | null;
+  scrollX?: unknown;
+  scrollY?: unknown;
 };
 
 export function worktreeIdentity(worktree: Worktree): WorktreeIdentity | null {
@@ -339,6 +361,9 @@ export type BrowserTab = {
   worktreePath?: string;
   worktreeLabel?: string;
   pinned?: boolean;
+  scrollPosition?: BrowserScrollPosition;
+  scrollX?: number;
+  scrollY?: number;
 };
 
 export type FileTab = {
@@ -453,6 +478,9 @@ export type BrowserPaneState = {
   readonly profileId?: string;
   readonly worktreePath?: string;
   readonly worktreeLabel?: string;
+  readonly scrollPosition?: BrowserScrollPosition;
+  readonly scrollX?: number;
+  readonly scrollY?: number;
 };
 
 export type BrowserPaneContent = {
@@ -808,6 +836,9 @@ export interface PersistedBrowserTabState {
   profileId?: string;
   worktreePath?: string;
   worktreeLabel?: string;
+  scrollPosition?: BrowserScrollPosition;
+  scrollX?: number;
+  scrollY?: number;
 }
 
 /**
