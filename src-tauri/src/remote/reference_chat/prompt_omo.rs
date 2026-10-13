@@ -1760,10 +1760,14 @@ fn prompt_tail_is_active(responder: OmoResponder, screen: &str) -> bool {
             return false;
         };
         let mut end = at;
-        while end < at + OMO_HINT_LINES && !hint_end_re().is_match(clean_lines[at..=end].join(" ").trim()) {
+        while end < at + OMO_HINT_LINES
+            && end < clean_lines.len()
+            && !hint_end_re().is_match(clean_lines[at..=end].join(" ").trim())
+        {
             end += 1;
         }
-        if end >= at + OMO_HINT_LINES {
+        // A hint that never ends in its esc phrase, before the screen itself ends, is not OmO's.
+        if end >= at + OMO_HINT_LINES || end >= clean_lines.len() {
             return false;
         }
         return footer_is_omo(&clean_lines[end + 1..]);
@@ -1946,6 +1950,16 @@ mod tests {
 
     fn option_answer(index: u32) -> ReferencePromptAnswer {
         ReferencePromptAnswer { option_index: Some(index), ..Default::default() }
+    }
+
+    #[test]
+    fn a_hint_that_does_not_end_in_an_esc_phrase_at_the_screens_end_is_no_card() {
+        let lines: Vec<&str> = FORM_TABBED.lines().collect();
+        let hint = lines.iter().position(|line| line.contains("esc cancel")).expect("the form has a hint");
+        let mut cut: Vec<String> = lines[..hint].iter().map(|line| line.to_string()).collect();
+        cut.push(format!("{}  x", lines[hint]));
+        let screen = cut.join("\n");
+        assert!(omo_card_for_screen("omo", &screen, None, true, &[]).is_none());
     }
 
     #[test]
