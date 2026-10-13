@@ -443,6 +443,41 @@ it("normalizes relay origin and extracts origin and pin from invite links with #
   expect(parsePairingInvite("")).toBeNull();
 });
 
+it("I1: accepts the pairing PIN only from the fragment and only as exactly 6 digits", () => {
+  expect(parsePairingInvite("https://relay.org/?pair=123456")).toEqual({ pin: undefined, relayOrigin: "https://relay.org" });
+  expect(parsePairingInvite("https://relay.org/?pair=123456#pair=654321")).toEqual({ pin: "654321", relayOrigin: "https://relay.org" });
+  expect(parsePairingInvite("https://relay.org/#pair=12345")?.pin).toBeUndefined();
+  expect(parsePairingInvite("https://relay.org/#pair=1234567")?.pin).toBeUndefined();
+  expect(parsePairingInvite("https://relay.org/#pair=12345a")?.pin).toBeUndefined();
+  expect(parsePairingInvite("#pair=12345a")).toEqual({ pin: undefined, relayOrigin: undefined });
+  expect(parsePairingInvite("#pair=123456")?.pin).toBe("123456");
+});
+
+it("I2: an invalid host view never advances the generation fence", async () => {
+  const { inventory, store, commands } = fixture();
+  await expect(inventory.handleNativeEvent({ type: "update", host: { ...view, generation: "20", displayLabel: 5 as unknown as string } })).rejects.toThrow("INVALID_HOST_VIEW");
+  await inventory.refresh();
+  expect(commands.list).toHaveBeenCalled();
+  expect(store.getState().hosts[hostId]?.generation).toBe("9");
+});
+
+it("I2: a native event whose handler throws is reported with a redacted code instead of an unhandled rejection", async () => {
+  const { inventory } = fixture();
+  await inventory.subscribeAppWide();
+  const listener = vi.mocked(listen).mock.calls.at(-1)![1] as (event: { payload: unknown }) => void;
+  listener({ payload: { type: "update", host: { ...view, generation: "not-a-number", displayLabel: token } } });
+  await vi.waitFor(() => expect(bootTrace).toHaveBeenCalledWith("paired.inventory.event_failed", { code: "INVALID_HOST_VIEW" }));
+  expect(JSON.stringify(vi.mocked(bootTrace).mock.calls)).not.toContain(token);
+});
+
+it("I4: a failed legacy migration records a redacted error code", async () => {
+  legacy(); const { commands, inventory } = fixture();
+  vi.mocked(commands.migrate).mockRejectedValue(Object.assign(new Error(token), { code: "UNAUTHORIZED" }));
+  await inventory.migrateLegacy();
+  expect(bootTrace).toHaveBeenCalledWith("paired.inventory.migration_failed", { code: "UNAUTHORIZED" });
+  expect(JSON.stringify(vi.mocked(bootTrace).mock.calls)).not.toContain(token);
+});
+
 it("R3-N4: ignores stale revoke events with older generation than current store generation", async () => {
   const { inventory, store } = fixture();
   await inventory.refresh();

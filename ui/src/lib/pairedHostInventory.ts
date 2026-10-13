@@ -162,6 +162,10 @@ export interface ParsedPairingInvite {
   relayOrigin?: string;
 }
 
+function validPin(value: string | null): string | undefined {
+  return value !== null && /^[0-9]{6}$/.test(value) ? value : undefined;
+}
+
 export function parsePairingInvite(input: string): ParsedPairingInvite | null {
   if (!input || typeof input !== "string") return null;
   const trimmed = input.trim();
@@ -170,7 +174,7 @@ export function parsePairingInvite(input: string): ParsedPairingInvite | null {
   try {
     if (trimmed.startsWith("#pair=")) {
       const hashParams = new URLSearchParams(trimmed.slice(1));
-      const pin = hashParams.get("pair") || undefined;
+      const pin = validPin(hashParams.get("pair"));
       const relayParam = hashParams.get("relay");
       let relayOrigin: string | undefined;
       if (relayParam) {
@@ -191,17 +195,16 @@ export function parsePairingInvite(input: string): ParsedPairingInvite | null {
     if (url.hash) {
       const hash = url.hash.replace(/^#/, "");
       const hashParams = new URLSearchParams(hash);
-      const p = hashParams.get("pair");
-      if (p) pin = p;
+      pin = validPin(hashParams.get("pair"));
       const r = hashParams.get("relay");
       if (r) {
         try { relayOrigin = normalizeRelayOrigin(r); } catch {}
       }
     }
 
-    if (!pin && url.search) {
-      const p = url.searchParams.get("pair");
-      if (p) pin = p;
+    // The pairing PIN is accepted from the fragment only: a query string is sent to the
+    // server and lands in access logs, history and Referer headers.
+    if (url.search) {
       const r = url.searchParams.get("relay");
       if (r && !relayOrigin) {
         try { relayOrigin = normalizeRelayOrigin(r); } catch {}
@@ -240,6 +243,7 @@ const ALLOWED_FAILURE_CODES = new Set([
   "PIN_EXPIRED", "EXPIRED_PIN", "INVALID_PIN", "PAIRED_HOST_STALE_GENERATION",
   "STALE_HOST_GENERATION", "PAIRED_HOST_INVALID_RESPONSE", "INVENTORY_UNAVAILABLE",
   "INVALID_HOST_VIEW", "MALFORMED_CAPABILITIES", "MALFORMED_INVENTORY",
+  "MIGRATION_PENDING",
 ]);
 
 function sanitizeFailureCode(err: unknown): string {
@@ -253,8 +257,13 @@ function sanitizeFailureCode(err: unknown): string {
 }
 
 function recordInventoryUnavailable(operation: "list" | "capabilities", err: unknown): void {
+  recordInventoryDiagnostic("paired.inventory.unavailable", { operation, code: sanitizeFailureCode(err) });
+}
+
+/** Best-effort diagnostic carrying only an allowlisted error code, never the raw error. */
+function recordInventoryDiagnostic(stage: string, details: Record<string, unknown>): void {
   try {
-    void bootTrace("paired.inventory.unavailable", { operation, code: sanitizeFailureCode(err) })
+    void bootTrace(stage, details)
       ?.catch(() => {
         // Best-effort diagnostic logging; swallow rejection when backend/Tauri is unavailable
       });
@@ -294,6 +303,9 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
   }
 
   function updateHostWithFence(view: HostView): boolean {
+    // Validate before fencing: endpoint() rejects a malformed generation, so BigInt below is safe
+    // and a rejected view never advances the fence.
+    const host = endpoint(view);
     const incomingGen = BigInt(view.generation);
     const hostId = view.hostId;
     const currentFenced = fencedGenerations.get(hostId);
@@ -313,12 +325,12 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
     }
     fencedGenerations.set(hostId, incomingGen);
     tombstones.delete(hostId);
-    const host = endpoint(view);
     store.upsertHost(host);
     return true;
   }
 
   function forgetHostWithFence(hostId: string, generationStr: string): boolean {
+    if (!validGeneration(generationStr)) return false;
     const gen = BigInt(generationStr);
     const currentFenced = fencedGenerations.get(hostId);
     if (currentFenced !== undefined && gen < currentFenced) {
@@ -381,7 +393,9 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
     if (isTauri()) {
       try {
         const unlisten = await listen<InventoryChangeEvent>("paired_host_inventory_changed", (e) => {
-          void handleNativeEvent(e.payload);
+          handleNativeEvent(e.payload).catch((err) => {
+            recordInventoryDiagnostic("paired.inventory.event_failed", { code: sanitizeFailureCode(err) });
+          });
         });
         const refreshIfUnavailable = () => {
           if (store.getState().nativeStatus === "unavailable") void refresh();
@@ -430,6 +444,9 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
       failingOp = "list";
       failureError = "INVALID_HOST_VIEW";
       const validViews = views.filter(v => {
+        // A malformed row still fails closed with the allowlisted INVALID_HOST_VIEW code; the
+        // generation is validated first so BigInt never surfaces a raw SyntaxError.
+        if (!validGeneration(v?.generation)) throw new Error("INVALID_HOST_VIEW");
         const gen = BigInt(v.generation);
         const fenced = fencedGenerations.get(v.hostId);
         if (fenced !== undefined && gen < fenced) return false;
@@ -578,7 +595,10 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
         store.upsertHost(verified);
       }
       if (started === revision || (!pending && Object.keys(store.getState().hosts).length > 0)) store.setState(s => ({ ...s, migrationStatus: pending ? "pending" : "complete" }));
-    } catch { store.setState(s => ({ ...s, migrationStatus: "pending" })); }
+    } catch (err) {
+      recordInventoryDiagnostic("paired.inventory.migration_failed", { code: sanitizeFailureCode(err) });
+      store.setState(s => ({ ...s, migrationStatus: "pending" }));
+    }
   }
   return {
     refresh,

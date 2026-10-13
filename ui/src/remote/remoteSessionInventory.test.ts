@@ -737,4 +737,28 @@ describe("identity invariants", () => {
     if (!stoppedOnly.ok) return;
     expect(preferredSessionForWorktree(stoppedOnly.inventory, "ws-ferryx-core", "main", ["s-stopped"])).toBeNull();
   });
+
+  it("drops an epoch-less observation when one session id exists on two daemon epochs", () => {
+    const row = (daemonEpoch: number) => ({
+      workspaceId: "ws-ferryx-core",
+      worktree: { wsId: "ws-ferryx-core", slug: "main" },
+      target: { machineId: MACHINE, sessionId: "s-reused", daemonEpoch },
+      running: true,
+    });
+    const parsed = parseSessionsPayload(MACHINE, { completeness: "complete", sessions: [row(1), row(2)] });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.inventory.entries).toHaveLength(2);
+    const ambiguous = applySessionActivity(parsed.inventory, [
+      { sessionId: "s-reused", state: "working", source: "agent_state", machineId: MACHINE },
+    ]);
+    expect(ambiguous).toBe(parsed.inventory);
+    const exact = applySessionActivity(parsed.inventory, [
+      { sessionId: "s-reused", state: "working", source: "agent_state", machineId: MACHINE, daemonEpoch: "2" },
+    ]);
+    expect(exact?.entries.map((entry) => [entry.daemonEpoch, entry.activityState])).toEqual([
+      ["1", null],
+      ["2", "working"],
+    ]);
+  });
 });

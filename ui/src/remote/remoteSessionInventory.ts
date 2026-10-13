@@ -457,11 +457,21 @@ export function applySessionActivity(
 ): RemoteSessionInventory | null {
   if (!inventory || observations.length === 0) return inventory;
   let changed = false;
+  // A session id may appear on two daemon epochs in one answer (parse keeps both). An
+  // observation that names no epoch cannot say which terminal it describes, so it is
+  // dropped for such ids instead of landing on every row that shares the id.
+  const rowsPerSession = new Map<string, number>();
+  for (const entry of inventory.entries) {
+    const key = sessionKey(entry.machineId, entry.sessionId);
+    rowsPerSession.set(key, (rowsPerSession.get(key) ?? 0) + 1);
+  }
   const entries = inventory.entries.map((entry) => {
+    const ambiguous = (rowsPerSession.get(sessionKey(entry.machineId, entry.sessionId)) ?? 0) > 1;
     let matched: SessionActivityObservation | null = null;
     for (const observation of observations) {
       if (observation.sessionId !== entry.sessionId) continue;
       if (observation.machineId && observation.machineId !== entry.machineId) continue;
+      if (ambiguous && !observation.daemonEpoch) continue;
       if (observation.daemonEpoch && !epochMatches(observation.daemonEpoch, entry.daemonEpoch)) continue;
       matched = observation;
       break;

@@ -975,9 +975,10 @@ function safeStringify(value: unknown): string {
     if (typeof value === "string") {
       raw = value;
     } else if (value instanceof Error) {
-      raw = value.stack || value.message || String(value);
+      // Never the stack: it carries file paths and is not a stable diagnostic.
+      raw = value.message || String(value);
     } else {
-      raw = JSON.stringify(value) ?? String(value);
+      raw = JSON.stringify(value, (key, entry) => (key === "stack" ? undefined : entry)) ?? String(value);
     }
   } catch {
     raw = String(value);

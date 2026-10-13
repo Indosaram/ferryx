@@ -498,6 +498,18 @@ describe("Tauri IPC wrapper contract", () => {
     });
   });
 
+  it("I7: does not leak stack traces through details.raw", async () => {
+    const err = new Error("boom");
+    err.stack = "Error: boom\n    at /Users/someone/secret/path.ts:1:1";
+    core.invoke.mockRejectedValueOnce(err);
+    const first = await createWorktree({ workspaceId: "w", worktree: { wsId: "ws-main", slug: "f" } }).catch((e) => e);
+    expect(first.details.raw).toBe("boom");
+    core.invoke.mockRejectedValueOnce({ code: "X", message: "m", details: {}, stack: "at /secret/path.ts:1" });
+    const second = await createWorktree({ workspaceId: "w", worktree: { wsId: "ws-main", slug: "f" } }).catch((e) => e);
+    expect(second.details.raw).not.toContain("secret");
+    expect(second.details.raw).toContain("\"code\":\"X\"");
+  });
+
   it("preserves structured errors and does not parse message strings", () => {
     const structured = { code: "DIRTY_WORKTREE", message: "dirty", details: { worktreeId: "wt-main" } };
     expect(toIpcError(structured)).toStrictEqual(structured);
