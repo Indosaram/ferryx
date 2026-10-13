@@ -24,6 +24,23 @@ function FocusHarness() {
   );
 }
 
+function ControlledSheetHarness({ initialOpen = true }: { initialOpen?: boolean }) {
+  const [open, setOpen] = useState(initialOpen);
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(false)} data-testid="external-close">
+        Close
+      </button>
+      <button type="button" onClick={() => setOpen(true)} data-testid="external-open">
+        Open
+      </button>
+      <MobileSheet open={open} onOpenChange={setOpen} title="Actions" ariaLabel="Actions" testId="sheet">
+        <MobileSheetItem label="Item 1" />
+      </MobileSheet>
+    </>
+  );
+}
+
 describe("MobileSheet", () => {
   it("renders nothing while closed", () => {
     render(
@@ -131,9 +148,46 @@ describe("MobileSheet", () => {
     expect(document.activeElement).toBe(dialog.querySelector('[aria-label="Close Actions"]'));
 
     fireEvent.click(screen.getByTestId("sheet-backdrop"));
+    fireEvent.animationEnd(dialog);
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("close plays the exit and unmounts only after animationend", () => {
+    render(<ControlledSheetHarness initialOpen />);
+    const dialog = screen.getByRole("dialog", { name: "Actions" });
+    expect(dialog).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("external-close"));
+
+    expect(screen.getByRole("dialog", { name: "Actions" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Actions" })).toHaveClass("animate-sheet-out");
+
+    fireEvent.animationEnd(screen.getByRole("dialog", { name: "Actions" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("re-opening during the exit keeps the sheet open and mounted", () => {
+    render(<ControlledSheetHarness initialOpen />);
+    const dialog = screen.getByRole("dialog", { name: "Actions" });
+    expect(dialog).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("external-close"));
+    expect(screen.getByRole("dialog", { name: "Actions" })).toHaveClass("animate-sheet-out");
+
+    fireEvent.click(screen.getByTestId("external-open"));
+    expect(screen.getByRole("dialog", { name: "Actions" })).toHaveClass("animate-sheet-in");
+
+    fireEvent.animationEnd(screen.getByRole("dialog", { name: "Actions" }));
+    expect(screen.getByRole("dialog", { name: "Actions" })).toBeInTheDocument();
+  });
+
+  it("close button title equals its accessible name", () => {
+    render(<MobileSheet open onOpenChange={vi.fn()} title="Actions" ariaLabel="Actions" />);
+    const dialog = screen.getByRole("dialog", { name: "Actions" });
+    const closeBtn = dialog.querySelector('button[aria-label="Close Actions"]');
+    expect(closeBtn).toHaveAttribute("title", "Close Actions");
   });
 });
 

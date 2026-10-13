@@ -1,5 +1,5 @@
 import { X, type LucideIcon } from "lucide-react";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { cn } from "../../lib/cn";
 
@@ -47,6 +47,20 @@ export function MobileSheet({
   const panelRef = useRef<HTMLDivElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
 
+  const [isMounted, setIsMounted] = useState(open);
+  const [isClosing, setIsClosing] = useState(false);
+  const [prevOpen, setPrevOpen] = useState(open);
+
+  if (open !== prevOpen) {
+    setPrevOpen(open);
+    if (open) {
+      setIsMounted(true);
+      setIsClosing(false);
+    } else if (isMounted) {
+      setIsClosing(true);
+    }
+  }
+
   // Escape closes from a window-level capture listener, as in MobileHostDrawer.tsx:153-157.
   useEffect(() => {
     if (!open) return;
@@ -73,16 +87,27 @@ export function MobileSheet({
     };
   }, [open]);
 
-  if (!open) return null;
+  const handleAnimationEnd = (event: React.AnimationEvent<HTMLDivElement>) => {
+    if (event.target !== panelRef.current) return;
+    if (isClosing) {
+      setIsMounted(false);
+      setIsClosing(false);
+    }
+  };
+
+  if (!isMounted) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end" data-testid={testId}>
+    <div
+      className={cn("fixed inset-0 z-50 flex flex-col justify-end", isClosing && "pointer-events-none")}
+      data-testid={testId}
+    >
       <button
         type="button"
         aria-label={closeAriaLabel ?? `Close ${ariaLabel}`}
         data-testid={testId ? `${testId}-backdrop` : undefined}
         onClick={() => onOpenChange(false)}
-        className="absolute inset-0 bg-black/50"
+        className={cn("absolute inset-0 bg-black/50", isClosing ? "animate-fade-out" : "animate-fade-in")}
       />
       <div
         ref={panelRef}
@@ -90,7 +115,11 @@ export function MobileSheet({
         aria-modal="true"
         aria-label={ariaLabel}
         tabIndex={-1}
-        className="relative z-10 flex max-h-[80dvh] min-w-0 flex-col overflow-hidden rounded-t-[20px] border-t border-chat-border bg-chat-surface animate-sheet-in focus:outline-none"
+        onAnimationEnd={handleAnimationEnd}
+        className={cn(
+          "relative z-10 flex max-h-[80dvh] min-w-0 flex-col overflow-hidden rounded-t-[20px] border-t border-chat-border bg-chat-surface focus:outline-none",
+          isClosing ? "animate-sheet-out" : "animate-sheet-in",
+        )}
       >
         <div className="flex justify-center px-4 pt-2.5" aria-hidden="true">
           <span className="h-1 w-9 rounded-full bg-chat-foreground-secondary/40" />
@@ -100,6 +129,7 @@ export function MobileSheet({
           <button
             type="button"
             aria-label={closeAriaLabel ?? `Close ${ariaLabel}`}
+            title={closeAriaLabel ?? `Close ${ariaLabel}`}
             onClick={() => onOpenChange(false)}
             className="flex size-11 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >

@@ -259,4 +259,19 @@ describe("MobileChatComposer", () => {
     expect(screen.getByTestId("chat-composer-attach-error")).toHaveTextContent("refused");
     expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent("stop request");
   });
+
+  it("provides title tooltips matching accessible names on icon buttons (+, mic, send, stop)", () => {
+    const { rerender } = render(
+      <MobileChatComposer onSend={vi.fn()} onStop={vi.fn()} isRunning={false} value="hello" />
+    );
+
+    expect(screen.getByTestId("attach-file-button")).toHaveAttribute("title", "Attach file");
+    expect(screen.getByTestId("mic-button")).toHaveAttribute("title", "Voice input is not supported");
+    expect(screen.getByTestId("send-button")).toHaveAttribute("title", "Send message");
+
+    rerender(
+      <MobileChatComposer onSend={vi.fn()} onStop={vi.fn()} isRunning={true} value="hello" />
+    );
+    expect(screen.getByTestId("stop-button")).toHaveAttribute("title", "Stop the running turn");
+  });
 });

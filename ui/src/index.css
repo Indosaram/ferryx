@@ -224,15 +224,48 @@ body {
     to { transform: translateY(0); }
   }
 
+  @keyframes sheet-out {
+    from { transform: translateY(0); }
+    to { transform: translateY(100%); }
+  }
+
+  .animate-sheet-out {
+    animation: sheet-out 200ms cubic-bezier(.2,.8,.2,1);
+  }
+
   @keyframes drawer-in {
     from { transform: translateX(-100%); }
     to { transform: translateX(0); }
   }
 
+  @keyframes sheet-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes sheet-fade-out {
+    from { opacity: 1; }
+    to { opacity: 0; }
+  }
+
+  .animate-fade-in {
+    animation: sheet-fade-in 200ms ease-out;
+  }
+
+  .animate-fade-out {
+    animation: sheet-fade-out 200ms ease-out;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .animate-sheet-in,
     .animate-drawer-in {
-      animation: none !important;
+      animation: sheet-fade-in 150ms ease-out !important;
+      transform: none !important;
+    }
+
+    .animate-sheet-out {
+      animation: sheet-fade-out 150ms ease-out !important;
+      transform: none !important;
     }
   }
 
