@@ -690,6 +690,7 @@ export function RemoteTerminal({
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let backoffAttempt = 0;
     let disposed = false;
+    let dialSequence = 0;
     const abort = new AbortController();
 
     const clearReconnectTimer = () => {
@@ -699,12 +700,41 @@ export function RemoteTerminal({
       }
     };
 
+    // Exponential backoff with jitter in (0.5, 1], so many clients dropped by one outage do not
+    // redial in lockstep.
+    const scheduleRedial = () => {
+      const delay = Math.min(10000, 1000 * Math.pow(2, backoffAttempt)) * (1 - 0.5 * Math.random());
+      backoffAttempt += 1;
+      clearReconnectTimer();
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        dial();
+      }, delay);
+    };
+
+    // Without a parent-owned recovery path, a failed ticket or dial retries like a closed socket
+    // instead of leaving the pane on "Connecting" forever.
+    const reportDialFailure = (error: unknown) => {
+      if (disposed) return;
+      if (onTransportFailure) {
+        onTransportFailure();
+        return;
+      }
+      console.warn("Terminal socket connection failed", error);
+      scheduleRedial();
+    };
+
     const dial = () => {
       clearReconnectTimer();
       if (disposed) return;
+      const sequence = ++dialSequence;
 
       const initSocket = (socketOrUrl: string | WebSocketLike) => {
-        if (disposed) return;
+        // A socket handed over after teardown or a newer dial is closed, never leaked.
+        if (disposed || sequence !== dialSequence) {
+          if (typeof socketOrUrl !== "string") socketOrUrl.close();
+          return;
+        }
         const socket = typeof socketOrUrl === "string" ? new WebSocket(socketOrUrl) : socketOrUrl;
         socket.onerror = () => {
           if (!disposed && socketRef.current === socket) onTransportFailure?.();
@@ -740,14 +770,7 @@ export function RemoteTerminal({
             return;
           }
           onSocketLifecycle?.(socketRequest.sessionId, "closed");
-
-          const delay = Math.min(10000, 1000 * Math.pow(2, backoffAttempt));
-          backoffAttempt += 1;
-          clearReconnectTimer();
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = null;
-            dial();
-          }, delay);
+          scheduleRedial();
         };
         socket.onmessage = (event: any) => {
           if (disposed || socketRef.current !== socket) return;
@@ -825,11 +848,7 @@ export function RemoteTerminal({
         const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(socketRequest.sessionId)}?daemonEpoch=${encodeURIComponent(epoch)}&render=grid`;
         Promise.resolve(createWebSocket(pathAndQuery))
           .then(initSocket)
-          .catch((error) => {
-            if (disposed) return;
-            if (onTransportFailure) onTransportFailure();
-            else console.warn("Terminal socket connection failed", error);
-          });
+          .catch(reportDialFailure);
         return;
       }
 
@@ -839,11 +858,7 @@ export function RemoteTerminal({
           socketRequest.geometry,
           transportUrl,
           attachKey,
-        ).then(initSocket).catch((error) => {
-          if (disposed) return;
-          if (onTransportFailure) onTransportFailure();
-          else console.warn("Terminal socket connection failed", error);
-        });
+        ).then(initSocket).catch(reportDialFailure);
         return;
       }
 
@@ -858,27 +873,32 @@ export function RemoteTerminal({
           followHostSize,
         );
       } catch (error) {
-        if (disposed) return;
-        if (onTransportFailure) onTransportFailure();
-        else console.warn("Terminal socket connection failed", error);
+        reportDialFailure(error);
         return;
       }
 
       if (typeof syncOrPromiseUrl === "string") {
         initSocket(syncOrPromiseUrl);
       } else {
-        syncOrPromiseUrl.then(initSocket).catch((error) => {
-          if (disposed) return;
-          if (onTransportFailure) onTransportFailure();
-          else console.warn("Terminal socket connection failed", error);
-        });
+        syncOrPromiseUrl.then(initSocket).catch(reportDialFailure);
       }
     };
 
+    // Coming back online or to the foreground redials at once instead of sitting out the backoff.
+    const recover = () => {
+      if (disposed || reconnectTimer === null) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      dial();
+    };
+
     dial();
+    window.addEventListener("online", recover);
+    document.addEventListener("visibilitychange", recover);
 
     return () => {
       disposed = true;
+      window.removeEventListener("online", recover);
+      document.removeEventListener("visibilitychange", recover);
       wheelRemainderRowsRef.current = 0;
       lastSentGenerationRef.current = null;
       generationRef.current = null;

@@ -63,6 +63,8 @@ const hiddenCursor = {
 
 describe("remote terminal grid contract", () => {
   beforeEach(() => {
+    // Pin jitter to zero so backoff tests stay deterministic (jitter = 1 - 0.5 * 0 = 1).
+    vi.spyOn(Math, "random").mockReturnValue(0);
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       if (this.hasAttribute("data-terminal-cell-measure")) return rect(10, 20);
       if (this.getAttribute("data-testid") === "remote-terminal-grid") return rect(800, 400);
@@ -1491,6 +1493,26 @@ describe("remote terminal grid contract", () => {
     );
     return { createWebSocket, paths, sockets, ...view };
   }
+
+  it("R1: closes a socket handed over after the pane unmounted instead of leaking it", async () => {
+    let deliver!: (ws: MockWebSocket) => void;
+    const createWebSocket = vi.fn(() => new Promise<MockWebSocket>((resolve) => { deliver = resolve; }));
+    const view = render(
+      <RemoteTerminal
+        sessionId="session-machine-late"
+        token="token-unused"
+        isAccountSession={true}
+        daemonEpoch="epoch-1"
+        createWebSocket={createWebSocket as never}
+      />,
+    );
+    await waitFor(() => expect(createWebSocket).toHaveBeenCalledTimes(1));
+    view.unmount();
+    const late = new MockWebSocket("mock://late");
+    await act(async () => { deliver(late); });
+    expect(late.close).toHaveBeenCalledTimes(1);
+    expect(late.onopen).toBeNull();
+  });
 
   it("holds machine controls until attached, fences them with its generation, and keeps PTY input binary", async () => {
     const { createWebSocket, paths, sockets } = renderMachineTerminal("epoch-1");

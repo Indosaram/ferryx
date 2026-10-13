@@ -2002,6 +2002,7 @@ export const RemoteHostConnection: React.FC<{
       try {
         if (activeTunnelConnection) {
           current = await activeTunnelConnection.openWebSocket("/api/v1/events");
+          if (disposed) { current.close(); return; }
         } else {
           const url = await remoteSocketUrl(transportBaseUrl, "/api/v1/events", token, abort.signal);
           if (disposed) return;
@@ -2012,7 +2013,7 @@ export const RemoteHostConnection: React.FC<{
         if (!activeTunnelConnection && transport.url !== relayUrl) rollbackTransport();
         else {
           console.warn("Event socket connection failed", error);
-          retry = setTimeout(connect, Math.min(10000, 1000 * 2 ** attempt));
+          retry = setTimeout(connect, Math.min(10000, 1000 * 2 ** attempt) * (1 - 0.5 * Math.random()));
           attempt = Math.min(attempt + 1, 4);
         }
         return;
@@ -2051,7 +2052,7 @@ export const RemoteHostConnection: React.FC<{
           rollbackTransport();
           return;
         }
-        retry = setTimeout(connect, Math.min(10000, 1000 * 2 ** attempt));
+        retry = setTimeout(connect, Math.min(10000, 1000 * 2 ** attempt) * (1 - 0.5 * Math.random()));
         attempt = Math.min(attempt + 1, 4);
       };
     };
@@ -2653,6 +2654,7 @@ export const RemoteHostConnection: React.FC<{
       setChatProviderSession(null);
       return;
     }
+    setChatProviderSession(null);
     let cancelled = false;
     const controller = new AbortController();
     void fetchChatSessionRows({
@@ -2755,7 +2757,13 @@ export const RemoteHostConnection: React.FC<{
         // and the generation it came from is recorded with it for the cursor check below.
         const liveTarget = chatTargetRef.current;
         if (liveTarget === null || !sameReferenceTarget(liveTarget, read.fence.target)) return;
+        // Skip state updates when the page generation is unchanged — avoids creating new
+        // objects every 3s that force downstream re-renders while nothing actually moved.
+        const prevFence = chatFenceRef.current;
+        const generationUnchanged = prevFence !== null && prevFence.generation === read.fence.generation
+          && prevFence.sessionId === read.fence.sessionId;
         chatFenceRef.current = read.fence;
+        if (generationUnchanged) { fetching = false; return; }
         setChatPage(read.page);
         if (!chatLoadedOlderRef.current) {
           setChatOlderCursor(read.page.cursor ?? null);
@@ -2808,10 +2816,15 @@ export const RemoteHostConnection: React.FC<{
     const timer = setInterval(() => {
       void readNewest();
     }, 3000);
+    const onVisible = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") void readNewest();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       controller.abort();
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [chatAgentType, chatProviderSession, chatTargetKey, effectiveSessionId, refreshChatIdentity, resetChatLane, token, transportBaseUrl, viewMode]);
 
@@ -3294,8 +3307,13 @@ export const RemoteHostConnection: React.FC<{
 
   const chatPartContext = useMemo<ReferencePartRenderContext>(
     () => ({
-      resolveImageUrl: (image: ReferenceImageRef) =>
-        referenceChatRoute(chatSessionIdRef.current ?? "", `files/${encodeURIComponent(image.ref)}`),
+      resolveImageUrl: (_image: ReferenceImageRef) => {
+        // An <img src> cannot carry the bearer header, and the server rejects URL-borne device
+        // tokens (they leak through logs, history and Referer). The old bare relative path was
+        // never authorized either, so render the labelled chip fallback until images are
+        // fetched with the bearer header into blob URLs.
+        return null;
+      },
     }),
     [],
   );
@@ -3903,7 +3921,7 @@ export const RemoteHostConnection: React.FC<{
                       data-testid="remote-manual-browser-id-input"
                       className="px-2 py-1 text-xs rounded bg-chat-surface border border-chat-border text-chat-foreground font-mono"
                       onKeyDown={(e) => {
-                        if (e.key === "Enter" && (e.target as HTMLInputElement).value.trim()) {
+                        if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229 && (e.target as HTMLInputElement).value.trim()) {
                           setSelectedBrowserId((e.target as HTMLInputElement).value.trim());
                         }
                       }}
