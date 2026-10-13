@@ -66,6 +66,31 @@ function getUtf8ByteLength(text: string | undefined): number {
 
 const MAX_QUEUE_CAPACITY = 64;
 
+/** Thrown when the outgoing queue/byte budget is exhausted. */
+export class BackpressureError extends Error {
+  readonly code = "BACKPRESSURE";
+  constructor(message = "BrowserClient queue full: backpressure limit exceeded") {
+    super(message);
+    this.name = "BackpressureError";
+  }
+}
+
+/** Thrown when sending on a socket that is closed or closing. */
+export class BrowserSocketClosedError extends Error {
+  readonly code = "SOCKET_CLOSED";
+  constructor(message = "Cannot send message: WebSocket is closed") {
+    super(message);
+    this.name = "BrowserSocketClosedError";
+  }
+}
+
+/** Socket URL without query/fragment: single-use tickets travel in the query string. */
+function redactSocketUrl(url: string): string {
+  return url.split(/[?#]/)[0];
+}
+
+type PendingResponseType = ServerMessage["type"];
+
 export class BrowserClient {
   private ws: WebSocket;
   private requestCounter = 0;
@@ -75,8 +100,10 @@ export class BrowserClient {
       resolve: (value: any) => void;
       reject: (reason: any) => void;
       timeoutId?: ReturnType<typeof setTimeout>;
+      expectedTypes: readonly PendingResponseType[];
     }
   >();
+  private openWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
 
   private frameListeners = new Set<(frame: BrowserFrame) => void>();
   private helloListeners = new Set<(hello: BrowserHelloMessage) => void>();
@@ -107,8 +134,18 @@ export class BrowserClient {
       this.handleIncomingMessage(event.data);
     };
 
+    this.ws.onopen = () => {
+      const waiters = this.openWaiters;
+      this.openWaiters = [];
+      this.pumpWriter();
+      for (const waiter of waiters) waiter.resolve();
+    };
+
     this.ws.onerror = (_err) => {
-      const error = new Error(`WebSocket error on ${this.url}`);
+      const waiters = this.openWaiters;
+      this.openWaiters = [];
+      for (const waiter of waiters) waiter.reject(new Error("WebSocket error before opening"));
+      const error = new Error(`WebSocket error on ${redactSocketUrl(this.url)}`);
       for (const listener of this.errorListeners) {
         listener(error);
       }
@@ -119,6 +156,9 @@ export class BrowserClient {
       this.subscribedBarrier = false;
       this.writerQueue = [];
       this.currentDriverState = "viewing";
+      const waiters = this.openWaiters;
+      this.openWaiters = [];
+      for (const waiter of waiters) waiter.reject(new Error("WebSocket closed before opening"));
       this.rejectAllPending(new Error("WebSocket closed"));
       for (const listener of this.closeListeners) {
         listener();
@@ -146,25 +186,8 @@ export class BrowserClient {
         }
       };
 
-      const prevOpen = this.ws.onopen;
-      this.ws.onopen = (ev) => {
-        prevOpen?.call(this.ws, ev as any);
-        this.pumpWriter();
-        resolve();
-      };
-
-      const prevClose = this.ws.onclose;
-      this.ws.onclose = (ev) => {
-        prevClose?.call(this.ws, ev as any);
-        reject(new Error("WebSocket closed before opening"));
-      };
-
-      const prevError = this.ws.onerror;
-      this.ws.onerror = (ev) => {
-        prevError?.call(this.ws, ev as any);
-        reject(new Error("WebSocket error before opening"));
-      };
-
+      // Handlers are installed once in the constructor; concurrent callers just wait here.
+      this.openWaiters.push({ resolve, reject });
       check();
     });
   }
@@ -178,6 +201,12 @@ export class BrowserClient {
     if (data instanceof ArrayBuffer) {
       try {
         const frame = decodeFrame(data);
+        if (
+          this.currentSubscription &&
+          frame.metadata.streamId !== this.currentSubscription.streamId
+        ) {
+          return;
+        }
         for (const listener of this.frameListeners) {
           listener(frame);
         }
@@ -306,7 +335,7 @@ export class BrowserClient {
 
   private enqueueMessage(msg: OutgoingWriterMessage): void {
     if (this.isClosed || this.isClosing) {
-      throw new Error("Cannot send message: WebSocket is closed");
+      throw new BrowserSocketClosedError();
     }
 
     // Coalesce frame ACKs: latest-only per streamId (R4-14)
@@ -339,7 +368,7 @@ export class BrowserClient {
       inFlightCount >= MAX_QUEUE_CAPACITY ||
       currentQueueBytes + nativeBuffered + msgBytes > MAX_QUEUE_BYTES
     ) {
-      throw new Error("BrowserClient queue full: backpressure limit exceeded");
+      throw new BackpressureError();
     }
 
     // Priority insertion: maintain queue order (CONTROL -> COMMAND -> ACK) (R4-14)
@@ -419,7 +448,7 @@ export class BrowserClient {
     requiresSubscription = false
   ) {
     if (this.isClosed || this.isClosing) {
-      throw new Error("Cannot send message: WebSocket is closed");
+      throw new BrowserSocketClosedError();
     }
     const text = serializeClientMessage(message);
     this.enqueueMessage({
@@ -431,6 +460,7 @@ export class BrowserClient {
   }
 
   private requestResponse<T>(
+    expectedTypes: readonly PendingResponseType[],
     buildMessage: (requestId: string) => ClientMessage,
     priority: MessagePriority = MessagePriority.COMMAND,
     requiresSubscription = false,
@@ -457,6 +487,7 @@ export class BrowserClient {
           reject(err);
         },
         timeoutId,
+        expectedTypes,
       });
 
       const doEnqueue = () => {
@@ -486,10 +517,18 @@ export class BrowserClient {
     });
   }
 
-  private resolvePending(requestId: string, value: unknown) {
+  private resolvePending(requestId: string, value: { type: PendingResponseType }) {
     const pending = this.pendingRequests.get(requestId);
     if (pending) {
       this.pendingRequests.delete(requestId);
+      if (!pending.expectedTypes.includes(value.type)) {
+        pending.reject(
+          new Error(
+            `Unexpected response type for request ${requestId}: expected ${pending.expectedTypes.join("|")}, got ${value.type}`,
+          ),
+        );
+        return;
+      }
       pending.resolve(value);
     }
   }
@@ -616,6 +655,7 @@ export class BrowserClient {
   ): Promise<BrowserSubscribedMessage> {
     this.isSubscribing = true;
     return this.requestResponse<BrowserSubscribedMessage>(
+      ["browserSubscribed"],
       (requestId) => ({
         type: "browserSubscribe",
         requestId,
@@ -638,6 +678,7 @@ export class BrowserClient {
       return Promise.reject(new Error("Cannot unsubscribe: no active subscription"));
     }
     return this.requestResponse<BrowserUnsubscribedMessage>(
+      ["browserUnsubscribed"],
       (requestId) => ({
         type: "browserUnsubscribe",
         requestId,
@@ -672,6 +713,7 @@ export class BrowserClient {
 
   heartbeat(leaseEpoch?: string, timeoutMs = 5000): Promise<BrowserPongMessage> {
     return this.requestResponse<BrowserPongMessage>(
+      ["browserPong"],
       (requestId) => ({
         type: "browserHeartbeat",
         requestId,
@@ -686,6 +728,7 @@ export class BrowserClient {
 
   claimDriver(browserId: string, subscriptionId: string, timeoutMs = 10000): Promise<BrowserDriverClaimedMessage> {
     return this.requestResponse<BrowserDriverClaimedMessage>(
+      ["browserDriverClaimed"],
       (requestId) => ({
         type: "browserDriverClaim",
         requestId,
@@ -700,6 +743,7 @@ export class BrowserClient {
 
   releaseDriver(leaseEpoch: string, timeoutMs = 10000): Promise<BrowserDriverReleasedMessage> {
     return this.requestResponse<BrowserDriverReleasedMessage>(
+      ["browserDriverReleased"],
       (requestId) => ({
         type: "browserDriverRelease",
         requestId,
@@ -716,6 +760,7 @@ export class BrowserClient {
     const requestSeq = this.requestCounter.toString();
 
     return this.requestResponse<any>(
+      ["browserResult"],
       (requestId) => ({
         type: "browserCommand",
         requestId,
@@ -736,6 +781,7 @@ export class BrowserClient {
 
   takeSnapshot(browserId: string, timeoutMs = 10000): Promise<BrowserSnapshotServerMessage> {
     return this.requestResponse<BrowserSnapshotServerMessage>(
+      ["browserSnapshot"],
       (requestId) => ({
         type: "browserSnapshot",
         requestId,
@@ -760,10 +806,9 @@ export class BrowserClient {
         true,
       );
     } catch (err) {
-      if (err instanceof Error && /backpressure/i.test(err.message)) {
-        throw err;
-      }
-      // Ignored if socket closed
+      // Only a closed socket is benign; backpressure and anything else must surface.
+      if (err instanceof BrowserSocketClosedError) return;
+      throw err;
     }
   }
 
@@ -780,10 +825,9 @@ export class BrowserClient {
         true,
       );
     } catch (err) {
-      if (err instanceof Error && /backpressure/i.test(err.message)) {
-        throw err;
-      }
-      // Ignored if socket closed
+      // Only a closed socket is benign; backpressure and anything else must surface.
+      if (err instanceof BrowserSocketClosedError) return;
+      throw err;
     }
   }
 

@@ -685,6 +685,33 @@ describe("browserProtocol - Phase 7B edge cases (§7.1)", () => {
       expect(() => decodeFrame(frameBuf)).not.toThrow(/out of bounds/i);
     });
 
+    it("rejects a JPEG that carries no SOF marker", () => {
+      const noSofJpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+      const frameBuf = makeFrameWithCustomImage(noSofJpeg, "jpeg");
+      expect(() => decodeFrame(frameBuf)).toThrow(/no SOF/i);
+    });
+
+    it("rejects inherited Object.prototype keys as server message types", () => {
+      for (const type of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+        expect(() => parseServerMessage(JSON.stringify({ type }))).toThrow(
+          /Unrecognized server message type/i,
+        );
+      }
+    });
+
+    it("rejects u64 decimal strings longer than 20 digits", () => {
+      const hello = {
+        type: "browserHello",
+        browserId: "b1",
+        browserInstanceId: "bi-1",
+        browserServiceEpoch: "1".repeat(21),
+        desktopEpoch: "1",
+        protocolVersion: 1,
+        supportedCommands: [],
+      };
+      expect(() => parseServerMessage(JSON.stringify(hello))).toThrow(/u64 decimal/i);
+    });
+
     it("rejects JPEG stream with corrupted SOF length (< 7 bytes)", () => {
       const corruptSofJpeg = new Uint8Array([
         0xff, 0xd8, // SOI

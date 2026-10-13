@@ -163,6 +163,8 @@ export function useRemoteBrowserDriver({
       setDriverState("viewing");
       setLeaseEpoch(null);
       setExpiresAt(null);
+      setDriverSnapshotId(null);
+      setDriverMapRevision(null);
       return;
     }
 
@@ -183,18 +185,17 @@ export function useRemoteBrowserDriver({
       }
     });
 
-    const unsubRevoked = client.onDriverRevoked
-      ? client.onDriverRevoked((_msg: ServerBrowserDriverRevoked) => {
-          setDriverState("revoked");
-          setLeaseEpoch(null);
-          setExpiresAt(null);
-        })
-      : typeof (client as any).on === "function"
-      ? (client as any).on("driverRevoked", (_msg: any) => {
-          setDriverState("revoked");
-          setLeaseEpoch(null);
-          setExpiresAt(null);
-        })
+    const handleRevoked = (_msg: ServerBrowserDriverRevoked) => {
+      setDriverState("revoked");
+      setLeaseEpoch(null);
+      setExpiresAt(null);
+    };
+    // Test doubles may expose only one of the two subscription entry points.
+    const revokedSource: Partial<Pick<BrowserClient, "onDriverRevoked" | "on">> = client;
+    const unsubRevoked = revokedSource.onDriverRevoked
+      ? revokedSource.onDriverRevoked(handleRevoked)
+      : revokedSource.on
+      ? revokedSource.on("driverRevoked", handleRevoked)
       : () => {};
 
     const unsubError = client.onError((err: Error | BrowserErrorMessage) => {
@@ -213,6 +214,8 @@ export function useRemoteBrowserDriver({
       setDriverState("viewing");
       setLeaseEpoch(null);
       setExpiresAt(null);
+      setDriverSnapshotId(null);
+      setDriverMapRevision(null);
     });
 
     return () => {
@@ -273,19 +276,33 @@ export function useRemoteBrowserDriver({
     return () => clearInterval(checkInterval);
   }, [driverState, expiresAt]);
 
-  // Unmount effect: clear heartbeat timers and release driving lease
+  // Client/browser switch or unmount: clear heartbeat timers and release the lease this hook held.
+  // The effect closure captures the OLD client; guardsRef still carries that lease's state at cleanup time.
   useEffect(() => {
     return () => {
       if (heartbeatTimerRef.current) {
         clearInterval(heartbeatTimerRef.current);
         heartbeatTimerRef.current = null;
       }
-      const { client: curClient, leaseEpoch: curEpoch, driverState: curState } = guardsRef.current;
-      if (curClient && curEpoch && curState === "driving") {
-        void curClient.releaseDriver(curEpoch).catch(() => {});
+      const { leaseEpoch: curEpoch, driverState: curState } = guardsRef.current;
+      if (client && curEpoch && curState === "driving") {
+        void client.releaseDriver(curEpoch).catch(() => {});
       }
     };
-  }, []);
+  }, [client, browserId]);
+
+  // A different client or browser invalidates the lease and any snapshot identifiers.
+  const prevTargetRef = useRef({ client, browserId });
+  useEffect(() => {
+    const prev = prevTargetRef.current;
+    if (prev.client === client && prev.browserId === browserId) return;
+    prevTargetRef.current = { client, browserId };
+    setDriverState("viewing");
+    setLeaseEpoch(null);
+    setExpiresAt(null);
+    setDriverSnapshotId(null);
+    setDriverMapRevision(null);
+  }, [client, browserId]);
 
   const claim = useCallback(async () => {
     if (!client || !browserId) {

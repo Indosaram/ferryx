@@ -64,6 +64,16 @@ describe("RemoteBrowserControls eval refusal", () => {
   });
 });
 
+describe("RemoteBrowserControls accessibility", () => {
+  it("labels inputs and exposes the driver badge as a status region", () => {
+    render(<RemoteBrowserControls url="https://example.com" driverState="driving" />);
+    expect(screen.getByLabelText("Page URL")).toBeDefined();
+    expect(screen.getByLabelText("Element reference")).toBeDefined();
+    expect(screen.getByLabelText("Text to fill")).toBeDefined();
+    expect(screen.getByRole("status").textContent).toBe("Driving");
+  });
+});
+
 describe("RemoteBrowserControls refusals it decides locally", () => {
   // RED mutation: drop the 32 KiB guard in `handleRunEval` -> this refusal never fires and
   // onEval is called.

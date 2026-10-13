@@ -75,7 +75,7 @@ const ALLOWED_METADATA_KEYS = new Set([
 
 const ALLOWED_RECT_KEYS = new Set(["x", "y", "width", "height"]);
 
-const U64_DECIMAL_REGEX = /^\d+$/;
+const U64_DECIMAL_REGEX = /^\d{1,20}$/;
 
 function isFiniteNumber(val: unknown): val is number {
   return typeof val === "number" && Number.isFinite(val);
@@ -334,7 +334,10 @@ export function decodeFrame(input: ArrayBuffer | Uint8Array): BrowserFrame {
       throw new Error("Invalid JPEG magic header: expected SOI marker 0xFF 0xD8");
     }
     const dims = parseJpegDimensions(imageBytes);
-    if (dims && (dims.width !== metadata.imageWidth || dims.height !== metadata.imageHeight)) {
+    if (!dims) {
+      throw new Error("Invalid JPEG: no SOF marker with dimensions found");
+    }
+    if (dims.width !== metadata.imageWidth || dims.height !== metadata.imageHeight) {
       throw new Error(
         `JPEG image dimension mismatch: header has ${dims.width}x${dims.height}, metadata specifies ${metadata.imageWidth}x${metadata.imageHeight}`,
       );
@@ -758,7 +761,9 @@ export function parseServerMessage(jsonString: string): ServerMessage {
     throw new Error("Server message missing type discriminator");
   }
 
-  const allowedKeys = SERVER_MESSAGE_ALLOWED_KEYS[type];
+  const allowedKeys = Object.prototype.hasOwnProperty.call(SERVER_MESSAGE_ALLOWED_KEYS, type)
+    ? SERVER_MESSAGE_ALLOWED_KEYS[type]
+    : undefined;
   if (!allowedKeys) {
     throw new Error(`Unrecognized server message type: ${type}`);
   }

@@ -11,6 +11,7 @@ import { RemoteBrowserWorkspace } from "./RemoteBrowserWorkspace";
 // Mock WebSocket for RemoteBrowser tests
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
+  static creationListeners = new Set<() => void>();
   binaryType: string = "blob";
   onopen: (() => void) | null = null;
   onclose: ((ev: { code: number; reason: string }) => void) | null = null;
@@ -21,6 +22,7 @@ class MockWebSocket {
 
   constructor(readonly url: string) {
     MockWebSocket.instances.push(this);
+    for (const listener of [...MockWebSocket.creationListeners]) listener();
     queueMicrotask(() => {
       this.onopen?.();
     });
@@ -36,15 +38,29 @@ class MockWebSocket {
   }
 }
 
-async function waitForSocket(index = 0): Promise<MockWebSocket> {
-  while (MockWebSocket.instances.length <= index) {
-    await new Promise((r) => setTimeout(r, 5));
-  }
-  return MockWebSocket.instances[index];
+// Resolves when the constructor of the index-th socket runs (event driven), bounded by a hard deadline.
+function waitForSocket(index = 0, timeoutMs = 2000): Promise<MockWebSocket> {
+  const existing = MockWebSocket.instances[index];
+  if (existing) return Promise.resolve(existing);
+  return new Promise<MockWebSocket>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      MockWebSocket.creationListeners.delete(listener);
+      reject(new Error(`Timed out waiting for WebSocket #${index}`));
+    }, timeoutMs);
+    const listener = () => {
+      const created = MockWebSocket.instances[index];
+      if (!created) return;
+      clearTimeout(timer);
+      MockWebSocket.creationListeners.delete(listener);
+      resolve(created);
+    };
+    MockWebSocket.creationListeners.add(listener);
+  });
 }
 
-async function drainAsync(ms = 15) {
-  await new Promise((r) => setTimeout(r, ms));
+// Deterministically settles queued promise continuations (no wall-clock sleep).
+async function drainAsync() {
+  for (let i = 0; i < 25; i++) await Promise.resolve();
 }
 
 function makeTestJpeg(width: number, height: number): Uint8Array {

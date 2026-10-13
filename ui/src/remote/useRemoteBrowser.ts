@@ -68,6 +68,7 @@ export function useRemoteBrowser({
   const [reconnectNonce, setReconnectNonce] = useState(0);
 
   const clientRef = useRef<BrowserClient | null>(null);
+  const [client, setClient] = useState<BrowserClient | null>(null);
   const currentStreamIdRef = useRef<number | null>(null);
   const lastDecodedSeqRef = useRef<number>(-1);
   const currentUrlRef = useRef<string | null>(null);
@@ -101,6 +102,7 @@ export function useRemoteBrowser({
       clientRef.current.close();
       clientRef.current = null;
     }
+    setClient(null);
     clearFrameBuffer();
     // Increment reconnect nonce to trigger fresh connection with new ticket and new subscription
     // NO mutation auto-replay is performed
@@ -165,6 +167,7 @@ export function useRemoteBrowser({
   useEffect(() => {
     if (!enabled || !browserId) {
       clearFrameBuffer();
+      setClient(null);
       setStatus("closed");
       return;
     }
@@ -183,6 +186,7 @@ export function useRemoteBrowser({
 
         const client = new BrowserClient(wsUrl);
         clientRef.current = client;
+        setClient(client);
 
         client.onClose(() => {
           if (!cancelled) {
@@ -214,9 +218,9 @@ export function useRemoteBrowser({
             return;
           }
 
-          // Verify stream ID matches active stream
+          // Drop frames until the subscription yields a stream id, then only accept that stream
           if (
-            currentStreamIdRef.current !== null &&
+            currentStreamIdRef.current === null ||
             incomingFrame.metadata.streamId !== currentStreamIdRef.current
           ) {
             return;
@@ -286,6 +290,7 @@ export function useRemoteBrowser({
         clientRef.current.close();
         clientRef.current = null;
       }
+      setClient(null);
       clearFrameBuffer();
       currentStreamIdRef.current = null;
       lastDecodedSeqRef.current = -1;
@@ -374,7 +379,7 @@ export function useRemoteBrowser({
     browserState,
     hello,
     error,
-    client: clientRef.current,
+    client,
     reconnect,
     sendAck,
     confirmPresented,

@@ -303,8 +303,9 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
             value={inputUrl}
             onChange={(e) => setInputUrl(e.target.value)}
             disabled={!isDriving}
+            aria-label="Page URL"
             placeholder={isDriving ? "https://example.com" : "Claim control to navigate"}
-            className="w-full px-2 py-1 rounded bg-[#0a0a0a] border border-[#191919] focus:outline-none focus:border-[#346bf1] disabled:opacity-50 disabled:cursor-not-allowed text-[#f5f5f5] text-xs font-mono"
+            className="w-full px-2 py-1 rounded bg-[#0a0a0a] border border-[#191919] focus:outline-none focus:border-[#346bf1] disabled:opacity-50 disabled:cursor-not-allowed text-[#f5f5f5] text-base sm:text-xs font-mono"
           />
           <button
             type="submit"
@@ -320,6 +321,7 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
         <div className="flex items-center gap-1.5 shrink-0">
           <span
             data-testid="remote-browser-driver-badge"
+            role="status"
             className={`px-2 py-0.5 rounded text-[11px] font-semibold uppercase tracking-wider ${
               driverState === "driving"
                 ? "bg-[#4bb8f0]/15 text-[#4bb8f0] border border-[#4bb8f0]/30"
@@ -378,8 +380,9 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
             value={reference}
             onChange={(e) => setReference(e.target.value)}
             disabled={!isDriving}
+            aria-label="Element reference"
             placeholder="e.g. e1"
-            className="w-16 px-1.5 py-0.5 rounded bg-[#0a0a0a] border border-[#191919] focus:outline-none focus:border-[#346bf1] disabled:opacity-50 text-[#f5f5f5] text-xs font-mono"
+            className="w-16 px-1.5 py-0.5 rounded bg-[#0a0a0a] border border-[#191919] focus:outline-none focus:border-[#346bf1] disabled:opacity-50 text-[#f5f5f5] text-base sm:text-xs font-mono"
           />
           <input
             type="text"
@@ -387,8 +390,9 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
             value={fillValue}
             onChange={(e) => setFillValue(e.target.value)}
             disabled={!isDriving}
+            aria-label="Text to fill"
             placeholder="Text to fill"
-            className="w-28 sm:w-40 px-1.5 py-0.5 rounded bg-[#0a0a0a] border border-[#191919] focus:outline-none focus:border-[#346bf1] disabled:opacity-50 text-[#f5f5f5] text-xs"
+            className="w-28 sm:w-40 px-1.5 py-0.5 rounded bg-[#0a0a0a] border border-[#191919] focus:outline-none focus:border-[#346bf1] disabled:opacity-50 text-[#f5f5f5] text-base sm:text-xs"
           />
           <button
             type="submit"

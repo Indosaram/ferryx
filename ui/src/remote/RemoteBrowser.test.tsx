@@ -8,7 +8,7 @@ import {
   type BrowserHelloMessage,
   type BrowserSubscribedMessage,
 } from "./browserProtocol";
-import { BrowserClient } from "./browserClient";
+import { BackpressureError, BrowserClient } from "./browserClient";
 import { useRemoteBrowser } from "./useRemoteBrowser";
 import { RemoteBrowser, resolveViewportClickParams } from "./RemoteBrowser";
 import { RemoteBrowserWorkspace } from "./RemoteBrowserWorkspace";
@@ -28,6 +28,7 @@ class MockWebSocket {
   readonly CLOSED = 3;
 
   static instances: MockWebSocket[] = [];
+  static creationListeners = new Set<() => void>();
   binaryType: string = "blob";
   onopen: (() => void) | null = null;
   onclose: ((ev: { code: number; reason: string }) => void) | null = null;
@@ -39,6 +40,7 @@ class MockWebSocket {
 
   constructor(readonly url: string) {
     MockWebSocket.instances.push(this);
+    for (const listener of [...MockWebSocket.creationListeners]) listener();
     queueMicrotask(() => {
       this.onopen?.();
     });
@@ -54,15 +56,29 @@ class MockWebSocket {
   }
 }
 
-async function waitForSocket(index = 0): Promise<MockWebSocket> {
-  while (MockWebSocket.instances.length <= index) {
-    await new Promise((r) => setTimeout(r, 5));
-  }
-  return MockWebSocket.instances[index];
+// Resolves when the constructor of the index-th socket runs (event driven), bounded by a hard deadline.
+function waitForSocket(index = 0, timeoutMs = 2000): Promise<MockWebSocket> {
+  const existing = MockWebSocket.instances[index];
+  if (existing) return Promise.resolve(existing);
+  return new Promise<MockWebSocket>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      MockWebSocket.creationListeners.delete(listener);
+      reject(new Error(`Timed out waiting for WebSocket #${index}`));
+    }, timeoutMs);
+    const listener = () => {
+      const created = MockWebSocket.instances[index];
+      if (!created) return;
+      clearTimeout(timer);
+      MockWebSocket.creationListeners.delete(listener);
+      resolve(created);
+    };
+    MockWebSocket.creationListeners.add(listener);
+  });
 }
 
-async function drainAsync(ms = 15) {
-  await new Promise((r) => setTimeout(r, ms));
+// Deterministically settles queued promise continuations (no wall-clock sleep).
+async function drainAsync() {
+  for (let i = 0; i < 25; i++) await Promise.resolve();
 }
 
 // Helpers for test frames
@@ -2055,5 +2071,178 @@ describe("RemoteBrowser component", () => {
     expect(() =>
       resolveViewportClickParams(500, 250, 1000, 500, staleFrame, 10),
     ).toThrow(/stale/i);
+  });
+});
+
+describe("review-fix regressions (remote browser)", () => {
+  function sub(requestId: string, streamId: number) {
+    return JSON.stringify({
+      type: "browserSubscribed",
+      requestId,
+      subscriptionId: "sub-1",
+      streamId,
+      browserId: "b1",
+      browserInstanceId: "bi-1",
+      browserServiceEpoch: "1",
+      desktopEpoch: "1",
+      documentGeneration: "1",
+      options: { format: "jpeg" },
+    });
+  }
+
+  it("B5: pause surfaces a typed BackpressureError code, not message text", () => {
+    const client = new BrowserClient("ws://localhost:9000/browser/b1");
+    const ws = MockWebSocket.instances[0];
+    ws.bufferedAmount = 2 * 1024 * 1024;
+    let thrown: unknown;
+    try {
+      client.pause("b1", 1);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(BackpressureError);
+    expect((thrown as BackpressureError).code).toBe("BACKPRESSURE");
+  });
+
+  it("B7: rejects a response whose type does not match the pending request", async () => {
+    const client = new BrowserClient("ws://localhost:9000/browser/b1");
+    const ws = MockWebSocket.instances[0];
+    const claim = client.claimDriver("b1", "sub-1");
+    const sent = JSON.parse(ws.sentMessages[0] as string);
+    ws.onmessage?.({ data: JSON.stringify({ type: "browserPong", requestId: sent.requestId }) });
+    await expect(claim).rejects.toThrow(/Unexpected response type/);
+  });
+
+  it("B8: socket error message does not leak the ticket query", () => {
+    const client = new BrowserClient("ws://localhost:9000/browser/b1?ticket=SECRET");
+    const ws = MockWebSocket.instances[0];
+    const messages: string[] = [];
+    client.onError((err) => messages.push(err instanceof Error ? err.message : err.message));
+    ws.onerror?.({});
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).not.toContain("SECRET");
+    expect(messages[0]).toContain("ws://localhost:9000/browser/b1");
+  });
+
+  it("B4: client drops frames whose streamId differs from the subscription", async () => {
+    const client = new BrowserClient("ws://localhost:9000/browser/b1");
+    const ws = MockWebSocket.instances[0];
+    const seen: number[] = [];
+    client.onFrame((f) => seen.push(f.metadata.streamId));
+    const subPromise = client.subscribe({ format: "jpeg" });
+    const sent = JSON.parse(ws.sentMessages[0] as string);
+    ws.onmessage?.({ data: sub(sent.requestId, 1) });
+    await subPromise;
+    ws.onmessage?.({ data: encodeFrame(makeTestFrame(1, 2)).buffer });
+    ws.onmessage?.({ data: encodeFrame(makeTestFrame(2, 1)).buffer });
+    expect(seen).toEqual([1]);
+  });
+
+  it("B4: useRemoteBrowser drops frames that arrive before the stream id is known", async () => {
+    function Harness() {
+      const state = useRemoteBrowser({
+        baseUrl: "http://localhost:8080",
+        browserId: "b1",
+        deviceToken: "mock-token",
+      });
+      return (
+        <div>
+          <div data-testid="seq">{state.frame?.seq ?? "none"}</div>
+          <div data-testid="has-client">{state.client ? "yes" : "no"}</div>
+        </div>
+      );
+    }
+    await act(async () => {
+      render(<Harness />);
+    });
+    const ws = await waitForSocket(0);
+    await drainAsync();
+    // B3: the client is exposed as soon as it exists, without waiting for an unrelated state change.
+    expect(screen.getByTestId("has-client").textContent).toBe("yes");
+
+    await act(async () => {
+      ws.onmessage?.({ data: encodeFrame(makeTestFrame(1, 1)).buffer });
+      await drainAsync();
+    });
+    expect(screen.getByTestId("seq").textContent).toBe("none");
+  });
+
+  it("B1/B2: switching client releases the old lease and clears snapshot identifiers", async () => {
+    const makeClient = (releaseDriver: ReturnType<typeof vi.fn>) =>
+      ({
+        sendCommand: vi.fn().mockResolvedValue({ ok: true }),
+        onDriverChanged: vi.fn(() => () => {}),
+        onError: vi.fn(() => () => {}),
+        onClose: vi.fn(() => () => {}),
+        heartbeat: vi.fn().mockResolvedValue({}),
+        claimDriver: vi.fn().mockResolvedValue({ leaseEpoch: "epoch-A" }),
+        takeSnapshot: vi.fn().mockResolvedValue({ snapshotId: "snap-A", mapRevision: "5" }),
+        releaseDriver,
+      }) as unknown as BrowserClient;
+    const releaseA = vi.fn().mockResolvedValue({});
+    const clientA = makeClient(releaseA);
+    const clientB = makeClient(vi.fn().mockResolvedValue({}));
+
+    let driver!: ReturnType<typeof useRemoteBrowserDriver>;
+    function Harness({ client }: { client: BrowserClient }) {
+      driver = useRemoteBrowserDriver({
+        client,
+        browserId: "b1",
+        browserInstanceId: "bi1",
+        desktopEpoch: "1",
+        documentGeneration: "1",
+      });
+      return null;
+    }
+
+    let rerender!: (ui: React.ReactElement) => void;
+    await act(async () => {
+      rerender = render(<Harness client={clientA} />).rerender;
+    });
+    await act(async () => {
+      await driver.claim();
+      await driver.takeSnapshot();
+    });
+    expect(driver.snapshotId).toBe("snap-A");
+    expect(releaseA).not.toHaveBeenCalled();
+
+    await act(async () => {
+      rerender(<Harness client={clientB} />);
+    });
+    expect(releaseA).toHaveBeenCalledWith("epoch-A");
+    expect(driver.snapshotId).toBeNull();
+    expect(driver.mapRevision).toBeNull();
+    expect(driver.driverState).toBe("viewing");
+  });
+
+  it("B1: socket close clears snapshot identifiers", async () => {
+    let closeCb: () => void = () => {};
+    const mockClient = {
+      onDriverChanged: vi.fn(() => () => {}),
+      onError: vi.fn(() => () => {}),
+      onClose: vi.fn((cb: () => void) => {
+        closeCb = cb;
+        return () => {};
+      }),
+      takeSnapshot: vi.fn().mockResolvedValue({ snapshotId: "snap-1", mapRevision: "7" }),
+      releaseDriver: vi.fn().mockResolvedValue({}),
+    } as unknown as BrowserClient;
+    let driver!: ReturnType<typeof useRemoteBrowserDriver>;
+    function Harness() {
+      driver = useRemoteBrowserDriver({ client: mockClient, browserId: "b1" });
+      return null;
+    }
+    await act(async () => {
+      render(<Harness />);
+    });
+    await act(async () => {
+      await driver.takeSnapshot();
+    });
+    expect(driver.snapshotId).toBe("snap-1");
+    await act(async () => {
+      closeCb();
+    });
+    expect(driver.snapshotId).toBeNull();
+    expect(driver.mapRevision).toBeNull();
   });
 });
