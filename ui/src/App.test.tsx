@@ -279,6 +279,7 @@ vi.mock("./lib/updater", async (importOriginal) => {
 });
 
 const workspaceStoreModule = await import("./state/workspaceStore");
+const { AUTO_RESUME_STAGGER_INTERVAL_MS, MAX_AUTO_RESUME_CANDIDATES } = await import("./lib/agentAutoResume");
 let storeSpy: any;
 
 vi.mock("./state/workspaceRuntime", () => ({
@@ -4326,6 +4327,10 @@ describe("App project workspace flow", () => {
 
   describe("Automatic agent session resume on workspace restore", () => {
     it("auto-resumes exited agent sessions in staggered order, while plain shell sessions and unsupported agents are not auto-resumed", async () => {
+      // Fake timers that still follow wall time, so waitFor keeps working while the stagger window
+      // can be flushed deterministically at the end.
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
       localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "eager", sessionIdleTimeoutMinutes: 30 }));
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
       localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
@@ -4427,9 +4432,18 @@ describe("App project workspace flow", () => {
         }),
       );
 
-      // Plain-shell and unsupported-agent are NOT auto-resumed
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      // Plain-shell and unsupported-agent are NOT auto-resumed. Every resume is scheduled up front at
+      // index * stagger, so running the whole candidate window fires any third resume if one existed.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(AUTO_RESUME_STAGGER_INTERVAL_MS * MAX_AUTO_RESUME_CANDIDATES);
+      });
       expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(2);
+      expect(
+        native.spawnTerminalDetailed.mock.calls.map(([req]) => (req as { startup?: { providerSession?: { id?: string } } }).startup?.providerSession?.id),
+      ).toEqual(["uuid-claude-1", "uuid-claude-2"]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("does not crash and degrades silently when auto-resume spawn fails", async () => {

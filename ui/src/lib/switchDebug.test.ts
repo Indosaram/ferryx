@@ -40,13 +40,14 @@ describe("switchDebug", () => {
     expect(sink).not.toHaveBeenCalled();
   });
 
-  it("persists release allowlisted input events even when general debug is disabled", () => {
+  it("persists release allowlisted input events when general debug is disabled and release persistence is opted in", () => {
     const sink = vi.fn();
     const log = createSwitchDebugLogger({
       enabled: false,
       runId: "run-prod",
       now: () => 5678,
       sink,
+      allowReleasePersisted: true,
     });
 
     expect(isReleasePersistedInputEvent("terminal.surface.input.accepted")).toBe(true);
@@ -70,6 +71,19 @@ describe("switchDebug", () => {
       },
     });
     expect(sink).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not persist release allowlisted input events unless allowReleasePersisted is opted in", () => {
+    const sink = vi.fn();
+    const log = createSwitchDebugLogger({
+      enabled: false,
+      runId: "run-default",
+      now: () => 1000,
+      sink,
+    });
+
+    expect(log("terminal.surface.input.accepted")).toBeNull();
+    expect(sink).not.toHaveBeenCalled();
   });
 
   it("drops all events when allowReleasePersisted is explicitly false", () => {

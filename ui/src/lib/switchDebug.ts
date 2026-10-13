@@ -47,6 +47,7 @@ type SwitchDebugLoggerOptions = {
   runId: string;
   now: () => number;
   sink: (entry: SwitchDebugEntry) => void;
+  /** Opt-in: also trace the release-persisted input allowlist while `enabled` is false. Defaults to false. */
   allowReleasePersisted?: boolean;
 };
 
@@ -55,7 +56,7 @@ export function createSwitchDebugLogger({
   runId,
   now,
   sink,
-  allowReleasePersisted = true,
+  allowReleasePersisted = false,
 }: SwitchDebugLoggerOptions): (
   event: string,
   details?: Record<string, unknown>,
@@ -99,6 +100,9 @@ const debugEnabled = resolveSwitchDebugEnabled({
   MODE: import.meta.env.MODE,
   VITE_SWITCH_DEBUG: import.meta.env.VITE_SWITCH_DEBUG as string | undefined,
 });
+
+/** True when general switch-debug tracing is on (dev build or `VITE_SWITCH_DEBUG=1`; never under test). */
+export const isSwitchDebugEnabled = debugEnabled;
 const runId = safeRandomUUID();
 export const switchDebugRunId = runId;
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -108,6 +112,8 @@ const MAX_PENDING_SINK_ENTRIES = 64;
 
 const logger = createSwitchDebugLogger({
   enabled: debugEnabled,
+  // The native input/presentation stall diagnostics are intentionally persisted in release builds.
+  allowReleasePersisted: true,
   runId,
   now: Date.now,
   sink: (entry) => {

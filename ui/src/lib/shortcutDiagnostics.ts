@@ -1,5 +1,6 @@
 // TEMPORARY-DIAGNOSTIC: uses switchDebug's dev/explicit opt-in gate and sinks.
 import { switchDebug } from "./switchDebug";
+import { getHostPlatform } from "./platform";
 
 function describeTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return null;
@@ -9,7 +10,7 @@ function describeTarget(target: EventTarget | null) {
 }
 
 export function shortcutContext() {
-  return { platform: navigator.platform, documentFocused: document.hasFocus(),
+  return { platform: getHostPlatform(), documentFocused: document.hasFocus(),
     activeElement: describeTarget(document.activeElement) };
 }
 

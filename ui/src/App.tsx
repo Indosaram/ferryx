@@ -139,6 +139,7 @@ import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, setSessionRebindHandler } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
 import { getAgentReconnectAffordance } from "./lib/agentResumeAffordance";
+import { persistActiveProjectId, persistProjects, persistSidebarOpen } from "./lib/appShellPersistence";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { reconnectLocalSession, replaceExitedShellSession } from "./lib/shellReplacement";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
@@ -1736,7 +1737,8 @@ function WorkspaceApp({
   const notificationInbox = useSyncExternalStore(notificationCenterStore.subscribe, notificationCenterStore.getSnapshot);
   const attentionRows = useMemo(
     () => buildAttentionRows(notificationInbox.entries, liveActivityLookup(state, listWorkspaceSnapshots())),
-    [notificationInbox, state, parkedActivityVersion],
+    // liveActivityLookup reads only the mounted workspace id and its per-session activity map.
+    [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
   );
   const openSessionCount = Object.keys(state.sessions).length + listWorkspaceSnapshots()
     .filter(([workspaceId]) => workspaceId !== activeProject.workspaceId)
@@ -3767,6 +3769,7 @@ function WorkspaceApp({
         <WorktreeDiskDialog
           workspaceId={diskManageProject.workspaceId}
           projectName={diskManageProject.workspaceId}
+          repoRoot={diskManageProject.repoRoot}
           onClose={() => setDiskManageProject(null)}
         />
       ) : null}
@@ -3969,27 +3972,11 @@ export function loadProjects(): RegisteredProject[] {
   }
 }
 
-function persistProjects(projects: RegisteredProject[]) {
-  try {
-    window.localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
-  } catch {
-    // A local persistence failure must not block native project registration.
-  }
-}
-
 function loadActiveProjectId() {
   try {
     return getMigratedItem(ACTIVE_PROJECT_STORAGE_KEY) || DEFAULT_WORKSPACE_ID;
   } catch {
     return DEFAULT_WORKSPACE_ID;
-  }
-}
-
-function persistActiveProjectId(workspaceId: string) {
-  try {
-    window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, workspaceId);
-  } catch {
-    // The selected project still remains active for this session.
   }
 }
 
@@ -3999,14 +3986,6 @@ function loadSidebarOpen() {
     return raw !== null ? raw !== "false" : true;
   } catch {
     return true;
-  }
-}
-
-function persistSidebarOpen(open: boolean) {
-  try {
-    window.localStorage.setItem(SIDEBAR_OPEN_STORAGE_KEY, String(open));
-  } catch {
-    // Persistence failure should not break in-memory state.
   }
 }
 
