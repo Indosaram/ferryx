@@ -15,4 +15,10 @@ describe("protected chat drafts", () => {
   expect(loadDraft(localStorage,b).text).toBe("");
   expect(localStorage.getItem("ferryx.other")).toBe("keep");
  });
+ it("falls back to an empty draft for corrupt or wrongly shaped entries", () => {
+  for (const raw of ["{not json", "null", "42", '{"text":1,"attachments":[]}', '{"text":"x"}']) {
+   localStorage.setItem(draftKey(a), raw);
+   expect(loadDraft(localStorage,a)).toEqual({text:"",attachments:[]});
+  }
+ });
 });

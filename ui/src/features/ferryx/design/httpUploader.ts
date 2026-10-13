@@ -10,8 +10,8 @@ export class HttpAttachmentUploader implements AttachmentUploader {
       "Content-Type": "image/png", "X-Ferryx-Target": encodeURIComponent(JSON.stringify(target)),
       "X-Ferryx-Sha256": sha256, "X-Ferryx-Request-Id": requestId,
     }, body: bytes.slice() });
-    const result = await response.json();
-    if (!response.ok || result.ok !== true) throw new Error(result.error?.code ?? `UPLOAD_HTTP_${response.status}`);
+    const result = await response.json().catch(() => null) as { ok?: boolean; data?: unknown; error?: { code?: string } } | null;
+    if (!response.ok || result?.ok !== true) throw new Error(result?.error?.code ?? `UPLOAD_HTTP_${response.status}`);
     const receipt = result.data as AttachmentReceipt;
     if (receipt.hostId !== target.hostId || receipt.sha256 !== sha256 || receipt.sizeBytes !== bytes.length || receipt.mediaType !== "image/png" || !receipt.attachmentId) throw new Error("ATTACHMENT_MISMATCH");
     return receipt;

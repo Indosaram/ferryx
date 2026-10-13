@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ManagedChat, type ChatService } from "./ManagedChat";
 import { draftKey } from "./drafts";
 const target={hostId:"qa",ownerId:"daemon",epoch:"1",backendSessionId:"chat"};
@@ -22,5 +22,20 @@ describe("managed chat surface",()=>{
   expect(localStorage.getItem(draftKey(target))).toBeNull();
   expect((screen.getByTestId("chat-composer") as HTMLTextAreaElement).value).toBe("");
   view.rerender(<ManagedChat {...props} kind="terminal"/>); expect(screen.getByTestId("terminal-fallback")).toBeTruthy();
+ });
+ it("shows the structured IPC message and revokes the preview URL when an attachment is removed",async()=>{
+  localStorage.clear();
+  const create=vi.fn(()=>"blob:preview-1"); const revoke=vi.fn();
+  vi.stubGlobal("URL",Object.assign(URL,{createObjectURL:create,revokeObjectURL:revoke}));
+  const file=new File([new Uint8Array([1,2])],"a.png",{type:"image/png"});
+  const service:ChatService={send:async()=>{throw {code:"HOST_DOWN",message:"host is down",details:{}};},stage:async()=>({hostId:target.hostId,attachmentId:"att-1",sha256:"x",sizeBytes:2,mediaType:"image/png"}) as never,reply:async()=>{},stop:async()=>{}};
+  render(<ManagedChat target={target} kind="managed" service={service} storage={localStorage} items={[]} callbacks={[]} terminal={<div/>}/>);
+  await act(async()=>{fireEvent.change(screen.getByTestId("chat-attachment"),{target:{files:[file]}});});
+  expect(create).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByText("Remove")); expect(revoke).toHaveBeenCalledWith("blob:preview-1");
+  fireEvent.change(screen.getByTestId("chat-composer"),{target:{value:"hello"}});
+  await act(async()=>{fireEvent.click(screen.getByTestId("chat-send"));});
+  expect(screen.getByRole("alert").textContent).toBe("host is down");
+  vi.unstubAllGlobals();
  });
 });

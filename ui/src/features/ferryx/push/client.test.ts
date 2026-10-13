@@ -13,7 +13,15 @@ describe("push client boundaries", () => {
   it("server unsubscribe precedes local removal and failure preserves subscription", async () => {
     let removed = false; const subscription = { endpoint: "https://push.test/a", unsubscribe: async () => { removed = true; return true; } };
     const client = new PushClient({request: async () => { throw new Error("offline"); }}, {pushManager: {getSubscription: async () => subscription}} as unknown as ServiceWorkerRegistration);
-    await expect(client.disable()).rejects.toThrow("offline"); expect(removed).toBe(false);
+    expect(await client.disable()).toBe("error"); expect(removed).toBe(false);
+  });
+  it("subscribes with the decoded VAPID applicationServerKey and refuses to subscribe without one", async () => {
+    const subscribe = vi.fn().mockResolvedValue({ endpoint: "https://push.test/new" });
+    const registration = { pushManager: { getSubscription: async () => null, subscribe } } as unknown as ServiceWorkerRegistration;
+    expect(await new PushClient({ request: vi.fn() }, registration).enable()).toBe("error");
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(await new PushClient({ request: vi.fn() }, registration, "AQID").enable()).toBe("enabled");
+    expect(subscribe).toHaveBeenCalledWith({ userVisibleOnly: true, applicationServerKey: new Uint8Array([1, 2, 3]) });
   });
   it("enable registers subscription with backend", async () => {
     const apiRequest = vi.fn().mockResolvedValue({ ok: true });
