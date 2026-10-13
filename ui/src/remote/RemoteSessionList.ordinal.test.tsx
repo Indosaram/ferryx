@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   RemoteWorkspaceMirror,
@@ -49,17 +49,18 @@ function ordinalModel(): RemoteWorkspaceModel {
 
 function renderOrdinalMirror(model: RemoteWorkspaceModel) {
   const onSelect = vi.fn();
+  const onSelectorOpenChange = vi.fn();
   render(
     <RemoteWorkspaceMirror
       model={model}
       pending={null}
       selectorOpen={true}
-      onSelectorOpenChange={vi.fn()}
+      onSelectorOpenChange={onSelectorOpenChange}
       onSelect={onSelect}
       activeMachineId={MACHINE_A}
     />,
   );
-  return { onSelect };
+  return { onSelect, onSelectorOpenChange };
 }
 
 afterEach(() => {
@@ -107,5 +108,17 @@ describe("remote terminal ordinal matches the rendered selection", () => {
     expect(
       renderedPaneOrder(mirrorInventory(ordinalModel(), MACHINE_A)).map((tab) => tab.id),
     ).toEqual(["tab-third", "tab-first", "tab-second"]);
+  });
+
+  it("closes the drawer when a tab row is tapped, like every other row", () => {
+    const { onSelect, onSelectorOpenChange } = renderOrdinalMirror(ordinalModel());
+    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
+
+    fireEvent.click(within(dialog).getByRole("tab", { name: "first" }));
+
+    expect(onSelect).toHaveBeenCalledWith(
+      expect.objectContaining({ tabId: "tab-first", sessionId: "s-first" }),
+    );
+    expect(onSelectorOpenChange).toHaveBeenCalledWith(false);
   });
 });
