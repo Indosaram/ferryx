@@ -228,3 +228,17 @@ describe("reference draft notification and failure", () => {
     expect(store.isUnsaved(paneA)).toBe(true);
   });
 });
+
+describe("reference draft overlapping sends", () => {
+  it("keeps text typed after a send that began while another was in flight", () => {
+    const { store } = fixture();
+    expect(store.begin(paneA, "A")).toBe(true);
+    expect(store.begin(paneA, "fix")).toBe(false);
+    store.set(paneA, "");
+    store.settle(paneA, "A");
+    store.end(paneA);
+    store.set(paneA, "fix the test");
+    store.settle(paneA, "fix");
+    expect(store.read(paneA).text).toBe("fix the test");
+  });
+});
