@@ -40,6 +40,7 @@
 
 use crate::remote::mirror::RemoteTerminalMirror;
 use crate::remote::protocol::{RemoteGridFrame, RemoteGridLine};
+use crate::terminal::output_hub::HistorySegment;
 
 use super::types::ReferenceScreenSnapshot;
 
@@ -60,6 +61,28 @@ const FNV1A_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 
 /// FNV-1a 64-bit prime.
 const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// [snapshot_reference_screen] over the backend's own segmented history, each segment with the
+/// geometry it was recorded at.
+///
+/// Each segment is replayed at the size it was produced at ([RemoteTerminalMirror::feed_segments]),
+/// then the mirror is returned to the geometry the caller created it at - the pane's live size -
+/// before the frame is read. Replaying wide history into a narrow grid would wrap and misplace
+/// what the prompt detectors read. The gap semantics are [snapshot_reference_screen]'s.
+pub fn snapshot_reference_screen_segments(
+    mirror: &mut RemoteTerminalMirror,
+    segments: Option<&[HistorySegment]>,
+) -> Result<ReferenceScreenSnapshot, String> {
+    let Some(segments) = segments else {
+        return snapshot_reference_screen(mirror, None);
+    };
+    let (cols, rows) = mirror.dimensions().map_err(|err| err.to_string())?;
+    mirror.feed_segments(segments).map_err(|err| err.to_string())?;
+    if mirror.dimensions().map_err(|err| err.to_string())? != (cols, rows) {
+        mirror.resize(cols, rows).map_err(|err| err.to_string())?;
+    }
+    snapshot_reference_screen(mirror, Some(&[]))
+}
 
 /// Take a bounded, read-only snapshot of the original pane.
 ///
@@ -386,5 +409,36 @@ mod tests {
         let (bounded, truncated) = bound_reference_screen_text(&exact);
         assert_eq!(bounded, exact);
         assert!(!truncated);
+    }
+
+    #[test]
+    fn segmented_history_replays_at_its_recorded_geometry() {
+        let segments = vec![
+            HistorySegment {
+                cols: Some(120),
+                rows: Some(6),
+                bytes: b"\x1b[1;1H\xed\x95\x9c\xea\xb8\x80\x1b[110GX".to_vec(),
+            },
+            HistorySegment { cols: Some(50), rows: Some(6), bytes: b"\x1b[2;1Hnext".to_vec() },
+        ];
+        let mut expected = RemoteTerminalMirror::new(50, 6).expect("mirror");
+        expected.feed_segments(&segments).expect("feed_segments");
+        let expected_text =
+            render_reference_screen_text(&expected.full_frame().expect("full frame"));
+
+        let mut mirror = RemoteTerminalMirror::new(50, 6).expect("mirror");
+        let snapshot = snapshot_reference_screen_segments(&mut mirror, Some(&segments))
+            .expect("screen snapshot");
+
+        assert_eq!(snapshot.text, expected_text, "history replayed at the wrong geometry");
+        assert_eq!((snapshot.cols, snapshot.rows), (50, 6));
+
+        // History that ends at another size is read back at the pane's live geometry.
+        let mut mirror = RemoteTerminalMirror::new(50, 6).expect("mirror");
+        let wide = &segments[..1];
+        let snapshot = snapshot_reference_screen_segments(&mut mirror, Some(wide))
+            .expect("screen snapshot");
+        assert_eq!((snapshot.cols, snapshot.rows), (50, 6));
+        assert_eq!(mirror.dimensions().expect("dimensions"), (50, 6));
     }
 }
