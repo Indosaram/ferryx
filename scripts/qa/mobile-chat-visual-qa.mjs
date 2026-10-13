@@ -122,7 +122,6 @@ const LAYOUT_PROBE = (expectedWidth) => {
     documentHorizontalOverflow:
       document.documentElement.scrollWidth > window.innerWidth + 1 ||
       (typeof expectedWidth === "number" && document.documentElement.scrollWidth > expectedWidth + 1),
-    documentHorizontalOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
     streamScrollable: streamEl ? streamEl.scrollHeight > streamEl.clientHeight : null,
     sendOrStopBottomWithinViewport,
     textareaScrollable,
@@ -241,10 +240,15 @@ const TOP_BAR_PROBE = (expectedWidth) => {
   const titleEllipsisOk = textOverflow === "ellipsis";
   const titleTruncated = Boolean(titleEl && titleEl.scrollWidth > clientWidth);
   const titleWidthOk = !titleTruncated || clientWidth >= 48;
+  const contextSpan = topBar.querySelector('[aria-label="Current desktop context"]');
+  const contextSpanClientWidth = contextSpan ? contextSpan.clientWidth : 0;
+  const contextSpanVisible = !contextSpan || contextSpanClientWidth >= 24;
   const hostBadge = topBar.querySelector('[data-testid="remote-connection-badge"]');
   const hostLabel = hostBadge?.querySelector("span");
   const hostLabelClientWidth = hostLabel?.clientWidth ?? 0;
-  const hostLabelVisible = !hostBadge || hostLabelClientWidth > 0;
+  const hostLabelScrollWidth = hostLabel?.scrollWidth ?? 0;
+  const hostLabelTruncated = Boolean(hostLabel && hostLabelScrollWidth > hostLabelClientWidth);
+  const hostLabelVisible = !hostBadge || !hostLabelTruncated || hostLabelClientWidth >= 24;
 
   return {
     count: topBars.length,
@@ -254,8 +258,6 @@ const TOP_BAR_PROBE = (expectedWidth) => {
     buttonFailures,
     scrollWidth,
     innerWidth,
-    scrollWidth,
-    innerWidth,
     targetWidth,
     noHorizontalScroll,
     titleTextOverflow: textOverflow,
@@ -263,8 +265,13 @@ const TOP_BAR_PROBE = (expectedWidth) => {
     titleEllipsisOk,
     titleWidthOk,
     titleTruncated,
+    contextSpanPresent: Boolean(contextSpan),
+    contextSpanClientWidth,
+    contextSpanVisible,
     hostBadgePresent: Boolean(hostBadge),
     hostLabelClientWidth,
+    hostLabelScrollWidth,
+    hostLabelTruncated,
     hostLabelVisible,
   };
 };
@@ -522,7 +529,14 @@ async function run() {
         fail(`${key}: titleWidthOk failed: truncated title clientWidth is ${value?.titleClientWidth}px (expected >= 48)`);
       }
       if (value?.hostLabelVisible !== true) {
-        fail(`${key}: hostLabelVisible failed: badge label clientWidth is ${value?.hostLabelClientWidth}px (expected > 0)`);
+        fail(
+          `${key}: hostLabelVisible failed: badge label clientWidth is ${value?.hostLabelClientWidth}px (expected >= 24 or untruncated)`
+        );
+      }
+      if (value?.contextSpanVisible !== true) {
+        fail(
+          `${key}: contextSpanVisible failed: context span clientWidth is ${value?.contextSpanClientWidth}px (expected >= 24)`
+        );
       }
     }
     if (key.startsWith("sheet-")) {

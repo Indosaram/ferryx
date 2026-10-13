@@ -117,11 +117,12 @@ describe("MobileTopBar", () => {
     expect(container.querySelector(".bg-status-warning")).toBeNull();
   });
 
-  it("renders the exact context label on its own subtitle span", () => {
+  it("renders the exact context label on its own subtitle span with a min-width floor", () => {
     renderTopBar({ contextLabel: "ferryx-ui / feat-x" });
     const context = screen.getByLabelText("Current desktop context");
     expect(context.textContent).toBe("ferryx-ui / feat-x");
-    expect(context).toHaveClass("truncate");
+    expect(context).toHaveClass("min-w-8", "shrink", "truncate");
+    expect(context).not.toHaveClass("min-w-0");
     expect(context.parentElement).toHaveClass("text-[13px]", "text-chat-foreground-secondary");
   });
 
@@ -134,7 +135,9 @@ describe("MobileTopBar", () => {
     expect(badge).toHaveAttribute("aria-label", "Connection: Relay");
     expect(badge).toHaveTextContent("maho-win");
     expect(badge.querySelector("svg")).toBeInTheDocument();
-    expect(badge).toHaveClass("max-w-[40%]", "min-w-[4ch]", "shrink");
+    expect(badge).toHaveClass("max-w-[50%]", "shrink-0");
+    expect(badge).not.toHaveClass("shrink");
+    expect(badge).not.toHaveClass("min-w-[4ch]");
     expect(badge).not.toHaveClass("shrink-[100]");
     expect(badge.lastElementChild).toHaveClass("min-w-0", "truncate");
     expect(badge.lastElementChild).not.toHaveClass("max-w-[40%]", "shrink-[100]");
