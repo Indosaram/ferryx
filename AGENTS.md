@@ -55,6 +55,16 @@ ferryx/
 - **Thread Safety**: All synchronous disk I/O, Git subprocesses, and OS dialogs must run via `crate::ipc::run_blocking`.
 - **Identity Triad**: Strict separation between visual `leafId`, frontend `sessionId`, and daemon `backendSessionId`.
 - **Worktree Isolation**: Managed worktrees must reside in `.orca-worktrees/<ws-id>/<slug>` using branch `orca/<ws-id>/<slug>`.
+- **Agent Worktree Location (dev/verify checkouts)**: Every throwaway checkout an agent creates for development, verification, gates, or QA must be a `git worktree` of the host's canonical clone under ONE fixed root per host, never a loose copy or extracted tarball in `$HOME`, `/tmp`, `%TEMP%`, or ad-hoc names (`ferryx-*-2026xxxx`, `task*`, `wt-*`, `herdr-*`, `plv-*`, `fx-*`):
+  | Host | Canonical clone | Worktree root | Cargo target |
+  |------|-----------------|---------------|--------------|
+  | macOS (this Mac) | `/Volumes/T9-Mac/project/ferryx` | `/Volumes/T9-Mac/project/ferryx-wt/<slug>` | shared `src-tauri/target` or `/tmp/ferryx-<slug>-target` |
+  | omarchy (Linux) | `~/code/ferryx` | `~/code/ferryx-wt/<slug>` | `~/code/ferryx-wt/.target` (shared) |
+  | maho-win (Windows) | `C:\Users\sook\ferryx` | `C:\Users\sook\ferryx-wt\<slug>` | `C:\Users\sook\ferryx-wt\.target` (shared) |
+  - Create with `git -C <canonical> worktree add <root>/<slug> <rev>`; `<slug>` is `<topic>-<yyyymmdd>` (lowercase, `-` only). Create the canonical clone first if it is missing.
+  - Remove when the task ends (pass or fail): `git -C <canonical> worktree remove --force <root>/<slug>` then `git -C <canonical> worktree prune`. Delete per-worktree cargo targets with it. Keep logs/evidence only under `<root>/.evidence/<slug>`.
+  - Release builds stay in `~/ferryx-releases/` (managed by the release runbook); the relay UI stays in `~/ferryx-relay-web` on omarchy (referenced by `ferryx-relay.service`). Neither is a worktree root.
+  - Never leave a worktree behind at the end of a session; before finishing, run `git -C <canonical> worktree list` on every host you touched and report what remains.
 - **Binary Stream Framing**: 20-byte fixed header; stream pumps coalesce bursts (`10ms` interval or `32KB` max).
 
 ## ANTI-PATTERNS (THIS PROJECT)
