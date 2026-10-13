@@ -1,5 +1,17 @@
 import { cleanup, render, screen, fireEvent } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const nodeCardRenders = vi.hoisted(() => ({ count: 0 }));
+vi.mock("./DagNodeCard", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./DagNodeCard")>();
+  return {
+    ...actual,
+    DagNodeCard: (props: Parameters<typeof actual.DagNodeCard>[0]) => {
+      nodeCardRenders.count += 1;
+      return actual.DagNodeCard(props);
+    },
+  };
+});
 
 import dagRunSampleJson from "../../state/__fixtures__/dagRunSample.json";
 import { parseDagRunSnapshot, type DagRunSnapshot } from "../../lib/dagTypes";
@@ -24,6 +36,29 @@ describe("DagGraphView", () => {
   it("renders empty state text when no dag runs exist", () => {
     render(<DagGraphView />);
     expect(screen.getByText("No dag runs yet")).toBeInTheDocument();
+  });
+
+  it("does not fall back to another run when the requested runId is missing", () => {
+    dagStore.applySnapshot("/repo", sampleSnapshot);
+    render(<DagGraphView runId="run-that-does-not-exist" />);
+    expect(screen.getByText("Dag run not available")).toBeInTheDocument();
+    expect(screen.queryByTestId("dag-world")).not.toBeInTheDocument();
+  });
+
+  it("pans without re-rendering node cards", () => {
+    render(<DagGraphView snapshot={sampleSnapshot} />);
+    const viewport = screen.getByTestId("dag-viewport");
+    const world = screen.getByTestId("dag-world");
+    const before = world.style.transform;
+    nodeCardRenders.count = 0;
+
+    fireEvent.pointerDown(viewport, { pointerId: 1, button: 0, buttons: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(viewport, { pointerId: 1, buttons: 1, clientX: 140, clientY: 130 });
+    fireEvent.pointerMove(viewport, { pointerId: 1, buttons: 1, clientX: 180, clientY: 160 });
+    fireEvent.pointerUp(viewport, { pointerId: 1, clientX: 180, clientY: 160 });
+
+    expect(world.style.transform).not.toBe(before);
+    expect(nodeCardRenders.count).toBe(0);
   });
 
   it("renders one column per wave (4) for the fixture", () => {

@@ -99,6 +99,8 @@ describe("previewHighlight highlightLines", () => {
   });
 
   it("escapes HTML special characters in code", () => {
+    // Lone CR line endings must split like splitPreviewLines, or source rows drift.
+    expect(highlightLines("const a = 1;\rconst b = 2;", "typescript")).toHaveLength(2);
     const code = "const el = <div>text</div>;";
     const lines = highlightLines(code, "typescript");
 

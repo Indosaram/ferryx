@@ -163,7 +163,8 @@ export function highlightLines(text: string, language: string): string[] | null 
     return null;
   }
 
-  const rawLines = highlighted.split(/\r?\n/);
+  // Same line endings as splitPreviewLines (CRLF, lone CR, LF) so highlighted rows stay aligned.
+  const rawLines = highlighted.split(/\r\n|\r|\n/);
   if (rawLines.length > MAX_HIGHLIGHT_LINES) {
     return null;
   }

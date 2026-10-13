@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractMarkdownHeadings } from "./markdownToc";
+import { extractMarkdownHeadingIndex, extractMarkdownHeadings } from "./markdownToc";
 
 describe("extractMarkdownHeadings", () => {
   it("extracts levels 1 through 3 and ignores deeper headings", () => {
@@ -92,6 +92,23 @@ describe("extractMarkdownHeadings", () => {
     expect(result).toEqual([
       { level: 1, text: "Heading With Hashes", slug: "heading-with-hashes" },
       { level: 2, text: "Multi   Space   Heading", slug: "multi-space-heading" },
+    ]);
+  });
+
+  it("lists setext headings and indexes every slug by its source line", () => {
+    const md = ["Title", "=====", "", "Two line", "sub title", "---", "", "---", "", "## Next"].join("\r\n");
+
+    const index = extractMarkdownHeadingIndex(md);
+
+    expect(index.headings).toEqual([
+      { level: 1, text: "Title", slug: "title" },
+      { level: 2, text: "Two line sub title", slug: "two-line-sub-title" },
+      { level: 2, text: "Next", slug: "next" },
+    ]);
+    expect([...index.slugByLine]).toEqual([
+      [1, "title"],
+      [4, "two-line-sub-title"],
+      [10, "next"],
     ]);
   });
 });

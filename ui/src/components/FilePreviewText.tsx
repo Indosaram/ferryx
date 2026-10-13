@@ -1,13 +1,15 @@
 import { Copy, Search, ChevronDown, ChevronUp, Columns, FileText, Image as ImageIcon, Link2, List, Minus, Plus, WrapText } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { cn } from "../lib/cn";
+import { copyTextToClipboard } from "../lib/clipboard";
 import {
   filePreviewErrorReason,
+  type FilePreviewChildAsset,
   type FilePreviewMarkdownCapability,
   type FilePreviewTextProps,
 } from "../lib/filePreviewTypes";
@@ -24,7 +26,7 @@ import {
   type PreviewRejectionReason,
 } from "../lib/previewMarkdown";
 import { highlightLines, languageForPath } from "../lib/previewHighlight";
-import { extractMarkdownHeadings, type MarkdownHeading } from "../lib/markdownToc";
+import { extractMarkdownHeadingIndex, type MarkdownHeadingIndex } from "../lib/markdownToc";
 import {
   loadFilePreviewWordWrap,
   loadMarkdownFontSize,
@@ -33,6 +35,9 @@ import {
   saveMarkdownFontSize,
   saveMarkdownWide,
 } from "../lib/filePreviewReadingSettings";
+
+const NO_MATCHES: readonly PreviewMatch[] = [];
+const EMPTY_HEADING_INDEX: MarkdownHeadingIndex = { headings: [], slugByLine: new Map() };
 
 /**
  * Read-only text and Markdown renderer for the file-preview modal (plan task 3).
@@ -108,7 +113,11 @@ export function FilePreviewText({
   }, []);
 
   const [showToc, setShowToc] = useState<boolean>(false);
-  const headings = useMemo(() => (isMarkdown ? extractMarkdownHeadings(text) : []), [isMarkdown, text]);
+  const headingIndex = useMemo(
+    () => (isMarkdown ? extractMarkdownHeadingIndex(text) : EMPTY_HEADING_INDEX),
+    [isMarkdown, text],
+  );
+  const headings = headingIndex.headings;
 
   useEffect(() => {
     setRequestedMatch(0);
@@ -145,9 +154,7 @@ export function FilePreviewText({
 
   const handleCopy = useCallback(async () => {
     try {
-      const clipboard = navigator.clipboard;
-      if (!clipboard?.writeText) throw new Error("clipboard unavailable");
-      await clipboard.writeText(text);
+      if (!(await copyTextToClipboard(text))) throw new Error("clipboard unavailable");
       setCopied(true);
       if (copyTimer.current) clearTimeout(copyTimer.current);
       copyTimer.current = setTimeout(() => setCopied(false), 1500);
@@ -162,6 +169,16 @@ export function FilePreviewText({
 
   const { byLine: matchesByLine, firstIndexByLine } = useMemo(() => indexMatches(matches), [matches]);
 
+  const stepMatch = useCallback(
+    (direction: 1 | -1) =>
+      setRequestedMatch((current) => {
+        if (matches.length === 0) return current;
+        const base = Math.min(current, matches.length - 1);
+        return (base + direction + matches.length) % matches.length;
+      }),
+    [matches.length],
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-card text-foreground" data-testid="file-preview-text">
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-worktree-sidebar-border px-2">
@@ -175,6 +192,11 @@ export function FilePreviewText({
                 data-testid="file-preview-search-input"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+                  event.preventDefault();
+                  stepMatch(event.shiftKey ? -1 : 1);
+                }}
                 placeholder="Search"
                 className="h-6 w-32 min-w-0 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted-foreground"
               />
@@ -191,12 +213,7 @@ export function FilePreviewText({
                   label="Previous match"
                   testId="file-preview-search-previous"
                   disabled={matches.length === 0}
-                  onClick={() =>
-                    setRequestedMatch((current) => {
-                      const base = Math.min(current, matches.length - 1);
-                      return (base - 1 + matches.length) % matches.length;
-                    })
-                  }
+                  onClick={() => stepMatch(-1)}
                 >
                   <ChevronUp aria-hidden className="size-3.5" />
                 </ToolbarButton>
@@ -204,12 +221,7 @@ export function FilePreviewText({
                   label="Next match"
                   testId="file-preview-search-next"
                   disabled={matches.length === 0}
-                  onClick={() =>
-                    setRequestedMatch((current) => {
-                      const base = Math.min(current, matches.length - 1);
-                      return (base + 1) % matches.length;
-                    })
-                  }
+                  onClick={() => stepMatch(1)}
                 >
                   <ChevronDown aria-hidden className="size-3.5" />
                 </ToolbarButton>
@@ -222,6 +234,7 @@ export function FilePreviewText({
             <ToolbarButton
               label="Table of contents"
               testId="file-preview-md-toc-toggle"
+              pressed={showToc}
               onClick={() => setShowToc((v) => !v)}
             >
               <List aria-hidden className="size-3.5" />
@@ -246,6 +259,7 @@ export function FilePreviewText({
             <ToolbarButton
               label={markdownWide ? "Reading width" : "Full width"}
               testId="file-preview-md-width-toggle"
+              pressed={markdownWide}
               onClick={handleWideToggle}
             >
               <Columns aria-hidden className="size-3.5" />
@@ -258,6 +272,7 @@ export function FilePreviewText({
             <ToolbarButton
               label="Toggle word wrap"
               testId="file-preview-wrap-toggle"
+              pressed={wordWrap}
               onClick={handleWordWrapToggle}
             >
               <WrapText aria-hidden className="size-3.5" />
@@ -318,19 +333,27 @@ export function FilePreviewText({
           tabIndex={0}
           className="min-h-0 flex-1 overflow-auto px-2 py-2 font-mono text-[12px] leading-5 focus-visible:outline-none"
         >
-          {lines.map((line, index) => (
-            <SourceLine
-              key={index}
-              line={line}
-              highlightedHtml={query.trim().length === 0 ? highlightedLines?.[index] : undefined}
-              number={index + 1}
-              caret={caret && caret.line === index + 1 ? caret : null}
-              matches={matchesByLine.get(index) ?? []}
-              activeMatch={activeMatch}
-              matchOffset={firstIndexByLine.get(index) ?? -1}
-              wordWrap={wordWrap}
-            />
-          ))}
+          {/* Every line stays mounted (no windowing); memoized lines with stable props keep a
+              search keystroke from re-rendering lines whose matches did not change. */}
+          {lines.map((line, index) => {
+            const lineMatches = matchesByLine.get(index) ?? NO_MATCHES;
+            const matchOffset = firstIndexByLine.get(index) ?? -1;
+            const ownsActiveMatch =
+              matchOffset >= 0 && activeMatch >= matchOffset && activeMatch < matchOffset + lineMatches.length;
+            return (
+              <SourceLine
+                key={index}
+                line={line}
+                highlightedHtml={query.trim().length === 0 ? highlightedLines?.[index] : undefined}
+                number={index + 1}
+                caret={caret && caret.line === index + 1 ? caret : null}
+                matches={lineMatches}
+                activeMatch={ownsActiveMatch ? activeMatch : -1}
+                matchOffset={matchOffset}
+                wordWrap={wordWrap}
+              />
+            );
+          })}
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -383,7 +406,7 @@ export function FilePreviewText({
               capability={markdown}
               generation={generation}
               containerRef={documentRef}
-              headings={headings}
+              slugByLine={headingIndex.slugByLine}
             />
           </div>
         </div>
@@ -432,13 +455,16 @@ type ToolbarButtonProps = {
   children: ReactNode;
   disabled?: boolean;
   wide?: boolean;
+  /** Set for toggle buttons so assistive tech can read their on/off state. */
+  pressed?: boolean;
 };
 
-function ToolbarButton({ label, testId, onClick, children, disabled, wide }: ToolbarButtonProps) {
+function ToolbarButton({ label, testId, onClick, children, disabled, wide, pressed }: ToolbarButtonProps) {
   return (
     <button
       type="button"
       aria-label={label}
+      aria-pressed={pressed}
       title={label}
       data-testid={testId}
       disabled={disabled}
@@ -470,7 +496,7 @@ type SourceLineProps = {
  * One document line: a fixed gutter number plus wrapped literal content. React
  * escapes the content, so `<script>` is text and can never become an element.
  */
-function SourceLine({
+const SourceLine = memo(function SourceLine({
   line,
   highlightedHtml,
   number,
@@ -515,6 +541,9 @@ function SourceLine({
           {line.slice(caret.offset)}
         </span>
       ) : highlightedHtml ? (
+        // Safe only because highlight.js escapes every source character (<, >, &, quotes)
+        // and highlightLines re-inserts nothing but its own <span class> tags; never feed
+        // unescaped text into this path.
         <span
           className={cn(contentClass, "hljs-line")}
           dangerouslySetInnerHTML={{ __html: highlightedHtml }}
@@ -524,7 +553,7 @@ function SourceLine({
       )}
     </div>
   );
-}
+});
 
 function renderMatchSegments(
   line: string,
@@ -562,7 +591,8 @@ type PreviewMarkdownDocumentProps = {
   capability: FilePreviewMarkdownCapability | null;
   generation: number;
   containerRef: { current: HTMLDivElement | null };
-  headings: readonly MarkdownHeading[];
+  /** TOC slug per 1-based source line, so each heading's id never depends on render order. */
+  slugByLine: ReadonlyMap<number, string>;
 };
 
 function PreviewMarkdownDocument({
@@ -570,7 +600,7 @@ function PreviewMarkdownDocument({
   capability,
   generation,
   containerRef,
-  headings,
+  slugByLine,
 }: PreviewMarkdownDocumentProps) {
   const scrollToFragment = useCallback(
     (id: string) => {
@@ -582,9 +612,6 @@ function PreviewMarkdownDocument({
     },
     [containerRef],
   );
-
-  const headingCursorRef = useRef(0);
-  headingCursorRef.current = 0;
 
   const components = useMemo<Components>(
     () => ({
@@ -611,18 +638,15 @@ function PreviewMarkdownDocument({
           {checked ? "[x]" : "[ ]"}
         </span>
       ),
-      h1: (props) => {
-        const slug = headings[headingCursorRef.current++]?.slug;
-        return <PreviewHeading level={1} slug={slug} {...props} />;
-      },
-      h2: (props) => {
-        const slug = headings[headingCursorRef.current++]?.slug;
-        return <PreviewHeading level={2} slug={slug} {...props} />;
-      },
-      h3: (props) => {
-        const slug = headings[headingCursorRef.current++]?.slug;
-        return <PreviewHeading level={3} slug={slug} {...props} />;
-      },
+      h1: ({ node, children }) => (
+        <PreviewHeading level={1} slug={slugByLine.get(node?.position?.start.line ?? -1)}>{children}</PreviewHeading>
+      ),
+      h2: ({ node, children }) => (
+        <PreviewHeading level={2} slug={slugByLine.get(node?.position?.start.line ?? -1)}>{children}</PreviewHeading>
+      ),
+      h3: ({ node, children }) => (
+        <PreviewHeading level={3} slug={slugByLine.get(node?.position?.start.line ?? -1)}>{children}</PreviewHeading>
+      ),
       h4: (props) => <PreviewHeading level={4} {...props} />,
       h5: (props) => <PreviewHeading level={5} {...props} />,
       h6: (props) => <PreviewHeading level={6} {...props} />,
@@ -664,7 +688,7 @@ function PreviewMarkdownDocument({
       ),
       hr: () => <hr className="my-4 border-worktree-sidebar-border" />,
     }),
-    [capability, generation, scrollToFragment, headings],
+    [capability, generation, scrollToFragment, slugByLine],
   );
 
   return (
@@ -818,20 +842,31 @@ function PreviewImageNode({ src, alt, capability, generation }: PreviewImageNode
   const classified = useMemo(() => classifyPreviewImage(src), [src]);
   const budgetExhausted = classified.kind === "local" && (capability?.remainingChildHandles ?? 0) <= 0;
   const [state, setState] = useState<ImageState>({ status: "idle" });
-  // R1: acquire each image at most once per generation, avoiding re-acquisition loops
-  const requestedRef = useRef(false);
+  // R1: acquire each image at most once per generation. The in-flight request lives in a ref,
+  // so a StrictMode effect replay (or a capability identity change) re-subscribes to the same
+  // promise instead of opening a second child handle. The capability has no per-handle release;
+  // filePreview.ts releases every child handle together with its parent.
+  const requestRef = useRef<{
+    generation: number;
+    path: string;
+    promise: Promise<FilePreviewChildAsset>;
+  } | null>(null);
 
   useEffect(() => {
-    requestedRef.current = false;
-  }, [generation]);
-
-  useEffect(() => {
-    if (classified.kind !== "local" || !capability || budgetExhausted) return;
-    if (requestedRef.current) return;
-    requestedRef.current = true;
+    if (classified.kind !== "local" || !capability) return;
+    let request = requestRef.current;
+    if (!request || request.generation !== generation || request.path !== classified.relativePath) {
+      if (budgetExhausted) return;
+      request = {
+        generation,
+        path: classified.relativePath,
+        promise: capability.requestImage(classified.relativePath),
+      };
+      requestRef.current = request;
+    }
     let cancelled = false;
     setState({ status: "loading" });
-    capability.requestImage(classified.relativePath).then(
+    request.promise.then(
       (asset) => {
         if (!cancelled) setState({ status: "ready", url: asset.mediaUrl });
       },

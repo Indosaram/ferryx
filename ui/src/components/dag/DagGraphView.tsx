@@ -34,6 +34,14 @@ import {
 } from "./dagViewUtils";
 import type { Camera } from "./dagViewUtils";
 
+// Memoized so per-frame camera updates (pan/zoom) and parent re-renders skip unchanged cards/edges.
+const MemoDagNodeCard = React.memo(DagNodeCard);
+const MemoDagEdgeLayer = React.memo(DagEdgeLayer);
+
+function formatCameraTransform(camera: Camera): string {
+  return `translate(${camera.x}px, ${camera.y}px) scale(${camera.scale})`;
+}
+
 export type DagGraphViewProps = {
   readonly runId?: string | null;
   readonly projectPath?: string;
@@ -57,6 +65,8 @@ export function DagGraphView({
       for (const projectRuns of Object.values(storeState.runsByProject)) {
         if (projectRuns[runId]) return projectRuns[runId];
       }
+      // A pane bound to a specific run must never show a different run's graph.
+      return null;
     }
 
     if (projectPath) {
@@ -74,12 +84,25 @@ export function DagGraphView({
 
   // Viewport & camera refs / state
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const worldRef = useRef<HTMLDivElement | null>(null);
   const cameraRef = useRef<Camera>({ x: 0, y: 0, scale: 1 });
-  const [camera, setCameraState] = useState<Camera>({ x: 0, y: 0, scale: 1 });
+  // Only the scale drives React output (zoom label / disabled state); translation is
+  // written straight to the world element so a pan frame does not re-render the graph.
+  const [cameraScale, setCameraScale] = useState(1);
 
   const setCamera = useCallback((next: Camera) => {
     cameraRef.current = next;
-    setCameraState(next);
+    if (worldRef.current) {
+      worldRef.current.style.transform = formatCameraTransform(next);
+    }
+    setCameraScale(next.scale);
+  }, []);
+
+  const setWorldRef = useCallback((node: HTMLDivElement | null) => {
+    worldRef.current = node;
+    if (node) {
+      node.style.transform = formatCameraTransform(cameraRef.current);
+    }
   }, []);
 
   const lastDimensionsRef = useRef<{ width: number; height: number } | null>(null);
@@ -727,13 +750,38 @@ export function DagGraphView({
     }
   }, [contentHeight, contentWidth, setCamera, viewportDimensions]);
 
+  // Stable per-node click handlers and card styles so memoized cards skip re-rendering.
+  const nodeClickHandlersRef = useRef<Map<string, () => void>>(new Map());
+  const getNodeClickHandler = useCallback((nodeId: string) => {
+    let handler = nodeClickHandlersRef.current.get(nodeId);
+    if (!handler) {
+      handler = () => setSelectedNodeId(nodeId);
+      nodeClickHandlersRef.current.set(nodeId, handler);
+    }
+    return handler;
+  }, []);
+
+  const cardStyles = useMemo(() => {
+    const styles = new Map<string, React.CSSProperties>();
+    for (const [nodeId, position] of nodePositions) {
+      styles.set(nodeId, {
+        position: "absolute",
+        left: position.x,
+        top: position.y,
+        height: CARD_HEIGHT,
+        width: CARD_WIDTH,
+      });
+    }
+    return styles;
+  }, [nodePositions]);
+
   if (!activeRun) {
     return (
       <div
         className="flex h-full w-full items-center justify-center bg-background text-sm text-muted-foreground select-none"
         data-testid="dag-graph-view"
       >
-        <span>No dag runs yet</span>
+        <span>{runId ? "Dag run not available" : "No dag runs yet"}</span>
       </div>
     );
   }
@@ -808,7 +856,7 @@ export function DagGraphView({
             <button
               type="button"
               aria-label="Zoom out"
-              aria-disabled={camera.scale <= effectiveMinScale + 1e-6 ? "true" : "false"}
+              aria-disabled={cameraScale <= effectiveMinScale + 1e-6 ? "true" : "false"}
               onClick={handleZoomOut}
               className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-disabled:cursor-default aria-disabled:opacity-35"
             >
@@ -820,12 +868,12 @@ export function DagGraphView({
               onClick={handleResetZoom}
               className="flex h-5 items-center justify-center rounded px-1.5 font-mono text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
-              {Math.round(camera.scale * 100)}%
+              {Math.round(cameraScale * 100)}%
             </button>
             <button
               type="button"
               aria-label="Zoom in"
-              aria-disabled={camera.scale >= MAX_SCALE - 1e-6 ? "true" : "false"}
+              aria-disabled={cameraScale >= MAX_SCALE - 1e-6 ? "true" : "false"}
               onClick={handleZoomIn}
               className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-disabled:cursor-default aria-disabled:opacity-35"
             >
@@ -855,16 +903,16 @@ export function DagGraphView({
         onClickCapture={onClickCapture}
       >
         <div
+          ref={setWorldRef}
           data-testid="dag-world"
           className="relative"
           style={{
             transformOrigin: "0 0",
-            transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.scale})`,
             width: contentWidth,
             height: contentHeight,
           }}
         >
-          <DagEdgeLayer
+          <MemoDagEdgeLayer
             edges={activeRun.edges}
             nodePositions={nodePositions}
             criticalPath={criticalPath}
@@ -887,25 +935,18 @@ export function DagGraphView({
               >
                 wave {colIndex + 1}
               </div>
-              {wave.nodeIds.map((nodeId, rowIndex) => {
+              {wave.nodeIds.map((nodeId) => {
                 const node = nodeMap.get(nodeId);
                 if (!node) return null;
-                const position = calculateNodePosition(colIndex, rowIndex);
                 return (
-                  <DagNodeCard
+                  <MemoDagNodeCard
                     key={node.id}
                     node={node}
                     isCriticalPath={criticalPathSet.has(node.id)}
                     blockedCount={bottleneckMap.get(node.id) ?? 0}
                     isSelected={node.id === selectedNodeId}
-                    onClick={() => setSelectedNodeId(node.id)}
-                    style={{
-                      position: "absolute",
-                      left: position.x,
-                      top: position.y,
-                      height: CARD_HEIGHT,
-                      width: CARD_WIDTH,
-                    }}
+                    onClick={getNodeClickHandler(node.id)}
+                    style={cardStyles.get(node.id)}
                   />
                 );
               })}
