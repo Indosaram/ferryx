@@ -50,7 +50,8 @@ export interface MobileChatComposerProps {
   readonly attachError?: string | null;
   /** Held messages for this target, in the order the user wrote them. */
   readonly heldMessages?: readonly HeldMessage[];
-  readonly heldSendingId?: string | null;
+  /** Held rows whose send is still on its way; each stays disabled until its own answer lands. */
+  readonly heldSendingIds?: readonly string[];
   readonly heldUnsaved?: boolean;
   readonly onEditHeld?: (id: string, text: string) => void;
   readonly onSendHeld?: (id: string) => void;
@@ -102,7 +103,7 @@ export const MobileChatComposer = React.forwardRef<
   attaching = false,
   attachError = null,
   heldMessages = [],
-  heldSendingId = null,
+  heldSendingIds = [],
   heldUnsaved = false,
   onEditHeld,
   onSendHeld,
@@ -326,7 +327,7 @@ export const MobileChatComposer = React.forwardRef<
               : "Held until you send them. Nothing is sent on its own."}
           </span>
           {heldMessages.map((message) => {
-            const sending = heldSendingId === message.id;
+            const sending = heldSendingIds.includes(message.id);
             return (
               <div
                 key={message.id}

@@ -64,7 +64,8 @@ export interface MobileChatWorkspaceProps {
 
   /** Held messages for this target; only an explicit press sends one. */
   readonly heldMessages?: readonly HeldMessage[];
-  readonly heldSendingId?: string | null;
+  /** Held rows whose send is still on its way: each stays disabled until its own answer lands. */
+  readonly heldSendingIds?: readonly string[];
   readonly heldUnsaved?: boolean;
   readonly onEditHeld?: (id: string, text: string) => void;
   readonly onSendHeld?: (id: string) => void;
@@ -72,6 +73,8 @@ export interface MobileChatWorkspaceProps {
 
   /** A prompt waiting on the original pane, drawn above the message box. */
   readonly promptCard?: React.ReactNode;
+  /** The owner's handle on the message box, so an answered prompt can pass the focus on to it. */
+  readonly composerHandleRef?: React.MutableRefObject<MobileChatComposerHandle | null>;
   /** Something the user must know about this lane. */
   readonly composerWarning?: string | null;
   /** Where a part bytes live when the page does not carry them. */
@@ -142,12 +145,13 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   attaching = false,
   attachError = null,
   heldMessages,
-  heldSendingId = null,
+  heldSendingIds,
   heldUnsaved = false,
   onEditHeld,
   onSendHeld,
   onRemoveHeld,
   promptCard,
+  composerHandleRef,
   composerWarning = null,
   referenceContext,
   className,
@@ -161,7 +165,14 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const composerRef = useRef<MobileChatComposerHandle>(null);
+  const composerRef = useRef<MobileChatComposerHandle | null>(null);
+  const bindComposer = useCallback(
+    (handle: MobileChatComposerHandle | null) => {
+      composerRef.current = handle;
+      if (composerHandleRef) composerHandleRef.current = handle;
+    },
+    [composerHandleRef],
+  );
 
   const [internalDraft, setInternalDraft] = useState("");
   const isDraftControlled = draft !== undefined;
@@ -374,6 +385,15 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         {abandoned !== null ? (
           <ReferenceAbandonedBranchDisclosure abandoned={abandoned} />
         ) : null}
+        {/* Older turns are prepended, so the control that fetches them sits above them. */}
+        {hasOlderPage || loadedOlder ? (
+          <ReferenceOlderPageControl
+            hasOlder={hasOlderPage}
+            loadedOlder={loadedOlder}
+            state={olderState}
+            onLoadOlder={onLoadOlder}
+          />
+        ) : null}
         {!hasMessages ? (
           <div
             data-testid="chat-empty-state"
@@ -430,14 +450,6 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             ))}
           </>
         )}
-        {hasOlderPage || loadedOlder ? (
-          <ReferenceOlderPageControl
-            hasOlder={hasOlderPage}
-            loadedOlder={loadedOlder}
-            state={olderState}
-            onLoadOlder={onLoadOlder}
-          />
-        ) : null}
 
         <div ref={messagesEndRef} className="h-2 w-full" />
       </div>
@@ -461,7 +473,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             </div>
           )}
           <MobileChatComposer
-            ref={composerRef}
+            ref={bindComposer}
             value={activeDraft}
             onValueChange={handleDraftChange}
             draftUnsaved={draftUnsaved}
@@ -471,7 +483,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             attaching={attaching}
             attachError={attachError}
             heldMessages={heldMessages}
-            heldSendingId={heldSendingId}
+            heldSendingIds={heldSendingIds}
             heldUnsaved={heldUnsaved}
             onEditHeld={onEditHeld}
             onSendHeld={onSendHeld}
