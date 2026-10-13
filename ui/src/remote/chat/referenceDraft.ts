@@ -25,6 +25,17 @@ export const REFERENCE_DRAFT_STORAGE_PREFIX = "ferryx.referenceChat.draft:";
 
 type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
+/**
+ * Where the sent text ends inside the draft, or null when the draft no longer extends it.
+ * The composer sends the trimmed draft, so leading whitespace before the sent text is
+ * part of what was sent and is cleared with it.
+ */
+function sentPrefixEnd(draft: string, sent: string): number | null {
+  if (draft.startsWith(sent)) return sent.length;
+  const lead = draft.length - draft.trimStart().length;
+  return draft.startsWith(sent, lead) ? lead + sent.length : null;
+}
+
 /** The draft for one pane, plus whether a send is currently in flight for it. */
 export interface ReferenceDraft {
   readonly text: string;
@@ -122,7 +133,7 @@ export class ReferenceDraftStore {
       if (text === this.saved.get(key)) return;
       // another tab changed it while a send was on its way: the same rule as a local edit
       const pending = this.pending.get(key);
-      if (pending && !(text ?? "").startsWith(pending.sent)) pending.edited = true;
+      if (pending && sentPrefixEnd(text ?? "", pending.sent) === null) pending.edited = true;
       this.saved.set(key, text);
       this.drafts.set(key, { ...draft, text: text ?? "" });
       this.notify();
@@ -137,7 +148,7 @@ export class ReferenceDraftStore {
     // cleared and retyped while on its way, a draft can end up starting with the sent text
     // again: once it stopped extending it, the whole of it is the user's own
     const pending = this.pending.get(key);
-    if (pending && !text.startsWith(pending.sent)) pending.edited = true;
+    if (pending && sentPrefixEnd(text, pending.sent) === null) pending.edited = true;
     this.drafts.set(key, { ...draft, text });
     try {
       if (text) this.storage().setItem(REFERENCE_DRAFT_STORAGE_PREFIX + key, text);
@@ -185,8 +196,9 @@ export class ReferenceDraftStore {
     }
     const editedMeanwhile = pending?.edited === true || overlapIndex >= 0;
     this.pending.delete(key);
-    const edited = editedMeanwhile || (current !== sent && !current.startsWith(sent));
-    const text = edited ? current : current.slice(sent.length);
+    const prefixEnd = sentPrefixEnd(current, sent);
+    const edited = editedMeanwhile || prefixEnd === null;
+    const text = prefixEnd === null || edited ? current : current.slice(prefixEnd);
     this.setKey(key, text);
     return { text, edited };
   }
