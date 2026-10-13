@@ -63,9 +63,14 @@ if (typeof window !== "undefined") {
   const note = () => {
     lastInteractionAt = Date.now();
   };
-  for (const type of ["keydown", "pointerdown", "wheel"]) {
+  const types = ["keydown", "pointerdown", "wheel"];
+  for (const type of types) {
     window.addEventListener(type, note, { capture: true, passive: true });
   }
+  // Without this each HMR re-evaluation stacks another set of never-removed listeners.
+  import.meta.hot?.dispose(() => {
+    for (const type of types) window.removeEventListener(type, note, { capture: true });
+  });
 }
 
 /** Mirrors workspaceStore's private isSessionActivelyObserved selector (store is read-only here). */

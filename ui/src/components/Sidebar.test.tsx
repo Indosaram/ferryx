@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Worktree } from "../lib/types";
@@ -703,6 +703,46 @@ describe("Sidebar navigation", () => {
     expect(sidebar).toHaveStyle({ width: "220px" });
     fireEvent.pointerUp(window, { clientX: 40, pointerId: 2 });
     expect(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe("220");
+  });
+
+  it("resizes with the arrow keys within the min/max bounds and persists the width", () => {
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, "300");
+    renderSidebar();
+
+    const sidebar = screen.getByRole("complementary");
+    const handle = screen.getByRole("separator", { name: "Resize sidebar" });
+    expect(handle).toHaveAttribute("tabindex", "0");
+
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(sidebar).toHaveStyle({ width: "316px" });
+    expect(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe("316");
+
+    for (let i = 0; i < 20; i += 1) fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(sidebar).toHaveStyle({ width: "220px" });
+    for (let i = 0; i < 20; i += 1) fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(sidebar).toHaveStyle({ width: "420px" });
+    expect(handle).toHaveAttribute("aria-valuenow", "420");
+  });
+
+  it("ends a resize drag on lost pointer capture and masks native views while dragging", () => {
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, "300");
+    renderSidebar();
+
+    const sidebar = screen.getByRole("complementary");
+    const handle = screen.getByRole("separator", { name: "Resize sidebar" });
+    expect(screen.queryByTestId("sidebar-resize-mask")).toBeNull();
+
+    fireEvent.pointerDown(handle, { clientX: 300, pointerId: 1 });
+    expect(screen.getByTestId("sidebar-resize-mask")).toBeInTheDocument();
+    fireEvent.pointerMove(window, { clientX: 340, pointerId: 1 });
+    expect(sidebar).toHaveStyle({ width: "340px" });
+
+    fireEvent.lostPointerCapture(handle, { pointerId: 1 });
+    expect(screen.queryByTestId("sidebar-resize-mask")).toBeNull();
+    expect(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe("340");
+
+    fireEvent.pointerMove(window, { clientX: 400, pointerId: 1 });
+    expect(sidebar).toHaveStyle({ width: "340px" });
   });
 
   it("renders exactly one visible sidebar divider without redundant aside border", () => {

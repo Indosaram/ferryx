@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { classifyNavigatorPlatform } from "./platform";
 import { BROWSER_HISTORY_ENABLED_STORAGE_KEY, BROWSER_SETTINGS_STORAGE_KEY } from "./storageKeys";
 
 export type BrowserSearchEngine = "duckduckgo" | "google" | "bing" | "brave";
@@ -90,9 +91,7 @@ export function isBuiltInBrowserProfileId(profileId: string): boolean {
 
 export function browserNamedProfilesSupported(): boolean {
   if (typeof navigator === "undefined") return true;
-  const platform = typeof navigator.platform === "string" ? navigator.platform : "";
-  const userAgent = typeof navigator.userAgent === "string" ? navigator.userAgent : "";
-  return !/Mac|iPhone|iPad|iPod/i.test(`${platform} ${userAgent}`);
+  return classifyNavigatorPlatform(navigator) !== "macos";
 }
 
 export function supportedBrowserProfiles(

@@ -43,7 +43,18 @@ import { worktreeListingFailureStore } from "../state/worktreeListingFailures";
 import { resolveWorktreeOwnerId } from "../lib/worktreeOwnership";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import {
-  getMigratedItem,
+  clampSidebarWidth,
+  loadCollapsedProjects,
+  loadSidebarWidth,
+  loadWorktreeOrder,
+  MAX_SIDEBAR_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  persistCollapsedProjects,
+  persistSidebarWidth,
+  persistWorktreeOrder,
+  type WorktreeOrder,
+} from "../lib/sidebarPersistence";
+import {
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
   SIDEBAR_WIDTH_STORAGE_KEY,
   SIDEBAR_WORKTREE_ORDER_STORAGE_KEY,
@@ -64,11 +75,7 @@ export {
   SIDEBAR_WIDTH_STORAGE_KEY,
   SIDEBAR_WORKTREE_ORDER_STORAGE_KEY,
 };
-const DEFAULT_SIDEBAR_WIDTH = 236;
-const MIN_SIDEBAR_WIDTH = 220;
-const MAX_SIDEBAR_WIDTH = 420;
-
-type WorktreeOrder = Record<string, string[]>;
+const SIDEBAR_KEYBOARD_STEP = 16;
 
 type SidebarProjectDragData = {
   type: "sidebar-project";
@@ -158,6 +165,7 @@ export function Sidebar({
   const selectWorktree = onSelectWorktree;
   const inboxOpen = attention?.inboxOpen ?? false;
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const [resizing, setResizing] = useState(false);
   const [width, setWidth] = useState(loadSidebarWidth);
   const widthRef = useRef(width);
   widthRef.current = width;
@@ -271,6 +279,14 @@ export function Sidebar({
       : undefined;
   }, [activePath, activeProjectId, projectGroups, worktreesByProject]);
 
+  const endResize = useCallback(() => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    persistSidebarWidth(widthRef.current);
+    document.body.style.cursor = "";
+    setResizing(false);
+  }, []);
+
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
       const drag = dragRef.current;
@@ -280,29 +296,39 @@ export function Sidebar({
       setWidth(nextWidth);
     };
 
-    const finishDrag = () => {
-      if (!dragRef.current) return;
-      dragRef.current = null;
-      persistSidebarWidth(widthRef.current);
-      document.body.style.cursor = "";
-    };
-
     window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", finishDrag);
-    window.addEventListener("pointercancel", finishDrag);
+    window.addEventListener("pointerup", endResize);
+    window.addEventListener("pointercancel", endResize);
     return () => {
       window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", finishDrag);
-      window.removeEventListener("pointercancel", finishDrag);
+      window.removeEventListener("pointerup", endResize);
+      window.removeEventListener("pointercancel", endResize);
       document.body.style.cursor = "";
     };
-  }, []);
+  }, [endResize]);
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
     dragRef.current = { startX: event.clientX, startWidth: widthRef.current };
     document.body.style.cursor = "col-resize";
+    setResizing(true);
+    // Capturing the pointer keeps pointerup/lostpointercapture routed here even over a native pane.
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // The pointer may already be released; window listeners still end the drag.
+    }
+  };
+
+  const resizeWithKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const delta = event.key === "ArrowLeft" ? -SIDEBAR_KEYBOARD_STEP : SIDEBAR_KEYBOARD_STEP;
+    const nextWidth = clampSidebarWidth(widthRef.current + delta);
+    widthRef.current = nextWidth;
+    setWidth(nextWidth);
+    persistSidebarWidth(nextWidth);
   };
 
   const clearActiveDrag = () => setActiveDrag(null);
@@ -474,7 +500,7 @@ export function Sidebar({
                 const active = isProjectGroupActive(group, activeProjectId);
                 const expanded = !collapsedProjects.has(group.groupId);
                 const projectWorktrees = worktreesByProject.get(project.workspaceId) ?? [];
-                const staleSummary = projectWorktrees.find((w) => (w as any).stale || (w as any).freshness?.stale)?.hostSummary;
+                const staleSummary = projectWorktrees.find((w) => w.stale || w.freshness?.stale)?.hostSummary;
                 const projectActivity = summarizeProjectActivity(
                   projectWorktrees,
                   activityByWorktreePath,
@@ -623,11 +649,19 @@ export function Sidebar({
           aria-valuemin={MIN_SIDEBAR_WIDTH}
           aria-valuemax={MAX_SIDEBAR_WIDTH}
           aria-valuenow={width}
+          tabIndex={0}
           onPointerDown={startResize}
+          onLostPointerCapture={endResize}
+          onKeyDown={resizeWithKeyboard}
           className="no-drag absolute inset-y-0 right-0 z-30 w-1.5 cursor-col-resize touch-none"
         >
           <span className="pointer-events-none absolute inset-y-0 right-0 w-px bg-worktree-sidebar-border transition-colors group-hover:bg-ring/45" />
         </div>
+        {resizing ? (
+          // A dialog-role surface makes native terminal/browser surfaces yield (see
+          // nativeTerminalVisibility) so a native pane cannot swallow the resize pointerup.
+          <div role="dialog" aria-hidden="true" data-testid="sidebar-resize-mask" className="fixed inset-0 z-50 cursor-col-resize" />
+        ) : null}
       </aside>
 
       <DragOverlay dropAnimation={null}>
@@ -1026,7 +1060,7 @@ function groupWorktreesByProject(
           for (let i = 0; i < bucket.length; i++) {
             if ((bucket[i].workspaceId ?? project.workspaceId) === member.workspaceId) {
               const row = bucket[i];
-              const isStale = Boolean((row as any).stale || (row as any).freshness?.stale);
+              const isStale = Boolean(row.stale || row.freshness?.stale);
               const summary = isStale && row.hostSummary
                 ? row.hostSummary
                 : (remoteState ? pairedConnectionStatus(target.hostId, remoteState) : "Unavailable");
@@ -1134,32 +1168,6 @@ function readSidebarDragData(value: unknown): SidebarDragData | null {
   return null;
 }
 
-function loadWorktreeOrder(): WorktreeOrder {
-  try {
-    const raw = getMigratedItem(SIDEBAR_WORKTREE_ORDER_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return Object.fromEntries(
-      Object.entries(parsed).flatMap(([workspaceId, paths]) => {
-        if (!Array.isArray(paths)) return [];
-        const uniquePaths = [...new Set(paths.filter((path): path is string => typeof path === "string"))];
-        return uniquePaths.length > 0 ? [[workspaceId, uniquePaths]] : [];
-      }),
-    );
-  } catch {
-    return {};
-  }
-}
-
-function persistWorktreeOrder(order: WorktreeOrder) {
-  try {
-    window.localStorage.setItem(SIDEBAR_WORKTREE_ORDER_STORAGE_KEY, JSON.stringify(order));
-  } catch {
-    // A storage failure should not break drag reordering for this session.
-  }
-}
-
 function seedCollapsedProjects(
   collapsed: Set<string>,
   projects: RegisteredProject[],
@@ -1176,45 +1184,3 @@ function seedCollapsedProjects(
   return next;
 }
 
-/** Returns `null` when the accordion has never been persisted, so callers can apply defaults. */
-function loadCollapsedProjects(): Set<string> | null {
-  try {
-    const raw = getMigratedItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return null;
-    return new Set(parsed.filter((id): id is string => typeof id === "string"));
-  } catch {
-    return null;
-  }
-}
-
-function persistCollapsedProjects(collapsed: Set<string>) {
-  try {
-    window.localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([...collapsed]));
-  } catch {
-    // A storage failure should not break accordion toggling for this session.
-  }
-}
-
-function loadSidebarWidth() {
-  try {
-    const raw = getMigratedItem(SIDEBAR_WIDTH_STORAGE_KEY);
-    const stored = Number(raw);
-    return Number.isFinite(stored) && stored > 0 ? clampSidebarWidth(stored) : DEFAULT_SIDEBAR_WIDTH;
-  } catch {
-    return DEFAULT_SIDEBAR_WIDTH;
-  }
-}
-
-function persistSidebarWidth(width: number) {
-  try {
-    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(clampSidebarWidth(width)));
-  } catch {
-    // A storage failure should not break pointer resizing for this session.
-  }
-}
-
-function clampSidebarWidth(width: number) {
-  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)));
-}

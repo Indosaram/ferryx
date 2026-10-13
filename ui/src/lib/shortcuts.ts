@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { classifyNavigatorPlatform, getRuntimeProcessPlatform } from "./platform";
 import { switchDebug } from "./switchDebug";
 import { shortcutChord, shortcutContext, traceShortcutAction } from "./shortcutDiagnostics";
 
@@ -638,14 +639,6 @@ function detectMacPlatform() {
   // agent, and only the touch-point count separates it from a real Mac (which is 0),
   // so an iPad with a hardware keyboard must not resolve `mod` to Cmd.
   if (/iPhone|iPad|iPod/.test(navigator.platform)) return true;
-  if (/Mac/.test(navigator.platform) && (navigator.maxTouchPoints ?? 0) === 0) return true;
-  if (
-    typeof navigator.userAgent === "string" &&
-    /Macintosh|Mac OS X/.test(navigator.userAgent) &&
-    (navigator.maxTouchPoints ?? 0) === 0
-  ) {
-    return true;
-  }
-  if (typeof process !== "undefined" && process.platform === "darwin") return true;
-  return false;
+  if (classifyNavigatorPlatform(navigator) === "macos" && (navigator.maxTouchPoints ?? 0) === 0) return true;
+  return getRuntimeProcessPlatform() === "macos";
 }

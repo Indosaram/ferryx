@@ -7,6 +7,7 @@ import { resolveActivityIndicator, type ActivitySummary } from "../lib/activity"
 import { workspaceName } from "../lib/branchFilter";
 import { cn } from "../lib/cn";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
+import { getHostPlatform } from "../lib/platform";
 import { revealPath } from "../lib/tauri";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
@@ -47,21 +48,15 @@ export type WorktreeRowProps = {
 };
 
 export function fileManagerActionLabel() {
-  const platform = typeof navigator === "undefined" ? "" : navigator.platform || navigator.userAgent;
-  if (/Mac/i.test(platform)) return "Reveal in Finder";
-  if (/Win/i.test(platform)) return "Show in File Explorer";
+  const platform = getHostPlatform();
+  if (platform === "macos") return "Reveal in Finder";
+  if (platform === "windows") return "Show in File Explorer";
   return "Open in File Manager";
 }
 
 function isCaseInsensitivePlatform(): boolean {
-  if (typeof process !== "undefined" && process.platform) {
-    return process.platform === "darwin" || process.platform === "win32";
-  }
-  if (typeof navigator !== "undefined") {
-    const p = navigator.platform || navigator.userAgent || "";
-    return /Mac|Win/i.test(p);
-  }
-  return false;
+  const platform = getHostPlatform();
+  return platform === "macos" || platform === "windows";
 }
 
 export function normalizeWorktreePath(p: string, caseInsensitive = isCaseInsensitivePlatform()): string {
@@ -191,8 +186,8 @@ export const WorktreeRow = memo(function WorktreeRow({
     });
   };
 
-  const isStale = Boolean((worktree as any).stale || (worktree as any).freshness?.stale);
-  const isDisabled = Boolean((worktree as any).disabled || isStale);
+  const isStale = Boolean(worktree.stale || worktree.freshness?.stale);
+  const isDisabled = Boolean(worktree.disabled || isStale);
   // A stale row shows the last list a paired machine sent before it dropped off. It must not open
   // (that machine cannot serve it now), but it must say why instead of swallowing the click.
   const unavailableReason = isDisabled

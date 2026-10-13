@@ -32,6 +32,7 @@ import {
   getCliLauncherStatus,
   installCliLauncher,
 } from "../../lib/tauri";
+import { classifyNavigatorPlatform } from "../../lib/platform";
 import type { CliLauncherStatus } from "../../lib/types";
 
 import { SettingRow, SettingsHeading } from "./primitives";
@@ -72,10 +73,8 @@ type ExternallyManagedHost = "windows" | "linux" | "unknown";
  */
 function externallyManagedHost(): ExternallyManagedHost {
   if (typeof navigator === "undefined") return "unknown";
-  const signals = [navigator.userAgent, navigator.platform];
-  if (signals.some((signal) => /Windows|Win32|Win64/i.test(signal))) return "windows";
-  if (signals.some((signal) => /Linux|X11|CrOS/i.test(signal))) return "linux";
-  return "unknown";
+  const platform = classifyNavigatorPlatform(navigator);
+  return platform === "windows" || platform === "linux" ? platform : "unknown";
 }
 
 function externallyManagedUpdateMessage(host: ExternallyManagedHost): string {

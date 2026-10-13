@@ -1,3 +1,5 @@
+import { classifyNavigatorPlatform } from "./platform";
+
 export type TerminalLinkHintKind = "file" | "directory" | "url";
 
 export function terminalLinkOpenHint(kind: TerminalLinkHintKind, isMac: boolean): string {
@@ -24,11 +26,7 @@ export function isMacPlatform(nav?: { platform?: string; userAgent?: string }): 
     return false;
   }
 
-  const macRegex = /Mac|iPhone|iPad/;
-  const platform = typeof effectiveNav.platform === "string" ? effectiveNav.platform : "";
-  const userAgent = typeof effectiveNav.userAgent === "string" ? effectiveNav.userAgent : "";
-
-  return macRegex.test(platform) || macRegex.test(userAgent);
+  return classifyNavigatorPlatform(effectiveNav) === "macos";
 }
 
 export function isTerminalLinkActionClick(e: {
