@@ -169,7 +169,7 @@ describe("MobileHostDrawer", () => {
       const key = remoteHostKey(relayOrigin, machineId);
       fireEvent.click(screen.getByTestId(`mobile-host-option-${key}`));
       expect(remoteHostStore.getState().activeHostId).toBe(key);
-      expect(screen.getByTestId(`mobile-host-option-${key}`)).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByTestId(`mobile-host-option-${key}`)).toHaveAttribute("aria-current", "true");
     }
     for (const machineId of ["a", "b"]) {
       expect(remoteHostStore.getState().hosts[remoteHostKey(relayOrigin, machineId)].deviceToken).toBe(`token-${machineId}`);
@@ -187,6 +187,38 @@ describe("MobileHostDrawer", () => {
 
     expect(remoteHostStore.getState().activeHostId).toBeNull();
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("exposes the active host with aria-current instead of aria-selected", () => {
+    remoteHostStore.setHosts([
+      makeHost({ hostId: "host-1", name: "Studio Mac" }),
+      makeHost({ hostId: "host-2", name: "Laptop" }),
+    ]);
+    remoteHostStore.setActiveHost("host-2");
+
+    render(<MobileHostDrawer open onOpenChange={vi.fn()} />);
+
+    const active = screen.getByTestId("mobile-host-option-host-2");
+    expect(active).toHaveAttribute("aria-current", "true");
+    expect(active).not.toHaveAttribute("aria-selected");
+    expect(screen.getByTestId("mobile-host-option-host-1")).not.toHaveAttribute("aria-current");
+    expect(screen.getByTestId("mobile-host-option-local")).not.toHaveAttribute("aria-current");
+    expect(screen.getByTestId("mobile-host-option-local")).not.toHaveAttribute("aria-selected");
+  });
+
+  it("disarms the disconnect confirmation when the drawer closes", () => {
+    const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn() };
+    const { rerender } = render(<MobileHostDrawer open {...props} />);
+
+    fireEvent.click(screen.getByTestId("mobile-host-drawer-disconnect"));
+    expect(screen.getByTestId("mobile-host-drawer-confirm-disconnect")).toBeInTheDocument();
+
+    rerender(<MobileHostDrawer open={false} {...props} />);
+    rerender(<MobileHostDrawer open {...props} />);
+
+    expect(screen.getByTestId("mobile-host-drawer-disconnect")).toBeInTheDocument();
+    expect(screen.queryByTestId("mobile-host-drawer-confirm-disconnect")).not.toBeInTheDocument();
+    expect(props.onDisconnect).not.toHaveBeenCalled();
   });
 
   it("closes when the backdrop is tapped", () => {

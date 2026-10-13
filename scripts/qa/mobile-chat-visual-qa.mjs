@@ -240,7 +240,7 @@ const TOP_BAR_PROBE = (expectedWidth) => {
   const titleEllipsisOk = textOverflow === "ellipsis";
   const titleTruncated = Boolean(titleEl && titleEl.scrollWidth > clientWidth);
   const titleWidthOk = !titleTruncated || clientWidth >= 48;
-  const contextSpan = topBar.querySelector('[aria-label="Current desktop context"]');
+  const contextSpan = topBar.querySelector('[data-testid="remote-context-label"]');
   const contextSpanClientWidth = contextSpan ? contextSpan.clientWidth : 0;
   const contextSpanVisible = !contextSpan || contextSpanClientWidth >= 24;
   const hostBadge = topBar.querySelector('[data-testid="remote-connection-badge"]');
