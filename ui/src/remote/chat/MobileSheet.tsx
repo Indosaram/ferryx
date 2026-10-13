@@ -12,6 +12,25 @@ import { cn } from "../../lib/cn";
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+function parseAnimationTimeMs(value: string | null | undefined): number {
+  if (!value) return 0;
+  const tokens = value.split(",");
+  let max = 0;
+  for (const token of tokens) {
+    const trimmed = token.trim();
+    let ms = 0;
+    if (trimmed.endsWith("ms")) {
+      ms = parseFloat(trimmed) || 0;
+    } else if (trimmed.endsWith("s")) {
+      ms = (parseFloat(trimmed) || 0) * 1000;
+    } else {
+      ms = parseFloat(trimmed) || 0;
+    }
+    if (ms > max) max = ms;
+  }
+  return max;
+}
+
 export type MobileSheetProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -46,20 +65,84 @@ export function MobileSheet({
 }: MobileSheetProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const closeFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [isMounted, setIsMounted] = useState(open);
   const [isClosing, setIsClosing] = useState(false);
   const [prevOpen, setPrevOpen] = useState(open);
+
+  const clearCloseFallback = () => {
+    if (closeFallbackTimerRef.current !== null) {
+      clearTimeout(closeFallbackTimerRef.current);
+      closeFallbackTimerRef.current = null;
+    }
+  };
 
   if (open !== prevOpen) {
     setPrevOpen(open);
     if (open) {
       setIsMounted(true);
       setIsClosing(false);
+      clearCloseFallback();
     } else if (isMounted) {
       setIsClosing(true);
     }
   }
+
+  // Fallback close handling: if animations are force-disabled, unmount immediately;
+  // otherwise arm a fallback timer that unmounts after duration + delay + 100ms.
+  useEffect(() => {
+    if (!isClosing) {
+      clearCloseFallback();
+      return;
+    }
+
+    const panel = panelRef.current;
+    if (!panel) {
+      clearCloseFallback();
+      setIsMounted(false);
+      setIsClosing(false);
+      return;
+    }
+
+    let hasNoAnimation = false;
+    let durationMs = 0;
+    let delayMs = 0;
+
+    try {
+      const style = window.getComputedStyle(panel);
+      const animName = style.animationName;
+      const animDuration = style.animationDuration;
+      const isZeroDuration =
+        animDuration === "0s" ||
+        animDuration === "0ms" ||
+        (animDuration !== "" && parseAnimationTimeMs(animDuration) === 0);
+      hasNoAnimation = animName === "none" || isZeroDuration;
+      durationMs = parseAnimationTimeMs(style.animationDuration);
+      delayMs = parseAnimationTimeMs(style.animationDelay);
+    } catch {
+      // Ignore if getComputedStyle fails in non-browser env
+    }
+
+    if (hasNoAnimation) {
+      clearCloseFallback();
+      setIsMounted(false);
+      setIsClosing(false);
+      return;
+    }
+
+    const fallbackTimeoutMs = durationMs + delayMs + 100;
+    clearCloseFallback();
+    closeFallbackTimerRef.current = setTimeout(() => {
+      closeFallbackTimerRef.current = null;
+      setIsMounted(false);
+      setIsClosing(false);
+    }, fallbackTimeoutMs);
+
+    return () => {
+      clearCloseFallback();
+    };
+  }, [isClosing]);
 
   // Escape closes from a window-level capture listener, as in MobileHostDrawer.tsx:153-157.
   useEffect(() => {
@@ -90,6 +173,7 @@ export function MobileSheet({
   const handleAnimationEnd = (event: React.AnimationEvent<HTMLDivElement>) => {
     if (event.target !== panelRef.current) return;
     if (isClosing) {
+      clearCloseFallback();
       setIsMounted(false);
       setIsClosing(false);
     }

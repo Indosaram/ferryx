@@ -1,13 +1,17 @@
 import "@testing-library/jest-dom/vitest";
 import { useState } from "react";
 import { Server } from "lucide-react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MobileSheet, MobileSheetItem } from "./MobileSheet";
 
 beforeEach(cleanup);
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 /** Hosts a sheet behind a real trigger so focus capture and restore run end to end. */
 function FocusHarness() {
@@ -188,6 +192,129 @@ describe("MobileSheet", () => {
     const dialog = screen.getByRole("dialog", { name: "Actions" });
     const closeBtn = dialog.querySelector('button[aria-label="Close Actions"]');
     expect(closeBtn).toHaveAttribute("title", "Close Actions");
+  });
+
+  it("with animation:none the sheet unmounts without any animationend", () => {
+    const origGetComputedStyle = window.getComputedStyle;
+    vi.spyOn(window, "getComputedStyle").mockImplementation((el: Element, pseudo?: string | null) => {
+      const style = origGetComputedStyle(el, pseudo);
+      return new Proxy(style, {
+        get(target, prop) {
+          if (prop === "animationName") return "none";
+          if (prop === "animationDuration") return "0s";
+          const val = Reflect.get(target, prop);
+          return typeof val === "function" ? val.bind(target) : val;
+        },
+      });
+    });
+
+    render(<ControlledSheetHarness initialOpen />);
+    expect(screen.getByRole("dialog", { name: "Actions" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("external-close"));
+
+    // Sheet unmounts immediately without any animationend fired
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("with animationDuration 0s the sheet unmounts without any animationend", () => {
+    const origGetComputedStyle = window.getComputedStyle;
+    vi.spyOn(window, "getComputedStyle").mockImplementation((el: Element, pseudo?: string | null) => {
+      const style = origGetComputedStyle(el, pseudo);
+      return new Proxy(style, {
+        get(target, prop) {
+          if (prop === "animationName") return "sheet-out";
+          if (prop === "animationDuration") return "0s";
+          const val = Reflect.get(target, prop);
+          return typeof val === "function" ? val.bind(target) : val;
+        },
+      });
+    });
+
+    render(<ControlledSheetHarness initialOpen />);
+    expect(screen.getByRole("dialog", { name: "Actions" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("external-close"));
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("with a running animation and animationend never fired, it unmounts after the fallback time", () => {
+    vi.useFakeTimers();
+    const origGetComputedStyle = window.getComputedStyle;
+    vi.spyOn(window, "getComputedStyle").mockImplementation((el: Element, pseudo?: string | null) => {
+      const style = origGetComputedStyle(el, pseudo);
+      return new Proxy(style, {
+        get(target, prop) {
+          if (prop === "animationName") return "sheet-out";
+          if (prop === "animationDuration") return "200ms";
+          if (prop === "animationDelay") return "0s";
+          const val = Reflect.get(target, prop);
+          return typeof val === "function" ? val.bind(target) : val;
+        },
+      });
+    });
+
+    render(<ControlledSheetHarness initialOpen />);
+    expect(screen.getByRole("dialog", { name: "Actions" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("external-close"));
+
+    // Immediately after close, dialog is still in exit transition
+    expect(screen.getByRole("dialog", { name: "Actions" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Actions" })).toHaveClass("animate-sheet-out");
+
+    // Advance timers before fallback deadline (200ms duration + 0ms delay + 100ms margin = 300ms)
+    act(() => {
+      vi.advanceTimersByTime(250);
+    });
+    expect(screen.getByRole("dialog", { name: "Actions" })).toBeInTheDocument();
+
+    // Advance past fallback deadline
+    act(() => {
+      vi.advanceTimersByTime(60);
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("re-open during closing cancels the fallback and stays mounted", () => {
+    vi.useFakeTimers();
+    const origGetComputedStyle = window.getComputedStyle;
+    vi.spyOn(window, "getComputedStyle").mockImplementation((el: Element, pseudo?: string | null) => {
+      const style = origGetComputedStyle(el, pseudo);
+      return new Proxy(style, {
+        get(target, prop) {
+          if (prop === "animationName") return "sheet-out";
+          if (prop === "animationDuration") return "200ms";
+          if (prop === "animationDelay") return "0s";
+          const val = Reflect.get(target, prop);
+          return typeof val === "function" ? val.bind(target) : val;
+        },
+      });
+    });
+
+    render(<ControlledSheetHarness initialOpen />);
+    expect(screen.getByRole("dialog", { name: "Actions" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("external-close"));
+    expect(screen.getByRole("dialog", { name: "Actions" })).toHaveClass("animate-sheet-out");
+
+    // Advance 100ms into the exit animation
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+
+    // Re-open while closing
+    fireEvent.click(screen.getByTestId("external-open"));
+    expect(screen.getByRole("dialog", { name: "Actions" })).toHaveClass("animate-sheet-in");
+
+    // Advance past the original fallback deadline
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+
+    // The sheet must STILL be mounted because fallback was cancelled
+    expect(screen.getByRole("dialog", { name: "Actions" })).toBeInTheDocument();
   });
 });
 
