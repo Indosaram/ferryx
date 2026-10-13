@@ -943,3 +943,106 @@ describe("accountSession client module", () => {
 
   });
 });
+
+describe("accountSession review hardening", () => {
+  const sessionToken = "account-token-secret-7788";
+  const pinKey = (machineId: string) => `ferryx.account.machine_attach_key_pin.${encodeURIComponent(machineId)}`;
+  const localKeyPair = { publicKey: "local-pub", privateKey: "local-priv" };
+
+  afterEach(() => {
+    vi.useRealTimers();
+    clearStoredAccountOrigin();
+  });
+
+  it("never sends the account token to an invalid stored or passed origin", async () => {
+    window.localStorage.setItem("ferryx.account.origin", "http://evil.example");
+    expect(getStoredAccountOrigin()).toBeNull();
+    expect(getConfiguredAccountOrigin()).toBe(DEFAULT_RELAY_ORIGIN);
+    expect(() => storeAccountOrigin("https://user:pw@relay.example.com")).toThrow(AccountSessionError);
+
+    const urls: string[] = [];
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      urls.push(String(input));
+      return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+    });
+    await listMachines("http://evil.example", sessionToken);
+    expect(urls).toEqual([`${DEFAULT_RELAY_ORIGIN}/api/account/v1/machines`]);
+  });
+
+  it("times out a hung account call and does not cache a timed-out origin probe", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    globalThis.fetch = vi.fn().mockImplementation((_input: RequestInfo | URL, init?: RequestInit) => {
+      calls += 1;
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      });
+    });
+
+    const listing = listMachines("https://relay.example.com", sessionToken).catch((err) => err);
+    await vi.advanceTimersByTimeAsync(15_000);
+    const err = await listing;
+    expect(err).toBeInstanceOf(AccountSessionError);
+    expect((err as AccountSessionError).code).toBe("REQUEST_TIMEOUT");
+
+    const pageOrigin = "https://probe-timeout.example.com";
+    const first = resolveAccountOrigin(pageOrigin);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(first).resolves.toBe(pageOrigin);
+    const second = resolveAccountOrigin(pageOrigin);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(second).resolves.toBe(pageOrigin);
+    // listMachines + two separate probes: the failed probe was not cached.
+    expect(calls).toBe(3);
+  });
+
+  it("rejects malformed 2xx bodies and truncates raw error bodies", async () => {
+    globalThis.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify({ sessionId: 42 }), { status: 200 })),
+    );
+    await expect(allocateSession("https://relay.example.com", sessionToken, "m-1")).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
+    globalThis.fetch = vi.fn().mockImplementation(() => Promise.resolve(new Response("<html>", { status: 200 })));
+    await expect(allocateSession("https://relay.example.com", sessionToken, "m-1")).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
+
+    const transport = {
+      fetchLike: vi.fn(async () => ({ status: 500, headers: {}, body: new TextEncoder().encode("x".repeat(5000)) })),
+      openWebSocket: vi.fn(),
+      close: vi.fn(),
+    };
+    const err = await redeemInTunnel(transport as any, "pairing", "device").catch((e) => e);
+    expect(err).toBeInstanceOf(AccountSessionError);
+    expect((err as AccountSessionError).message.length).toBeLessThanOrEqual(203);
+  });
+
+  it("pins the machine attach key on first use and refuses a change without a newer enrollment epoch", async () => {
+    window.localStorage.removeItem(pinKey("pin-machine"));
+    const spy = vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({
+      transport: { fetchLike: vi.fn(), openWebSocket: vi.fn(), close: vi.fn() } as any,
+      close: vi.fn(),
+    });
+    const base = {
+      relayOrigin: "https://relay.example.com",
+      machineId: "pin-machine",
+      localKeyPair,
+      sessionId: "s-1",
+    };
+
+    await openTunnel({ ...base, enrollmentEpoch: "1", machineAttachPublicKey: "key-a" });
+    await expect(
+      openTunnel({ ...base, enrollmentEpoch: "1", machineAttachPublicKey: "key-evil" }),
+    ).rejects.toMatchObject({ code: "MACHINE_KEY_CHANGED" });
+    await openTunnel({ ...base, enrollmentEpoch: "2", machineAttachPublicKey: "key-b" });
+    await expect(
+      openTunnel({ ...base, enrollmentEpoch: "1", machineAttachPublicKey: "key-a" }),
+    ).rejects.toMatchObject({ code: "MACHINE_KEY_CHANGED" });
+    await expect(
+      openTunnel({ ...base, relayOrigin: "http://evil.example", enrollmentEpoch: "2", machineAttachPublicKey: "key-b" }),
+    ).rejects.toMatchObject({ code: "INVALID_RELAY_ORIGIN" });
+    expect(spy).toHaveBeenCalledTimes(2);
+    window.localStorage.removeItem(pinKey("pin-machine"));
+  });
+});

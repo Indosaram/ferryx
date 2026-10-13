@@ -72,7 +72,6 @@ import { storeAccountSessionToken, clearStoredAccountSessionToken } from "./acco
 import * as attachTunnelModule from "./attachTunnel";
 import * as accountAttachModule from "./accountAttach";
 import { remoteHostStore } from "../state/remoteHostStore";
-import { setRemoteAuthToken } from "../lib/remoteClient";
 
 /**
  * Chat is the default surface at every width now (plan task 12), so a test that asserts the
@@ -1457,7 +1456,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
                 machineId: "2773ab38-d556-4a81-ae49-18a3b0fb83af",
                 machineRecordId: "rec-1",
                 publicKey: "pub-1",
-                attachPublicKey: "attach-1",
+                attachPublicKey: "attach-pub",
                 relayOrigin: "https://relay.example.com",
                 displayName: "omarchy",
                 platform: "linux",
@@ -1904,7 +1903,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
                 machineId: "2773ab38-d556-4a81-ae49-18a3b0fb83af",
                 machineRecordId: "rec-1",
                 publicKey: "pub-1",
-                attachPublicKey: "attach-1",
+                attachPublicKey: "attach-pub",
                 relayOrigin: "https://relay.example.com",
                 displayName: "omarchy",
                 platform: "linux",

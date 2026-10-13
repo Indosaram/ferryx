@@ -192,4 +192,79 @@ describe("useAccountWorktrees machine projects discovery", () => {
     );
     expect(mockFetchLike).not.toHaveBeenCalledWith("/api/v1/workspace/state", expect.anything());
   });
+
+  it("reuses the paired device token across retries, closes the replaced tunnel, and re-pairs only on 401", async () => {
+    const machine: AccountMachineView = {
+      machineId: "reuse-machine",
+      machineRecordId: "rec-reuse",
+      publicKey: "pub",
+      attachPublicKey: "attach-1",
+      relayOrigin: relayUrl,
+      displayName: "reuse",
+      platform: "linux",
+      online: true,
+      enrollmentEpoch: "1",
+      lastSeenAt: 1,
+    };
+    vi.mocked(listMachines).mockResolvedValue([machine]);
+    vi.mocked(allocateSession).mockResolvedValue({ sessionId: "s" });
+    vi.mocked(requestGrant).mockResolvedValue({
+      grantId: "g",
+      machineId: machine.machineId,
+      relayOrigin: relayUrl,
+      machineAttachPublicKey: "attach-1",
+      pairingToken: "pt",
+      grantScope: "machine",
+      expiresAt: 1,
+    });
+    let pairCount = 0;
+    vi.mocked(redeemInTunnel).mockImplementation(async () => {
+      pairCount += 1;
+      return { token: `device-${pairCount}`, device: { id: "d", name: "D" }, machineId: machine.machineId, displayName: "reuse" };
+    });
+    let revoked: string | null = null;
+    const json = (status: number, value: unknown): TunnelResponse => ({
+      status,
+      headers: {},
+      body: new TextEncoder().encode(JSON.stringify(value)),
+    });
+    const tunnels: Array<{ close: ReturnType<typeof vi.fn> }> = [];
+    vi.mocked(openTunnel).mockImplementation(async () => {
+      const close = vi.fn();
+      tunnels.push({ close });
+      return {
+        transport: {
+          fetchLike: vi.fn(async (path: string, init?: { headers?: Record<string, string> }) => {
+            if (revoked && init?.headers?.Authorization === `Bearer ${revoked}`) return json(401, { code: "UNAUTHORIZED" });
+            if (path === "/api/v1/workspace/projects") return json(200, { projects: [] });
+            if (path === "/api/v1/sessions") return json(200, { revision: "1", completeness: "complete", sessions: [] });
+            return json(404, {});
+          }),
+          openWebSocket: vi.fn(),
+          close: vi.fn(),
+        },
+        close,
+      };
+    });
+
+    const { result } = renderHook(() => useAccountWorktrees(relayUrl, sessionToken, true));
+    await waitFor(() => expect(result.current.machineStatuses[machine.machineId]?.status).toBe("ready"));
+    expect(tunnels).toHaveLength(1);
+
+    await result.current.retryMachine(machine.machineId);
+    await waitFor(() => expect(result.current.machineStatuses[machine.machineId]?.status).toBe("ready"));
+    expect(tunnels).toHaveLength(2);
+    expect(requestGrant).toHaveBeenCalledTimes(1);
+    expect(pairCount).toBe(1);
+    expect(tunnels[0].close).toHaveBeenCalledTimes(1);
+    expect(tunnels[1].close).not.toHaveBeenCalled();
+
+    revoked = "device-1";
+    await result.current.retryMachine(machine.machineId);
+    await waitFor(() => expect(result.current.machineStatuses[machine.machineId]?.status).toBe("ready"));
+    expect(requestGrant).toHaveBeenCalledTimes(2);
+    expect(pairCount).toBe(2);
+    const conn = await result.current.acquireConnection(machine.machineId);
+    expect(conn?.deviceToken).toBe("device-2");
+  });
 });

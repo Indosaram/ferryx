@@ -113,6 +113,31 @@ interface MinimalMachineSession {
   title?: string | null;
 }
 
+interface CachedDeviceLink {
+  deviceToken: string;
+  /** Relay origin and machine attach key from the grant that produced the token (the pinned pair). */
+  relayOrigin: string;
+  machineAttachPublicKey: string;
+}
+
+interface MachineTunnelLink {
+  tunnel: { transport: TunnelTransport; close: () => void };
+  deviceToken: string;
+  /** True when the device token came from the per-session cache rather than a new pairing. */
+  reused: boolean;
+}
+
+/** A daemon answer that means the device token is no longer accepted. */
+function isDeviceAuthFailure(res: { status: number; body: Uint8Array }): boolean {
+  if (res.status === 401 || res.status === 403) return true;
+  try {
+    const data = JSON.parse(new TextDecoder().decode(res.body));
+    return data?.code === "UNAUTHORIZED";
+  } catch {
+    return false;
+  }
+}
+
 export function useAccountWorktrees(
   relayUrl: string,
   accountSessionToken: string | null,
@@ -127,6 +152,17 @@ export function useAccountWorktrees(
   const [sessionInventories, setSessionInventories] = useState<Record<string, RemoteSessionInventory>>({});
 
   const tunnelsRef = useRef<Map<string, StoredTunnelState>>(new Map());
+  /**
+   * Device tokens paired in this account session, keyed by machine id and enrollment
+   * epoch. Reused across probes, retries and acquisitions; replaced only on auth failure.
+   */
+  const deviceTokensRef = useRef<Map<string, CachedDeviceLink>>(new Map());
+  const deviceTokenScopeRef = useRef<string | null>(null);
+  const deviceTokenScope = `${relayUrl}\u0000${accountSessionToken ?? ""}`;
+  if (deviceTokenScopeRef.current !== deviceTokenScope) {
+    deviceTokenScopeRef.current = deviceTokenScope;
+    deviceTokensRef.current = new Map();
+  }
   const activeGenerationRef = useRef(0);
   const machinesRef = useRef<AccountMachineView[]>([]);
   machinesRef.current = machines;
@@ -161,6 +197,78 @@ export function useAccountWorktrees(
     }));
   }, []);
 
+  /**
+   * Opens a tunnel to the machine and returns a device token for it: the cached token when
+   * one exists for this account session and enrollment epoch (unless forceRepair), otherwise
+   * a fresh grant redeemed inside the tunnel. Returns null when the generation died.
+   */
+  const linkMachine = useCallback(
+    async (
+      machine: AccountMachineView,
+      attachKey: AttachKeyPair,
+      isAlive: () => boolean,
+      forceRepair: boolean,
+    ): Promise<MachineTunnelLink | null> => {
+      const tokens = deviceTokensRef.current;
+      const cacheKey = `${machine.machineId}\u0000${String(machine.enrollmentEpoch)}`;
+      if (forceRepair) tokens.delete(cacheKey);
+      const cached = tokens.get(cacheKey);
+      const cachedToken = cached?.deviceToken;
+
+      const grant = cachedToken
+        ? null
+        : await requestGrant(relayUrl, accountSessionToken!, machine, attachKey.publicKey, { grantScope: "machine" });
+      if (!isAlive()) return null;
+
+      const session = await allocateSession(relayUrl, accountSessionToken!, machine.machineId);
+      if (!isAlive()) return null;
+
+      const tunnel = await openTunnel({
+        relayOrigin: (grant ? grant.relayOrigin : cached!.relayOrigin) || relayUrl,
+        machineId: machine.machineId,
+        enrollmentEpoch: machine.enrollmentEpoch,
+        machineAttachPublicKey: grant ? grant.machineAttachPublicKey : cached!.machineAttachPublicKey,
+        localKeyPair: attachKey,
+        sessionId: session.sessionId,
+      });
+      if (!isAlive()) {
+        try {
+          tunnel.close();
+        } catch {}
+        return null;
+      }
+      if (cachedToken) return { tunnel, deviceToken: cachedToken, reused: true };
+
+      try {
+        const pair = await redeemInTunnel(
+          tunnel.transport,
+          grant!.pairingToken,
+          suggestDeviceName(),
+          getOrCreateInstallationId(),
+        );
+        // The cache map belongs to this account session even if the scope changed meanwhile.
+        tokens.set(cacheKey, {
+          deviceToken: pair.token,
+          relayOrigin: grant!.relayOrigin,
+          machineAttachPublicKey: grant!.machineAttachPublicKey,
+        });
+        if (!isAlive()) {
+          try {
+            tunnel.close();
+          } catch {}
+          return null;
+        }
+        return { tunnel, deviceToken: pair.token, reused: false };
+      } catch (err) {
+        try {
+          tunnel.close();
+        } catch {}
+        throw err;
+      }
+    },
+    [accountSessionToken, relayUrl],
+  );
+
   const probeMachine = useCallback(
     async (
       machine: AccountMachineView,
@@ -189,39 +297,28 @@ export function useAccountWorktrees(
       let tunnelRetained = false;
 
       try {
-        const grant = await requestGrant(
-          relayUrl,
-          accountSessionToken!,
-          machine,
-          attachKey.publicKey,
-          { grantScope: "machine" },
-        );
-        if (!isGenerationAlive()) return;
+        let link = await linkMachine(machine, attachKey, isGenerationAlive, false);
+        if (!link) return;
+        localTunnel = link.tunnel;
 
-        const session = await allocateSession(
-          relayUrl,
-          accountSessionToken!,
-          machine.machineId,
-        );
-        if (!isGenerationAlive()) return;
-
-        localTunnel = await openTunnel({
-          relayOrigin: grant.relayOrigin || relayUrl,
-          machineId: machine.machineId,
-          enrollmentEpoch: machine.enrollmentEpoch,
-          machineAttachPublicKey: grant.machineAttachPublicKey,
-          localKeyPair: attachKey,
-          sessionId: session.sessionId,
+        let projRes = await localTunnel.transport.fetchLike("/api/v1/workspace/projects", {
+          headers: { Authorization: `Bearer ${link.deviceToken}` },
         });
+        if (link.reused && isDeviceAuthFailure(projRes)) {
+          // The cached device token was revoked: pair once more on a fresh tunnel.
+          try {
+            localTunnel.close();
+          } catch {}
+          localTunnel = null;
+          link = await linkMachine(machine, attachKey, isGenerationAlive, true);
+          if (!link) return;
+          localTunnel = link.tunnel;
+          projRes = await localTunnel.transport.fetchLike("/api/v1/workspace/projects", {
+            headers: { Authorization: `Bearer ${link.deviceToken}` },
+          });
+        }
         if (!isGenerationAlive()) return;
-
-        const pair = await redeemInTunnel(
-          localTunnel.transport,
-          grant.pairingToken,
-          suggestDeviceName(),
-          getOrCreateInstallationId(),
-        );
-        if (!isGenerationAlive()) return;
+        const pair = { token: link.deviceToken };
 
         const state: StoredTunnelState = {
           transport: localTunnel.transport,
@@ -229,12 +326,15 @@ export function useAccountWorktrees(
           deviceToken: pair.token,
           machine,
         };
+        const previous = tunnelsRef.current.get(machine.machineId);
+        if (previous && previous.transport !== state.transport) {
+          // A retry replaces the pooled tunnel; the old one must not leak.
+          try {
+            previous.close();
+          } catch {}
+        }
         tunnelsRef.current.set(machine.machineId, state);
         tunnelRetained = true;
-
-        const projRes = await localTunnel.transport.fetchLike("/api/v1/workspace/projects", {
-          headers: { Authorization: `Bearer ${pair.token}` },
-        });
 
         if (projRes.status < 200 || projRes.status >= 300) {
           throw new Error(`Machine projects query failed (${projRes.status})`);
@@ -355,7 +455,7 @@ export function useAccountWorktrees(
         }
       }
     },
-    [accountSessionToken, noteSessionsPayload, relayUrl],
+    [linkMachine, noteSessionsPayload],
   );
 
   useEffect(() => {
@@ -506,53 +606,42 @@ export function useAccountWorktrees(
         const attachKey = await getOrCreateAttachKey();
         if (!attachKey) return null;
 
-        const grant = await requestGrant(
-          relayUrl,
-          accountSessionToken,
-          machine,
-          attachKey.publicKey,
-          { grantScope: "machine" },
-        );
-
-        const session = await allocateSession(
-          relayUrl,
-          accountSessionToken,
-          machine.machineId,
-        );
-
-        const tunnel = await openTunnel({
-          relayOrigin: grant.relayOrigin || relayUrl,
-          machineId: machine.machineId,
-          enrollmentEpoch: machine.enrollmentEpoch,
-          machineAttachPublicKey: grant.machineAttachPublicKey,
-          localKeyPair: attachKey,
-          sessionId: session.sessionId,
-        });
-
-        const pair = await redeemInTunnel(
-          tunnel.transport,
-          grant.pairingToken,
-          suggestDeviceName(),
-          getOrCreateInstallationId(),
-        ).catch((err) => {
-          try {
-            tunnel.close();
-          } catch {}
-          throw err;
-        });
+        const alwaysAlive = () => true;
+        let link = await linkMachine(machine, attachKey, alwaysAlive, false);
+        if (!link) return null;
+        if (link.reused) {
+          // Validate the cached device token before handing the tunnel out; re-pair only
+          // when the daemon rejects it.
+          const reusedTunnel = link.tunnel;
+          const check = await reusedTunnel.transport.fetchLike("/api/v1/workspace/projects", {
+            headers: { Authorization: `Bearer ${link.deviceToken}` },
+          }).catch((err) => {
+            try {
+              reusedTunnel.close();
+            } catch {}
+            throw err;
+          });
+          if (isDeviceAuthFailure(check)) {
+            try {
+              reusedTunnel.close();
+            } catch {}
+            link = await linkMachine(machine, attachKey, alwaysAlive, true);
+            if (!link) return null;
+          }
+        }
 
         return {
-          transport: tunnel.transport,
-          close: tunnel.close,
+          transport: link.tunnel.transport,
+          close: link.tunnel.close,
           machine,
-          deviceToken: pair.token,
+          deviceToken: link.deviceToken,
         };
       } catch (err) {
         console.warn("Account tunnel acquisition failed", err);
         return null;
       }
     },
-    [accountSessionToken, relayUrl],
+    [accountSessionToken, linkMachine],
   );
 
   const accountOptions: AccountWorktreeOption[] = [];

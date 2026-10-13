@@ -110,12 +110,93 @@ export interface OpenTunnelParams {
   sessionId: string;
 }
 
-function cleanOrigin(origin: string): string {
-  const trimmed = origin.trim();
-  if (!trimmed) {
-    return typeof window !== "undefined" ? window.location.origin : "";
+/**
+ * Returns the canonical origin when it may receive account credentials: https, or http
+ * only for loopback hosts, with no userinfo, path, query or hash. Otherwise null.
+ * Mirrors normalizeRelayOrigin in ../lib/pairedHostInventory.
+ */
+export function normalizeAccountOrigin(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    const isLoopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || url.hostname === "[::1]";
+    const validProtocol = url.protocol === "https:" || (url.protocol === "http:" && isLoopback);
+    if (!validProtocol || url.username || url.password || (url.pathname !== "/" && url.pathname !== "") || url.search || url.hash) {
+      return null;
+    }
+    return url.origin;
+  } catch {
+    return null;
   }
-  return trimmed.replace(/\/+$/, "");
+}
+
+/** An invalid origin falls back to the default account origin so it never receives a token. */
+function cleanOrigin(origin: string): string {
+  const trimmed = typeof origin === "string" ? origin.trim() : "";
+  const candidate = trimmed || (typeof window !== "undefined" ? window.location.origin : "");
+  return normalizeAccountOrigin(candidate) ?? DEFAULT_RELAY_ORIGIN;
+}
+
+const ACCOUNT_REQUEST_TIMEOUT_MS = 15_000;
+const ERROR_BODY_MAX_CHARS = 200;
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs: number = ACCOUNT_REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const callerSignal = init.signal ?? null;
+  const onCallerAbort = () => controller.abort();
+  if (callerSignal) {
+    if (callerSignal.aborted) controller.abort();
+    else callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+  }
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (timedOut) {
+      throw new AccountSessionError("REQUEST_TIMEOUT", `Account request timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", onCallerAbort);
+  }
+}
+
+function truncateBody(text: string): string {
+  return text.length > ERROR_BODY_MAX_CHARS ? `${text.slice(0, ERROR_BODY_MAX_CHARS)}...` : text;
+}
+
+/** Parses a 2xx JSON object body; a non-JSON or non-object body is a typed INVALID_RESPONSE. */
+async function readJsonObject(res: Response, what: string): Promise<Record<string, unknown>> {
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    throw new AccountSessionError("INVALID_RESPONSE", `${what} response is not valid JSON`, res.status);
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new AccountSessionError("INVALID_RESPONSE", `${what} response is not a JSON object`, res.status);
+  }
+  return data as Record<string, unknown>;
+}
+
+function requireStrings(data: Record<string, unknown>, fields: readonly string[], what: string, status?: number): void {
+  for (const field of fields) {
+    const value = data[field];
+    if (typeof value !== "string" || value.length === 0) {
+      throw new AccountSessionError("INVALID_RESPONSE", `${what} response missing ${field}`, status);
+    }
+  }
 }
 
 export function getStoredAccountSessionToken(origin: string = getConfiguredAccountOrigin()): string | null {
@@ -150,17 +231,22 @@ export function getStoredAccountOrigin(
   storage: (Pick<Storage, "getItem" | "setItem"> & Partial<Pick<Storage, "removeItem">>) | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
 ): string | null {
   const fromStorage = getMigratedItem(ACCOUNT_ORIGIN_STORAGE_KEY, storage);
-  if (fromStorage && fromStorage.trim().length > 0) {
-    return fromStorage.trim();
-  }
-  return null;
+  // A stored origin that may not receive credentials is ignored (default origin applies).
+  return normalizeAccountOrigin(fromStorage);
 }
 
 export function storeAccountOrigin(
   origin: string,
   storage: Pick<Storage, "setItem"> | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
 ): void {
-  storage?.setItem(ACCOUNT_ORIGIN_STORAGE_KEY, cleanOrigin(origin));
+  const normalized = normalizeAccountOrigin(origin);
+  if (!normalized) {
+    throw new AccountSessionError(
+      "INVALID_ACCOUNT_ORIGIN",
+      "Account origin must be https (http only for localhost) without credentials, path, query or hash.",
+    );
+  }
+  storage?.setItem(ACCOUNT_ORIGIN_STORAGE_KEY, normalized);
 }
 
 export function clearStoredAccountOrigin(
@@ -214,7 +300,7 @@ export async function resolveAccountOrigin(pageOrigin: string): Promise<string> 
   const requested = typeof pageOrigin === "string" ? pageOrigin.trim() : "";
   if (!requested) return DEFAULT_ACCOUNT_ORIGIN;
 
-  const candidate = cleanOrigin(requested);
+  const candidate = normalizeAccountOrigin(requested);
   if (!candidate) return DEFAULT_ACCOUNT_ORIGIN;
 
   const cacheKey = `${ACCOUNT_ORIGIN_PROBE_STORAGE_KEY}:${candidate}`;
@@ -237,7 +323,7 @@ export async function resolveAccountOrigin(pageOrigin: string): Promise<string> 
     let resolved = candidate;
     let shouldCache = false;
     try {
-      const res = await fetch(`${candidate}${ACCOUNT_ORIGIN_HEALTH_PATH}`);
+      const res = await fetchWithTimeout(`${candidate}${ACCOUNT_ORIGIN_HEALTH_PATH}`);
       if (res.ok) {
         resolved = candidate;
         shouldCache = true;
@@ -246,7 +332,10 @@ export async function resolveAccountOrigin(pageOrigin: string): Promise<string> 
         shouldCache = true;
       }
     } catch {
-      // Transient network or connection failure: retains candidate and shouldCache=false
+      // Transient network failure or timeout: retains candidate and shouldCache=false
+    } finally {
+      // A failed or timed-out probe never stays cached; the next call probes again.
+      accountOriginProbes.delete(candidate);
     }
     if (shouldCache) {
       try {
@@ -255,7 +344,6 @@ export async function resolveAccountOrigin(pageOrigin: string): Promise<string> 
         // A full or blocked sessionStorage must not change the resolved origin.
       }
     }
-    accountOriginProbes.delete(candidate);
     return resolved;
   })();
   accountOriginProbes.set(candidate, probe);
@@ -267,7 +355,7 @@ export async function requestLogin(
   email: string,
 ): Promise<LoginRequestResponse> {
   const url = `${cleanOrigin(origin)}/api/account/v1/login/request`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email: email.trim() }),
@@ -294,16 +382,11 @@ export async function requestLogin(
     throw new AccountSessionError(code, message, res.status);
   }
 
-  const data = (await res.json()) as LoginRequestResponse;
-  if (!data?.loginHandle || typeof data.loginHandle !== "string") {
-    throw new AccountSessionError(
-      "INVALID_RESPONSE",
-      "Malformed login request response from server",
-      res.status,
-    );
+  const data = await readJsonObject(res, "Login request");
+  if (typeof data.loginHandle !== "string" || !data.loginHandle) {
+    throw new AccountSessionError("INVALID_RESPONSE", "Malformed login request response from server", res.status);
   }
-
-  return data;
+  return data as unknown as LoginRequestResponse;
 }
 
 export async function pollLogin(
@@ -311,7 +394,7 @@ export async function pollLogin(
   loginHandle: string,
 ): Promise<LoginPollResponse> {
   const url = `${cleanOrigin(origin)}/api/account/v1/login/poll`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ loginHandle: loginHandle.trim() }),
@@ -328,9 +411,13 @@ export async function pollLogin(
     throw new AccountSessionError(code, message, res.status);
   }
 
-  const data = (await res.json()) as LoginPollResponse;
+  const data = await readJsonObject(res, "Login poll");
+  if (data.status !== "pending" && data.status !== "approved") {
+    throw new AccountSessionError("INVALID_RESPONSE", "Login poll response has an unknown status", res.status);
+  }
+  if (data.status === "approved") requireStrings(data, ["token"], "Login poll", res.status);
   // Note: Callers decide whether and when to store the session token.
-  return data;
+  return data as unknown as LoginPollResponse;
 }
 
 export const TERMINAL_LOGIN_POLL_ERROR_CODES = new Set([
@@ -385,7 +472,7 @@ export async function consumeLogin(
   token: string,
 ): Promise<LoginConsumeResponse> {
   const url = `${cleanOrigin(origin)}/api/account/v1/login/consume`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ code: token.trim() }),
@@ -406,10 +493,9 @@ export async function consumeLogin(
     throw new AccountSessionError(code, message, res.status);
   }
 
-  const data = (await res.json()) as LoginConsumeResponse;
-  if (!data?.token || typeof data.token !== "string") {
-    throw new AccountSessionError("INVALID_RESPONSE", "Malformed login response from server", res.status);
-  }
+  const raw = await readJsonObject(res, "Login consume");
+  requireStrings(raw, ["token"], "Login consume", res.status);
+  const data = raw as unknown as LoginConsumeResponse;
 
   storeAccountSessionToken(data.token, origin);
   return data;
@@ -420,7 +506,7 @@ export async function listMachines(
   sessionToken: string,
 ): Promise<AccountMachineView[]> {
   const url = `${cleanOrigin(origin)}/api/account/v1/machines`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     headers: { Authorization: `Bearer ${sessionToken}` },
   });
 
@@ -445,9 +531,20 @@ export async function listMachines(
     throw new AccountSessionError(code, message, res.status);
   }
 
-  const data = await res.json();
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    throw new AccountSessionError("INVALID_RESPONSE", "Machine list response is not valid JSON", res.status);
+  }
   if (!Array.isArray(data)) {
     throw new AccountSessionError("INVALID_RESPONSE", "Expected machine list array", res.status);
+  }
+  for (const item of data) {
+    if (!item || typeof item !== "object") {
+      throw new AccountSessionError("INVALID_RESPONSE", "Machine list entry is not an object", res.status);
+    }
+    requireStrings(item as Record<string, unknown>, ["machineId", "machineRecordId"], "Machine list", res.status);
   }
   return data as AccountMachineView[];
 }
@@ -474,7 +571,7 @@ export async function requestGrant(
     attachPublicKey,
   };
 
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -511,11 +608,16 @@ export async function requestGrant(
     throw new AccountSessionError(code, message, res.status);
   }
 
-  const data = await res.json();
-  if (!data?.pairingToken || !data?.machineAttachPublicKey) {
-    throw new AccountSessionError("INVALID_RESPONSE", "Grant response missing required fields", res.status);
+  const data = await readJsonObject(res, "Grant");
+  requireStrings(data, ["pairingToken", "machineAttachPublicKey"], "Grant", res.status);
+  if (data.relayOrigin !== undefined && data.relayOrigin !== null && data.relayOrigin !== "") {
+    const relayOrigin = normalizeAccountOrigin(data.relayOrigin);
+    if (!relayOrigin) {
+      throw new AccountSessionError("INVALID_RELAY_ORIGIN", "Grant response carries an invalid relay origin", res.status);
+    }
+    data.relayOrigin = relayOrigin;
   }
-  return data as AccountGrantResponse;
+  return data as unknown as AccountGrantResponse;
 }
 
 export async function allocateSession(
@@ -524,7 +626,7 @@ export async function allocateSession(
   machineId: string,
 ): Promise<AllocateSessionResponse> {
   const url = `${cleanOrigin(origin)}/api/v1/attach/session`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -559,18 +661,76 @@ export async function allocateSession(
     throw new AccountSessionError(code, message, res.status);
   }
 
-  const data = await res.json();
-  if (!data?.sessionId) {
-    throw new AccountSessionError("INVALID_RESPONSE", "Missing sessionId in allocation response", res.status);
+  const data = await readJsonObject(res, "Attach session allocation");
+  requireStrings(data, ["sessionId"], "Attach session allocation", res.status);
+  return data as unknown as AllocateSessionResponse;
+}
+
+const MACHINE_ATTACH_KEY_PIN_PREFIX = "ferryx.account.machine_attach_key_pin.";
+
+interface MachineAttachKeyPin {
+  enrollmentEpoch: string;
+  attachPublicKey: string;
+}
+
+/**
+ * Trust-on-first-use pin of a machine's attach key, keyed by machineId. The key may only
+ * change together with a newer enrollment epoch (the server bumps the epoch on every
+ * re-enrollment and rejects grants for a stale epoch); a key change within the same
+ * epoch is refused with MACHINE_KEY_CHANGED.
+ */
+export function verifyMachineAttachKeyPin(
+  machineId: string,
+  enrollmentEpoch: string | number,
+  attachPublicKey: string,
+): void {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  const key = `${MACHINE_ATTACH_KEY_PIN_PREFIX}${encodeURIComponent(machineId)}`;
+  const epoch = String(enrollmentEpoch);
+  let pinned: MachineAttachKeyPin | null = null;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.enrollmentEpoch === "string" && typeof parsed.attachPublicKey === "string") {
+        pinned = parsed;
+      }
+    }
+  } catch {
+    pinned = null;
   }
-  return data as AllocateSessionResponse;
+  if (pinned && pinned.attachPublicKey !== attachPublicKey && !isNewerEpoch(epoch, pinned.enrollmentEpoch)) {
+    throw new AccountSessionError(
+      "MACHINE_KEY_CHANGED",
+      "The machine's attach key changed without a re-enrollment. Refusing to connect.",
+      undefined,
+      { machineId, enrollmentEpoch: epoch, pinnedEnrollmentEpoch: pinned.enrollmentEpoch },
+    );
+  }
+  if (pinned && pinned.attachPublicKey === attachPublicKey && pinned.enrollmentEpoch === epoch) return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify({ enrollmentEpoch: epoch, attachPublicKey }));
+  } catch (err) {
+    console.warn("Failed to persist machine attach key pin", err instanceof Error ? err.message : String(err));
+  }
+}
+
+function isNewerEpoch(next: string, pinned: string): boolean {
+  const decimal = /^(0|[1-9][0-9]*)$/;
+  if (decimal.test(next) && decimal.test(pinned)) return BigInt(next) > BigInt(pinned);
+  return next !== pinned;
 }
 
 export async function openTunnel(
   params: OpenTunnelParams,
 ): Promise<{ transport: TunnelTransport; close: () => void }> {
+  const relayOrigin = normalizeAccountOrigin(params.relayOrigin);
+  if (!relayOrigin) {
+    throw new AccountSessionError("INVALID_RELAY_ORIGIN", "Relay origin must be https (http only for localhost)");
+  }
+  verifyMachineAttachKeyPin(params.machineId, params.enrollmentEpoch, params.machineAttachPublicKey);
   const socketUrl = buildAttachSocketUrl(
-    params.relayOrigin,
+    relayOrigin,
     params.sessionId,
     params.localKeyPair,
   );
@@ -611,16 +771,22 @@ export async function redeemInTunnel(
       if (data?.code) code = data.code;
       if (data?.message) message = data.message;
     } catch {
-      if (text) message = text;
+      if (text) message = truncateBody(text);
     }
     throw new AccountSessionError(code, message, res.status);
   }
 
-  const data = JSON.parse(text) as PairExchangeResponse;
-  if (!data?.token) {
-    throw new AccountSessionError("INVALID_RESPONSE", "Missing device token in redemption response", res.status);
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new AccountSessionError("INVALID_RESPONSE", "Redemption response is not valid JSON", res.status);
   }
-  return data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new AccountSessionError("INVALID_RESPONSE", "Redemption response is not a JSON object", res.status);
+  }
+  requireStrings(data as Record<string, unknown>, ["token"], "Redemption", res.status);
+  return data as PairExchangeResponse;
 }
 
 export interface IssueEnrollmentCodeResponse {
@@ -633,7 +799,7 @@ export async function issueEnrollmentCode(
   sessionToken: string,
 ): Promise<IssueEnrollmentCodeResponse> {
   const url = `${cleanOrigin(origin)}/api/account/v1/enrollment-codes`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${sessionToken}`,
@@ -661,11 +827,9 @@ export async function issueEnrollmentCode(
     throw new AccountSessionError(code, message, res.status);
   }
 
-  const data = await res.json();
-  if (!data?.code || typeof data.code !== "string") {
-    throw new AccountSessionError("INVALID_RESPONSE", "Missing code in enrollment code response", res.status);
-  }
-  return data as IssueEnrollmentCodeResponse;
+  const data = await readJsonObject(res, "Enrollment code");
+  requireStrings(data, ["code"], "Enrollment code", res.status);
+  return data as unknown as IssueEnrollmentCodeResponse;
 }
 
 export interface OpenAccountWebSocketParams {
@@ -951,23 +1115,22 @@ export function clearAccountLastSelectedTarget(relayUrl?: string): void {
 
 export async function logoutAccountSession(origin: string, token: string): Promise<void> {
   if (!token || !origin) return;
-  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timer = controller ? setTimeout(() => controller.abort(), 5000) : null;
   try {
-    const res = await fetch(`${cleanOrigin(origin)}/api/account/v1/logout`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
+    const res = await fetchWithTimeout(
+      `${cleanOrigin(origin)}/api/account/v1/logout`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       },
-      signal: controller?.signal,
-    });
+      5000,
+    );
     if (!res.ok) {
       console.warn(`Account session logout returned HTTP ${res.status}`);
     }
   } catch (err) {
     console.warn("Account session logout request failed", err instanceof Error ? err.message : String(err));
-  } finally {
-    if (timer) clearTimeout(timer);
   }
 }
 
