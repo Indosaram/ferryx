@@ -6,7 +6,12 @@ import {
   openAccountTunnel,
   WS_OPEN,
   WS_CLOSED,
+  MAX_TUNNEL_WS_MESSAGE_BYTES,
+  DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS,
+  MAX_TUNNEL_RESPONSE_HEADER_BYTES,
+  MAX_TUNNEL_RESPONSE_BODY_BYTES,
   type TunnelByteStream,
+  type TunnelWebSocket,
 } from "./attachTunnel";
 import {
   attachPrologue,
@@ -16,6 +21,38 @@ import {
 } from "./attachFraming";
 import { createNoisePrimitives } from "./noisePrimitives";
 import { getOrCreateAttachKey } from "./accountAttach";
+
+// Inert unless a test installs decryptHook: lets a test hold one AEAD decrypt open to
+// observe whether a later inbound message is decrypted concurrently (U4).
+const decryptControl = vi.hoisted(() => ({
+  hook: null as null | (() => Promise<void>),
+  calls: 0,
+}));
+vi.mock("./noisePrimitives", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./noisePrimitives")>();
+  return {
+    ...actual,
+    createNoisePrimitives: () => {
+      const base = actual.createNoisePrimitives();
+      return {
+        ...base,
+        async aeadDecrypt(
+          key: Uint8Array,
+          nonce: number,
+          ad: Uint8Array,
+          ct: Uint8Array,
+        ): Promise<Uint8Array> {
+          const hook = decryptControl.hook;
+          if (hook) {
+            decryptControl.calls += 1;
+            await hook();
+          }
+          return base.aeadDecrypt(key, nonce, ad, ct);
+        },
+      };
+    },
+  };
+});
 
 class ScriptedByteStream implements TunnelByteStream {
   public written: Uint8Array[] = [];
@@ -426,6 +463,108 @@ describe("attachTunnel RFC 6455 WebSocket transport", () => {
     // When attempting fetchLike after upgrade
     // Then it rejects with STREAM_UPGRADED
     await expect(transport.fetchLike("/api/v1/sessions")).rejects.toThrow(/STREAM_UPGRADED/);
+  });
+
+  function lastCloseCode(stream: ScriptedByteStream): number {
+    const frame = stream.written[stream.written.length - 1];
+    expect(frame[0]).toBe(0x88);
+    const payload = unmaskClientFrame(frame);
+    return new DataView(payload.buffer, payload.byteOffset, 2).getUint16(0, false);
+  }
+
+  function awaitClose(ws: Pick<TunnelWebSocket, "onclose">) {
+    return new Promise<number>((resolve) => {
+      ws.onclose = (event) => resolve(event.code);
+    });
+  }
+
+  it("closes with 1009 when a frame or reassembled fragments exceed the message cap", async () => {
+    // Given a single frame declaring cap+1 bytes via the 64-bit length
+    const stream = new ScriptedByteStream();
+    const ws = await establishTestWebSocket(createTunnelTransport(stream), stream);
+    const closed = awaitClose(ws);
+    const header = new Uint8Array(10);
+    header[0] = 0x82;
+    header[1] = 127;
+    new DataView(header.buffer).setBigUint64(2, BigInt(MAX_TUNNEL_WS_MESSAGE_BYTES + 1), false);
+    stream.pushIncoming(header);
+    expect(await closed).toBe(1009);
+    expect(lastCloseCode(stream)).toBe(1009);
+
+    // Given a fragment, then a continuation whose length pushes the total past the cap
+    const stream2 = new ScriptedByteStream();
+    const ws2 = await establishTestWebSocket(createTunnelTransport(stream2), stream2);
+    const closed2 = awaitClose(ws2);
+    const cont = new Uint8Array(10);
+    cont[0] = 0x80;
+    cont[1] = 127;
+    new DataView(cont.buffer).setBigUint64(2, BigInt(MAX_TUNNEL_WS_MESSAGE_BYTES - 5), false);
+    stream2.pushIncoming(concatAll([new Uint8Array([0x02, 10]), new Uint8Array(10), cont]));
+    expect(await closed2).toBe(1009);
+  });
+
+  it.each([
+    ["nonzero RSV bits", new Uint8Array([0xc2, 0x00])],
+    ["control frame over 125 bytes", concatAll([new Uint8Array([0x89, 126, 0, 126]), new Uint8Array(126)])],
+    ["fragmented control frame", new Uint8Array([0x09, 0x00])],
+  ])("closes with 1002 on %s", async (_label, frame) => {
+    const stream = new ScriptedByteStream();
+    const ws = await establishTestWebSocket(createTunnelTransport(stream), stream);
+    const closed = awaitClose(ws);
+    stream.pushIncoming(frame);
+    expect(await closed).toBe(1002);
+    expect(lastCloseCode(stream)).toBe(1002);
+  });
+});
+
+describe("attachTunnel HTTP shim deadlines and caps", () => {
+  it("rejects a hung request at the deadline and releases the queue", async () => {
+    vi.useFakeTimers();
+    try {
+      // Given a request whose response never arrives, and a second request queued behind it
+      const stream = new ScriptedByteStream();
+      const transport = createTunnelTransport(stream);
+      const hung = transport.fetchLike("/hung");
+      const hungResult = expect(hung).rejects.toThrow(/HTTP_TIMEOUT/);
+      const queued = transport.fetchLike("/next");
+      const queuedResult = expect(queued).rejects.toThrow(/STREAM_CLOSED/);
+
+      // When the default deadline elapses
+      await vi.advanceTimersByTimeAsync(DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS);
+
+      // Then the hung request rejects, the stream is closed, and the queue does not hang
+      await hungResult;
+      await queuedResult;
+      expect(stream.closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("honours a caller AbortSignal", async () => {
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const controller = new AbortController();
+    const req = transport.fetchLike("/slow", { signal: controller.signal });
+    await stream.waitForWrites(1);
+    controller.abort();
+    await expect(req).rejects.toThrow(/HTTP_ABORTED/);
+  });
+
+  it("rejects oversized headers and an oversized Content-Length body", async () => {
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const req = transport.fetchLike("/big-headers");
+    await stream.waitForWrites(1);
+    stream.pushIncoming(`HTTP/1.1 200 OK\r\nX-Pad: ${"a".repeat(MAX_TUNNEL_RESPONSE_HEADER_BYTES + 1)}`);
+    await expect(req).rejects.toThrow(/HTTP_HEADERS_TOO_LARGE/);
+
+    const stream2 = new ScriptedByteStream();
+    const transport2 = createTunnelTransport(stream2);
+    const req2 = transport2.fetchLike("/big-body");
+    await stream2.waitForWrites(1);
+    stream2.pushIncoming(`HTTP/1.1 200 OK\r\nContent-Length: ${MAX_TUNNEL_RESPONSE_BODY_BYTES + 1}\r\n\r\n`);
+    await expect(req2).rejects.toThrow(/HTTP_BODY_TOO_LARGE/);
   });
 });
 
@@ -847,6 +986,125 @@ describe("attachTunnel encrypted channel (P19 / F3)", () => {
 
       tunnel.close();
     } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+/** Opens a tunnel against a scripted responder; the server side pushes raw encrypted frames. */
+async function openScriptedTunnel() {
+  const primitives = createNoisePrimitives();
+  const localKeyPair = await getOrCreateAttachKey();
+  const responderKeys = await primitives.generateEphemeralKey();
+  const machineId = "mach-terminal-path";
+  const sessionId = "sess-terminal-path";
+  const responder = new TestNoiseResponder(
+    primitives,
+    responderKeys.privateKey,
+    responderKeys.publicKey,
+    attachPrologue(machineId, sessionId, "1"),
+  );
+  let socket: MockEncryptedAttachWebSocket | null = null;
+  vi.stubGlobal(
+    "WebSocket",
+    class extends MockEncryptedAttachWebSocket {
+      constructor(url: string) {
+        super(url);
+        socket = this;
+        this.onSend = async (raw: Uint8Array) => {
+          const [msg1] = decodeFrames(raw).messages;
+          const { msg2 } = await responder.accept(msg1, () => true);
+          this.onSend = null;
+          this.pushServerMessage(encodeFrame(msg2));
+        };
+      }
+    },
+  );
+  const tunnel = await openAccountTunnel({
+    socketUrl: `wss://relay.example.com/tunnel/opaque/${sessionId}`,
+    machineId,
+    enrollmentEpoch: "1",
+    machineAttachPublicKey: bytesToBase64(responderKeys.publicKey),
+    localKeyPair,
+    sessionId,
+  });
+  const serverSend = async (text: string) =>
+    encodeFrame(await responder.encrypt(new TextEncoder().encode(text)));
+  return { tunnel, socket: socket! as MockEncryptedAttachWebSocket, serverSend };
+}
+
+describe("attachTunnel encrypted stream terminal path and ordering", () => {
+  it("reports a socket error to reads instead of a clean EOF, even after close", async () => {
+    try {
+      const { tunnel, socket } = await openScriptedTunnel();
+      const pending = tunnel.stream!.read();
+      const pendingResult = expect(pending).rejects.toThrow(/WEBSOCKET_ERROR/);
+
+      // When the socket errors and then closes
+      socket.onerror?.({ type: "error" });
+      socket.onclose?.({ code: 1006, reason: "", wasClean: false });
+
+      // Then the pending read and every later read report the error, not EOF
+      await pendingResult;
+      await expect(tunnel.stream!.read()).rejects.toThrow(/WEBSOCKET_ERROR/);
+      await expect(tunnel.stream!.write(new Uint8Array([1]))).rejects.toThrow(/STREAM_CLOSED/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("closes the socket and rejects reads when decrypting an inbound frame fails", async () => {
+    try {
+      const { tunnel, socket } = await openScriptedTunnel();
+      const pending = tunnel.stream!.read();
+      const pendingResult = expect(pending).rejects.toThrow();
+      socket.pushServerMessage(encodeFrame(new Uint8Array(32)));
+      await pendingResult;
+      expect(socket.readyState).toBe(MockEncryptedAttachWebSocket.CLOSED);
+      await expect(tunnel.stream!.read()).rejects.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("decrypts inbound messages one at a time so plaintext keeps arrival order", async () => {
+    try {
+      const { tunnel, socket, serverSend } = await openScriptedTunnel();
+      const first = await serverSend("first");
+      const second = await serverSend("second");
+
+      // Given the first inbound decrypt is held open
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>((resolve) => (releaseFirst = resolve));
+      let firstStarted!: () => void;
+      const firstStartedSignal = new Promise<void>((resolve) => (firstStarted = resolve));
+      decryptControl.calls = 0;
+      decryptControl.hook = () => {
+        if (decryptControl.calls === 1) {
+          firstStarted();
+          return firstGate;
+        }
+        return Promise.resolve();
+      };
+
+      socket.pushServerMessage(first);
+      await firstStartedSignal;
+
+      // When a second message arrives while the first decrypt is in flight
+      socket.pushServerMessage(second);
+
+      // Then, after pending microtasks and I/O callbacks drain, its decrypt has still not started
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(decryptControl.calls).toBe(1);
+
+      // And both arrive in order once the first is released
+      releaseFirst();
+      const decoder = new TextDecoder();
+      expect(decoder.decode(await tunnel.stream!.read())).toBe("first");
+      expect(decoder.decode(await tunnel.stream!.read())).toBe("second");
+      tunnel.close();
+    } finally {
+      decryptControl.hook = null;
       vi.unstubAllGlobals();
     }
   });

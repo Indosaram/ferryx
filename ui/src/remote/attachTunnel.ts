@@ -17,6 +17,26 @@ const CRLF = new Uint8Array([0x0d, 0x0a]);
 const CRLF_CRLF = new Uint8Array([0x0d, 0x0a, 0x0d, 0x0a]);
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+/**
+ * Hard cap on one inbound tunnel WebSocket frame and on a reassembled fragmented message.
+ * The attach layer bounds each encrypted chunk to MAX_ATTACH_FRAME, but a gateway WebSocket
+ * message spans many chunks: the largest gateway routes accept 4 MiB messages and terminal
+ * replays carry a 512 KiB ring, so 16 MiB leaves headroom while refusing the 4 GiB the
+ * 64-bit length field allows.
+ */
+export const MAX_TUNNEL_WS_MESSAGE_BYTES = 16 * 1024 * 1024;
+/** RFC 6455 5.5: control frames carry at most 125 payload bytes and are never fragmented. */
+export const MAX_WS_CONTROL_PAYLOAD = 125;
+/** Per-request deadline for the tunnel HTTP shim (headers and body). */
+export const DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS = 30_000;
+/** Cap on the response status line + headers (and on a chunk-size line). */
+export const MAX_TUNNEL_RESPONSE_HEADER_BYTES = 64 * 1024;
+/** Cap on a response body, whatever its framing. */
+export const MAX_TUNNEL_RESPONSE_BODY_BYTES = 16 * 1024 * 1024;
+
+const WS_CLOSE_PROTOCOL_ERROR = 1002;
+const WS_CLOSE_MESSAGE_TOO_BIG = 1009;
+
 export interface TunnelByteStream {
   write(bytes: Uint8Array): Promise<void>;
   read(): Promise<Uint8Array>;
@@ -33,6 +53,13 @@ export interface FetchLikeInit {
   method?: string;
   headers?: Record<string, string>;
   body?: Uint8Array | string;
+  /**
+   * Aborts the request. HTTP/1.1 cannot cancel one response on a shared stream, so an
+   * abort after the request was written closes the tunnel stream.
+   */
+  signal?: AbortSignal;
+  /** Deadline in ms; defaults to DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 export interface TunnelMessageEvent {
@@ -159,6 +186,26 @@ function getRandomBytes(count: number): Uint8Array {
   return buf;
 }
 
+/** A receive-side violation that fails the WebSocket with a specific close code. */
+class WsFailure extends Error {
+  readonly closeCode: number;
+  readonly closeReason: string;
+  constructor(closeCode: number, closeReason: string, message: string) {
+    super(message);
+    this.closeCode = closeCode;
+    this.closeReason = closeReason;
+  }
+}
+
+function encodeClosePayload(code: number, reason?: string): Uint8Array {
+  const reasonBytes = reason ? new TextEncoder().encode(reason) : new Uint8Array(0);
+  const payload = new Uint8Array(2 + reasonBytes.length);
+  const view = new DataView(payload.buffer, payload.byteOffset, 2);
+  view.setUint16(0, code, false);
+  payload.set(reasonBytes, 2);
+  return payload;
+}
+
 function encodeClientFrame(opcode: number, payload: Uint8Array): Uint8Array {
   const len = payload.length;
   let headerSize = 2;
@@ -250,21 +297,103 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
     return next;
   }
 
+  /** Closes the shared stream: after a timeout, abort, or cap violation its framing is unknown. */
+  function failTransport() {
+    if (isClosed) return;
+    isClosed = true;
+    stream.close();
+  }
+
+  function tooLarge(message: string): Error {
+    failTransport();
+    return new Error(message);
+  }
+
+  function withDeadline<T>(
+    work: () => Promise<T>,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    if (signal?.aborted) {
+      return Promise.reject(new Error("HTTP_ABORTED: request aborted before it was sent"));
+    }
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (complete: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        complete();
+      };
+      const fail = (err: Error) =>
+        finish(() => {
+          failTransport();
+          reject(err);
+        });
+      const onAbort = () => fail(new Error("HTTP_ABORTED: request aborted; tunnel stream closed"));
+      const timer = setTimeout(
+        () => fail(new Error(`HTTP_TIMEOUT: no complete response within ${timeoutMs}ms; tunnel stream closed`)),
+        timeoutMs,
+      );
+      signal?.addEventListener("abort", onAbort, { once: true });
+      work().then(
+        (value) => finish(() => resolve(value)),
+        (err) => finish(() => reject(err)),
+      );
+    });
+  }
+
   async function readChunk(): Promise<Uint8Array> {
     const chunk = await stream.read();
     return chunk;
   }
 
-  async function parseHeaders(): Promise<{ status: number; headers: Record<string, string> }> {
-    let headerEndIndex = findSubarray(readBuffer, CRLF_CRLF);
-    while (headerEndIndex === -1) {
-      const chunk = await readChunk();
-      if (chunk.length === 0) {
-        throw new Error("HTTP_PREMATURE_CLOSE: stream closed while reading headers");
+  /** Buffers until readBuffer holds at least minLength bytes; joins chunks once. */
+  async function fillTo(minLength: number, onEof: (have: number) => Error): Promise<void> {
+    if (readBuffer.length >= minLength) return;
+    const parts: Uint8Array[] = [readBuffer];
+    let total = readBuffer.length;
+    try {
+      while (total < minLength) {
+        const chunk = await readChunk();
+        if (chunk.length === 0) throw onEof(total);
+        parts.push(chunk);
+        total += chunk.length;
       }
-      readBuffer = concatBytes(readBuffer, chunk);
-      headerEndIndex = findSubarray(readBuffer, CRLF_CRLF);
+    } finally {
+      readBuffer = concatBytes(...parts);
     }
+  }
+
+  /** Returns the index of needle in readBuffer, reading more (at most limit bytes) as needed. */
+  async function readUntil(
+    needle: Uint8Array,
+    limit: number,
+    onEof: () => Error,
+    onLimit: () => Error,
+  ): Promise<number> {
+    let index = findSubarray(readBuffer, needle);
+    while (index === -1) {
+      if (readBuffer.length > limit) throw onLimit();
+      const from = Math.max(0, readBuffer.length - (needle.length - 1));
+      const chunk = await readChunk();
+      if (chunk.length === 0) throw onEof();
+      readBuffer = concatBytes(readBuffer, chunk);
+      index = findSubarray(readBuffer, needle, from);
+    }
+    if (index > limit) throw onLimit();
+    return index;
+  }
+
+  async function parseHeaders(): Promise<{ status: number; headers: Record<string, string> }> {
+    const headerEndIndex = await readUntil(
+      CRLF_CRLF,
+      MAX_TUNNEL_RESPONSE_HEADER_BYTES,
+      () => new Error("HTTP_PREMATURE_CLOSE: stream closed while reading headers"),
+      () =>
+        tooLarge(`HTTP_HEADERS_TOO_LARGE: response headers exceed ${MAX_TUNNEL_RESPONSE_HEADER_BYTES} bytes`),
+    );
 
     const headerBytes = sliceBytes(readBuffer, 0, headerEndIndex);
     readBuffer = sliceBytes(readBuffer, headerEndIndex + 4);
@@ -304,18 +433,16 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
     const transferEncoding = headers["transfer-encoding"]?.toLowerCase();
     if (transferEncoding && transferEncoding.includes("chunked")) {
       const chunks: Uint8Array[] = [];
+      let bodyBytes = 0;
       const textDecoder = new TextDecoder("utf-8");
 
       while (true) {
-        let crlfIndex = findSubarray(readBuffer, CRLF);
-        while (crlfIndex === -1) {
-          const next = await readChunk();
-          if (next.length === 0) {
-            throw new Error("HTTP_PREMATURE_CLOSE: stream closed while reading chunk size");
-          }
-          readBuffer = concatBytes(readBuffer, next);
-          crlfIndex = findSubarray(readBuffer, CRLF);
-        }
+        const crlfIndex = await readUntil(
+          CRLF,
+          MAX_TUNNEL_RESPONSE_HEADER_BYTES,
+          () => new Error("HTTP_PREMATURE_CLOSE: stream closed while reading chunk size"),
+          () => tooLarge("HTTP_CHUNK_SIZE_LINE_TOO_LARGE: chunk-size line exceeds header cap"),
+        );
 
         const sizeLineBytes = sliceBytes(readBuffer, 0, crlfIndex);
         readBuffer = sliceBytes(readBuffer, crlfIndex + 2);
@@ -352,13 +479,14 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
           break;
         }
 
-        while (readBuffer.length < chunkSize + 2) {
-          const next = await readChunk();
-          if (next.length === 0) {
-            throw new Error("HTTP_PREMATURE_CLOSE: stream closed while reading chunk data");
-          }
-          readBuffer = concatBytes(readBuffer, next);
+        bodyBytes += chunkSize;
+        if (bodyBytes > MAX_TUNNEL_RESPONSE_BODY_BYTES) {
+          throw tooLarge(`HTTP_BODY_TOO_LARGE: chunked body exceeds ${MAX_TUNNEL_RESPONSE_BODY_BYTES} bytes`);
         }
+        await fillTo(
+          chunkSize + 2,
+          () => new Error("HTTP_PREMATURE_CLOSE: stream closed while reading chunk data"),
+        );
 
         const chunkData = sliceBytes(readBuffer, 0, chunkSize);
         if (readBuffer[chunkSize] !== 0x0d || readBuffer[chunkSize + 1] !== 0x0a) {
@@ -376,25 +504,33 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
       if (isNaN(len) || len < 0) {
         throw new Error(`HTTP_INVALID_CONTENT_LENGTH: '${headers["content-length"]}'`);
       }
-      while (readBuffer.length < len) {
-        const next = await readChunk();
-        if (next.length === 0) {
-          throw new Error(`HTTP_PREMATURE_CLOSE: expected ${len} bytes, got ${readBuffer.length}`);
-        }
-        readBuffer = concatBytes(readBuffer, next);
+      if (len > MAX_TUNNEL_RESPONSE_BODY_BYTES) {
+        throw tooLarge(
+          `HTTP_BODY_TOO_LARGE: content-length ${len} exceeds ${MAX_TUNNEL_RESPONSE_BODY_BYTES} bytes`,
+        );
       }
+      await fillTo(len, (have) => new Error(`HTTP_PREMATURE_CLOSE: expected ${len} bytes, got ${have}`));
       const body = sliceBytes(readBuffer, 0, len);
       readBuffer = sliceBytes(readBuffer, len);
       return body;
     }
 
     if (headers["connection"]?.toLowerCase() === "close") {
+      const parts: Uint8Array[] = [readBuffer];
+      let total = readBuffer.length;
       while (true) {
+        if (total > MAX_TUNNEL_RESPONSE_BODY_BYTES) {
+          throw tooLarge(`HTTP_BODY_TOO_LARGE: body exceeds ${MAX_TUNNEL_RESPONSE_BODY_BYTES} bytes`);
+        }
         const next = await readChunk();
         if (next.length === 0) break;
-        readBuffer = concatBytes(readBuffer, next);
+        parts.push(next);
+        total += next.length;
       }
-      const body = readBuffer;
+      const body = concatBytes(...parts);
+      if (body.length > MAX_TUNNEL_RESPONSE_BODY_BYTES) {
+        throw tooLarge(`HTTP_BODY_TOO_LARGE: body exceeds ${MAX_TUNNEL_RESPONSE_BODY_BYTES} bytes`);
+      }
       readBuffer = new Uint8Array(0);
       return body;
     }
@@ -522,10 +658,18 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
 
   return {
     fetchLike(pathAndQuery: string, init?: FetchLikeInit): Promise<TunnelResponse> {
-      return enqueue(() => doFetch(pathAndQuery, init));
+      return enqueue(() =>
+        withDeadline(
+          () => doFetch(pathAndQuery, init),
+          init?.timeoutMs ?? DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS,
+          init?.signal,
+        ),
+      );
     },
     openWebSocket(pathAndQuery: string, headers?: Record<string, string>): Promise<TunnelWebSocket> {
-      return enqueue(() => doOpenWebSocket(pathAndQuery, headers));
+      return enqueue(() =>
+        withDeadline(() => doOpenWebSocket(pathAndQuery, headers), DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS),
+      );
     },
     close(): void {
       isClosed = true;
@@ -594,6 +738,7 @@ function createTunnelWebSocketInstance(
   async function runReceiveLoop() {
     let fragmentedOpcode = 0;
     let fragmentedPayloads: Uint8Array[] = [];
+    let fragmentedBytes = 0;
 
     try {
       while (readyState !== WS_CLOSED) {
@@ -613,6 +758,21 @@ function createTunnelWebSocketInstance(
         const hasMask = (byte1 & 0x80) !== 0;
         let payloadLen = byte1 & 0x7f;
         let headerSize = 2;
+
+        if ((byte0 & 0x70) !== 0) {
+          throw new WsFailure(
+            WS_CLOSE_PROTOCOL_ERROR,
+            "protocol error",
+            "PROTOCOL_ERROR: nonzero RSV bits without a negotiated extension",
+          );
+        }
+        if ((opcode & 0x08) !== 0 && (!fin || payloadLen > MAX_WS_CONTROL_PAYLOAD)) {
+          throw new WsFailure(
+            WS_CLOSE_PROTOCOL_ERROR,
+            "protocol error",
+            "PROTOCOL_ERROR: control frame is fragmented or longer than 125 bytes",
+          );
+        }
 
         if (payloadLen === 126) {
           headerSize += 2;
@@ -642,10 +802,23 @@ function createTunnelWebSocketInstance(
           const high = view.getUint32(0, false);
           const low = view.getUint32(4, false);
           if (high !== 0) {
-            throw new Error("FRAME_TOO_LARGE: 64-bit lengths > 4GB not supported");
+            throw new WsFailure(
+              WS_CLOSE_MESSAGE_TOO_BIG,
+              "message too big",
+              `FRAME_TOO_LARGE: frame exceeds ${MAX_TUNNEL_WS_MESSAGE_BYTES} bytes`,
+            );
           }
           payloadLen = low;
           offset += 8;
+        }
+
+        const messageBytes = opcode === 0x0 ? fragmentedBytes + payloadLen : payloadLen;
+        if (messageBytes > MAX_TUNNEL_WS_MESSAGE_BYTES) {
+          throw new WsFailure(
+            WS_CLOSE_MESSAGE_TOO_BIG,
+            "message too big",
+            `FRAME_TOO_LARGE: message exceeds ${MAX_TUNNEL_WS_MESSAGE_BYTES} bytes`,
+          );
         }
 
         let maskKey: Uint8Array | null = null;
@@ -706,17 +879,20 @@ function createTunnelWebSocketInstance(
             throw new Error("PROTOCOL_ERROR: unexpected continuation frame");
           }
           fragmentedPayloads.push(payload);
+          fragmentedBytes += payload.length;
           if (fin) {
             const assembled = concatBytes(...fragmentedPayloads);
             const deliverOp = fragmentedOpcode;
             fragmentedOpcode = 0;
             fragmentedPayloads = [];
+            fragmentedBytes = 0;
             deliverMessage(deliverOp, assembled);
           }
         } else if (opcode === 0x1 || opcode === 0x2) {
           if (!fin) {
             fragmentedOpcode = opcode;
             fragmentedPayloads = [payload];
+            fragmentedBytes = payload.length;
           } else {
             deliverMessage(opcode, payload);
           }
@@ -726,7 +902,16 @@ function createTunnelWebSocketInstance(
       }
     } catch (err) {
       handleError(err);
-      handleClose(1006, "Stream read error", false);
+      if (err instanceof WsFailure) {
+        if (readyState === WS_OPEN) {
+          readyState = WS_CLOSING;
+          isClosing = true;
+          await sendFrame(0x8, encodeClosePayload(err.closeCode, err.closeReason));
+        }
+        handleClose(err.closeCode, err.closeReason, false);
+      } else {
+        handleClose(1006, "Stream read error", false);
+      }
     }
   }
 
@@ -756,14 +941,7 @@ function createTunnelWebSocketInstance(
       readyState = WS_CLOSING;
       isClosing = true;
 
-      let payload = new Uint8Array(0);
-      if (code !== undefined) {
-        const reasonBytes = reason ? new TextEncoder().encode(reason) : new Uint8Array(0);
-        payload = new Uint8Array(2 + reasonBytes.length);
-        const view = new DataView(payload.buffer, payload.byteOffset, 2);
-        view.setUint16(0, code, false);
-        payload.set(reasonBytes, 2);
-      }
+      const payload = code !== undefined ? encodeClosePayload(code, reason) : new Uint8Array(0);
 
       sendFrame(0x8, payload).finally(() => {
         handleClose(code ?? 1000, reason ?? "", true);
@@ -866,6 +1044,41 @@ export async function openAccountTunnel(
   let isClosed = false;
   let socketError: Error | null = null;
   let rxBuffer: Uint8Array = new Uint8Array(0);
+  // Every inbound event (message, error, close) runs on this chain so plaintext reaches
+  // readers in arrival order even if AEAD decrypts settle out of order, and a close or
+  // error never overtakes a message that arrived before it.
+  let incomingChain: Promise<void> = Promise.resolve();
+
+  function enqueueIncoming(task: () => Promise<void> | void) {
+    incomingChain = incomingChain.then(task).catch((err) => {
+      failTerminal(err instanceof Error ? err : new Error(String(err)));
+    });
+  }
+
+  /**
+   * The one terminal path after the handshake: records the first error, marks the stream
+   * closed, closes the socket, and wakes a pending read (rejecting it when an error caused
+   * the termination, otherwise resolving it with EOF).
+   */
+  function failTerminal(err: Error | null) {
+    if (err && !socketError) socketError = err;
+    if (isClosed) return;
+    isClosed = true;
+    try {
+      ws.close();
+    } catch {
+      // The socket is already closing; nothing else to release.
+    }
+    const resolve = pendingReadResolve;
+    const reject = pendingReadReject;
+    pendingReadResolve = null;
+    pendingReadReject = null;
+    if (socketError) {
+      reject?.(socketError);
+    } else {
+      resolve?.(new Uint8Array(0));
+    }
+  }
 
   function pushPlaintext(bytes: Uint8Array) {
     if (bytes.length === 0) return;
@@ -880,22 +1093,13 @@ export async function openAccountTunnel(
   }
 
   async function handleIncomingEncryptedBytes(raw: Uint8Array) {
+    if (isClosed) return;
     rxBuffer = concatBytes(rxBuffer, raw);
-    try {
-      const { messages, rest: remaining } = decodeFrames(rxBuffer);
-      rxBuffer = toCleanBytes(remaining);
-      for (const ciphertext of messages) {
-        const plaintext = await initiator.decrypt(ciphertext);
-        pushPlaintext(plaintext);
-      }
-    } catch (err) {
-      socketError = err instanceof Error ? err : new Error(String(err));
-      if (pendingReadReject) {
-        const reject = pendingReadReject;
-        pendingReadResolve = null;
-        pendingReadReject = null;
-        reject(socketError);
-      }
+    const { messages, rest: remaining } = decodeFrames(rxBuffer);
+    rxBuffer = toCleanBytes(remaining);
+    for (const ciphertext of messages) {
+      const plaintext = await initiator.decrypt(ciphertext);
+      pushPlaintext(plaintext);
     }
   }
 
@@ -919,90 +1123,90 @@ export async function openAccountTunnel(
       }
     };
 
-    ws.onmessage = async (event) => {
+    ws.onmessage = (event) => {
+      if (handshakeComplete) {
+        if (typeof event.data === "string") {
+          enqueueIncoming(() => {
+            throw new Error("NON_BINARY_MESSAGE: received non-binary WebSocket message");
+          });
+          return;
+        }
+        const bytes = toCleanBytes(new Uint8Array(event.data as ArrayBuffer));
+        enqueueIncoming(() => handleIncomingEncryptedBytes(bytes));
+        return;
+      }
+      enqueueIncoming(() => handleHandshakeMessage(event));
+    };
+
+    const handleHandshakeMessage = async (event: MessageEvent) => {
+      if (handshakeComplete) {
+        // A message queued behind message 2 is ordinary transport data.
+        if (typeof event.data === "string") {
+          throw new Error("NON_BINARY_MESSAGE: received non-binary WebSocket message");
+        }
+        await handleIncomingEncryptedBytes(toCleanBytes(new Uint8Array(event.data as ArrayBuffer)));
+        return;
+      }
       if (typeof event.data === "string") {
         if (timeoutId) clearTimeout(timeoutId);
         ws.close();
-        const err = new Error("NON_BINARY_MESSAGE: received non-binary WebSocket message during handshake");
-        if (!handshakeComplete) {
-          reject(err);
-        } else {
-          socketError = err;
-          if (pendingReadReject) {
-            const pReject = pendingReadReject;
-            pendingReadResolve = null;
-            pendingReadReject = null;
-            pReject(err);
-          }
-        }
+        reject(new Error("NON_BINARY_MESSAGE: received non-binary WebSocket message during handshake"));
         return;
       }
 
       const raw = toCleanBytes(new Uint8Array(event.data as ArrayBuffer));
 
-      if (!handshakeComplete) {
-        rxBuffer = concatBytes(rxBuffer, raw);
-        try {
-          const { messages, rest: remaining } = decodeFrames(rxBuffer);
-          if (messages.length > 0) {
-            const msg2 = messages[0];
-            rxBuffer = toCleanBytes(remaining);
-            await initiator.processHandshakeMessage2(msg2);
-            handshakeComplete = true;
-            if (timeoutId) clearTimeout(timeoutId);
+      rxBuffer = concatBytes(rxBuffer, raw);
+      try {
+        const { messages, rest: remaining } = decodeFrames(rxBuffer);
+        if (messages.length > 0) {
+          const msg2 = messages[0];
+          rxBuffer = toCleanBytes(remaining);
+          await initiator.processHandshakeMessage2(msg2);
+          handshakeComplete = true;
+          if (timeoutId) clearTimeout(timeoutId);
 
-            for (let i = 1; i < messages.length; i++) {
-              const pt = await initiator.decrypt(messages[i]);
+          for (let i = 1; i < messages.length; i++) {
+            const pt = await initiator.decrypt(messages[i]);
+            pushPlaintext(pt);
+          }
+          if (rxBuffer.length > 0) {
+            const decoded = decodeFrames(rxBuffer);
+            rxBuffer = toCleanBytes(decoded.rest);
+            for (const ct of decoded.messages) {
+              const pt = await initiator.decrypt(ct);
               pushPlaintext(pt);
             }
-            if (rxBuffer.length > 0) {
-              const decoded = decodeFrames(rxBuffer);
-              rxBuffer = toCleanBytes(decoded.rest);
-              for (const ct of decoded.messages) {
-                const pt = await initiator.decrypt(ct);
-                pushPlaintext(pt);
-              }
-            }
-
-            resolve();
           }
-        } catch (err) {
-          if (timeoutId) clearTimeout(timeoutId);
-          ws.close();
-          reject(err instanceof Error ? err : new Error(String(err)));
+
+          resolve();
         }
-      } else {
-        await handleIncomingEncryptedBytes(raw);
+      } catch (err) {
+        if (timeoutId) clearTimeout(timeoutId);
+        ws.close();
+        reject(err instanceof Error ? err : new Error(String(err)));
       }
     };
 
     ws.onerror = (event) => {
-      if (timeoutId) clearTimeout(timeoutId);
       const err = new Error(`WEBSOCKET_ERROR: ${String(event)}`);
-      socketError = err;
       if (!handshakeComplete) {
+        if (timeoutId) clearTimeout(timeoutId);
+        socketError = err;
         reject(err);
-      } else if (pendingReadReject) {
-        const pReject = pendingReadReject;
-        pendingReadResolve = null;
-        pendingReadReject = null;
-        pReject(err);
+        return;
       }
+      enqueueIncoming(() => failTerminal(err));
     };
 
     ws.onclose = () => {
-      if (timeoutId) clearTimeout(timeoutId);
-      isClosed = true;
       if (!handshakeComplete) {
+        if (timeoutId) clearTimeout(timeoutId);
+        isClosed = true;
         reject(new Error("PREMATURE_CLOSE: socket closed before handshake completed"));
-      } else {
-        if (pendingReadResolve) {
-          const pResolve = pendingReadResolve;
-          pendingReadResolve = null;
-          pendingReadReject = null;
-          pResolve(new Uint8Array(0));
-        }
+        return;
       }
+      enqueueIncoming(() => failTerminal(null));
     };
   });
 
@@ -1029,11 +1233,11 @@ export async function openAccountTunnel(
       if (incomingQueue.length > 0) {
         return incomingQueue.shift()!;
       }
-      if (isClosed) {
-        return new Uint8Array(0);
-      }
       if (socketError) {
         throw socketError;
+      }
+      if (isClosed) {
+        return new Uint8Array(0);
       }
       return new Promise<Uint8Array>((resolve, reject) => {
         pendingReadResolve = resolve;
@@ -1042,16 +1246,7 @@ export async function openAccountTunnel(
     },
 
     close(): void {
-      if (!isClosed) {
-        isClosed = true;
-        ws.close();
-        if (pendingReadResolve) {
-          const pResolve = pendingReadResolve;
-          pendingReadResolve = null;
-          pendingReadReject = null;
-          pResolve(new Uint8Array(0));
-        }
-      }
+      failTerminal(null);
     },
   };
 
