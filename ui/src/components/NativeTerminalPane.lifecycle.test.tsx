@@ -855,38 +855,27 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     expect(view.queryByRole("alert")).toBeNull();
   });
 
-  it("shares one recovery for concurrent inputs from a live owner", async () => {
+  it("retries an unwritten input before any later queued input, with one recovery attach", async () => {
+    // ABC with A failing must stay ABC: the failed keystroke keeps the session lane
+    // through recovery, so later keystrokes cannot overtake its retry.
     const boundary = inputRecoveryBoundary();
     boundary.holdRecovery();
-    const secondInput = deferred<typeof PRESENTED>();
-    const secondStarted = deferred();
-    const invokeBoundary = tauriInvoke.getMockImplementation();
-    let inputs = 0;
-    tauriInvoke.mockImplementation(async (cmd, args) => {
-      if (cmd === "cmd_native_terminal_send_input" && ++inputs === 2) {
-        secondStarted.resolve();
-        return secondInput.promise;
-      }
-      return invokeBoundary?.(cmd, args);
-    });
     const view = render(<NativeTerminalPane session={session("owner-a")} />);
     await act(async () => {});
     await startPendingInput(view, boundary);
-    // The bounded frontend queue dispatches per session in FIFO order, so the second
-    // input is admitted now but only reaches the IPC boundary after the first one
-    // settles. The shared-recovery contract is exercised through that order: the first
-    // failure opens the recovery, and the second failure must reuse it instead of
-    // opening another attach.
     fireEvent.input(view.getByTestId("native-terminal-focus-sink"), { target: { value: "y" } });
     await act(async () => {
       boundary.input.reject(INPUT_NOT_WRITTEN);
-      await secondStarted.promise;
-      secondInput.reject(INPUT_NOT_WRITTEN);
       await boundary.recoveryStarted.promise;
     });
-    expect(lifecycleCalls().filter(([cmd]) => cmd === "cmd_native_terminal_attach")).toHaveLength(2);
+    const sentTexts = () => tauriInvoke.mock.calls
+      .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+      .map(([, args]) => args.input.text);
+    // "y" is held behind the recovering "x".
+    expect(sentTexts()).toEqual(["x"]);
     await act(async () => { boundary.recovery.resolve(); });
-    expect(inputs).toBe(4);
+    await waitFor(() => expect(sentTexts()).toEqual(["x", "x", "y"]));
+    expect(lifecycleCalls().filter(([cmd]) => cmd === "cmd_native_terminal_attach")).toHaveLength(2);
     expect(view.queryByRole("alert")).toBeNull();
   });
 

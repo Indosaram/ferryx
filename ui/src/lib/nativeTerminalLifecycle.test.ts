@@ -307,6 +307,28 @@ describe("nativeTerminalLifecycle sibling pane ownership", () => {
     expect(detached).toEqual(["pane-gone"]);
   });
 
+  it("releases detachments parked under an attach that bails out without presenting", async () => {
+    const detached: string[] = [];
+    await attachNativeTerminalLifecycle("pane-outgoing", async () => undefined);
+    presentNativeTerminalLifecycle("pane-outgoing");
+    const outgoingDetach = detachNativeTerminalLifecycle("pane-outgoing", async () => {
+      detached.push("pane-outgoing");
+    });
+    // The incoming attach parks the outgoing detach, then finds its owner gone.
+    await attachNativeTerminalLifecycle("pane-incoming", async () => false);
+    await expect(outgoingDetach).resolves.toBe(true);
+    expect(detached).toEqual(["pane-outgoing"]);
+  });
+
+  it("settles a pending detach that a newer detach of the same session replaces", async () => {
+    await attachNativeTerminalLifecycle("pane-twice", async () => undefined);
+    presentNativeTerminalLifecycle("pane-twice");
+    const first = detachNativeTerminalLifecycle("pane-twice", async () => undefined);
+    const second = detachNativeTerminalLifecycle("pane-twice", async () => undefined);
+    await expect(first).resolves.toBe(false);
+    await expect(second).resolves.toBe(true);
+  });
+
   it("skips slow detach queued in lifecycle queue when session re-attaches before detach runs", async () => {
     const detached: string[] = [];
     let resolveSlowAttach: (() => void) | undefined;

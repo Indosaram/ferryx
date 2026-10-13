@@ -91,9 +91,11 @@ interface QueuedItem<T = unknown> {
   readonly execute: (requestId: string) => Promise<T>;
   readonly resolve: (value: T) => void;
   readonly reject: (error: unknown) => void;
-  readonly kind?: "input" | "preedit";
+  /** "pointer" items (wheel/mouse) are bounded separately so momentum scrolling cannot evict keystrokes. */
+  readonly kind?: "input" | "preedit" | "pointer";
   readonly supersededResolvers?: Array<(value: T) => void>;
   readonly identityMeta?: InputIdentityMeta;
+  readonly recover?: (error: unknown) => Promise<boolean>;
   dispatchedAt?: number | null;
 }
 
@@ -107,17 +109,30 @@ interface SessionQueueState {
   items: QueuedItem[];
   allocatedBytes: number;
   allocatedEntries: number;
+  pointerEntries: number;
   running: boolean;
   preeditRunning: boolean;
   inputLane: LaneExecutionState;
   preeditLane: LaneExecutionState;
   activeGeneration: number | null;
+  /** Set by clear() while a lane is still running; the entry is dropped once it goes idle. */
+  cleared?: boolean;
   lastHeadBlockedLogAt?: number;
 }
 
 export interface NativeTerminalInputQueueOptions {
   readonly maxQueueBytes?: number;
   readonly maxQueueEntries?: number;
+}
+
+export interface NativeTerminalEnqueueOptions {
+  /** Wheel/mouse items: counted against their own entry cap, never the keystroke cap. */
+  readonly pointer?: boolean;
+  /**
+   * Called when the operation fails. Resolving true re-executes the same item once while it
+   * still holds the session lane, so later items cannot overtake it.
+   */
+  readonly recover?: (error: unknown) => Promise<boolean>;
 }
 
 export const SLOW_INPUT_THRESHOLD_MS = 250;
@@ -140,6 +155,29 @@ function notifySuperseded<T>(
       // Superseded preedit resolution errors must not disrupt pump.
     }
   }
+}
+
+function createSessionState(activeGeneration: number | null): SessionQueueState {
+  return {
+    items: [],
+    allocatedBytes: 0,
+    allocatedEntries: 0,
+    pointerEntries: 0,
+    running: false,
+    preeditRunning: false,
+    inputLane: { runningSince: null, runningRequestId: null },
+    preeditLane: { runningSince: null, runningRequestId: null },
+    activeGeneration,
+  };
+}
+
+function releaseItem(state: SessionQueueState, item: QueuedItem): void {
+  if (item.kind === "pointer") {
+    state.pointerEntries = Math.max(0, state.pointerEntries - 1);
+    return;
+  }
+  state.allocatedBytes = Math.max(0, state.allocatedBytes - item.bytes);
+  state.allocatedEntries = Math.max(0, state.allocatedEntries - 1);
 }
 
 export class NativeTerminalInputQueueManager {
@@ -219,34 +257,17 @@ export class NativeTerminalInputQueueManager {
   private getOrCreateState(sessionId: string): SessionQueueState {
     let state = this.sessions.get(sessionId);
     if (!state) {
-      state = {
-        items: [],
-        allocatedBytes: 0,
-        allocatedEntries: 0,
-        running: false,
-        preeditRunning: false,
-        inputLane: { runningSince: null, runningRequestId: null },
-        preeditLane: { runningSince: null, runningRequestId: null },
-        activeGeneration: null,
-      };
+      state = createSessionState(null);
       this.sessions.set(sessionId, state);
     }
+    state.cleared = false;
     return state;
   }
 
   public invalidateOldGenerations(sessionId: string, currentGeneration: number): void {
     const state = this.sessions.get(sessionId);
     if (!state) {
-      this.sessions.set(sessionId, {
-        items: [],
-        allocatedBytes: 0,
-        allocatedEntries: 0,
-        running: false,
-        preeditRunning: false,
-        inputLane: { runningSince: null, runningRequestId: null },
-        preeditLane: { runningSince: null, runningRequestId: null },
-        activeGeneration: currentGeneration,
-      });
+      this.sessions.set(sessionId, createSessionState(currentGeneration));
       return;
     }
 
@@ -256,8 +277,7 @@ export class NativeTerminalInputQueueManager {
     const remaining: QueuedItem[] = [];
     for (const item of state.items) {
       if (item.generation !== null && item.generation < currentGeneration) {
-        state.allocatedBytes = Math.max(0, state.allocatedBytes - item.bytes);
-        state.allocatedEntries = Math.max(0, state.allocatedEntries - 1);
+        releaseItem(state, item);
         item.reject(new NativeTerminalStaleGenerationError());
         notifySuperseded(item.supersededResolvers, undefined);
       } else {
@@ -280,10 +300,15 @@ export class NativeTerminalInputQueueManager {
     state.items = [];
 
     for (const item of items) {
-      state.allocatedBytes = Math.max(0, state.allocatedBytes - item.bytes);
-      state.allocatedEntries = Math.max(0, state.allocatedEntries - 1);
+      releaseItem(state, item);
       item.reject(new Error("Terminal input queue cleared"));
       notifySuperseded(item.supersededResolvers, undefined);
+    }
+
+    if (!state.running && !state.preeditRunning) {
+      this.sessions.delete(sessionId);
+    } else {
+      state.cleared = true;
     }
   }
 
@@ -303,6 +328,7 @@ export class NativeTerminalInputQueueManager {
     customRequestId?: string,
     operationName = "input",
     identityMeta?: InputIdentityMeta,
+    options?: NativeTerminalEnqueueOptions,
   ): Promise<T> {
     const state = this.getOrCreateState(sessionId);
 
@@ -334,15 +360,22 @@ export class NativeTerminalInputQueueManager {
     }
 
     const boundedBytes = Math.max(1, payloadBytes);
+    const pointer = options?.pointer === true;
     if (
-      state.allocatedEntries >= this.maxQueueEntries ||
-      state.allocatedBytes + boundedBytes > this.maxQueueBytes
+      pointer
+        ? state.pointerEntries >= this.maxQueueEntries
+        : state.allocatedEntries >= this.maxQueueEntries ||
+          state.allocatedBytes + boundedBytes > this.maxQueueBytes
     ) {
       return Promise.reject(new NativeTerminalQueueOverflowError());
     }
 
-    state.allocatedBytes += boundedBytes;
-    state.allocatedEntries += 1;
+    if (pointer) {
+      state.pointerEntries += 1;
+    } else {
+      state.allocatedBytes += boundedBytes;
+      state.allocatedEntries += 1;
+    }
 
     const itemId = this.nextItemId++;
     const runPrefix = queueRunId;
@@ -359,8 +392,9 @@ export class NativeTerminalInputQueueManager {
         execute: operation,
         resolve,
         reject,
-        kind: "input",
+        kind: pointer ? "pointer" : "input",
         identityMeta,
+        recover: options?.recover,
       };
 
       state.items.push(item as QueuedItem);
@@ -431,8 +465,7 @@ export class NativeTerminalInputQueueManager {
     if (existingIndex !== -1) {
       const removed = state.items.splice(existingIndex, 1)[0];
       if (removed) {
-        state.allocatedBytes = Math.max(0, state.allocatedBytes - removed.bytes);
-        state.allocatedEntries = Math.max(0, state.allocatedEntries - 1);
+        releaseItem(state, removed);
         supersededResolvers.push(removed.resolve);
         if (removed.supersededResolvers) {
           supersededResolvers.push(...removed.supersededResolvers);
@@ -535,7 +568,7 @@ export class NativeTerminalInputQueueManager {
           notifySuperseded(item.supersededResolvers, undefined);
         } else {
           try {
-            const result = await item.execute(item.requestId);
+            const result = await this.executeWithRecovery(item, state);
             item.resolve(result);
             notifySuperseded(item.supersededResolvers, result);
           } catch (error: unknown) {
@@ -559,8 +592,7 @@ export class NativeTerminalInputQueueManager {
             queuedBytes: state.allocatedBytes,
           });
         }
-        state.allocatedBytes = Math.max(0, state.allocatedBytes - item.bytes);
-        state.allocatedEntries = Math.max(0, state.allocatedEntries - 1);
+        releaseItem(state, item);
         if (isInput) {
           state.running = false;
         } else {
@@ -568,9 +600,35 @@ export class NativeTerminalInputQueueManager {
         }
         lane.runningSince = null;
         lane.runningRequestId = null;
+        if (
+          state.cleared &&
+          !state.running &&
+          !state.preeditRunning &&
+          state.items.length === 0 &&
+          this.sessions.get(sessionId) === state
+        ) {
+          this.sessions.delete(sessionId);
+          return;
+        }
         this.pump(sessionId);
       }
     })();
+  }
+
+  private async executeWithRecovery(item: QueuedItem, state: SessionQueueState): Promise<unknown> {
+    try {
+      return await item.execute(item.requestId);
+    } catch (error: unknown) {
+      if (!item.recover || !(await item.recover(error))) throw error;
+      if (
+        item.generation !== null &&
+        state.activeGeneration !== null &&
+        item.generation < state.activeGeneration
+      ) {
+        throw new NativeTerminalStaleGenerationError();
+      }
+      return item.execute(item.requestId);
+    }
   }
 }
 

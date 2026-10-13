@@ -1,7 +1,7 @@
 import { filePreviewController } from "../lib/filePreview";
 import * as switchDebugModule from "../lib/switchDebug";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import type { TerminalSession } from "../lib/types";
 import type { TerminalActivity } from "../lib/activity";
@@ -12,6 +12,7 @@ import {
 } from "../lib/nativeTerminalLifecycle";
 import { attachNativeTerminalRebind, terminalEventBus } from "../lib/terminalEvents";
 import { useShortcuts } from "../lib/shortcuts";
+import * as shortcutsModule from "../lib/shortcuts";
 import {
   NativeTerminalPane,
   dragDropPositionToLogical,
@@ -278,6 +279,12 @@ function expectedNativeBinding(backendSessionId: string | null) {
   const owner = [...persistedNativeSessions.values()].find(session => session.backendSessionId === backendSessionId);
   if (!owner?.attachTuple) throw new Error("Expected a persisted native binding");
   return owner.attachTuple;
+}
+
+// Paste chords are platform-specific: Ctrl+V pastes only off macOS.
+function useNonMacShortcutPlatform(): void {
+  const spy = vi.spyOn(shortcutsModule, "isMacShortcutPlatform").mockReturnValue(false);
+  onTestFinished(() => spy.mockRestore());
 }
 
 function createSession(
@@ -2459,6 +2466,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   it("claims Ctrl+V with Korean layout key ㅍ on focused textarea and routes native text clipboard content", async () => {
+    useNonMacShortcutPlatform();
     const session = createSession("term-session-korean-ctrl-v");
     tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
       if (cmd === "cmd_native_terminal_clipboard_content") {
@@ -2501,6 +2509,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   it("claims Ctrl+V with Latin v on focused textarea and routes native text clipboard content", async () => {
+    useNonMacShortcutPlatform();
     const session = createSession("term-session-latin-ctrl-v");
     tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
       if (cmd === "cmd_native_terminal_clipboard_content") {
@@ -2543,6 +2552,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   it("claims Ctrl+Shift+V on focused textarea and routes native text clipboard content", async () => {
+    useNonMacShortcutPlatform();
     const session = createSession("term-session-ctrl-shift-v");
     tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
       if (cmd === "cmd_native_terminal_clipboard_content") {
@@ -2618,6 +2628,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   it("claims Ctrl+V on focused textarea and saves clipboard image locally, pasting the local path", async () => {
+    useNonMacShortcutPlatform();
     const session = createSession("term-session-native-image-paste-ctrl-v");
     tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
       if (cmd === "cmd_native_terminal_clipboard_content") {
@@ -3116,6 +3127,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   it("claims native fallback on non-macOS platforms for Ctrl+V", async () => {
+    useNonMacShortcutPlatform();
     const originalPlatform = navigator.platform;
     const originalUserAgent = navigator.userAgent;
     try {
@@ -3172,6 +3184,28 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         configurable: true,
       });
     }
+  });
+
+  it("forwards macOS Ctrl+V to the PTY instead of claiming it as paste", async () => {
+    const spy = vi.spyOn(shortcutsModule, "isMacShortcutPlatform").mockReturnValue(true);
+    onTestFinished(() => spy.mockRestore());
+    const session = createSession("term-session-mac-ctrl-v");
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-mac-ctrl-v" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "v", code: "KeyV", ctrlKey: true, bubbles: true, cancelable: true }));
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", expect.objectContaining({
+        sessionId: "term-session-mac-ctrl-v",
+        input: expect.objectContaining({ keyEvent: expect.objectContaining({ modifiers: expect.objectContaining({ ctrl: true }) }) }),
+      }));
+    });
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
   });
 
   it("ignores standalone Meta key before Korean Cmd+V (ㅍ) across capture fallback and textarea", async () => {
@@ -4386,11 +4420,27 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     tauriCoreMocks.invoke.mockClear();
     fireEvent.pointerDown(thumb, { clientY: 290, pointerId: 8 });
-    fireEvent.pointerMove(window, { clientY: 620, pointerId: 8 });
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
-      sessionId: "term-session-scrollbar",
-      behavior: { type: "row", offset: 180 },
+    // Drag moves are coalesced to one scroll per animation frame carrying the latest offset.
+    const dragFrames: FrameRequestCallback[] = [];
+    const rafSpy = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      dragFrames.push(callback);
+      return dragFrames.length;
     });
+    try {
+      fireEvent.pointerMove(window, { clientY: 400, pointerId: 8 });
+      fireEvent.pointerMove(window, { clientY: 500, pointerId: 8 });
+      fireEvent.pointerMove(window, { clientY: 620, pointerId: 8 });
+      const scrollCalls = () => tauriCoreMocks.invoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_scroll");
+      expect(scrollCalls()).toHaveLength(0);
+      expect(dragFrames).toHaveLength(1);
+      act(() => { dragFrames[0]!(16); });
+      expect(scrollCalls()).toEqual([["cmd_native_terminal_scroll", {
+        sessionId: "term-session-scrollbar",
+        behavior: { type: "row", offset: 180 },
+      }]]);
+    } finally {
+      rafSpy.mockRestore();
+    }
     fireEvent.pointerUp(window, { clientY: 620, pointerId: 8 });
   });
 

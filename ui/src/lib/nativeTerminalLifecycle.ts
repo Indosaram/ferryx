@@ -32,11 +32,13 @@ export function nativeBindingRemainingMs(sessionId: string, stageCapMs: number):
 }
 
 type NativeTerminalLifecycleOperation<T> = () => Promise<T>;
+/** An attach operation resolves `false` when it bailed out without attaching anything. */
+type NativeTerminalAttachOperation = NativeTerminalLifecycleOperation<void | false>;
 
 const lifecycleTails = new Map<string, Promise<void>>();
 const attachedSessionIds = new Set<string>();
 const attachments = new Map<string, Promise<void>>();
-const queuedAttachments = new Map<string, { operation: NativeTerminalLifecycleOperation<void> }>();
+const queuedAttachments = new Map<string, { operation: NativeTerminalAttachOperation }>();
 const sessionGenerations = new Map<string, number>();
 
 type PendingDetachment = {
@@ -218,7 +220,7 @@ function startLifecycleOperation<T>(
  */
 export function attachNativeTerminalLifecycle(
   sessionId: string,
-  operation: NativeTerminalLifecycleOperation<void>,
+  operation: NativeTerminalAttachOperation,
 ): Promise<void> {
   switchDebug("terminal.lifecycle.attach.requested", {
     backendSessionId: sessionId,
@@ -271,7 +273,14 @@ export function attachNativeTerminalLifecycle(
   const attachment = enqueueNativeTerminalLifecycle(sessionId, () => {
     if (queuedAttachments.get(sessionId) === queued) queuedAttachments.delete(sessionId);
     return queued.operation();
-  }).catch((error: unknown) => {
+  }).then((result) => {
+    // An attach that bailed out (its owner moved on) will never present, so detachments
+    // parked under it must not wait for a presentation that cannot come.
+    if (result === false) {
+      switchDebug("terminal.lifecycle.attach.noop", { backendSessionId: sessionId, generation });
+      releasePresentationWaiters(sessionId);
+    }
+  }, (error: unknown) => {
     if (attachments.get(sessionId) === attachment) {
       attachedSessionIds.delete(sessionId);
       attachments.delete(sessionId);
@@ -294,7 +303,7 @@ export function attachNativeTerminalLifecycle(
  */
 export function reattachNativeTerminalLifecycle(
   sessionId: string,
-  operation: NativeTerminalLifecycleOperation<void>,
+  operation: NativeTerminalAttachOperation,
 ): Promise<void> {
   attachedSessionIds.delete(sessionId);
   return attachNativeTerminalLifecycle(sessionId, operation);
@@ -491,6 +500,8 @@ export function detachNativeTerminalLifecycle(
       resolve,
       reject,
     };
+    const replaced = pendingDetachments.get(sessionId);
+    if (replaced) replaced.resolve(false);
     pendingDetachments.set(sessionId, pending);
     switchDebug("terminal.lifecycle.detach.queued", {
       backendSessionId: sessionId,

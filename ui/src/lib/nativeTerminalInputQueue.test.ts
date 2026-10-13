@@ -260,6 +260,55 @@ describe("NativeTerminalInputQueueManager", () => {
     expect(pendingTask).not.toHaveBeenCalled();
   });
 
+  it("retries a recovered item before later items so keystrokes keep their order", async () => {
+    const writes: string[] = [];
+    const recovery = createDeferred<boolean>();
+    let failA = true;
+    const send = (text: string) => async () => {
+      if (text === "A" && failA) {
+        failA = false;
+        throw new Error("not written");
+      }
+      writes.push(text);
+      return text;
+    };
+    const a = queue.enqueue("session-1", null, 1, send("A"), undefined, "input", undefined, {
+      recover: () => recovery.promise,
+    });
+    const b = queue.enqueue("session-1", null, 1, send("B"));
+    const c = queue.enqueue("session-1", null, 1, send("C"));
+    await Promise.resolve();
+    expect(writes).toEqual([]);
+    recovery.resolve(true);
+    await Promise.all([a, b, c]);
+    expect(writes).toEqual(["A", "B", "C"]);
+  });
+
+  it("bounds wheel/mouse items separately so they never evict keystrokes", async () => {
+    const blocked = createDeferred<void>();
+    const pointers = [queue.enqueue("session-1", null, 32, () => blocked.promise, undefined, "wheel", undefined, { pointer: true })];
+    for (let index = 1; index < 4; index += 1) {
+      pointers.push(queue.enqueue("session-1", null, 32, async () => undefined, undefined, "wheel", undefined, { pointer: true }));
+    }
+    await expect(queue.enqueue("session-1", null, 32, async () => undefined, undefined, "wheel", undefined, { pointer: true }))
+      .rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+    const keys = Array.from({ length: 4 }, (_, index) => queue.enqueue("session-1", null, 1, async () => index));
+    expect(queue.getQueuedCount("session-1")).toBe(4);
+    blocked.resolve();
+    await Promise.all([...pointers, ...keys]);
+  });
+
+  it("drops an idle session's state when it is cleared", async () => {
+    const pending = createDeferred<void>();
+    const running = queue.enqueue("session-1", 3, 1, () => pending.promise);
+    queue.invalidateOldGenerations("session-1", 3);
+    queue.clear("session-1");
+    pending.resolve();
+    await running;
+    // A fresh entry has no remembered generation: old-generation input is admitted again.
+    await expect(queue.enqueue("session-1", 1, 1, async () => "fresh")).resolves.toBe("fresh");
+  });
+
   it("delivers a preedit update enqueued while input send is in flight strictly after that input", async () => {
     const deliveryOrder: string[] = [];
     const inputDeferred = createDeferred<string>();
