@@ -1000,7 +1000,8 @@ fn parse_claude_confirm(screen: &str) -> Option<ClaudePrompt> {
         .first()
         .cloned()
         .unwrap_or_else(|| "Choose an option".to_string());
-    let prose = normalize_text(&panel[1..].join(" "));
+    // the panel is empty when the rows start the screen or sit right under a rule
+    let prose = normalize_text(&panel.get(1..).unwrap_or_default().join(" "));
     let asked = asked_question()
         .captures(&prose)
         .and_then(|captures| captures.get(1))
@@ -2048,6 +2049,18 @@ claude_pattern!(claude_tip, r#"^Try ""#);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_confirm_with_no_panel_above_its_rows_reads_without_panicking() {
+        for screen in [
+            "❯ Yes\n  No\n\nEnter to confirm · Esc to cancel",
+            "────────\n❯ Yes\n  No\n\nEnter to confirm · Esc to cancel",
+        ] {
+            let parsed = parse_claude_prompt(screen).expect("the confirm is a card");
+            assert_eq!(parsed.prompt.kind, ReferencePromptKind::Menu);
+            assert_eq!(parsed.prompt.title, "Choose an option");
+        }
+    }
 
     const QUESTION: &str = include_str!("fixtures/claude/prompt/question.screen");
     const QUESTION_TABS: &str = include_str!("fixtures/claude/prompt/question-tabs.screen");

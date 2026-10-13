@@ -84,7 +84,7 @@ use super::prompt_codex::{
 };
 use super::prompt_omo::{
     omo_card_for_screen, omo_form_is_trusted, omo_form_on_screen, omo_reads_forms, open_omo_asks,
-    pending_omo_ask, reference_omo_answer_keys, OmoCard, OmoResponder,
+    omo_answer_plan, pending_omo_ask, OmoCard, OmoResponder,
     REFERENCE_OMO_OPEN_FORM_KEY,
 };
 use super::prompt_omp::{detect_omp_prompt_card, remember_omp_prompt, OmpPromptCard};
@@ -483,18 +483,30 @@ fn plan_answer_keys(
                     ReferenceCodexAnswerStep::Text(text) => {
                         planned.push(ReferenceKeyStep::typed(text.clone()));
                     }
-                    // The row's own key is the screen's to name: read it off the screen this
-                    // answer was planned against — never a guessed Enter, never a dropped step.
+                    // The row's own key is the screen's to name, but the screen read here is
+                    // the one before the moves: its footer belongs to the row the cursor is
+                    // leaving. Only the card's own `row_key` (resolved for the rows it offers)
+                    // names the key of the row the moves land on, and the screen must still say
+                    // the same. A list whose cursor row only opens another list has no
+                    // `row_key`, and is refused rather than answered with that row's Enter,
+                    // which on a level row saves the level as the default.
                     ReferenceCodexAnswerStep::Pick => {
                         let footer = screen.and_then(codex_row_key_on_screen);
-                        planned.push(footer.ok_or(ScopeErrorCode::Unsupported)?);
+                        match (&parsed.row_key, footer) {
+                            (Some(row_key), Some(footer)) if *row_key == footer => {
+                                planned.push(footer);
+                            }
+                            _ => return Err(ScopeErrorCode::Unsupported),
+                        }
                     }
                 }
             }
             Ok(planned)
         }
-        ReferencePromptCard::Omo(_) => reference_omo_answer_keys(prompt, answer),
-        ReferencePromptCard::Omp(_) => super::prompt_omp::reference_answer_keys(prompt, answer),
+        // Planned from the card in hand: the lanes' registries are keyed by a cursor-free id, so
+        // another pane's (or an older) read of the same card could supply the cursor.
+        ReferencePromptCard::Omo(card) => omo_answer_plan(card, answer),
+        ReferencePromptCard::Omp(card) => card.answer_steps(answer),
         ReferencePromptCard::Pi(_) => {
             plan_pi_answer(prompt, answer).map_err(|_| pi_answer_error_code())
         }
@@ -738,6 +750,23 @@ impl ReferencePromptAnswers {
                 REFERENCE_PROMPT_UNKNOWN_CARD_MESSAGE,
             );
         };
+
+        // A custom answer is typed into the pane as it stands: a newline or any other control
+        // byte inside it would act as a key (an early Enter submits part of the answer and the
+        // rest lands in whatever the agent shows next), so such text is refused untyped.
+        if request
+            .payload
+            .answer
+            .custom_text
+            .as_deref()
+            .is_some_and(|text| text.trim().chars().any(char::is_control))
+        {
+            return refused(
+                ScopeErrorCode::InvalidRequest,
+                false,
+                REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE,
+            );
+        }
 
         // Single use: a card already answered is refused before the pane is read again.
         let ledger_key = answer_ledger_key(request);
@@ -1049,6 +1078,8 @@ mod tests {
     const CLAUDE_QUESTION: &str = include_str!("fixtures/claude/prompt/question.screen");
     const CODEX_MENU: &str = include_str!("fixtures/codex/menu.txt");
     const CODEX_MODEL_LIST: &str = include_str!("fixtures/codex/model-list.txt");
+    const CODEX_MODEL_LEVELS_MORE: &str = include_str!("fixtures/codex/model-levels-more-row.txt");
+    const OMP_QUESTION_MOVED: &str = include_str!("fixtures/omp-prompt/question-single-moved.txt");
     const OMP_QUESTION: &str = include_str!("fixtures/omp-prompt/question-single.txt");
     const PI_DIALOG: &str = include_str!("fixtures/prompt-pi/dialog-select.txt");
     const OMO_FORM: &str = include_str!("fixtures/prompt-omo/form-tabbed.screen");
@@ -1531,6 +1562,22 @@ mod tests {
     }
 
     #[test]
+    fn the_route_plans_an_omp_answer_from_the_card_in_hand_not_the_registry() {
+        let moved = detect_omp_prompt_card("omp", OMP_QUESTION_MOVED).expect("the moved menu is a card");
+        let older = detect_omp_prompt_card("omp", OMP_QUESTION).expect("the menu is a card");
+        assert_eq!(moved.prompt.id, older.prompt.id, "the cursor is not part of the id");
+        // another pane's (or an older) read lands in the registry under the same id
+        remember_omp_prompt(&older);
+        let card = ReferencePromptCard::Omp(moved.clone());
+        let planned = plan_answer_keys(&card, &moved.prompt, &option(0), None).unwrap();
+        assert_eq!(
+            planned.iter().map(keys_of).collect::<Vec<_>>(),
+            vec![vec!["up".to_string()], vec!["up".to_string()], vec!["enter".to_string()]],
+            "the moves count from the cursor of the card being answered"
+        );
+    }
+
+    #[test]
     fn every_key_the_five_families_plan_has_bytes() {
         for (agent, screen, answer) in [
             ("claude", CLAUDE_QUESTION, option(1)),
@@ -1615,6 +1662,62 @@ mod tests {
             vec!["\u{1b}[B".to_string(), "\r".to_string()],
             "the plan's moves then its Enter"
         );
+    }
+
+    #[tokio::test]
+    async fn a_codex_level_picked_from_the_opener_row_never_sends_enter() {
+        let prompt =
+            detect_reference_prompt("codex", CODEX_MODEL_LEVELS_MORE).expect("the levels list is a card");
+        let target = target("sess-1");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader = ScriptedScreen::one(CODEX_MODEL_LEVELS_MORE);
+        let answers = ReferencePromptAnswers::new();
+        let payload = payload(&prompt.id, REVISION, option(2));
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-1",
+            payload: &payload,
+            session: ReferencePromptSession::default(),
+            authorize: &allow(),
+            alive: &alive(),
+        };
+        let _ = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert!(
+            !writer.text().iter().any(|write| write.contains('\r')),
+            "Enter on a level row saves it as the default: {:?}",
+            writer.text()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_custom_answer_with_a_newline_is_refused_rather_than_typed_as_keys() {
+        let prompt = detect_reference_prompt("claude", CLAUDE_QUESTION).expect("a claude card");
+        let target = target("sess-1");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader = ScriptedScreen::one(CLAUDE_QUESTION);
+        let answers = ReferencePromptAnswers::new();
+        let answer = ReferencePromptAnswer { custom_text: Some("a\nb".to_string()), ..Default::default() };
+        let payload = payload(&prompt.id, REVISION, answer);
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-1",
+            payload: &payload,
+            session: ReferencePromptSession::default(),
+            authorize: &allow(),
+            alive: &alive(),
+        };
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert!(
+            !writer.log().iter().any(|write| write.contains(&b'\n')),
+            "a newline inside the answer reaches the pane as a key: {:?}",
+            writer.text()
+        );
+        assert_not_typed(&outcome, ScopeErrorCode::InvalidRequest);
+        assert!(writer.log().is_empty(), "a refused answer types nothing");
     }
 
     #[tokio::test]
