@@ -5092,20 +5092,11 @@ impl reference_prompts::ReferenceAnswerScreenReader for ReferenceGatewayScreenRe
             let mut mirror = RemoteTerminalMirror::new(details.cols, details.rows)
                 .map_err(|error| error.to_string())?;
             // A replay gap means the history could not be reconstructed: the snapshot is marked
-            // gapped rather than rendered from a hole.
-            let segments: Option<Vec<Vec<u8>>> = if attachment.snapshot.gap.is_some() {
-                None
-            } else {
-                Some(
-                    attachment
-                        .snapshot
-                        .history_segments
-                        .iter()
-                        .map(|segment| segment.bytes.clone())
-                        .collect(),
-                )
-            };
-            reference_screen::snapshot_reference_screen(&mut mirror, segments.as_deref())
+            // gapped rather than rendered from a hole. Each segment replays at the size it was
+            // recorded at, then the mirror returns to the pane's live geometry.
+            let segments = (attachment.snapshot.gap.is_none())
+                .then_some(attachment.snapshot.history_segments.as_slice());
+            reference_screen::snapshot_reference_screen_segments(&mut mirror, segments)
         })
     }
 }
@@ -5606,19 +5597,9 @@ async fn reference_chat_snapshot_screen(
         .map_err(|message| reference_chat_scope(ScopeErrorCode::Timeout, message))?;
     let mut mirror = RemoteTerminalMirror::new(details.cols, details.rows)
         .map_err(|error| reference_chat_scope(ScopeErrorCode::Unsupported, error.to_string()))?;
-    let segments: Option<Vec<Vec<u8>>> = if attachment.snapshot.gap.is_some() {
-        None
-    } else {
-        Some(
-            attachment
-                .snapshot
-                .history_segments
-                .iter()
-                .map(|segment| segment.bytes.clone())
-                .collect(),
-        )
-    };
-    reference_screen::snapshot_reference_screen(&mut mirror, segments.as_deref())
+    let segments = (attachment.snapshot.gap.is_none())
+        .then_some(attachment.snapshot.history_segments.as_slice());
+    reference_screen::snapshot_reference_screen_segments(&mut mirror, segments)
         .map_err(|message| reference_chat_scope(ScopeErrorCode::Unsupported, message))
 }
 
@@ -5663,25 +5644,47 @@ async fn reference_chat_session_jsonl(
     Some(String::from_utf8_lossy(bounded).into_owned())
 }
 
-/// The prompt the pane is holding, when this route's own screen read saw one.
+/// What this route's own screen read says about a prompt the pane may be holding.
+///
+/// A request that names no registry id has no detector to run (the mobile client omits it when
+/// the pane's agent is unknown), so the stale-prompt guard does not apply and the read is
+/// [Clear]. Otherwise a screen read that failed, and a screen that is gapped, truncated or empty,
+/// are [Unknown], so the submit guard refuses rather than typing into a menu it could not rule
+/// out.
+///
+/// [Clear]: reference_input::ReferencePromptProbe::Clear
+/// [Unknown]: reference_input::ReferencePromptProbe::Unknown
 async fn reference_chat_blocked_prompt(
     state: &Arc<RemoteGatewayState>,
     target: &reference_types::ReferenceTargetRef,
     registry_id: Option<&str>,
-) -> Option<String> {
-    let agent = registry_id.map(str::trim).filter(|value| !value.is_empty())?;
-    let snapshot = reference_chat_snapshot_screen(state, target).await.ok()?;
+) -> reference_input::ReferencePromptProbe {
+    use reference_input::ReferencePromptProbe;
+    let Some(agent) = registry_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return ReferencePromptProbe::Clear;
+    };
+    let snapshot = match reference_chat_snapshot_screen(state, target).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return ReferencePromptProbe::Unknown(error.message),
+    };
     if !snapshot.is_answerable() {
-        return None;
+        return ReferencePromptProbe::Unknown(format!(
+            "the screen is not readable whole (gap {}, truncated {}, empty {})",
+            snapshot.gap,
+            snapshot.truncated,
+            snapshot.text.is_empty()
+        ));
     }
     let identity = reference_chat_identity(state, target, Some(agent)).await;
     let session = reference_chat_prompt_session(state, &identity).await;
-    let prompt = reference_prompts::detect_reference_prompt_in_session(
+    match reference_prompts::detect_reference_prompt_in_session(
         agent,
         &snapshot.text,
         &session.borrow(),
-    )?;
-    Some(prompt.id)
+    ) {
+        Some(prompt) => ReferencePromptProbe::Blocked(prompt.id),
+        None => ReferencePromptProbe::Clear,
+    }
 }
 
 /// The response one ordered input transaction produces.
@@ -5944,8 +5947,6 @@ async fn reference_chat_submit(
         .terminal_service
         .output_hub()
         .is_bracketed_paste_enabled(&session_id);
-    let blocked_prompt =
-        reference_chat_blocked_prompt(&state, &target, body.registry_id.as_deref()).await;
     let authorize = reference_chat_authorize(&state, &headers);
     let clock = reference_input::SystemReferenceClock;
     let submit = reference_input::ReferenceSubmitRequest {
@@ -5953,13 +5954,20 @@ async fn reference_chat_submit(
         request_id: &body.request_id,
         payload: &body.params,
         bracketed_paste,
-        blocked_prompt: blocked_prompt.as_deref(),
+        // The prompt guard reads the screen INSIDE the target's step (the probe below), so a
+        // prompt that appears while this message waits behind earlier input is still seen.
+        blocked_prompt: None,
         arrived_at_ms: clock.now_ms(),
         last_typed_at_ms: None,
         authorize: &*authorize,
     };
+    let registry_id = body.registry_id.as_deref();
+    let probe = || reference_chat_blocked_prompt(&state, &target, registry_id);
     let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
-    let outcome = runtime.input.submit(&submit, &writer, &clock).await;
+    let outcome = runtime
+        .input
+        .submit_with_probe(&submit, probe, &writer, &clock)
+        .await;
     reference_chat_input_response(&body.request_id, outcome)
 }
 

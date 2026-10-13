@@ -1309,6 +1309,207 @@ fn the_relay_allowlist_admits_exactly_the_reference_chat_route_table() {
     assert!(validate_http_query(&format!("reference-chat/{session}/submit"), None).is_ok());
 }
 
+/// A backend whose one pane shows a fixed screen and records every write it is handed.
+struct ScreenStubBackend {
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    screen: Vec<u8>,
+    writes: std::sync::Mutex<Vec<Vec<u8>>>,
+}
+
+impl crate::remote::backend::RemoteSessionBackend for ScreenStubBackend {
+    fn list_sessions(&self) -> futures_util::future::BoxFuture<'_, Vec<String>> {
+        Box::pin(async move { vec![self.session_id.clone()] })
+    }
+    fn describe_session<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<crate::remote::backend::RemoteSessionDetails, String>,
+    > {
+        Box::pin(async move {
+            if session_id != self.session_id {
+                return Err("unknown session".to_string());
+            }
+            Ok(crate::remote::backend::RemoteSessionDetails {
+                session_id: self.session_id.clone(),
+                workspace_id: None,
+                worktree_label: None,
+                worktree_path: None,
+                running: true,
+                cols: self.cols,
+                rows: self.rows,
+            })
+        })
+    }
+    fn attach_with_sequence<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _after_sequence: Option<u64>,
+    ) -> futures_util::future::BoxFuture<'a, Result<crate::terminal::SessionAttachment, String>>
+    {
+        Box::pin(async move {
+            let (_sender, receiver) = tokio::sync::broadcast::channel(1);
+            Ok(crate::terminal::SessionAttachment {
+                snapshot: crate::terminal::AttachmentSnapshot {
+                    session_id: self.session_id.clone(),
+                    history_start_sequence: Some(1),
+                    history_end_sequence: Some(1),
+                    history: self.screen.clone(),
+                    history_segments: vec![crate::terminal::HistorySegment {
+                        cols: Some(self.cols),
+                        rows: Some(self.rows),
+                        bytes: self.screen.clone(),
+                    }],
+                    gap: None,
+                },
+                receiver,
+            })
+        })
+    }
+    fn write_input<'a>(
+        &'a self,
+        _session_id: &'a str,
+        data: &'a [u8],
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        self.writes.lock().expect("writes").push(data.to_vec());
+        Box::pin(async { Ok(()) })
+    }
+    fn resize<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _cols: u16,
+        _rows: u16,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("this stub never resizes".to_string()) })
+    }
+    fn signal<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _signal: crate::terminal::TerminalSignal,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("this stub never signals".to_string()) })
+    }
+}
+
+/// A screen too large to answer from must not read as "no prompt": a chat message is not typed
+/// into the Claude menu at its bottom.
+#[tokio::test]
+async fn a_chat_submit_is_refused_when_the_screen_cannot_be_read_whole() {
+    let session_id = "reference-route-truncated".to_string();
+    let (cols, rows) = (300u16, 70u16);
+    let mut screen = Vec::new();
+    for _ in 0..56 {
+        screen.extend_from_slice("x".repeat(usize::from(cols) - 1).as_bytes());
+        screen.extend_from_slice(b"\r\n");
+    }
+    let menu = include_str!("fixtures/claude/prompt/approval-command.screen");
+    screen.extend_from_slice(menu.trim_end().replace('\n', "\r\n").as_bytes());
+    let backend = Arc::new(ScreenStubBackend {
+        session_id: session_id.clone(),
+        cols,
+        rows,
+        screen,
+        writes: std::sync::Mutex::new(Vec::new()),
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "reference-route-truncated")
+        .expect("control token");
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let epoch = state
+        .daemon_epoch
+        .load(std::sync::atomic::Ordering::Acquire)
+        .to_string();
+    let body = serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(),
+        "target": {
+            "hostId": reference_files::reference_host_id(),
+            "ownerId": state.reference_owner_id,
+            "epoch": epoch,
+            "backendSessionId": session_id,
+        },
+        "registryId": "claude",
+        "params": { "text": "1", "origin": "chat" },
+    });
+    let (status, response) = server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"),
+            Some(&control),
+            Some(&body.to_string()),
+        )
+        .await;
+
+    assert_eq!(status, 409, "{response}");
+    assert!(response.contains("CONTROL_CONFLICT"), "{response}");
+    assert!(
+        backend.writes.lock().expect("writes").is_empty(),
+        "chat text was typed into a menu the gateway could not rule out"
+    );
+    server.stop().await;
+}
+
+/// A chat submit that names no registry id (the mobile client omits it when the pane's agent is
+/// unknown) has no prompt detector to run, so it is still delivered.
+#[tokio::test]
+async fn a_chat_submit_without_a_registry_id_is_still_delivered() {
+    let session_id = "reference-route-no-registry".to_string();
+    let backend = Arc::new(ScreenStubBackend {
+        session_id: session_id.clone(),
+        cols: 80,
+        rows: 24,
+        screen: b"$ ".to_vec(),
+        writes: std::sync::Mutex::new(Vec::new()),
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "reference-route-no-registry")
+        .expect("control token");
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let epoch = state
+        .daemon_epoch
+        .load(std::sync::atomic::Ordering::Acquire)
+        .to_string();
+    let body = serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(),
+        "target": {
+            "hostId": reference_files::reference_host_id(),
+            "ownerId": state.reference_owner_id,
+            "epoch": epoch,
+            "backendSessionId": session_id,
+        },
+        "params": { "text": "hello", "origin": "chat" },
+    });
+    let (status, response) = server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"),
+            Some(&control),
+            Some(&body.to_string()),
+        )
+        .await;
+
+    assert_eq!(status, 200, "{response}");
+    assert!(response.contains("\"stage\":\"accepted\""), "{response}");
+    let writes = backend.writes.lock().expect("writes").clone();
+    assert_eq!(writes.first().map(Vec::as_slice), Some(b"hello".as_slice()), "{writes:?}");
+    assert_eq!(writes.last().map(Vec::as_slice), Some(b"\r".as_slice()), "{writes:?}");
+    server.stop().await;
+}
+
 /// No control router is mounted under the prefix, and an unknown suffix is not a route.
 #[tokio::test]
 async fn an_unknown_reference_chat_suffix_is_not_a_route() {
