@@ -575,6 +575,33 @@ describe("AddProjectDialog Remote flow", () => {
     expect(onRegistered).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ssh:canonical" }));
   });
 
+  it("blocks every dismissal route while a remote registration is in flight so onRegistered is not skipped", async () => {
+    const registration = deferred<{ workspaceId: string; hostId: string; repoRoot: string; gitRoot: null }>();
+    remote.registerRemoteProject.mockReturnValue(registration.promise);
+    const onClose = vi.fn();
+    const onRegistered = vi.fn();
+    await act(async () => { render(<AddProjectDialog initialHostId="host-1" onClose={onClose} onRegistered={onRegistered} />); });
+    await openRemotePath("/srv/app");
+    await act(async () => { fireEvent.click(screen.getByTestId("add-project-confirm-remote")); });
+
+    expect(screen.getByRole("button", { name: "Close Add Project" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+
+    await act(async () => { registration.resolve({ workspaceId: "ssh:app", hostId: "host-1", repoRoot: "/srv/app", gitRoot: null }); });
+    expect(onRegistered).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ssh:app" }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("exposes an Escape-dismissible modal dialog when idle", async () => {
+    const onClose = vi.fn();
+    await act(async () => { render(<AddProjectDialog initialHostId="host-1" onClose={onClose} onRegistered={vi.fn()} />); });
+    expect(screen.getByRole("dialog", { name: "Add Project" })).toHaveAttribute("aria-modal", "true");
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it("ignores an older folder response after a newer keyboard navigation", async () => {
     const slow = deferred<RemoteDirectoryListing>();
     const fast = deferred<RemoteDirectoryListing>();
@@ -1085,7 +1112,7 @@ describe("AddProjectDialog Remote flow", () => {
     const onRegistered = vi.fn();
     const onClose = vi.fn();
 
-    render(<AddProjectDialog onClose={onClose} onRegistered={onRegistered} />);
+    const view = render(<AddProjectDialog onClose={onClose} onRegistered={onRegistered} />);
 
     fireEvent.click(screen.getByTestId("project-type-remote"));
     await openRemotePath("/srv/repo");
@@ -1098,9 +1125,9 @@ describe("AddProjectDialog Remote flow", () => {
 
     expect(remote.registerRemoteProject).toHaveBeenCalledOnce();
 
-    // User dismisses dialog while registration is in-flight
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(onClose).toHaveBeenCalledOnce();
+    // The parent unmounts the dialog while registration is in-flight (the in-dialog
+    // dismissal controls are disabled while submitting).
+    view.unmount();
 
     // Now registration resolves late
     await act(async () => {
@@ -1119,6 +1146,33 @@ describe("AddProjectDialog Remote flow", () => {
 });
 
 describe("AddWorktreeDialog flow", () => {
+  it("is a modal dialog whose Close/Cancel/Escape are blocked while creating, so onClose runs exactly once", async () => {
+    native.listProjectBranches.mockResolvedValue([{ name: "main", isCurrent: true }]);
+    const create = deferred<unknown>();
+    native.createWorktree.mockReturnValue(create.promise);
+    const onClose = vi.fn();
+    await act(async () => {
+      render(
+        <AddWorktreeDialog
+          project={{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite", gitRoot: "/repo/orca-lite" }}
+          onClose={onClose}
+          onCreated={vi.fn()}
+        />,
+      );
+    });
+    expect(screen.getByRole("dialog", { name: "Add Worktree" })).toHaveAttribute("aria-modal", "true");
+    fireEvent.change(screen.getByLabelText("Worktree slug"), { target: { value: "feature-x" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Create Worktree" })); });
+
+    expect(screen.getByRole("button", { name: "Close Add Worktree" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+
+    await act(async () => { create.resolve({ workspaceId: "orca-lite", path: "/x", head: "a", branch: null, bare: false, detached: false, locked: null, prunable: null }); });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it("loads local branches and uses a real branch dropdown for Add Worktree", async () => {
     const branchesDef = deferred<unknown>();
     const createDef = deferred<unknown>();

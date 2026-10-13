@@ -22,6 +22,7 @@ import {
   listProjectBranches,
   previewGitHubIssue,
   registerProject,
+  toIpcError,
   type GitHubIssuePreview,
   type LocalBranch,
   type RegisteredProject,
@@ -29,6 +30,7 @@ import {
 import type { Worktree } from "../lib/types";
 import { RemoteDirectoryPicker } from "./RemoteDirectoryPicker";
 import { PairedDaemonProjectForm } from "./PairedDaemonProjectForm";
+import { useModalDialog } from "./useModalDialog";
 
 const fieldClass =
   "h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground/45 focus:border-ring";
@@ -179,6 +181,15 @@ export function AddProjectDialog({
     onCloseRef.current();
   };
 
+  // Escape follows the Close/Cancel buttons: no dismissal while a registration is in
+  // flight, otherwise onRegistered would be skipped for a project that did register.
+  const { dialogRef } = useModalDialog({
+    onEscape: handleDismiss,
+    dismissible: !submitting,
+    active: step !== "paired-form",
+    focusKey: step,
+  });
+
   const handleChooseLocal = () => {
     if (isTauri) {
       setStep("local-pending");
@@ -201,7 +212,7 @@ export function AddProjectDialog({
         .catch((cause) => {
           if (dismissedRef.current || !isMountedRef.current) return;
           console.error(cause);
-          const message = cause instanceof Error ? cause.message : String(cause);
+          const message = typeof cause === "string" ? cause : toIpcError(cause).message;
           setLocalError(message || "Could not open folder picker.");
           setStep("local-manual");
         })
@@ -330,7 +341,9 @@ export function AddProjectDialog({
     return (
       <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
         <div
+          ref={dialogRef}
           role="dialog"
+          aria-modal="true"
           aria-label="Add Project"
           className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
         >
@@ -410,7 +423,9 @@ export function AddProjectDialog({
     return (
       <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
         <div
+          ref={dialogRef}
           role="dialog"
+          aria-modal="true"
           aria-label="Add Project"
           aria-busy="true"
           className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
@@ -450,7 +465,9 @@ export function AddProjectDialog({
     return (
       <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
         <div
+          ref={dialogRef}
           role="dialog"
+          aria-modal="true"
           aria-label="Add Project"
           className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
         >
@@ -509,7 +526,9 @@ export function AddProjectDialog({
     return (
       <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
         <form
+          ref={dialogRef}
           role="dialog"
+          aria-modal="true"
           aria-label="Add Project"
           className="flex max-h-[calc(100dvh-3rem)] w-full max-w-xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
           onSubmit={handleRemoteSubmit}
@@ -533,7 +552,8 @@ export function AddProjectDialog({
             <button
               type="button"
               aria-label="Close Add Project"
-              className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+              disabled={submitting}
+              className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-45"
               onClick={handleDismiss}
             >
               <X className="size-3.5" />
@@ -636,7 +656,8 @@ export function AddProjectDialog({
             </button>
             <button
               type="button"
-              className="h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"
+              disabled={submitting}
+              className="h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-45"
               onClick={handleDismiss}
             >
               Cancel
@@ -669,7 +690,9 @@ export function AddProjectDialog({
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
       <form
+        ref={dialogRef}
         role="dialog"
+        aria-modal="true"
         aria-label="Add Project"
         className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
         onSubmit={handleManualSubmit}
@@ -786,6 +809,9 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
   const submitInFlight = useRef(false);
   const issueRequestId = useRef(0);
   const supportsIssueIntake = isGitBacked && !isRemote;
+  // No dismissal while the create request is in flight: onClose would otherwise run
+  // once for the dismissal and again when the create succeeds.
+  const { dialogRef } = useModalDialog({ onEscape: onClose, dismissible: !submitting });
 
   const remoteHostId = remoteTarget?.hostId ?? null;
   const hostLabel = remoteHostId
@@ -902,18 +928,22 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
-      <form
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
         aria-label="Add Worktree"
         className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
-        onSubmit={submit}
       >
+      <form aria-label="Add Worktree" onSubmit={submit}>
         <div className="flex h-9 items-center border-b border-border px-3">
           <GitBranch className="mr-2 size-3.5 text-muted-foreground" />
           <h2 className="min-w-0 flex-1 truncate text-[13px] font-medium">{dialogTitle}</h2>
           <button
             type="button"
             aria-label="Close Add Worktree"
-            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+            disabled={submitting}
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-45"
             onClick={onClose}
           >
             <X className="size-3.5" />
@@ -1038,7 +1068,7 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
           {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
         </div>
         <div className="flex justify-end gap-2 border-t border-border px-3 py-2">
-          <button type="button" className="h-7 rounded-md px-2.5 text-xs text-muted-foreground hover:bg-accent" onClick={onClose}>
+          <button type="button" disabled={submitting} className="h-7 rounded-md px-2.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-45" onClick={onClose}>
             {isGitBacked ? "Cancel" : "Close"}
           </button>
           {isGitBacked ? (
@@ -1052,6 +1082,7 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
           ) : null}
         </div>
       </form>
+      </div>
     </div>
   );
 }
@@ -1076,6 +1107,7 @@ export function RemoveProjectDialog({ project, onClose, onConfirm }: RemoveProje
   const displayName = isRemote
     ? `${remoteFolder} (${hostLabel})`
     : project.workspaceId;
+  const { dialogRef } = useModalDialog({ onEscape: onClose });
 
   return (
     <div
@@ -1084,7 +1116,9 @@ export function RemoveProjectDialog({ project, onClose, onConfirm }: RemoveProje
       onMouseDown={onClose}
     >
       <div
+        ref={dialogRef}
         role="dialog"
+        aria-modal="true"
         aria-label="Remove Project"
         className="w-full max-w-[400px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
         onMouseDown={(event) => event.stopPropagation()}

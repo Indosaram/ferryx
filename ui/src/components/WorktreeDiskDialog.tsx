@@ -36,6 +36,7 @@ import { unmanagedWorktreeDeleteError } from "../lib/unmanagedWorktree";
 import { Badge } from "./ui/badge";
 import { Progress } from "./ui/progress";
 import { WorktreeDeleteDialog } from "./WorktreeDeleteDialog";
+import { useModalDialog } from "./useModalDialog";
 import { isPrimaryWorktree, isSameWorktreePath, normalizeWorktreePath } from "./WorktreeList";
 
 export { isPrimaryWorktree, isSameWorktreePath, normalizeWorktreePath };
@@ -173,6 +174,8 @@ export function WorktreeDiskDialog({
 
   const [snapshot, setSnapshot] = useState<DiskScanSnapshot | null>(null);
   const [error, setError] = useState<StructuredIpcError | null>(null);
+  // A failed cancel leaves the scan running, so it must not flip the dialog to "Scan failed".
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [deletingRow, setDeletingRow] = useState<WorktreeDiskRow | null>(null);
   const [sortField, setSortField] = useState<SortField>("size-desc");
@@ -232,6 +235,7 @@ export function WorktreeDiskDialog({
       current = { ...latest, rows: latest.rows.filter((row) => !deletedPaths.has(row.worktree.path)) };
       setSnapshot(current);
       setError(latest.status === "failed" ? latest.error : null);
+      if (latest.status !== "running") setCancelError(null);
     };
     removeRowRef.current = (path) => {
       if (!mounted) return;
@@ -243,7 +247,7 @@ export function WorktreeDiskDialog({
       try {
         await resolvedServices.cancelScan(workspaceId, owned.scanId);
       } catch (cause) {
-        if (mounted && current?.scanId === owned.scanId) setError(toIpcError(cause));
+        if (mounted && current?.scanId === owned.scanId) setCancelError(toIpcError(cause).message);
         else console.error("Failed to cancel worktree disk scan during teardown", cause);
       }
     };
@@ -253,6 +257,7 @@ export function WorktreeDiskDialog({
       earlyEvents.clear();
       deletedPaths.clear();
       setError(null);
+      setCancelError(null);
       setCancelling(false);
       try {
         const initial = await resolvedServices.startScan(workspaceId, refresh);
@@ -317,16 +322,8 @@ export function WorktreeDiskDialog({
     };
   }, [workspaceId, resolvedServices]);
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (deletingRow) return;
-      event.preventDefault();
-      onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, deletingRow]);
+  // The nested delete dialog registers after this one, so it owns Escape while open.
+  const { dialogRef } = useModalDialog({ onEscape: onClose });
 
   const handleCancelScan = () => cancelScanRef.current();
 
@@ -378,6 +375,7 @@ export function WorktreeDiskDialog({
       onMouseDown={onClose}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-label="Worktree Disk Management"
         aria-modal="true"
@@ -496,6 +494,12 @@ export function WorktreeDiskDialog({
               </div>
 
               <Progress value={progressPercent} className="h-1.5" />
+
+              {cancelError ? (
+                <div role="alert" className="text-[11px] text-destructive">
+                  Could not cancel the scan: {cancelError}
+                </div>
+              ) : null}
 
               <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
                 <div>
@@ -679,6 +683,7 @@ export function WorktreeDiskDialog({
                             disabled={isRoot}
                             onClick={() => setDeletingRow(row)}
                             data-testid={`delete-btn-${slug}`}
+                            aria-label={`Clean up ${slug}`}
                             title={isRoot ? "Primary root worktree cannot be deleted" : "Clean up worktree"}
                             className={cn(
                               "inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",

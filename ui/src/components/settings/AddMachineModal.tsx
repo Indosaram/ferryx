@@ -16,7 +16,7 @@ import {
   pairedHostInventory,
   type PairedHostError,
 } from "../../lib/pairedHostInventory";
-import { getRemoteStatus } from "../../lib/tauri";
+import { isStructuredIpcError } from "../../lib/tauri";
 import {
   createPairedDaemonProjectAdapter,
   type PairedHostContext,
@@ -138,17 +138,7 @@ export interface AddMachineModalProps {
   onOfferProject?: (target: MachineProjectTarget) => void;
   onImportDone?: (selectedHostId: string) => void;
   initialRelayOrigin?: string;
-  getStoredRelayOrigin?: () => Promise<string | null>;
   initialTab?: "ssh" | "import";
-}
-
-async function defaultGetStoredRelayOrigin(): Promise<string | null> {
-  try {
-    const status = await getRemoteStatus();
-    return status?.relayUrl ?? null;
-  } catch {
-    return null;
-  }
 }
 
 export function AddMachineModal({
@@ -161,7 +151,6 @@ export function AddMachineModal({
   onOfferProject,
   onImportDone,
   initialRelayOrigin: _initialRelayOrigin,
-  getStoredRelayOrigin: _getStoredRelayOrigin = defaultGetStoredRelayOrigin,
   initialTab,
 }: AddMachineModalProps) {
   const [activeTab, setActiveTab] = useState<"ssh" | "import">(
@@ -184,6 +173,7 @@ export function AddMachineModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [structuredError, setStructuredError] = useState<PairedHostError | null>(null);
+  const [systemConfigError, setSystemConfigError] = useState<string | null>(null);
   const [successTarget, setSuccessTarget] = useState<{ target: MachineProjectTarget; name: string } | null>(null);
   const [importResult, setImportResult] = useState<{ count: number; hosts: SshHost[] } | null>(null);
 
@@ -228,26 +218,57 @@ export function AddMachineModal({
     }
   }, [isOpen, successTarget, importResult]);
 
+  // Disabling the focused control while busy would strand focus on <body>, outside the
+  // key-trap; park it on the dialog container instead.
+  useEffect(() => {
+    if (isOpen && busy && !modalRef.current?.contains(document.activeElement)) {
+      modalRef.current?.focus();
+    }
+  }, [isOpen, busy]);
+
   useEffect(() => {
     if (!isOpen) return;
-
+    // A newer request (path override change, close/reopen) supersedes this one, so a
+    // slow earlier read can never overwrite the config the user is now looking at.
+    let stale = false;
+    setSystemConfigError(null);
     void readSystemSshConfig(configPathOverride)
       .then(cfg => {
-        if (isMountedRef.current && !isDismissedRef.current) {
+        if (!stale && isMountedRef.current && !isDismissedRef.current) {
           setSystemConfig(cfg);
           if (cfg && cfg.hosts.length > 0) {
             setImportSubMode("system");
           }
         }
       })
-      .catch(() => {
-        if (isMountedRef.current && !isDismissedRef.current) {
+      .catch(err => {
+        if (!stale && isMountedRef.current && !isDismissedRef.current) {
           setSystemConfig(null);
+          setSystemConfigError(extractIpcErrorMessage(err, "Could not read the system SSH configuration."));
         }
       });
+    return () => {
+      stale = true;
+    };
   }, [isOpen, configPathOverride]);
 
   if (!isOpen) return null;
+
+  const showError = (message: string, structured: PairedHostError | null = null) => {
+    setError(message);
+    setStructuredError(structured);
+  };
+
+  // Structured IPC errors carry a stable `code`; keep it so the code-specific
+  // guidance below renders, and fall back to the plain message otherwise.
+  const reportError = (err: unknown, fallback: string) => {
+    if (isStructuredIpcError(err) && err.message.trim() !== "") {
+      const structured: PairedHostError = { code: err.code, message: err.message, retryable: false };
+      showError(getModalErrorMessage(structured), structured);
+      return;
+    }
+    showError(extractIpcErrorMessage(err, fallback));
+  };
 
   const handleClose = () => {
     if (busy) return;
@@ -274,11 +295,16 @@ export function AddMachineModal({
       const focusable = modalRef.current?.querySelectorAll<HTMLElement>(
         'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
       );
-      if (!focusable || focusable.length === 0) return;
+      if (!focusable || focusable.length === 0) {
+        // Nothing is tabbable (every control disabled): keep focus on the dialog container.
+        e.preventDefault();
+        modalRef.current?.focus();
+        return;
+      }
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
 
-      if (e.shiftKey && document.activeElement === first) {
+      if (e.shiftKey && (document.activeElement === first || document.activeElement === modalRef.current)) {
         e.preventDefault();
         last.focus();
       } else if (!e.shiftKey && document.activeElement === last) {
@@ -293,16 +319,16 @@ export function AddMachineModal({
     if (busy) return;
 
     if (!sshForm.label.trim()) {
-      setError("Label is required.");
+      showError("Label is required.");
       return;
     }
     if (!sshForm.hostname.trim()) {
-      setError("Hostname or IP is required.");
+      showError("Hostname or IP is required.");
       return;
     }
     const portNumber = sshForm.port.trim() ? Number(sshForm.port) : 22;
     if (isNaN(portNumber) || portNumber < 1 || portNumber > 65535 || !Number.isInteger(portNumber)) {
-      setError("Port must be an integer between 1 and 65535.");
+      showError("Port must be an integer between 1 and 65535.");
       return;
     }
 
@@ -330,7 +356,7 @@ export function AddMachineModal({
       if (isDismissedRef.current || !isMountedRef.current) return;
 
       if (!summary.reachable) {
-        setError(summary.lastError || "SSH connection test failed. Check host, credentials, and network reachability.");
+        showError(summary.lastError || "SSH connection test failed. Check host, credentials, and network reachability.");
         setBusy(false);
         return;
       }
@@ -349,7 +375,7 @@ export function AddMachineModal({
       });
     } catch (err) {
       if (isDismissedRef.current || !isMountedRef.current) return;
-      setError(extractIpcErrorMessage(err, "SSH connection test failed."));
+      reportError(err, "SSH connection test failed.");
     } finally {
       if (isMountedRef.current) {
         setBusy(false);
@@ -374,11 +400,11 @@ export function AddMachineModal({
         setImportResult({ count: importedHosts.length, hosts: importedHosts });
         onImportDone?.(importedHosts[0].id);
       } else {
-        handleClose();
+        showError("No hosts were found in that SSH configuration. Check the text and try again.");
       }
     } catch (err) {
       if (isDismissedRef.current || !isMountedRef.current) return;
-      setError(extractIpcErrorMessage(err, "Failed to import SSH configuration."));
+      reportError(err, "Failed to import SSH configuration.");
       // Retains configText on failure!
     } finally {
       if (isMountedRef.current) {
@@ -400,11 +426,11 @@ export function AddMachineModal({
         setImportResult({ count: importedHosts.length, hosts: importedHosts });
         onImportDone?.(importedHosts[0].id);
       } else {
-        handleClose();
+        showError("No hosts were found in the system SSH configuration.");
       }
     } catch (err) {
       if (isDismissedRef.current || !isMountedRef.current) return;
-      setError(extractIpcErrorMessage(err, "Failed to import system SSH configuration."));
+      reportError(err, "Failed to import system SSH configuration.");
     } finally {
       if (isMountedRef.current) {
         setBusy(false);
@@ -425,7 +451,7 @@ export function AddMachineModal({
       setConfigPathOverrideState(chosen);
       setSshConfigPathOverride(chosen);
     } catch (err) {
-      setError(extractIpcErrorMessage(err, "Failed to select configuration file."));
+      reportError(err, "Failed to select configuration file.");
     }
   };
 
@@ -439,6 +465,7 @@ export function AddMachineModal({
     >
       <div
         ref={modalRef}
+        tabIndex={-1}
         className="relative w-full max-w-lg rounded-lg border border-border bg-card p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto"
       >
         <div className="flex items-center justify-between border-b border-border pb-3">
@@ -710,6 +737,11 @@ export function AddMachineModal({
             ) : (
               /* Config Import Method */
               <div className="space-y-4 pt-2">
+                {systemConfigError ? (
+                  <p role="alert" className="text-[11px] text-destructive">
+                    Could not read the system SSH configuration: {systemConfigError}
+                  </p>
+                ) : null}
                 <div className="flex gap-2 border-b border-border/60 pb-2">
                   {systemConfig?.exists ? (
                     <Button

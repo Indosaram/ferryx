@@ -20,6 +20,7 @@ import {
   type Worktree,
 } from "../lib/types";
 import { unmanagedWorktreeDeleteError } from "../lib/unmanagedWorktree";
+import { useModalDialog } from "./useModalDialog";
 
 // Destructive deletion is irreversible, so the confirmation has to name what is being
 // discarded rather than describing it in the abstract. Long lists are truncated with a
@@ -108,6 +109,9 @@ export function WorktreeDeleteDialog({
   const dirtyState = preview && "dirtyState" in preview ? preview.dirtyState : undefined;
   const dirtyFiles = dirtyState?.files ?? [];
   const hasDirtyLoss = dirtyState?.isDirty || error?.code === "DIRTY_WORKTREE";
+  // Escape closes only this dialog (it is rendered inside WorktreeDiskDialog's backdrop)
+  // and, like a backdrop click, is ignored while a preview or delete is in flight.
+  const { dialogRef } = useModalDialog({ onEscape: onClose, dismissible: !busy });
 
   useEffect(() => {
     let cancelled = false;
@@ -189,8 +193,17 @@ export function WorktreeDeleteDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        // React bubbles through portals and nesting: without this the parent
+        // WorktreeDiskDialog backdrop would also receive the outside click.
+        event.stopPropagation();
+        if (!busy) onClose();
+      }}
+    >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-label="Delete worktree"
         aria-modal="true"

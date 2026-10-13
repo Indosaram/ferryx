@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, act } from "@testing-library/react";
+import { invoke } from "@tauri-apps/api/core";
 import { AddMachineModal, getModalErrorMessage } from "./AddMachineModal";
 import { createRemoteHostStore } from "../../state/remoteHostStore";
 import { parsePairingInvite, type PairedHostError } from "../../lib/pairedHostInventory";
@@ -99,6 +100,49 @@ describe("AddMachineModal - P04 custom relay origin support", () => {
 });
 
 describe("AddMachineModal - SSH connection and import", () => {
+  function openPasteImport(onClose: () => void) {
+    render(<AddMachineModal isOpen={true} onClose={onClose} onSuccess={() => {}} initialTab="import" />);
+    fireEvent.change(screen.getByLabelText("SSH Configuration"), { target: { value: "Host a\n  HostName a.example" } });
+  }
+
+  it("keeps the dialog open and shows an error when an import returns zero hosts", async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) =>
+      command === "cmd_ssh_read_system_config" ? { path: "", exists: false, rawText: "", hosts: [] } : [],
+    );
+    const onClose = vi.fn();
+    openPasteImport(onClose);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Import Configuration" })); });
+    expect(screen.getByRole("alert")).toHaveTextContent(/No hosts were found/i);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("renders the code-specific hint for a structured IPC error code", async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, rawText: "", hosts: [] };
+      throw { code: "WRONG_RELAY", message: "relay differs", details: {} };
+    });
+    openPasteImport(() => {});
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Import Configuration" })); });
+    expect(screen.getByRole("alert")).toHaveTextContent(/Verify both machines use the same relay URL/i);
+  });
+
+  it("keeps focus on the dialog container when Tab is pressed with every control disabled", async () => {
+    let release!: (hosts: unknown[]) => void;
+    vi.mocked(invoke).mockImplementation((command: string) =>
+      command === "cmd_ssh_read_system_config"
+        ? Promise.resolve({ path: "", exists: false, rawText: "", hosts: [] })
+        : new Promise((resolve) => { release = resolve as (hosts: unknown[]) => void; }),
+    );
+    openPasteImport(() => {});
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Import Configuration" })); });
+    const dialog = screen.getByRole("dialog", { name: "Add Machine" });
+    const container = dialog.firstElementChild as HTMLElement;
+    expect(container).toHaveAttribute("tabindex", "-1");
+    fireEvent.keyDown(document.activeElement ?? container, { key: "Tab" });
+    expect(document.activeElement).toBe(container);
+    await act(async () => { release([]); });
+  });
+
   it("renders SSH connection form by default and allows SSH connection test", () => {
     const store = createRemoteHostStore();
     render(

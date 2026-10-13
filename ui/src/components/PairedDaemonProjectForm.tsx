@@ -4,7 +4,9 @@ import type { MachineProjectTarget } from "../lib/machineNavigation";
 import type { DirectorySource } from "../lib/remoteDirectories";
 import type { RegisteredProject } from "../lib/tauri";
 import { remoteHostStore, type HostEndpoint } from "../state/remoteHostStore";
+import { safeRandomUUID } from "../lib/uuid";
 import { RemoteDirectoryPicker } from "./RemoteDirectoryPicker";
+import { useModalDialog } from "./useModalDialog";
 
 function unavailable(host: HostEndpoint | undefined, nativeReady: boolean): string | null {
   if (!nativeReady) return "Native machine access is unavailable. Upgrade the desktop and local daemon.";
@@ -20,6 +22,9 @@ export function PairedDaemonProjectForm({ onBack, onClose, onRegistered, initial
   onBack: () => void; onClose: () => void; onRegistered: (project: RegisteredProject) => void;
 }) {
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
+  const [registering, setRegistering] = useState(false);
+  // Escape must not dismiss mid-registration, or onRegistered is skipped for a project that did register.
+  const { dialogRef } = useModalDialog({ onEscape: onClose, dismissible: !registering });
   const hosts = Object.values(state.hosts);
   const [selectedHostId, setHostId] = useState(() => hosts[0]?.hostId ?? "");
   const hostId = initialTarget?.hostId ?? selectedHostId;
@@ -30,10 +35,10 @@ export function PairedDaemonProjectForm({ onBack, onClose, onRegistered, initial
   const key = JSON.stringify([hostId, host?.generation, issue]);
   // Remounting discards selected paths, cached listings, negotiated capabilities and pending UI adoption.
   return <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
-    <div role="dialog" aria-label="Add Paired Daemon Project" className="w-full max-w-[480px] space-y-3 rounded-lg border border-border bg-card p-3 shadow-2xl">
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Add Paired Daemon Project" className="w-full max-w-[480px] space-y-3 rounded-lg border border-border bg-card p-3 shadow-2xl">
       <h2 className="text-[13px] font-medium">Add Paired Daemon Project</h2>
       <p className="text-xs text-muted-foreground">Browse folders on the paired machine without SSH. Pair or manage machines in Settings &gt; Remote Access.</p>
-      <PairedFolder key={key} host={host} issue={issue} onClose={onClose} onBack={onBack} onRegistered={onRegistered}
+      <PairedFolder key={key} host={host} issue={issue} onClose={onClose} onBack={onBack} onRegistered={onRegistered} onBusyChange={setRegistering}
         hostSelector={(busy) => <label className="block text-xs">Paired machine
           <select aria-label="Paired machine" value={hostId} disabled={busy || !!initialTarget} className="mt-1 h-8 w-full rounded border border-input bg-background px-2"
             onChange={event => setHostId(event.target.value)}>
@@ -45,9 +50,10 @@ export function PairedDaemonProjectForm({ onBack, onClose, onRegistered, initial
   </div>;
 }
 
-function PairedFolder({ host, issue, hostSelector, onClose, onBack, onRegistered }: {
+function PairedFolder({ host, issue, hostSelector, onClose, onBack, onRegistered, onBusyChange }: {
   host: HostEndpoint | undefined; issue: string | null; hostSelector: (busy: boolean) => React.ReactNode;
   onClose: () => void; onBack: () => void; onRegistered: (project: RegisteredProject) => void;
+  onBusyChange: (busy: boolean) => void;
 }) {
   const adapter = useMemo(() => host && !issue ? createPairedDaemonProjectAdapter({ hostId: host.hostId, generation: host.generation! }) : null, [host?.hostId, host?.generation, issue]);
   const [ready, setReady] = useState(false);
@@ -57,6 +63,10 @@ function PairedFolder({ host, issue, hostSelector, onClose, onBack, onRegistered
   const alive = useRef(false);
   const submitting = useRef(false);
   const select = useCallback((value: string | null) => setPath(value), []);
+  useEffect(() => {
+    onBusyChange(busy);
+    return () => onBusyChange(false);
+  }, [busy, onBusyChange]);
   useEffect(() => {
     alive.current = true;
     if (adapter) void adapter.capabilities().then(result => {
@@ -75,7 +85,7 @@ function PairedFolder({ host, issue, hostSelector, onClose, onBack, onRegistered
     if (!adapter || !ready || !path || submitting.current) return;
     submitting.current = true; setBusy(true); setError(null);
     try {
-      const project = await adapter.registerProject({ requestId: crypto.randomUUID(), repoPath: path });
+      const project = await adapter.registerProject({ requestId: safeRandomUUID(), repoPath: path });
       if (!alive.current) return;
       onRegistered(project);
       onClose();
@@ -89,7 +99,7 @@ function PairedFolder({ host, issue, hostSelector, onClose, onBack, onRegistered
     {ready && source ? <RemoteDirectoryPicker source={source} disabled={busy} onSelect={select} /> : null}
     <div className="flex justify-end gap-2 border-t border-border pt-2">
       <button type="button" disabled={busy} onClick={onBack} className="rounded border px-3 py-1 text-xs">Back</button>
-      <button type="button" onClick={onClose} className="rounded border px-3 py-1 text-xs">Cancel</button>
+      <button type="button" disabled={busy} onClick={onClose} className="rounded border px-3 py-1 text-xs disabled:opacity-50">Cancel</button>
       <button type="submit" data-testid="add-project-confirm-paired" disabled={busy || !ready || !path || !!issue}
         className="rounded bg-primary px-3 py-1 text-xs text-primary-foreground disabled:opacity-50">{busy ? "Adding..." : "Add Project"}</button>
     </div>

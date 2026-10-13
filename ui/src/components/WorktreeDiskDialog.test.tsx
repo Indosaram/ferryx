@@ -511,4 +511,79 @@ describe("WorktreeDiskDialog", () => {
     expect(extDeleteBtn.disabled).toBe(false);
     expect(view.getByTestId("candidate-badge-external-branch-wt")).toBeTruthy();
   });
+
+  it("closes only the nested delete dialog on an outside click or Escape, never the parent", async () => {
+    const { services } = createMockServices();
+    const onClose = vi.fn();
+    const view = await renderSettled(
+      <WorktreeDiskDialog workspaceId="ws-1" projectName="Test Project" onClose={onClose} services={services} />,
+    );
+
+    await act(async () => fireEvent.click(view.getByTestId("delete-btn-stale-b")));
+    const child = view.getByRole("dialog", { name: /Delete worktree/i });
+    await act(async () => fireEvent.mouseDown(child.parentElement as HTMLElement));
+    expect(view.queryByRole("dialog", { name: /Delete worktree/i })).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await act(async () => fireEvent.click(view.getByTestId("delete-btn-stale-b")));
+    view.getByRole("dialog", { name: /Delete worktree/i });
+    await act(async () => { fireEvent.keyDown(document.body, { key: "Escape" }); });
+    expect(view.queryByRole("dialog", { name: /Delete worktree/i })).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await act(async () => { fireEvent.keyDown(document.body, { key: "Escape" }); });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the delete dialog open on outside click while its delete request is in flight", async () => {
+    let finishDelete!: () => void;
+    const { services } = createMockServices({
+      deleteDestructive: vi.fn(() => new Promise<void>((resolve) => { finishDelete = resolve; })),
+    });
+    const onClose = vi.fn();
+    const view = await renderSettled(
+      <WorktreeDiskDialog workspaceId="ws-1" projectName="Test Project" onClose={onClose} services={services} />,
+    );
+    await act(async () => fireEvent.click(view.getByTestId("delete-btn-stale-b")));
+    const child = view.getByRole("dialog", { name: /Delete worktree/i });
+    await act(async () => fireEvent.click(
+      view.getByRole("button", { name: /Delete worktree and discard changes permanently/i }),
+    ));
+    await act(async () => fireEvent.mouseDown(child.parentElement as HTMLElement));
+    expect(view.getByRole("dialog", { name: /Delete worktree/i })).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => finishDelete());
+  });
+
+  it("reports a failed cancel separately and keeps the running scan out of the failed state", async () => {
+    const running: DiskScanSnapshot = {
+      ...completedSnapshot,
+      scanId: "scan-cancel-fail",
+      status: "running",
+      rows: [],
+      progress: { ...completedSnapshot.progress, completedWorktrees: 1, totalWorktrees: 4 },
+    };
+    const { services } = createMockServices({
+      startScan: vi.fn(async () => running),
+      cancelScan: vi.fn(async () => { throw { code: "IO_ERROR", message: "daemon unreachable" }; }),
+    });
+    const view = await renderSettled(
+      <WorktreeDiskDialog workspaceId="ws-1" projectName="Test Project" onClose={vi.fn()} services={services} />,
+    );
+    await act(async () => fireEvent.click(view.getByRole("button", { name: /Cancel scan/i })));
+
+    expect(view.getByText(/Could not cancel the scan: daemon unreachable/i)).toBeTruthy();
+    expect(view.queryByText("Scan failed")).toBeNull();
+    expect(view.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(view.getByText(/Scanning worktrees/i)).toBeTruthy();
+  });
+
+  it("prefers the repoRoot prop over the stored projects blob and labels cleanup buttons", async () => {
+    const { services } = createMockServices();
+    const view = await renderSettled(
+      <WorktreeDiskDialog workspaceId="ws-1" projectName="Test Project" repoRoot="/repo/main" onClose={vi.fn()} services={services} />,
+    );
+    expect((view.getByRole("button", { name: "Clean up main" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((view.getByRole("button", { name: "Clean up stale-b" }) as HTMLButtonElement).disabled).toBe(false);
+  });
 });
