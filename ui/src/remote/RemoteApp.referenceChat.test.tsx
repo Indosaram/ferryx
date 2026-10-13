@@ -983,4 +983,424 @@ describe("reference chat lane (task 12)", () => {
   });
 });
 
+/* ---- review-fix regressions (fix/remote-chat-wiring) ---- */
 
+const SECOND_SESSION_ID = "sess-second";
+
+const twoTabState = {
+  activeContext: {
+    ...remoteState.activeContext,
+    terminalTabs: [
+      ...remoteState.activeContext.terminalTabs,
+      { id: "tab-second", sessionId: SECOND_SESSION_ID, label: "second", agentType: "claude", activityState: "idle", worktreeLabel: "main" },
+    ],
+  },
+};
+
+type LaneRoute = (call: HarnessCall) => Response | Promise<Response> | undefined;
+
+const okSubmit = () =>
+  jsonResponse({ ok: true, data: { receipt: { requestId: "r1", target: {}, stage: "accepted" } }, requestId: "r1" });
+
+const okStage = () =>
+  jsonResponse({
+    ok: true,
+    data: {
+      receipt: { hostId: "local", attachmentId: "att-1", sha256: NOTES_TXT_SHA256, sizeBytes: 3, mediaType: "text/plain" },
+      displayName: "notes.txt",
+      mentionText: "@notes.txt ",
+    },
+    requestId: "r4",
+  });
+
+/** A two-pane host: every route answered, and `route` overrides any of them first. */
+function installLane(route: LaneRoute = () => undefined): HarnessCall[] {
+  const calls: HarnessCall[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      let body: unknown = null;
+      if (typeof init?.body === "string") {
+        try {
+          body = JSON.parse(init.body);
+        } catch {
+          body = init.body;
+        }
+      }
+      const call = { url, method, body };
+      calls.push(call);
+      const routed = route(call);
+      if (routed) return routed;
+      if (url.includes("/api/v1/socket-ticket")) return jsonResponse({ ticket: "t", expiresAt: 9999999999 });
+      if (url.includes("/api/v1/capabilities")) {
+        return jsonResponse({ apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH, referenceOwnerId: REFERENCE_OWNER_ID });
+      }
+      if (url.includes("/api/v1/sessions")) {
+        return jsonResponse({
+          sessions: [
+            { sessionId: SESSION_ID, daemonEpoch: DAEMON_EPOCH, running: true },
+            { sessionId: SECOND_SESSION_ID, daemonEpoch: DAEMON_EPOCH, running: true },
+          ],
+        });
+      }
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(twoTabState);
+      if (url.includes("/history")) {
+        return jsonResponse(
+          url.includes(SECOND_SESSION_ID)
+            ? nativePage({ turns: [{ role: "user", parts: [{ kind: "text", text: "B0" }], startedAt: "2026-10-06T00:00:00Z" }] })
+            : nativePage(),
+        );
+      }
+      if (url.includes("/prompt")) return jsonResponse({ prompt: null, screenRevision: "rev-1", cols: 80, rows: 24 });
+      if (url.includes("/submit")) return okSubmit();
+      if (url.includes("/files")) return method === "DELETE" ? jsonResponse({ ok: true }) : okStage();
+      return jsonResponse({});
+    }) as unknown as typeof fetch,
+  );
+  return calls;
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+/**
+ * Every response in these tests is answered by an already-settled mock, so a settled request's
+ * whole continuation is microtasks: one task boundary drains all of them.
+ */
+async function drainSettledResponses(): Promise<void> {
+  await act(async () => {
+    await new Promise<void>((done) => setTimeout(done, 0));
+  });
+}
+
+async function switchToSecondTab(): Promise<void> {
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+  });
+  const sheet = screen.getByRole("tablist", { name: /terminal tabs/i });
+  await act(async () => {
+    fireEvent.click(within(sheet).getByRole("tab", { name: /second/i }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
+  });
+  await screen.findByText("B0");
+}
+
+/** The lane is bound once the main pane's newest page has rendered. */
+async function laneReady(): Promise<void> {
+  await screen.findByText("The parser now streams line by line.");
+}
+
+async function stageNotes(): Promise<void> {
+  await act(async () => {
+    fireEvent.change(screen.getByTestId("file-upload-input"), {
+      target: { files: [readableFile("abc", "notes.txt", "text/plain")] },
+    });
+  });
+}
+
+function promptBody(id: string, multiSelect: boolean): Record<string, unknown> {
+  return {
+    prompt: {
+      promptId: id,
+      agent: "claude",
+      kind: "question",
+      title: `Question ${id}`,
+      question: `Question ${id}`,
+      options: [{ label: "alpha" }, { label: "bravo" }, { label: "charlie" }],
+      multiSelect,
+    },
+    screenRevision: `rev-${id}`,
+    cols: 80,
+    rows: 24,
+  };
+}
+
+describe("reference chat lane review fixes", () => {
+  beforeEach(() => {
+    StubWebSocket.instances = [];
+    localStorage.clear();
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    vi.stubGlobal("WebSocket", StubWebSocket);
+    setWidth(390);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    cleanup();
+    localStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
+  it("ui-composer-prompt-1: a new prompt gets a fresh card, never the previous prompt's picks", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let current = promptBody("A", true);
+    installLane(({ url }) => (url.includes("/prompt") ? jsonResponse(current) : undefined));
+    render(<RemoteApp />);
+    await screen.findByText("Question A");
+    fireEvent.click(within(screen.getByTestId("reference-prompt-multi-0")).getByRole("checkbox"));
+    expect(screen.getByTestId("reference-prompt-submit")).toBeEnabled();
+
+    current = promptBody("B", true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await screen.findByText("Question B");
+
+    expect(within(screen.getByTestId("reference-prompt-multi-0")).getByRole("checkbox")).not.toBeChecked();
+    expect(screen.getByTestId("reference-prompt-submit")).toBeDisabled();
+  });
+
+  it("ui-composer-prompt-2: a held message still in flight cannot be sent a second time", async () => {
+    const submits: Array<(response: Response) => void> = [];
+    const calls = installLane(({ url }) => {
+      if (url.includes("/prompt")) return jsonResponse(promptBody("P", false));
+      if (url.includes("/submit")) return new Promise<Response>((done) => submits.push(done));
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await screen.findByText("Question P");
+    const textarea = screen.getByTestId("chat-composer-textarea");
+    for (const text of ["note one", "note two"]) {
+      fireEvent.change(textarea, { target: { value: text } });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("send-button"));
+      });
+    }
+    const [sendA, sendB] = screen.getAllByTestId(/^held-message-send-/);
+    await act(async () => {
+      fireEvent.click(sendA);
+    });
+    await act(async () => {
+      fireEvent.click(sendB);
+    });
+    expect(submits).toHaveLength(2);
+
+    await act(async () => {
+      submits[0](okSubmit());
+    });
+    await drainSettledResponses();
+
+    const remaining = screen.getAllByTestId(/^held-message-send-/);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]).toBeDisabled();
+    await act(async () => {
+      fireEvent.click(remaining[0]);
+    });
+    expect(calls.filter((call) => call.url.includes("/submit"))).toHaveLength(2);
+  });
+
+  it("ui-composer-prompt-3: a keyboard answer hands the focus on to the message box", async () => {
+    let answered = false;
+    installLane(({ url }) => {
+      if (url.includes("/answer")) {
+        answered = true;
+        return jsonResponse({ ok: true, data: {}, requestId: "r3" });
+      }
+      if (url.includes("/prompt")) {
+        return jsonResponse(answered ? { prompt: null, screenRevision: "rev-2", cols: 80, rows: 24 } : promptBody("F", false));
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    const option = await screen.findByTestId("reference-prompt-option-0");
+    option.focus();
+    await act(async () => {
+      fireEvent.keyDown(option, { key: "Enter" });
+      fireEvent.click(option, { detail: 0 });
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("reference-prompt-card")).not.toBeInTheDocument();
+    });
+    expect(document.activeElement).toBe(screen.getByTestId("chat-composer-textarea"));
+  });
+
+  it("rs-history-core-3: paging keeps going past the first older page of the same stream", async () => {
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      return url.includes("cursor=")
+        ? jsonResponse(nativePage({
+            turns: [{ role: "user", parts: [{ kind: "text", text: "OLDER-1" }], startedAt: "2026-10-05T00:00:00Z" }],
+            cursor: { streamId: "omo:abc", offset: 100 },
+            hasMore: true,
+          }))
+        : jsonResponse(nativePage({ cursor: { streamId: "omo:abc", offset: 500 }, hasMore: true }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+    await screen.findByText("OLDER-1");
+    expect(screen.getByTestId("reference-older-button")).toBeInTheDocument();
+  });
+
+  it("rs-files-routes-4: leaving a pane releases the files it staged and never sent", async () => {
+    const calls = installLane();
+    render(<RemoteApp />);
+    await laneReady();
+    await stageNotes();
+    await screen.findByTestId("attachment-preview-att-1");
+
+    await switchToSecondTab();
+
+    await waitFor(() => {
+      expect(
+        calls.some((call) => call.method === "DELETE" && call.url.includes(`/reference-chat/${SESSION_ID}/files/att-1`)),
+      ).toBe(true);
+    });
+  });
+
+  it("ui-workspace-wiring-2: a late older page from the previous pane is never painted", async () => {
+    const older = deferred<Response>();
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      return url.includes("cursor=")
+        ? older.promise
+        : jsonResponse(nativePage({ cursor: { streamId: "omo:abc", offset: 500 }, hasMore: true }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+
+    await switchToSecondTab();
+    await act(async () => {
+      older.resolve(jsonResponse(nativePage({
+        turns: [{ role: "user", parts: [{ kind: "text", text: "A-OLD" }], startedAt: "2026-10-05T00:00:00Z" }],
+        cursor: null,
+        hasMore: false,
+      })));
+    });
+    await drainSettledResponses();
+
+    expect(screen.queryByText("A-OLD")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("reference-older-endcap")).not.toBeInTheDocument();
+  });
+
+  it("ui-workspace-wiring-3: the newest-page poll keeps an older page that was loaded", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      return url.includes("cursor=")
+        ? jsonResponse(nativePage({
+            turns: [{ role: "user", parts: [{ kind: "text", text: "OLD-1" }], startedAt: "2026-10-05T00:00:00Z" }],
+            cursor: null,
+            hasMore: false,
+          }))
+        : jsonResponse(nativePage({ cursor: { streamId: "omo:abc", offset: 500 }, hasMore: true }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+    await screen.findByText("OLD-1");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await drainSettledResponses();
+
+    expect(screen.getByText("OLD-1")).toBeInTheDocument();
+  });
+
+  it("ui-workspace-wiring-5: a staged file finishing after a pane switch stays out of the new pane", async () => {
+    const stage = deferred<Response>();
+    const calls = installLane(({ url, method }) =>
+      url.includes("/files") && method === "POST" ? stage.promise : undefined,
+    );
+    render(<RemoteApp />);
+    await laneReady();
+    await stageNotes();
+    await waitFor(() => {
+      expect(calls.some((call) => call.url.includes("/files") && call.method === "POST")).toBe(true);
+    });
+
+    await switchToSecondTab();
+    await act(async () => {
+      stage.resolve(okStage());
+    });
+    await drainSettledResponses();
+
+    expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).not.toContain("@notes.txt");
+    expect(screen.queryByTestId(/^attachment-preview-/)).not.toBeInTheDocument();
+  });
+
+  it("ui-workspace-wiring-6: a repeating identity refusal does not wipe what the user is typing", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    installLane(({ url }) =>
+      url.includes("/history")
+        ? jsonResponse({ error: { code: "INVENTORY_INCOMPLETE" } }, false, 503)
+        : undefined,
+    );
+    render(<RemoteApp />);
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not available/i);
+    });
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "abc" } });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await drainSettledResponses();
+
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("abc");
+  });
+
+  it("ui-workspace-wiring-7: a delivered file mention clears its staged chip", async () => {
+    const calls = installLane();
+    render(<RemoteApp />);
+    await laneReady();
+    await stageNotes();
+    await screen.findByTestId("attachment-preview-att-1");
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await waitFor(() => {
+      expect(calls.some((call) => call.url.includes("/submit"))).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("chat-composer-attachments")).not.toBeInTheDocument();
+    });
+  });
+
+  it("ui-workspace-wiring-9: a delivered send clears the earlier not-delivered warning", async () => {
+    let submits = 0;
+    installLane(({ url }) => {
+      if (!url.includes("/submit")) return undefined;
+      submits += 1;
+      return submits === 1
+        ? jsonResponse({ ok: false, error: { code: "FORBIDDEN", message: "no", retryable: false }, requestId: "r1" })
+        : okSubmit();
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "one" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not delivered/);
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await waitFor(() => {
+      expect(submits).toBe(2);
+    });
+    await drainSettledResponses();
+    expect(screen.queryByTestId("chat-history-warning")?.textContent ?? "").not.toMatch(/not delivered/);
+  });
+});

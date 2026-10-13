@@ -252,6 +252,19 @@ describe("MobileChatWorkspace", () => {
     expect(screen.getByTestId("reference-older-endcap")).toBeInTheDocument();
   });
 
+  it("ui-workspace-wiring-8: the older-page control sits above the first message", () => {
+    render(
+      <MobileChatWorkspace
+        messages={[{ id: "m1", role: "user", content: "first visible turn", timestamp: 1 }]}
+        onSendMessage={vi.fn()}
+        hasOlderPage={true}
+      />
+    );
+    const button = screen.getByTestId("reference-older-button");
+    const first = screen.getByText("first visible turn");
+    expect(button.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("14. passes rich reference parts through to the message renderer", () => {
     const messages: MobileChatMessageProps[] = [
       {
