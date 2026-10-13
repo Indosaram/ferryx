@@ -302,5 +302,34 @@ describe("MobileTopBar", () => {
       expect(button).toHaveClass("before:absolute", "before:inset-x-0", "before:-inset-y-1.5");
     }
   });
+
+  it("provides title tooltips matching accessible names on icon-only buttons", () => {
+    renderTopBar({
+      sessionCount: 2,
+      attention: {
+        label: "Approval",
+        count: 1,
+        ariaLabel: "Needs approval (1)",
+        disabled: false,
+        onPress: vi.fn(),
+      },
+    });
+
+    expect(
+      screen.getByRole("button", { name: "Change workspace context" })
+    ).toHaveAttribute("title", "Change workspace context");
+
+    expect(
+      screen.getByRole("button", { name: "Needs approval (1)" })
+    ).toHaveAttribute("title", "Needs approval (1)");
+
+    expect(
+      screen.getByRole("button", { name: "Sessions (2)" })
+    ).toHaveAttribute("title", "Sessions (2)");
+
+    expect(screen.getByTestId("remote-view-mode-chat")).toHaveAttribute("title", "Chat");
+    expect(screen.getByTestId("remote-view-mode-terminal")).toHaveAttribute("title", "Terminal");
+    expect(screen.getByRole("button", { name: "More actions" })).toHaveAttribute("title", "More actions");
+  });
 });
 

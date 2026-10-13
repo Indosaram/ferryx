@@ -87,6 +87,7 @@ export function MobileTopBar({
           <button
             type="button"
             aria-label="Change workspace context"
+            title="Change workspace context"
             aria-expanded={pickerOpen}
             onClick={onTogglePicker}
             className={cn(ICON_BUTTON_32, "text-chat-foreground-secondary hover:text-chat-foreground")}
@@ -155,6 +156,7 @@ export function MobileTopBar({
                 type="button"
                 data-testid="remote-attention-badge"
                 aria-label={attention.ariaLabel}
+                title={attention.ariaLabel}
                 disabled={attention.disabled}
                 onClick={attention.onPress}
                 className={ATTENTION_BUTTON}
@@ -169,6 +171,7 @@ export function MobileTopBar({
               <button
                 type="button"
                 aria-label={"Sessions (" + sessionCount + ")"}
+                title={"Sessions (" + sessionCount + ")"}
                 aria-haspopup="dialog"
                 aria-expanded={switcherOpen}
                 onClick={onOpenSwitcher}
@@ -185,6 +188,7 @@ export function MobileTopBar({
               <button
                 type="button"
                 data-testid="remote-view-mode-chat"
+                title="Chat"
                 aria-pressed={viewMode === "chat"}
                 onClick={() => onViewModeChange("chat")}
                 className={cn(
@@ -200,6 +204,7 @@ export function MobileTopBar({
               <button
                 type="button"
                 data-testid="remote-view-mode-terminal"
+                title="Terminal"
                 aria-pressed={viewMode === "terminal"}
                 onClick={() => onViewModeChange("terminal")}
                 className={cn(
@@ -217,6 +222,7 @@ export function MobileTopBar({
             <button
               type="button"
               aria-label="More actions"
+              title="More actions"
               aria-haspopup="dialog"
               aria-expanded={menuOpen}
               onClick={onOpenMenu}

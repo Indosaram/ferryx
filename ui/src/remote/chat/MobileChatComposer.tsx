@@ -428,6 +428,7 @@ export const MobileChatComposer = React.forwardRef<
               type="button"
               data-testid="attach-file-button"
               aria-label="Attach file"
+              title="Attach file"
               aria-busy={attaching || undefined}
               disabled={disabled || attaching}
               onClick={() => fileInputRef.current?.click()}
@@ -453,6 +454,7 @@ export const MobileChatComposer = React.forwardRef<
                   type="button"
                   data-testid="stop-button"
                   aria-label="Stop the running turn"
+                  title="Stop the running turn"
                   onClick={onStop}
                   className="flex size-8 shrink-0 items-center justify-center rounded-full bg-chat-danger text-chat-foreground shadow-sm hover:bg-chat-danger/90 active:bg-chat-danger/80 active:scale-95 transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
@@ -464,6 +466,7 @@ export const MobileChatComposer = React.forwardRef<
                   type="button"
                   data-testid="send-button"
                   aria-label="Send message"
+                  title="Send message"
                   disabled={!canSubmit}
                   onClick={handleSend}
                   className={cn(

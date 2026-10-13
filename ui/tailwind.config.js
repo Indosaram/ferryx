@@ -104,15 +104,30 @@ export default {
           from: { transform: "translateY(100%)" },
           to: { transform: "translateY(0)" },
         },
+        "sheet-out": {
+          from: { transform: "translateY(0)" },
+          to: { transform: "translateY(100%)" },
+        },
         "drawer-in": {
           from: { transform: "translateX(-100%)" },
           to: { transform: "translateX(0)" },
+        },
+        "fade-in": {
+          from: { opacity: "0" },
+          to: { opacity: "1" },
+        },
+        "fade-out": {
+          from: { opacity: "1" },
+          to: { opacity: "0" },
         },
       },
       animation: {
         enter: "enter 140ms ease-out",
         "sheet-in": "sheet-in 220ms cubic-bezier(.2,.8,.2,1)",
+        "sheet-out": "sheet-out 200ms cubic-bezier(.2,.8,.2,1)",
         "drawer-in": "drawer-in 260ms cubic-bezier(.2,.8,.2,1)",
+        "fade-in": "fade-in 200ms ease-out",
+        "fade-out": "fade-out 200ms ease-out",
       },
     },
   },

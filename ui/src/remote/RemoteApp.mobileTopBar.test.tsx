@@ -183,9 +183,11 @@ describe("RemoteApp - MobileTopBar and Sheets (Todo 7)", () => {
 
     // Re-open and verify Escape closes it
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    expect(await screen.findByRole("dialog", { name: "Actions" })).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "Actions" });
+    expect(dialog).toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.animationEnd(dialog);
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Actions" })).not.toBeInTheDocument();
     });

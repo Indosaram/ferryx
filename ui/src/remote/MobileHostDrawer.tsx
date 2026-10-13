@@ -145,11 +145,7 @@ export type MobileHostDrawerProps = {
 export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, isAccountSession }: MobileHostDrawerProps) {
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const hosts = useMemo(() => selectHostList(state), [state]);
-  // Declared above the `!open` early return so the hook count is stable while the drawer
-  // is closed; a hook below that guard changes the order on open.
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
-
-  if (!open) return null;
 
   const selectHost = (hostId: string | null) => {
     remoteHostStore.setActiveHost(hostId);

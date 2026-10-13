@@ -349,7 +349,9 @@ async function run() {
             };
           });
           await page.keyboard.press("Escape");
-          await page.waitForTimeout(350);
+          try {
+            await page.waitForSelector('[role="dialog"]', { state: "detached", timeout: 2000 });
+          } catch {}
           const sheetAfter = await page.evaluate(() => {
             const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
             return {
@@ -426,7 +428,9 @@ async function run() {
       } else {
         await page.keyboard.press("Escape");
       }
-      await page.waitForTimeout(450);
+      try {
+        await page.waitForSelector('[data-testid="remote-sidebar-drawer"][inert]', { timeout: 2000 });
+      } catch {}
       report.probes[`drawer-closed-inert-${label}`] = await page.evaluate(() => {
         const drawer = document.querySelector('[data-testid="remote-sidebar-drawer"]');
         if (!drawer) return { drawerPresent: false, closed: true };
