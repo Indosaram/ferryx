@@ -809,6 +809,27 @@ describe("useWorkspaceStore terminal ownership", () => {
     expect(result.current.agents).toHaveLength(1);
     expect(services.closeTerminal).toHaveBeenCalledWith("backend-2");
   });
+
+  it("refuses an unconfirmed empty worktree listing instead of closing every live PTY", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    await act(async () => {
+      await result.current.openTab(worktree);
+    });
+
+    await act(async () => {
+      await result.current.syncWorktrees([]);
+    });
+    expect(result.current.state.worktrees).toEqual([worktree]);
+    expect(Object.keys(result.current.state.sessions)).toHaveLength(1);
+    expect(services.closeTerminal).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.syncWorktrees([], { confirmedRemoval: true });
+    });
+    expect(Object.keys(result.current.state.sessions)).toHaveLength(0);
+    expect(services.closeTerminal).toHaveBeenCalledWith("backend-1");
+  });
 });
 
 describe("session screen activity", () => {

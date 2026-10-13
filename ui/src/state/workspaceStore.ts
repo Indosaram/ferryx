@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import {
   activityStateToAgentState,
@@ -350,15 +350,19 @@ export function useWorkspaceStore({
   const [parkedActivityVersion, setParkedActivityVersion] = useState(0);
   const bumpParkedActivity = useCallback(() => setParkedActivityVersion((value) => value + 1), []);
   // Provenance belongs to the workspace currently mounted; keeping the first
-  // one would make restore pick the wrong HMR-vs-disk path after a switch.
-  const recoveredFromHmrRef = useRef(initialRef.current.recoveredFromHmr);
+  // one would make restore pick the wrong HMR-vs-disk path after a switch. It is
+  // state (not a ref) so the swap below can set it during render without mutating
+  // anything a discarded render could leave behind.
+  const [provenance, setProvenance] = useState(() => ({
+    workspaceId,
+    recoveredFromHmr: initialRef.current!.recoveredFromHmr,
+  }));
 
   let renderedState = state;
-  let recoveredFromHmr = recoveredFromHmrRef.current;
+  let recoveredFromHmr = provenance.recoveredFromHmr;
 
   if (state.workspaceId !== workspaceId) {
     const previousWorkspaceId = state.workspaceId ?? mountedWorkspaceIdRef.current;
-    setWorkspaceSnapshot(previousWorkspaceId, state);
     const swapped = initWorkspaceState({ workspaceId, initialWorktrees });
     switchDebug("workspace.store.swap", {
       fromWorkspaceId: previousWorkspaceId,
@@ -374,12 +378,28 @@ export function useWorkspaceStore({
     });
     renderedState = swapped.state;
     recoveredFromHmr = swapped.recoveredFromHmr;
-    recoveredFromHmrRef.current = swapped.recoveredFromHmr;
+    if (provenance.workspaceId !== workspaceId || provenance.recoveredFromHmr !== swapped.recoveredFromHmr) {
+      setProvenance({ workspaceId, recoveredFromHmr: swapped.recoveredFromHmr });
+    }
     reactDispatch({ type: "RESTORE_WORKSPACE", state: swapped.state });
   }
 
-  stateRef.current = renderedState;
-  mountedWorkspaceIdRef.current = workspaceId;
+  // The reducer mints ids, so stateRef must track React's committed reduction rather than
+  // dispatch()'s private one; outside a switch it re-syncs every render as before. Across a
+  // workspace switch the refs and the outgoing snapshot move only once the swapped render
+  // commits, so a discarded or StrictMode double render cannot repoint them.
+  if (mountedWorkspaceIdRef.current === workspaceId && state.workspaceId === workspaceId) {
+    stateRef.current = renderedState;
+  }
+  useLayoutEffect(() => {
+    const previousWorkspaceId = mountedWorkspaceIdRef.current;
+    if (previousWorkspaceId === workspaceId) return;
+    const outgoing = stateRef.current;
+    setWorkspaceSnapshot(outgoing.workspaceId ?? previousWorkspaceId, outgoing);
+    stateRef.current = state;
+    mountedWorkspaceIdRef.current = workspaceId;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the switch only; dispatch owns later updates
+  }, [workspaceId]);
 
   const emitActivityChanges = useCallback((previous: WorkspaceState, next: WorkspaceState) => {
     for (const target of selectActivityNotificationTargets(next)) {
@@ -605,20 +625,31 @@ export function useWorkspaceStore({
         const startedAt = Date.now();
         if (!probe?.inFlight && (!probe || startedAt - probe.startedAt >= PROVIDER_SESSION_PROBE_INTERVAL_MS)) {
           fallbackProbesByAgent.set(probeKey, { inFlight: true, startedAt });
+          // The probe can outlive a project switch; its answer belongs to the project that
+          // owned the pane when the probe started, not to whichever store is mounted later.
+          const probeOwner = stateRef.current.workspaceId ?? mountedWorkspaceIdRef.current;
           void discoverAgentProviderSession(payload.sessionId, discoveryAgent)
             .then((id) => {
               if (!id) return;
-              dispatch({
+              dispatchToOwner({
                 type: "APPLY_PROVIDER_SESSION",
                 sessionId: resolved.sessionId,
                 providerSession: { key: "session_id", id },
                 agentType: discoveryAgent,
-              });
+              }, probeOwner);
             })
             .catch(() => undefined)
             .finally(() => {
               const entry = fallbackProbesByAgent.get(probeKey);
               if (entry) entry.inFlight = false;
+              // Settled entries only rate-limit repeats; once past the interval they carry no
+              // information, so sweep them instead of keeping one per pane/agent forever.
+              const now = Date.now();
+              for (const [key, settled] of fallbackProbesByAgent) {
+                if (!settled.inFlight && now - settled.startedAt >= PROVIDER_SESSION_PROBE_INTERVAL_MS) {
+                  fallbackProbesByAgent.delete(key);
+                }
+              }
             });
         }
       }
@@ -665,7 +696,7 @@ export function useWorkspaceStore({
       unlistenAgentState?.();
       unlistenFocus?.();
     };
-  }, [dispatch]);
+  }, [dispatch, dispatchToOwner]);
 
   const createSpawnedTab = useCallback(
     async (worktree: Worktree, label?: string, backendSessionIdOverride?: string, shell?: string) => {
@@ -782,9 +813,12 @@ export function useWorkspaceStore({
   );
 
   const sshRearmsRef = useRef(new Map<string, number>());
-  const sshRecoveryKey = Object.values(renderedState.sessions)
-    .filter(session => isRemoteWorkspaceId(session.workspaceId))
-    .map(session => `${session.id}:${session.backendSessionId}:${session.remoteConnectionState ?? ""}`).join("|");
+  const sshRecoveryKey = useMemo(
+    () => Object.values(renderedState.sessions)
+      .filter(session => isRemoteWorkspaceId(session.workspaceId))
+      .map(session => `${session.id}:${session.backendSessionId}:${session.remoteConnectionState ?? ""}`).join("|"),
+    [renderedState.sessions],
+  );
   useEffect(() => {
     if (!tauriIpc.isTauriRuntime() || !sshRecoveryKey) return;
     const recovery = startSshRecovery({
@@ -901,28 +935,55 @@ export function useWorkspaceStore({
         let entries: Array<{ index: number; sessionId: string | null; error: string | null }> = [];
         try {
           entries = await services.spawnTerminalsBatch(requests);
-        } catch {
-          // Transport-level batch failure: fall through to per-session spawns.
+        } catch (batchError) {
+          // Batch requests carry no clientRequestId, so the daemon cannot dedupe a retry. When
+          // the failure is ambiguous the batch may already have created PTYs; spawning again
+          // per session would duplicate them. Only a definite failure falls through.
+          if (isAmbiguousRendererTransportError(batchError)) {
+            const reason = toIpcError(batchError).message;
+            for (const sessionId of targets) {
+              spawningSessionIdsRef.current.delete(sessionId);
+              dispatchToOwner({ type: "SESSION_BACKEND_UNAVAILABLE", sessionId, backendSessionId: null, reason }, workspaceId);
+            }
+            throw batchError;
+          }
         }
         if (entries.length > 0) {
-          for (const entry of entries) {
-            const sessionId = targets[entry.index];
-            spawningSessionIdsRef.current.delete(sessionId);
-            const session = stateRef.current.sessions[sessionId];
-            if (!entry.sessionId || !session) continue;
-            // Recovery spawns can outlive a project switch; rebinding now would
-            // point another project's session at this PTY.
-            if (mountedWorkspaceIdRef.current !== workspaceId) {
-              await closeBackendSession({ ...session, backendSessionId: entry.sessionId }, services);
-              continue;
+          try {
+            for (const entry of entries) {
+              const sessionId = targets[entry.index];
+              if (sessionId === undefined) {
+                if (entry.sessionId) await closeOrphanBackend(entry.sessionId, services);
+                continue;
+              }
+              spawningSessionIdsRef.current.delete(sessionId);
+              if (!entry.sessionId) {
+                dispatchToOwner({
+                  type: "SESSION_BACKEND_UNAVAILABLE",
+                  sessionId,
+                  backendSessionId: null,
+                  reason: entry.error ?? "Terminal spawn failed",
+                }, workspaceId);
+                continue;
+              }
+              const session = stateRef.current.sessions[sessionId];
+              // Recovery spawns can outlive a project switch, a pane close, or a newer
+              // binding; in each case this PTY has no owner and must not leak.
+              if (mountedWorkspaceIdRef.current !== workspaceId || !session || session.backendSessionId != null) {
+                await closeOrphanBackend(entry.sessionId, services);
+                continue;
+              }
+              const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
+              dispatch({
+                type: "REBIND_SESSION_BACKEND",
+                sessionId,
+                backendSessionId: entry.sessionId,
+                clearAgent: options?.fallbackToShell || isAgent,
+              });
             }
-            const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
-            dispatch({
-              type: "REBIND_SESSION_BACKEND",
-              sessionId,
-              backendSessionId: entry.sessionId,
-              clearAgent: options?.fallbackToShell || isAgent,
-            });
+          } finally {
+            // Targets the batch result did not cover must become retryable again.
+            for (const sessionId of targets) spawningSessionIdsRef.current.delete(sessionId);
           }
           return;
         }
@@ -942,13 +1003,14 @@ export function useWorkspaceStore({
                 cwd: session.cwd ?? session.worktreePath,
                 ...(startup ? { startup } : {}),
               });
-              // Recovery spawns can outlive a project switch; rebinding now would
-              // point another project's session at this PTY.
-              if (mountedWorkspaceIdRef.current !== workspaceId) {
-                await closeBackendSession({ ...session, backendSessionId }, services);
+              // Recovery spawns can outlive a project switch, a pane close, or a newer
+              // binding; in each case this PTY has no owner and must not leak.
+              const current = stateRef.current.sessions[sessionId];
+              if (mountedWorkspaceIdRef.current !== workspaceId || !current || current.backendSessionId != null) {
+                await closeOrphanBackend(backendSessionId, services);
                 return;
               }
-              const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
+              const isAgent = Boolean(current.agentType || current.providerSession || current.agentSessionId);
               dispatch({
                 type: "REBIND_SESSION_BACKEND",
                 sessionId,
@@ -971,7 +1033,7 @@ export function useWorkspaceStore({
         }),
       );
     },
-    [dispatch, services, workspaceId],
+    [dispatch, dispatchToOwner, services, workspaceId],
   );
 
   const ensureTabForWorktreeOnce = useCallback(
@@ -1218,6 +1280,10 @@ export function useWorkspaceStore({
       let daemonEpoch: string | null = null;
       let incarnation: string | null = null;
       let inheritedCwd = sourceSession.cwd;
+      // Pin the owner before the first await: a project switch mid-spawn must still land
+      // the binding (or the failure) on the workspace that owns this pane.
+      const isRemote = isRemoteWorkspaceId(workspaceId) || isRemoteWorkspaceId(sourceSession.workspaceId);
+      const owningWorkspaceId = isRemote ? (sourceSession.workspaceId || workspaceId) : mountedWorkspaceIdRef.current;
       try {
         await services.ensureTerminalEvents();
         if (services.spawnTerminalDetailed) {
@@ -1252,8 +1318,6 @@ export function useWorkspaceStore({
           });
         }
 
-        const isRemote = isRemoteWorkspaceId(workspaceId) || isRemoteWorkspaceId(sourceSession.workspaceId);
-        const owningWorkspaceId = isRemote ? (sourceSession.workspaceId || workspaceId) : mountedWorkspaceIdRef.current;
         const ownerState = owningWorkspaceId === mountedWorkspaceIdRef.current
           ? stateRef.current
           : getWorkspaceSnapshot(owningWorkspaceId);
@@ -1276,8 +1340,6 @@ export function useWorkspaceStore({
           terminalEventBus.clearSession(backendSessionId);
           await services.closeTerminal(backendSessionId).catch(() => undefined);
         }
-        const isRemote = isRemoteWorkspaceId(workspaceId) || isRemoteWorkspaceId(sourceSession.workspaceId);
-        const owningWorkspaceId = isRemote ? (sourceSession.workspaceId || workspaceId) : mountedWorkspaceIdRef.current;
         dispatchToOwner({
           type: "SESSION_BACKEND_UNAVAILABLE",
           sessionId: localSessionId,
@@ -1464,14 +1526,24 @@ export function useWorkspaceStore({
   );
 
   const syncWorktrees = useCallback(
-    async (worktrees: Worktree[]) => {
+    async (worktrees: Worktree[], options?: { confirmedRemoval?: boolean }) => {
       const snapshot = stateRef.current;
+      // An empty listing next to live sessions is far more often a transient listing failure
+      // than every worktree vanishing at once; applying it would close every PTY. Callers
+      // that know the removal is real pass confirmedRemoval.
+      if (worktrees.length === 0 && Object.keys(snapshot.sessions).length > 0 && !options?.confirmedRemoval) {
+        switchDebug("worktree.sync.refused-empty", {
+          workspaceId,
+          sessionCount: Object.keys(snapshot.sessions).length,
+        });
+        return;
+      }
       const validWorktreePaths = new Set(worktrees.map((worktree) => worktree.path));
       const staleSessions = Object.values(snapshot.sessions).filter((session) => !validWorktreePaths.has(sessionWorktreePath(session)));
       dispatch({ type: "SET_WORKTREES", worktrees });
       await Promise.allSettled(staleSessions.map((session) => closeBackendSession(session, services)));
     },
-    [dispatch, services],
+    [dispatch, services, workspaceId],
   );
 
   const activateTab = useCallback((tabId: string) => dispatch({ type: "ACTIVATE_TAB", tabId }), [dispatch]);
@@ -3702,6 +3774,17 @@ async function closeBackendSession(session: TerminalSession | undefined, service
     await services.closeTerminal(session.backendSessionId);
   } finally {
     terminalEventBus.clearSession(session.backendSessionId);
+  }
+}
+
+/** Closes a PTY that never became bound to a pane, clearing its buffered events. */
+async function closeOrphanBackend(backendSessionId: string, services: WorkspaceServices) {
+  try {
+    await services.closeTerminal(backendSessionId);
+  } catch (error) {
+    console.warn("Failed to close unowned terminal session:", backendSessionId, error);
+  } finally {
+    terminalEventBus.clearSession(backendSessionId);
   }
 }
 

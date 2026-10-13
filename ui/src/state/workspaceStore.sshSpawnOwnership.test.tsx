@@ -637,4 +637,65 @@ describe("SSH spawn completion ownership", () => {
       hook.unmount();
     }
   });
+
+  it("binds a paired-daemon split to its owning workspace when the project switches mid-spawn", async () => {
+    const pairedWorkspaceId = "daemon:host-1:proj";
+    clearWorkspaceSnapshot(pairedWorkspaceId);
+    clearHmrWorkspaceState(pairedWorkspaceId);
+    const spawnDeferred = createDeferred<{ sessionId: string; session?: { cwd?: string | null } | null }>();
+    const spawnStarted = createDeferred<void>();
+    const services: WorkspaceServices = {
+      ensureTerminalEvents: vi.fn(async () => undefined),
+      spawnTerminal: vi.fn(async () => "unexpected"),
+      spawnTerminalDetailed: vi.fn(async () => {
+        spawnStarted.resolve();
+        return await spawnDeferred.promise;
+      }),
+      getTerminalCwd: vi.fn(async () => "/srv/paired"),
+      closeTerminal: vi.fn(async () => undefined),
+      waitForTerminalExit: vi.fn(async () => undefined),
+    };
+    const tab: TerminalTab = { id: "tab-p", label: "P", sessionId: "session-p" };
+    setWorkspaceSnapshot(pairedWorkspaceId, {
+      workspaceId: pairedWorkspaceId,
+      worktrees: [sshWorktree],
+      activeWorktreePath: sshWorktree.path,
+      sessions: {
+        "session-p": {
+          id: "session-p", cwd: sshWorktree.path, worktreePath: sshWorktree.path,
+          workspaceId: pairedWorkspaceId, worktree: null, backendSessionId: "backend-p", lifecycle: "working",
+        },
+      },
+      layout: {
+        tabs: [tab], activeTabId: tab.id,
+        layoutsByTabId: {
+          [tab.id]: { root: { type: "leaf", leafId: "leaf-p" }, activeLeafId: "leaf-p", expandedLeafId: null, sessionIdsByLeafId: { "leaf-p": "session-p" } },
+        },
+      },
+      unreadTabIds: {}, unreadWorktreePaths: {}, activityBySessionId: {},
+    });
+    const hook = renderHook(
+      ({ wsId, worktrees }) => useWorkspaceStore({ workspaceId: wsId, initialWorktrees: worktrees, services }),
+      { initialProps: { wsId: pairedWorkspaceId, worktrees: [sshWorktree] } },
+    );
+    try {
+      let splitPromise!: Promise<void>;
+      act(() => { splitPromise = hook.result.current.splitPane("tab-p", "leaf-p", "horizontal"); });
+      await waitForStarted(spawnStarted.promise);
+      const splitSessionId = Object.keys(hook.result.current.state.sessions).find((id) => id !== "session-p")!;
+      act(() => { hook.rerender({ wsId: "local-ws", worktrees: [localWorktree] }); });
+      await act(async () => {
+        spawnDeferred.resolve({ sessionId: "backend-p-split", session: { cwd: "/srv/paired/sub" } });
+        await splitPromise;
+      });
+      expect(services.closeTerminal).not.toHaveBeenCalledWith("backend-p-split");
+      const bound = getWorkspaceSnapshot(pairedWorkspaceId)!.sessions[splitSessionId];
+      expect(bound.backendSessionId).toBe("backend-p-split");
+      expect(bound.lifecycle).toBe("running");
+    } finally {
+      hook.unmount();
+      clearWorkspaceSnapshot(pairedWorkspaceId);
+      clearHmrWorkspaceState(pairedWorkspaceId);
+    }
+  });
 });

@@ -151,6 +151,124 @@ describe("Daemon restart batch recovery & fresh shell fallback", () => {
     expect(result.current.state.activityBySessionId?.["sess-agent"]).toBeUndefined();
   });
 
+  it("closes batch PTYs whose session vanished or was rebound, reports entry errors, and frees uncovered targets", async () => {
+    let resolveBatch!: (entries: Array<{ index: number; sessionId: string | null; error: string | null }>) => void;
+    let notifyBatchStarted!: () => void;
+    const batchStarted = new Promise<void>((resolve) => { notifyBatchStarted = resolve; });
+    const spawnTerminalsBatch = vi.fn(() => {
+      notifyBatchStarted();
+      return new Promise<Array<{ index: number; sessionId: string | null; error: string | null }>>((resolve) => { resolveBatch = resolve; });
+    });
+    const services: WorkspaceServices = {
+      ensureTerminalEvents: vi.fn(async () => {}),
+      spawnTerminal: vi.fn(async () => "backend-single-retry"),
+      spawnTerminalsBatch,
+      getTerminalCwd: vi.fn(async () => "/repo"),
+      closeTerminal: vi.fn(async () => {}),
+      waitForTerminalExit: vi.fn(async () => {}),
+    };
+    const shell = (id: string): TerminalSession => ({
+      id, backendSessionId: null, lifecycle: "exited", workspaceId: "ws-batch", worktree: null, cwd: "/repo",
+    });
+    const base = (sessions: Record<string, TerminalSession>): WorkspaceState => ({
+      workspaceId: "ws-batch",
+      worktrees: [],
+      activeWorktreePath: null,
+      layout: { tabs: [], activeTabId: null, layoutsByTabId: {} },
+      sessions,
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+    });
+    const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "ws-batch", services }));
+    act(() => {
+      result.current.restoreWorkspace(base({ a: shell("a"), b: shell("b"), c: shell("c"), d: shell("d") }));
+    });
+
+    let ensure!: Promise<void>;
+    act(() => { ensure = result.current.ensureSessionBackends(["a", "b", "c", "d"]); });
+    await act(async () => { await batchStarted; });
+    // While the batch is in flight: "a" gets a newer binding, "b" is closed.
+    act(() => {
+      result.current.restoreWorkspace(base({ a: { ...shell("a"), backendSessionId: "backend-newer", lifecycle: "running" }, c: shell("c"), d: shell("d") }));
+    });
+    await act(async () => {
+      resolveBatch([
+        { index: 0, sessionId: "backend-batch-a", error: null },
+        { index: 1, sessionId: "backend-batch-b", error: null },
+        { index: 2, sessionId: null, error: "spawn refused" },
+      ]);
+      await ensure;
+    });
+
+    const sessions = result.current.state.sessions;
+    expect(sessions.a.backendSessionId).toBe("backend-newer");
+    expect(services.closeTerminal).toHaveBeenCalledWith("backend-batch-a");
+    expect(services.closeTerminal).toHaveBeenCalledWith("backend-batch-b");
+    expect(sessions.c.backendUnavailableReason).toBe("spawn refused");
+
+    // "d" was not covered by the batch result; it must be retryable rather than stuck in-flight.
+    await act(async () => { await result.current.ensureSessionBackends(["d"]); });
+    expect(result.current.state.sessions.d.backendSessionId).toBe("backend-single-retry");
+  });
+
+  it("does not fall back to per-session spawns after an ambiguous batch transport failure", async () => {
+    const services: WorkspaceServices = {
+      ensureTerminalEvents: vi.fn(async () => {}),
+      spawnTerminal: vi.fn(async () => "backend-duplicate"),
+      spawnTerminalsBatch: vi.fn(async () => { throw new Error("transport dropped"); }),
+      getTerminalCwd: vi.fn(async () => "/repo"),
+      closeTerminal: vi.fn(async () => {}),
+      waitForTerminalExit: vi.fn(async () => {}),
+    };
+    const shell = (id: string): TerminalSession => ({
+      id, backendSessionId: null, lifecycle: "exited", workspaceId: "ws-amb", worktree: null, cwd: "/repo",
+    });
+    const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "ws-amb", services }));
+    act(() => {
+      result.current.restoreWorkspace({
+        workspaceId: "ws-amb", worktrees: [], activeWorktreePath: null,
+        layout: { tabs: [], activeTabId: null, layoutsByTabId: {} },
+        sessions: { a: shell("a"), b: shell("b") }, unreadTabIds: {}, unreadWorktreePaths: {},
+      });
+    });
+    await act(async () => {
+      await expect(result.current.ensureSessionBackends(["a", "b"])).rejects.toThrow("transport dropped");
+    });
+    expect(services.spawnTerminal).not.toHaveBeenCalled();
+    expect(result.current.state.sessions.a.backendUnavailableReason).toBeTruthy();
+  });
+
+  it("closes a per-session recovery PTY when the session was rebound during the spawn", async () => {
+    let resolveSpawn!: (id: string) => void;
+    let notifyStarted!: () => void;
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    const services: WorkspaceServices = {
+      ensureTerminalEvents: vi.fn(async () => {}),
+      spawnTerminal: vi.fn(() => { notifyStarted(); return new Promise<string>((resolve) => { resolveSpawn = resolve; }); }),
+      getTerminalCwd: vi.fn(async () => "/repo"),
+      closeTerminal: vi.fn(async () => {}),
+      waitForTerminalExit: vi.fn(async () => {}),
+    };
+    const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "ws-one", services }));
+    act(() => {
+      result.current.restoreWorkspace({
+        workspaceId: "ws-one", worktrees: [], activeWorktreePath: null,
+        layout: { tabs: [], activeTabId: null, layoutsByTabId: {} },
+        sessions: { s: { id: "s", backendSessionId: null, lifecycle: "exited", workspaceId: "ws-one", worktree: null, cwd: "/repo" } },
+        unreadTabIds: {}, unreadWorktreePaths: {},
+      });
+    });
+    let ensure!: Promise<void>;
+    act(() => { ensure = result.current.ensureSessionBackends(["s"]); });
+    await act(async () => { await started; });
+    act(() => {
+      result.current.dispatchWorkspaceAction({ type: "REBIND_SESSION_BACKEND", sessionId: "s", backendSessionId: "backend-newer" });
+    });
+    await act(async () => { resolveSpawn("backend-late"); await ensure; });
+    expect(result.current.state.sessions.s.backendSessionId).toBe("backend-newer");
+    expect(services.closeTerminal).toHaveBeenCalledWith("backend-late");
+  });
+
   it("ensureSessionBackends automatically recovers unresumable agents as shells while preserving resumable agents", async () => {
     const spawnTerminal = vi.fn(async ({ cwd }: { cwd?: string }) => `backend-spawned-${cwd ?? "root"}`);
 
