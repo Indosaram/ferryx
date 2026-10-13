@@ -247,6 +247,26 @@ describe("terminalProtocol", () => {
 
       expect(assembler.activeMetadata).toBeNull();
     });
+
+    it("ignores an abort for a different snapshot and keeps the active transfer", () => {
+      const assembler = new SnapshotTransferAssembler();
+      assembler.handleBegin(fixture.validSnapshotAssembly.metadata);
+      expect(() =>
+        assembler.handleAbort("some-other-snapshot", 1, { reason: "clientCancelled" }),
+      ).toThrow("Abort does not match active transfer");
+      expect(assembler.activeMetadata).not.toBeNull();
+    });
+
+    it("rejects negative and non-integer chunk indexes", () => {
+      const assembler = new SnapshotTransferAssembler();
+      assembler.handleBegin(fixture.validSnapshotAssembly.metadata);
+      const chunk = fixture.validSnapshotAssembly.chunks[0];
+      for (const index of [-1, 0.5, Number.NaN]) {
+        expect(() =>
+          assembler.handleChunk(chunk.snapshotId, chunk.generation, index, chunk.chunkBase64, chunk.chunkCrc32c),
+        ).toThrow("must be a non-negative integer");
+      }
+    });
   });
 
   describe("chunkSnapshotPayload helper", () => {

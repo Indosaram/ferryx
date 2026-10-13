@@ -324,4 +324,55 @@ describe("terminalEventBus backlog buffer", () => {
 
     expect(getBacklogMetricsForTest(sessionId)).toEqual({ sessions: 0, chunks: 0, chars: 0 });
   });
+
+  it("treats an undecodable frame as a replay gap for the session named in its header", async () => {
+    const sessionId = "backend-bad-frame";
+    const gaps: Array<{ reason?: string }> = [];
+    const unsubscribeGap = terminalEventBus.subscribeReplayGap(sessionId, (gap) => gaps.push(gap));
+    const unsubscribeOutput = terminalEventBus.subscribeOutput(sessionId, () => undefined, false);
+    callbacks.output?.({ sessionId, data: encodeOutput("before") });
+    expect(getBacklogMetricsForTest(sessionId).chars).toBe(6);
+
+    // Valid v2 header naming the session, but an unsupported flag layout is irrelevant: force the
+    // body check to fail by declaring a gap block the payload does not contain.
+    const name = new TextEncoder().encode(sessionId);
+    const frame = new Uint8Array(20 + name.byteLength);
+    frame[0] = 2;
+    frame[1] = 1 << 2;
+    frame[2] = name.byteLength;
+    frame.set(name, 20);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    (terminalEventBus as unknown as { handleChannelFrame(f: Uint8Array): void }).handleChannelFrame(frame);
+    consoleError.mockRestore();
+
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]?.reason).toBe("decodeError");
+    expect(getBacklogMetricsForTest(sessionId).chars).toBe(0);
+
+    unsubscribeGap();
+    unsubscribeOutput();
+    terminalEventBus.clearSession(sessionId);
+  });
+
+  it("trims the backlog head on a UTF-8 boundary and copies the retained tail", async () => {
+    await terminalEventBus.ensureStarted();
+    const sessionId = "backend-utf8-trim";
+    const maxBacklog = 512 * 1024;
+    const unsubscribeSink = terminalEventBus.subscribeOutput(sessionId, () => undefined, false);
+    // "€" is e2 82 ac. Overflowing by 2 bytes cuts it after its lead byte, leaving a lone 0xac.
+    callbacks.output?.({ sessionId, data: encodeOutput("€" + "a".repeat(maxBacklog - 3)) });
+    callbacks.output?.({ sessionId, data: encodeOutput("bb") });
+    const replayedChunks: Uint8Array[] = [];
+    const unsubscribe = terminalEventBus.subscribeOutput(sessionId, (chunk) => {
+      replayedChunks.push(chunk as Uint8Array);
+    }, true);
+    const first = replayedChunks[0]!;
+    expect(first[0]).toBe("a".charCodeAt(0));
+    expect(getBacklogMetricsForTest(sessionId).chars).toBe(maxBacklog - 1);
+    // slice() detaches the tail from the original frame buffer instead of pinning all of it.
+    expect(first.buffer.byteLength).toBe(first.byteLength);
+    unsubscribe();
+    unsubscribeSink();
+    terminalEventBus.clearSession(sessionId);
+  });
 });

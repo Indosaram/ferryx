@@ -100,16 +100,8 @@ export class WebSocketTerminalTransport implements TerminalTransport {
     const flush = () => {
       this.flushOutboundBuffer(sessionId, ws);
     };
-    if (typeof ws.addEventListener === "function") {
-      ws.addEventListener("open", flush);
-    }
-    const origOnOpen = ws.onopen;
-    ws.onopen = (event: Event) => {
-      flush();
-      if (typeof origOnOpen === "function") {
-        origOnOpen.call(ws, event);
-      }
-    };
+    // A single open handler: flushing from both addEventListener and onopen ran it twice per open.
+    ws.onopen = () => flush();
     if (ws.readyState === WebSocket.OPEN) {
       flush();
     }

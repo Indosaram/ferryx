@@ -10,6 +10,7 @@ import {
 import { terminalEventBus } from "../terminalEvents";
 import { decodeBase64 } from "../terminalOutput";
 import type { TerminalAttachment, TerminalTransport, Unsubscribe } from "./types";
+import type { TerminalResync } from "./types";
 
 export class TauriTerminalTransport implements TerminalTransport {
   async listSessions() {
@@ -57,7 +58,27 @@ export class TauriTerminalTransport implements TerminalTransport {
     void terminalEventBus.ensureStarted().catch((error) => {
       console.warn("Failed to start terminal output event bus", error);
     });
-    return terminalEventBus.subscribeOutput(sessionId, listener, false);
+    const unsubscribeOutput = terminalEventBus.subscribeOutput(sessionId, listener, false);
+    // The bus drops the backlog/decoder on a replay gap and never publishes the gap frame's
+    // history as output, so forward it here or the consumer silently loses those bytes.
+    const unsubscribeGap = terminalEventBus.subscribeReplayGap(sessionId, (gap) => {
+      const history = typeof gap.history === "string" ? decodeBase64(gap.history) : gap.history;
+      if (history.byteLength > 0) listener(history);
+    });
+    return () => {
+      unsubscribeOutput();
+      unsubscribeGap();
+    };
+  }
+
+  onResync(sessionId: string, listener: (resync: TerminalResync) => void): Unsubscribe {
+    return terminalEventBus.subscribeReplayGap(sessionId, (gap) => {
+      listener({
+        reason: gap.reason ?? "gap",
+        requestedAfterSequence: gap.requestedAfterSequence,
+        availableFromSequence: gap.availableFromSequence,
+      });
+    });
   }
 
   onLifecycle(listener: (event: { sessionId: string; state: string; exitCode?: number | null }) => void): Unsubscribe {

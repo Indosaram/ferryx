@@ -302,6 +302,10 @@ export class SnapshotTransferAssembler {
       );
     }
 
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+      throw new Error(`Chunk index ${chunkIndex} must be a non-negative integer`);
+    }
+
     if (chunkIndex >= this.activeMeta.totalChunks) {
       throw new Error(
         `Chunk index ${chunkIndex} out of bounds for total chunks ${this.activeMeta.totalChunks}`,
@@ -411,16 +415,19 @@ export class SnapshotTransferAssembler {
       );
     }
 
-    if (
-      this.activeMeta &&
-      this.activeMeta.generation === generation &&
-      this.activeMeta.snapshotId === snapshotId
-    ) {
-      this.reset();
-      throw new Error(`Snapshot transfer was aborted: reason=${reason.reason}`);
+    if (!this.activeMeta) {
+      return;
+    }
+
+    // An abort for a different snapshot or generation must not tear down the live transfer.
+    if (this.activeMeta.generation !== generation || this.activeMeta.snapshotId !== snapshotId) {
+      throw new Error(
+        `Abort does not match active transfer: expected '${this.activeMeta.snapshotId}' generation ${this.activeMeta.generation}, got '${snapshotId}' generation ${generation}`,
+      );
     }
 
     this.reset();
+    throw new Error(`Snapshot transfer was aborted: reason=${reason.reason}`);
   }
 }
 

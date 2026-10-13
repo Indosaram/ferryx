@@ -14,6 +14,9 @@ import type { TerminalLifecyclePayload, TerminalOutputPayload, TerminalSession }
 
 const MAX_BACKLOG_BYTES = 512 * 1024;
 const MAX_OSC_TITLE_CHARS = 8 * 1024;
+const UTF8_MAX_CONTINUATION_BYTES = 3;
+const TERMINAL_OUTPUT_FRAME_FIXED_BYTES = 20;
+const TERMINAL_OUTPUT_FRAME_VERSIONS = [1, 2];
 const OSC_TITLE_START_RE = /\u001b\](?:0|1|2);/g;
 const OSC_PARTIAL_PREFIXES = ["\u001b", "\u001b]", "\u001b]0", "\u001b]1", "\u001b]2"] as const;
 
@@ -42,6 +45,8 @@ export type TerminalRuntimeReplayGap = {
   endSequence?: string | null;
   history: string | Uint8Array;
   daemonEpoch?: string | null;
+  /** "gap" = daemon-reported replay gap; "decodeError" = a frame was unreadable and output was lost. */
+  reason?: "gap" | "decodeError";
 };
 
 type ReplayGapListener = (gap: TerminalRuntimeReplayGap) => void;
@@ -51,10 +56,43 @@ type SessionBacklog = {
   totalBytes: number;
 };
 
+/** Recovers the session id from a frame header whose body failed to decode, or null if untrustworthy. */
+function peekFrameSessionId(frame: ArrayBuffer | Uint8Array): string | null {
+  const bytes = ArrayBuffer.isView(frame)
+    ? new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength)
+    : new Uint8Array(frame);
+  if (bytes.byteLength < TERMINAL_OUTPUT_FRAME_FIXED_BYTES) return null;
+  if (!TERMINAL_OUTPUT_FRAME_VERSIONS.includes(bytes[0]!)) return null;
+  const sessionEnd = TERMINAL_OUTPUT_FRAME_FIXED_BYTES + (bytes[2]! | (bytes[3]! << 8));
+  if (sessionEnd > bytes.byteLength) return null;
+  const sessionId = new TextDecoder().decode(bytes.subarray(TERMINAL_OUTPUT_FRAME_FIXED_BYTES, sessionEnd));
+  return sessionId.length > 0 ? sessionId : null;
+}
+
 export type OscTitleScanResult = {
   titles: string[];
   carry: string;
 };
+
+/**
+ * After the backlog head is trimmed it may start inside a multi-byte UTF-8 sequence. Drop the
+ * orphaned continuation bytes (0b10xxxxxx) so a replay never begins with a split character.
+ */
+function alignBacklogToUtf8Boundary(entry: SessionBacklog) {
+  let dropped = 0;
+  while (dropped < UTF8_MAX_CONTINUATION_BYTES && entry.chunks.length > 0) {
+    const head = entry.chunks[0]!;
+    if (head.byteLength === 0) {
+      entry.chunks.shift();
+      continue;
+    }
+    if ((head[0]! & 0xc0) !== 0x80) break;
+    if (head.byteLength === 1) entry.chunks.shift();
+    else entry.chunks[0] = head.slice(1);
+    entry.totalBytes -= 1;
+    dropped += 1;
+  }
+}
 
 /**
  * Extracts OSC 0/1/2 terminal titles from decoded PTY output while preserving an incomplete
@@ -229,14 +267,7 @@ export class TerminalEventBus {
   private async ensureBinaryOutputChannel(): Promise<void> {
     if (!isTauri() || this.binaryOutputChannel) return;
 
-    const channel = new Channel<ArrayBuffer>((frame) => {
-      const receivedAtMs = terminalThroughputMetricsEnabled() ? metricsNow() : undefined;
-      try {
-        this.handleBinaryOutput(decodeTerminalOutputFrame(frame), receivedAtMs);
-      } catch (error) {
-        console.error("Failed to decode terminal output channel frame", error);
-      }
-    });
+    const channel = new Channel<ArrayBuffer>((frame) => this.handleChannelFrame(frame));
 
     try {
       await invoke<void>("cmd_terminal_output_channel", { channel });
@@ -244,6 +275,16 @@ export class TerminalEventBus {
     } catch (error) {
       // The Rust side keeps the legacy terminal_output event as a no-loss fallback.
       console.warn("Failed to register terminal output channel; using event fallback", error);
+    }
+  }
+
+  private handleChannelFrame(frame: ArrayBuffer | Uint8Array) {
+    const receivedAtMs = terminalThroughputMetricsEnabled() ? metricsNow() : undefined;
+    try {
+      this.handleBinaryOutput(decodeTerminalOutputFrame(frame), receivedAtMs);
+    } catch (error) {
+      console.error("Failed to decode terminal output channel frame", error);
+      this.handleUndecodableFrame(frame);
     }
   }
 
@@ -255,6 +296,7 @@ export class TerminalEventBus {
     endSequence: string | null,
     history: string | Uint8Array,
     daemonEpoch: string | null,
+    reason: "gap" | "decodeError" = "gap",
   ) {
     this.decoderRegistry.reset(sessionId);
     this.backlog.delete(sessionId);
@@ -267,9 +309,25 @@ export class TerminalEventBus {
       endSequence,
       history,
       daemonEpoch,
+      reason,
     };
     for (const listener of this.replayGapListeners.get(sessionId) ?? []) {
       listener(gap);
+    }
+  }
+
+  /**
+   * An unreadable frame means output for its session was lost with no sequence information, so it
+   * is treated like a replay gap: decoder/backlog state is reset and gap listeners are told to
+   * resync. When the header is too damaged to name the session, every known session resyncs.
+   */
+  private handleUndecodableFrame(frame: ArrayBuffer | Uint8Array) {
+    const sessionId = peekFrameSessionId(frame);
+    const sessionIds = sessionId
+      ? [sessionId]
+      : [...new Set([...this.outputListeners.keys(), ...this.replayGapListeners.keys()])];
+    for (const id of sessionIds) {
+      this.handleReplayGap(id, "0", "0", null, null, new Uint8Array(0), null, "decodeError");
     }
   }
 
@@ -375,11 +433,13 @@ export class TerminalEventBus {
           entry.chunks.shift();
           entry.totalBytes -= oldest.byteLength;
         } else {
-          entry.chunks[0] = oldest.subarray(overflow);
+          // slice copies, so the retained tail no longer pins the whole original frame buffer.
+          entry.chunks[0] = oldest.slice(overflow);
           entry.totalBytes -= overflow;
           break;
         }
       }
+      alignBacklogToUtf8Boundary(entry);
     }
 
     for (const listener of this.outputListeners.get(sessionId) ?? []) {

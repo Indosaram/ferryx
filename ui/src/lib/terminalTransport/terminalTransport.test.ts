@@ -196,6 +196,36 @@ describe("TerminalTransport abstractions", () => {
     expect(unlistenFn).toHaveBeenCalled();
   });
 
+  it("TauriTerminalTransport onOutput delivers replay-gap history and onResync signals the gap", async () => {
+    vi.spyOn(terminalEventBus, "ensureStarted").mockResolvedValue();
+    vi.spyOn(terminalEventBus, "subscribeOutput").mockReturnValue(() => undefined);
+    let gapHandler: ((gap: Parameters<Parameters<typeof terminalEventBus.subscribeReplayGap>[1]>[0]) => void) | null = null;
+    vi.spyOn(terminalEventBus, "subscribeReplayGap").mockImplementation((_sessionId, handler) => {
+      // onOutput and onResync each register one; the last registration is the one under test.
+      gapHandler = handler;
+      return () => undefined;
+    });
+
+    const transport = new TauriTerminalTransport();
+    const received: string[] = [];
+    transport.onOutput("sess-gap", (data) => {
+      received.push(typeof data === "string" ? data : new TextDecoder().decode(data));
+    });
+    const emitOutputGap = gapHandler as unknown as (gap: object) => void;
+    emitOutputGap({
+      requestedAfterSequence: "5",
+      availableFromSequence: "40",
+      history: new TextEncoder().encode("resynced-history"),
+    });
+    expect(received).toEqual(["resynced-history"]);
+
+    const resyncs: unknown[] = [];
+    transport.onResync("sess-gap", (resync) => resyncs.push(resync));
+    const emitResyncGap = gapHandler as unknown as (gap: object) => void;
+    emitResyncGap({ requestedAfterSequence: "5", availableFromSequence: "40", history: new Uint8Array(0) });
+    expect(resyncs).toEqual([{ reason: "gap", requestedAfterSequence: "5", availableFromSequence: "40" }]);
+  });
+
   it("TauriTerminalTransport onLifecycle forwards lifecycle events", async () => {
     let lifecycleHandler: ((payload: tauri.TerminalLifecyclePayload) => void) | null = null;
     const unlistenFn = vi.fn();
@@ -280,6 +310,15 @@ describe("TerminalTransport abstractions", () => {
       expect(lastMockWs?.sent[1]).toBe(JSON.stringify({ type: "resize", cols: 120, rows: 40 }));
       expect(lastMockWs?.sent[2]).toBe(JSON.stringify({ type: "signal", signal: "interrupt" }));
       expect(decoder.decode(lastMockWs?.sent[3] as Uint8Array)).toBe("second-chunk\n");
+    });
+
+    it("WebSocketTerminalTransport flushes exactly once per socket open", async () => {
+      const transport = new WebSocketTerminalTransport("http://127.0.0.1:43821", "dummy_token");
+      const flushSpy = vi.spyOn(transport as unknown as { flushOutboundBuffer: () => void }, "flushOutboundBuffer");
+      await transport.attach("sess-once");
+      expect(flushSpy).not.toHaveBeenCalled();
+      lastMockWs?.open();
+      expect(flushSpy).toHaveBeenCalledTimes(1);
     });
 
     it("WebSocketTerminalTransport increments drop counter when byte bound is exceeded without unbounded buffer growth", async () => {
