@@ -79,11 +79,11 @@ export function MobileTopBar({
   return (
     <header
       data-testid="mobile-top-bar"
-      className="shrink-0 bg-chat-header border-b border-chat-header-border pt-safe-header px-3"
+      className="shrink-0 bg-chat-header border-b border-chat-header-border pt-safe-header px-3 max-[374px]:px-2"
     >
-      <div className="h-14 flex items-center gap-2">
+      <div className="h-14 flex items-center gap-2 max-[374px]:gap-0">
         {/* Left island: the workspace-context switcher (paseo compact-header.tsx island chrome). */}
-        <div className="rounded-full p-[7px] bg-chat-surface-raised shadow-sm">
+        <div className="rounded-full p-[7px] max-[374px]:p-1 bg-chat-surface-raised shadow-sm">
           <button
             type="button"
             aria-label="Change workspace context"
@@ -127,18 +127,18 @@ export function MobileTopBar({
             ) : null}
           </div>
           <div className="flex min-w-0 items-center gap-1.5 text-[13px] text-chat-foreground-secondary">
-            <span aria-label="Current desktop context" className="min-w-0 shrink truncate">
+            <span aria-label="Current desktop context" className="min-w-8 shrink truncate">
               {contextLabel}
             </span>
             {hostBadge ? (
               <>
-                <span aria-hidden="true" className="shrink-0 text-chat-foreground-tertiary">·</span>
-                {/* Cap the badge while keeping room for its glyph and a visible label. */}
+                <span aria-hidden="true" className="shrink-0 text-chat-foreground-tertiary max-[374px]:hidden">·</span>
+                {/* Cap the badge via max-w rather than shrinking so the host name stays legible (R1/IS-4). */}
                 <span
                   data-testid="remote-connection-badge"
                   data-connection={hostBadge.transport}
                   aria-label={hostBadge.ariaLabel}
-                  className="flex min-w-[4ch] max-w-[40%] shrink items-center gap-1"
+                  className="flex min-w-12 max-w-[50%] shrink-0 items-center gap-1"
                 >
                   <Server aria-hidden="true" className="size-3 shrink-0" />
                   <span className="min-w-0 truncate">{hostBadge.label}</span>
@@ -149,7 +149,7 @@ export function MobileTopBar({
         </div>
 
         {hideControls ? null : (
-          <div className="flex min-w-0 rounded-full p-[7px] bg-chat-surface-raised shadow-sm gap-0.5">
+          <div className="flex min-w-0 rounded-full p-[7px] max-[374px]:p-1 bg-chat-surface-raised shadow-sm gap-0.5">
             {attention ? (
               <button
                 type="button"
@@ -160,7 +160,7 @@ export function MobileTopBar({
                 className={ATTENTION_BUTTON}
               >
                 <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-status-warning" />
-                <span className="min-w-0 max-w-24 truncate max-[389px]:sr-only">{attention.label}</span>
+                <span className="min-w-0 max-w-24 truncate max-[390px]:sr-only">{attention.label}</span>
                 {attention.count > 1 ? <span className="shrink-0 tabular-nums">{attention.count}</span> : null}
               </button>
             ) : null}
