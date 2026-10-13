@@ -148,7 +148,9 @@ export function MobileTopBar({
                 >
                   <span className="sr-only">{hostBadge.ariaLabel}</span>
                   <Server aria-hidden="true" className="size-3 shrink-0" />
-                  <span className="min-w-0 truncate">{hostBadge.label}</span>
+                  <span data-testid="remote-connection-badge-label" className="min-w-0 truncate">
+                    {hostBadge.label}
+                  </span>
                 </span>
               </>
             ) : null}

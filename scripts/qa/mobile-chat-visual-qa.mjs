@@ -244,7 +244,7 @@ const TOP_BAR_PROBE = (expectedWidth) => {
   const contextSpanClientWidth = contextSpan ? contextSpan.clientWidth : 0;
   const contextSpanVisible = !contextSpan || contextSpanClientWidth >= 24;
   const hostBadge = topBar.querySelector('[data-testid="remote-connection-badge"]');
-  const hostLabel = hostBadge?.querySelector("span");
+  const hostLabel = hostBadge?.querySelector('[data-testid="remote-connection-badge-label"]');
   const hostLabelClientWidth = hostLabel?.clientWidth ?? 0;
   const hostLabelScrollWidth = hostLabel?.scrollWidth ?? 0;
   const hostLabelTruncated = Boolean(hostLabel && hostLabelScrollWidth > hostLabelClientWidth);
