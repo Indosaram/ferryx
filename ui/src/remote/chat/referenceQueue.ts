@@ -156,9 +156,15 @@ export class ReferenceQueueStore {
     } catch {
       /* private mode */
     }
-    let messages: HeldMessage[] = raw ? [{ id: newId(), text: raw }] : [];
+    let messages: HeldMessage[] = [];
     try {
       const data = JSON.parse(raw ?? "null");
+      // a parsed primitive is a legacy plain-text message that happens to be valid JSON ("42")
+      if (raw && (data === null || typeof data !== "object")) {
+        messages = [{ id: newId(), text: raw }];
+      }
+      // an object or array that is not a v1 envelope (a future version, another build):
+      // never surface the raw JSON as a sendable message, and leave the stored value alone
       if (data?.version === 1 && Array.isArray(data.messages)) {
         const ids = new Set<string>();
         messages = data.messages.filter((item: unknown): item is HeldMessage => {
@@ -172,7 +178,8 @@ export class ReferenceQueueStore {
         });
       }
     } catch {
-      /* previous versions stored a single plain-text message */
+      // previous versions stored a single plain-text message
+      if (raw) messages = [{ id: newId(), text: raw }];
     }
     this.saved.set(key, raw);
     this.queues.set(key, messages);

@@ -37,6 +37,8 @@ export class ReferenceDraftStore {
   private unsaved = new Set<string>();
   /** the text each pending send carries, and whether the draft stopped extending it meanwhile */
   private pending = new Map<string, { sent: string; edited: boolean }>();
+  /** sends whose `begin` was refused because another send was in flight: no pending record */
+  private overlapped = new Map<string, string[]>();
   private listeners = new Set<() => void>();
 
   constructor(private storage: () => DraftStorage = () => window.localStorage) {}
@@ -152,7 +154,10 @@ export class ReferenceDraftStore {
 
   private beginKey(key: string, sent?: string): boolean {
     const draft = this.readKey(key);
-    if (draft.sending) return false;
+    if (draft.sending) {
+      if (sent !== undefined) this.overlapped.set(key, [...(this.overlapped.get(key) ?? []), sent]);
+      return false;
+    }
     if (sent !== undefined) this.pending.set(key, { sent, edited: false });
     this.drafts.set(key, { ...draft, sending: true });
     this.notify();
@@ -168,7 +173,17 @@ export class ReferenceDraftStore {
   private settleKey(key: string, sent: string): { text: string; edited: boolean } {
     this.refreshKey(key);
     const current = this.readKey(key).text;
-    const editedMeanwhile = this.pending.get(key)?.edited === true;
+    const pending = this.pending.get(key);
+    // a send that began while another was in flight never had a pending record, so nothing
+    // tracked whether the draft still extends it: keep the draft rather than strip a prefix
+    const queued = pending?.sent === sent ? [] : (this.overlapped.get(key) ?? []);
+    const overlapIndex = queued.indexOf(sent);
+    if (overlapIndex >= 0) {
+      const rest = queued.filter((_, index) => index !== overlapIndex);
+      if (rest.length) this.overlapped.set(key, rest);
+      else this.overlapped.delete(key);
+    }
+    const editedMeanwhile = pending?.edited === true || overlapIndex >= 0;
     this.pending.delete(key);
     const edited = editedMeanwhile || (current !== sent && !current.startsWith(sent));
     const text = edited ? current : current.slice(sent.length);

@@ -66,14 +66,18 @@ describe("reference held queue persistence", () => {
     expect(data.has(queue.storageKey(paneA))).toBe(false);
   });
 
-  it("migrates the previous plain-text queue without losing JSON-like messages", () => {
-    for (const text of ["legacy", '{"message":"legacy"}']) {
+  it("migrates the previous plain-text queue, including a legacy primitive that parses as JSON", () => {
+    for (const text of ["legacy", "42"]) {
       const { queue, data, storage } = fixture();
       data.set(queue.storageKey(paneA), text);
       expect(queue.read(paneA)[0]!.text).toBe(text);
       queue.add(paneA, "next");
       expect(texts(new ReferenceQueueStore(() => storage), paneA)).toEqual([text, "next"]);
     }
+    const { queue, data } = fixture();
+    data.set(queue.storageKey(paneA), '{"message":"legacy"}');
+    expect(queue.read(paneA)).toEqual([]);
+    expect(data.get(queue.storageKey(paneA))).toBe('{"message":"legacy"}');
   });
 });
 
@@ -234,5 +238,30 @@ describe("reference held queue storage failure", () => {
       },
     }));
     expect(texts(reopened, paneA)).toEqual(["held", "held again"]);
+  });
+});
+
+describe("reference held queue unrecognised storage", () => {
+  it("does not turn parseable non-v1 JSON into a sendable held message", () => {
+    const { queue, data } = fixture();
+    const raw = JSON.stringify({ version: 2, messages: [] });
+    data.set(queue.storageKey(paneA), raw);
+    expect(queue.read(paneA)).toEqual([]);
+    expect(data.get(queue.storageKey(paneA))).toBe(raw);
+  });
+
+  it("does not turn a parseable non-envelope value into a held message", () => {
+    for (const raw of ["[1]", JSON.stringify({ version: 2, messages: [] })]) {
+      const { queue, data } = fixture();
+      data.set(queue.storageKey(paneA), raw);
+      expect(queue.read(paneA)).toEqual([]);
+      expect(data.get(queue.storageKey(paneA))).toBe(raw);
+    }
+  });
+
+  it("still reads a legacy plain-text value as one held message", () => {
+    const { queue, data } = fixture();
+    data.set(queue.storageKey(paneA), "legacy text");
+    expect(texts(queue, paneA)).toEqual(["legacy text"]);
   });
 });
