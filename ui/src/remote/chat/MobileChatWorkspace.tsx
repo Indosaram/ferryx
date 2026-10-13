@@ -205,7 +205,13 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   const [turnAnnouncement, setTurnAnnouncement] = useState("");
   const wasRunningRef = useRef(isRunning);
   // the viewport as it was before this commit, so an older page can be anchored
-  const viewportRef = useRef({ top: 0, height: 0, count: 0, atBottom: true });
+  const viewportRef = useRef<{
+    top: number;
+    height: number;
+    count: number;
+    atBottom: boolean;
+    firstId: string | null;
+  }>({ top: 0, height: 0, count: 0, atBottom: true, firstId: null });
 
   const scrollToBottom = useCallback((smooth = true) => {
     if (messagesEndRef.current) {
@@ -227,10 +233,11 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
       height: el.scrollHeight,
       count: messages.length,
       atBottom,
+      firstId: messages[0]?.id ?? null,
     };
     setIsAtBottom(atBottom);
     setShowScrollPill(distanceFromBottom > 100);
-  }, [messages.length]);
+  }, [messages]);
 
   useEffect(() => {
     const wasRunning = wasRunningRef.current;
@@ -251,7 +258,14 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
     const el = scrollContainerRef.current;
     if (!el) return;
     const previous = viewportRef.current;
+    const firstId = messages[0]?.id ?? null;
+    // a page was prepended only when the first turn changed and the old first turn is still here
+    const prepended =
+      previous.firstId !== null &&
+      firstId !== previous.firstId &&
+      messages.some((message) => message.id === previous.firstId);
     if (
+      prepended &&
       messages.length > previous.count &&
       !previous.atBottom &&
       previous.top > 0 &&
@@ -264,6 +278,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
       height: el.scrollHeight,
       count: messages.length,
       atBottom: el.scrollHeight - el.scrollTop - el.clientHeight < 48,
+      firstId,
     };
   }, [messages]);
 

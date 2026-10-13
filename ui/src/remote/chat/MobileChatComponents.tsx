@@ -775,6 +775,8 @@ const REFERENCE_PROSE_COMPONENTS = {
     </code>
   ),
   img: ChatMarkdownImage,
+  ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
+  ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
 };
 
 /** Markdown the page already carries, drawn the way the rest of the chat draws prose. */

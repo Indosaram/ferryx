@@ -1403,4 +1403,57 @@ describe("reference chat lane review fixes", () => {
     await drainSettledResponses();
     expect(screen.queryByTestId("chat-history-warning")?.textContent ?? "").not.toMatch(/not delivered/);
   });
+
+  it("ui-workspace-wiring-r2-2: a transient capabilities failure warns and retries instead of killing the lane", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let capabilityReads = 0;
+    installLane(({ url }) => {
+      if (!url.includes("/api/v1/capabilities")) return undefined;
+      capabilityReads += 1;
+      return capabilityReads === 1 ? jsonResponse({ error: "bad gateway" }, false, 502) : undefined;
+    });
+    render(<RemoteApp />);
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not available/i);
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await drainSettledResponses();
+
+    expect(capabilityReads).toBeGreaterThan(1);
+    await laneReady();
+  });
+
+  it("ui-workspace-wiring-r2-3: a newest page that slid past the loaded older pages drops them instead of leaving a gap", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let newestOffset = 500;
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      return url.includes("cursor=")
+        ? jsonResponse(nativePage({
+            turns: [{ role: "user", parts: [{ kind: "text", text: "OLD-1" }], startedAt: "2026-10-05T00:00:00Z" }],
+            cursor: null,
+            hasMore: false,
+          }))
+        : jsonResponse(nativePage({ cursor: { streamId: "omo:abc", offset: newestOffset }, hasMore: true }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+    await screen.findByText("OLD-1");
+
+    // the agent wrote more turns: the newest page now starts later than the one the older page joined
+    newestOffset = 600;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await drainSettledResponses();
+
+    expect(screen.queryByText("OLD-1")).not.toBeInTheDocument();
+    expect(screen.getByTestId("reference-older-button")).toBeInTheDocument();
+  });
 });
