@@ -2030,3 +2030,150 @@ async fn orphaned_staged_files_are_listed_and_can_be_released() {
     fixture.server.stop().await;
 }
 
+/// The attachment directories under a pane's staging root, if the root exists yet.
+fn staged_attachment_dirs(worktree: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(reference_files::reference_staging_base_dir(worktree))
+        .map(|entries| entries.filter_map(|entry| entry.ok().map(|entry| entry.path())).collect())
+        .unwrap_or_default()
+}
+
+/// rs-files-routes-r4-1: a stage whose caller leaves while its bytes are being written must not
+/// leave a hidden reservation behind. The handler future is dropped exactly as hyper drops it on
+/// a disconnect, while the write is in flight; afterwards every slot the target holds is either
+/// listed (and so releasable) or free, so a full set can be staged again.
+#[tokio::test]
+async fn a_stage_whose_caller_leaves_mid_write_leaves_no_hidden_reservation() {
+    use base64::Engine as _;
+
+    let fixture = fixture().await;
+    let worktree = fixture.worktree().await;
+    let bytes = vec![b'x'; 4 * 1024 * 1024];
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(fixture.route("files"))
+        .header("authorization", format!("Bearer {}", fixture.control))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(fixture.mutation(
+            &uuid::Uuid::new_v4().to_string(),
+            serde_json::json!({
+                "name": "aborted.bin",
+                "mediaType": "text/plain",
+                "sizeBytes": bytes.len(),
+                "contentBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }),
+        )))
+        .expect("request");
+    let mut handler = Box::pin(crate::remote::server::reference_chat_stage_file(
+        axum::extract::State(Arc::clone(&fixture.state)),
+        axum::extract::Path(fixture.session_id.clone()),
+        request,
+    ));
+    // Drive the handler only until its write has begun on disk; the disk is checked BEFORE each
+    // poll, so the handler can never run past the write without this loop seeing it first.
+    let mid_write = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if !staged_attachment_dirs(&worktree).is_empty() {
+                return;
+            }
+            if let std::task::Poll::Ready(response) = futures_util::poll!(handler.as_mut()) {
+                panic!("the stage finished before its caller left: {:?}", response.status());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(mid_write.is_ok(), "the stage never began writing its bytes");
+    // The caller leaves while the write is in flight.
+    drop(handler);
+
+    let query = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    // The stage the caller left must become visible (and so releasable): there is no event for
+    // it, so the list is re-read until it shows the file, within a bound.
+    let listed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let (status, body) = fixture
+                .server
+                .request(
+                    "GET",
+                    &format!("{}?{query}", fixture.route("files")),
+                    Some(&fixture.control),
+                    None,
+                )
+                .await;
+            assert_eq!(status, 200, "{body}");
+            let listed: serde_json::Value = serde_json::from_str(&body).expect("a file list");
+            if !listed["files"].as_array().expect("files array").is_empty() {
+                return listed;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the stage whose caller left never became listable, so it cannot be released");
+    for file in listed["files"].as_array().expect("files array") {
+        let id = file["receipt"]["attachmentId"].as_str().expect("attachmentId");
+        let own = format!("{}?{query}", fixture.route(&format!("files/{id}")));
+        let (status, body) = fixture
+            .server
+            .request("DELETE", &own, Some(&fixture.control), None)
+            .await;
+        assert_eq!(status, 204, "a listed slot can be released: {body}");
+    }
+    for index in 0..crate::scoped_contracts::ATTACHMENT_MAX_FILES_PER_TURN {
+        let (status, body) = fixture.stage(&format!("after-abort-{index}.txt"), b"after").await;
+        assert_eq!(
+            status, 200,
+            "an aborted stage left a reservation that is neither listed nor free: {body}"
+        );
+    }
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-r4-2: a pane whose session runs on an SSH remote must not have its file staged
+/// on this gateway's own disk at the remote's project path; the stage is refused, typed, and no
+/// bytes land locally.
+#[tokio::test]
+async fn a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally() {
+    let fixture = fixture().await;
+    let worktree = fixture.worktree().await;
+    let store_path = fixture
+        .state
+        .machine_services
+        .as_ref()
+        .expect("machine services")
+        .sessions
+        .remote_sessions_store_path()
+        .to_path_buf();
+    // The remote's project path exists on this host too, the case where a local write would
+    // silently succeed at the wrong place.
+    let store = serde_json::json!({
+        "version": 3,
+        "remoteSessions": [{
+            "descriptor": {
+                "backendSessionId": fixture.session_id,
+                "config": {
+                    "host": { "authMethod": "agent", "hostname": "203.0.113.7", "id": "ssh-test" },
+                    "environment": { "home": "/home/remote", "platform": "posix" },
+                    "projectPath": worktree.to_string_lossy(),
+                },
+            },
+        }],
+    });
+    std::fs::create_dir_all(store_path.parent().expect("store dir")).expect("store dir");
+    std::fs::write(&store_path, store.to_string()).expect("write remote session store");
+
+    let (status, body) = fixture.stage("remote.txt", b"remote body").await;
+    assert!(
+        staged_attachment_dirs(&worktree).is_empty(),
+        "an SSH-remote pane's file was staged on this gateway's disk: {body}"
+    );
+    assert_eq!(status, 422, "{body}");
+    assert!(body.contains("UNSUPPORTED"), "{body}");
+    fixture.server.stop().await;
+}
+
