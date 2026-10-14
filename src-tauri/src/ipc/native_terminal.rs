@@ -110,6 +110,15 @@ pub enum NativeTerminalSelectMode {
     All,
     Word { col: u16, row: u16 },
     Line { row: u16 },
+    /// Inclusive cell range in screen (scrollback-inclusive) rows, for keyboard copy mode.
+    #[serde(rename_all = "camelCase")]
+    Range {
+        start_col: u16,
+        start_row: u32,
+        end_col: u16,
+        end_row: u32,
+        rectangle: bool,
+    },
     None,
 }
 
@@ -127,6 +136,23 @@ pub struct NativeTerminalSelectionRange {
 pub struct NativeTerminalSelectionReceipt {
     pub text: Option<String>,
     pub range: Option<NativeTerminalSelectionRange>,
+}
+
+/// PTY cursor and viewport placement used to seed keyboard copy mode.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTerminalCursorReceipt {
+    /// Cursor column in the active area.
+    pub col: u16,
+    /// Cursor row in the active area (0 = top of the live screen).
+    pub row: u16,
+    /// Screen (scrollback-inclusive) row of the cursor.
+    pub screen_row: u64,
+    /// Screen row shown at the top of the viewport.
+    pub viewport_top_row: u64,
+    /// Monotonic count of rows pruned from the top of the screen; stored screen rows
+    /// shift up by the difference between two readings.
+    pub scrollback_pruned_rows: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1363,6 +1389,17 @@ pub fn select_attached_native_terminal(
             NativeTerminalSelectMode::All => term.select_all(),
             NativeTerminalSelectMode::Word { col, row } => term.select_word_at(*col, *row),
             NativeTerminalSelectMode::Line { row } => term.select_line_at(*row),
+            NativeTerminalSelectMode::Range {
+                start_col,
+                start_row,
+                end_col,
+                end_row,
+                rectangle,
+            } => term.select_range(
+                (*start_col, *start_row),
+                (*end_col, *end_row),
+                *rectangle,
+            ),
             NativeTerminalSelectMode::None => term.clear_selection(),
         };
         match selection_res {
@@ -1394,6 +1431,25 @@ pub fn copy_attached_native_selection(
     state.with_session_terminal(session_id, |term| {
         let text = term.selection_text()?.unwrap_or_default();
         Ok(text)
+    })
+}
+
+/// PTY cursor plus viewport top, in screen rows, for an attached native session.
+pub fn cursor_for_attached_native_terminal(
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+) -> Result<NativeTerminalCursorReceipt, NativeTerminalError> {
+    require_attached_surface(state, session_id)?;
+    state.with_session_terminal(session_id, |term| {
+        let (col, row) = term.cursor_position()?;
+        let active_top = term.total_rows()?.saturating_sub(usize::from(term.rows()?)) as u64;
+        Ok(NativeTerminalCursorReceipt {
+            col,
+            row,
+            screen_row: active_top + u64::from(row),
+            viewport_top_row: term.scrollbar()?.offset,
+            scrollback_pruned_rows: term.scrollback_pruned_rows(),
+        })
     })
 }
 
@@ -1997,12 +2053,51 @@ pub async fn cmd_native_terminal_set_attention_frame<R: Runtime>(
 
 #[tauri::command]
 pub async fn cmd_native_terminal_select<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     mode: NativeTerminalSelectMode,
 ) -> Result<NativeTerminalSelectionReceipt, IpcError> {
-    select_attached_native_terminal(state.inner(), &session_id, &mode)
+    let receipt = select_attached_native_terminal(state.inner(), &session_id, &mode)
+        .map_err(|err| IpcError::internal(err.to_string()))?;
+
+    // Keyboard copy mode moves the selection without any PTY output, so nothing else
+    // would present the new highlight; render a frame the way mouse selection does.
+    if matches!(mode, NativeTerminalSelectMode::Range { .. }) {
+        if let Some(window) = app.get_window("main") {
+            let state_inner = state.inner().clone();
+            let surface_window = window.clone();
+            let (sender, receiver) = oneshot::channel();
+            let session_id_clone = session_id.clone();
+            if window
+                .run_on_main_thread(move || {
+                    if let Some(bounds) = state_inner.session_logical_bounds(&session_id_clone) {
+                        let _ = state_inner.render(
+                            &surface_window,
+                            NativeTerminalBoundsRequest {
+                                session_id: session_id_clone,
+                                bounds,
+                            },
+                        );
+                    }
+                    let _ = sender.send(());
+                })
+                .is_ok()
+            {
+                let _ = receiver.await;
+            }
+        }
+    }
+
+    Ok(receipt)
+}
+
+#[tauri::command]
+pub async fn cmd_native_terminal_cursor(
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    session_id: String,
+) -> Result<NativeTerminalCursorReceipt, IpcError> {
+    cursor_for_attached_native_terminal(state.inner(), &session_id)
         .map_err(|err| IpcError::internal(err.to_string()))
 }
 
@@ -2551,6 +2646,45 @@ fn into_bound_ipc_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_range_mode_returns_the_selected_text() {
+        let state = NativeTerminalSurfaceHostState::default();
+        state.attach_test_session_for_liveness("range", 1, None).unwrap();
+        state
+            .with_session_terminal("range", |term| {
+                for i in 0..40 {
+                    term.feed(format!("entry {i:02}\r\n").as_bytes())?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let mode: NativeTerminalSelectMode = serde_json::from_value(serde_json::json!({
+            "type": "range", "startCol": 0, "startRow": 3, "endCol": 7, "endRow": 4, "rectangle": false,
+        }))
+        .unwrap();
+        let receipt = select_attached_native_terminal(&state, "range", &mode).unwrap();
+        assert_eq!(receipt.text.as_deref(), Some("entry 03\nentry 04"));
+
+        let cursor = cursor_for_attached_native_terminal(&state, "range").unwrap();
+        assert_eq!((cursor.col, cursor.row), (0, 23));
+        assert_eq!(cursor.screen_row, 40);
+        assert_eq!(cursor.viewport_top_row, 17);
+
+        let out_of_bounds = NativeTerminalSelectMode::Range {
+            start_col: 0,
+            start_row: 0,
+            end_col: 0,
+            end_row: 10_000,
+            rectangle: false,
+        };
+        assert!(matches!(
+            select_attached_native_terminal(&state, "range", &out_of_bounds),
+            Err(NativeTerminalError::InvalidValue(_))
+        ));
+        state.teardown();
+    }
 
     #[test]
     fn pane_liveness_native_binding_response_serializes_authoritative_tuple_without_presentation() {
