@@ -11,19 +11,11 @@ export type SessionRestorePolicy = "lazy" | "activeOnly" | "eager";
 export type GeneralSettings = {
   confirmCloseTab: boolean;
   sessionRestorePolicy: SessionRestorePolicy;
-  /** Minutes of idle inactivity before auto-suspend. 0 disables auto-suspend. */
-  sessionIdleTimeoutMinutes: number;
 };
-
-/** `sessionIdleTimeoutMinutes` value that turns auto-suspend off. */
-export const SESSION_IDLE_TIMEOUT_OFF_MINUTES = 0;
-export const MIN_SESSION_IDLE_TIMEOUT_MINUTES = 1;
-export const MAX_SESSION_IDLE_TIMEOUT_MINUTES = 24 * 60;
 
 export const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   confirmCloseTab: false,
   sessionRestorePolicy: "lazy",
-  sessionIdleTimeoutMinutes: 30,
 };
 
 export const GENERAL_SETTINGS_EVENT = "ferryx:general-settings";
@@ -33,26 +25,16 @@ function normalizeGeneralSettings(value: unknown): GeneralSettings {
     ? value as {
         confirmCloseTab?: unknown;
         sessionRestorePolicy?: unknown;
-        sessionIdleTimeoutMinutes?: unknown;
       }
     : {};
   const sessionRestorePolicy: SessionRestorePolicy = source.sessionRestorePolicy === "activeOnly" || source.sessionRestorePolicy === "eager"
     ? source.sessionRestorePolicy
     : "lazy";
-  const timeout = typeof source.sessionIdleTimeoutMinutes === "number" && Number.isFinite(source.sessionIdleTimeoutMinutes)
-    ? Math.round(source.sessionIdleTimeoutMinutes)
-    : DEFAULT_GENERAL_SETTINGS.sessionIdleTimeoutMinutes;
   return {
     confirmCloseTab: typeof source.confirmCloseTab === "boolean"
       ? source.confirmCloseTab
       : DEFAULT_GENERAL_SETTINGS.confirmCloseTab,
     sessionRestorePolicy,
-    // 0 (and any non-positive value) means auto-suspend is disabled; positive
-    // values clamp into the 1..MAX minute range.
-    sessionIdleTimeoutMinutes: Math.min(
-      MAX_SESSION_IDLE_TIMEOUT_MINUTES,
-      Math.max(SESSION_IDLE_TIMEOUT_OFF_MINUTES, timeout),
-    ),
   };
 }
 

@@ -907,7 +907,7 @@ describe("workspaceRestore coordinator", () => {
   it("under Active Only policy, puts non-active tab missing sessions into standby while leaving active tab session eager", async () => {
     localStorage.setItem(
       "ferryx.settings.general",
-      JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "activeOnly", sessionIdleTimeoutMinutes: 30 }),
+      JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "activeOnly" }),
     );
 
     const workspaceId = "ws-active-only";

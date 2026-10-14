@@ -21,7 +21,6 @@ describe("generalSettings", () => {
     expect(settings).toEqual(DEFAULT_GENERAL_SETTINGS);
     expect(settings.confirmCloseTab).toBe(false);
     expect(settings.sessionRestorePolicy).toBe("lazy");
-    expect(settings.sessionIdleTimeoutMinutes).toBe(30);
   });
 
   it("normalizes malformed persisted settings", () => {
@@ -32,33 +31,15 @@ describe("generalSettings", () => {
     expect(loadGeneralSettings()).toEqual(DEFAULT_GENERAL_SETTINGS);
   });
 
-  it("normalizes restore policy and clamps the idle timeout", () => {
+  it("normalizes restore policy and drops legacy sessionIdleTimeoutMinutes", () => {
     localStorage.setItem(GENERAL_SETTINGS_STORAGE_KEY, JSON.stringify({
-      sessionRestorePolicy: "activeOnly",
-      sessionIdleTimeoutMinutes: 0,
+      confirmCloseTab: true,
+      sessionRestorePolicy: "eager",
+      sessionIdleTimeoutMinutes: 45,
     }));
-    // 0 is the explicit "off" value and must survive normalization.
-    expect(loadGeneralSettings()).toMatchObject({
-      sessionRestorePolicy: "activeOnly",
-      sessionIdleTimeoutMinutes: 0,
-    });
-
-    localStorage.setItem(GENERAL_SETTINGS_STORAGE_KEY, JSON.stringify({
+    expect(loadGeneralSettings()).toEqual({
+      confirmCloseTab: true,
       sessionRestorePolicy: "eager",
-      sessionIdleTimeoutMinutes: -5,
-    }));
-    expect(loadGeneralSettings()).toMatchObject({
-      sessionRestorePolicy: "eager",
-      sessionIdleTimeoutMinutes: 0,
-    });
-
-    localStorage.setItem(GENERAL_SETTINGS_STORAGE_KEY, JSON.stringify({
-      sessionRestorePolicy: "eager",
-      sessionIdleTimeoutMinutes: 10_000,
-    }));
-    expect(loadGeneralSettings()).toMatchObject({
-      sessionRestorePolicy: "eager",
-      sessionIdleTimeoutMinutes: 1440,
     });
   });
 
@@ -72,13 +53,11 @@ describe("generalSettings", () => {
     const updated = saveGeneralSettings({
       confirmCloseTab: true,
       sessionRestorePolicy: "activeOnly",
-      sessionIdleTimeoutMinutes: 45,
     });
     try {
       expect(updated).toEqual({
         confirmCloseTab: true,
         sessionRestorePolicy: "activeOnly",
-        sessionIdleTimeoutMinutes: 45,
       });
       expect(JSON.parse(localStorage.getItem(GENERAL_SETTINGS_STORAGE_KEY) ?? "null")).toEqual(updated);
       expect(observed).toEqual(updated);
@@ -89,7 +68,7 @@ describe("generalSettings", () => {
   });
 
   it("resets settings back to default", () => {
-    saveGeneralSettings({ confirmCloseTab: true, sessionRestorePolicy: "eager", sessionIdleTimeoutMinutes: 90 });
+    saveGeneralSettings({ confirmCloseTab: true, sessionRestorePolicy: "eager" });
     expect(loadGeneralSettings().confirmCloseTab).toBe(true);
 
     const reset = resetGeneralSettings();
@@ -103,7 +82,6 @@ describe("generalSettings", () => {
     expect(settings).toEqual({
       confirmCloseTab: true,
       sessionRestorePolicy: "lazy",
-      sessionIdleTimeoutMinutes: 30,
     });
     expect(JSON.parse(localStorage.getItem(GENERAL_SETTINGS_STORAGE_KEY) ?? "null")).toEqual({ confirmCloseTab: true });
   });

@@ -646,11 +646,6 @@ export async function hibernateTerminal(sessionId: string) {
   await invokeCommand<void>("cmd_terminal_hibernate", { sessionId });
 }
 
-export async function suspendTerminal(sessionId: string) {
-  if (!isTauri()) return;
-  await invokeCommand<void>("cmd_terminal_suspend", { sessionId });
-}
-
 export async function resumeTerminal(sessionId: string) {
   if (!isTauri()) return;
   await invokeCommand<void>("cmd_terminal_resume", { sessionId });

@@ -1,14 +1,18 @@
 import { useSyncExternalStore } from "react";
 
 import type { TerminalActivityState } from "./activity";
-import { loadGeneralSettings } from "./generalSettings";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "./remoteProject";
-import { describeTerminal, getTerminalHistorySnapshot, hibernateTerminal, onNativeTerminalAgentState, suspendTerminal, resumeTerminal, closeTerminal, spawnTerminalDetailed, toIpcError } from "./tauri";
+import { describeTerminal, getTerminalHistorySnapshot, hibernateTerminal, resumeTerminal, closeTerminal, spawnTerminalDetailed, toIpcError } from "./tauri";
 import type { SessionProcessState, TerminalSession } from "./types";
 import { safeRandomUUID } from "./uuid";
 
 export type { SessionProcessState } from "./types";
-export type SessionLifecycleAction = "suspend" | "resume" | "restart" | "hibernate";
+/**
+ * Ferryx no longer suspends (SIGSTOPs) sessions: the idle sweep and the suspend action were
+ * removed because a frozen process kept no meaningful resources while it blocked input and
+ * required a manual click to wake. "resume" remains only to release stops left by older builds.
+ */
+export type SessionLifecycleAction = "resume" | "restart" | "hibernate";
 
 export const STANDBY_BACKEND_PREFIX = "standby:";
 /**
@@ -53,9 +57,6 @@ export function getSessionProcessState(session: TerminalSession | null | undefin
 type RegisteredSession = {
   session: TerminalSession;
   active: boolean;
-  idleSince: number | null;
-  /** Last activity state observed for this session; a working session is never a sweep candidate. */
-  activityState: TerminalActivityState | "idle" | "blocked" | null;
 };
 
 const registeredSessions = new Map<string, RegisteredSession>();
@@ -72,8 +73,6 @@ export function getDaemonSuspension(sessionId: string): import("./tauri").Termin
   return suspensionDetails.get(sessionId);
 }
 let sleepingSnapshot = "";
-let monitoringStarted = false;
-let idleSweepTimer: ReturnType<typeof setInterval> | null = null;
 
 export type SessionRebindHandler = (
   sessionId: string,
@@ -150,36 +149,23 @@ export function restoreSessionRecentScrollback(sessionId: string, value: string 
   );
 }
 
-function activityIsIdle(state: TerminalActivityState | "idle" | "blocked" | undefined): boolean {
-  return state === "done" || state === "idle";
-}
-
 export function registerSessionSnapshot(
   session: TerminalSession,
-  activityState?: TerminalActivityState | "idle" | "blocked",
+  // Kept for caller compatibility; activity no longer drives any lifecycle decision.
+  _activityState?: TerminalActivityState | "idle" | "blocked",
 ): void {
   const previous = registeredSessions.get(session.id);
-  const now = Date.now();
-  const idleSince = activityIsIdle(activityState)
-    ? previous?.idleSince ?? now
-    : activityState === "working" || activityState === "waiting" || activityState === "blocked"
-      ? null
-      : previous?.idleSince ?? null;
   registeredSessions.set(session.id, {
     session,
     active: previous?.active ?? false,
-    idleSince,
-    activityState: activityState ?? previous?.activityState ?? null,
   });
-  ensureLifecycleMonitoring();
   reconcileDaemonSuspension(session);
 }
 
 /**
- * The sleeping set and `processState` live only in this GUI process, but the suspended process
- * lives in the daemon. After a GUI restart (or a suspend issued by another client) the pane would
- * otherwise render a stopped process as running: no overlay, no auto-resume, a frozen terminal.
- * Ask the daemon once per backend binding and adopt its kernel-observed answer.
+ * Ask the daemon once per backend binding whether the process is stopped. Ferryx no longer
+ * suspends sessions, so a stop the daemon attributes to Ferryx (left by an older build) is
+ * released automatically; any other stop keeps the Resume overlay because Ferryx did not cause it.
  */
 function reconcileDaemonSuspension(session: TerminalSession): void {
   const backendSessionId = session.backendSessionId;
@@ -200,8 +186,12 @@ function reconcileDaemonSuspension(session: TerminalSession): void {
       suspensionDetails.set(session.id, details);
       const stopped = details.suspended === true || details.kernelStopped === true || details.readerPaused === true;
       entry.session = { ...entry.session, processState: stopped ? "suspended" : "running" };
-      entry.idleSince = null;
       setSessionSleeping(session.id, stopped);
+      if (stopped && (details.suspensionSource === "ferryx-owned" || details.registrySuspended === true)) {
+        void resumeRegisteredSession(session.id).catch((error) => {
+          console.warn("Failed to release a Ferryx-suspended session:", error);
+        });
+      }
     })
     .catch((error) => {
       // Unknown is not suspended; allow a later registration to ask again.
@@ -220,23 +210,6 @@ export function setSessionActive(sessionId: string, active: boolean): void {
   if (active && !wasActive) manualHibernateHoldIds.delete(sessionId);
 }
 
-export function markSessionActivity(
-  sessionId: string,
-  state: TerminalActivityState | "idle" | "blocked",
-): void {
-  const entry = registeredSessions.get(sessionId);
-  if (!entry) return;
-  entry.activityState = state;
-  entry.idleSince = activityIsIdle(state) ? entry.idleSince ?? Date.now() : null;
-}
-
-function findRegisteredByBackend(backendSessionId: string): RegisteredSession | null {
-  for (const entry of registeredSessions.values()) {
-    if (entry.session.backendSessionId === backendSessionId) return entry;
-  }
-  return null;
-}
-
 async function captureRecentScrollback(sessionId: string, backendSessionId: string): Promise<void> {
   try {
     const history = await getTerminalHistorySnapshot(backendSessionId);
@@ -250,31 +223,6 @@ async function captureRecentScrollback(sessionId: string, backendSessionId: stri
   } catch {
     // History capture is best-effort; failure must never prevent memory reclamation.
   }
-}
-
-export async function suspendRegisteredSession(sessionId: string): Promise<void> {
-  const entry = registeredSessions.get(sessionId);
-  if (!entry) {
-    setSessionSleeping(sessionId, true);
-    return;
-  }
-  const session = entry.session;
-  if (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)) return;
-  const backendSessionId = session.backendSessionId;
-  if (!backendSessionId || isStandbyBackendSessionId(backendSessionId)) {
-    entry.session = { ...session, processState: "suspended" };
-    setSessionSleeping(sessionId, true);
-    return;
-  }
-
-  await captureRecentScrollback(sessionId, backendSessionId);
-  // Mark the pane sleeping only once the daemon has stopped the process. Sleeping detaches the
-  // native surface; flipping it on before a suspend that then fails tore the surface down and
-  // re-attached it, which blanked the pane and let the re-attach take keyboard focus.
-  await suspendTerminal(backendSessionId);
-  setSessionSleeping(sessionId, true);
-  entry.session = { ...session, processState: "suspended" };
-  entry.idleSince = null;
 }
 
 export async function resumeRegisteredSession(sessionId: string): Promise<void> {
@@ -303,7 +251,6 @@ export async function resumeRegisteredSession(sessionId: string): Promise<void> 
       suspensionDetails.delete(sessionId);
       setSessionSleeping(sessionId, false);
       entry.session = { ...session, processState: "running" };
-      entry.idleSince = Date.now();
     } catch (error) {
       const ipcError = toIpcError(error);
       if (ipcError.code === "SESSION_NOT_FOUND" || ipcError.code === "PROCESS_NOT_FOUND") {
@@ -366,7 +313,6 @@ export async function restartRegisteredSession(
         processState: "running",
         lifecycle: "working",
       };
-      entry.idleSince = Date.now();
 
       const rebind = onRebind ?? globalRebindHandler;
       if (rebind) {
@@ -423,79 +369,16 @@ export async function hibernateRegisteredSession(sessionId: string): Promise<voi
     throw error;
   }
   entry.session = { ...session, backendSessionId: null, processState: "hibernated", lifecycle: "exited" };
-  entry.idleSince = null;
-}
-
-async function sweepIdleSessions(): Promise<void> {
-  const timeoutMs = loadGeneralSettings().sessionIdleTimeoutMinutes * 60_000;
-  // 0 (or negative) is the explicit "off" setting: never auto-suspend.
-  if (timeoutMs <= 0) return Promise.resolve();
-  const now = Date.now();
-  const candidates = [...registeredSessions.entries()].filter(([, entry]) =>
-    !entry.active &&
-    entry.idleSince !== null &&
-    now - entry.idleSince >= timeoutMs &&
-    // A session whose latest known activity is working/waiting/blocked is by
-    // definition not idle, even if a stale idleSince survived an event gap.
-    entry.activityState !== "working" &&
-    entry.activityState !== "waiting" &&
-    entry.activityState !== "blocked" &&
-    Boolean(entry.session.backendSessionId) &&
-    !isStandbyBackendSessionId(entry.session.backendSessionId) &&
-    !isRemoteWorkspaceId(entry.session.workspaceId) &&
-    !isPairedWorkspaceId(entry.session.workspaceId),
-  );
-  // Ground truth before pulling the trigger: recent PTY output vetoes
-  // suspension regardless of what any screen/extension classifier reported.
-  // A working agent keeps writing (spinners, redraws), so this closes the
-  // "working session got auto-suspended" hole. Query failure also vetoes:
-  // never suspend a session whose activity we could not verify.
-  const verdicts = await Promise.all(
-    candidates.map(async ([sessionId, entry]) => {
-      const backendSessionId = entry.session.backendSessionId;
-      if (!backendSessionId || isStandbyBackendSessionId(backendSessionId)) return null;
-      try {
-        const details = await describeTerminal(backendSessionId);
-        if (!details) return null;
-        const lastOutputAgeMs = details.lastOutputAgeMs;
-        if (lastOutputAgeMs != null && lastOutputAgeMs < timeoutMs) return null;
-        return sessionId;
-      } catch {
-        return null;
-      }
-    }),
-  );
-  const confirmed = verdicts.filter((sessionId): sessionId is string => sessionId !== null);
-  await Promise.allSettled(confirmed.map((sessionId) => suspendRegisteredSession(sessionId)));
-}
-
-function ensureLifecycleMonitoring(): void {
-  if (monitoringStarted) return;
-  monitoringStarted = true;
-  void Promise.resolve(onNativeTerminalAgentState((payload) => {
-    const entry = findRegisteredByBackend(payload.sessionId);
-    if (!entry) return;
-    entry.activityState = payload.state;
-    entry.idleSince = payload.state === "idle" ? entry.idleSince ?? Date.now() : null;
-  })).catch(() => undefined);
-  idleSweepTimer = setInterval(() => {
-    void sweepIdleSessions();
-  }, 30_000);
 }
 
 export function requestSessionLifecycleAction(action: SessionLifecycleAction, sessionId: string): void {
-  if (action === "suspend" || action === "hibernate") {
+  if (action === "hibernate") {
     manualHibernateHoldIds.add(sessionId);
   } else {
     manualHibernateHoldIds.delete(sessionId);
   }
   for (const listener of actionListeners) listener(action, sessionId);
-  if (action === "suspend") {
-    void suspendRegisteredSession(sessionId).catch((error) => {
-      manualHibernateHoldIds.delete(sessionId);
-      console.warn(`Failed to suspend session`, error);
-    });
-  } else if (action === "resume") {
+  if (action === "resume") {
     void resumeRegisteredSession(sessionId).catch((error) => {
       console.warn(`Failed to resume session`, error);
     });
@@ -527,7 +410,4 @@ export function resetSessionLifecycleForTests(): void {
   reconciledSuspendBindings.clear();
   suspensionDetails.clear();
   sleepingSnapshot = "";
-  monitoringStarted = false;
-  if (idleSweepTimer) clearInterval(idleSweepTimer);
-  idleSweepTimer = null;
 }

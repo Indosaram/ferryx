@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as tauri from "./tauri";
-import * as generalSettingsModule from "./generalSettings";
 
 import {
   clearSleepingSessions,
@@ -19,7 +18,6 @@ import {
   setSessionActive,
   setSessionRebindHandler,
   setSessionSleeping,
-  suspendRegisteredSession,
   subscribeSleepingSessions,
   getDaemonSuspension,
 } from "./sessionLifecycle";
@@ -86,6 +84,62 @@ describe("sessionLifecycle", () => {
     expect(isSessionSleeping(current.id)).toBe(true);
     expect(getDaemonSuspension(current.id)?.suspensionSource).toBe("externalOrUnknownStop");
     expect(resume).not.toHaveBeenCalled();
+  });
+
+  function stoppedDetails(overrides: Partial<tauri.TerminalDescribeResult>): tauri.TerminalDescribeResult {
+    return { sessionId: "back", cols: 80, rows: 24, running: true, suspended: true, kernelStopped: true, ...overrides };
+  }
+
+  it("releases a Ferryx-owned stop left by an earlier build", async () => {
+    vi.spyOn(tauri, "describeTerminal").mockResolvedValue(
+      stoppedDetails({ suspensionSource: "ferryx-owned", registrySuspended: true }),
+    );
+    let resumed: () => void = () => {};
+    const resumeCalled = new Promise<void>((done) => { resumed = done; });
+    const resume = vi.spyOn(tauri, "resumeTerminal").mockImplementation(async () => { resumed(); });
+    const current = session("back");
+    const awake = new Promise<void>((done) => {
+      const unsubscribe = subscribeSleepingSessions(() => {
+        if (!isSessionSleeping(current.id) && resume.mock.calls.length > 0) { unsubscribe(); done(); }
+      });
+    });
+    registerSessionSnapshot(current);
+    await resumeCalled;
+    await awake;
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(resume).toHaveBeenCalledWith("back");
+    expect(isSessionSleeping(current.id)).toBe(false);
+  });
+
+  it("releases a stop the daemon registry records as its own", async () => {
+    vi.spyOn(tauri, "describeTerminal").mockResolvedValue(
+      stoppedDetails({ suspensionSource: "unknown", registrySuspended: true }),
+    );
+    let resumed: () => void = () => {};
+    const resumeCalled = new Promise<void>((done) => { resumed = done; });
+    const resume = vi.spyOn(tauri, "resumeTerminal").mockImplementation(async () => { resumed(); });
+    registerSessionSnapshot(session("back"));
+    await resumeCalled;
+    expect(resume).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the Resume overlay when releasing a Ferryx-owned stop fails", async () => {
+    vi.spyOn(tauri, "describeTerminal").mockResolvedValue(
+      stoppedDetails({ suspensionSource: "ferryx-owned", registrySuspended: true }),
+    );
+    let rejected: () => void = () => {};
+    const resumeRejected = new Promise<void>((done) => { rejected = done; });
+    vi.spyOn(tauri, "resumeTerminal").mockImplementation(() => {
+      queueMicrotask(rejected);
+      return Promise.reject({ code: "TIMEOUT", message: "held" });
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const current = session("back");
+    registerSessionSnapshot(current);
+    await resumeRejected;
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith("Failed to release a Ferryx-suspended session:", expect.anything()));
+    expect(isSessionSleeping(current.id)).toBe(true);
+    expect(getDaemonSuspension(current.id)).toBeDefined();
   });
 
   it("failed explicit resume preserves the suspended state", async () => {
@@ -209,39 +263,11 @@ describe("sessionLifecycle", () => {
     }
   });
 
-  it("suspendRegisteredSession preserves backendSessionId and marks processState suspended", async () => {
-    const live = session("backend-live-1", "running");
-    registerSessionSnapshot(live, "idle");
-
-    await suspendRegisteredSession(live.id);
-    expect(isSessionSleeping(live.id)).toBe(true);
-    expect(getSessionProcessState(live)).toBe("suspended");
-    // Crucial: backendSessionId is NOT wiped!
-    expect(live.backendSessionId).toBe("backend-live-1");
-  });
-
-  it("never marks a session sleeping when the daemon refuses the suspend", async () => {
-    // Given: a live session whose daemon suspend fails.
-    const live = session("backend-live-1", "running");
-    registerSessionSnapshot(live, "idle");
-    vi.spyOn(tauri, "suspendTerminal").mockRejectedValue(new Error("suspend refused"));
-    const sleepingSeen: boolean[] = [];
-    const unsubscribe = subscribeSleepingSessions(() => sleepingSeen.push(isSessionSleeping(live.id)));
-
-    // When: the suspend is attempted.
-    await expect(suspendRegisteredSession(live.id)).rejects.toThrow("suspend refused");
-    unsubscribe();
-
-    // Then: the pane never flipped to sleeping, so its surface was never torn down.
-    expect(sleepingSeen).toEqual([]);
-    expect(isSessionSleeping(live.id)).toBe(false);
-  });
-
   it("resumeRegisteredSession clears sleeping bit and restores running state", async () => {
+    vi.spyOn(tauri, "resumeTerminal").mockResolvedValue(undefined);
     const live = session("backend-live-1", "running");
     registerSessionSnapshot(live, "idle");
-
-    await suspendRegisteredSession(live.id);
+    setSessionSleeping(live.id, true);
     expect(isSessionSleeping(live.id)).toBe(true);
 
     await resumeRegisteredSession(live.id);
@@ -274,118 +300,5 @@ describe("sessionLifecycle", () => {
     setSessionRebindHandler(null);
     closeSpy.mockRestore();
     spawnSpy.mockRestore();
-  });
-
-  describe("idle sweep", () => {
-    function useIdleSettings(minutes: number): () => void {
-      const spy = vi
-        .spyOn(generalSettingsModule, "loadGeneralSettings")
-        .mockReturnValue({
-          confirmCloseTab: false,
-          sessionRestorePolicy: "lazy",
-          sessionIdleTimeoutMinutes: minutes,
-        });
-      return () => spy.mockRestore();
-    }
-
-    function armSpies(describeResult: Promise<unknown>) {
-      const suspendSpy = vi.spyOn(tauri, "suspendTerminal").mockResolvedValue(undefined as any);
-      const describeSpy = vi.spyOn(tauri, "describeTerminal").mockReturnValue(describeResult as any);
-      const historySpy = vi.spyOn(tauri, "getTerminalHistorySnapshot").mockResolvedValue(null as any);
-      return { suspendSpy, describeSpy, historySpy };
-    }
-
-    function disarmSpies(spies: ReturnType<typeof armSpies>): void {
-      spies.suspendSpy.mockRestore();
-      spies.describeSpy.mockRestore();
-      spies.historySpy.mockRestore();
-    }
-
-    it("never suspends when the idle timeout is 0 (off)", async () => {
-      vi.useFakeTimers();
-      const restoreSettings = useIdleSettings(0);
-      const spies = armSpies(Promise.resolve({
-        sessionId: "backend-live-1", cols: 80, rows: 24, running: true, lastOutputAgeMs: null,
-      }));
-      try {
-        const live = session("backend-live-1", "running");
-        registerSessionSnapshot(live, "idle");
-        await vi.advanceTimersByTimeAsync(31 * 60_000);
-        // Only the one-time suspension reconcile on registration; the disabled sweep never asks.
-        expect(spies.describeSpy).toHaveBeenCalledTimes(1);
-        expect(spies.suspendSpy).not.toHaveBeenCalled();
-        expect(isSessionSleeping(live.id)).toBe(false);
-      } finally {
-        vi.useRealTimers();
-        restoreSettings();
-        disarmSpies(spies);
-      }
-    });
-
-    it("vetoes suspension when the session produced recent PTY output despite an idle classifier", async () => {
-      // Regression: a working omo subagent keeps redrawing its TUI, but the
-      // classifier can report "idle" during long tool turns. The daemon-side
-      // output ground truth (read 1 minute ago) must beat the classifier.
-      vi.useFakeTimers();
-      const restoreSettings = useIdleSettings(30);
-      const spies = armSpies(Promise.resolve({
-        sessionId: "backend-live-1", cols: 80, rows: 24, running: true, lastOutputAgeMs: 60_000,
-      }));
-      try {
-        const live = session("backend-live-1", "running");
-        registerSessionSnapshot(live, "idle");
-        await vi.advanceTimersByTimeAsync(31 * 60_000);
-        expect(spies.describeSpy).toHaveBeenCalled();
-        expect(spies.suspendSpy).not.toHaveBeenCalled();
-        expect(isSessionSleeping(live.id)).toBe(false);
-      } finally {
-        vi.useRealTimers();
-        restoreSettings();
-        disarmSpies(spies);
-      }
-    });
-
-    it("leaves inactivity suspension to the daemon even when classifier and output agree", async () => {
-      vi.useFakeTimers();
-      const restoreSettings = useIdleSettings(30);
-      const spies = armSpies(Promise.resolve({
-        sessionId: "backend-live-1", cols: 80, rows: 24, running: true, lastOutputAgeMs: 45 * 60_000,
-      }));
-      try {
-        const live = session("backend-live-1", "running");
-        registerSessionSnapshot(live, "idle");
-        await vi.advanceTimersByTimeAsync(31 * 60_000);
-        expect(spies.suspendSpy).not.toHaveBeenCalled();
-        expect(isSessionSleeping(live.id)).toBe(false);
-      } finally {
-        vi.useRealTimers();
-        restoreSettings();
-        disarmSpies(spies);
-      }
-    });
-
-    it("vetoes suspension when the output ground truth cannot be verified", async () => {
-      vi.useFakeTimers();
-      const restoreSettings = useIdleSettings(30);
-      const suspendSpy = vi.spyOn(tauri, "suspendTerminal").mockResolvedValue(undefined as any);
-      const describeSpy = vi
-        .spyOn(tauri, "describeTerminal")
-        .mockImplementation(() => Promise.reject(new Error("ipc down")));
-      const historySpy = vi.spyOn(tauri, "getTerminalHistorySnapshot").mockResolvedValue(null as any);
-      try {
-        const live = session("backend-live-1", "running");
-        registerSessionSnapshot(live, "idle");
-        await vi.advanceTimersByTimeAsync(31 * 60_000);
-        expect(describeSpy).toHaveBeenCalled();
-        expect(suspendSpy).not.toHaveBeenCalled();
-        expect(isSessionSleeping(live.id)).toBe(false);
-      } finally {
-        vi.useRealTimers();
-        restoreSettings();
-        suspendSpy.mockRestore();
-        describeSpy.mockRestore();
-        historySpy.mockRestore();
-      }
-    });
   });
 });
