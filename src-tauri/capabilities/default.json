@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
+    "core:window:allow-set-focus",
     "dialog:allow-open",
     "notification:default",
     "notification:allow-is-permission-granted",

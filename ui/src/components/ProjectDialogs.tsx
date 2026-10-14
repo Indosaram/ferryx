@@ -1,4 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ArrowLeft,
   FolderGit2,
@@ -200,9 +201,13 @@ export function AddProjectDialog({
         multiple: false,
         title: "Add Project",
       })
-        .then((selected) => {
+        .then(async (selected) => {
           if (dismissedRef.current || !isMountedRef.current) return;
           if (typeof selected === "string" && selected.length > 0) {
+            // Restore native focus before showing confirmation so its first click
+            // submits instead of only activating the window after the picker.
+            await getCurrentWindow().setFocus();
+            if (dismissedRef.current || !isMountedRef.current) return;
             setSelectedPath(selected);
             setStep("local-confirm");
           } else {

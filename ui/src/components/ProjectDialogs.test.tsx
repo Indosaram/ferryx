@@ -14,6 +14,9 @@ const dialog = vi.hoisted(() => ({
   open: vi.fn(),
 }));
 
+const appWindow = vi.hoisted(() => ({ setFocus: vi.fn() }));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => appWindow }));
+
 const remote = vi.hoisted(() => ({
   registerRemoteProject: vi.fn(),
   createRemoteWorktree: vi.fn(),
@@ -110,6 +113,8 @@ beforeEach(() => {
   native.createWorktree.mockReset();
   native.previewGitHubIssue.mockReset();
   dialog.open.mockReset();
+  appWindow.setFocus.mockReset();
+  appWindow.setFocus.mockResolvedValue(undefined);
   remote.registerRemoteProject.mockReset();
   ssh.useSshHosts.mockReset();
   directories.listRemoteDirectories.mockReset();
@@ -190,6 +195,30 @@ describe("AddProjectDialog Location Chooser", () => {
 });
 
 describe("AddProjectDialog Local flow", () => {
+  it("restores native window focus before enabling a single-click registration after folder selection", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    const picker = deferred<string | null>();
+    const focus = deferred<void>();
+    dialog.open.mockReturnValue(picker.promise);
+    appWindow.setFocus.mockReturnValue(focus.promise);
+    const project = { workspaceId: "project", repoRoot: "/Users/dev/project", gitRoot: "/Users/dev/project" };
+    native.registerProject.mockResolvedValue(project);
+    const onRegistered = vi.fn();
+    const onClose = vi.fn();
+    render(<AddProjectDialog onClose={onClose} onRegistered={onRegistered} />);
+    fireEvent.click(screen.getByTestId("project-type-local"));
+
+    await act(async () => { picker.resolve(project.repoRoot); });
+    expect(appWindow.setFocus).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Add Project" })).not.toBeInTheDocument();
+    await act(async () => { focus.resolve(); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Add Project" })); });
+
+    expect(native.registerProject).toHaveBeenCalledExactlyOnceWith({ workspaceId: "project", repoPath: project.repoRoot });
+    expect(onRegistered).toHaveBeenCalledExactlyOnceWith(project);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it("opens native picker on explicit Local click and closes dialog when cancelled (null result)", async () => {
     native.isTauriRuntime.mockReturnValue(true);
     const pickerDef = deferred<string | null>();
