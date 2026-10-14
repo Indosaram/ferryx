@@ -363,12 +363,8 @@ pub fn resolve_reference_history_stream(
 
     // 5. The cwd, only when nothing identifies the session, this pane owns the cwd alone, it
     //    holds exactly one candidate, and the candidate store is this reader's (`.omo`) store.
-    let reads_omo_store = matches!(
-        kind,
-        ReferenceNativeHistoryKind::Omo
-            | ReferenceNativeHistoryKind::Omp
-            | ReferenceNativeHistoryKind::Gjc
-    );
+    // omp and gjc keep their stores elsewhere, so an `.omo` file in the cwd is never theirs.
+    let reads_omo_store = kind == ReferenceNativeHistoryKind::Omo;
     if let Some(cwd) = identity
         .cwd
         .as_deref()
@@ -990,19 +986,19 @@ fn reference_history_window_generation(
     )
 }
 
-/// The byte offset just past the last `context_clear` reset in an omp-shaped stream, if any.
+/// The byte offset just past the last reset in a stream, if any: an omp-shaped `context_clear`
+/// or a Claude `/clear` envelope.
 ///
 /// Every turn before it was cleared, so no page boundary may lie before it.
 fn reference_history_reset_end(kind: ReferenceNativeHistoryKind, bytes: &[u8]) -> Option<usize> {
-    if !matches!(
-        kind,
+    let marker: &[u8] = match kind {
         ReferenceNativeHistoryKind::Omo
-            | ReferenceNativeHistoryKind::Omp
-            | ReferenceNativeHistoryKind::Gjc
-            | ReferenceNativeHistoryKind::Pi
-    ) {
-        return None;
-    }
+        | ReferenceNativeHistoryKind::Omp
+        | ReferenceNativeHistoryKind::Gjc
+        | ReferenceNativeHistoryKind::Pi => b"context_clear",
+        ReferenceNativeHistoryKind::Claude => b"/clear",
+        _ => return None,
+    };
     let mut reset = None;
     let mut line_start = 0usize;
     while line_start < bytes.len() {
@@ -1012,9 +1008,14 @@ fn reference_history_reset_end(kind: ReferenceNativeHistoryKind, bytes: &[u8]) -
             .map(|index| line_start + index)
             .unwrap_or(bytes.len());
         let line = &bytes[line_start..line_end];
-        if line.windows(b"context_clear".len()).any(|window| window == b"context_clear") {
+        if line.windows(marker.len()).any(|window| window == marker) {
             let cleared = serde_json::from_slice::<serde_json::Value>(line)
-                .map(|entry| super::history_omo::is_omo_context_clear(&entry))
+                .map(|entry| match kind {
+                    ReferenceNativeHistoryKind::Claude => entry
+                        .as_object()
+                        .is_some_and(super::history_claude::is_claude_context_clear),
+                    _ => super::history_omo::is_omo_context_clear(&entry),
+                })
                 .unwrap_or(false);
             if cleared {
                 reset = Some(line_end);
@@ -1250,7 +1251,18 @@ pub async fn read_reference_history_page(
             ScopeErrorCode::Timeout,
             format!("the transcript read did not finish: {}", error.message),
         )
-    })??;
+    })?;
+    // A pi store past the branch cap is disclosed like a branch past it: the pane shows its own
+    // output rather than an error that leaves it with nothing.
+    let window = match window {
+        Err(error)
+            if kind == ReferenceNativeHistoryKind::Pi
+                && error.code == ScopeErrorCode::PayloadTooLarge =>
+        {
+            return Ok(unreadable_page(stream, super::history_pi::PI_BRANCH_UNREADABLE));
+        }
+        other => other?,
+    };
 
     reference_history_page_from_window(stream, identity, window.start, &window.bytes, limit, cursor)
 }
@@ -2211,6 +2223,79 @@ mod tests {
                 .expect("the wake is on the newest page");
             assert_eq!(title, "audit parser", "{registry}");
         }
+    }
+
+    #[test]
+    fn the_cwd_fallback_never_binds_an_omo_store_to_an_omp_or_gjc_pane() {
+        let home = TempHome::new();
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", THREE_TURNS);
+        for registry in ["omp", "gjc"] {
+            let identity = identity(registry, "sess-z").with_cwd("/w");
+            let refusal = resolve_reference_history_stream(home.path(), &identity, &[])
+                .expect_err("an omo store in the cwd is not this reader's store");
+            assert_eq!(refusal.code, ScopeErrorCode::NotFound, "{registry}");
+        }
+    }
+
+    #[test]
+    fn a_claude_clear_fences_paging_so_no_older_page_reaches_the_cleared_conversation() {
+        let home = TempHome::new();
+        let user = |text: &str| {
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": text}})
+                .to_string()
+        };
+        let assistant = serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}}).to_string();
+        let mut lines = Vec::new();
+        for index in 0..5 {
+            lines.push(user(&format!("cleared {index}")));
+            lines.push(assistant.clone());
+        }
+        lines.push(user("<command-name>/clear</command-name>"));
+        for index in 0..2 {
+            lines.push(user(&format!("kept {index}")));
+            lines.push(assistant.clone());
+        }
+        let body = format!("{}\n", lines.join("\n"));
+        let dir = home.path().join("claude");
+        std::fs::create_dir_all(&dir).expect("a claude folder is creatable");
+        let path = dir.join("aaa.jsonl");
+        std::fs::write(&path, &body).expect("a claude store is writable");
+
+        let identity = bound_identity("claude", "sess-1", "aaa").with_provider_transcript_path(&path);
+        let stream = omo_stream(&home, &identity);
+        assert_eq!(stream.kind, ReferenceNativeHistoryKind::Claude);
+        let page = reference_history_page_from_bytes(&stream, &identity, body.as_bytes(), 4, None)
+            .expect("the newest page is served");
+        assert_eq!(page.turns.len(), 4, "the two kept prompts and their answers");
+        assert!(!page.has_more, "nothing before the clear may be paged in");
+        assert!(page.cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pi_store_past_the_read_cap_is_disclosed_as_scrollback_not_an_error() {
+        let home = TempHome::new();
+        let path = home.write_session("--w--", "2026-10-06_aaa.jsonl", "");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_len(REFERENCE_HISTORY_MAX_PI_BYTES as u64 + 1))
+            .expect("a sparse oversized store is creatable");
+        let identity = bound_identity("pi", "sess-1", "aaa");
+        let stream = omo_stream(&home, &identity);
+        assert_eq!(stream.file_path(), Some(path.as_path()));
+
+        let page = read_reference_history_page(&stream, &identity, 10, None)
+            .await
+            .expect("an oversized pi store is disclosed, not an error");
+        assert_eq!(page.availability, ReferenceHistoryAvailability::Scrollback);
+        assert!(page.turns.is_empty());
+        assert!(
+            page.unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(super::super::history_pi::PI_BRANCH_UNREADABLE)),
+            "{:?}",
+            page.unavailable_reason
+        );
     }
 
     #[tokio::test]
