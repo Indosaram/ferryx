@@ -117,6 +117,35 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     expect(screen.getByTestId("markdown-remote-image")).toHaveTextContent("Image (evil.example)");
   });
 
+  it("a linked remote image opens the link target, never a nested image anchor", () => {
+    const badge = "[![build](https://img.shields.io/b.svg)](https://ci.example/run/1)";
+    const { container } = render(
+      <MobileChatMessage
+        id="msg-badge"
+        role="assistant"
+        content={badge}
+        referenceParts={undefined}
+      />
+    );
+    const anchors = Array.from(container.querySelectorAll("a"));
+    expect(anchors.map((a) => a.getAttribute("href"))).toEqual(["https://ci.example/run/1"]);
+    expect(screen.getByTestId("markdown-remote-image")).toHaveTextContent("build (img.shields.io)");
+    cleanup();
+
+    const { container: rich } = render(
+      <MobileChatMessage
+        id="msg-badge-ref"
+        role="assistant"
+        content=""
+        referenceParts={[{ kind: "text", text: badge }]}
+      />
+    );
+    expect(Array.from(rich.querySelectorAll("a")).map((a) => a.getAttribute("href"))).toEqual([
+      "https://ci.example/run/1",
+    ]);
+    expect(rich.querySelector("img")).toBeNull();
+  });
+
   it("keeps rendered prose mounted when only unrelated props change", () => {
     const { rerender } = render(
       <MobileChatMessage id="m" role="assistant" content="stable prose" timestamp={1} />

@@ -11,6 +11,7 @@ import {
   ApprovalActionCardProps,
   AttachmentList,
   ChatMarkdownImage,
+  MarkdownLinkContext,
   ChatAttachment,
   ChatWorkItem,
   chatMarkdownUrlTransform,
@@ -194,7 +195,7 @@ const ASSISTANT_MARKDOWN_COMPONENTS = {
       rel="noopener noreferrer"
       className="text-chat-link decoration-chat-link/60 hover:decoration-chat-link underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
     >
-      {children}
+      <MarkdownLinkContext.Provider value={true}>{children}</MarkdownLinkContext.Provider>
     </a>
   ),
   blockquote: ({ children }: any) => (
