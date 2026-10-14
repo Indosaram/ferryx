@@ -1555,7 +1555,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(Arc::clone(&in_process_backend)
             as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>)
         .manage(in_process_backend)
-        .manage(file_preview_service);
+        .manage(file_preview_service)
+        .manage(crate::ipc::updater::UpdaterDownloadState::default());
 
     #[cfg(desktop)]
     let builder = if crate::ipc::updater::updater_managed_externally() {
@@ -1590,6 +1591,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::file_open_with::cmd_webview_print,
         crate::ipc::updater::cmd_updater_managed_externally,
         crate::ipc::updater::cmd_distribution_channel,
+        crate::ipc::updater::cmd_updater_download,
+        crate::ipc::updater::cmd_updater_cancel,
+        crate::ipc::updater::cmd_updater_install,
         cmd_switch_debug_log,
         cmd_terminal_output_channel,
         cmd_terminal_spawn,
