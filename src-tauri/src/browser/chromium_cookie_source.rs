@@ -10,8 +10,7 @@ use crate::browser::chromium_cookies::{
 #[cfg(target_os = "macos")]
 use crate::browser::chromium_cookies::CHROMIUM_PBKDF2_ITERATIONS_MACOS;
 use crate::browser::cookies::{
-    filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
-    InstalledBrowserKind,
+    resolve_installed_browser_profile_dir, ImportedCookie, InstalledBrowserKind,
 };
 use crate::browser::BrowserError;
 
@@ -150,7 +149,10 @@ pub fn import_installed_browser_cookies_sync(
     profile_name: Option<&str>,
     home_dir: Option<&Path>,
 ) -> Result<ChromiumCookieReadResult, InstalledCookieImportError> {
-    let profile_dir: PathBuf = resolve_installed_browser_profile_dir(kind, profile_name, home_dir);
+    let profile_dir: PathBuf = resolve_installed_browser_profile_dir(kind, profile_name, home_dir)
+        .map_err(|err| {
+            cookie_import_error(InstalledCookieImportFailureReason::NoProfile, err.to_string())
+        })?;
     if !profile_dir.exists() {
         return Err(cookie_import_error(
             InstalledCookieImportFailureReason::NoProfile,
@@ -169,20 +171,26 @@ pub fn import_installed_browser_cookies_sync(
     })?;
 
     let key_source = resolve_platform_key_source(kind)?;
-    let mut result = read_chromium_cookie_db(&cookie_db_path, &key_source).map_err(|err| {
+    let result = read_chromium_cookie_db(&cookie_db_path, &key_source).map_err(|err| {
         cookie_import_error(
             InstalledCookieImportFailureReason::CookieImportFailed,
             err.to_string(),
         )
     })?;
 
-    let original_count = result.cookies.len();
-    result.cookies = filter_google_cookies(result.cookies);
-    let excluded = original_count.saturating_sub(result.cookies.len());
-    result.google_excluded_count += excluded;
+    finalize_installed_cookie_read(result)
+}
 
+/// Applies the post-read acceptance rules to a profile database read. Google exclusion is owned
+/// by `read_chromium_cookie_db`, which already drops and counts those rows.
+fn finalize_installed_cookie_read(
+    result: ChromiumCookieReadResult,
+) -> Result<ChromiumCookieReadResult, InstalledCookieImportError> {
     if result.cookies.is_empty() {
-        if result.unsupported_v11_count > 0 && result.decrypt_failed_count == 0 && excluded == 0 {
+        if result.unsupported_v11_count > 0
+            && result.decrypt_failed_count == 0
+            && result.google_excluded_count == 0
+        {
             return Err(cookie_import_error(
                 InstalledCookieImportFailureReason::NoCookies,
                 format!(
@@ -203,8 +211,46 @@ pub fn import_installed_browser_cookies_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::cookies::ImportedCookie;
+    use crate::browser::cookies::{filter_google_cookies, ImportedCookie};
     use tempfile::Builder;
+
+    #[test]
+    fn test_finalize_does_not_recount_google_exclusions_from_reader() {
+        // The reader already excluded one Google row and counted it. A Google-domain cookie that
+        // reaches finalize (it cannot in production) must not be filtered or counted a second time.
+        let read = ChromiumCookieReadResult {
+            cookies: vec![
+                ImportedCookie {
+                    name: "session".into(),
+                    value: "abc".into(),
+                    domain: Some(".github.com".into()),
+                    path: "/".into(),
+                    secure: true,
+                    http_only: true,
+                    expires_unix: None,
+                    same_site: None,
+                },
+                ImportedCookie {
+                    name: "SID".into(),
+                    value: "xyz".into(),
+                    domain: Some(".google.com".into()),
+                    path: "/".into(),
+                    secure: true,
+                    http_only: true,
+                    expires_unix: None,
+                    same_site: None,
+                },
+            ],
+            unsupported_v11_count: 0,
+            decrypt_failed_count: 0,
+            google_excluded_count: 1,
+            invalid_count: 0,
+        };
+
+        let finalized = finalize_installed_cookie_read(read).expect("non-empty read is accepted");
+        assert_eq!(finalized.google_excluded_count, 1);
+        assert_eq!(finalized.cookies.len(), 2);
+    }
 
     #[test]
     fn test_failure_reason_as_str() {
@@ -264,6 +310,18 @@ mod tests {
     }
 
     #[test]
+    fn test_import_without_home_dir_refuses_instead_of_using_literal_tilde() {
+        let err = import_installed_browser_cookies_sync(InstalledBrowserKind::Chrome, None, None)
+            .expect_err("unknown home directory must be refused");
+
+        assert_eq!(err.reason(), InstalledCookieImportFailureReason::NoProfile);
+        assert!(
+            err.message.contains("home directory unknown"),
+            "expected home-directory refusal, got: {err}"
+        );
+    }
+
+    #[test]
     fn test_import_missing_cookie_db_returns_no_profile() {
         let temp_dir = Builder::new().prefix("test-fake-home-").tempdir().unwrap();
         let fake_home = temp_dir.path();
@@ -272,7 +330,8 @@ mod tests {
             InstalledBrowserKind::Chrome,
             Some("Default"),
             Some(fake_home),
-        );
+        )
+        .expect("home directory is provided");
         std::fs::create_dir_all(&profile_dir).unwrap();
 
         let err = import_installed_browser_cookies_sync(
@@ -302,7 +361,8 @@ mod tests {
                 InstalledBrowserKind::Chrome,
                 Some("Default"),
                 Some(fake_home),
-            );
+            )
+            .expect("home directory is provided");
             std::fs::create_dir_all(&profile_dir).unwrap();
             let db_path = profile_dir.join("Cookies");
 

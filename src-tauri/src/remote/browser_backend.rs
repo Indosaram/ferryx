@@ -1722,9 +1722,11 @@ impl RemoteBrowserBackend for InProcessBrowserServiceBackend {
                                 crate::browser::security::BrowserSecurityContext::Remote,
                             )
                             .map_err(|e| match e {
-                                crate::browser::security::BrowserError::SchemeDenied(_)
-                                | crate::browser::security::BrowserError::InvalidUrl(_) => {
+                                crate::browser::security::BrowserError::SchemeDenied(_) => {
                                     RemoteBrowserError::Forbidden(e.to_string())
+                                }
+                                crate::browser::security::BrowserError::InvalidUrl(_) => {
+                                    RemoteBrowserError::InvalidRequest(e.to_string())
                                 }
                                 other => RemoteBrowserError::ExecutionFailed(other.to_string()),
                             })?;
@@ -2153,6 +2155,18 @@ pub mod tests {
             "fallback remote navigate to a local file must be denied, got {res:?}"
         );
         assert_eq!(manager.get_state(&state.browser_id).unwrap().url, state.url);
+        let malformed = backend
+            .execute_command(BrowserCommandContext {
+                browser_id: state.browser_id.clone(),
+                command: "navigate".into(),
+                params: Some(serde_json::json!({ "url": "https://user:pw@example.com/" })),
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            matches!(malformed, Err(RemoteBrowserError::InvalidRequest(_))),
+            "fallback remote navigate to a malformed URL must be InvalidRequest, got {malformed:?}"
+        );
     }
 
     #[cfg(unix)]

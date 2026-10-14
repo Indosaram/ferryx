@@ -49,6 +49,9 @@ export type BrowserOpenRequestedPayload = {
 export type BrowserDownloadRequestedPayload = {
   browserId: string;
   targetUrl: string;
+  /** The host could not attribute the request to the user: nothing is fetched until the user
+   * confirms with Save. Absent means a user-initiated download. */
+  requiresConfirmation?: boolean;
 };
 
 export type DownloadStatus = "pending" | "inProgress" | "completed" | "failed" | "cancelled";
@@ -151,6 +154,8 @@ export type BrowserFindResult = {
 export type BrowserSnapshotCapability = {
   supported: boolean;
   formats: string[];
+  /** Element picking: native snapshots AND this tab's isolated-world bridge. */
+  pick: boolean;
 };
 export type BrowserDesignDomElement = { id: string; tag: string; bounds: [number, number, number, number]; text?: string | null };
 export type BrowserDesignSnapshot = {
@@ -405,8 +410,8 @@ export async function finishBrowserElementPick(browserId: string): Promise<Brows
 
 /** Reports whether this build can capture native webview snapshots (macOS today) and which
  * encodings it supports, so platform-limited affordances can be gated instead of offered dead. */
-export async function getBrowserSnapshotCapability(): Promise<BrowserSnapshotCapability> {
-  return invoke<BrowserSnapshotCapability>("cmd_browser_snapshot_capability");
+export async function getBrowserSnapshotCapability(browserId?: string): Promise<BrowserSnapshotCapability> {
+  return invoke<BrowserSnapshotCapability>("cmd_browser_snapshot_capability", { browserId: browserId ?? null });
 }
 
 export async function getBrowserState(browserId: string): Promise<BrowserState> {

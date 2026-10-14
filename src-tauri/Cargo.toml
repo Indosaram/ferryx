@@ -171,8 +171,21 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSObject",
     "NSData",
     "NSEnumerator",
+    "NSJSONSerialization",
 ] }
-objc2-web-kit = { version = "0.3", default-features = false, features = ["WKWebView", "WKNavigation"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    "block2",
+    "WKWebView",
+    "WKNavigation",
+    "WKContentWorld",
+    "WKUserContentController",
+    "WKUserScript",
+    "WKScriptMessage",
+    "WKScriptMessageHandler",
+    "WKFrameInfo",
+    "WKSecurityOrigin",
+    "WKWebViewConfiguration",
+] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
@@ -206,10 +219,16 @@ windows-sys = { version = "0.59", default-features = false, features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
 ] }
+# Trusted browser bridge (src/browser/bridge/windows.rs). Same versions wry 0.55 already
+# pulls in (Cargo.lock: webview2-com 0.38.2, windows 0.61.3), so no second copy is built.
+webview2-com = "0.38"
+windows = { version = "0.61", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", default-features = false }
 webkit2gtk = { version = "2.0.2", default-features = false }
+# Reads the trusted bridge's JavaScriptCore values (browser/bridge/linux.rs); same pin as wry.
+javascriptcore = { package = "javascriptcore-rs", version = "=1.1.2", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.17"

@@ -877,11 +877,6 @@ describe("browserProtocol - Phase 7B edge cases (§7.1)", () => {
         leaseEpoch: "43",
       });
 
-      // Missing leaseEpoch
-      expect(() =>
-        parseServerMessage(JSON.stringify({ type: "browserDriverRevoked" })),
-      ).toThrow(/leaseEpoch/i);
-
       // Non-string leaseEpoch
       expect(() =>
         parseServerMessage(
@@ -910,6 +905,36 @@ describe("browserProtocol - Phase 7B edge cases (§7.1)", () => {
           }),
         ),
       ).toThrow(/unknown field/i);
+    });
+
+    it("parses browserDriverRevoked with absent leaseEpoch (server omits optional field) (R3-fix)", () => {
+      // Rust server sends lease_epoch: Option<String> with skip_serializing_if = "Option::is_none",
+      // so the field can be legitimately absent.
+      const withoutEpoch = parseServerMessage(
+        JSON.stringify({ type: "browserDriverRevoked", reason: "desktop reclaimed" }),
+      );
+      expect(withoutEpoch).toEqual({
+        type: "browserDriverRevoked",
+        reason: "desktop reclaimed",
+      });
+
+      // Absent leaseEpoch AND absent reason
+      const bare = parseServerMessage(
+        JSON.stringify({ type: "browserDriverRevoked" }),
+      );
+      expect(bare).toEqual({ type: "browserDriverRevoked" });
+
+      // Explicit null leaseEpoch
+      expect(
+        parseServerMessage(JSON.stringify({ type: "browserDriverRevoked", leaseEpoch: null })),
+      ).toEqual({ type: "browserDriverRevoked", leaseEpoch: null });
+
+      // Non-string leaseEpoch must still be rejected
+      expect(() =>
+        parseServerMessage(
+          JSON.stringify({ type: "browserDriverRevoked", leaseEpoch: 42 }),
+        ),
+      ).toThrow(/leaseEpoch/i);
     });
   });
 

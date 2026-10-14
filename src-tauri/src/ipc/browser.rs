@@ -1054,6 +1054,22 @@ fn emit_browser_state<R: tauri::Runtime>(webview: &tauri::Webview<R>, state: &Br
     );
 }
 
+/// Publishes state changes the manager makes outside a webview callback as
+/// `browser_state_changed`. The trusted bridge kind is one: Windows upgrades it from a CDP
+/// completion that has no webview in scope, and the toolbar's pick capability depends on it.
+pub fn install_browser_state_emitter<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+) {
+    let app = app.clone();
+    manager.set_state_listener(Arc::new(move |state: &BrowserState| {
+        let _ = app.emit(
+            BROWSER_STATE_CHANGED_EVENT,
+            BrowserStateChangedPayload::from(state),
+        );
+    }));
+}
+
 fn update_webview_state<R: tauri::Runtime>(
     webview: &tauri::Webview<R>,
     manager: Arc<BrowserManager>,
@@ -1109,6 +1125,20 @@ fn keep_or_discard_fresh_webview(session_exists: bool) -> Result<(), String> {
 }
 
 static CREATED_SESSION_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Passes `result` through and, when it is an error, drops the session that was
+/// already registered so neither the manager nor CREATED_SESSION_IDS keeps it.
+#[cfg(any(not(target_os = "macos"), test))]
+fn discard_session_on_error<T, E>(
+    manager: &BrowserManager,
+    browser_id: &str,
+    result: Result<T, E>,
+) -> Result<T, E> {
+    if result.is_err() {
+        discard_failed_session(manager, browser_id);
+    }
+    result
+}
 
 /// Drops a session whose webview creation failed.
 fn discard_failed_session(manager: &BrowserManager, browser_id: &str) {
@@ -1218,14 +1248,21 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
     #[cfg(not(target_os = "macos"))]
     let profile_data_dir = match request.profile.as_ref() {
         Some(BrowserProfileId::Named(profile_id)) => {
-            let root = app
-                .path()
-                .app_data_dir()
-                .map_err(|error| BrowserError::CreateFailed(error.to_string()))?;
+            let root = discard_session_on_error(
+                manager,
+                &state.browser_id,
+                app.path()
+                    .app_data_dir()
+                    .map_err(|error| BrowserError::CreateFailed(error.to_string())),
+            )?;
             let data_dir = root.join("browser-profiles").join(profile_id);
-            tokio::fs::create_dir_all(&data_dir)
-                .await
-                .map_err(|error| BrowserError::CreateFailed(error.to_string()))?;
+            discard_session_on_error(
+                manager,
+                &state.browser_id,
+                tokio::fs::create_dir_all(&data_dir)
+                    .await
+                    .map_err(|error| BrowserError::CreateFailed(error.to_string())),
+            )?;
             Some(data_dir)
         }
         _ => None,
@@ -1238,17 +1275,16 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
         let visible = state.visible;
         let browser_id = state.browser_id.clone();
         let incognito = state.profile_id.is_private();
-        let profile_id = state.profile_id.clone();
-        let worktree_path = state.worktree_path.clone();
         let zoom_factor = state.zoom_factor;
         let bridge_app = app.clone();
         let bridge_browser_id = browser_id.clone();
-        let bridge_profile_id = profile_id.clone();
-        let bridge_worktree_path = worktree_path.clone();
         let page_manager = Arc::clone(manager);
         let title_manager = Arc::clone(manager);
         let creation_manager = Arc::clone(manager);
         let bridge_manager = Arc::clone(manager);
+        let new_window_manager = Arc::clone(manager);
+        let new_window_app = app.clone();
+        let new_window_browser_id = browser_id.clone();
         let page_browser_id = browser_id.clone();
         let title_browser_id = browser_id.clone();
 
@@ -1257,6 +1293,19 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
         let is_popup = opener.is_some();
         let eval_bridge_script = browser_guest_bridge_script(&guest_bridge_nonce, is_popup);
         let page_load_bridge_script = eval_bridge_script.clone();
+        // The guest starts at about:blank so the platform bridge install (which only takes
+        // effect from the next document on WebKit) is in place before the first real page.
+        // Until the target navigation starts, the bootstrap about:blank load events are
+        // not a load failure of the target URL, so they are ignored.
+        let bootstrapping_blank = Arc::new(std::sync::atomic::AtomicBool::new(
+            target_url != "about:blank",
+        ));
+        let page_bootstrapping_blank = Arc::clone(&bootstrapping_blank);
+        let install_ctx = crate::browser::bridge::BridgeInstallCtx {
+            browser_id: browser_id.clone(),
+            manager: Arc::clone(manager),
+            sink: trusted_bridge_sink(app.clone(), Arc::clone(manager)),
+        };
         let (creation_sender, creation_receiver) =
             tokio::sync::oneshot::channel::<Result<(), String>>();
 
@@ -1285,10 +1334,10 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
 
         let window_clone = main_window.clone();
         let run_result = main_window.run_on_main_thread(move || {
-            let parsed_url: tauri::WebviewUrl = if let Ok(u) = target_url.parse() {
-                tauri::WebviewUrl::External(u)
-            } else {
-                tauri::WebviewUrl::App("about:blank".into())
+            let target_parsed: Option<tauri::Url> = target_url.parse().ok();
+            let parsed_url: tauri::WebviewUrl = match "about:blank".parse() {
+                Ok(blank) => tauri::WebviewUrl::External(blank),
+                Err(_) => tauri::WebviewUrl::App("about:blank".into()),
             };
 
             let builder = tauri::WebviewBuilder::new(label, parsed_url)
@@ -1296,32 +1345,39 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                 .incognito(incognito)
                 .devtools(true)
                 .initialization_script(browser_guest_bridge_script(&guest_bridge_nonce, is_popup))
+                // Native new windows never open. In an Isolated tab the broker owns
+                // window.open; in an Unavailable tab nothing can attest the request, so it is
+                // denied visibly instead of vanishing (design 3.5, "as implemented").
+                .on_new_window(move |url, _features| {
+                    use crate::browser::bridge::{new_window_policy, NewWindowDecision};
+                    let kind = new_window_manager
+                        .get_state(&new_window_browser_id)
+                        .map(|state| state.trusted_bridge)
+                        .unwrap_or_default();
+                    if let NewWindowDecision::DenyWithWarning(reason) =
+                        new_window_policy(kind, url.as_str())
+                    {
+                        tracing::warn!(browser_id = %new_window_browser_id, url = %url, reason, "native new window denied");
+                        let app = new_window_app.clone();
+                        let manager = Arc::clone(&new_window_manager);
+                        let browser_id = new_window_browser_id.clone();
+                        let script = crate::browser::popup::page_warning_script(&format!(
+                            "[ferryx] {reason}: {url}"
+                        ));
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(error) =
+                                eval_browser_session(&app, &manager, &browser_id, &script).await
+                            {
+                                tracing::debug!(%error, "could not report a denied new window to the page");
+                            }
+                        });
+                    }
+                    tauri::webview::NewWindowResponse::Deny
+                })
                 .on_navigation(
                     move |target| match parse_browser_guest_action(target, &nonce) {
-                        Some(BrowserGuestAction::Open(target_url)) => {
-                            let _ = bridge_app.emit(
-                                BROWSER_OPEN_REQUESTED_EVENT,
-                                BrowserOpenRequestedPayload {
-                                    browser_id: bridge_browser_id.clone(),
-                                    target_url,
-                                    profile_id: bridge_profile_id.clone(),
-                                    worktree_path: bridge_worktree_path.clone(),
-                                    opener_browser_id: None,
-                                    popup_handle: None,
-                                },
-                            );
-                            false
-                        }
-                        Some(BrowserGuestAction::Download(target_url)) => {
-                            let _ = bridge_app.emit(
-                                BROWSER_DOWNLOAD_REQUESTED_EVENT,
-                                BrowserDownloadRequestedPayload {
-                                    browser_id: bridge_browser_id.clone(),
-                                    target_url,
-                                },
-                            );
-                            false
-                        }
+                        // Class (b) only: self-scoped shortcuts and popup-handle traffic.
+                        // Class (a) actions arrive through the trusted bridge sink.
                         Some(BrowserGuestAction::Shortcut(action)) => {
                             let _ = bridge_app.emit(
                                 BROWSER_SHORTCUT_REQUESTED_EVENT,
@@ -1332,51 +1388,22 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                             );
                             false
                         }
-                        Some(BrowserGuestAction::ElementPick) => {
-                            let _ = bridge_app.emit(
-                                BROWSER_ELEMENT_PICKED_EVENT,
-                                BrowserElementPickedPayload {
-                                    browser_id: bridge_browser_id.clone(),
-                                },
-                            );
-                            false
-                        }
-                        Some(BrowserGuestAction::LinkClick(target_url))
-                        | Some(BrowserGuestAction::ModifierLinkClick(target_url)) => {
-                            let modifier = target.host_str() == Some("modclick.ferryx.invalid");
-                            let _ = bridge_app.emit(
-                                BROWSER_LINK_CLICKED_EVENT,
-                                BrowserLinkClickedPayload {
-                                    browser_id: bridge_browser_id.clone(),
-                                    target_url,
-                                    modifier,
-                                    profile_id: bridge_profile_id.clone(),
-                                    worktree_path: bridge_worktree_path.clone(),
-                                },
-                            );
-                            false
-                        }
-                        Some(BrowserGuestAction::PopupOpen { url, handle }) => {
-                            let _ = bridge_app.emit(
-                                BROWSER_OPEN_REQUESTED_EVENT,
-                                BrowserOpenRequestedPayload {
-                                    browser_id: bridge_browser_id.clone(),
-                                    target_url: url,
-                                    profile_id: bridge_profile_id.clone(),
-                                    worktree_path: bridge_worktree_path.clone(),
-                                    opener_browser_id: Some(bridge_browser_id.clone()),
-                                    popup_handle: Some(handle),
-                                },
-                            );
-                            false
-                        }
                         Some(BrowserGuestAction::PopupNavigate { url, handle }) => {
                             let app = bridge_app.clone();
                             let manager = Arc::clone(&bridge_manager);
                             let opener_browser_id = bridge_browser_id.clone();
                             tauri::async_runtime::spawn(async move {
-                                navigate_linked_popup(&app, &manager, &opener_browser_id, &handle, &url)
-                                    .await;
+                                if let Err(error) = navigate_linked_popup(
+                                    &app,
+                                    &manager,
+                                    &opener_browser_id,
+                                    &handle,
+                                    &url,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(%error, opener = %opener_browser_id, "popup navigation refused");
+                                }
                             });
                             false
                         }
@@ -1420,21 +1447,18 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                             });
                             false
                         }
-                        Some(BrowserGuestAction::PopupCloseRequested) => {
-                            let _ = bridge_app.emit(
-                                crate::browser::guest::BROWSER_CLOSE_REQUESTED_EVENT,
-                                crate::browser::model::BrowserCloseRequestedPayload {
-                                    browser_id: bridge_browser_id.clone(),
-                                },
-                            );
-                            false
-                        }
                         None => true,
                     },
                 )
                 .on_page_load(move |webview, payload| {
                     let loading = matches!(payload.event(), PageLoadEvent::Started);
                     let page_url = payload.url().to_string();
+                    if page_bootstrapping_blank.load(std::sync::atomic::Ordering::SeqCst) {
+                        if page_url == "about:blank" {
+                            return;
+                        }
+                        page_bootstrapping_blank.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
                     if !loading {
                         let _ = webview.eval(&page_load_bridge_script);
                     }
@@ -1514,6 +1538,35 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                         Ok(()) => {
                             let _ = child.eval(&eval_bridge_script);
                             let _ = child.set_zoom(zoom_factor);
+                            let bridge_kind =
+                                crate::browser::bridge::install(&child, &install_ctx);
+                            if let Err(error) =
+                                creation_manager.set_trusted_bridge(&browser_id, bridge_kind)
+                            {
+                                tracing::warn!(browser_id = %browser_id, %error, "could not record the trusted bridge kind");
+                            }
+                            match target_parsed.filter(|url| url.as_str() != "about:blank") {
+                                Some(url) => {
+                                    if let Err(error) = child.navigate(url) {
+                                        bootstrapping_blank
+                                            .store(false, std::sync::atomic::Ordering::SeqCst);
+                                        tracing::warn!(browser_id = %browser_id, %error, "initial navigation after the bridge install failed");
+                                        let _ = creation_manager.update_navigation_state(
+                                            &browser_id,
+                                            None,
+                                            None,
+                                            Some(false),
+                                            None,
+                                            None,
+                                            Some(error.to_string()),
+                                        );
+                                    }
+                                }
+                                None => {
+                                    bootstrapping_blank
+                                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                                }
+                            }
                             #[cfg(target_os = "linux")]
                             let initial_bounds = creation_manager
                                 .get_bounds(&browser_id)
@@ -1621,7 +1674,148 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
             return Err(BrowserError::CreateFailed("popup closed while creation pending".into()).into());
         }
     }
-    Ok(state)
+    // Report the bridge kind the platform install recorded.
+    Ok(manager.get_state(&state.browser_id).unwrap_or(state))
+}
+
+/// The host receiver the platform bridge calls with `(browser_id, raw envelope, attestation)`.
+/// It may run on any thread, so it only parses and hands off to the async dispatcher.
+pub(crate) fn trusted_bridge_sink<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: Arc<BrowserManager>,
+) -> crate::browser::bridge::BridgeSink {
+    Arc::new(move |browser_id: &str, raw: &str, attestation| {
+        let action = match crate::browser::bridge::parse_envelope(raw) {
+            Ok(action) => action,
+            Err(error) => {
+                tracing::warn!(browser_id = %browser_id, %error, "rejected a trusted bridge envelope");
+                return;
+            }
+        };
+        let app = app.clone();
+        let manager = Arc::clone(&manager);
+        let browser_id = browser_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            dispatch_trusted_action(&app, &manager, &browser_id, action, attestation).await;
+        });
+    })
+}
+
+/// Gates one class (a) request through [`crate::browser::bridge::admit`] and carries out the
+/// decision. These are the actions the page route used to deliver by navigation.
+pub(crate) async fn dispatch_trusted_action<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    browser_id: &str,
+    action: crate::browser::bridge::TrustedAction,
+    attestation: crate::browser::bridge::Attestation,
+) -> crate::browser::bridge::Decision {
+    use crate::browser::bridge::{admit, AdmitCtx, BridgeEmit, Decision};
+
+    let state = match manager.get_state(browser_id) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(%error, "trusted bridge action for an unknown browser");
+            return Decision::Deny("unknown browser session");
+        }
+    };
+    let armed = manager.armed_pick_token(browser_id);
+    let native = manager.recent_native_user_initiated(browser_id);
+    let ctx = AdmitCtx {
+        is_popup: crate::browser::popup::lookup(browser_id).is_some(),
+        armed_pick_token: armed.as_deref(),
+        recent_native_user_initiated: &native,
+        now: std::time::Instant::now(),
+    };
+    let decision = admit(action, attestation, state.trusted_bridge, &ctx);
+    // Host-side popup cap per opener, on top of the broker's one-open-per-activation rule.
+    let decision = match decision {
+        Decision::Emit(BridgeEmit::PopupOpen { .. })
+            if !manager.admit_popup_open(browser_id, std::time::Instant::now()) =>
+        {
+            Decision::Deny(crate::browser::bridge::DENY_POPUP_RATE)
+        }
+        other => other,
+    };
+    let emit_download = |target_url: String, requires_confirmation: bool| {
+        let _ = app.emit(
+            BROWSER_DOWNLOAD_REQUESTED_EVENT,
+            BrowserDownloadRequestedPayload {
+                browser_id: browser_id.to_string(),
+                target_url,
+                requires_confirmation,
+            },
+        );
+    };
+    match &decision {
+        Decision::Emit(BridgeEmit::Download { url }) => emit_download(url.clone(), false),
+        Decision::NeedsConfirmation(BridgeEmit::Download { url }) => {
+            emit_download(url.clone(), true)
+        }
+        Decision::Emit(BridgeEmit::Link { url, modifier }) => {
+            let _ = app.emit(
+                BROWSER_LINK_CLICKED_EVENT,
+                BrowserLinkClickedPayload {
+                    browser_id: browser_id.to_string(),
+                    target_url: url.clone(),
+                    modifier: *modifier,
+                    profile_id: state.profile_id.clone(),
+                    worktree_path: state.worktree_path.clone(),
+                },
+            );
+        }
+        Decision::Emit(BridgeEmit::NavigateInTab { url })
+        | Decision::Downgrade(BridgeEmit::NavigateInTab { url }) => {
+            if let Err(error) = navigate_browser_session(app, manager, browser_id, url).await {
+                tracing::warn!(%error, browser_id = %browser_id, "downgraded link navigation failed");
+            }
+        }
+        Decision::Emit(BridgeEmit::PopupOpen { url, handle }) => {
+            let _ = app.emit(
+                BROWSER_OPEN_REQUESTED_EVENT,
+                BrowserOpenRequestedPayload {
+                    browser_id: browser_id.to_string(),
+                    target_url: url.clone(),
+                    profile_id: state.profile_id.clone(),
+                    worktree_path: state.worktree_path.clone(),
+                    opener_browser_id: Some(browser_id.to_string()),
+                    popup_handle: Some(handle.clone()),
+                },
+            );
+        }
+        Decision::Emit(BridgeEmit::ElementPicked { token }) => {
+            // One arm yields one pick: a replayed token finds nothing armed.
+            if manager.consume_pick_token(browser_id, token) {
+                let _ = app.emit(
+                    BROWSER_ELEMENT_PICKED_EVENT,
+                    BrowserElementPickedPayload {
+                        browser_id: browser_id.to_string(),
+                    },
+                );
+            } else {
+                return Decision::Deny(crate::browser::bridge::DENY_PICK_TOKEN);
+            }
+        }
+        Decision::Emit(BridgeEmit::CloseSelf) => {
+            let _ = app.emit(
+                crate::browser::guest::BROWSER_CLOSE_REQUESTED_EVENT,
+                crate::browser::model::BrowserCloseRequestedPayload {
+                    browser_id: browser_id.to_string(),
+                },
+            );
+        }
+        Decision::Deny(reason) => {
+            tracing::warn!(browser_id = %browser_id, reason, "trusted bridge action denied");
+            let script = crate::browser::popup::page_warning_script(&format!("[ferryx] {reason}"));
+            if let Err(error) = eval_browser_session(app, manager, browser_id, &script).await {
+                tracing::debug!(%error, "could not report a denied bridge action to the page");
+            }
+        }
+        other => {
+            tracing::warn!(browser_id = %browser_id, decision = ?other, "unexpected trusted bridge decision");
+        }
+    }
+    decision
 }
 
 #[tauri::command]
@@ -1661,13 +1855,17 @@ pub async fn cmd_browser_inject_element_picker<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
-    eval_browser_session(
-        &app,
-        manager.inner(),
-        &browser_id,
-        crate::browser::picker::ELEMENT_PICKER_SCRIPT,
+    let webview = browser_webview(&app, manager.inner(), &browser_id)?;
+    let token = manager.arm_pick_token(&browser_id);
+    if let Err(error) = crate::browser::bridge::eval_in_world(
+        webview,
+        crate::browser::bridge::picker_arm_script(&token),
     )
-    .await?;
+    .await
+    {
+        manager.clear_pick_tokens(&browser_id);
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -1677,14 +1875,32 @@ pub async fn cmd_browser_remove_element_picker<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
-    eval_browser_session(
-        &app,
-        manager.inner(),
-        &browser_id,
-        crate::browser::picker::ELEMENT_PICKER_REMOVE_SCRIPT,
+    manager.clear_pick_tokens(&browser_id);
+    let webview = browser_webview(&app, manager.inner(), &browser_id)?;
+    crate::browser::bridge::eval_in_world(
+        webview,
+        crate::browser::bridge::PICKER_DISARM_SCRIPT.to_string(),
     )
     .await?;
     Ok(())
+}
+
+fn browser_webview<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+) -> Result<tauri::Webview<R>, IpcError> {
+    let state = manager.get_state(browser_id)?;
+    app.get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label).into())
+}
+
+/// The finish step only proceeds for a pick the host admitted (its one-time token was
+/// consumed by [`dispatch_trusted_action`]); anything else is the empty-pick error.
+fn require_consumed_pick(manager: &BrowserManager, browser_id: &str) -> Result<String, IpcError> {
+    manager
+        .take_consumed_pick_token(browser_id)
+        .ok_or_else(|| IpcError::new(IpcErrorCode::ParseError, "element pick is empty"))
 }
 
 #[tauri::command]
@@ -1695,25 +1911,25 @@ pub async fn cmd_browser_finish_element_pick<R: tauri::Runtime>(
     png_base64: Option<String>,
 ) -> Result<crate::remote::design_mode::DesignModeSnapshot, IpcError> {
     let state = manager.get_state(&browser_id)?;
-    let (raw, _) = eval_browser_session(
-        &app,
-        manager.inner(),
-        &browser_id,
-        "window.__ferryxElementPick",
+    require_consumed_pick(manager.inner(), &browser_id)?;
+    let webview = browser_webview(&app, manager.inner(), &browser_id)?;
+    let raw = crate::browser::bridge::eval_in_world(
+        webview.clone(),
+        crate::browser::bridge::PICKER_READ_SCRIPT.to_string(),
     )
     .await?;
-    let json = raw
-        .as_deref()
+    let json = Some(raw.as_str())
         .map(crate::browser::picker::unwrap_eval_json)
         .filter(|value| !value.trim().is_empty() && value != "null" && value != "undefined")
         .ok_or_else(|| IpcError::new(IpcErrorCode::ParseError, "element pick is empty"))?;
-    let _ = eval_browser_session(
-        &app,
-        manager.inner(),
-        &browser_id,
-        crate::browser::picker::ELEMENT_PICKER_REMOVE_SCRIPT,
+    if let Err(error) = crate::browser::bridge::eval_in_world(
+        webview,
+        crate::browser::bridge::PICKER_DISARM_SCRIPT.to_string(),
     )
-    .await;
+    .await
+    {
+        tracing::warn!(%error, browser_id = %browser_id, "could not disarm the element picker");
+    }
     let png = match png_base64.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
         Some(encoded) => base64::engine::general_purpose::STANDARD
             .decode(encoded)
@@ -1742,6 +1958,162 @@ mod devtools_tests {
     #[test]
     fn browser_sessions_enable_devtools() {
         assert!(browser_session_devtools_enabled());
+    }
+}
+
+#[cfg(test)]
+mod trusted_dispatch_tests {
+    use super::*;
+    use crate::browser::bridge::{
+        Attestation, BridgeEmit, Decision, TrustedAction, TrustedBridgeKind, DENY_PICK_TOKEN,
+        DENY_SELF_CLOSE_NOT_POPUP,
+    };
+    use std::sync::Mutex as StdMutex;
+    use tauri::Listener;
+
+    fn session(manager: &BrowserManager, id: &str, kind: TrustedBridgeKind) {
+        manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some(id.into()),
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://example.com/".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: None,
+            })
+            .unwrap();
+        manager.set_trusted_bridge(id, kind).unwrap();
+    }
+
+    fn capture(app: &tauri::App<tauri::test::MockRuntime>, event: &str) -> Arc<StdMutex<Vec<String>>> {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        app.listen_any(event, move |event| sink.lock().unwrap().push(event.payload().to_string()));
+        seen
+    }
+
+    #[test]
+    fn pick_ready_emits_once_per_armed_token_and_finish_requires_consumption() {
+        let app = tauri::test::mock_app();
+        let manager = Arc::new(BrowserManager::new());
+        session(&manager, "pick-1", TrustedBridgeKind::Isolated);
+        let picked = capture(&app, BROWSER_ELEMENT_PICKED_EVENT);
+
+        // Nothing armed: denied, nothing emitted, finish has nothing to read.
+        let denied = tauri::async_runtime::block_on(dispatch_trusted_action(
+            app.handle(), &manager, "pick-1",
+            TrustedAction::PickReady { token: "guess".into() }, Attestation::IsolatedWorld,
+        ));
+        assert_eq!(denied, Decision::Deny(DENY_PICK_TOKEN));
+        let error = require_consumed_pick(&manager, "pick-1").unwrap_err();
+        assert_eq!(error.code, IpcErrorCode::ParseError);
+        assert_eq!(error.message, "element pick is empty");
+
+        let token = manager.arm_pick_token("pick-1");
+        let accepted = tauri::async_runtime::block_on(dispatch_trusted_action(
+            app.handle(), &manager, "pick-1",
+            TrustedAction::PickReady { token: token.clone() }, Attestation::IsolatedWorld,
+        ));
+        assert_eq!(accepted, Decision::Emit(BridgeEmit::ElementPicked { token: token.clone() }));
+        // Replay of the consumed token is denied.
+        let replay = tauri::async_runtime::block_on(dispatch_trusted_action(
+            app.handle(), &manager, "pick-1",
+            TrustedAction::PickReady { token: token.clone() }, Attestation::IsolatedWorld,
+        ));
+        assert_eq!(replay, Decision::Deny(DENY_PICK_TOKEN));
+        assert_eq!(picked.lock().unwrap().len(), 1);
+        assert_eq!(require_consumed_pick(&manager, "pick-1").unwrap(), token);
+        assert!(require_consumed_pick(&manager, "pick-1").is_err());
+    }
+
+    #[test]
+    fn unattested_download_is_emitted_as_needing_confirmation() {
+        let app = tauri::test::mock_app();
+        let manager = Arc::new(BrowserManager::new());
+        session(&manager, "dl-1", TrustedBridgeKind::Unavailable);
+        session(&manager, "dl-2", TrustedBridgeKind::Isolated);
+        let downloads = capture(&app, BROWSER_DOWNLOAD_REQUESTED_EVENT);
+        for (id, attestation) in [("dl-1", Attestation::None), ("dl-2", Attestation::IsolatedWorld)] {
+            tauri::async_runtime::block_on(dispatch_trusted_action(
+                app.handle(), &manager, id,
+                TrustedAction::Download { url: "https://example.com/a.zip".into() }, attestation,
+            ));
+        }
+        let seen = downloads.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(&seen[0]).unwrap();
+        let second: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+        assert_eq!(first["browserId"], "dl-1");
+        assert_eq!(first["requiresConfirmation"], true);
+        assert_eq!(second["browserId"], "dl-2");
+        assert!(second.get("requiresConfirmation").is_none());
+    }
+
+    #[test]
+    fn self_close_on_a_non_popup_tab_emits_nothing() {
+        let _guard = crate::browser::popup::registry_test_lock();
+        let app = tauri::test::mock_app();
+        let manager = Arc::new(BrowserManager::new());
+        session(&manager, "close-1", TrustedBridgeKind::Isolated);
+        let closes = capture(&app, crate::browser::guest::BROWSER_CLOSE_REQUESTED_EVENT);
+        let decision = tauri::async_runtime::block_on(dispatch_trusted_action(
+            app.handle(), &manager, "close-1",
+            TrustedAction::PopupSelfClose, Attestation::IsolatedWorld,
+        ));
+        assert_eq!(decision, Decision::Deny(DENY_SELF_CLOSE_NOT_POPUP));
+        assert!(closes.lock().unwrap().is_empty());
+
+        assert!(crate::browser::popup::link("close-1", "opener-x", "h-1"));
+        let decision = tauri::async_runtime::block_on(dispatch_trusted_action(
+            app.handle(), &manager, "close-1",
+            TrustedAction::PopupSelfClose, Attestation::IsolatedWorld,
+        ));
+        crate::browser::popup::unlink("close-1");
+        assert_eq!(decision, Decision::Emit(BridgeEmit::CloseSelf));
+        assert_eq!(closes.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sink_rejects_malformed_envelopes_without_dispatching() {
+        let app = tauri::test::mock_app();
+        let manager = Arc::new(BrowserManager::new());
+        session(&manager, "sink-1", TrustedBridgeKind::Isolated);
+        let downloads = capture(&app, BROWSER_DOWNLOAD_REQUESTED_EVENT);
+        let sink = trusted_bridge_sink(app.handle().clone(), Arc::clone(&manager));
+        sink("sink-1", r#"{"v":1,"kind":"download","url":"javascript:alert(1)"}"#, Attestation::IsolatedWorld);
+        sink("sink-1", "not json", Attestation::IsolatedWorld);
+        // Parsing is synchronous and rejected envelopes never spawn a dispatch.
+        assert!(downloads.lock().unwrap().is_empty());
+    }
+
+    /// n1: a later trusted bridge upgrade (macOS creation callback, Windows CDP leak probe)
+    /// must reach the UI, or a toolbar that read pick:false keeps the picker disabled.
+    #[test]
+    fn trusted_bridge_change_emits_browser_state_with_the_new_kind() {
+        let app = tauri::test::mock_app();
+        let manager = Arc::new(BrowserManager::new());
+        install_browser_state_emitter(app.handle(), &manager);
+        let states = capture(&app, BROWSER_STATE_CHANGED_EVENT);
+
+        // Registering at the default kind and re-recording it is not a change.
+        session(&manager, "bridge-1", TrustedBridgeKind::Unavailable);
+        assert!(states.lock().unwrap().is_empty());
+
+        manager.set_trusted_bridge("bridge-1", TrustedBridgeKind::Isolated).unwrap();
+        manager.set_trusted_bridge("bridge-1", TrustedBridgeKind::Isolated).unwrap();
+        let seen = states.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "exactly one emit per kind change: {seen:?}");
+        let payload: serde_json::Value = serde_json::from_str(&seen[0]).unwrap();
+        assert_eq!(payload["browserId"], "bridge-1");
+        assert_eq!(payload["trustedBridge"], "isolated");
+
+        manager.set_trusted_bridge("bridge-1", TrustedBridgeKind::Unavailable).unwrap();
+        let seen = states.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        let payload: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+        assert_eq!(payload["trustedBridge"], "unavailable");
     }
 }
 
@@ -1817,13 +2189,13 @@ pub(crate) fn history_navigation<R: tauri::Runtime>(
     browser_id: &str,
     forward: bool,
 ) -> Result<(), IpcError> {
-    let state = manager.begin_history_navigation(browser_id, forward)?;
+    let (state, dispatch) = manager.begin_history_dispatch(browser_id, forward)?;
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
     emit_browser_state(&webview, &state);
 
-    if !state.loading {
+    if !dispatch {
         return Ok(());
     }
     #[cfg(target_os = "macos")]
@@ -1877,8 +2249,12 @@ pub(crate) fn history_navigation<R: tauri::Runtime>(
             "history.back()"
         };
         if let Err(error) = webview.eval(script) {
-            if let Ok(restored) = manager.cancel_history_navigation(browser_id, forward) {
-                emit_browser_state(&webview, &restored);
+            // Only a shadow-vector move (loading) has state to roll back; an
+            // engine-only dispatch moved nothing.
+            if state.loading {
+                if let Ok(restored) = manager.cancel_history_navigation(browser_id, forward) {
+                    emit_browser_state(&webview, &restored);
+                }
             }
             return Err(BrowserError::HistoryFailed(error.to_string()).into());
         }
@@ -2668,13 +3044,17 @@ pub async fn browser_automation_act<R: tauri::Runtime>(
 ///
 /// `window.open('')` followed by `handle.location.href = url` is the common OAuth shape:
 /// the first assignment creates the tab, and every later one lands here.
+///
+/// The URL is page-originated, so it is validated under the Remote context (http(s) and
+/// about:blank only): a page must not load local file:// HTML into its popup.
 async fn navigate_linked_popup<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,
     opener_browser_id: &str,
     handle: &str,
     url: &str,
-) {
+) -> Result<(), IpcError> {
+    crate::browser::security::validate_url_remote(url)?;
     let Some(popup_browser_id) = crate::browser::popup::popup_for_handle(opener_browser_id, handle)
     else {
         tracing::warn!(
@@ -2682,11 +3062,16 @@ async fn navigate_linked_popup<R: tauri::Runtime>(
             handle = %handle,
             "popup navigation ignored: no open popup is linked to this handle"
         );
-        return;
+        return Ok(());
     };
-    if let Err(error) = navigate_browser_session(app, manager, &popup_browser_id, url).await {
-        tracing::warn!(%error, popup = %popup_browser_id, "popup navigation failed");
-    }
+    navigate_browser_session_with_context(
+        app,
+        manager,
+        &popup_browser_id,
+        url,
+        crate::browser::security::BrowserSecurityContext::Remote,
+    )
+    .await
 }
 
 /// Closes the popup tab linked to `handle` for `opener_browser_id`.
@@ -2922,6 +3307,7 @@ pub async fn close_browser_session<R: tauri::Runtime>(
     let session = manager
         .remove_session(browser_id)
         .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+    crate::browser::bridge::forget_webview(app, &session.webview_label);
     CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
     // A closing popup is how the opener learns the popup is gone. Closing the tab -- by the
     // user, by the page, or by the host -- has to flip the handle's `closed`, or a library
@@ -4598,9 +4984,8 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                     )
                     .await
                     .map_err(|e| match e.code {
-                        IpcErrorCode::BrowserUrlSchemeDenied | IpcErrorCode::BrowserUrlInvalid => {
-                            RemoteBrowserError::Forbidden(e.message)
-                        }
+                        IpcErrorCode::BrowserUrlSchemeDenied => RemoteBrowserError::Forbidden(e.message),
+                        IpcErrorCode::BrowserUrlInvalid => RemoteBrowserError::InvalidRequest(e.message),
                         _ => RemoteBrowserError::ExecutionFailed(e.to_string()),
                     })?;
                     let state = self
@@ -4729,26 +5114,10 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                                 ))
                             })?;
                         let sel_json = serde_json::to_string(&selector).unwrap_or_default();
-                        format!(
-                            r#"(function() {{
-                                const el = document.querySelector({});
-                                if (!el) return JSON.stringify({{ ok: false, error: "element not found" }});
-                                el.click();
-                                return JSON.stringify({{ ok: true }});
-                            }})()"#,
-                            sel_json
-                        )
+                        crate::browser::remote_input::build_selector_click_script(&sel_json)
                     } else if let Some(selector) = p.get("selector").and_then(|v| v.as_str()) {
                         let sel_json = serde_json::to_string(selector).unwrap_or_default();
-                        format!(
-                            r#"(function() {{
-                                const el = document.querySelector({});
-                                if (!el) return JSON.stringify({{ ok: false, error: "element not found" }});
-                                el.click();
-                                return JSON.stringify({{ ok: true }});
-                            }})()"#,
-                            sel_json
-                        )
+                        crate::browser::remote_input::build_selector_click_script(&sel_json)
                     } else if let (Some(px), Some(py)) = (
                         p.get("x").and_then(|n| n.as_f64()),
                         p.get("y").and_then(|n| n.as_f64()),
@@ -4785,7 +5154,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         .map_err(|e| RemoteBrowserError::InvalidRequest(e.to_string()))?;
                         crate::browser::remote_input::build_point_click_script(pt.x, pt.y)
                     } else {
-                        return Err(RemoteBrowserError::InvalidRequest(
+                        return Err(RemoteBrowserError::TargetNotFound(
                             "missing click target".into(),
                         ));
                     };
@@ -4797,19 +5166,8 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                     let res_str = eval_webview(webview, script)
                         .await
                         .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
-                    crate::browser::remote_input::decode_point_click_result(&res_str).map_err(|e| {
-                        match e {
-                            crate::browser::remote_input::ActionDecodeError::Refused(input_err) => {
-                                RemoteBrowserError::InputRefused(input_err.explanation())
-                            }
-                            crate::browser::remote_input::ActionDecodeError::NotFound(message) => {
-                                RemoteBrowserError::TargetNotFound(message)
-                            }
-                            crate::browser::remote_input::ActionDecodeError::Malformed(message) => {
-                                RemoteBrowserError::ExecutionFailed(message)
-                            }
-                        }
-                    })?;
+                    crate::browser::remote_input::decode_point_click_result(&res_str)
+                        .map_err(point_click_decode_error_to_remote)?;
                     Ok(BrowserCommandResult {
                         success: true,
                         value: Some(serde_json::json!({ "clicked": true })),
@@ -4832,19 +5190,20 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                     let res_str = eval_webview(webview, script)
                         .await
                         .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
-                    crate::browser::remote_input::decode_action_result(&res_str).map_err(|e| {
-                        if e.contains("element not found") || e.contains("no active element") {
-                            RemoteBrowserError::TargetNotFound(e)
-                        } else {
-                            RemoteBrowserError::ExecutionFailed(e)
-                        }
-                    })?;
+                    crate::browser::remote_input::decode_action_result(&res_str)
+                        .map_err(fill_decode_error_to_remote)?;
                     Ok(BrowserCommandResult {
                         success: true,
                         value: Some(serde_json::json!({ "filled": true })),
                     })
                 }
                 "keypress" => {
+                    let p = ctx.params.as_ref().ok_or_else(|| {
+                        RemoteBrowserError::InvalidRequest("keypress requires params".into())
+                    })?;
+                    let key = p.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                    crate::browser::remote_input::validate_page_key(key)
+                        .map_err(|e| RemoteBrowserError::InvalidRequest(e.to_string()))?;
                     let state = self
                         .manager
                         .get_state(&ctx.browser_id)
@@ -4853,10 +5212,6 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         .app
                         .get_webview(&state.webview_label)
                         .ok_or_else(|| RemoteBrowserError::NotFound(state.webview_label.clone()))?;
-                    let p = ctx.params.as_ref().ok_or_else(|| {
-                        RemoteBrowserError::InvalidRequest("keypress requires params".into())
-                    })?;
-                    let key = p.get("key").and_then(|v| v.as_str()).unwrap_or("");
                     let key_json = serde_json::to_string(key).unwrap_or_default();
                     let script = format!(
                         r#"(function() {{
@@ -5040,6 +5395,38 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
     }
 }
 
+/// Maps a decoded fill/type failure onto the remote error surface.
+fn fill_decode_error_to_remote(
+    e: crate::browser::remote_input::ActionDecodeError,
+) -> crate::remote::browser_backend::RemoteBrowserError {
+    use crate::remote::browser_backend::RemoteBrowserError;
+    use crate::browser::remote_input::ActionDecodeError;
+    match e {
+        ActionDecodeError::NotFound(message) => RemoteBrowserError::TargetNotFound(message),
+        ActionDecodeError::Failed(message) | ActionDecodeError::Malformed(message) => {
+            RemoteBrowserError::ExecutionFailed(message)
+        }
+        refused @ ActionDecodeError::Refused(_) => {
+            RemoteBrowserError::ExecutionFailed(refused.to_string())
+        }
+    }
+}
+
+/// Maps a decoded click failure onto the remote error surface by variant only.
+fn point_click_decode_error_to_remote(
+    e: crate::browser::remote_input::ActionDecodeError,
+) -> crate::remote::browser_backend::RemoteBrowserError {
+    use crate::browser::remote_input::ActionDecodeError;
+    use crate::remote::browser_backend::RemoteBrowserError;
+    match e {
+        ActionDecodeError::Refused(input_err) => RemoteBrowserError::InputRefused(input_err.explanation()),
+        ActionDecodeError::NotFound(message) => RemoteBrowserError::TargetNotFound(message),
+        ActionDecodeError::Failed(message) | ActionDecodeError::Malformed(message) => {
+            RemoteBrowserError::ExecutionFailed(message)
+        }
+    }
+}
+
 pub fn build_fill_script(
     manager: Option<&BrowserManager>,
     browser_id: &str,
@@ -5087,7 +5474,7 @@ pub fn build_fill_script(
         Ok(format!(
             r#"(function() {{
                 const el = document.activeElement;
-                if (!el || el === document.body) return JSON.stringify({{ ok: false, error: "no active element to fill" }});
+                if (!el || el === document.body) return JSON.stringify({{ ok: false, code: "not_found", error: "no active element to fill" }});
                 const trackedRevision = el.__ferryx_tracked_revision !== undefined ? el.__ferryx_tracked_revision : 0;
                 const incomingRevision = {rev_json};
                 if (incomingRevision !== null && incomingRevision < trackedRevision) {{
@@ -5130,7 +5517,7 @@ pub fn build_fill_script(
         Ok(format!(
             r#"(function() {{
                 const el = document.querySelector({sel_json});
-                if (!el) return JSON.stringify({{ ok: false, error: "element not found" }});
+                if (!el) return JSON.stringify({{ ok: false, code: "not_found", error: "element not found" }});
                 const trackedRevision = el.__ferryx_tracked_revision !== undefined ? el.__ferryx_tracked_revision : 0;
                 const incomingRevision = {rev_json};
                 if (incomingRevision !== null && incomingRevision < trackedRevision) {{
@@ -5156,7 +5543,7 @@ pub fn build_fill_script(
         Ok(format!(
             r#"(function() {{
                 const el = document.querySelector({sel_json});
-                if (!el) return JSON.stringify({{ ok: false, error: "element not found" }});
+                if (!el) return JSON.stringify({{ ok: false, code: "not_found", error: "element not found" }});
                 const trackedRevision = el.__ferryx_tracked_revision !== undefined ? el.__ferryx_tracked_revision : 0;
                 const incomingRevision = {rev_json};
                 if (incomingRevision !== null && incomingRevision < trackedRevision) {{
@@ -5181,7 +5568,7 @@ pub fn build_fill_script(
         Ok(format!(
             r#"(function() {{
                 const el = document.activeElement;
-                if (!el || el === document.body) return JSON.stringify({{ ok: false, error: "no active element to fill" }});
+                if (!el || el === document.body) return JSON.stringify({{ ok: false, code: "not_found", error: "no active element to fill" }});
                 const trackedRevision = el.__ferryx_tracked_revision !== undefined ? el.__ferryx_tracked_revision : 0;
                 const incomingRevision = {rev_json};
                 if (incomingRevision !== null && incomingRevision < trackedRevision) {{
@@ -5246,6 +5633,104 @@ mod r6_fill_tests {
         assert!(script.contains("fill superseded"), "Must abort on mismatch");
     }
 
+    #[test]
+    fn fill_decode_error_maps_by_variant_not_text() {
+        use crate::browser::remote_input::ActionDecodeError;
+        use crate::remote::browser_backend::RemoteBrowserError;
+        assert!(matches!(
+            fill_decode_error_to_remote(ActionDecodeError::Failed("element not found".into())),
+            RemoteBrowserError::ExecutionFailed(_)
+        ));
+        assert!(matches!(
+            fill_decode_error_to_remote(ActionDecodeError::Failed("no active element to fill".into())),
+            RemoteBrowserError::ExecutionFailed(_)
+        ));
+        assert!(matches!(
+            fill_decode_error_to_remote(ActionDecodeError::NotFound("element not found".into())),
+            RemoteBrowserError::TargetNotFound(_)
+        ));
+        assert!(matches!(
+            fill_decode_error_to_remote(ActionDecodeError::Malformed("bad".into())),
+            RemoteBrowserError::ExecutionFailed(_)
+        ));
+    }
+
+    #[test]
+    fn fill_scripts_report_missing_target_with_structured_code() {
+        for params in [
+            serde_json::json!({ "reference": "active", "value": "v" }),
+            serde_json::json!({ "selector": "#input", "value": "v" }),
+        ] {
+            let script = build_fill_script(None, "b1", &params).unwrap();
+            assert!(
+                script.contains(r#"code: "not_found""#),
+                "fill script must tag a missing target with code not_found: {params}"
+            );
+        }
+    }
+
+    #[test]
+    fn selector_click_missing_target_maps_to_target_not_found() {
+        use crate::browser::remote_input::{build_selector_click_script, decode_point_click_result};
+        use crate::remote::browser_backend::RemoteBrowserError;
+        let script = build_selector_click_script(r##""#btn""##);
+        assert!(
+            script.contains(r#"ok: false, code: "not_found""#),
+            "selector-click script must tag a missing target with code not_found: {script}"
+        );
+        let missing = decode_point_click_result(
+            r#"{"ok":false,"code":"not_found","error":"element not found"}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            point_click_decode_error_to_remote(missing),
+            RemoteBrowserError::TargetNotFound(_)
+        ));
+        let untagged =
+            decode_point_click_result(r#"{"ok":false,"error":"element not found"}"#).unwrap_err();
+        assert!(matches!(
+            point_click_decode_error_to_remote(untagged),
+            RemoteBrowserError::ExecutionFailed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn linked_popup_navigation_refuses_file_urls() {
+        let _guard = crate::browser::popup::registry_test_lock();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let popup = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-popup-nav-target".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://example.com/".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        assert!(crate::browser::popup::link(&popup.browser_id, "b-popup-nav-opener", "h1"));
+        let refused = navigate_linked_popup(
+            app.handle(),
+            &manager,
+            "b-popup-nav-opener",
+            "h1",
+            "file:///tmp/x.html",
+        )
+        .await;
+        assert!(refused.is_err(), "a page must not load file:// into its popup");
+        assert_eq!(manager.get_state(&popup.browser_id).unwrap().url, "https://example.com/");
+        navigate_linked_popup(app.handle(), &manager, "b-popup-nav-opener", "h1", "https://example.org/cb")
+            .await
+            .expect("http(s) popup navigation is allowed");
+        assert_eq!(manager.get_state(&popup.browser_id).unwrap().url, "https://example.org/cb");
+        crate::browser::popup::unlink(&popup.browser_id);
+    }
+
     #[tokio::test]
     async fn remote_executor_navigate_rejects_local_file_url() {
         use crate::remote::browser_backend::{
@@ -5281,10 +5766,94 @@ mod r6_fill_tests {
             "remote navigate to a local file must be denied by the remote URL policy, got {res:?}"
         );
         assert_eq!(manager.get_state(&state.browser_id).unwrap().url, state.url);
+        // A malformed URL is a bad request, not a policy denial.
+        let malformed = executor
+            .execute(BrowserCommandContext {
+                browser_id: state.browser_id.clone(),
+                command: "navigate".into(),
+                params: Some(serde_json::json!({ "url": "https://user:pw@example.com/" })),
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            matches!(malformed, Err(RemoteBrowserError::InvalidRequest(_))),
+            "remote navigate to a malformed URL must be InvalidRequest, got {malformed:?}"
+        );
         // Local callers keep the local policy.
         navigate_browser_session(app.handle(), &manager, &state.browser_id, "file:///tmp/x.html")
             .await
             .expect("local navigate keeps the local file policy");
+    }
+
+    #[tokio::test]
+    async fn remote_executor_keypress_rejects_control_character_key() {
+        use crate::remote::browser_backend::{
+            BrowserCommandContext, BrowserCommandExecutor, RemoteBrowserError,
+        };
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-remote-key".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        let executor = GuiBrowserCommandExecutor::new(app.handle().clone(), Arc::clone(&manager));
+        let res = executor
+            .execute(BrowserCommandContext {
+                browser_id: state.browser_id.clone(),
+                command: "keypress".into(),
+                params: Some(serde_json::json!({ "key": "\u{1b}" })),
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            matches!(res, Err(RemoteBrowserError::InvalidRequest(_))),
+            "remote keypress with a control character must be InvalidRequest, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn failed_named_profile_step_discards_registered_session() {
+        let manager = BrowserManager::new();
+        let request = |id: &str| crate::browser::model::CreateBrowserRequest {
+            browser_id: Some(id.into()),
+            workspace_id: Some("ws1".into()),
+            worktree_path: None,
+            url: "https://example.com".into(),
+            profile: None,
+            zoom_factor: None,
+            bounds: None,
+            visible: Some(true),
+        };
+        let tracked = |id: &str| CREATED_SESSION_IDS.lock().iter().any(|t| t == id);
+
+        let failed = manager.register_session(request("b-profile-dir-fail")).unwrap();
+        record_session_created(&failed.browser_id);
+        let res: Result<(), BrowserError> = discard_session_on_error(
+            &manager,
+            &failed.browser_id,
+            Err(BrowserError::CreateFailed("profile dir unavailable".into())),
+        );
+        assert!(res.is_err());
+        assert!(manager.get_state(&failed.browser_id).is_err());
+        assert!(!tracked(&failed.browser_id));
+
+        let kept = manager.register_session(request("b-profile-dir-ok")).unwrap();
+        record_session_created(&kept.browser_id);
+        let ok: Result<u8, BrowserError> = discard_session_on_error(&manager, &kept.browser_id, Ok(1));
+        assert_eq!(ok, Ok(1));
+        assert!(manager.get_state(&kept.browser_id).is_ok());
+        assert!(tracked(&kept.browser_id));
+        discard_failed_session(&manager, &kept.browser_id);
     }
 
     #[tokio::test]
@@ -5374,6 +5943,7 @@ mod popup_handle_tests {
     async fn test_popup_handle_close_targets_linked_popup_not_opener() {
         use tauri::Listener;
 
+        let _guard = crate::browser::popup::registry_test_lock();
         crate::browser::popup::clear_all();
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -5437,6 +6007,7 @@ mod popup_handle_tests {
 
     #[tokio::test]
     async fn test_popup_handle_close_race_records_pending_close_and_discards_late_creation() {
+        let _guard = crate::browser::popup::registry_test_lock();
         crate::browser::popup::clear_all();
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))

@@ -200,6 +200,8 @@ function settingsForPersistence(settings: BrowserSettingsState): Partial<Browser
     "defaultZoom",
     "restoreTabsOnLaunch",
     "openLinksInBuiltInBrowser",
+    "linkClickTarget",
+    "modifierClickTarget",
     "shiftOpensSystemBrowser",
     "showTerminalLinkActions",
     "localhostWorktreeLabels",

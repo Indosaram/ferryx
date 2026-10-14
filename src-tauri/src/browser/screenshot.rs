@@ -111,7 +111,15 @@ pub async fn take_browser_screenshot_with_source<S: BrowserSnapshotSource + ?Siz
     crate::ipc::run_blocking(move || {
         if let Some(parent) = path_to_write.parent() {
             if !parent.as_os_str().is_empty() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    IpcError::new(
+                        IpcErrorCode::BrowserScreenshotFailed,
+                        format!(
+                            "failed to create parent directory {}: {e}",
+                            parent.display()
+                        ),
+                    )
+                })?;
             }
         }
         std::fs::write(&path_to_write, snapshot.bytes).map_err(|e| {
@@ -138,19 +146,39 @@ pub async fn take_browser_screenshot_with_source<S: BrowserSnapshotSource + ?Siz
 pub struct BrowserSnapshotCapability {
     pub supported: bool,
     pub formats: Vec<String>,
+    /// Element picking needs both a native snapshot and the tab's isolated-world bridge:
+    /// without the world, a pick cannot be told apart from page-forged input (design 3.6).
+    pub pick: bool,
+}
+
+/// `pick` is true only when snapshots work and this tab's trusted bridge is isolated.
+pub fn element_pick_capability(
+    snapshot_supported: bool,
+    bridge: Option<crate::browser::bridge::TrustedBridgeKind>,
+) -> bool {
+    snapshot_supported && bridge == Some(crate::browser::bridge::TrustedBridgeKind::Isolated)
 }
 
 /// Reports whether native webview snapshot capture is available in this build and
 /// which encodings it supports. Non-macOS builds report the platform limitation here
-/// instead of failing silently when a snapshot is requested.
+/// instead of failing silently when a snapshot is requested. With `browser_id`, `pick`
+/// also reflects that tab's trusted bridge; without it `pick` is false.
 #[tauri::command]
 pub fn cmd_browser_snapshot_capability(
     service: State<'_, Arc<BrowserRemoteService>>,
+    manager: State<'_, Arc<crate::browser::BrowserManager>>,
+    browser_id: Option<String>,
 ) -> BrowserSnapshotCapability {
     let source = service.snapshot_source();
+    let supported = service.is_snapshot_supported();
+    let bridge = browser_id
+        .as_deref()
+        .and_then(|id| manager.get_state(id).ok())
+        .map(|state| state.trusted_bridge);
     BrowserSnapshotCapability {
-        supported: service.is_snapshot_supported(),
+        supported,
         formats: source.supported_formats(),
+        pick: element_pick_capability(supported, bridge),
     }
 }
 
@@ -212,6 +240,21 @@ mod tests {
     fn test_unsupported_screenshot_error_contract() {
         let err = unsupported_screenshot_error();
         assert_eq!(err.code, IpcErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn element_pick_capability_requires_snapshot_and_isolated_bridge() {
+        use crate::browser::bridge::TrustedBridgeKind;
+        assert!(element_pick_capability(true, Some(TrustedBridgeKind::Isolated)));
+        assert!(!element_pick_capability(true, Some(TrustedBridgeKind::Unavailable)));
+        assert!(!element_pick_capability(true, None));
+        assert!(!element_pick_capability(false, Some(TrustedBridgeKind::Isolated)));
+    }
+
+    #[test]
+    fn test_unsupported_screenshot_error_contract_details() {
+        let err = unsupported_screenshot_error();
+        assert_eq!(err.code, IpcErrorCode::Unsupported);
         let code_str = serde_json::to_value(&err.code)
             .ok()
             .and_then(|v| v.as_str().map(str::to_string))
@@ -220,15 +263,44 @@ mod tests {
         assert!(err.message.contains("macOS-only"));
     }
 
-    #[test]
-    fn test_non_macos_screenshot_validates_path_before_unsupported() {
-        assert_eq!(
-            resolve_screenshot_path("").unwrap_err().code,
-            IpcErrorCode::InvalidArgument
-        );
-        assert_eq!(
-            resolve_screenshot_path("   ").unwrap_err().code,
-            IpcErrorCode::InvalidArgument
+    // A-CORE-10: drive the real `take_browser_screenshot` (whichever platform variant
+    // this build compiles) with no such webview. An unusable path must be reported as
+    // InvalidArgument before capture, webview lookup or the non-macOS Unsupported error.
+    #[tokio::test]
+    async fn take_browser_screenshot_rejects_empty_path_before_capture_or_unsupported() {
+        let app = tauri::test::mock_app();
+        for out_path in ["", "   "] {
+            let err = take_browser_screenshot(app.handle(), "browser-missing", out_path)
+                .await
+                .expect_err("empty path must fail");
+            assert_eq!(err.code, IpcErrorCode::InvalidArgument, "{out_path:?}: {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn take_browser_screenshot_reports_parent_directory_creation_failure() {
+        // A-CORE-12: a parent that cannot be created must surface its own error.
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let blocker = temp_dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("write blocker file");
+        let parent = blocker.join("nested");
+        let source = FakeBrowserSnapshotSource::new(FakeSnapshotBehavior::Auto {
+            width: 4,
+            height: 4,
+        });
+
+        let err = take_browser_screenshot_with_source(&source, "main-view", parent.join("shot.png"))
+            .await
+            .expect_err("parent under a regular file cannot be created");
+
+        assert_eq!(err.code, IpcErrorCode::BrowserScreenshotFailed);
+        assert!(
+            err.message.contains(&format!(
+                "failed to create parent directory {}",
+                parent.display()
+            )),
+            "message must name the parent: {}",
+            err.message
         );
     }
 }

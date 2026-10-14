@@ -334,3 +334,66 @@ async fn test_coordinator_late_callback_quarantine_and_permit_release() {
         "Permit must be released when quarantined late callback is discarded"
     );
 }
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn test_unsupported_platform_source_completes_coordinator_with_error() {
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let source = TauriBrowserSnapshotSource::new(app.handle().clone());
+
+    let (coordinator, rx) = SnapshotCallbackCoordinator::new();
+    let permit_released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let permit_released_clone = std::sync::Arc::clone(&permit_released);
+    coordinator.set_permit_releaser(move || {
+        permit_released_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let direct = source
+        .take_snapshot_coordinated("webview-main", SnapshotOptions::png(), coordinator.clone())
+        .await
+        .expect_err("unsupported platform must refuse the snapshot");
+    assert_eq!(direct.code, IpcErrorCode::Unsupported);
+
+    let delivered = rx
+        .await
+        .expect("coordinator must deliver a result instead of dropping its sender")
+        .expect_err("delivered result must be the unsupported error");
+    assert_eq!(delivered.code, IpcErrorCode::Unsupported);
+    assert_eq!(coordinator.call_count(), 1);
+    assert!(
+        permit_released.load(std::sync::atomic::Ordering::SeqCst),
+        "permit must be released when the unsupported source completes the coordinator"
+    );
+}
+
+#[tokio::test]
+async fn test_default_coordinated_snapshot_completes_coordinator_with_error() {
+    let source = UnsupportedSnapshotSource;
+
+    let (coordinator, rx) = SnapshotCallbackCoordinator::new();
+    let permit_released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let permit_released_clone = std::sync::Arc::clone(&permit_released);
+    coordinator.set_permit_releaser(move || {
+        permit_released_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let direct = source
+        .take_snapshot_coordinated("webview-main", SnapshotOptions::png(), coordinator.clone())
+        .await
+        .expect_err("unsupported source must refuse the snapshot");
+    assert_eq!(direct.code, IpcErrorCode::Unsupported);
+
+    let delivered = tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .expect("coordinator result must already be delivered")
+        .expect("coordinator must deliver a result instead of dropping its sender")
+        .expect_err("delivered result must be the unsupported error");
+    assert_eq!(delivered.code, IpcErrorCode::Unsupported);
+    assert_eq!(coordinator.call_count(), 1);
+    assert!(
+        permit_released.load(std::sync::atomic::Ordering::SeqCst),
+        "default coordinated path must release the permit"
+    );
+}

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   ArrowLeft,
   ArrowRight,
@@ -100,10 +101,10 @@ export function BrowserToolbar({
   const [designError, setDesignError] = useState<string | null>(null);
   const { settings, updateSettings } = useBrowserSettings();
 
-  // Native snapshot capture is a build/platform capability (macOS today). An unknown capability
-  // (an older backend without the command) keeps the control as-is instead of removing a working
-  // affordance, so only an explicit `supported: false` disables element picking.
-  const elementPickSupported = snapshotCapability?.supported !== false;
+  // Picking needs native snapshot capture AND this tab's isolated-world bridge, which the
+  // backend reports as `pick`. An unknown capability (an older backend without the command)
+  // keeps the control as-is; a reported capability enables picking only when `pick` is true.
+  const elementPickSupported = snapshotCapability === null || snapshotCapability.pick === true;
 
   const omniboxEntries = useMemo(() => {
     if (!settings.rememberBrowsingHistory) return [];
@@ -131,22 +132,47 @@ export function BrowserToolbar({
 
   useEffect(() => {
     let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+    let lastTrustedBridge: unknown;
     // The IPC binding may be unavailable or partial (missing export, non-function, sync throw),
     // and toolbar rendering must never break over it. Deferring the call into the promise chain
     // routes any such failure into the catch below. The capability only decides whether one
     // control is offered, so an unknown capability must leave the control as it is today.
+    const refreshCapability = () => {
+      void Promise.resolve()
+        .then(() => getBrowserSnapshotCapability(tab.browserId))
+        .then((capability) => {
+          if (!disposed) setSnapshotCapability(capability);
+        })
+        .catch(() => {
+          // Older backends do not expose the capability command; leave the control untouched.
+        });
+    };
+    refreshCapability();
+    // `pick` depends on the tab's trusted bridge, which the backend records after creation
+    // (and on Windows upgrades later still). Re-read the capability when it changes.
     void Promise.resolve()
-      .then(() => getBrowserSnapshotCapability())
-      .then((capability) => {
-        if (!disposed) setSnapshotCapability(capability);
+      .then(() =>
+        listen<{ browserId?: string; trustedBridge?: unknown }>("browser_state_changed", (event) => {
+          const { browserId, trustedBridge } = event.payload ?? {};
+          if (browserId !== tab.browserId || trustedBridge === undefined) return;
+          if (trustedBridge === lastTrustedBridge) return;
+          lastTrustedBridge = trustedBridge;
+          refreshCapability();
+        }),
+      )
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
       })
       .catch(() => {
-        // Older backends do not expose the capability command; leave the control untouched.
+        // Without the event the capability stays as first read; the control still renders.
       });
     return () => {
       disposed = true;
+      unlisten?.();
     };
-  }, []);
+  }, [tab.browserId]);
 
   const handleGoBack = async () => {
     try {

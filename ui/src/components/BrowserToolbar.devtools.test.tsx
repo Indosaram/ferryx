@@ -9,9 +9,23 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke,
 }));
 
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async () => () => undefined),
+const stateEvents = vi.hoisted(() => ({
+  handlers: new Set<(event: { payload: unknown }) => void>(),
 }));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (eventName: string, handler: (event: { payload: unknown }) => void) => {
+    if (eventName !== "browser_state_changed") return () => undefined;
+    stateEvents.handlers.add(handler);
+    return () => {
+      stateEvents.handlers.delete(handler);
+    };
+  }),
+}));
+
+function emitStateChanged(payload: Record<string, unknown>) {
+  for (const handler of [...stateEvents.handlers]) handler({ payload });
+}
 
 vi.mock("../lib/browserTauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/browserTauri")>()),
@@ -67,7 +81,7 @@ describe("BrowserToolbar devtools", () => {
     removePickerSpy.mockClear();
     finishPickerSpy.mockClear();
     capabilitySpy.mockClear();
-    capabilitySpy.mockResolvedValue({ supported: true, formats: ["png"] });
+    capabilitySpy.mockResolvedValue({ supported: true, formats: ["png"], pick: true });
     localStorage.clear();
   });
 
@@ -111,12 +125,21 @@ describe("BrowserToolbar devtools", () => {
   });
 
   it("disables element picking when the snapshot capability reports no native capture", async () => {
-    capabilitySpy.mockResolvedValue({ supported: false, formats: [] });
+    capabilitySpy.mockResolvedValue({ supported: false, formats: [], pick: false });
     renderToolbar();
 
     const picker = screen.getByRole("button", { name: "Select element" }) as HTMLButtonElement;
     await waitFor(() => expect(picker.disabled).toBe(true));
     expect(capabilitySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables element picking when snapshots work but the tab has no isolated bridge", async () => {
+    capabilitySpy.mockResolvedValue({ supported: true, formats: ["png"], pick: false });
+    renderToolbar();
+
+    const picker = screen.getByRole("button", { name: "Select element" }) as HTMLButtonElement;
+    await waitFor(() => expect(picker.disabled).toBe(true));
+    expect(capabilitySpy).toHaveBeenCalledWith("browser-42");
   });
 
   it("keeps element picking enabled and working when the snapshot capability reports support", async () => {
@@ -126,6 +149,34 @@ describe("BrowserToolbar devtools", () => {
     await act(async () => undefined);
     expect(capabilitySpy).toHaveBeenCalledTimes(1);
     expect(picker.disabled).toBe(false);
+
+    fireEvent.click(picker);
+    expect(elementPickerSpy).toHaveBeenCalledWith("browser-42");
+  });
+
+  it("enables element picking once a state change reports the tab's isolated bridge", async () => {
+    capabilitySpy.mockResolvedValue({ supported: true, formats: ["png"], pick: false });
+    renderToolbar();
+
+    const picker = screen.getByRole("button", { name: "Select element" }) as HTMLButtonElement;
+    await waitFor(() => expect(picker.disabled).toBe(true));
+    await waitFor(() => expect(stateEvents.handlers.size).toBeGreaterThan(0));
+
+    // Another tab's upgrade is not this tab's capability.
+    capabilitySpy.mockResolvedValue({ supported: true, formats: ["png"], pick: true });
+    act(() => emitStateChanged({ browserId: "browser-other", trustedBridge: "isolated" }));
+    await act(async () => undefined);
+    expect(picker.disabled).toBe(true);
+    expect(capabilitySpy).toHaveBeenCalledTimes(1);
+
+    act(() => emitStateChanged({ browserId: "browser-42", trustedBridge: "isolated" }));
+    await waitFor(() => expect(picker.disabled).toBe(false));
+    expect(capabilitySpy).toHaveBeenCalledTimes(2);
+
+    // An ordinary navigation update with the same kind does not re-query.
+    act(() => emitStateChanged({ browserId: "browser-42", trustedBridge: "isolated", loading: true }));
+    await act(async () => undefined);
+    expect(capabilitySpy).toHaveBeenCalledTimes(2);
 
     fireEvent.click(picker);
     expect(elementPickerSpy).toHaveBeenCalledWith("browser-42");

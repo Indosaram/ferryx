@@ -496,7 +496,8 @@ export interface BrowserDriverReleasedMessage {
 export interface ServerBrowserDriverRevoked {
   type: "browserDriverRevoked";
   reason?: string;
-  leaseEpoch: string;
+  /** The Rust server omits this when the revoked lease had no epoch (Option<String>). */
+  leaseEpoch?: string | null;
 }
 
 export type BrowserDriverRevokedMessage = ServerBrowserDriverRevoked;
@@ -841,7 +842,9 @@ export function parseServerMessage(jsonString: string): ServerMessage {
       return obj as unknown as BrowserDriverReleasedMessage;
     }
     case "browserDriverRevoked": {
-      if (typeof obj.leaseEpoch !== "string") throw new Error("browserDriverRevoked: invalid leaseEpoch");
+      if (obj.leaseEpoch !== undefined && obj.leaseEpoch !== null && typeof obj.leaseEpoch !== "string") {
+        throw new Error("browserDriverRevoked: invalid leaseEpoch");
+      }
       if (obj.reason !== undefined && typeof obj.reason !== "string") {
         throw new Error("browserDriverRevoked: reason must be a string");
       }

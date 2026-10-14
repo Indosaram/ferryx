@@ -112,6 +112,9 @@ export function BrowserPane({
   const [paneAlert, setPaneAlert] = useState<{ action: string; code: string } | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [downloadStatus, setDownloadStatus] = useState<string | null>(null);
+  // A request the host could not attribute to the user (no trusted bridge): nothing is fetched
+  // until the user confirms with Save.
+  const [downloadNeedsConfirmation, setDownloadNeedsConfirmation] = useState(false);
   const [displayError, setDisplayError] = useState<BrowserDisplayError | null>(null);
   const [downloadsShelfOpen, setDownloadsShelfOpen] = useState(true);
   // The download registry emits no lifecycle event of its own, so every shelf refresh is driven
@@ -220,6 +223,7 @@ export function BrowserPane({
       if (payload.browserId !== tab.browserId) return;
       setDownloadUrl(payload.targetUrl);
       setDownloadStatus(null);
+      setDownloadNeedsConfirmation(payload.requiresConfirmation === true);
       // A new download re-reveals the shelf the user dismissed earlier, and refreshes it.
       setDownloadsShelfOpen(true);
       setDownloadsRefreshToken((current) => current + 1);
@@ -371,6 +375,7 @@ export function BrowserPane({
     try {
       await downloadBrowserUrlWithSession(tab.browserId, downloadUrl, filePath);
       setDownloadStatus("Saved");
+      setDownloadNeedsConfirmation(false);
     } catch (error) {
       setDownloadStatus(extractBrowserErrorCode(error));
     } finally {
@@ -412,13 +417,22 @@ export function BrowserPane({
           </div>
         ) : null}
         {downloadUrl ? (
-          <div className="flex items-center gap-2 border-b border-border bg-popover px-3 py-1.5 text-[11px]" data-testid="browser-download-prompt">
+          <div
+            className="flex items-center gap-2 border-b border-border bg-popover px-3 py-1.5 text-[11px]"
+            data-testid="browser-download-prompt"
+            data-requires-confirmation={downloadNeedsConfirmation ? "true" : undefined}
+          >
             <Download className="size-3.5 shrink-0" />
             <span className="min-w-0 flex-1 truncate">Download {suggestedDownloadName(downloadUrl)}</span>
+            {downloadNeedsConfirmation ? (
+              <span className="text-amber-500" data-testid="browser-download-needs-confirmation">
+                Needs confirmation: the page started this without a click
+              </span>
+            ) : null}
             {downloadStatus ? <span className="text-muted-foreground">{downloadStatus}</span> : null}
             <button type="button" onClick={() => void openExternalUrl(downloadUrl)} className="flex items-center gap-1 rounded border border-border px-2 py-1 hover:bg-accent"><ExternalLink className="size-3" /> Open in system browser</button>
-            <button type="button" onClick={() => void saveDownload()} className="rounded border border-border px-2 py-1 hover:bg-accent">Save as…</button>
-            <button type="button" aria-label="Dismiss download" onClick={() => { setDownloadUrl(null); setDownloadStatus(null); }} className="rounded p-1 hover:bg-accent"><X className="size-3.5" /></button>
+            <button type="button" onClick={() => void saveDownload()} className="rounded border border-border px-2 py-1 hover:bg-accent">{downloadNeedsConfirmation ? "Save" : "Save as…"}</button>
+            <button type="button" aria-label="Dismiss download" onClick={() => { setDownloadUrl(null); setDownloadStatus(null); setDownloadNeedsConfirmation(false); }} className="rounded p-1 hover:bg-accent"><X className="size-3.5" /></button>
           </div>
         ) : null}
         {paneAlert ? (

@@ -544,6 +544,76 @@ impl NativeTerminalPasteLatch {
     }
 }
 
+/// Maps an AppKit chord to an app-chrome browser action through the single table in
+/// `browser::bridge::keys`, so the guest key source and the other platforms agree.
+#[cfg(target_os = "macos")]
+fn macos_guest_chord_action(
+    flags: objc2_app_kit::NSEventModifierFlags,
+    key_code: u16,
+) -> Option<&'static str> {
+    use browser::bridge::keys::{chord_to_action, mac_key_id, Chord, KeyPlatform};
+    use objc2_app_kit::NSEventModifierFlags as Flags;
+    chord_to_action(
+        Chord {
+            key: mac_key_id(key_code),
+            ctrl: flags.contains(Flags::Control),
+            meta: flags.contains(Flags::Command),
+            alt: flags.contains(Flags::Option),
+            shift: flags.contains(Flags::Shift),
+        },
+        KeyPlatform::Mac,
+    )
+}
+
+/// The browser whose guest WKWebView (registered by the platform bridge install) contains
+/// the event window's first responder. None when no guest has focus.
+#[cfg(target_os = "macos")]
+fn macos_focused_browser_guest(
+    manager: &browser::BrowserManager,
+    event: &objc2_app_kit::NSEvent,
+) -> Option<String> {
+    use objc2::rc::Retained;
+    use objc2_app_kit::NSView;
+
+    if !manager.has_guest_views() {
+        return None;
+    }
+    let mtm = objc2::MainThreadMarker::new()?;
+    let window = event.window(mtm)?;
+    let responder = window.firstResponder()?;
+    let mut view: Option<Retained<NSView>> = responder.downcast::<NSView>().ok();
+    while let Some(current) = view {
+        let ptr = Retained::as_ptr(&current) as usize;
+        if let Some(browser_id) = manager.browser_for_guest_view(ptr) {
+            return Some(browser_id);
+        }
+        // SAFETY: the superview is retained by the returned `Retained` for this iteration.
+        view = unsafe { current.superview() };
+    }
+    None
+}
+
+/// Whether the key window's first responder (WKWebView's content view in a guest) is
+/// composing IME text. Probed dynamically through NSTextInputClient's hasMarkedText, so a
+/// responder that does not implement it counts as not composing.
+#[cfg(target_os = "macos")]
+fn macos_first_responder_has_marked_text(event: &objc2_app_kit::NSEvent) -> bool {
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return false;
+    };
+    let Some(responder) = event.window(mtm).and_then(|window| window.firstResponder()) else {
+        return false;
+    };
+    let responder: &objc2::runtime::AnyObject = &responder;
+    if !responder.class().responds_to(objc2::sel!(hasMarkedText)) {
+        return false;
+    }
+    // SAFETY: the selector exists on this class (checked above) and NSTextInputClient
+    // declares it as - (BOOL)hasMarkedText; called on the main thread.
+    let composing: bool = unsafe { objc2::msg_send![responder, hasMarkedText] };
+    composing
+}
+
 #[cfg(target_os = "macos")]
 fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     use block2::RcBlock;
@@ -552,6 +622,7 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
     use std::ptr::{self, NonNull};
 
     let app_handle = app.handle().clone();
+    let browser_manager = app.state::<Arc<browser::BrowserManager>>().inner().clone();
     #[cfg(feature = "native-terminal")]
     let surface_host = app
         .state::<NativeTerminalSurfaceHostState>()
@@ -597,6 +668,35 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
         };
         let chars_str = chars.as_deref().map(|s| s.to_string());
         let key_code = event.keyCode();
+        // Guest-focused chords come from this native source, which page script cannot
+        // synthesize (design 4.2). The main window keeps the menu_* routing below.
+        if event_type == NSEventType::KeyDown {
+            if let Some(browser_id) = macos_focused_browser_guest(&browser_manager, event) {
+                // IME composition in the guest: the key belongs to the input method, so hand
+                // the event to WebKit untouched (no chord, no menu routing).
+                if macos_first_responder_has_marked_text(event) {
+                    return event_ptr.as_ptr();
+                }
+                if let Some(action) = macos_guest_chord_action(flags, key_code) {
+                    if trace_chord {
+                        tracing::info!(
+                            event = "shortcut.native.forward",
+                            action,
+                            browser_id = %browser_id,
+                            "TEMPORARY-DIAGNOSTIC"
+                        );
+                    }
+                    let _ = app_handle.emit(
+                        browser::BROWSER_SHORTCUT_REQUESTED_EVENT,
+                        browser::BrowserShortcutRequestedPayload {
+                            browser_id,
+                            action: action.to_string(),
+                        },
+                    );
+                    return ptr::null_mut();
+                }
+            }
+        }
         let worktree_digit = if event_type == NSEventType::KeyDown {
             unshifted_cmd_digit(flags, chars_str.as_deref(), key_code)
         } else {
@@ -1307,6 +1407,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             let _ = event;
         })
         .setup(move |app| {
+            // Bridge-kind changes happen outside any webview callback (Windows upgrades from
+            // the async CDP leak probe), so the manager publishes them as browser_state_changed.
+            crate::ipc::browser::install_browser_state_emitter(
+                app.handle(),
+                app.state::<Arc<browser::BrowserManager>>().inner(),
+            );
             // Hand the daemon's lifetime to the supervisor before a terminal can ask for one, so
             // quitting, crashing, or replacing this app can no longer take the PTYs with it. The
             // daemon client repeats this on demand, which is what makes the race harmless; this

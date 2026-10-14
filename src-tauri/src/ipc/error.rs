@@ -464,7 +464,7 @@ impl From<crate::browser::BrowserError> for IpcError {
             crate::browser::BrowserError::InvalidUrl(_) => IpcErrorCode::BrowserUrlInvalid,
             crate::browser::BrowserError::SchemeDenied(_) => IpcErrorCode::BrowserUrlSchemeDenied,
             crate::browser::BrowserError::InvalidBounds => IpcErrorCode::BrowserBoundsInvalid,
-            crate::browser::BrowserError::UnsupportedProfile(_) => IpcErrorCode::InternalError,
+            crate::browser::BrowserError::UnsupportedProfile(_) => IpcErrorCode::InvalidArgument,
             crate::browser::BrowserError::CreateFailed(_) => IpcErrorCode::BrowserCreateFailed,
             crate::browser::BrowserError::NavigationFailed(_) => {
                 IpcErrorCode::BrowserNavigationFailed
@@ -486,7 +486,7 @@ impl From<crate::browser::BrowserError> for IpcError {
                 IpcErrorCode::BrowserAutomationFailed
             }
             crate::browser::BrowserError::CliUnavailable(_) => IpcErrorCode::BrowserCliUnavailable,
-            crate::browser::BrowserError::PlatformUnsupported(_) => IpcErrorCode::InternalError,
+            crate::browser::BrowserError::PlatformUnsupported(_) => IpcErrorCode::Unsupported,
             crate::browser::BrowserError::Internal(_) => IpcErrorCode::InternalError,
         };
         Self::new(code, message)
@@ -626,5 +626,24 @@ mod tests {
 
         let not_found_browser = IpcError::from(BrowserError::NotFound("b-1".into()));
         assert_eq!(not_found_browser.code, IpcErrorCode::BrowserNotFound);
+    }
+
+    #[test]
+    fn test_browser_platform_unsupported_maps_to_unsupported() {
+        use crate::browser::BrowserError;
+
+        let err = IpcError::from(BrowserError::PlatformUnsupported("linux".into()));
+        assert_eq!(err.code, IpcErrorCode::Unsupported);
+        assert_eq!(serde_json::to_string(&err.code).unwrap(), "\"UNSUPPORTED\"");
+    }
+
+    #[test]
+    fn test_browser_unsupported_profile_maps_to_invalid_argument() {
+        use crate::browser::BrowserError;
+
+        let err = IpcError::from(BrowserError::UnsupportedProfile("profile-x".into()));
+        assert_eq!(err.code, IpcErrorCode::InvalidArgument);
+        assert_eq!(serde_json::to_string(&err.code).unwrap(), "\"INVALID_ARGUMENT\"");
+        assert!(err.message.contains("profile-x"));
     }
 }

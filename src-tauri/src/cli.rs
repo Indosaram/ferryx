@@ -2718,14 +2718,109 @@ pub fn run_browser_cli(command: BrowserCliCommand) -> Result<(), String> {
         .enable_io()
         .build()
         .map_err(|error| error.to_string())?;
+    let cwd = std::env::current_dir()
+        .map_err(|error| format!("failed to read current directory: {error}"))?;
+    let home = cli_home_dir();
+    let request = absolutize_browser_cli_paths(
+        browser_cli_request(command.clone()),
+        &cwd,
+        home.as_deref(),
+    );
     let response = runtime
-        .block_on(send_browser_cli_request(browser_cli_request(
-            command.clone(),
-        )))
+        .block_on(send_browser_cli_request(request))
         .map_err(|error| error.to_string())?;
     let output = format_browser_cli_response(&command, response)?;
     println!("{output}");
     Ok(())
+}
+
+/// File paths in a browser CLI request are resolved by the GUI process, whose cwd is
+/// unrelated to the caller's, so relative paths are anchored to the CLI's cwd here.
+fn absolutize_browser_cli_paths(
+    request: BrowserCliRequest,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> BrowserCliRequest {
+    let anchor = |path: String| anchor_cli_path(path, cwd, home);
+    match request {
+        BrowserCliRequest::Screenshot {
+            browser_id,
+            out_path,
+        } => BrowserCliRequest::Screenshot {
+            browser_id,
+            out_path: anchor(out_path),
+        },
+        BrowserCliRequest::StateSave {
+            browser_id,
+            out_path,
+        } => BrowserCliRequest::StateSave {
+            browser_id,
+            out_path: anchor(out_path),
+        },
+        BrowserCliRequest::StateLoad {
+            browser_id,
+            in_path,
+        } => BrowserCliRequest::StateLoad {
+            browser_id,
+            in_path: anchor(in_path),
+        },
+        BrowserCliRequest::Download {
+            browser_id,
+            url,
+            path,
+            id,
+            action,
+        } => BrowserCliRequest::Download {
+            browser_id,
+            url,
+            path: path.map(anchor),
+            id,
+            action,
+        },
+        other => other,
+    }
+}
+
+/// Expands `~` with the CLI user's home and joins relative paths onto `cwd`. Blank
+/// paths pass through so the GUI keeps reporting its own validation error.
+fn anchor_cli_path(
+    path: String,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> String {
+    anchor_cli_path_with(path, cwd, home, cfg!(windows))
+}
+
+fn anchor_cli_path_with(
+    path: String,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+    windows: bool,
+) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return path;
+    }
+    let home_rest = trimmed
+        .strip_prefix("~/")
+        .or_else(|| windows.then(|| trimmed.strip_prefix("~\\")).flatten());
+    let expanded = match (home_rest, home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        (None, Some(home)) if trimmed == "~" => home.to_path_buf(),
+        _ => std::path::PathBuf::from(trimmed),
+    };
+    if expanded.is_relative() {
+        cwd.join(expanded).to_string_lossy().into_owned()
+    } else {
+        expanded.to_string_lossy().into_owned()
+    }
+}
+
+fn cli_home_dir() -> Option<std::path::PathBuf> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var)
+        .filter(|home| !home.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 pub fn parse_launch_mode<I, T>(args: I) -> LaunchMode
@@ -5821,6 +5916,104 @@ mod tests {
                 out_path: "/tmp/out.json".into(),
             }
         );
+    }
+
+    #[test]
+    fn browser_cli_windows_tilde_backslash_is_expanded() {
+        // m6: on Windows `~\\foo` is the native spelling of `~/foo`.
+        let cwd = std::path::Path::new("/cli-cwd");
+        let home = std::path::Path::new("/cli-home");
+        assert_eq!(
+            anchor_cli_path_with("~\\shot.png".into(), cwd, Some(home), true),
+            home.join("shot.png").to_string_lossy().into_owned()
+        );
+        assert_eq!(
+            anchor_cli_path_with("~/shot.png".into(), cwd, Some(home), true),
+            home.join("shot.png").to_string_lossy().into_owned()
+        );
+        // Elsewhere a backslash is an ordinary filename character.
+        assert_eq!(
+            anchor_cli_path_with("~\\shot.png".into(), cwd, Some(home), false),
+            cwd.join("~\\shot.png").to_string_lossy().into_owned()
+        );
+    }
+
+    #[test]
+    fn browser_cli_relative_paths_are_anchored_to_cli_cwd() {
+        // A-CORE-15: the GUI resolves paths against its own cwd, so the CLI must send
+        // absolute paths for screenshot --out, state save/load and download --path.
+        let cwd = std::env::temp_dir().join("ferryx-cli-cwd");
+        let home = std::env::temp_dir().join("ferryx-cli-home");
+        let abs = |rel: &str| cwd.join(rel).to_string_lossy().into_owned();
+        let map = |request| absolutize_browser_cli_paths(request, &cwd, Some(&home));
+
+        assert_eq!(
+            map(BrowserCliRequest::Screenshot {
+                browser_id: "b-1".into(),
+                out_path: "shots/rel.png".into(),
+            }),
+            BrowserCliRequest::Screenshot {
+                browser_id: "b-1".into(),
+                out_path: abs("shots/rel.png"),
+            }
+        );
+        assert_eq!(
+            map(BrowserCliRequest::StateSave {
+                browser_id: "b-1".into(),
+                out_path: "state.json".into(),
+            }),
+            BrowserCliRequest::StateSave {
+                browser_id: "b-1".into(),
+                out_path: abs("state.json"),
+            }
+        );
+        assert_eq!(
+            map(BrowserCliRequest::StateLoad {
+                browser_id: "b-1".into(),
+                in_path: "state.json".into(),
+            }),
+            BrowserCliRequest::StateLoad {
+                browser_id: "b-1".into(),
+                in_path: abs("state.json"),
+            }
+        );
+        assert_eq!(
+            map(BrowserCliRequest::Download {
+                browser_id: Some("b-1".into()),
+                url: Some("https://example.com/f.zip".into()),
+                path: Some("dl/f.zip".into()),
+                id: None,
+                action: "start".into(),
+            }),
+            BrowserCliRequest::Download {
+                browser_id: Some("b-1".into()),
+                url: Some("https://example.com/f.zip".into()),
+                path: Some(abs("dl/f.zip")),
+                id: None,
+                action: "start".into(),
+            }
+        );
+
+        // `~` is expanded with the CLI user's home, not the GUI's.
+        assert_eq!(
+            map(BrowserCliRequest::Screenshot {
+                browser_id: "b-1".into(),
+                out_path: "~/shot.png".into(),
+            }),
+            BrowserCliRequest::Screenshot {
+                browser_id: "b-1".into(),
+                out_path: home.join("shot.png").to_string_lossy().into_owned(),
+            }
+        );
+
+        // Absolute paths and path-free requests pass through untouched.
+        let absolute = std::env::temp_dir().join("abs.png").to_string_lossy().into_owned();
+        let unchanged = BrowserCliRequest::Screenshot {
+            browser_id: "b-1".into(),
+            out_path: absolute,
+        };
+        assert_eq!(map(unchanged.clone()), unchanged);
+        assert_eq!(map(BrowserCliRequest::List), BrowserCliRequest::List);
     }
 
     #[test]

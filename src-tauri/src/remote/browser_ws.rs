@@ -349,32 +349,7 @@ pub fn remote_browser_error_details(err: &RemoteBrowserError) -> Option<serde_js
 }
 
 pub fn map_remote_browser_error(err: &RemoteBrowserError) -> (&'static str, bool, Option<u64>) {
-    let msg = match err {
-        RemoteBrowserError::ExecutionFailed(m)
-        | RemoteBrowserError::TargetNotFound(m)
-        | RemoteBrowserError::StaleFrame(m)
-        | RemoteBrowserError::InvalidRequest(m)
-        | RemoteBrowserError::Unavailable(m)
-        | RemoteBrowserError::Forbidden(m)
-        | RemoteBrowserError::NotFound(m) => m.as_str(),
-        RemoteBrowserError::WaitTimeout => "",
-        RemoteBrowserError::InputRefused(_) => "",
-    };
-
-    if msg.contains("BROWSER_STALE_FRAME") || msg.contains("stale frame") {
-        return ("BROWSER_STALE_FRAME", false, None);
-    }
-    if msg.contains("BROWSER_TARGET_NOT_FOUND")
-        || msg.contains("element not found")
-        || msg.contains("no element at coordinates")
-        || msg.contains("no active element")
-        || msg.contains("target element not found")
-        || msg.contains("target resolution failed")
-        || msg.contains("missing click target")
-    {
-        return ("BROWSER_TARGET_NOT_FOUND", false, None);
-    }
-
+    // Classification is by variant only: messages may carry page-originated text.
     match err {
         RemoteBrowserError::WaitTimeout => ("BROWSER_TIMEOUT", true, Some(1000)),
         RemoteBrowserError::Forbidden(_) => ("BROWSER_FORBIDDEN", false, None),
@@ -573,6 +548,9 @@ impl BrowserWsSession {
     /// Marks the remote driver lease as revoked and republishes sharing state (R4-5).
     pub fn mark_driver_revoked(&mut self, _reason: &str) -> Option<u64> {
         let epoch = self.lease_epoch.take();
+        if let Some(e) = epoch {
+            crate::browser::remote_input::prune_ime_supersession(&self.browser_id, e);
+        }
         self.is_driver = false;
         if let Some(registry) = self.sharing.as_ref() {
             registry.driver_released(&self.connection_id);
@@ -2003,6 +1981,22 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn ime_supersession_tracker_pruned_on_driver_revoke() {
+        let browser_id = "b-ime-prune-revoke";
+        let (mut session, _backend, admission) = subscribed_driver(browser_id).await;
+        let epoch = session.lease_epoch.unwrap();
+        crate::browser::remote_input::IME_SUPERSESSION_TRACKER
+            .lock()
+            .insert((browser_id.to_string(), epoch, "#field".to_string()), 4);
+        assert_eq!(session.mark_driver_revoked("desktop reclaim"), Some(epoch));
+        assert!(
+            !ime_tracker_has(browser_id, epoch),
+            "driver revoke must prune IME supersession entries for its browser/epoch"
+        );
+        session.teardown(&admission);
+    }
+
+    #[tokio::test]
     async fn ime_supersession_tracker_pruned_on_driver_release() {
         let browser_id = "b-ime-prune-release";
         let (mut session, backend, admission) = subscribed_driver(browser_id).await;
@@ -2734,30 +2728,35 @@ pub mod tests {
 
         let cases = [
             (
-                RemoteBrowserError::ExecutionFailed("element not found".into()),
+                RemoteBrowserError::TargetNotFound("element not found".into()),
                 "BROWSER_TARGET_NOT_FOUND",
             ),
             (
-                RemoteBrowserError::ExecutionFailed("no element at coordinates".into()),
+                RemoteBrowserError::TargetNotFound("no element at coordinates".into()),
                 "BROWSER_TARGET_NOT_FOUND",
             ),
             (
-                RemoteBrowserError::ExecutionFailed(
-                    "BROWSER_TARGET_NOT_FOUND: querySelector null".into(),
-                ),
-                "BROWSER_TARGET_NOT_FOUND",
-            ),
-            (
-                RemoteBrowserError::InvalidRequest(
+                RemoteBrowserError::TargetNotFound(
                     "target resolution failed: invalid reference".into(),
                 ),
                 "BROWSER_TARGET_NOT_FOUND",
             ),
             (
-                RemoteBrowserError::ExecutionFailed(
-                    "BROWSER_STALE_FRAME: viewport revision changed since frame capture".into(),
+                RemoteBrowserError::StaleFrame(
+                    "viewport revision changed since frame capture".into(),
                 ),
                 "BROWSER_STALE_FRAME",
+            ),
+            // Page-originated text must never pick a typed code: only the variant does.
+            (
+                RemoteBrowserError::ExecutionFailed("element not found".into()),
+                "BROWSER_EXECUTION_FAILED",
+            ),
+            (
+                RemoteBrowserError::ExecutionFailed(
+                    "BROWSER_STALE_FRAME: spoofed by page".into(),
+                ),
+                "BROWSER_EXECUTION_FAILED",
             ),
         ];
 

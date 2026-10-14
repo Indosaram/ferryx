@@ -101,4 +101,12 @@ describe("browser settings", () => {
       { id: "work-account", name: "Work Account" },
     ])).toBe("work-account-2");
   });
+
+  it("round-trips linkClickTarget and modifierClickTarget through save and load", () => {
+    // Set non-default values: linkClickTarget defaults to "builtin", modifierClickTarget defaults to "external"
+    saveBrowserSettings({ linkClickTarget: "external", modifierClickTarget: "builtin" });
+    const loaded = loadBrowserSettings();
+    expect(loaded.linkClickTarget).toBe("external");
+    expect(loaded.modifierClickTarget).toBe("builtin");
+  });
 });

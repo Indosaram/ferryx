@@ -697,15 +697,7 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                     IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string())
                 })?;
                 (
-                    format!(
-                        r#"(function() {{
-                            const el = document.querySelector({});
-                            if (!el) return JSON.stringify({{ ok: false, error: "element not found" }});
-                            el.click();
-                            return JSON.stringify({{ ok: true }});
-                        }})()"#,
-                        selector_json
-                    ),
+                    crate::browser::remote_input::build_selector_click_script(&selector_json),
                     None,
                     None,
                 )
@@ -744,23 +736,8 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 .get_webview(&state.webview_label)
                 .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
             let res_str = crate::ipc::browser::eval_webview(webview, script).await?;
-            crate::browser::remote_input::decode_point_click_result(&res_str).map_err(|err| {
-                use crate::browser::remote_input::ActionDecodeError;
-                match err {
-                    ActionDecodeError::Refused(input_err) => IpcError::new(
-                        input_err.ipc_error_code(),
-                        input_err.to_string(),
-                    )
-                    .with_details(input_err.explanation().to_details()),
-                    ActionDecodeError::NotFound(message) => IpcError::new(
-                        IpcErrorCode::Custom("BROWSER_TARGET_NOT_FOUND".into()),
-                        message,
-                    ),
-                    ActionDecodeError::Malformed(message) => {
-                        IpcError::new(IpcErrorCode::BrowserAutomationFailed, message)
-                    }
-                }
-            })?;
+            crate::browser::remote_input::decode_point_click_result(&res_str)
+                .map_err(point_click_decode_error_to_ipc)?;
             let mut res_map = serde_json::Map::new();
             res_map.insert("clicked".into(), serde_json::json!(true));
             if let Some(sid) = stream_id {
@@ -822,7 +799,7 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             let script = format!(
                 r#"(function() {{
                     const el = document.querySelector({});
-                    if (!el) return JSON.stringify({{ ok: false, error: "element not found" }});
+                    if (!el) return JSON.stringify({{ ok: false, code: "not_found", error: "element not found" }});
                     el.value = {};
                     el.dispatchEvent(new Event("input", {{ bubbles: true }}));
                     el.dispatchEvent(new Event("change", {{ bubbles: true }}));
@@ -831,11 +808,15 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 selector_json, value_json
             );
             let res_str = crate::ipc::browser::eval_webview(webview, script).await?;
-            crate::browser::remote_input::decode_action_result(&res_str).map_err(|err_msg| {
-                IpcError::new(
-                    IpcErrorCode::Custom("BROWSER_TARGET_NOT_FOUND".into()),
-                    err_msg,
-                )
+            crate::browser::remote_input::decode_action_result(&res_str).map_err(|err| {
+                use crate::browser::remote_input::ActionDecodeError;
+                match err {
+                    ActionDecodeError::NotFound(message) => IpcError::new(
+                        IpcErrorCode::Custom("BROWSER_TARGET_NOT_FOUND".into()),
+                        message,
+                    ),
+                    other => IpcError::new(IpcErrorCode::BrowserAutomationFailed, other.to_string()),
+                }
             })?;
             Ok(serde_json::json!({ "filled": true }))
         }
@@ -2849,10 +2830,52 @@ async fn send_browser_cli_request_at_path(
     send_over_stream(stream, request, token).await
 }
 
+/// Maps a decoded click failure onto the IPC surface by variant only.
+fn point_click_decode_error_to_ipc(err: crate::browser::remote_input::ActionDecodeError) -> IpcError {
+    use crate::browser::remote_input::ActionDecodeError;
+    match err {
+        ActionDecodeError::Refused(input_err) => {
+            IpcError::new(input_err.ipc_error_code(), input_err.to_string())
+                .with_details(input_err.explanation().to_details())
+        }
+        ActionDecodeError::NotFound(message) => IpcError::new(
+            IpcErrorCode::Custom("BROWSER_TARGET_NOT_FOUND".into()),
+            message,
+        ),
+        ActionDecodeError::Failed(message) | ActionDecodeError::Malformed(message) => {
+            IpcError::new(IpcErrorCode::BrowserAutomationFailed, message)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::browser::{BrowserProfileId, BrowserSessionSummary, CreateBrowserRequest};
+
+    #[test]
+    fn selector_click_missing_target_maps_to_browser_target_not_found() {
+        use crate::browser::remote_input::{build_selector_click_script, decode_point_click_result};
+        let script = build_selector_click_script(r##""#btn""##);
+        assert!(
+            script.contains(r#"ok: false, code: "not_found""#),
+            "selector-click script must tag a missing target with code not_found: {script}"
+        );
+        let missing = decode_point_click_result(
+            r#"{"ok":false,"code":"not_found","error":"element not found"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            ipc_error_code_string(point_click_decode_error_to_ipc(missing).code),
+            "BROWSER_TARGET_NOT_FOUND"
+        );
+        let untagged =
+            decode_point_click_result(r#"{"ok":false,"error":"element not found"}"#).unwrap_err();
+        assert_eq!(
+            ipc_error_code_string(point_click_decode_error_to_ipc(untagged).code),
+            ipc_error_code_string(IpcErrorCode::BrowserAutomationFailed)
+        );
+    }
 
     #[test]
     fn remote_execution_failed_page_text_is_not_reclassified() {

@@ -241,11 +241,15 @@ pub fn resolve_installed_browser_profile_dir(
     kind: InstalledBrowserKind,
     profile_name: Option<&str>,
     home_dir: Option<&std::path::Path>,
-) -> std::path::PathBuf {
+) -> Result<std::path::PathBuf, BrowserError> {
     let profile = profile_name.unwrap_or("Default");
     let mut base = match home_dir {
         Some(path) => path.to_path_buf(),
-        None => std::path::PathBuf::from("~"),
+        None => {
+            return Err(BrowserError::CookieImport(
+                "home directory unknown".into(),
+            ))
+        }
     };
 
     #[cfg(target_os = "macos")]
@@ -295,7 +299,7 @@ pub fn resolve_installed_browser_profile_dir(
     }
 
     base.push(profile);
-    base
+    Ok(base)
 }
 
 pub fn parse_installed_profile_cookie_content(

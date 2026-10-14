@@ -1,4 +1,5 @@
 pub mod adoption;
+pub mod bridge;
 pub mod chromium_cookie_source;
 pub mod chromium_cookies;
 pub mod cookies;
@@ -28,6 +29,7 @@ pub mod state_cookies;
 pub mod tests;
 
 pub use cookies::{cookie_from_imported, parse_cookie_file, ImportedCookie};
+pub use bridge::{TrustedAction, TrustedBridgeKind};
 pub use download::download_url_to_path;
 pub use find::{browser_find_script, parse_browser_find_callback, BROWSER_CLEAR_FIND_SCRIPT};
 pub use guest::{

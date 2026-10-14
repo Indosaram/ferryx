@@ -8,55 +8,52 @@ pub const BROWSER_ELEMENT_PICKED_EVENT: &str = "browser_element_picked";
 pub const BROWSER_LINK_CLICKED_EVENT: &str = "browser_link_clicked";
 pub const BROWSER_CLOSE_REQUESTED_EVENT: &str = "browser_close_requested";
 
-const OPEN_HOST: &str = "open.ferryx.invalid";
-const DOWNLOAD_HOST: &str = "download.ferryx.invalid";
 const SHORTCUT_HOST: &str = "shortcut.ferryx.invalid";
-const PICK_HOST: &str = "pick.ferryx.invalid";
-const CLICK_HOST: &str = "click.ferryx.invalid";
-const MODCLICK_HOST: &str = "modclick.ferryx.invalid";
-/// `window.open` from a page: params `url`, `handle`, `op=open|navigate`.
+/// Popup handle traffic from the opener page: params `handle`, `op=navigate|close|message`.
 const POPUP_HOST: &str = "popup.ferryx.invalid";
-/// `window.close()` from a popup tab.
+/// `handle.close()` from the opener page: param `handle`.
 const POPUP_CLOSE_HOST: &str = "popupclose.ferryx.invalid";
 /// `window.opener.postMessage(...)` from a popup tab: param `msg` = JSON
 /// `{ data, targetOrigin }`.
 const OPENER_HOST: &str = "opener.ferryx.invalid";
 
+/// Shortcuts the page route may still carry: they only affect the sending tab's own
+/// document, which the page can already do itself (design 2.1 "b-self"). App-chrome
+/// shortcuts come from native key sources through `crate::browser::bridge::keys`.
+const PAGE_SHORTCUT_ACTIONS: [&str; 4] = ["back", "forward", "reload", "reload-hard"];
+
+/// Class (b) guest actions: everything here is something the page could already do to
+/// itself or to its own popups. Class (a) actions travel on the trusted bridge
+/// (`crate::browser::bridge`) instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserGuestAction {
-    Open(String),
-    Download(String),
+    /// A self-scoped shortcut (back, forward, reload, reload-hard).
     Shortcut(String),
-    ElementPick,
-    LinkClick(String),
-    ModifierLinkClick(String),
-    /// The host creates the popup tab and links it to `handle`, the opener's
-    /// per-page popup id.
-    PopupOpen { url: String, handle: String },
     /// A later `location.href` / `assign` / `replace` on an already-routed handle.
     PopupNavigate { url: String, handle: String },
     /// `window.opener.postMessage(...)` from a popup tab.
     OpenerMessage { message: String },
-    /// `window.close()` from a popup tab.
-    PopupCloseRequested,
     /// `handle.close()` from the opener tab for a specific popup handle.
     PopupCloseHandle { handle: String },
     /// `handle.postMessage(...)` from the opener tab to a specific popup handle.
     PopupMessage { handle: String, message: String },
 }
 
+/// Parses a class (b) control navigation from the page-world bridge.
+///
+/// The `nonce` is a frame-confusion filter, not an authorization boundary: it stops a
+/// frame or document that never received the bridge from producing these URLs by accident,
+/// but page script can learn it (design 1.2). Nothing accepted here may do more than the
+/// page could do to itself or to its own popups.
 pub fn parse_browser_guest_action(url: &Url, expected_nonce: &str) -> Option<BrowserGuestAction> {
     let host = url.host_str()?;
     if query_value(url, "nonce").as_deref() != Some(expected_nonce) {
         return None;
     }
     match host {
-        OPEN_HOST => query_value(url, "url").map(BrowserGuestAction::Open),
-        DOWNLOAD_HOST => query_value(url, "url").map(BrowserGuestAction::Download),
-        SHORTCUT_HOST => query_value(url, "action").map(BrowserGuestAction::Shortcut),
-        PICK_HOST => Some(BrowserGuestAction::ElementPick),
-        CLICK_HOST => query_value(url, "url").map(BrowserGuestAction::LinkClick),
-        MODCLICK_HOST => query_value(url, "url").map(BrowserGuestAction::ModifierLinkClick),
+        SHORTCUT_HOST => query_value(url, "action")
+            .filter(|action| PAGE_SHORTCUT_ACTIONS.contains(&action.as_str()))
+            .map(BrowserGuestAction::Shortcut),
         POPUP_HOST => {
             let handle = query_value(url, "handle")?;
             match query_value(url, "op").as_deref() {
@@ -72,20 +69,13 @@ pub fn parse_browser_guest_action(url: &Url, expected_nonce: &str) -> Option<Bro
                         handle,
                     })
                 }
-                Some("open") | None => {
-                    let target = query_value(url, "url")?;
-                    Some(BrowserGuestAction::PopupOpen {
-                        url: target,
-                        handle,
-                    })
-                }
-                Some(_) => None,
+                // `op=open` (and the legacy op-less open) moved to the trusted bridge.
+                _ => None,
             }
         }
-        POPUP_CLOSE_HOST => match query_value(url, "handle") {
-            Some(handle) => Some(BrowserGuestAction::PopupCloseHandle { handle }),
-            None => Some(BrowserGuestAction::PopupCloseRequested),
-        },
+        // A bare popupclose (the old popup self-close) is gone: it closed any tab.
+        POPUP_CLOSE_HOST => query_value(url, "handle")
+            .map(|handle| BrowserGuestAction::PopupCloseHandle { handle }),
         OPENER_HOST => {
             query_value(url, "msg").map(|message| BrowserGuestAction::OpenerMessage { message })
         }
@@ -102,7 +92,23 @@ fn query_value(url: &Url, key: &str) -> Option<String> {
 
 const BRIDGE_NONCE_PLACEHOLDER: &str = "__FERRYX_BROWSER_BRIDGE_NONCE__";
 const BRIDGE_HARD_RELOAD_PLACEHOLDER: &str = "__FERRYX_BROWSER_BRIDGE_HARD_RELOAD__";
+const BRIDGE_NATIVE_OPEN_PLACEHOLDER: &str = "__FERRYX_BROWSER_BRIDGE_NATIVE_OPEN__";
 const POPUP_SURFACE_PLACEHOLDER: &str = "__FERRYX_IS_POPUP_SURFACE__";
+const WINDOW_CLOSE_BODY_PLACEHOLDER: &str = "__FERRYX_WINDOW_CLOSE_BODY__";
+
+/// Body of the `window.close` replacement in a popup tab, substituted for
+/// [`WINDOW_CLOSE_BODY_PLACEHOLDER`]. Closing asks the host, and the host is the only
+/// thing that can: it owns the tab, and its close path is what calls
+/// `window.__ferryxPopupClosed(handle)` in the opener. The request is an intent for the
+/// trusted broker; the host honours it only for a tab it linked as a popup.
+const POPUP_WINDOW_CLOSE_BODY: &str = "    postIntent({ op: 'selfClose' });";
+
+/// Body of the `window.close` replacement in every other tab. A page must never close
+/// a tab it did not open: WebKitGTK (wry) destroys the webview on a script close, which
+/// left the manager holding a dead tab, and other engines may act on it too. So the
+/// call reaches nothing and only leaves a console note.
+const TAB_WINDOW_CLOSE_BODY: &str =
+    "    pushConsoleEntry('warn', '[ferryx] window.close() is ignored: only a popup tab can close itself');";
 
 /// Source of the popup-only bridge surface, substituted for
 /// [`POPUP_SURFACE_PLACEHOLDER`].
@@ -159,22 +165,13 @@ const POPUP_SURFACE_SOURCE: &str = r#"
   } catch (error) {
     reportBridgeFailure('could not mark the opener proxy as installed', error);
   }
-
-  // window.close() in a popup asks the host to close this tab, and the host is the only
-  // thing that can: it owns the tab, and its close path is what calls
-  // window.__ferryxPopupClosed(handle) in the opener. Closing the webview directly here
-  // would skip that bookkeeping and leave the opener's handle reporting `closed === false`
-  // forever.
-  window.close = () => {
-    routeHost('popupclose.ferryx.invalid');
-  };
 "#;
 
 /// Builds the guest bridge initialization script for one browser webview.
-/// `nonce` is JSON-encoded into the script and required as an extra query
-/// parameter on every routed control URL, so a page that never received the
-/// bridge cannot forge open/download/shortcut requests (see
-/// `parse_browser_guest_action`).
+/// `nonce` is JSON-encoded into the script and appended to every class (b) control
+/// URL. It is a frame-confusion filter, not an authorization boundary (see
+/// `parse_browser_guest_action`); class (a) requests leave this script only as
+/// `ferryx-intent` events for the isolated-world broker.
 ///
 /// `is_popup` is true only for a tab the host created because a page called
 /// `window.open`; every other tab must keep `window.opener` null (see
@@ -188,12 +185,23 @@ pub fn browser_guest_bridge_script(nonce: &str, is_popup: bool) -> String {
             if is_popup { POPUP_SURFACE_SOURCE } else { "" },
         )
         .replace(
+            WINDOW_CLOSE_BODY_PLACEHOLDER,
+            if is_popup { POPUP_WINDOW_CLOSE_BODY } else { TAB_WINDOW_CLOSE_BODY },
+        )
+        .replace(
             BRIDGE_HARD_RELOAD_PLACEHOLDER,
             if crate::browser::hard_reload::hard_reload_supported() {
                 "true"
             } else {
                 "false"
             },
+        )
+        // Windows pairs a popup intent with WebView2's native NewWindowRequested
+        // (IsUserInitiated) when no isolated world is available (design 3.5), so only there
+        // does the shim also call the engine's own window.open.
+        .replace(
+            BRIDGE_NATIVE_OPEN_PLACEHOLDER,
+            if cfg!(windows) { "true" } else { "false" },
         )
 }
 
@@ -349,14 +357,15 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
 
   // This script runs at document start, before any page script, so these
   // references are still pristine. `route` below builds a URL containing the
-  // bridge nonce and hands it to `assign`; resolving either function at call
-  // time instead would let a page install its own `location.assign` or
-  // `encodeURIComponent` and capture the nonce, which is exactly the credential
-  // that stops it from forging control messages.
+  // bridge nonce and hands it to `assign`. The nonce is only a frame-confusion
+  // filter for class (b) traffic, not an authorization boundary: nothing it guards lets a
+  // page do more than it already could.
   const assign = location.assign.bind(location);
   const enc = encodeURIComponent;
-  const closestOf = Element.prototype.closest;
   const addDocumentListener = document.addEventListener.bind(document);
+  const dispatchDocumentEvent = document.dispatchEvent.bind(document);
+  const IntentEvent = CustomEvent;
+  const toJson = JSON.stringify;
   // Captured at document start, before page script runs.
   // In Chromium/Gecko, `isTrusted` is an accessor on Event.prototype.
   // In WebKit/WKWebView, `isTrusted` is an own [LegacyUnforgeable] property on each event
@@ -365,12 +374,7 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
   // property (which cannot be shadowed or reconfigured when [LegacyUnforgeable]).
   const isTrustedDesc = Object.getOwnPropertyDescriptor(Event.prototype, 'isTrusted');
   const isTrustedOf = isTrustedDesc && typeof isTrustedDesc.get === 'function' ? isTrustedDesc.get : null;
-  // Only real user input may reach the bridge. Without this, ordinary page script
-  // can `document.dispatchEvent(new KeyboardEvent('keydown', {key:'t', metaKey:true}))`
-  // and drive privileged app chrome -- spawning terminal tabs, closing the active
-  // surface and its running session, opening the palette -- with no user interaction,
-  // including from a hidden background tab. The bridge nonce cannot help: the bridge
-  // itself supplies the nonce on behalf of the forged event.
+  // Only real user input may drive the self-scoped shortcuts and URL drops below.
   const isUserEvent = (event) => {
     try {
       if (!event) return false;
@@ -399,10 +403,17 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
   const route = (host, key, value) => {
     routeParams(host, { [key]: value });
   };
-  const routeHost = (host) => {
-    assign(`https://${host}/?nonce=${__FERRYX_BROWSER_BRIDGE_NONCE__}`);
+  // Class (a) requests (popup open, popup self-close) are only intents: the isolated-world
+  // broker forwards them to the host if it saw a trusted user activation, and the host
+  // re-checks them. This page-world script holds no route for them.
+  const postIntent = (intent) => {
+    try {
+      dispatchDocumentEvent(new IntentEvent('ferryx-intent', { detail: toJson(intent) }));
+    } catch (error) {
+      reportBridgeFailure('could not post a ' + intent.op + ' intent', error);
+    }
   };
-  window.__ferryxRoute = route;
+  // The route must never be reachable from page script; it is kept in this closure.
 
   // OAuth popups are host-created browser tabs, so a popup's callback has to travel
   // through the host: a same-origin broadcast channel only reaches the same storage partition,
@@ -413,13 +424,55 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
   // continuing the redirect flow.
 __FERRYX_IS_POPUP_SURFACE__
 
+  // Every tab replaces the engine's window.close, because a page must not be able to
+  // close or destroy a tab behind the host. A popup tab's replacement asks the host
+  // through the broker; any other tab's is a no-op. The property is made read-only and
+  // non-configurable so page script cannot put the native close back.
+  const ferryxWindowClose = function close() {
+__FERRYX_WINDOW_CLOSE_BODY__
+  };
+  try {
+    Object.defineProperty(window, 'close', {
+      value: ferryxWindowClose,
+      writable: false,
+      configurable: false,
+      enumerable: true,
+    });
+  } catch (defineError) {
+    // An engine that refuses the redefinition still gets the replacement by assignment.
+    try {
+      window.close = ferryxWindowClose;
+    } catch (assignError) {
+      reportBridgeFailure('could not replace window.close (' + defineError + ')', assignError);
+    }
+  }
+
   // Every tab, popup or not, gets real window.open handles: the opener drives the popup
   // through the handle and the host creates the actual tab. Each handle is registered
   // under a per-page id so the host can address it in both directions.
   const popupHandles = (window.__ferryxPopupHandles = window.__ferryxPopupHandles || {});
   let popupHandleCounter = 0;
+  // Handle ids are host-visible keys for pending closes and popup links, and the host
+  // keys them per tab. A per-document random prefix keeps a handle from a previous
+  // document in this tab from ever matching a handle minted by this one.
+  const popupDocumentId = (() => {
+    const bytes = new Uint8Array(8);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  })();
 
   const originalOpen = window.open.bind(window);
+  const nativeOpenAlongsideIntent = __FERRYX_BROWSER_BRIDGE_NATIVE_OPEN__;
+  const requestOpen = (url, handleId, name) => {
+    postIntent({ op: 'open', url, handle: handleId });
+    if (nativeOpenAlongsideIntent) {
+      try {
+        originalOpen(url, typeof name === 'string' ? name : '_blank');
+      } catch (error) {
+        reportBridgeFailure('native window.open failed', error);
+      }
+    }
+  };
   window.open = (url, name, ...rest) => {
     if (window.__FERRYX_POPUP_POLICY__ === 'block') {
       pushConsoleEntry('warn', '[popup:blocked] Popup blocked by policy: ' + url);
@@ -435,7 +488,7 @@ __FERRYX_IS_POPUP_SURFACE__
     }
 
     popupHandleCounter += 1;
-    const handleId = `p${popupHandleCounter}`;
+    const handleId = `${popupDocumentId}-p${popupHandleCounter}`;
     let closed = false;
     let currentUrl = initial || 'about:blank';
     let routed = false;
@@ -447,12 +500,12 @@ __FERRYX_IS_POPUP_SURFACE__
         return;
       }
       currentUrl = resolved;
-      // The first assignment is what creates the popup tab; later ones navigate the tab
-      // the host already created for this handle.
+      // The first assignment asks for the popup tab; later ones navigate the tab the host
+      // already created for this handle (a no-op host-side if none was created).
       if (routed) {
         routeParams('popup.ferryx.invalid', { url: resolved, handle: handleId, op: 'navigate' });
       } else {
-        routeParams('popup.ferryx.invalid', { url: resolved, handle: handleId, op: 'open' });
+        requestOpen(resolved, handleId, name);
         routed = true;
       }
     };
@@ -504,7 +557,7 @@ __FERRYX_IS_POPUP_SURFACE__
     popupHandles[handleId] = popupHandle;
 
     if (initial) {
-      routeParams('popup.ferryx.invalid', { url: initial, handle: handleId, op: 'open' });
+      requestOpen(initial, handleId, name);
       routed = true;
     }
     return popupHandle;
@@ -517,30 +570,8 @@ __FERRYX_IS_POPUP_SURFACE__
     return true;
   };
 
-  addDocumentListener('click', (event) => {
-    if (!isUserEvent(event)) return;
-    if (window.__ferryxPicker && window.__ferryxPicker.installed) return;
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    const anchor = closestOf.call(target, 'a[href]');
-    if (!(anchor instanceof HTMLAnchorElement)) return;
-    const url = resolveHttpUrl(anchor.href);
-    if (!url) return;
-    if (anchor.hasAttribute('download')) {
-      event.preventDefault();
-      route('download.ferryx.invalid', 'url', url);
-      return;
-    }
-    const isMac = typeof navigator !== 'undefined' && (
-      /Mac|iPhone|iPod|iPad/.test(navigator.platform || '') ||
-      /Macintosh/.test(navigator.userAgent || '')
-    );
-    const modifier = isMac ? (event.metaKey && !event.ctrlKey) : (event.ctrlKey && !event.metaKey);
-    const blank = (anchor.target || '').toLowerCase() === '_blank';
-    event.preventDefault();
-    route(modifier || blank ? 'modclick.ferryx.invalid' : 'click.ferryx.invalid', 'url', url);
-  }, true);
-
+  // Anchor clicks (links, downloads) are decided by the isolated-world broker from the
+  // trusted click itself; this page-world script no longer handles them.
   const isMac = typeof navigator !== 'undefined' && (
     /Mac|iPhone|iPod|iPad/.test(navigator.platform || '') ||
     /Macintosh/.test(navigator.userAgent || '')
@@ -550,6 +581,8 @@ __FERRYX_IS_POPUP_SURFACE__
   // host substitutes the platform flag as a literal, so Windows never offers the chord at all.
   const hardReloadSupported = __FERRYX_BROWSER_BRIDGE_HARD_RELOAD__;
 
+  // Only self-scoped shortcuts live here (back, forward, reload, reload-hard): the page can
+  // already do each of them itself. App-chrome chords come from native key sources.
   addDocumentListener('keydown', (event) => {
     if (!isUserEvent(event)) return;
     let action = null;
@@ -560,65 +593,10 @@ __FERRYX_IS_POPUP_SURFACE__
     const key = event.key ? event.key.toLowerCase() : '';
     const primaryMod = isMac ? (event.metaKey && !event.ctrlKey) : (event.ctrlKey && !event.metaKey);
 
-    // Global app commands (new tab, close tab, command palette, sidebar toggle,
-    // settings, pane split, tab select, tab cycle, workspace select) work
-    // everywhere in the child webview, even while typing in text inputs or
-    // textareas, matching native desktop browser expectations.
-    if (primaryMod && !event.altKey) {
-      if (!event.shiftKey) {
-        if (key === 't' || code === 'KeyT') action = 'tab-new-browser';
-        else if (key === 'w' || code === 'KeyW') action = 'tab-close';
-        else if (key === 'k' || code === 'KeyK') action = 'command-palette';
-        else if (key === 'b' || code === 'KeyB') action = 'sidebar-toggle';
-        else if (key === ',' || code === 'Comma') action = 'settings-toggle';
-        else if (key === 'd' || code === 'KeyD') action = 'split-right';
-        else if (key === '=' || code === 'Equal') action = 'zoom-in';
-        else if (key === '-' || code === 'Minus') action = 'zoom-out';
-        else if (key === '0' || code === 'Digit0') action = 'zoom-reset';
-      } else {
-        if (key === 't' || code === 'KeyT') action = 'tab-reopen-closed';
-        else if (key === 'd' || code === 'KeyD') action = 'split-down';
-        else if (key === '+' || code === 'Equal') action = 'zoom-in';
-        else if (hardReloadSupported && (key === 'r' || code === 'KeyR')) action = 'reload-hard';
-      }
-    }
-
-    // Workspace selection: Cmd+1..9 on macOS, Alt+1..9 on Windows/Linux
-    if (!action && !event.shiftKey) {
-      const isWsMod = isMac ? (event.metaKey && !event.ctrlKey && !event.altKey) : (event.altKey && !event.ctrlKey && !event.metaKey);
-      if (isWsMod) {
-        const digit = /^[1-9]$/.test(event.key) ? event.key : (code.match(/^Digit([1-9])$/) || [])[1];
-        if (digit) action = 'workspace-select-' + digit;
-      }
-    }
-
-    // Tab selection (Ctrl+1..9 on all platforms)
-    if (!action && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
-      const digit = /^[1-9]$/.test(event.key) ? event.key : (code.match(/^Digit([1-9])$/) || [])[1];
-      if (digit) action = 'tab-select-' + digit;
-    }
-
-    // Tab cycling (Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+PageUp/Down, Cmd+Shift+[/])
-    if (!action) {
-      if (event.ctrlKey && !event.metaKey && !event.altKey && (key === 'tab' || code === 'Tab')) {
-        action = event.shiftKey ? 'tab-previous' : 'tab-next';
-      } else if (event.ctrlKey && !event.metaKey && !event.altKey && (key === 'pagedown' || code === 'PageDown')) {
-        action = 'tab-next';
-      } else if (event.ctrlKey && !event.metaKey && !event.altKey && (key === 'pageup' || code === 'PageUp')) {
-        action = 'tab-previous';
-      } else if (primaryMod && event.shiftKey && !event.altKey && (code === 'BracketRight' || key === ']' || key === '}')) {
-        action = 'tab-next';
-      } else if (primaryMod && event.shiftKey && !event.altKey && (code === 'BracketLeft' || key === '[' || key === '{')) {
-        action = 'tab-previous';
-      }
-    }
-
-    // Browser address bar, reload, and find work everywhere, even while typing
-    // in text inputs or textareas, matching standard browser keyboard conventions.
-    if (!action && primaryMod && !event.altKey && !event.shiftKey) {
-      if (key === 'l' || code === 'KeyL') action = 'focus-address';
-      else if (key === 'r' || code === 'KeyR') action = 'reload';
-      else if (key === 'f' || code === 'KeyF') action = 'find';
+    // Reload works everywhere, even while typing in text inputs, matching browser conventions.
+    if (primaryMod && !event.altKey && (key === 'r' || code === 'KeyR')) {
+      if (!event.shiftKey) action = 'reload';
+      else if (hardReloadSupported) action = 'reload-hard';
     }
 
     // In-page navigation outside editable fields
@@ -680,86 +658,14 @@ mod tests {
 
     #[test]
     fn parses_bridge_actions_and_ignores_normal_navigation() {
-        let open = Url::parse(&format!(
-            "https://open.ferryx.invalid/?url=https%3A%2F%2Fexample.com%2Foauth&nonce={TEST_NONCE}"
-        ))
-        .unwrap();
-        assert_eq!(
-            parse_browser_guest_action(&open, TEST_NONCE),
-            Some(BrowserGuestAction::Open("https://example.com/oauth".into()))
-        );
-
-        let download = Url::parse(&format!(
-            "https://download.ferryx.invalid/?url=https%3A%2F%2Fexample.com%2Ffile.pdf&nonce={TEST_NONCE}"
-        ))
-        .unwrap();
-        assert_eq!(
-            parse_browser_guest_action(&download, TEST_NONCE),
-            Some(BrowserGuestAction::Download(
-                "https://example.com/file.pdf".into()
-            ))
-        );
-
         let shortcut = Url::parse(&format!(
-            "https://shortcut.ferryx.invalid/?action=find&nonce={TEST_NONCE}"
+            "https://shortcut.ferryx.invalid/?action=reload&nonce={TEST_NONCE}"
         ))
         .unwrap();
         assert_eq!(
             parse_browser_guest_action(&shortcut, TEST_NONCE),
-            Some(BrowserGuestAction::Shortcut("find".into()))
+            Some(BrowserGuestAction::Shortcut("reload".into()))
         );
-
-        let click = Url::parse(&format!(
-            "https://click.ferryx.invalid/?url=https%3A%2F%2Fexample.com%2Fdocs&nonce={TEST_NONCE}"
-        ))
-        .unwrap();
-        assert_eq!(
-            parse_browser_guest_action(&click, TEST_NONCE),
-            Some(BrowserGuestAction::LinkClick("https://example.com/docs".into()))
-        );
-        let modifier_click = Url::parse(&format!(
-            "https://modclick.ferryx.invalid/?url=https%3A%2F%2Fexample.com%2Fdocs&nonce={TEST_NONCE}"
-        ))
-        .unwrap();
-        assert_eq!(
-            parse_browser_guest_action(&modifier_click, TEST_NONCE),
-            Some(BrowserGuestAction::ModifierLinkClick(
-                "https://example.com/docs".into()
-            ))
-        );
-
-        // App-level and tab navigation chords ride the same shortcut host so the main
-        // webview (which never sees the keydown) can still switch tabs and run app commands.
-        for action in [
-            "tab-next",
-            "tab-previous",
-            "tab-select-1",
-            "tab-select-9",
-            "tab-new-terminal",
-            "tab-new-browser",
-            "tab-reopen-closed",
-            "tab-close",
-            "command-palette",
-            "sidebar-toggle",
-            "settings-toggle",
-            "split-right",
-            "split-down",
-            "zoom-in",
-            "zoom-out",
-            "zoom-reset",
-            "workspace-select-1",
-            "workspace-select-9",
-            "reload-hard",
-        ] {
-            let forwarded = Url::parse(&format!(
-                "https://shortcut.ferryx.invalid/?action={action}&nonce={TEST_NONCE}"
-            ))
-            .unwrap();
-            assert_eq!(
-                parse_browser_guest_action(&forwarded, TEST_NONCE),
-                Some(BrowserGuestAction::Shortcut(action.into()))
-            );
-        }
 
         // The hard-reload chord is emitted only where the platform can honour it, so the bridge
         // must carry the resolved platform flag instead of a leftover placeholder.
@@ -780,31 +686,18 @@ mod tests {
     #[test]
     fn guest_control_urls_require_matching_nonce() {
         // Correct nonce still parses.
-        let open = Url::parse(&format!(
-            "https://open.ferryx.invalid/?nonce={TEST_NONCE}&url=https%3A%2F%2Fexample.com"
+        let back = Url::parse(&format!(
+            "https://shortcut.ferryx.invalid/?nonce={TEST_NONCE}&action=back"
         ))
         .unwrap();
         assert_eq!(
-            parse_browser_guest_action(&open, TEST_NONCE),
-            Some(BrowserGuestAction::Open("https://example.com".into()))
+            parse_browser_guest_action(&back, TEST_NONCE),
+            Some(BrowserGuestAction::Shortcut("back".into()))
         );
 
         // Wrong nonce is rejected on every control host.
-        let forged_open = Url::parse(
-            "https://open.ferryx.invalid/?url=https%3A%2F%2Fexample.com&nonce=attacker-guess",
-        )
-        .unwrap();
-        assert_eq!(parse_browser_guest_action(&forged_open, TEST_NONCE), None);
-        let forged_download = Url::parse(
-            "https://download.ferryx.invalid/?url=https%3A%2F%2Fexample.com%2Ff.pdf&nonce=attacker-guess",
-        )
-        .unwrap();
-        assert_eq!(
-            parse_browser_guest_action(&forged_download, TEST_NONCE),
-            None
-        );
         let forged_shortcut =
-            Url::parse("https://shortcut.ferryx.invalid/?action=find&nonce=attacker-guess")
+            Url::parse("https://shortcut.ferryx.invalid/?action=back&nonce=attacker-guess")
                 .unwrap();
         assert_eq!(
             parse_browser_guest_action(&forged_shortcut, TEST_NONCE),
@@ -812,17 +705,7 @@ mod tests {
         );
 
         // Missing nonce (the legacy shape any page can produce) is rejected.
-        let legacy_open =
-            Url::parse("https://open.ferryx.invalid/?url=https%3A%2F%2Fexample.com").unwrap();
-        assert_eq!(parse_browser_guest_action(&legacy_open, TEST_NONCE), None);
-        let legacy_download =
-            Url::parse("https://download.ferryx.invalid/?url=https%3A%2F%2Fexample.com%2Ff.pdf")
-                .unwrap();
-        assert_eq!(
-            parse_browser_guest_action(&legacy_download, TEST_NONCE),
-            None
-        );
-        let legacy_shortcut = Url::parse("https://shortcut.ferryx.invalid/?action=find").unwrap();
+        let legacy_shortcut = Url::parse("https://shortcut.ferryx.invalid/?action=back").unwrap();
         assert_eq!(
             parse_browser_guest_action(&legacy_shortcut, TEST_NONCE),
             None
@@ -830,15 +713,14 @@ mod tests {
     }
 
     #[test]
-    fn guest_bridge_covers_popup_download_shortcuts_and_url_drop() {
+    fn guest_bridge_covers_popup_intents_self_shortcuts_and_url_drop() {
         let script = browser_guest_bridge_script(TEST_NONCE, false);
         assert!(script.contains("window.open"));
-        assert!(script.contains("download.ferryx.invalid"));
+        assert!(script.contains("'ferryx-intent'"));
         assert!(script.contains("shortcut.ferryx.invalid"));
         assert!(script.contains("text/uri-list"));
-        assert!(script.contains("tab-new-browser"));
-        assert!(script.contains("tab-reopen-closed"));
-        assert!(script.contains("zoom-in"));
+        assert!(script.contains("action = 'reload'"));
+        assert!(script.contains("action = 'back'"));
         // The OAuth callback travels through the host now, not through BroadcastChannel,
         // which is same-origin and same-storage-partition only and therefore delivered
         // nothing between two webviews.
@@ -905,32 +787,19 @@ mod tests {
     }
 
     #[test]
-    fn parses_popup_open_navigate_and_opener_message_actions() {
-        // `window.open(url)` routes the popup creation with the page-local handle id.
+    fn parses_popup_navigate_and_opener_message_actions() {
+        // `window.open(url)` no longer creates a tab through the page route: op=open moved
+        // to the trusted bridge, with or without an explicit op.
         let open = Url::parse(&format!(
             "https://popup.ferryx.invalid/?url=https%3A%2F%2Fauth.example.com%2Fauthorize&handle=p1&op=open&nonce={TEST_NONCE}"
         ))
         .unwrap();
-        assert_eq!(
-            parse_browser_guest_action(&open, TEST_NONCE),
-            Some(BrowserGuestAction::PopupOpen {
-                url: "https://auth.example.com/authorize".into(),
-                handle: "p1".into(),
-            })
-        );
-
-        // A missing `op` is the legacy shape of the same action and stays an open.
+        assert_eq!(parse_browser_guest_action(&open, TEST_NONCE), None);
         let implicit_open = Url::parse(&format!(
             "https://popup.ferryx.invalid/?url=https%3A%2F%2Fauth.example.com%2Fauthorize&handle=p2&nonce={TEST_NONCE}"
         ))
         .unwrap();
-        assert_eq!(
-            parse_browser_guest_action(&implicit_open, TEST_NONCE),
-            Some(BrowserGuestAction::PopupOpen {
-                url: "https://auth.example.com/authorize".into(),
-                handle: "p2".into(),
-            })
-        );
+        assert_eq!(parse_browser_guest_action(&implicit_open, TEST_NONCE), None);
 
         // A later `handle.location.href = ...` navigates the tab the host already made.
         let navigate = Url::parse(&format!(
@@ -954,7 +823,7 @@ mod tests {
 
         // A popup action without a handle cannot be addressed back to the opener.
         let missing_handle = Url::parse(&format!(
-            "https://popup.ferryx.invalid/?url=https%3A%2F%2Fapp.example.com&op=open&nonce={TEST_NONCE}"
+            "https://popup.ferryx.invalid/?url=https%3A%2F%2Fapp.example.com&op=navigate&nonce={TEST_NONCE}"
         ))
         .unwrap();
         assert_eq!(parse_browser_guest_action(&missing_handle, TEST_NONCE), None);
@@ -971,15 +840,12 @@ mod tests {
             })
         );
 
-        // `window.close()` from the popup.
+        // A bare popupclose (the old popup self-close) is refused: it closed any tab.
         let close = Url::parse(&format!(
             "https://popupclose.ferryx.invalid/?nonce={TEST_NONCE}"
         ))
         .unwrap();
-        assert_eq!(
-            parse_browser_guest_action(&close, TEST_NONCE),
-            Some(BrowserGuestAction::PopupCloseRequested)
-        );
+        assert_eq!(parse_browser_guest_action(&close, TEST_NONCE), None);
 
         // `handle.close()` from the opener carried via popupclose.ferryx.invalid with handle.
         let handle_close = Url::parse(&format!(
@@ -1071,9 +937,48 @@ mod tests {
         let popup = browser_guest_bridge_script(TEST_NONCE, true);
         assert!(popup.contains("window.opener = openerProxy"));
         assert!(popup.contains("opener.ferryx.invalid"));
-        assert!(popup.contains("popupclose.ferryx.invalid"));
+        assert!(popup.contains("postIntent({ op: 'selfClose' })"));
         assert!(popup.contains("window.__ferryxPopupClosed"));
         assert!(!popup.contains(POPUP_SURFACE_PLACEHOLDER));
+    }
+
+    /// Body of the bridge's `window.close` replacement, for asserting what a page's
+    /// `window.close()` can reach.
+    fn window_close_body(script: &str) -> &str {
+        let start_marker = "const ferryxWindowClose = function close() {";
+        let start = script
+            .find(start_marker)
+            .expect("the bridge must install its own window.close")
+            + start_marker.len();
+        let end = start + script[start..].find("\n  };").expect("window.close body must end");
+        &script[start..end]
+    }
+
+    #[test]
+    fn guest_bridge_neuters_window_close_in_non_popup_tabs() {
+        // Measured on WebKitGTK: a page's window.close() in a normal tab destroyed the
+        // webview behind the manager (wry connects close -> destroy), leaving a zombie tab.
+        let normal = browser_guest_bridge_script(TEST_NONCE, false);
+        assert!(normal.contains(
+            "Object.defineProperty(window, 'close', {\n      value: ferryxWindowClose,\n      writable: false,\n      configurable: false,"
+        ));
+        let body = window_close_body(&normal);
+        assert!(body.contains("pushConsoleEntry('warn'"), "a blocked close should say so");
+        for forbidden in ["postIntent", "route", "assign", "selfClose", "popupclose", "originalClose"] {
+            assert!(!body.contains(forbidden), "non-popup window.close must route nothing: {forbidden}");
+        }
+        assert!(!normal.contains("op: 'selfClose'"));
+    }
+
+    #[test]
+    fn guest_bridge_popup_window_close_keeps_the_self_close_intent() {
+        let popup = browser_guest_bridge_script(TEST_NONCE, true);
+        assert!(popup.contains(
+            "Object.defineProperty(window, 'close', {\n      value: ferryxWindowClose,\n      writable: false,\n      configurable: false,"
+        ));
+        let body = window_close_body(&popup);
+        assert!(body.contains("postIntent({ op: 'selfClose' })"));
+        assert!(!body.contains("route"), "the self-close stays a broker intent, never a page route");
     }
 
     #[test]
@@ -1086,7 +991,7 @@ mod tests {
         assert!(script.contains("const handleLocation = {"));
         assert!(script.contains("assign: (nextUrl) => navigate(nextUrl)"));
         assert!(script.contains("replace: (nextUrl) => navigate(nextUrl)"));
-        assert!(script.contains("op: 'open'"));
+        assert!(script.contains("postIntent({ op: 'open', url, handle: handleId })"));
         assert!(script.contains("op: 'navigate'"));
         assert!(script.contains("popup.ferryx.invalid"));
         // `closed` is host-confirmed state, not an optimistic guess flipped by close().
@@ -1151,6 +1056,133 @@ mod tests {
         assert_eq!(parsed[0].level, "log");
         assert_eq!(parsed[0].text, "x");
         assert_eq!(parsed[0].at_ms, 1);
+    }
+
+    #[test]
+    fn guest_bridge_never_exposes_the_nonce_router_on_window() {
+        // A-CORE-1: the router stays in the bridge closure. The nonce is only a
+        // frame-confusion filter now, but there is still no reason to publish it.
+        for is_popup in [false, true] {
+            let script = browser_guest_bridge_script(TEST_NONCE, is_popup);
+            assert!(!script.contains("__ferryxRoute"), "the nonce router must not be published");
+            for line in script.lines() {
+                let trimmed = line.trim();
+                let assigns_router = trimmed.contains("= route;")
+                    || trimmed.contains("= routeParams;")
+                    || trimmed.contains("= postIntent;")
+                    || trimmed.contains("value: route,")
+                    || trimmed.contains("value: routeParams,")
+                    || trimmed.contains("value: postIntent,");
+                assert!(!assigns_router, "bridge must not hand the router to page script: {trimmed}");
+            }
+            assert!(!script.contains("__ferryxPickReady"));
+        }
+    }
+
+    #[test]
+    fn native_open_alongside_intent_is_substituted_per_platform() {
+        let script = browser_guest_bridge_script(TEST_NONCE, false);
+        assert!(!script.contains(BRIDGE_NATIVE_OPEN_PLACEHOLDER));
+        #[cfg(windows)]
+        assert!(script.contains("const nativeOpenAlongsideIntent = true;"));
+        #[cfg(not(windows))]
+        assert!(script.contains("const nativeOpenAlongsideIntent = false;"));
+        assert!(script.contains("if (nativeOpenAlongsideIntent) {"));
+    }
+
+    #[test]
+    fn guest_bridge_popup_handles_are_unique_per_document() {
+        // A-CORE-2: handle ids restarted at p1 on every document load, so a stale pending
+        // close or link recorded for the previous document matched the new document's p1.
+        let script = browser_guest_bridge_script(TEST_NONCE, false);
+        assert!(!script.contains("const handleId = `p${popupHandleCounter}`;"));
+        assert!(script.contains("getRandomValues"));
+        assert!(script.contains("const handleId = `${popupDocumentId}-p${popupHandleCounter}`;"));
+    }
+
+    /// Class (a) routes removed by the trusted-bridge redesign (REVIEW M2). A page that
+    /// learns the nonce must not be able to drive any of them by navigation.
+    const REMOVED_CLASS_A_URLS: [&str; 9] = [
+        "https://open.ferryx.invalid/?url=https%3A%2F%2Fevil.example",
+        "https://download.ferryx.invalid/?url=https%3A%2F%2Fevil.example%2Ff.bin",
+        "https://pick.ferryx.invalid/?ready=1",
+        "https://click.ferryx.invalid/?url=https%3A%2F%2Fevil.example",
+        "https://modclick.ferryx.invalid/?url=https%3A%2F%2Fevil.example",
+        "https://popup.ferryx.invalid/?url=https%3A%2F%2Fevil.example&handle=p1&op=open",
+        "https://popup.ferryx.invalid/?url=https%3A%2F%2Fevil.example&handle=p1",
+        "https://popupclose.ferryx.invalid/?x=1",
+        "https://shortcut.ferryx.invalid/?action=tab-close",
+    ];
+
+    #[test]
+    fn removed_class_a_routes_are_refused_even_with_the_correct_nonce() {
+        for raw in REMOVED_CLASS_A_URLS {
+            let url = Url::parse(&format!("{raw}&nonce={TEST_NONCE}")).unwrap();
+            assert_eq!(
+                parse_browser_guest_action(&url, TEST_NONCE),
+                None,
+                "removed class (a) route must not parse: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn page_shortcut_route_carries_only_self_scoped_actions() {
+        for action in ["back", "forward", "reload", "reload-hard"] {
+            let url = Url::parse(&format!(
+                "https://shortcut.ferryx.invalid/?action={action}&nonce={TEST_NONCE}"
+            ))
+            .unwrap();
+            assert_eq!(
+                parse_browser_guest_action(&url, TEST_NONCE),
+                Some(BrowserGuestAction::Shortcut(action.into()))
+            );
+        }
+        for action in [
+            "tab-close",
+            "tab-new-browser",
+            "command-palette",
+            "settings-toggle",
+            "split-right",
+            "workspace-select-1",
+            "tab-select-1",
+            "focus-address",
+            "find",
+        ] {
+            let url = Url::parse(&format!(
+                "https://shortcut.ferryx.invalid/?action={action}&nonce={TEST_NONCE}"
+            ))
+            .unwrap();
+            assert_eq!(
+                parse_browser_guest_action(&url, TEST_NONCE),
+                None,
+                "app-chrome action {action} must come from a native key source"
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_script_contains_no_class_a_host_or_pick_ready_hook() {
+        for is_popup in [false, true] {
+            let script = browser_guest_bridge_script(TEST_NONCE, is_popup);
+            for host in [
+                "open.ferryx.invalid",
+                "download.ferryx.invalid",
+                "pick.ferryx.invalid",
+                "click.ferryx.invalid",
+                "modclick.ferryx.invalid",
+            ] {
+                assert!(!script.contains(&format!("'{host}'")), "{host} must be gone");
+            }
+            assert!(!script.contains("__ferryxPickReady"));
+            // No op=open route parameter: popup open is only a broker intent now.
+            assert!(!script.contains("handle: handleId, op: 'open'"));
+            assert!(!script.contains("routeParams('popup.ferryx.invalid', { url: initial"));
+            assert!(!script.contains("routeHost('popupclose.ferryx.invalid')"));
+            for action in ["tab-close", "tab-new-browser", "command-palette", "workspace-select-"] {
+                assert!(!script.contains(&format!("'{action}")), "{action} must not be page-sourced");
+            }
+        }
     }
 }
 

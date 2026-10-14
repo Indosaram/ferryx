@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, renderHook } from "@testing-library/react";
 
 import { saveBrowserSettings } from "../lib/browserSettings";
 import type { BrowserTab } from "../lib/types";
 import { createLayoutState } from "./layout";
-import { hydrateRestoredBrowserSessions } from "./browserSessionHydration";
+import { hydrateRestoredBrowserSessions, useBrowserSessionHydration } from "./browserSessionHydration";
 import type { WorkspaceState } from "./workspaceStore";
 
 const browserMocks = vi.hoisted(() => ({
@@ -222,5 +223,63 @@ describe("browser session hydration", () => {
     await hydrateRestoredBrowserSessions(state, "workspace-1");
 
     expect(browserMocks.ensureBrowser).not.toHaveBeenCalled();
+  });
+
+  it("useBrowserSessionHydration re-runs restore when only state.worktrees changes (F-UI-STATE-REMOTE-4)", async () => {
+    saveBrowserSettings({ restoreTabsOnLaunch: true });
+    const tab: BrowserTab = {
+      kind: "browser",
+      id: "tab-wt",
+      label: "WT Browser",
+      browserId: "browser-wt",
+      url: "https://example.com/wt",
+      worktreePath: "/repo/wt-new",
+    };
+    // The worktree list is non-empty but does not yet contain the tab's
+    // worktree, so the stale-worktree guard skips it on the first pass.
+    const state: WorkspaceState = {
+      workspaceId: "workspace-1",
+      worktrees: [
+        { path: "/repo/other", branch: "other", head: "111", bare: false, detached: false, locked: null, prunable: null },
+      ],
+      activeWorktreePath: "/repo/wt-new",
+      sessions: {},
+      layout: createLayoutState([tab], tab.id),
+      worktreeLayouts: {},
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+    };
+
+    const { rerender } = renderHook(
+      ({ current }: { current: WorkspaceState }) => useBrowserSessionHydration(current, "workspace-1"),
+      { initialProps: { current: state } },
+    );
+    await act(async () => {});
+    expect(browserMocks.ensureBrowser).not.toHaveBeenCalled();
+
+    // Only state.worktrees changes (layout and worktreeLayouts keep identity);
+    // the tab's worktree becomes known, so the hook must restore it.
+    const stateWithWt: WorkspaceState = {
+      ...state,
+      worktrees: [
+        ...state.worktrees,
+        { path: "/repo/wt-new", branch: "feature", head: "abc", bare: false, detached: false, locked: null, prunable: null },
+      ],
+    };
+    await act(async () => {
+      rerender({ current: stateWithWt });
+    });
+    expect(browserMocks.ensureBrowser).toHaveBeenCalledTimes(1);
+    expect(browserMocks.ensureBrowser).toHaveBeenCalledWith(expect.objectContaining({
+      browserId: "browser-wt",
+      worktreePath: "/repo/wt-new",
+    }));
+
+    // A further render with an unchanged worktree list must not restore again.
+    await act(async () => {
+      rerender({ current: { ...stateWithWt } });
+    });
+    expect(browserMocks.ensureBrowser).toHaveBeenCalledTimes(1);
   });
 });

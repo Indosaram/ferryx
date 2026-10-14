@@ -1,9 +1,11 @@
 use crate::browser::model::*;
 use crate::browser::security::{validate_url, BrowserError};
-use parking_lot::RwLock;
+use crate::browser::bridge::TrustedBridgeKind;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -30,6 +32,8 @@ pub struct ManagedBrowserSession {
     pub remote_snapshot_id: Option<String>,
     pub map_revision: u64,
     pub creation_sequence: u64,
+    /// Which guest -> host channel the platform installed for this tab.
+    pub trusted_bridge: TrustedBridgeKind,
     history: Vec<String>,
     history_index: usize,
     /// Set once the platform reports real engine history flags. The shadow
@@ -56,6 +60,7 @@ fn browser_state(s: &ManagedBrowserSession) -> BrowserState {
         zoom_factor: s.zoom_factor,
         load_error: s.load_error.clone(),
         visible: s.visible,
+        trusted_bridge: s.trusted_bridge,
     }
 }
 
@@ -101,18 +106,53 @@ fn is_valid_browser_id(value: &str) -> bool {
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b':' | b'.' | b'_' | b'-'))
 }
 
+/// Most native user-initiated records kept per tab (design 4.3).
+pub const NATIVE_USER_INITIATED_CAP: usize = 16;
+/// At most this many admitted popups per opener tab per POPUP_RATE_WINDOW.
+pub const POPUP_RATE_CAP: usize = 5;
+pub const POPUP_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Per-tab trusted-bridge bookkeeping that never leaves the host.
+#[derive(Default)]
+struct BridgeRegistry {
+    /// One-time element-pick tokens: armed by the host, consumed by an admitted pick.
+    armed_pick_tokens: HashMap<String, String>,
+    /// Tokens consumed by an admitted pick and not yet read by finish.
+    consumed_pick_tokens: HashMap<String, String>,
+    /// Native user-initiated navigations / new-window requests, newest last.
+    native_user_initiated: HashMap<String, Vec<(String, Instant)>>,
+    /// Native guest view pointers (macOS WKWebView) registered by the platform install.
+    guest_views: HashMap<String, usize>,
+    /// Admitted popup opens per opener within the last POPUP_RATE_WINDOW, oldest first.
+    popup_opens: HashMap<String, Vec<Instant>>,
+}
+
 #[derive(Default, Clone)]
 pub struct BrowserManager {
     sessions: Arc<RwLock<HashMap<String, ManagedBrowserSession>>>,
     creation_counter: Arc<AtomicU64>,
+    bridge: Arc<Mutex<BridgeRegistry>>,
+    /// Told about state changes the manager makes on its own, outside any webview callback
+    /// (today: the trusted bridge kind, which Windows upgrades from a CDP completion).
+    state_listener: Arc<RwLock<Option<BrowserStateListener>>>,
 }
+
+/// Receives a tab's state after a manager-originated change. Called without manager locks held.
+pub type BrowserStateListener = Arc<dyn Fn(&BrowserState) + Send + Sync>;
 
 impl BrowserManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             creation_counter: Arc::new(AtomicU64::new(0)),
+            bridge: Arc::new(Mutex::new(BridgeRegistry::default())),
+            state_listener: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Installs the receiver for manager-originated state changes, replacing any earlier one.
+    pub fn set_state_listener(&self, listener: BrowserStateListener) {
+        *self.state_listener.write() = Some(listener);
     }
 
     pub fn register_session(
@@ -134,11 +174,17 @@ impl BrowserManager {
             .filter(|value| is_valid_browser_id(value))
             .map(str::to_string);
         let browser_id = requested_browser_id.unwrap_or_else(|| uuid.clone());
-        if self.sessions.read().contains_key(&browser_id) {
-            return Err(BrowserError::Internal(format!(
-                "browser session id already exists: {browser_id}"
-            )));
-        }
+        // One write guard covers the duplicate check and the insert, so two racing
+        // creates for the same id cannot both pass the check and replace each other.
+        let mut guard = self.sessions.write();
+        let slot = match guard.entry(browser_id.clone()) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(BrowserError::Internal(format!(
+                    "browser session id already exists: {browser_id}"
+                )));
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => slot,
+        };
         let webview_label = format!("browser-{uuid}");
         let profile_id = req.profile.unwrap_or(BrowserProfileId::Default);
         let visible = req.visible.unwrap_or(true);
@@ -168,13 +214,14 @@ impl BrowserManager {
             remote_snapshot_id: None,
             map_revision: 0,
             creation_sequence,
+            trusted_bridge: TrustedBridgeKind::Unavailable,
             history: vec![valid_url],
             history_index: 0,
             native_history_flags: false,
         };
 
         let state = browser_state(&session);
-        self.sessions.write().insert(browser_id, session);
+        slot.insert(session);
         Ok(state)
     }
 
@@ -274,6 +321,38 @@ impl BrowserManager {
         browser_id: &str,
         forward: bool,
     ) -> Result<BrowserState, BrowserError> {
+        self.begin_history_dispatch(browser_id, forward)
+            .map(|(state, _dispatch)| state)
+    }
+
+    /// Like `begin_history_navigation`, plus whether the platform history call
+    /// (`goBack()`/`history.back()`) must be dispatched. Dispatch is reported
+    /// separately from `loading`: off macOS an engine-only entry is dispatched
+    /// without a pending load, because a no-op `history.back()` fires no event
+    /// that would ever clear one.
+    pub fn begin_history_dispatch(
+        &self,
+        browser_id: &str,
+        forward: bool,
+    ) -> Result<(BrowserState, bool), BrowserError> {
+        self.begin_history_dispatch_with_engine_fallback(
+            browser_id,
+            forward,
+            cfg!(not(target_os = "macos")),
+        )
+    }
+
+    /// `engine_resolves_unrecorded_history`: whether the platform dispatch
+    /// (`history.back()`/`history.forward()` off macOS) must run even when the
+    /// shadow vector has no entry in that direction. Same-document navigations
+    /// (`pushState`, fragments) never reach the vector, so without native
+    /// history flags only the engine knows whether the move is possible.
+    fn begin_history_dispatch_with_engine_fallback(
+        &self,
+        browser_id: &str,
+        forward: bool,
+        engine_resolves_unrecorded_history: bool,
+    ) -> Result<(BrowserState, bool), BrowserError> {
         let mut guard = self.sessions.write();
         let s = guard
             .get_mut(browser_id)
@@ -292,7 +371,7 @@ impl BrowserManager {
             };
             if !can_navigate {
                 s.loading = false;
-                return Ok(browser_state(s));
+                return Ok((browser_state(s), false));
             }
             // Same-URL history entries can replace the document/state without
             // a URL change. Invalidate the snapshot when dispatch begins.
@@ -302,7 +381,7 @@ impl BrowserManager {
             s.remote_snapshot_id = None;
             s.loading = true;
             s.load_error = None;
-            return Ok(browser_state(s));
+            return Ok((browser_state(s), true));
         }
 
         let next_index = if forward {
@@ -314,7 +393,18 @@ impl BrowserManager {
         let Some(next_index) = next_index else {
             s.loading = false;
             sync_history_flags(s);
-            return Ok(browser_state(s));
+            if !engine_resolves_unrecorded_history {
+                return Ok((browser_state(s), false));
+            }
+            // pushState/fragment entries never reach the shadow vector, so only the
+            // engine knows whether this move exists. Dispatch it without guessing a
+            // URL; a real move reports its URL through the bridge. The snapshot is
+            // invalidated because the document state may change in place.
+            s.generation += 1;
+            s.automation_targets.clear();
+            s.remote_targets.clear();
+            s.remote_snapshot_id = None;
+            return Ok((browser_state(s), true));
         };
 
         s.history_index = next_index;
@@ -326,7 +416,7 @@ impl BrowserManager {
         s.loading = true;
         s.load_error = None;
         sync_history_flags(s);
-        Ok(browser_state(s))
+        Ok((browser_state(s), true))
     }
 
     pub fn cancel_history_navigation(
@@ -575,7 +665,151 @@ impl BrowserManager {
     }
 
     pub fn remove_session(&self, browser_id: &str) -> Option<ManagedBrowserSession> {
-        self.sessions.write().remove(browser_id)
+        {
+            let mut bridge = self.bridge.lock();
+            bridge.armed_pick_tokens.remove(browser_id);
+            bridge.consumed_pick_tokens.remove(browser_id);
+            bridge.native_user_initiated.remove(browser_id);
+            bridge.guest_views.remove(browser_id);
+            bridge.popup_opens.remove(browser_id);
+        }
+        let removed = self.sessions.write().remove(browser_id);
+        #[cfg(target_os = "windows")]
+        if let Some(session) = removed.as_ref() {
+            crate::browser::bridge::windows::forget_webview(&session.webview_label);
+        }
+        removed
+    }
+
+    /// Host-side popup cap: records and admits an open for `opener` at `now` unless it
+    /// already opened POPUP_RATE_CAP popups within POPUP_RATE_WINDOW.
+    pub fn admit_popup_open(&self, opener: &str, now: Instant) -> bool {
+        let mut bridge = self.bridge.lock();
+        let opens = bridge.popup_opens.entry(opener.to_string()).or_default();
+        opens.retain(|at| {
+            now.checked_duration_since(*at)
+                .is_none_or(|age| age < POPUP_RATE_WINDOW)
+        });
+        if opens.len() >= POPUP_RATE_CAP {
+            return false;
+        }
+        opens.push(now);
+        true
+    }
+
+    /// Records the channel kind the platform install achieved for this tab.
+    pub fn set_trusted_bridge(
+        &self,
+        browser_id: &str,
+        kind: TrustedBridgeKind,
+    ) -> Result<BrowserState, BrowserError> {
+        let (state, changed) = {
+            let mut guard = self.sessions.write();
+            let s = guard
+                .get_mut(browser_id)
+                .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+            let changed = s.trusted_bridge != kind;
+            s.trusted_bridge = kind;
+            (browser_state(s), changed)
+        };
+        // The pick capability depends on this kind and it can change long after creation
+        // (Windows upgrades it from the async leak probe), so the UI must hear about it.
+        if changed {
+            let listener = self.state_listener.read().clone();
+            if let Some(listener) = listener {
+                listener(&state);
+            }
+        }
+        Ok(state)
+    }
+
+    /// Arms a fresh one-time pick token for this tab, replacing any earlier one.
+    pub fn arm_pick_token(&self, browser_id: &str) -> String {
+        let token = Uuid::new_v4().to_string();
+        let mut bridge = self.bridge.lock();
+        bridge.consumed_pick_tokens.remove(browser_id);
+        bridge
+            .armed_pick_tokens
+            .insert(browser_id.to_string(), token.clone());
+        token
+    }
+
+    pub fn armed_pick_token(&self, browser_id: &str) -> Option<String> {
+        self.bridge.lock().armed_pick_tokens.get(browser_id).cloned()
+    }
+
+    /// Moves the armed token to consumed if it equals `token`. One arm yields one pick.
+    pub fn consume_pick_token(&self, browser_id: &str, token: &str) -> bool {
+        let mut bridge = self.bridge.lock();
+        if bridge.armed_pick_tokens.get(browser_id).map(String::as_str) != Some(token) {
+            return false;
+        }
+        bridge.armed_pick_tokens.remove(browser_id);
+        bridge
+            .consumed_pick_tokens
+            .insert(browser_id.to_string(), token.to_string());
+        true
+    }
+
+    /// Takes the consumed token for finish; None means no admitted pick is pending.
+    pub fn take_consumed_pick_token(&self, browser_id: &str) -> Option<String> {
+        self.bridge.lock().consumed_pick_tokens.remove(browser_id)
+    }
+
+    /// Drops both the armed and the consumed token (picker removed).
+    pub fn clear_pick_tokens(&self, browser_id: &str) {
+        let mut bridge = self.bridge.lock();
+        bridge.armed_pick_tokens.remove(browser_id);
+        bridge.consumed_pick_tokens.remove(browser_id);
+    }
+
+    /// Records a native user-initiated navigation or new-window request for `url`.
+    /// Called only by platform code observing a native event (the Windows step), never
+    /// with page-supplied data alone.
+    pub fn record_native_user_initiated(&self, browser_id: &str, url: &str, at: Instant) {
+        let mut bridge = self.bridge.lock();
+        let ring = bridge
+            .native_user_initiated
+            .entry(browser_id.to_string())
+            .or_default();
+        ring.push((url.to_string(), at));
+        if ring.len() > NATIVE_USER_INITIATED_CAP {
+            let excess = ring.len() - NATIVE_USER_INITIATED_CAP;
+            ring.drain(..excess);
+        }
+    }
+
+    pub fn recent_native_user_initiated(&self, browser_id: &str) -> Vec<(String, Instant)> {
+        self.bridge
+            .lock()
+            .native_user_initiated
+            .get(browser_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Registers the native guest view pointer (macOS WKWebView) for key attribution.
+    /// Called from the platform install inside `with_webview`.
+    pub fn register_guest_view(&self, browser_id: &str, ptr: usize) {
+        self.bridge
+            .lock()
+            .guest_views
+            .insert(browser_id.to_string(), ptr);
+    }
+
+    /// The browser whose registered guest view pointer is `ptr`.
+    pub fn browser_for_guest_view(&self, ptr: usize) -> Option<String> {
+        self.bridge
+            .lock()
+            .guest_views
+            .iter()
+            .find(|(_, registered)| **registered == ptr)
+            .map(|(browser_id, _)| browser_id.clone())
+    }
+
+    /// Cheap pre-check for key monitors: no registered guest view means no guest focus.
+    pub fn has_guest_views(&self) -> bool {
+        !self.bridge.lock().guest_views.is_empty()
     }
 
     pub fn list_sessions(&self) -> Vec<BrowserSessionSummary> {
@@ -621,6 +855,90 @@ pub fn order_sessions_by_creation(
 mod tests {
     use super::*;
 
+    #[test]
+    fn popup_opens_are_capped_per_opener_per_second() {
+        let manager = BrowserManager::new();
+        let start = Instant::now();
+        for index in 0..POPUP_RATE_CAP {
+            assert!(manager.admit_popup_open("opener-a", start), "open {index} must be admitted");
+        }
+        assert!(!manager.admit_popup_open("opener-a", start));
+        assert!(!manager.admit_popup_open("opener-a", start + std::time::Duration::from_millis(999)));
+        // Another opener has its own budget.
+        assert!(manager.admit_popup_open("opener-b", start));
+        // Once the window has passed, opens are admitted again.
+        assert!(manager.admit_popup_open("opener-a", start + POPUP_RATE_WINDOW));
+        // Removing the session clears its budget.
+        manager.remove_session("opener-b");
+        for _ in 0..POPUP_RATE_CAP {
+            assert!(manager.admit_popup_open("opener-b", start));
+        }
+    }
+
+    #[test]
+    fn pick_tokens_are_one_time_and_cleared_with_the_session() {
+        let manager = BrowserManager::new();
+        let state = manager.register_session(create_request("pick-b")).unwrap();
+        assert_eq!(state.trusted_bridge, TrustedBridgeKind::Unavailable);
+        let token = manager.arm_pick_token("pick-b");
+        assert_eq!(manager.armed_pick_token("pick-b").as_deref(), Some(token.as_str()));
+        assert!(!manager.consume_pick_token("pick-b", "guess"));
+        assert!(manager.consume_pick_token("pick-b", &token));
+        // Consumed: a replay finds nothing armed.
+        assert!(!manager.consume_pick_token("pick-b", &token));
+        assert_eq!(manager.armed_pick_token("pick-b"), None);
+        assert_eq!(manager.take_consumed_pick_token("pick-b").as_deref(), Some(token.as_str()));
+        assert_eq!(manager.take_consumed_pick_token("pick-b"), None);
+        // Re-arming replaces; removal clears everything.
+        let first = manager.arm_pick_token("pick-b");
+        let second = manager.arm_pick_token("pick-b");
+        assert_ne!(first, second);
+        assert!(!manager.consume_pick_token("pick-b", &first));
+        manager.clear_pick_tokens("pick-b");
+        assert_eq!(manager.armed_pick_token("pick-b"), None);
+        manager.arm_pick_token("pick-b");
+        manager.remove_session("pick-b");
+        assert_eq!(manager.armed_pick_token("pick-b"), None);
+    }
+
+    #[test]
+    fn native_user_initiated_ring_is_capped_per_browser() {
+        let manager = BrowserManager::new();
+        let now = Instant::now();
+        for index in 0..(NATIVE_USER_INITIATED_CAP + 5) {
+            manager.record_native_user_initiated("ring-a", &format!("https://e.com/{index}"), now);
+        }
+        manager.record_native_user_initiated("ring-b", "https://other.com/", now);
+        let ring = manager.recent_native_user_initiated("ring-a");
+        assert_eq!(ring.len(), NATIVE_USER_INITIATED_CAP);
+        assert_eq!(ring.first().map(|(url, _)| url.as_str()), Some("https://e.com/5"));
+        assert_eq!(
+            ring.last().map(|(url, _)| url.clone()),
+            Some(format!("https://e.com/{}", NATIVE_USER_INITIATED_CAP + 4))
+        );
+        assert_eq!(manager.recent_native_user_initiated("ring-b").len(), 1);
+        assert!(manager.recent_native_user_initiated("ring-none").is_empty());
+    }
+
+    #[test]
+    fn guest_views_resolve_to_their_browser_and_trusted_bridge_is_recorded() {
+        let manager = BrowserManager::new();
+        manager.register_session(create_request("view-b")).unwrap();
+        assert!(!manager.has_guest_views());
+        manager.register_guest_view("view-b", 0x1234);
+        assert!(manager.has_guest_views());
+        assert_eq!(manager.browser_for_guest_view(0x1234).as_deref(), Some("view-b"));
+        assert_eq!(manager.browser_for_guest_view(0x9999), None);
+        let state = manager
+            .set_trusted_bridge("view-b", TrustedBridgeKind::Isolated)
+            .unwrap();
+        assert_eq!(state.trusted_bridge, TrustedBridgeKind::Isolated);
+        assert!(manager.set_trusted_bridge("missing", TrustedBridgeKind::Isolated).is_err());
+        manager.remove_session("view-b");
+        assert_eq!(manager.browser_for_guest_view(0x1234), None);
+        assert!(!manager.has_guest_views());
+    }
+
     fn create_request(browser_id: &str) -> CreateBrowserRequest {
         CreateBrowserRequest {
             browser_id: Some(browser_id.to_string()),
@@ -644,6 +962,79 @@ mod tests {
             title: None,
             visible: true,
         }
+    }
+
+    #[test]
+    fn concurrent_register_with_same_id_admits_exactly_one_session() {
+        // A-CORE-7: the duplicate-id check and the insert must be one atomic step, so
+        // racing creates for the same frontend id never replace a live session.
+        const THREADS: usize = 32;
+        for round in 0..20 {
+            let manager = BrowserManager::new();
+            let browser_id = format!("restored-browser:race-{round}");
+            let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+            let handles: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let manager = manager.clone();
+                    let barrier = Arc::clone(&barrier);
+                    let request = create_request(&browser_id);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        manager.register_session(request)
+                    })
+                })
+                .collect();
+            let results: Vec<_> = handles
+                .into_iter()
+                .map(|handle| handle.join().expect("register thread"))
+                .collect();
+            let ok_count = results.iter().filter(|result| result.is_ok()).count();
+            assert_eq!(ok_count, 1, "round {round}: exactly one create may win");
+            for result in results.iter().filter(|result| result.is_err()) {
+                assert!(matches!(
+                    result,
+                    Err(BrowserError::Internal(message)) if message.contains("browser session id already exists")
+                ));
+            }
+            assert_eq!(manager.sessions.read().len(), 1);
+        }
+    }
+
+    #[test]
+    fn history_without_native_flags_dispatches_unrecorded_engine_entries() {
+        // A-CORE-8: a pushState/hash entry never reaches the shadow vector, so with no
+        // native flags the engine (history.back()/forward()) must still be asked.
+        let manager = BrowserManager::new();
+        let state = manager
+            .register_session(create_request("spa-history"))
+            .expect("register");
+        assert!(!state.can_go_back);
+
+        let (back, dispatch_back) = manager
+            .begin_history_dispatch_with_engine_fallback("spa-history", false, true)
+            .expect("begin back");
+        assert!(dispatch_back, "back must be dispatched to the engine");
+        assert!(!back.loading, "a possibly no-op engine move must not leave a stuck load");
+        assert_eq!(back.url, state.url, "no shadow entry, so the URL is not guessed");
+        assert!(back.generation > state.generation);
+
+        let (forward, dispatch_forward) = manager
+            .begin_history_dispatch_with_engine_fallback("spa-history", true, true)
+            .expect("begin forward");
+        assert!(dispatch_forward, "forward must be dispatched to the engine");
+        assert!(!forward.loading);
+        assert!(forward.generation > back.generation);
+
+        // macOS keeps vetoing from the shadow vector until WebKit reports flags.
+        let vetoed_manager = BrowserManager::new();
+        vetoed_manager
+            .register_session(create_request("mac-history"))
+            .expect("register");
+        let (vetoed, dispatch_vetoed) = vetoed_manager
+            .begin_history_dispatch_with_engine_fallback("mac-history", false, false)
+            .expect("begin back");
+        assert!(!dispatch_vetoed);
+        assert!(!vetoed.loading);
     }
 
     #[test]

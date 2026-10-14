@@ -11,7 +11,12 @@ pub struct LogicalRect {
 
 impl LogicalRect {
     pub fn is_valid(&self) -> bool {
-        self.width >= 0.0 && self.height >= 0.0 && self.x.is_finite() && self.y.is_finite()
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.width.is_finite()
+            && self.height.is_finite()
+            && self.width >= 0.0
+            && self.height >= 0.0
     }
 }
 
@@ -132,6 +137,10 @@ pub struct BrowserState {
     pub zoom_factor: f64,
     pub load_error: Option<String>,
     pub visible: bool,
+    /// The guest -> host channel this tab has. Old persisted state has no field and
+    /// loads as `Unavailable`, the conservative kind.
+    #[serde(default)]
+    pub trusted_bridge: crate::browser::bridge::TrustedBridgeKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,6 +194,8 @@ pub struct BrowserStateChangedPayload {
     pub can_go_forward: bool,
     pub zoom_factor: f64,
     pub load_error: Option<String>,
+    /// Lets the toolbar re-read the pick capability when the bridge kind changes.
+    pub trusted_bridge: crate::browser::bridge::TrustedBridgeKind,
 }
 
 impl From<&BrowserState> for BrowserStateChangedPayload {
@@ -199,6 +210,7 @@ impl From<&BrowserState> for BrowserStateChangedPayload {
             can_go_forward: state.can_go_forward,
             zoom_factor: state.zoom_factor,
             load_error: state.load_error.clone(),
+            trusted_bridge: state.trusted_bridge,
         }
     }
 }
@@ -230,6 +242,10 @@ pub struct BrowserCloseRequestedPayload {
 pub struct BrowserDownloadRequestedPayload {
     pub browser_id: String,
     pub target_url: String,
+    /// Set when the request could not be attributed to the user (design 3.5): the UI
+    /// shows it as "needs confirmation" and fetches nothing until the user clicks Save.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_confirmation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,6 +642,20 @@ pub struct RemoteSnapshotRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logical_rect_rejects_non_finite_fields() {
+        // A-CORE-13: every field must be finite, not only the origin.
+        let rect = |x: f64, y: f64, width: f64, height: f64| LogicalRect { x, y, width, height };
+        assert!(rect(0.0, 0.0, 10.0, 10.0).is_valid());
+        assert!(!rect(0.0, 0.0, f64::INFINITY, 10.0).is_valid());
+        assert!(!rect(0.0, 0.0, 10.0, f64::INFINITY).is_valid());
+        assert!(!rect(0.0, 0.0, f64::NAN, 10.0).is_valid());
+        assert!(!rect(0.0, 0.0, 10.0, f64::NAN).is_valid());
+        assert!(!rect(f64::INFINITY, 0.0, 10.0, 10.0).is_valid());
+        assert!(!rect(0.0, f64::NEG_INFINITY, 10.0, 10.0).is_valid());
+        assert!(!rect(0.0, 0.0, -1.0, 10.0).is_valid());
+    }
 
     #[test]
     fn test_r5_15_wait_condition_string_and_tagged_deserialization() {

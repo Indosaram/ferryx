@@ -74,59 +74,6 @@ pub fn parse_element_pick(json: &str) -> Result<ElementPick, String> {
     })
 }
 
-pub const ELEMENT_PICKER_SCRIPT: &str = r#"(() => {
-  const previous = window.__ferryxPicker;
-  if (previous && previous.installed) {
-    document.removeEventListener('mouseover', previous.onOver, true);
-    document.removeEventListener('mouseout', previous.onOut, true);
-    document.removeEventListener('click', previous.onClick, true);
-    if (previous.outlined && previous.outlined.el) previous.outlined.el.style.outline = previous.outlined.outline;
-  }
-  const outlined = { el: null, outline: '' };
-  const onOver = (e) => {
-    const t = e.target;
-    if (!t || !t.style) return;
-    if (outlined.el && outlined.el !== t) outlined.el.style.outline = outlined.outline;
-    outlined.outline = t.style.outline;
-    outlined.el = t;
-    t.style.outline = '2px solid #4c8dff';
-  };
-  const onOut = (e) => {
-    const t = e.target;
-    if (outlined.el === t) {
-      t.style.outline = outlined.outline;
-      outlined.el = null;
-    }
-  };
-  const onClick = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const t = e.target;
-    const r = t.getBoundingClientRect();
-    window.__ferryxElementPick = JSON.stringify({
-      outerHTML: t.outerHTML,
-      css: getComputedStyle(t).cssText,
-      devicePixelRatio: window.devicePixelRatio || 1,
-      rect: { x: r.x, y: r.y, width: r.width, height: r.height }
-    });
-    if (typeof window.__ferryxRoute === 'function') window.__ferryxRoute('pick.ferryx.invalid', 'ready', '1');
-  };
-  document.addEventListener('mouseover', onOver, true);
-  document.addEventListener('mouseout', onOut, true);
-  document.addEventListener('click', onClick, true);
-  window.__ferryxPicker = { installed: true, onOver, onOut, onClick, outlined };
-})();"#;
-
-pub const ELEMENT_PICKER_REMOVE_SCRIPT: &str = r#"(() => {
-  const previous = window.__ferryxPicker;
-  if (!previous || !previous.installed) return;
-  document.removeEventListener('mouseover', previous.onOver, true);
-  document.removeEventListener('mouseout', previous.onOut, true);
-  document.removeEventListener('click', previous.onClick, true);
-  if (previous.outlined && previous.outlined.el) previous.outlined.el.style.outline = previous.outlined.outline;
-  window.__ferryxElementPick = null;
-  window.__ferryxPicker = { installed: false };
-})();"#;
 
 pub fn element_pick_to_design_snapshot(pick: &ElementPick, png: &[u8]) -> DesignModeSnapshot {
     let tag = pick
@@ -165,13 +112,21 @@ pub fn element_pick_report(json: &str, full_png: &[u8]) -> Result<DesignModeSnap
         return Err("empty screenshot".to_string());
     }
     let dpr = pick.device_pixel_ratio;
-    let x = (pick.rect.x * dpr).floor().max(0.0) as u32;
-    let y = (pick.rect.y * dpr).floor().max(0.0) as u32;
-    if x >= img.width() || y >= img.height() {
+    // Clamp both edges to the screenshot: clamping only the origin keeps the full size and
+    // crops pixels the element does not cover when it is partly scrolled off-screen.
+    let left = (pick.rect.x * dpr).floor();
+    let top = (pick.rect.y * dpr).floor();
+    let right = ((pick.rect.x + pick.rect.width) * dpr).ceil();
+    let bottom = ((pick.rect.y + pick.rect.height) * dpr).ceil();
+    let x1 = left.max(0.0);
+    let y1 = top.max(0.0);
+    let x2 = right.min(f64::from(img.width()));
+    let y2 = bottom.min(f64::from(img.height()));
+    if x2 <= x1 || y2 <= y1 {
         return Err("element rect is outside the screenshot".to_string());
     }
-    let cw = ((pick.rect.width * dpr).ceil() as u32).min(img.width() - x);
-    let ch = ((pick.rect.height * dpr).ceil() as u32).min(img.height() - y);
+    let (x, y) = (x1 as u32, y1 as u32);
+    let (cw, ch) = ((x2 - x1) as u32, (y2 - y1) as u32);
     if cw == 0 || ch == 0 {
         return Err("empty crop".to_string());
     }
@@ -434,12 +389,53 @@ mod tests {
     }
 
     #[test]
-    fn picker_script_can_be_removed_and_reports_device_pixels() {
-        assert!(ELEMENT_PICKER_SCRIPT.contains("removeEventListener"));
-        assert!(ELEMENT_PICKER_SCRIPT.contains("devicePixelRatio"));
-        assert!(ELEMENT_PICKER_SCRIPT.contains("__ferryxRoute"));
-        assert!(ELEMENT_PICKER_REMOVE_SCRIPT.contains("removeEventListener"));
-        assert!(ELEMENT_PICKER_REMOVE_SCRIPT.contains("installed: false"));
+    fn picker_script_uses_only_the_narrow_pick_ready_hook() {
+        // Red-phase lock for the trusted-bridge picker (design 3.6): the picker scripts moved
+        // to the isolated world, keep their state off page-visible globals and accept only
+        // trusted clicks. Writing a pick into a page global let any page fake one.
+        use crate::browser::bridge::{PICKER_ARM_SCRIPT, PICKER_DISARM_SCRIPT, PICKER_READ_SCRIPT};
+        for script in [PICKER_ARM_SCRIPT, PICKER_READ_SCRIPT, PICKER_DISARM_SCRIPT] {
+            assert!(!script.contains("window.__ferryxElementPick ="));
+            assert!(!script.contains("__ferryxPickReady"));
+            // A-CORE-1: the picker must not depend on a page-visible nonce router.
+            assert!(!script.contains("__ferryxRoute"));
+            assert!(!script.contains("pick.ferryx.invalid"));
+            assert!(!script.contains("nonce"));
+        }
+        assert!(PICKER_ARM_SCRIPT.contains("isTrusted"));
+        assert!(PICKER_ARM_SCRIPT.contains("removeEventListener"));
+        assert!(PICKER_ARM_SCRIPT.contains("devicePixelRatio"));
+        assert!(PICKER_DISARM_SCRIPT.contains("picker.disarm()"));
+    }
+
+    #[test]
+    fn element_pick_report_clamps_both_edges_of_a_partly_offscreen_rect() {
+        // A-CORE-9: clamping only the origin kept the full height, cropping rows the
+        // element does not cover.
+        use image::{ImageBuffer, Rgb};
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(4, 4, |x, y| Rgb([x as u8, y as u8, 1]));
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let json = "{\"outerHTML\":\"<div>\",\"css\":\"\",\"rect\":{\"x\":0,\"y\":-1,\"width\":2,\"height\":2}}";
+        let snapshot = element_pick_report(json, &png).unwrap();
+        let cropped = base64::engine::general_purpose::STANDARD
+            .decode(&snapshot.screenshot_png_base64)
+            .unwrap();
+        let decoded = image::load_from_memory(&cropped).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (2, 1));
+
+        let right = "{\"outerHTML\":\"<div>\",\"css\":\"\",\"rect\":{\"x\":3,\"y\":0,\"width\":3,\"height\":1}}";
+        let snapshot = element_pick_report(right, &png).unwrap();
+        let cropped = base64::engine::general_purpose::STANDARD
+            .decode(&snapshot.screenshot_png_base64)
+            .unwrap();
+        let decoded = image::load_from_memory(&cropped).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1, 1));
+
+        let above = "{\"outerHTML\":\"<div>\",\"css\":\"\",\"rect\":{\"x\":0,\"y\":-5,\"width\":2,\"height\":2}}";
+        assert!(element_pick_report(above, &png).is_err());
     }
 
     #[test]

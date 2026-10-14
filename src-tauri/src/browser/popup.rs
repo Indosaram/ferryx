@@ -12,8 +12,13 @@
 
 use parking_lot::Mutex;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
+
+/// Upper bound on recorded pending closes per opener. A close for a handle that never
+/// becomes a popup is never consumed, so without a cap a page could grow this set forever;
+/// the cap is per opener so one flooding page cannot evict another tab's pending close.
+const MAX_PENDING_CLOSES: usize = 256;
 
 /// One popup tab, keyed by the popup's own browser id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,40 +47,63 @@ fn links() -> &'static Mutex<HashMap<String, PopupLink>> {
     LINKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn pending_closes() -> &'static Mutex<HashSet<(String, String)>> {
-    static PENDING: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
-    PENDING.get_or_init(|| Mutex::new(HashSet::new()))
+/// Pending closes in insertion order, so the oldest is evicted first at the cap.
+fn pending_closes() -> &'static Mutex<VecDeque<(String, String)>> {
+    static PENDING: OnceLock<Mutex<VecDeque<(String, String)>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
 /// Records that a handle was closed before its popup tab finished creation.
 pub fn record_pending_close(opener_browser_id: &str, handle: &str) {
-    pending_closes()
-        .lock()
-        .insert((opener_browser_id.to_string(), handle.to_string()));
+    let key = (opener_browser_id.to_string(), handle.to_string());
+    let mut pending = pending_closes().lock();
+    if pending.contains(&key) {
+        return;
+    }
+    let same_opener = |(opener, _): &(String, String)| opener == opener_browser_id;
+    while pending.iter().filter(|entry| same_opener(entry)).count() >= MAX_PENDING_CLOSES {
+        match pending.iter().position(same_opener) {
+            Some(oldest) => {
+                pending.remove(oldest);
+            }
+            None => break,
+        }
+    }
+    pending.push_back(key);
 }
 
 /// Checks whether a pending close exists for `(opener_browser_id, handle)`.
 pub fn is_pending_close(opener_browser_id: &str, handle: &str) -> bool {
     pending_closes()
         .lock()
-        .contains(&(opener_browser_id.to_string(), handle.to_string()))
+        .iter()
+        .any(|(opener, h)| opener == opener_browser_id && h == handle)
 }
 
 /// Takes and removes a pending close if one existed.
 pub fn take_pending_close(opener_browser_id: &str, handle: &str) -> bool {
-    pending_closes()
-        .lock()
-        .remove(&(opener_browser_id.to_string(), handle.to_string()))
+    let mut pending = pending_closes().lock();
+    match pending
+        .iter()
+        .position(|(opener, h)| opener == opener_browser_id && h == handle)
+    {
+        Some(index) => pending.remove(index).is_some(),
+        None => false,
+    }
 }
 
 /// Records that `popup_browser_id` is the popup of `opener_browser_id` for `handle`.
 /// Returns `false` if the handle had already been closed via a pending close (in which case
 /// the link is NOT registered and the caller must discard the newly created webview).
+/// A second link for the same `(opener, handle)` replaces the first, so
+/// [`popup_for_handle`] always resolves to exactly one popup.
 pub fn link(popup_browser_id: &str, opener_browser_id: &str, handle: &str) -> bool {
     if take_pending_close(opener_browser_id, handle) {
         return false;
     }
-    links().lock().insert(
+    let mut links = links().lock();
+    links.retain(|_, link| !(link.opener_browser_id == opener_browser_id && link.handle == handle));
+    links.insert(
         popup_browser_id.to_string(),
         PopupLink {
             opener_browser_id: opener_browser_id.to_string(),
@@ -308,6 +336,14 @@ pub fn page_warning_script(message: &str) -> String {
     )
 }
 
+/// The registry is process-wide; every test in the crate that mutates or asserts it
+/// (here and in `ipc::browser::popup_handle_tests`) holds this lock.
+#[cfg(test)]
+pub(crate) fn registry_test_lock() -> parking_lot::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +352,7 @@ mod tests {
     fn registry_links_looks_up_and_unlinks() {
         // RED when `unlink` stops removing the entry (returns the link but leaves it
         // registered), or when `popup_for_handle` matches on the handle alone.
+        let _guard = registry_test_lock();
         clear_all();
         link("popup-1", "opener-1", "p1");
         link("popup-2", "opener-2", "p1");
@@ -354,6 +391,7 @@ mod tests {
         // Deterministic regression: when opener calls popup.close() before creation completes,
         // pending close is recorded. When link() runs later, it detects pending close,
         // refuses registration (returns false), and leaves the registry clean.
+        let _guard = registry_test_lock();
         clear_all();
         record_pending_close("opener-race", "p_fast_close");
         assert!(is_pending_close("opener-race", "p_fast_close"));
@@ -373,6 +411,88 @@ mod tests {
             Some("popup-normal")
         );
         clear_all();
+    }
+
+    #[test]
+    fn pending_closes_stay_bounded() {
+        // A-CORE-2: an opener that keeps closing handles that never become popups must not
+        // grow the process-wide pending set without limit.
+        let _guard = registry_test_lock();
+        for index in 0..5_000 {
+            record_pending_close("opener-flood", &format!("flood-p{index}"));
+        }
+        assert!(pending_closes().lock().len() <= 256);
+        // The newest close is kept; the oldest was evicted.
+        assert!(is_pending_close("opener-flood", "flood-p4999"));
+        assert!(!is_pending_close("opener-flood", "flood-p0"));
+        clear_all();
+    }
+
+    #[test]
+    fn pending_close_cap_is_per_opener() {
+        // m2: the cap is per opener, so one page flooding closes cannot evict another
+        // tab's legitimate pending close.
+        let _guard = registry_test_lock();
+        clear_all();
+        record_pending_close("opener-quiet", "q-p1");
+        for index in 0..(MAX_PENDING_CLOSES * 4) {
+            record_pending_close("opener-noisy", &format!("noisy-p{index}"));
+        }
+        assert!(
+            is_pending_close("opener-quiet", "q-p1"),
+            "another opener's flood must not evict this opener's pending close"
+        );
+        let noisy = pending_closes()
+            .lock()
+            .iter()
+            .filter(|(opener, _)| opener == "opener-noisy")
+            .count();
+        assert_eq!(noisy, MAX_PENDING_CLOSES);
+        assert!(is_pending_close(
+            "opener-noisy",
+            &format!("noisy-p{}", MAX_PENDING_CLOSES * 4 - 1)
+        ));
+        assert!(!is_pending_close("opener-noisy", "noisy-p0"));
+        clear_all();
+    }
+
+    #[test]
+    fn stale_pending_close_from_an_old_document_does_not_block_a_new_document_handle() {
+        // A-CORE-2: handles carry a per-document id, so a pending close recorded for the
+        // previous document can never match the next document's handle.
+        let _guard = registry_test_lock();
+        let opener = "opener-doc-reload";
+        record_pending_close(opener, "dk3j9a1-p1");
+        assert!(link("popup-doc-reload", opener, "dq77x0c-p1"));
+        assert_eq!(
+            popup_for_handle(opener, "dq77x0c-p1").as_deref(),
+            Some("popup-doc-reload")
+        );
+        assert_eq!(popup_for_handle(opener, "dk3j9a1-p1"), None);
+        assert!(take_pending_close(opener, "dk3j9a1-p1"));
+        unlink("popup-doc-reload");
+    }
+
+    #[test]
+    fn linking_the_same_opener_handle_twice_keeps_one_entry() {
+        // A-CORE-2: a second link for (opener, handle) must replace the first, never leave
+        // two entries that `popup_for_handle` resolves by first hit.
+        let _guard = registry_test_lock();
+        let opener = "opener-dup-link";
+        assert!(link("popup-dup-old", opener, "dz-p1"));
+        assert!(link("popup-dup-new", opener, "dz-p1"));
+        let entries = links()
+            .lock()
+            .values()
+            .filter(|l| l.opener_browser_id == opener && l.handle == "dz-p1")
+            .count();
+        assert_eq!(entries, 1);
+        assert_eq!(lookup("popup-dup-old"), None);
+        assert_eq!(
+            popup_for_handle(opener, "dz-p1").as_deref(),
+            Some("popup-dup-new")
+        );
+        unlink("popup-dup-new");
     }
 
     #[test]

@@ -167,8 +167,11 @@ pub trait BrowserSnapshotSource: Send + Sync {
         options: SnapshotOptions,
         coordinator: SnapshotCallbackCoordinator,
     ) -> Pin<Box<dyn Future<Output = Result<BrowserSnapshot, IpcError>> + Send + 'a>> {
-        let _ = coordinator;
-        self.take_snapshot(webview_label, options)
+        Box::pin(async move {
+            let result = self.take_snapshot(webview_label, options).await;
+            coordinator.complete(result.clone());
+            result
+        })
     }
 }
 

@@ -186,6 +186,8 @@ pub enum ActionDecodeError {
     Refused(RemoteInputError),
     /// The target element was not present at the requested location.
     NotFound(String),
+    /// The page reported a failure that carries no recognized structured code.
+    Failed(String),
     /// The payload was not a decodable action result.
     Malformed(String),
 }
@@ -195,6 +197,7 @@ impl std::fmt::Display for ActionDecodeError {
         match self {
             Self::Refused(err) => write!(f, "{}", err),
             Self::NotFound(message) => write!(f, "target element not found: {}", message),
+            Self::Failed(message) => write!(f, "action failed: {}", message),
             Self::Malformed(message) => write!(f, "malformed action result: {}", message),
         }
     }
@@ -544,14 +547,21 @@ pub fn truncate_eval_result(output: &str) -> (String, bool) {
     (output[..boundary].to_string(), true)
 }
 
-/// Decodes the JSON evaluation result returned by automation actions (click, fill)
+/// Structured failure code the host-built click/fill/type scripts write for a missing target.
+pub const ACTION_CODE_NOT_FOUND: &str = "not_found";
+
+/// Decodes the JSON evaluation result returned by automation actions (fill, type)
 /// and verifies that target lookup succeeded (R5-6).
-pub fn decode_action_result(raw: &str) -> Result<(), String> {
-    let parsed: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| format!("invalid action result json: {e}"))?;
+///
+/// A failure is classified only by its structured `code` field; the free-text `error`
+/// is page-reachable and never selects the kind.
+pub fn decode_action_result(raw: &str) -> Result<(), ActionDecodeError> {
+    let parsed: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| ActionDecodeError::Malformed(format!("invalid action result json: {e}")))?;
     let obj = if let Some(s) = parsed.as_str() {
-        serde_json::from_str::<serde_json::Value>(s)
-            .map_err(|e| format!("invalid nested action result json: {e}"))?
+        serde_json::from_str::<serde_json::Value>(s).map_err(|e| {
+            ActionDecodeError::Malformed(format!("invalid nested action result json: {e}"))
+        })?
     } else {
         parsed
     };
@@ -560,7 +570,12 @@ pub fn decode_action_result(raw: &str) -> Result<(), String> {
             .get("error")
             .and_then(|v| v.as_str())
             .unwrap_or("target element not found");
-        return Err(err_msg.to_string());
+        return Err(
+            match obj.get("code").and_then(|v| v.as_str()) {
+                Some(ACTION_CODE_NOT_FOUND) => ActionDecodeError::NotFound(err_msg.to_string()),
+                _ => ActionDecodeError::Failed(err_msg.to_string()),
+            },
+        );
     }
     Ok(())
 }
@@ -575,7 +590,7 @@ pub fn build_point_click_script(x: f64, y: f64) -> String {
     format!(
         r#"(function() {{
             const el = document.elementFromPoint({}, {});
-            if (!el) return JSON.stringify({{ ok: false, error: "no element at coordinates" }});
+            if (!el) return JSON.stringify({{ ok: false, code: "not_found", error: "no element at coordinates" }});
             const tag = el.tagName ? el.tagName.toUpperCase() : "";
             if (tag === "IFRAME" || tag === "FRAME") return JSON.stringify({{ ok: false, refused: "{}" }});
             if (tag === "CANVAS") return JSON.stringify({{ ok: false, refused: "{}" }});
@@ -591,12 +606,30 @@ pub fn build_point_click_script(x: f64, y: f64) -> String {
     )
 }
 
+/// Builds the page-side selector-click script executed in the target webview.
+///
+/// `selector_json` is a JSON string literal the host built from a verified selector; the
+/// script never reads page text to pick its failure kind.
+pub fn build_selector_click_script(selector_json: &str) -> String {
+    format!(
+        r#"(function() {{
+            const el = document.querySelector({});
+            if (!el) return JSON.stringify({{ ok: false, code: "not_found", error: "element not found" }});
+            el.click();
+            return JSON.stringify({{ ok: true }});
+        }})()"#,
+        selector_json
+    )
+}
+
 /// Typed decode of a point-click action result payload (R4-8 / audit D-10).
 ///
 /// - `{"ok":true}` -> `Ok(())`
 /// - `{"ok":false,"refused":"<iframe|canvas|dialog>"}` -> typed refusal carrying the same
 ///   canonical message `map_point_mainframe` uses for that input class
-/// - `{"ok":false,"error":"..."}` (or a missing `error`) -> typed not-found
+/// - `{"ok":false,"code":"not_found",...}` -> typed not-found
+/// - any other `{"ok":false,...}` -> generic failure; the free-text `error` is
+///   page-reachable and never selects the kind
 /// - anything else (non-JSON, non-object, non-boolean `ok`, unknown `refused` token) -> malformed
 pub fn decode_point_click_result(raw: &str) -> Result<(), ActionDecodeError> {
     let parsed: serde_json::Value = serde_json::from_str(raw)
@@ -637,8 +670,12 @@ pub fn decode_point_click_result(raw: &str) -> Result<(), ActionDecodeError> {
     let message = map
         .get("error")
         .and_then(|v| v.as_str())
-        .unwrap_or("target element not found");
-    Err(ActionDecodeError::NotFound(message.to_string()))
+        .unwrap_or("target element not found")
+        .to_string();
+    Err(match map.get("code").and_then(|v| v.as_str()) {
+        Some(ACTION_CODE_NOT_FOUND) => ActionDecodeError::NotFound(message),
+        _ => ActionDecodeError::Failed(message),
+    })
 }
 
 /// Tracks the highest queued IME fill revision per (browser_id, lease_epoch, target)
@@ -905,15 +942,40 @@ mod tests {
 
         // Target not found error
         let err1 = decode_action_result(r#"{"ok":false,"error":"element not found"}"#).unwrap_err();
-        assert_eq!(err1, "element not found");
+        assert_eq!(err1, ActionDecodeError::Failed("element not found".into()));
 
         let err2 =
             decode_action_result(r#""{\"ok\":false,\"error\":\"no element at coordinates\"}""#)
                 .unwrap_err();
-        assert_eq!(err2, "no element at coordinates");
+        assert_eq!(err2, ActionDecodeError::Failed("no element at coordinates".into()));
 
         // Missing ok or ok != true
         assert!(decode_action_result(r#"{"error":"failed"}"#).is_err());
+    }
+
+    /// M5: only the host-written `code` classifies a failure; free text never does.
+    #[test]
+    fn decode_action_result_classifies_by_code_not_text() {
+        assert_eq!(
+            decode_action_result(r#"{"ok":false,"error":"element not found"}"#),
+            Err(ActionDecodeError::Failed("element not found".into()))
+        );
+        assert_eq!(
+            decode_action_result(r#"{"ok":false,"code":"not_found","error":"element not found"}"#),
+            Err(ActionDecodeError::NotFound("element not found".into()))
+        );
+        assert_eq!(
+            decode_action_result(r#""{\"ok\":false,\"code\":\"not_found\"}""#),
+            Err(ActionDecodeError::NotFound("target element not found".into()))
+        );
+        assert_eq!(
+            decode_action_result(r#"{"ok":false,"code":"other","error":"x"}"#),
+            Err(ActionDecodeError::Failed("x".into()))
+        );
+        assert!(matches!(
+            decode_action_result("not json"),
+            Err(ActionDecodeError::Malformed(_))
+        ));
     }
 
     // RED mutation: change any string in `RefusedInputToken::canonical_message` (or in the
@@ -952,7 +1014,7 @@ mod tests {
     }
 
     // RED mutation: drop the `refused` branch of `decode_point_click_result` (falling through
-    // to not-found) -> the iframe/canvas/dialog assertions below fail.
+    // to the generic failure) -> the iframe/canvas/dialog assertions below fail.
     #[test]
     fn test_decode_point_click_result_typed_outcomes() {
         assert_eq!(decode_point_click_result(r#"{"ok":true}"#), Ok(()));
@@ -980,14 +1042,48 @@ mod tests {
         }
 
         assert_eq!(
-            decode_point_click_result(r#"{"ok":false,"error":"element not found"}"#),
+            decode_point_click_result(r#"{"ok":false,"code":"not_found","error":"element not found"}"#),
             Err(ActionDecodeError::NotFound("element not found".to_string()))
         );
         assert_eq!(
             decode_point_click_result(r#"{"ok":false}"#),
-            Err(ActionDecodeError::NotFound(
+            Err(ActionDecodeError::Failed(
                 "target element not found".to_string()
             ))
+        );
+    }
+
+    /// Finding 3: click scripts tag a missing target with the structured code, and the
+    /// point-click decoder classifies by that code alone; untagged text is a generic failure.
+    #[test]
+    fn click_scripts_and_decoder_classify_missing_target_by_code() {
+        let tagged = r#"ok: false, code: "not_found""#;
+        let selector_script = build_selector_click_script(r##""#btn""##);
+        assert!(
+            selector_script.contains(tagged),
+            "selector-click script must tag a missing target with code not_found: {selector_script}"
+        );
+        let point_script = build_point_click_script(1.0, 2.0);
+        assert!(
+            point_script.contains(tagged),
+            "point-click script must tag an empty point with code not_found: {point_script}"
+        );
+
+        assert_eq!(
+            decode_point_click_result(r#"{"ok":false,"code":"not_found","error":"element not found"}"#),
+            Err(ActionDecodeError::NotFound("element not found".into()))
+        );
+        assert_eq!(
+            decode_point_click_result(r#""{\"ok\":false,\"code\":\"not_found\"}""#),
+            Err(ActionDecodeError::NotFound("target element not found".into()))
+        );
+        assert_eq!(
+            decode_point_click_result(r#"{"ok":false,"error":"element not found"}"#),
+            Err(ActionDecodeError::Failed("element not found".into()))
+        );
+        assert_eq!(
+            decode_point_click_result(r#"{"ok":false,"code":"other","error":"x"}"#),
+            Err(ActionDecodeError::Failed("x".into()))
         );
     }
 

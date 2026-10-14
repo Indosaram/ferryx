@@ -7,7 +7,7 @@ import { BrowserPane } from "./BrowserPane";
 
 const callbackState = vi.hoisted(() => ({
   shortcut: null as null | ((payload: { browserId: string; action: "focus-address" | "reload" | "back" | "forward" | "find" }) => void),
-  download: null as null | ((payload: { browserId: string; targetUrl: string }) => void),
+  download: null as null | ((payload: { browserId: string; targetUrl: string; requiresConfirmation?: boolean }) => void),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -26,7 +26,7 @@ const browserMocks = vi.hoisted(() => ({
     callbackState.shortcut = listener;
     return () => { callbackState.shortcut = null; };
   }),
-  onBrowserDownloadRequested: vi.fn(async (listener: (payload: { browserId: string; targetUrl: string }) => void) => {
+  onBrowserDownloadRequested: vi.fn(async (listener: (payload: { browserId: string; targetUrl: string; requiresConfirmation?: boolean }) => void) => {
     callbackState.download = listener;
     return () => { callbackState.download = null; };
   }),
@@ -157,5 +157,41 @@ describe("BrowserPane parity affordances", () => {
         "/tmp/example.zip",
       );
     });
+  });
+
+  it("fetches nothing for a needs-confirmation download until the user clicks Save", async () => {
+    render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    await waitFor(() => expect(callbackState.download).not.toBeNull());
+
+    act(() => callbackState.download?.({
+      browserId: "browser-1",
+      targetUrl: "https://example.com/files/unattested.zip",
+      requiresConfirmation: true,
+    }));
+    const prompt = await screen.findByTestId("browser-download-prompt");
+    expect(prompt).toHaveAttribute("data-requires-confirmation", "true");
+    expect(screen.getByTestId("browser-download-needs-confirmation")).toHaveTextContent("Needs confirmation");
+    expect(dialogMocks.save).not.toHaveBeenCalled();
+    expect(browserMocks.downloadBrowserUrlWithSession).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(browserMocks.downloadBrowserUrlWithSession).toHaveBeenCalledWith(
+        "browser-1",
+        "https://example.com/files/unattested.zip",
+        "/tmp/example.zip",
+      );
+    });
+    await waitFor(() => expect(screen.queryByTestId("browser-download-needs-confirmation")).toBeNull());
+  });
+
+  it("treats a download without requiresConfirmation as user-initiated", async () => {
+    render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    await waitFor(() => expect(callbackState.download).not.toBeNull());
+    act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/a.zip" }));
+    const prompt = await screen.findByTestId("browser-download-prompt");
+    expect(prompt).not.toHaveAttribute("data-requires-confirmation");
+    expect(screen.queryByTestId("browser-download-needs-confirmation")).toBeNull();
+    expect(screen.getByRole("button", { name: "Save as…" })).toBeTruthy();
   });
 });

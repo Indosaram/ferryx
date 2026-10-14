@@ -238,5 +238,5 @@ export function useBrowserSessionHydration(
     return () => {
       disposed = true;
     };
-  }, [state.layout, state.worktreeLayouts, workspaceId, activeWorktreePath, state.activeWorktreePath]);
+  }, [state.layout, state.worktreeLayouts, state.worktrees, workspaceId, activeWorktreePath, state.activeWorktreePath]);
 }
