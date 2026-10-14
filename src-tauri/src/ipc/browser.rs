@@ -1126,6 +1126,20 @@ fn keep_or_discard_fresh_webview(session_exists: bool) -> Result<(), String> {
 
 static CREATED_SESSION_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// Re-checks the session once the platform bridge is installed. The 5 s creation timeout
+/// can remove the session after the orphan check passed but before the install finished;
+/// then `discard` must close the webview and forget the bridge state installed for it.
+fn discard_if_abandoned_after_install(
+    session_exists: impl FnOnce() -> bool,
+    discard: impl FnOnce(),
+) -> Result<(), String> {
+    if session_exists() {
+        return Ok(());
+    }
+    discard();
+    Err("browser session was abandoned while its trusted bridge was installed; closing the orphaned webview".to_string())
+}
+
 /// Passes `result` through and, when it is an error, drops the session that was
 /// already registered so neither the manager nor CREATED_SESSION_IDS keeps it.
 #[cfg(any(not(target_os = "macos"), test))]
@@ -1558,7 +1572,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                     match keep_or_discard_fresh_webview(
                         creation_manager.get_state(&browser_id).is_ok(),
                     ) {
-                        Ok(()) => {
+                        Ok(()) => 'kept: {
                             let _ = child.eval(&eval_bridge_script);
                             let _ = child.set_zoom(zoom_factor);
                             let bridge_kind =
@@ -1567,6 +1581,19 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                                 creation_manager.set_trusted_bridge(&browser_id, bridge_kind)
                             {
                                 tracing::warn!(browser_id = %browser_id, %error, "could not record the trusted bridge kind");
+                            }
+                            if let Err(message) = discard_if_abandoned_after_install(
+                                || creation_manager.get_state(&browser_id).is_ok(),
+                                || {
+                                    let label = child.label().to_string();
+                                    let _ = child.close();
+                                    crate::browser::bridge::forget_webview(child.app_handle(), &label);
+                                    // remove_session may have run before install inserted the world.
+                                    #[cfg(target_os = "windows")]
+                                    crate::browser::bridge::windows::forget_webview(&label);
+                                },
+                            ) {
+                                break 'kept Err(message);
                             }
                             match target_parsed.filter(|url| url.as_str() != "about:blank") {
                                 Some(url) => {
@@ -3706,6 +3733,66 @@ mod tests {
                 .any(|id| id == &state.browser_id),
             "a session whose creation failed must not stay in CREATED_SESSION_IDS"
         );
+    }
+
+    #[test]
+    fn session_removed_during_install_discards_the_webview() {
+        let manager = BrowserManager::new();
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: Some("ws-install-race".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        let mut discarded = 0;
+        assert!(discard_if_abandoned_after_install(
+            || manager.get_state(&state.browser_id).is_ok(),
+            || discarded += 1,
+        )
+        .is_ok());
+        assert_eq!(discarded, 0, "a live session keeps its webview");
+        // The timed-out async side removes the session while install runs.
+        manager.remove_session(&state.browser_id);
+        let outcome = discard_if_abandoned_after_install(
+            || manager.get_state(&state.browser_id).is_ok(),
+            || discarded += 1,
+        );
+        assert!(outcome.unwrap_err().contains("abandoned"));
+        assert_eq!(discarded, 1, "an abandoned session must close and forget its webview");
+    }
+
+    // The seam tests above cannot reach the main-thread creation path, so pin its wiring
+    // in source: every error exit after the queue discards the installed bridge, and the
+    // closure re-checks the session after install.
+    #[test]
+    fn creation_error_exits_discard_the_installed_bridge() {
+        let source = include_str!("browser.rs");
+        let tests_at = source.find(&["mod ", "tests {"].concat()).unwrap();
+        let start = source.find("match run_result {").unwrap();
+        let end = start + source[start..].find("if let Some(link) = opener.as_ref()").unwrap();
+        assert!(end < tests_at);
+        let exits: Vec<&str> = source[start..end]
+            .split("return Err(BrowserError::CreateFailed(")
+            .collect();
+        assert_eq!(exits.len(), 4, "expected three CreateFailed exits after the queue");
+        for before in &exits[..3] {
+            assert!(
+                before
+                    .trim_end()
+                    .ends_with("discard_failed_creation(app, manager, &state.browser_id);"),
+                "a creation error exit must call discard_failed_creation first"
+            );
+        }
+        let closure = &source[source.find("let bridge_kind =").unwrap()..start];
+        let install = closure.find("set_trusted_bridge(&browser_id, bridge_kind)").unwrap();
+        let recheck = closure.find("discard_if_abandoned_after_install(").unwrap();
+        assert!(install < recheck, "the session must be re-checked after the bridge install");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Executes the real isolated-world broker (src-tauri/src/browser/bridge/broker.js) under
 // jsdom. The only rewrite is the inert `const hooks = null;` declaration, pointed at a
@@ -180,16 +180,26 @@ describe('isolated-world broker', () => {
   });
 
   // A trusted keydown between the spending pointerup and a later click clears the spent
-  // gesture, so that click is a fresh activation.
+  // gesture, so that click is a fresh activation. No popup is admitted after the keydown,
+  // and the clock moves past the keydown's own 1000 ms window, so only the keydown's clear
+  // of the spent gesture can let the click stamp and admit 'c'.
   it('clears the spent pointer gesture on a keydown', () => {
-    loadBroker();
-    fakeWindow.dispatchEvent(new MouseEvent('pointerup'));
-    openIntent('a');
-    fakeWindow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
-    openIntent('b');
-    fakeWindow.dispatchEvent(new MouseEvent('click'));
-    openIntent('c');
-    expect(handles()).toEqual(['a', 'b', 'c']);
+    let nowMs = 0;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => nowMs);
+    try {
+      loadBroker();
+      fakeWindow.dispatchEvent(new MouseEvent('pointerup'));
+      openIntent('a');
+      nowMs = 10;
+      fakeWindow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      nowMs = 1500;
+      openIntent('b');
+      fakeWindow.dispatchEvent(new MouseEvent('click'));
+      openIntent('c');
+      expect(handles()).toEqual(['a', 'c']);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('does not stamp activation from an untrusted click', () => {
