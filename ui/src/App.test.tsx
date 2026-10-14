@@ -4331,7 +4331,7 @@ describe("App project workspace flow", () => {
       // can be flushed deterministically at the end.
       vi.useFakeTimers({ shouldAdvanceTime: true });
       try {
-      localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "eager", sessionIdleTimeoutMinutes: 30 }));
+      localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "eager" }));
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
       localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
       native.getInitialProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
@@ -4447,7 +4447,7 @@ describe("App project workspace flow", () => {
     });
 
     it("does not crash and degrades silently when auto-resume spawn fails", async () => {
-      localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "eager", sessionIdleTimeoutMinutes: 30 }));
+      localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "eager" }));
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
       localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
       native.getInitialProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });

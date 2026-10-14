@@ -1,7 +1,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { SoftwareUpdateCard } from "./GeneralSection";
+import { GeneralSection, SoftwareUpdateCard } from "./GeneralSection";
 
 const updater = vi.hoisted(() => ({
   checkForUpdate: vi.fn(),
@@ -91,5 +91,10 @@ describe("SoftwareUpdateCard externally managed installs", () => {
 
     const message = await screen.findByText(/Updates for this install are managed outside the app\./);
     expect(message.textContent).not.toContain("Microsoft Store");
+  });
+
+  it("does not render auto-suspend setting row", () => {
+    render(<GeneralSection />);
+    expect(screen.queryByLabelText("Auto-suspend idle sessions")).toBeNull();
   });
 });
