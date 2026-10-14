@@ -7,9 +7,24 @@ export type TerminalInvokeFn = <T>(cmd: string, args?: Record<string, unknown>) 
 
 export const TERMINAL_FILE_LINK_ACTION_EVENT = "ferryx:terminal-file-link-actions";
 
+export interface TerminalLinkOpenOverrides {
+  /** Overrides the configured file-link editor for this open. */
+  editor?: "system" | "vscode" | "cursor" | "zed";
+}
+
 export interface TerminalFileLinkActionDetail {
   token: TerminalToken & { absolutePath?: string };
-  open: (shiftKey: boolean) => Promise<void>;
+  open: (shiftKey: boolean, overrides?: TerminalLinkOpenOverrides) => Promise<void>;
+  /** The path names a file on an SSH/paired host; local-disk actions do not apply. */
+  remote?: boolean;
+}
+
+export interface TokenFromHyperlinkOptions {
+  /**
+   * The session runs on another host (ssh:/daemon: workspace): accept any file://
+   * authority and keep the absolute pathname so it is fetched from that host.
+   */
+  remote?: boolean;
 }
 
 const sessionMouseTracking = new Map<string, boolean>();
@@ -23,14 +38,17 @@ export function isSessionMouseTrackingEnabled(sessionId?: string | null): boolea
   return sessionMouseTracking.get(sessionId) ?? false;
 }
 
-export function tokenFromHyperlink(uri: string): TerminalToken | null {
+export function tokenFromHyperlink(
+  uri: string,
+  options: TokenFromHyperlinkOptions = {},
+): TerminalToken | null {
   try {
     const url = new URL(uri);
     if (url.protocol === "http:" || url.protocol === "https:") {
       return { type: "url", target: uri };
     }
     if (url.protocol === "file:") {
-      if (url.host !== "" && url.host !== "localhost") {
+      if (!options.remote && url.host !== "" && url.host !== "localhost") {
         return null;
       }
       let pathname: string;
@@ -116,6 +134,8 @@ export async function readLinkLine(
 export interface OpenRemoteFileTokenOptions {
   workspaceId: string;
   cwd?: string | null;
+  /** Backend session id; forwarded to paired-host fetches only. */
+  sessionId?: string | null;
   shiftKey: boolean;
   openLocal: (localToken: TerminalFileToken) => Promise<boolean>;
   invokeFn: TerminalInvokeFn;
@@ -125,15 +145,26 @@ export async function openRemoteFileToken(
   token: TerminalFileToken,
   opts: OpenRemoteFileTokenOptions,
 ): Promise<boolean> {
+  const paired = opts.workspaceId.startsWith("daemon:");
   const fetched = await opts.invokeFn<{
     localPath: string;
     remotePath: string;
     byteLength: number;
-  }>("cmd_remote_file_fetch", {
-    workspaceId: opts.workspaceId,
-    path: token.path,
-    cwd: opts.cwd ?? null,
-  });
+  }>(
+    paired ? "cmd_paired_file_fetch" : "cmd_remote_file_fetch",
+    paired
+      ? {
+          workspaceId: opts.workspaceId,
+          path: token.path,
+          cwd: opts.cwd ?? null,
+          sessionId: opts.sessionId ?? null,
+        }
+      : {
+          workspaceId: opts.workspaceId,
+          path: token.path,
+          cwd: opts.cwd ?? null,
+        },
+  );
 
   return opts.openLocal({
     ...token,

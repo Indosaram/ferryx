@@ -27,7 +27,7 @@ describe("createPathExistenceCache", () => {
     const call2 = cache.check("src/App.tsx", "session-1");
 
     expect(mockResolve).toHaveBeenCalledTimes(1);
-    expect(mockResolve).toHaveBeenCalledWith("src/App.tsx", "session-1");
+    expect(mockResolve).toHaveBeenCalledWith("src/App.tsx", "session-1", null);
 
     const resolvedValue: FilePreviewResolved = {
       resolvedPath: "/path/to/src/App.tsx",

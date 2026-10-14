@@ -788,6 +788,42 @@ fn paste_upload_chunk_requires_machine_workspace_capability() {
     assert_eq!(route.segments, vec!["workspace", "paste-upload"]);
 }
 
+#[test]
+fn file_read_routes_to_its_own_capability_without_journal() {
+    let operation = Operation::FileRead {
+        request: m::FileReadRequest {
+            request_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into(),
+            session_id: Some("s".into()),
+            cwd: None,
+            path: "shot.png".into(),
+            offset: 0,
+            length: m::FILE_READ_CHUNK_MAX_BYTES,
+        },
+    };
+    assert!(!operation.is_mutation());
+    let route = operation.route().expect("route succeeds");
+    assert_eq!(route.capability, Some("pairedFileReadV1"));
+    assert_eq!(route.segments, vec!["workspace", "file-read"]);
+    assert_eq!(route.method, Method::POST);
+    // Idempotent read: no journal pre-query and no ambiguity relabel.
+    assert_eq!(route.request_id, None);
+    assert_eq!(route.response_limit, m::FILE_READ_JSON_MAX_BYTES);
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert_eq!(body["path"], "shot.png");
+    assert_eq!(body["sessionId"], "s");
+    assert!(m::FILE_READ_JSON_MAX_BYTES > (m::FILE_READ_CHUNK_MAX_BYTES as usize / 3 + 1) * 4 + 4096);
+    assert!(route.idempotent, "a file read may be resent over the relay");
+    let mutation = Operation::RegisterProject {
+        request: m::RegisterRequest {
+            request_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into(),
+            repo_path: "/same".into(),
+        },
+    };
+    assert!(!mutation.route().unwrap().idempotent);
+    assert!(Operation::Capabilities.route().unwrap().idempotent);
+}
+
+
 #[tokio::test]
 async fn paste_upload_chunk_executes_and_returns_result() {
     let req_id = "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".to_string();
@@ -1622,3 +1658,64 @@ async fn mutation_over_lost_direct_is_not_resent_over_relay() {
     direct.abort();
     cleanup(root, task).await;
 }
+
+#[tokio::test]
+async fn file_read_over_lost_direct_retries_once_over_relay() {
+    let mut direct_caps = caps("a");
+    direct_caps["capabilities"] = json!(["directoryBrowseV1", "machineWorkspaceV1", "pairedFileReadV1"]);
+    // The direct adapter answers the capability probe, then drops the file-read connection.
+    let (origin, direct) = serve(
+        Router::new()
+            .route("/api/v1/capabilities", get(move || { let c = direct_caps.clone(); async move { Json(c) } }))
+            .route(
+                "/api/v1/workspace/file-read",
+                post(|| async {
+                    panic!("direct adapter drops the file-read connection");
+                    #[allow(unreachable_code)]
+                    ""
+                }),
+            ),
+    )
+    .await;
+    let relay_reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = relay_reads.clone();
+    let relay = Router::new().route(
+        "/host/a/api/v1/workspace/file-read",
+        post(move || {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Json(json!({"resolvedPath":"/h/f","totalBytes":3,"offset":0,"data":"YWJj","eof":true,"version":"v1"}))
+            }
+        }),
+    );
+    let (root, service, host, task) = fixture(relay).await;
+    publish_direct(&host, origin);
+    let response = MachineClient::new()
+        .execute(
+            &service,
+            request(
+                &host,
+                Operation::FileRead {
+                    request: m::FileReadRequest {
+                        request_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into(),
+                        session_id: None,
+                        cwd: Some("/h".into()),
+                        path: "f".into(),
+                        offset: 0,
+                        length: 3,
+                    },
+                },
+            ),
+        )
+        .await;
+    assert_eq!(relay_reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    match response.expect("file read falls back to the relay").result {
+        OperationResult::FileRead(page) => assert_eq!(page.resolved_path, "/h/f"),
+        other => panic!("unexpected result {other:?}"),
+    }
+    GLOBAL_DIRECT_ROUTES.reset(&host.host_id);
+    direct.abort();
+    cleanup(root, task).await;
+}
+

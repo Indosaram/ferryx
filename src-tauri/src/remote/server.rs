@@ -3691,7 +3691,7 @@ async fn get_capabilities(
         "accessScope": device.access_scope,
         "permission": device.permission,
         "capabilities": if state.machine_services.is_some() && device.access_scope == DeviceAccessScope::Machine && device.permission == DevicePermission::Control {
-            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2"];
+            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2", crate::paired_host::file_read::PAIRED_FILE_READ_CAPABILITY];
             if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok()) {
                 capabilities.push("terminalCreateV1");
                 capabilities.push("terminalStreamV1");
@@ -4262,6 +4262,338 @@ async fn paste_upload_boundary(
         chunk_index: req.chunk_index,
     };
     Ok(Json(res).into_response())
+}
+
+/// Serves one byte range of a regular host file to an authenticated machine peer.
+/// The peer already holds terminal control of this host; admission matches paste-upload.
+async fn file_read_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Response> {
+    use crate::paired_host::file_read as fr;
+    let admission = super::workspace_api::admit(
+        state.clone(),
+        headers.clone(),
+        false,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await?;
+    let body = project_body(request, &admission).await?;
+    let req: super::machine_protocol::FileReadRequest = super::machine_protocol::decode_json(
+        &body,
+        super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+    )
+    .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+    ensure_file_read_session_is_host_local(state.session_backend.as_ref(), &req).await?;
+    let mut req = req;
+    let session_base = file_read_session_base(state.session_backend.as_ref(), &req).await?;
+    apply_file_read_session_base(&mut req, session_base.as_deref());
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from);
+    let outcome = crate::ipc::run_blocking(move || {
+        Ok(fr::serve_host_read(&req, home.as_deref(), session_base.as_deref()))
+    })
+    .await
+    .map_err(|_| machine_error(StatusCode::INTERNAL_SERVER_ERROR, "MACHINE_SERVICE_UNAVAILABLE"))?;
+    match outcome {
+        Ok(result) => Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response()),
+        Err(error) => Err(machine_error(
+            StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_REQUEST),
+            error.code(),
+        )),
+    }
+}
+
+/// A session whose shell runs on an SSH remote or another paired host printed paths of
+/// THAT machine, not of this host: serving them would hand the paired desktop a
+/// different file under the same name. Session-less requests and host-local PTYs pass;
+/// a session that cannot be described is refused.
+async fn ensure_file_read_session_is_host_local(
+    backend: &dyn crate::remote::backend::RemoteSessionBackend,
+    req: &super::machine_protocol::FileReadRequest,
+) -> Result<(), Response> {
+    let Some(id) = req.session_id.as_deref() else {
+        return Ok(());
+    };
+    // A session relayed from another paired host runs its shell on a third machine.
+    if crate::terminal::paired_runtime::Runtime::owns(id) {
+        return Err(machine_error(StatusCode::BAD_REQUEST, "UNSUPPORTED_PATH"));
+    }
+    // Fail closed: a session this host cannot describe cannot be proven host-local.
+    let details = backend
+        .describe_session(id)
+        .await
+        .map_err(|_| machine_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND"))?;
+    match details.workspace_id.as_deref() {
+        Some(ws)
+            if crate::ssh::projects::is_remote(ws)
+                || ws.starts_with("ssh:")
+                || ws.starts_with("daemon:") =>
+        {
+            Err(machine_error(StatusCode::BAD_REQUEST, "UNSUPPORTED_PATH"))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Where a relative file-read path anchors. The session's live shell cwd wins: it is
+/// what the terminal printed relative to, while the request cwd is only the desktop's
+/// stored spawn directory. Without a live cwd an explicit request cwd stays
+/// authoritative (`None` here), then the session's worktree.
+async fn file_read_session_base(
+    backend: &dyn crate::remote::backend::RemoteSessionBackend,
+    req: &super::machine_protocol::FileReadRequest,
+) -> Result<Option<PathBuf>, Response> {
+    use crate::paired_host::file_read as fr;
+    let Some(id) = req.session_id.as_deref() else {
+        return Ok(None);
+    };
+    if fr::is_home_or_absolute(&req.path) {
+        return Ok(None);
+    }
+    if let Some(live) = backend.live_cwd(id).await.filter(|p| p.is_absolute()) {
+        return Ok(Some(live));
+    }
+    if req.cwd.is_some() {
+        return Ok(None);
+    }
+    backend
+        .describe_session(id)
+        .await
+        .ok()
+        .and_then(|details| details.worktree_path)
+        .map(Some)
+        .ok_or_else(|| machine_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND"))
+}
+
+/// A live shell cwd replaces the desktop-supplied cwd, which is only the session's
+/// stored spawn directory and goes stale once the shell cd's.
+fn apply_file_read_session_base(
+    req: &mut super::machine_protocol::FileReadRequest,
+    base: Option<&std::path::Path>,
+) {
+    if base.is_some() {
+        req.cwd = None;
+    }
+}
+
+#[cfg(test)]
+mod file_read_session_base_tests {
+    use super::*;
+    use crate::remote::backend::{RemoteSessionBackend, RemoteSessionDetails};
+    use crate::terminal::{SessionAttachment, TerminalSignal};
+    use futures_util::future::BoxFuture;
+
+    struct LiveCwdBackend {
+        worktree: PathBuf,
+        live: Option<PathBuf>,
+    }
+
+    impl RemoteSessionBackend for LiveCwdBackend {
+        fn list_sessions(&self) -> BoxFuture<'_, Vec<String>> {
+            Box::pin(async { vec!["s1".to_string()] })
+        }
+        fn describe_session<'a>(
+            &'a self,
+            session_id: &'a str,
+        ) -> BoxFuture<'a, Result<RemoteSessionDetails, String>> {
+            let worktree = self.worktree.clone();
+            Box::pin(async move {
+                if session_id != "s1" {
+                    return Err("unknown session".into());
+                }
+                Ok(RemoteSessionDetails {
+                    session_id: session_id.into(),
+                    workspace_id: None,
+                    worktree_label: None,
+                    worktree_path: Some(worktree),
+                    running: true,
+                    cols: 80,
+                    rows: 24,
+                })
+            })
+        }
+        fn live_cwd<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Option<PathBuf>> {
+            let live = (session_id == "s1").then(|| self.live.clone()).flatten();
+            Box::pin(async move { live })
+        }
+        fn attach_with_sequence<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _after_sequence: Option<u64>,
+        ) -> BoxFuture<'a, Result<SessionAttachment, String>> {
+            Box::pin(async { Err("attach unsupported".into()) })
+        }
+        fn write_input<'a>(&'a self, _id: &'a str, _data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn resize<'a>(&'a self, _id: &'a str, _c: u16, _r: u16) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn signal<'a>(&'a self, _id: &'a str, _s: TerminalSignal) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// Same session, projected into an SSH workspace the way the daemon's metadata does.
+    struct SshWorkspace(LiveCwdBackend);
+
+    impl RemoteSessionBackend for SshWorkspace {
+        fn list_sessions(&self) -> BoxFuture<'_, Vec<String>> {
+            self.0.list_sessions()
+        }
+        fn describe_session<'a>(
+            &'a self,
+            session_id: &'a str,
+        ) -> BoxFuture<'a, Result<RemoteSessionDetails, String>> {
+            Box::pin(async move {
+                let mut details = self.0.describe_session(session_id).await?;
+                details.workspace_id = Some("ssh:build-box".into());
+                Ok(details)
+            })
+        }
+        fn attach_with_sequence<'a>(
+            &'a self,
+            session_id: &'a str,
+            after_sequence: Option<u64>,
+        ) -> BoxFuture<'a, Result<SessionAttachment, String>> {
+            self.0.attach_with_sequence(session_id, after_sequence)
+        }
+        fn write_input<'a>(&'a self, id: &'a str, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+            self.0.write_input(id, data)
+        }
+        fn resize<'a>(&'a self, id: &'a str, c: u16, r: u16) -> BoxFuture<'a, Result<(), String>> {
+            self.0.resize(id, c, r)
+        }
+        fn signal<'a>(&'a self, id: &'a str, s: TerminalSignal) -> BoxFuture<'a, Result<(), String>> {
+            self.0.signal(id, s)
+        }
+    }
+
+    /// Same session, projected into an arbitrary workspace id.
+    struct SshWorkspaceNamed(LiveCwdBackend, &'static str);
+
+    impl RemoteSessionBackend for SshWorkspaceNamed {
+        fn list_sessions(&self) -> BoxFuture<'_, Vec<String>> {
+            self.0.list_sessions()
+        }
+        fn describe_session<'a>(
+            &'a self,
+            session_id: &'a str,
+        ) -> BoxFuture<'a, Result<RemoteSessionDetails, String>> {
+            Box::pin(async move {
+                let mut details = self.0.describe_session(session_id).await?;
+                details.workspace_id = Some(self.1.into());
+                Ok(details)
+            })
+        }
+        fn attach_with_sequence<'a>(
+            &'a self,
+            session_id: &'a str,
+            after_sequence: Option<u64>,
+        ) -> BoxFuture<'a, Result<SessionAttachment, String>> {
+            self.0.attach_with_sequence(session_id, after_sequence)
+        }
+        fn write_input<'a>(&'a self, id: &'a str, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+            self.0.write_input(id, data)
+        }
+        fn resize<'a>(&'a self, id: &'a str, c: u16, r: u16) -> BoxFuture<'a, Result<(), String>> {
+            self.0.resize(id, c, r)
+        }
+        fn signal<'a>(&'a self, id: &'a str, s: TerminalSignal) -> BoxFuture<'a, Result<(), String>> {
+            self.0.signal(id, s)
+        }
+    }
+
+    fn req(path: &str, cwd: Option<&str>) -> super::super::machine_protocol::FileReadRequest {
+        super::super::machine_protocol::FileReadRequest {
+            request_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into(),
+            session_id: Some("s1".into()),
+            cwd: cwd.map(str::to_owned),
+            path: path.into(),
+            offset: 0,
+            length: 16,
+        }
+    }
+
+    #[tokio::test]
+    async fn relative_path_anchors_on_live_shell_cwd_before_worktree() {
+        let backend = LiveCwdBackend {
+            worktree: PathBuf::from("/wt"),
+            live: Some(PathBuf::from("/wt/sub/dir")),
+        };
+        let base = file_read_session_base(&backend, &req("shot.png", None)).await.ok().flatten();
+        assert_eq!(base, Some(PathBuf::from("/wt/sub/dir")), "live cwd must win over worktree_path");
+    }
+
+    #[tokio::test]
+    async fn relative_path_falls_back_to_worktree_without_live_cwd() {
+        let backend = LiveCwdBackend { worktree: PathBuf::from("/wt"), live: None };
+        let base = file_read_session_base(&backend, &req("shot.png", None)).await.ok().flatten();
+        assert_eq!(base, Some(PathBuf::from("/wt")));
+        let explicit = file_read_session_base(&backend, &req("shot.png", Some("/other"))).await.ok().flatten();
+        assert_eq!(explicit, None, "without a live cwd the explicit request cwd stays authoritative");
+    }
+
+    #[tokio::test]
+    async fn an_ssh_session_on_this_host_is_refused_before_any_path_resolution() {
+        // The shell runs on the SSH remote: no path it printed names a file on this host.
+        let backend = LiveCwdBackend {
+            worktree: PathBuf::from("/remote/proj"),
+            live: None,
+        };
+        let backend = SshWorkspace(backend);
+        for (path, cwd) in [("shot.png", None), ("/etc/hosts", None), ("~/.bashrc", None), ("a.txt", Some("/remote/proj"))] {
+            let refused = ensure_file_read_session_is_host_local(&backend, &req(path, cwd)).await;
+            assert!(refused.is_err(), "{path} must be refused for an SSH session");
+        }
+        // A session-less request (absolute path or explicit cwd) is unaffected.
+        let mut sessionless = req("/etc/hosts", None);
+        sessionless.session_id = None;
+        assert!(ensure_file_read_session_is_host_local(&backend, &sessionless).await.is_ok());
+        // A host-local PTY session is unaffected.
+        let local = LiveCwdBackend { worktree: PathBuf::from("/wt"), live: None };
+        assert!(ensure_file_read_session_is_host_local(&local, &req("shot.png", None)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_or_relayed_session_is_refused_not_served_from_this_host() {
+        let backend = LiveCwdBackend { worktree: PathBuf::from("/wt"), live: None };
+        // The lookup fails (e.g. the SSH project no longer resolves): fail closed.
+        let mut unknown = req("/etc/hosts", None);
+        unknown.session_id = Some("gone".into());
+        assert!(ensure_file_read_session_is_host_local(&backend, &unknown).await.is_err());
+        // A session relayed from another paired host runs its shell on a third machine.
+        let mut relayed = req("shot.png", Some("/wt"));
+        relayed.session_id = Some("daemon-session:abc".into());
+        assert!(ensure_file_read_session_is_host_local(&backend, &relayed).await.is_err());
+        let paired = SshWorkspaceNamed(LiveCwdBackend { worktree: PathBuf::from("/wt"), live: None }, "daemon:host-b");
+        assert!(ensure_file_read_session_is_host_local(&paired, &req("shot.png", None)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn live_shell_cwd_wins_over_the_desktop_supplied_cwd() {
+        // The desktop always sends the session's stored spawn cwd; the shell may have cd'ed since.
+        let backend = LiveCwdBackend {
+            worktree: PathBuf::from("/wt"),
+            live: Some(PathBuf::from("/wt/sub/dir")),
+        };
+        let mut request = req("shot.png", Some("/wt"));
+        let base = file_read_session_base(&backend, &request).await.ok().flatten();
+        assert_eq!(base, Some(PathBuf::from("/wt/sub/dir")));
+        apply_file_read_session_base(&mut request, base.as_deref());
+        let resolved = crate::paired_host::file_read::resolve_host_path(
+            &request.path,
+            request.cwd.as_deref(),
+            None,
+            base.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(resolved, PathBuf::from("/wt/sub/dir/shot.png"));
+        // Absolute and home paths never consult the session.
+        assert_eq!(file_read_session_base(&backend, &req("/abs/x.png", Some("/wt"))).await.ok().flatten(), None);
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -6366,6 +6698,12 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/workspace/paste-upload",
             post(paste_upload_boundary).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/workspace/file-read",
+            post(file_read_boundary).layer(axum::extract::DefaultBodyLimit::max(
                 super::machine_protocol::MACHINE_JSON_MAX_BYTES,
             )),
         )

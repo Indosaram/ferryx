@@ -76,6 +76,7 @@ import {
   setSessionMouseTracking,
   TERMINAL_FILE_LINK_ACTION_EVENT,
   type TerminalFileLinkActionDetail,
+  type TerminalLinkOpenOverrides,
 } from "../lib/terminalLinkTarget";
 
 const terminalLinkPathCache = createPathExistenceCache(resolveFilePreviewPath);
@@ -944,7 +945,11 @@ export function NativeTerminalPane({
             row,
           });
           if (uri) {
-            token = tokenFromHyperlink(uri);
+            token = tokenFromHyperlink(uri, {
+              remote: Boolean(
+                session?.workspaceId && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)),
+              ),
+            });
           }
         } catch {
         }
@@ -963,7 +968,7 @@ export function NativeTerminalPane({
             session?.id ??
             targetSessionId;
 
-          const openAction = async (actionShiftKey: boolean) => {
+          const openAction = async (actionShiftKey: boolean, overrides?: TerminalLinkOpenOverrides) => {
             const tokenOptions = {
               shiftKey: actionShiftKey,
               preview: !actionShiftKey,
@@ -975,14 +980,18 @@ export function NativeTerminalPane({
               },
               cwd: session?.cwd || session?.worktreePath,
               sessionId: targetSessionId,
-              editor: loadFileLinkEditor(),
+              editor: overrides?.editor ?? loadFileLinkEditor(),
             };
 
-            if (token.type === "file" && session?.workspaceId && isRemoteWorkspaceId(session.workspaceId)) {
+            const isRemoteHost = Boolean(
+              session?.workspaceId && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)),
+            );
+            if (token.type === "file" && session?.workspaceId && isRemoteHost) {
               try {
                 const opened = await openRemoteFileToken(token, {
                   workspaceId: session.workspaceId,
                   cwd: session.cwd || session.worktreePath || null,
+                  sessionId: targetSessionId,
                   shiftKey: actionShiftKey,
                   openLocal: (localToken) => openTerminalToken(localToken, tokenOptions),
                   invokeFn: invoke,
@@ -1002,9 +1011,14 @@ export function NativeTerminalPane({
             const settings = loadBrowserSettings();
             if (settings.showTerminalLinkActions && typeof window !== "undefined") {
               let actionToken: TerminalToken & { absolutePath?: string } = token;
-              const isRemote = Boolean(session?.workspaceId && isRemoteWorkspaceId(session.workspaceId));
+              const isRemote = Boolean(
+                session?.workspaceId && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)),
+              );
+              // A remote or paired-host shell's path names a file on another host: the popover
+              // keeps Open (fetched through openRemoteFileToken) and Copy path, and hides the
+              // local-disk actions. Only local paths are resolved against this machine's disk.
               if (token.type === "file" && !isRemote) {
-                const resolved = await resolveFilePreviewPath(token.path, targetSessionId).catch(() => null);
+                const resolved = await resolveFilePreviewPath(token.path, targetSessionId, session?.workspaceId ?? null).catch(() => null);
                 actionToken = { ...token, absolutePath: resolved?.resolvedPath };
               }
               window.dispatchEvent(
@@ -1012,6 +1026,7 @@ export function NativeTerminalPane({
                   detail: {
                     token: actionToken,
                     open: openAction,
+                    ...(token.type === "file" && isRemote ? { remote: true } : {}),
                   },
                 }),
               );
@@ -1052,7 +1067,11 @@ export function NativeTerminalPane({
             row,
           });
           if (uri) {
-            token = tokenFromHyperlink(uri);
+            token = tokenFromHyperlink(uri, {
+              remote: Boolean(
+                session?.workspaceId && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)),
+              ),
+            });
           }
         } catch {
         }
@@ -1098,11 +1117,13 @@ export function NativeTerminalPane({
         if (token.type === "url") {
           kind = "url";
         } else {
-          const isRemote = Boolean(session?.workspaceId && isRemoteWorkspaceId(session.workspaceId));
+          const isRemote = Boolean(
+            session?.workspaceId && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)),
+          );
           if (isRemote) {
             kind = "file";
           } else {
-            const resolved = await terminalLinkPathCache.check(token.path, targetSessionId);
+            const resolved = await terminalLinkPathCache.check(token.path, targetSessionId, session?.workspaceId ?? null);
             if (revision !== linkHoverRevision.current) return;
             const exists = resolved === undefined ? true : Boolean(resolved?.exists);
             if (!exists) {

@@ -644,3 +644,119 @@ fn resolve_file_link_relative_normalizes_slashes_to_native_separators() {
     assert_eq!(resolved, expected);
 }
 
+// --- R3-RS-1: fetched remote cache files never launch through the OS opener ---
+
+struct FetchedCache {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    cache_root: PathBuf,
+    outside_dir: PathBuf,
+}
+
+fn fetched_cache() -> FetchedCache {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache_root = dir.path().join("cache");
+    let root = crate::ipc::remote_file::remote_files_root(&cache_root);
+    let outside_dir = dir.path().join("local");
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    FetchedCache {
+        _dir: dir,
+        root,
+        cache_root,
+        outside_dir,
+    }
+}
+
+impl FetchedCache {
+    fn fetch(&self, remote_path: &str) -> String {
+        let local =
+            crate::ipc::remote_file::remote_cache_path(&self.cache_root, "ssh:ws", remote_path);
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, b"payload").unwrap();
+        local.to_string_lossy().into_owned()
+    }
+}
+
+async fn admit(
+    cache: &FetchedCache,
+    path: &str,
+    session_id: Option<&str>,
+    editor: EditorTarget,
+) -> Result<Option<String>, IpcError> {
+    crate::ipc::browser::admit_file_open(
+        None,
+        path,
+        None,
+        session_id.map(str::to_string),
+        session_id.map(|_| "ssh:0123abcd".to_string()),
+        editor,
+        Some(cache.root.clone()),
+    )
+    .await
+}
+
+fn assert_not_launchable(result: Result<Option<String>, IpcError>, path: &str) {
+    let error = result.expect_err("a fetched launcher must not reach the OS opener");
+    assert_eq!(error.code, IpcErrorCode::Unsupported, "{path}");
+    assert_eq!(
+        error.details.as_ref().and_then(|d| d["reason"].as_str()),
+        Some("remoteFileNotLaunchable"),
+        "{path}"
+    );
+}
+
+#[tokio::test]
+async fn system_open_refuses_fetched_launchers_from_a_remote_workspace() {
+    let cache = fetched_cache();
+    for remote in [
+        "/srv/run.bat", "/srv/run.command", "/srv/x.terminal", "/srv/setup.exe", "/srv/evil.py",
+        "/srv/main.rs", "/srv/x.rb",
+    ] {
+        let local = cache.fetch(remote);
+        assert_not_launchable(
+            admit(&cache, &local, Some("ssh-session"), EditorTarget::System).await,
+            remote,
+        );
+    }
+}
+
+#[tokio::test]
+async fn system_open_allows_fetched_passive_documents() {
+    let cache = fetched_cache();
+    for remote in ["/srv/a.png", "/srv/doc.pdf", "/srv/notes.txt", "/srv/run.log", "/srv/README.md"] {
+        let local = cache.fetch(remote);
+        admit(&cache, &local, Some("ssh-session"), EditorTarget::System)
+            .await
+            .unwrap_or_else(|error| panic!("{remote} must stay openable: {error:?}"));
+    }
+}
+
+#[tokio::test]
+async fn editor_cli_targets_may_open_fetched_launchers() {
+    let cache = fetched_cache();
+    let local = cache.fetch("/srv/run.bat");
+    for editor in [EditorTarget::VsCode, EditorTarget::Cursor, EditorTarget::Zed] {
+        admit(&cache, &local, Some("ssh-session"), editor)
+            .await
+            .unwrap_or_else(|error| panic!("{editor:?} must open the file as text: {error:?}"));
+    }
+}
+
+#[tokio::test]
+async fn sessionless_system_open_refuses_fetched_launchers_but_not_local_files() {
+    let cache = fetched_cache();
+    let launcher = cache.fetch("/srv/run.command");
+    assert_not_launchable(admit(&cache, &launcher, None, EditorTarget::System).await, &launcher);
+
+    let image = cache.fetch("/srv/a.png");
+    admit(&cache, &image, None, EditorTarget::System)
+        .await
+        .expect("a fetched image opens with the default app");
+
+    let local_script = cache.outside_dir.join("build.command");
+    std::fs::write(&local_script, b"echo local").unwrap();
+    admit(&cache, &local_script.to_string_lossy(), None, EditorTarget::System)
+        .await
+        .expect("a local file outside the remote cache is not this guard's business");
+}
+

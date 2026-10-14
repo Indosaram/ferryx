@@ -70,6 +70,10 @@ pub enum Operation {
     PasteUploadChunk {
         request: m::PasteUploadChunkRequest,
     },
+    /// Reads one byte range of a host file; idempotent, so it is never journaled.
+    FileRead {
+        request: m::FileReadRequest,
+    },
     /// Capability probe for DAG streaming. The stream itself is a socket, opened by
     /// [`MachineClient::attach_dag`], not an HTTP result.
     DagStream {
@@ -101,6 +105,7 @@ pub enum OperationResult {
     CloseSession(()),
     Operation(m::Operation),
     PasteUploadChunk(m::PasteUploadChunkResult),
+    FileRead(m::FileReadResult),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -222,6 +227,9 @@ struct Route {
     body: Option<Vec<u8>>,
     capability: Option<&'static str>,
     request_id: Option<String>,
+    response_limit: usize,
+    /// Safe to resend over the relay after a direct transport loss.
+    idempotent: bool,
 }
 impl Operation {
     pub fn is_mutation(&self) -> bool {
@@ -244,6 +252,8 @@ impl Operation {
             body: None,
             capability: None,
             request_id: None,
+            response_limit: m::MACHINE_JSON_MAX_BYTES,
+            idempotent: true,
         };
         let path;
         match self {
@@ -312,6 +322,11 @@ impl Operation {
                 path = "workspace/paste-upload";
                 r.capability = Some("machineWorkspaceV1");
             }
+            Self::FileRead { .. } => {
+                path = "workspace/file-read";
+                r.capability = Some(super::file_read::PAIRED_FILE_READ_CAPABILITY);
+                r.response_limit = m::FILE_READ_JSON_MAX_BYTES;
+            }
             Self::DagStream { .. } => {
                 path = "capabilities";
                 r.capability = Some(crate::remote::dag_api::DAG_STREAM_CAPABILITY);
@@ -349,6 +364,13 @@ impl Operation {
             Self::CreateSession { request } => body!(request, Method::POST),
             Self::CloseSession { request, .. } => body!(request, Method::DELETE),
             Self::PasteUploadChunk { request } => body!(request, Method::POST),
+            Self::FileRead { request } => {
+                r.method = Method::POST;
+                r.body = Some(
+                    serde_json::to_vec(request)
+                        .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
+            }
             _ => {}
         }
         if r.body
@@ -357,6 +379,7 @@ impl Operation {
         {
             return Err(ClientError::local("PAYLOAD_TOO_LARGE"));
         }
+        r.idempotent = r.method == Method::GET || matches!(self, Self::FileRead { .. });
         if r.segments
             .iter()
             .any(|s| s.is_empty() || s == "." || s == ".." || s.chars().any(char::is_control))
@@ -849,8 +872,8 @@ impl MachineClient {
     }
 
     /// Sends one machine request over the direct adapter when one is published,
-    /// else the relay. A transport failure over direct reports the loss; only a GET
-    /// is retried over the relay, so a mutation is never sent twice.
+    /// else the relay. A transport failure over direct reports the loss; only an
+    /// idempotent route is retried over the relay, so a mutation is never sent twice.
     async fn http(
         &self,
         host: &HostView,
@@ -863,7 +886,7 @@ impl MachineClient {
         match (first, base.direct_epoch) {
             (Err(error), Some(epoch)) if super::direct_client::is_transport_failure(&error) => {
                 super::direct_client::report_direct_loss(host, epoch);
-                if route.method != Method::GET {
+                if !route.idempotent {
                     return Err(error);
                 }
                 let relay =
@@ -913,7 +936,7 @@ impl MachineClient {
                 let mut response=request.send().await.map_err(|_| ClientError::local("HOST_UNAVAILABLE"))?;
                 let status=response.status();
                 if status.is_redirection() { return Err(ClientError::local("PAIRED_HOST_REDIRECT_REJECTED")); }
-                let limit=if directory {m::DIRECTORY_JSON_MAX_BYTES} else {m::MACHINE_JSON_MAX_BYTES};
+                let limit=if directory {m::DIRECTORY_JSON_MAX_BYTES} else {route.response_limit};
                 if response.content_length().is_some_and(|n| n>limit as u64) { return Err(ClientError::local("PAYLOAD_TOO_LARGE")); }
                 if status.as_u16()==204 { return Ok(b"null".to_vec()); }
                 let json=response.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|v| v.split(';').next().map(str::trim)==Some("application/json"));
@@ -1214,6 +1237,7 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
             OperationResult::Operation(op)
         }
         Operation::PasteUploadChunk { .. } => OperationResult::PasteUploadChunk(decode(bytes)?),
+        Operation::FileRead { .. } => OperationResult::FileRead(decode(bytes)?),
         // The capability probe returns this host's advertised capabilities; the stream
         // is opened separately over a socket.
         Operation::DagStream { .. } => OperationResult::Capabilities(decode(bytes)?),

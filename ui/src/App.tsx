@@ -2945,18 +2945,22 @@ function WorkspaceApp({
         : null;
       const session = localSessionId ? currentState.sessions[localSessionId] : undefined;
 
+      // `ferryx open` names an absolute LOCAL file the backend already validated, so it
+      // carries no backend session: the empty id takes the backend's no-session path
+      // instead of a fake id whose failed lookup would be indistinguishable from a
+      // dead remote shell. The focused pane is kept only for focus restoration.
       const source: Parameters<typeof openFilePreviewTab>[0] =
-        focusedTab && activeLeafId && localSessionId && session?.backendSessionId
+        focusedTab && activeLeafId && localSessionId
           ? {
               leafId: activeLeafId,
               sessionId: localSessionId,
-              backendSessionId: session.backendSessionId,
-              workspaceId: session.workspaceId ?? activeWorkspaceId,
+              backendSessionId: "",
+              workspaceId: session?.workspaceId ?? activeWorkspaceId,
             }
           : {
               leafId: "cli",
               sessionId: "cli",
-              backendSessionId: "cli",
+              backendSessionId: "",
               workspaceId: activeWorkspaceId ?? null,
             };
 

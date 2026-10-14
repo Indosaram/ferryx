@@ -9,10 +9,12 @@ export type FilePreviewResolved = {
 export async function resolveFilePreviewPath(
   path: string,
   backendSessionId: string,
+  workspaceId: string | null = null,
 ): Promise<FilePreviewResolved> {
   return invoke<FilePreviewResolved>("cmd_file_preview_resolve", {
     path,
     backendSessionId,
+    workspaceId,
   });
 }
 

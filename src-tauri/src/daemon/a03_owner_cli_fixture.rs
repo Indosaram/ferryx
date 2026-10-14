@@ -240,6 +240,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         let local_capabilities = {
             let mut capabilities = vec!["machinePairingV1", "sshPasswordV1", "dagStreamingV1"];
             if server.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1"); }
+            capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY);
             // Mirrors the daemon's GetCapabilities surface: handover advertises ownership transfer.
             #[cfg(unix)]
             capabilities.push("sessionOwnershipTransferV1");
@@ -290,7 +291,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         ensure!(value["accessScope"] == serde_json::to_value(expected)?, "capability scope mismatch");
         let machine_terminal_ready = server.remote_state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok());
         let expected_capabilities = if machine {
-            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2"];
+            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2", "pairedFileReadV1"];
             if machine_terminal_ready { capabilities.push("terminalCreateV1"); capabilities.push("terminalStreamV1"); }
             // DAG streaming is advertised whenever the catalog that resolves remote
             // roots is readable, independent of terminal readiness.

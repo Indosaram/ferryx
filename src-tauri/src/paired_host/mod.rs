@@ -7,6 +7,7 @@ pub mod direct_connect;
 pub mod direct_route;
 pub mod direct_trust;
 pub mod direct_wire;
+pub mod file_read;
 pub mod path_select;
 pub mod inventory;
 pub mod projects;

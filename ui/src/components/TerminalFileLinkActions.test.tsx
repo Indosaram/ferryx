@@ -19,6 +19,11 @@ vi.mock("../lib/tauri", () => ({
   revealPath: (path: string) => mockRevealPath(path),
 }));
 
+const mockInvoke = vi.fn().mockResolvedValue(true);
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (command: string, args?: unknown) => mockInvoke(command, args),
+}));
+
 const mockToast = {
   custom: vi.fn((renderFn: (id: string) => ReactNode, _options?: any) => {
     render(renderFn("custom-toast-id") as React.ReactElement);
@@ -44,6 +49,7 @@ describe("TerminalFileLinkActions", () => {
     vi.clearAllMocks();
     mockCopyTextToClipboard.mockResolvedValue(true);
     mockRevealPath.mockResolvedValue(undefined);
+    mockInvoke.mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -74,7 +80,7 @@ describe("TerminalFileLinkActions", () => {
     expect(open).toHaveBeenCalledWith(false);
   });
 
-  it("calls open(true) when Open with default app is clicked", async () => {
+  it("opens an unresolved file with the system app override when Open with default app is clicked", async () => {
     render(<TerminalFileLinkActions />);
     const open = vi.fn().mockResolvedValue(undefined);
 
@@ -93,7 +99,62 @@ describe("TerminalFileLinkActions", () => {
     fireEvent.click(defaultAppButton);
 
     expect(mockToast.dismiss).toHaveBeenCalledWith("custom-toast-id");
-    expect(open).toHaveBeenCalledWith(true);
+    expect(open).toHaveBeenCalledWith(true, { editor: "system" });
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it("offers only Open and Copy path for a remote file and opens it through detail.open", async () => {
+    render(<TerminalFileLinkActions />);
+    const open = vi.fn().mockResolvedValue(undefined);
+
+    window.dispatchEvent(
+      new CustomEvent(TERMINAL_FILE_LINK_ACTION_EVENT, {
+        detail: {
+          token: { type: "file", path: "/srv/app/out/run.png" },
+          open,
+          remote: true,
+        },
+      }),
+    );
+
+    expect(screen.getByRole("menuitem", { name: "Open" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Copy path" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Reveal in folder" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Open with default app" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open" }));
+    expect(open).toHaveBeenCalledWith(false);
+    expect(mockRevealPath).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it("opens a resolved local file with the system app, bypassing the configured editor", async () => {
+    render(<TerminalFileLinkActions />);
+    const open = vi.fn().mockResolvedValue(undefined);
+
+    window.dispatchEvent(
+      new CustomEvent(TERMINAL_FILE_LINK_ACTION_EVENT, {
+        detail: {
+          token: {
+            type: "file",
+            path: "assets/foo.png",
+            absolutePath: "/workspace/project/assets/foo.png",
+          },
+          open,
+        },
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open with default app" }));
+
+    expect(mockToast.dismiss).toHaveBeenCalledWith("custom-toast-id");
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("cmd_open_file_path", {
+        path: "/workspace/project/assets/foo.png",
+        editor: "system",
+      });
+    });
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("copies path when Copy path is clicked", async () => {

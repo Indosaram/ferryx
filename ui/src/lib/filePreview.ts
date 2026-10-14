@@ -36,6 +36,8 @@ import {
 export type FilePreviewExternalRequest = {
   readonly path: string;
   readonly backendSessionId: string;
+  /** Workspace of the original click; lets the backend refuse remote-shell paths. */
+  readonly workspaceId?: string | null;
   readonly line: number | null;
   readonly col: number | null;
 };
@@ -168,6 +170,7 @@ async function defaultOpenExternalFile(request: FilePreviewExternalRequest): Pro
   await tauriInvoke<boolean>("cmd_open_file_path", {
     path: request.path,
     sessionId: request.backendSessionId,
+    workspaceId: request.workspaceId ?? null,
     editor: loadFileLinkEditor(),
     line: request.line ?? undefined,
     col: request.col ?? undefined,
@@ -234,6 +237,7 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
         ownerId: deps.ownerId,
         path: request.path,
         backendSessionId: request.backendSessionId,
+        workspaceId: source.workspaceId ?? null,
         line: request.line,
         col: request.col,
       });
@@ -396,6 +400,7 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
       await openExternalFile({
         path: snapshot.request.path,
         backendSessionId: snapshot.source.backendSessionId,
+        workspaceId: snapshot.source.workspaceId ?? null,
         line: snapshot.request.line,
         col: snapshot.request.col,
       });

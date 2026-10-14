@@ -196,6 +196,54 @@ pub async fn cmd_daemon_paste_clipboard_image<R: tauri::Runtime>(
     }
 }
 
+/// Fetches a file a paired-host terminal names into the local remote-files cache.
+///
+/// `session_id` is the id the desktop UI holds: the local relayed proxy id
+/// (`daemon-session:<hash>`). It is mapped through the daemon's paired-runtime descriptor
+/// to the HOST-side session id, which anchors relative paths on the host; an id the paired
+/// runtime does not own is forwarded unchanged, and a relayed id that no longer maps is
+/// refused rather than dropped, so the host can still check where the shell runs.
+#[tauri::command]
+pub async fn cmd_paired_file_fetch<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    daemon: State<'_, Arc<DaemonClient>>,
+    workspace_id: String,
+    path: String,
+    cwd: Option<String>,
+    session_id: Option<String>,
+) -> std::result::Result<crate::ipc::remote_file::RemoteFileFetched, crate::ipc::IpcError> {
+    use tauri::Manager;
+    let io = |e: tauri::Error| {
+        crate::ipc::IpcError::new(crate::ipc::error::IpcErrorCode::IoError, e.to_string())
+    };
+    let data_dir = app.path().app_data_dir().map_err(io)?;
+    let cache_root = app.path().app_cache_dir().map_err(io)?;
+    let host_session_id =
+        crate::paired_host::file_read::resolve_host_session_id(session_id, |id| async {
+            daemon
+                .paired_terminal_descriptor(id)
+                .await
+                .map(|descriptor| descriptor.map(|d| d.target.session_id))
+        })
+        .await?;
+    let (local, remote_path, byte_length) = crate::paired_host::file_read::fetch_paired_file(
+        &daemon,
+        &data_dir,
+        &cache_root,
+        &workspace_id,
+        host_session_id,
+        cwd,
+        path,
+    )
+    .await?;
+    Ok(crate::ipc::remote_file::RemoteFileFetched {
+        local_path: local.to_string_lossy().into_owned(),
+        remote_path,
+        byte_length,
+    })
+}
+
+
 #[tauri::command]
 pub async fn paired_host_attach_session(
     daemon: State<'_, Arc<DaemonClient>>,

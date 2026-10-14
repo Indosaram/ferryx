@@ -1938,6 +1938,7 @@ impl DaemonClient {
             | Operation::Sessions { .. }
             | Operation::Session { .. }
             | Operation::DagStream { .. }
+            | Operation::FileRead { .. }
             | Operation::Operation { .. } => None,
         };
         let transport_error = |error: crate::paired_host::service::ServiceError| ClientError {
@@ -1987,6 +1988,15 @@ impl DaemonClient {
         self.paired_host_request(DaemonRequest::GetCapabilities)
             .await?;
         Ok(serde_json::json!({"pairedHostInventoryV1": true, "pairedDaemonProxyV1": true}))
+    }
+    /// The local daemon's advertised capability list, over the connect-only paired path.
+    pub async fn paired_daemon_capabilities(
+        &self,
+    ) -> crate::paired_host::service::Result<Vec<String>> {
+        match self.paired_host_request(DaemonRequest::GetCapabilities).await? {
+            DaemonResponse::CapabilitiesOk { capabilities } => Ok(capabilities),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
     }
     pub async fn paired_host_read(
         &self,

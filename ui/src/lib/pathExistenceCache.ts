@@ -7,7 +7,7 @@ export interface PathExistenceCacheOptions {
 }
 
 export interface PathExistenceCache {
-  check(path: string, backendSessionId: string): Promise<FilePreviewResolved | null>;
+  check(path: string, backendSessionId: string, workspaceId?: string | null): Promise<FilePreviewResolved | null>;
   clear(): void;
 }
 
@@ -17,7 +17,7 @@ interface CacheEntry {
 }
 
 export function createPathExistenceCache(
-  resolve: (path: string, backendSessionId: string) => Promise<FilePreviewResolved>,
+  resolve: (path: string, backendSessionId: string, workspaceId: string | null) => Promise<FilePreviewResolved>,
   options?: PathExistenceCacheOptions,
 ): PathExistenceCache {
   const ttlMs = options?.ttlMs ?? 5000;
@@ -39,8 +39,8 @@ export function createPathExistenceCache(
   }
 
   return {
-    async check(path: string, backendSessionId: string): Promise<FilePreviewResolved | null> {
-      const key = `${backendSessionId}\u0000${path}`;
+    async check(path: string, backendSessionId: string, workspaceId: string | null = null): Promise<FilePreviewResolved | null> {
+      const key = `${workspaceId ?? ""}\u0000${backendSessionId}\u0000${path}`;
       const currentTime = now();
 
       const cached = entries.get(key);
@@ -58,7 +58,7 @@ export function createPathExistenceCache(
 
       const promise = (async () => {
         try {
-          const resolved = await resolve(path, backendSessionId);
+          const resolved = await resolve(path, backendSessionId, workspaceId);
           const expiresAt = now() + ttlMs;
           if (entries.has(key)) {
             entries.delete(key);

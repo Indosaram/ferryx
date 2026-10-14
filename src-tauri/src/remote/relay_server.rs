@@ -1936,6 +1936,9 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["terminal", "preferences"])
             | ("GET", ["browser", "sessions" | "identify"])
             | ("POST", ["workspace", "select" | "selection"])
+            // Paired desktop machine reads/uploads; each paste-upload chunk is 32 KiB raw,
+            // which stays under the 64 KiB forwarded-body bound once base64 + JSON wrapped.
+            | ("POST", ["workspace", "file-read" | "paste-upload"])
             | ("POST", ["pair", "exchange"])
             | ("POST", ["direct", "offer"])
             | ("POST", ["push", "subscribe" | "unsubscribe"])
@@ -3481,6 +3484,37 @@ mod tests {
         assert!(!allowed_http_route(&Method::GET, "attach/../secret"));
         assert!(!allowed_http_route(&Method::GET, "api/v1/attach"));
         assert!(allowed_http_route(&Method::GET, "capabilities"));
+    }
+
+    #[test]
+    fn test_allowed_http_route_admits_paired_file_read_and_paste_upload() {
+        // Desktop paired clients reach these machine routes through the relay when no
+        // direct adapter is up; a refusal here surfaces as a bodyless 403.
+        assert!(allowed_http_route(&Method::POST, "workspace/file-read"));
+        assert!(allowed_http_route(&Method::POST, "workspace/paste-upload"));
+        assert!(!allowed_http_route(&Method::GET, "workspace/file-read"));
+        assert!(!allowed_http_route(&Method::DELETE, "workspace/paste-upload"));
+        assert!(!allowed_http_route(&Method::POST, "workspace/file-read/extra"));
+        assert!(!allowed_http_route(&Method::POST, "workspace/../file-read"));
+    }
+
+    #[test]
+    fn paste_upload_chunk_fits_the_forwarded_body_cap() {
+        // host_http_handler bounds non-reference-chat bodies at 64 KiB.
+        let request = crate::remote::machine_protocol::PasteUploadChunkRequest {
+            request_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into(),
+            upload_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f5".into(),
+            file_name: "x".repeat(255),
+            chunk_index: u32::MAX,
+            total_chunks: u32::MAX,
+            data: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                vec![0u8; crate::paired_host::upload::UPLOAD_CHUNK_BYTES],
+            ),
+            offset: Some(u64::MAX),
+            total_bytes: Some(u64::MAX),
+        };
+        assert!(serde_json::to_vec(&request).unwrap().len() < 64 * 1024);
     }
 
     #[tokio::test]
