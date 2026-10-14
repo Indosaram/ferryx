@@ -116,6 +116,21 @@ describe("reference draft acknowledgement", () => {
     expect(store.settle(paneA, "sent").text).toBe("another tab's draft");
   });
 
+  it("clears a trimmed send from a draft that had leading whitespace", () => {
+    const { store, data } = fixture();
+    store.set(paneA, "\nfix the build");
+    store.begin(paneA, "fix the build");
+    expect(store.settle(paneA, "fix the build")).toEqual({ text: "", edited: false });
+    store.end(paneA);
+    expect(data.has(store.storageKey(paneA))).toBe(false);
+
+    store.set(paneA, "  \nnext step");
+    store.begin(paneA, "next step");
+    store.set(paneA, "  \nnext step and more");
+    expect(store.settle(paneA, "next step")).toEqual({ text: " and more", edited: false });
+    store.end(paneA);
+  });
+
   it("keeps a draft cleared and retyped while its send was on its way", () => {
     const { store } = fixture();
     store.set(paneA, "a");
