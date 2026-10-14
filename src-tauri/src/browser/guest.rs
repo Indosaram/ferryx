@@ -442,6 +442,10 @@ __FERRYX_WINDOW_CLOSE_BODY__
     // An engine that refuses the redefinition still gets the replacement by assignment.
     try {
       window.close = ferryxWindowClose;
+      // This script is sloppy mode, so assigning a non-writable close fails silently.
+      if (window.close !== ferryxWindowClose) {
+        reportBridgeFailure('could not replace window.close (' + defineError + ')', 'the page kept its own window.close');
+      }
     } catch (assignError) {
       reportBridgeFailure('could not replace window.close (' + defineError + ')', assignError);
     }

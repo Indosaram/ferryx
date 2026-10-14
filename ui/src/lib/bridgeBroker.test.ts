@@ -107,6 +107,113 @@ describe('isolated-world broker', () => {
     expect(posts.map((body) => JSON.parse(body).handle)).toEqual(['a']);
   });
 
+  // One physical mouse click delivers pointerup and then click. A page that opens a popup
+  // from each handler must still get only one popup for that one click.
+  it('admits one popup for a pointerup and the click that follows it', () => {
+    loadBroker();
+    const open = (handle: string) =>
+      doc.dispatchEvent(
+        new CustomEvent('ferryx-intent', {
+          detail: JSON.stringify({ op: 'open', url: 'https://example.com/' + handle, handle }),
+        }),
+      );
+    fakeWindow.dispatchEvent(new MouseEvent('pointerup'));
+    open('a');
+    fakeWindow.dispatchEvent(new MouseEvent('click'));
+    open('b');
+    expect(posts.map((body) => JSON.parse(body).handle)).toEqual(['a']);
+  });
+
+  it('still admits one popup per separate physical click', () => {
+    loadBroker();
+    const open = (handle: string) =>
+      doc.dispatchEvent(
+        new CustomEvent('ferryx-intent', {
+          detail: JSON.stringify({ op: 'open', url: 'https://example.com/' + handle, handle }),
+        }),
+      );
+    fakeWindow.dispatchEvent(new MouseEvent('pointerup'));
+    open('a');
+    fakeWindow.dispatchEvent(new MouseEvent('click'));
+    fakeWindow.dispatchEvent(new MouseEvent('pointerup'));
+    fakeWindow.dispatchEvent(new MouseEvent('click'));
+    open('b');
+    expect(posts.map((body) => JSON.parse(body).handle)).toEqual(['a', 'b']);
+  });
+
+  const openIntent = (handle: string) =>
+    doc.dispatchEvent(
+      new CustomEvent('ferryx-intent', {
+        detail: JSON.stringify({ op: 'open', url: 'https://example.com/' + handle, handle }),
+      }),
+    );
+  const handles = () => posts.map((body) => JSON.parse(body).handle);
+
+  // Holding a key fires auto-repeat keydowns about 30 times a second; they must not keep
+  // re-arming popup activation after a popup spent it.
+  it('does not re-arm activation from an auto-repeat keydown', () => {
+    loadBroker();
+    fakeWindow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    openIntent('a');
+    fakeWindow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', repeat: true }));
+    openIntent('b');
+    expect(handles()).toEqual(['a']);
+  });
+
+  it('re-arms activation from a fresh non-repeat keydown', () => {
+    loadBroker();
+    fakeWindow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    openIntent('a');
+    fakeWindow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', repeat: true }));
+    fakeWindow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    openIntent('b');
+    expect(handles()).toEqual(['a', 'b']);
+  });
+
+  it('admits one popup for a pointerup and the auxclick that follows it', () => {
+    loadBroker();
+    fakeWindow.dispatchEvent(new MouseEvent('pointerup'));
+    openIntent('a');
+    fakeWindow.dispatchEvent(new MouseEvent('auxclick'));
+    openIntent('b');
+    expect(handles()).toEqual(['a']);
+  });
+
+  // A trusted keydown between the spending pointerup and a later click clears the spent
+  // gesture, so that click is a fresh activation.
+  it('clears the spent pointer gesture on a keydown', () => {
+    loadBroker();
+    fakeWindow.dispatchEvent(new MouseEvent('pointerup'));
+    openIntent('a');
+    fakeWindow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    openIntent('b');
+    fakeWindow.dispatchEvent(new MouseEvent('click'));
+    openIntent('c');
+    expect(handles()).toEqual(['a', 'b', 'c']);
+  });
+
+  it('does not stamp activation from an untrusted click', () => {
+    loadBroker();
+    trusted = false;
+    fakeWindow.dispatchEvent(new MouseEvent('click'));
+    openIntent('a');
+    expect(handles()).toEqual([]);
+  });
+
+  // An untrusted click neither stamps nor clears the spent gesture: the trusted click that
+  // completes the spending pointerup is still swallowed.
+  it('leaves the spent pointer gesture intact on an untrusted click', () => {
+    loadBroker();
+    fakeWindow.dispatchEvent(new MouseEvent('pointerup'));
+    openIntent('a');
+    trusted = false;
+    fakeWindow.dispatchEvent(new MouseEvent('click'));
+    trusted = true;
+    fakeWindow.dispatchEvent(new MouseEvent('click'));
+    openIntent('b');
+    expect(handles()).toEqual(['a']);
+  });
+
   // WebView2 injects the broker (a CDP new-document script) into every frame, and the
   // binding is visible in every frame's ferryx-bridge world, but the host accepts posts only
   // from the main frame. A subframe broker must stay inert so in-frame clicks stay native.

@@ -19,6 +19,11 @@
   if (!topFrame) return;
   const ACTIVATION_WINDOW_MS = 1000;
   let lastActivationMs = -Infinity;
+  // One physical click delivers pointerup and then click (or auxclick). When a popup
+  // already spent the pointerup's activation, the click that completes the same gesture
+  // must not stamp a fresh one, or one click would admit two popups.
+  let activationType = null;
+  let spentPointerGesture = false;
   const isTrusted = (event) => (hooks ? hooks.isTrusted(event) : event.isTrusted === true);
   // The world-scoped channel, or null when this document has none. Callers that cancel a
   // native default must check this first: a missing channel falls back to native behaviour.
@@ -49,7 +54,14 @@
   };
   const activationAgeMs = () => performance.now() - lastActivationMs;
   const stamp = (event) => {
-    if (isTrusted(event)) lastActivationMs = performance.now();
+    if (!isTrusted(event)) return;
+    // A held key auto-repeats keydown; only the first press is a user activation.
+    if (event.type === 'keydown' && event.repeat === true) return;
+    const completesSpentGesture = spentPointerGesture && (event.type === 'click' || event.type === 'auxclick');
+    spentPointerGesture = false;
+    if (completesSpentGesture) return;
+    lastActivationMs = performance.now();
+    activationType = event.type;
   };
   ['click', 'auxclick', 'keydown', 'pointerup', 'drop'].forEach((type) => {
     window.addEventListener(type, stamp, true);
@@ -108,6 +120,7 @@
       if (post({ v: 1, kind: 'popupOpen', url, handle: intent.handle, activationAgeMs: age })) {
         // One activation admits one popup.
         lastActivationMs = -Infinity;
+        spentPointerGesture = activationType === 'pointerup';
       }
     } else if (intent.op === 'selfClose') {
       post({ v: 1, kind: 'popupSelfClose' });

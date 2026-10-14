@@ -9,6 +9,7 @@ use crate::ipc::browser::{
     browser_get_dialogs, browser_handle_dialog, browser_set_dialog_policy, close_browser_session,
     create_browser_session, focus_browser_session, highlight_browser_session,
     highlight_browser_session_with_duration, identify_browser_session, navigate_browser_session,
+    navigate_browser_session_with_context,
 };
 use crate::ipc::error::{IpcError, IpcErrorCode};
 use serde::{Deserialize, Serialize};
@@ -478,7 +479,8 @@ impl RemoteBrowserOperation {
             | Self::ReleaseDriver { .. }
             | Self::HeartbeatDriver { .. } => Ok(()),
             Self::Navigate { url, .. } => {
-                crate::browser::validate_url(url).map_err(IpcError::from)?;
+                crate::browser::security::validate_url_remote(url)
+                    .map_err(|e| remote_url_error_to_ipc(IpcError::from(e)))?;
                 Ok(())
             }
             Self::Fill {
@@ -594,6 +596,27 @@ impl RemoteBrowserOperation {
     }
 }
 
+/// Maps a URL policy failure on a remote operation onto the remote error codes:
+/// a scheme denial is a policy refusal, a malformed URL is a bad request.
+fn remote_url_error_to_ipc(e: IpcError) -> IpcError {
+    match e.code {
+        IpcErrorCode::BrowserUrlSchemeDenied => {
+            IpcError::new(IpcErrorCode::Custom("BROWSER_FORBIDDEN".into()), e.message)
+        }
+        IpcErrorCode::BrowserUrlInvalid => {
+            IpcError::new(IpcErrorCode::Custom("BROWSER_INVALID_REQUEST".into()), e.message)
+        }
+        _ => e,
+    }
+}
+
+/// Builds the script for a remote-operation keypress. It reuses the remote executor's
+/// builder, which dispatches the trimmed key that validate_page_key returns.
+fn keypress_operation_script(key: &str) -> Result<String, IpcError> {
+    crate::ipc::browser::remote_keypress_script(key)
+        .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e.to_string()))
+}
+
 pub async fn execute_remote_operation<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,
@@ -602,7 +625,17 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
     op.validate()?;
     match op {
         RemoteBrowserOperation::Navigate { browser_id, url } => {
-            let state = navigate_browser_session(app, manager, &browser_id, &url).await?;
+            // A framed remote operation: the Remote URL policy applies (file:// denied).
+            // A scheme denial is a policy refusal; a malformed URL stays a bad request.
+            let state = navigate_browser_session_with_context(
+                app,
+                manager,
+                &browser_id,
+                &url,
+                crate::browser::security::BrowserSecurityContext::Remote,
+            )
+            .await
+            .map_err(remote_url_error_to_ipc)?;
             serde_json::to_value(&state)
                 .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))
         }
@@ -825,17 +858,7 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             let webview = app
                 .get_webview(&state.webview_label)
                 .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-            let key_json = serde_json::to_string(&key)
-                .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))?;
-            let script = format!(
-                r#"(function() {{
-                    const target = document.activeElement || document.body;
-                    target.dispatchEvent(new KeyboardEvent("keydown", {{ key: {}, bubbles: true }}));
-                    target.dispatchEvent(new KeyboardEvent("keyup", {{ key: {}, bubbles: true }}));
-                    return JSON.stringify({{ ok: true }});
-                }})()"#,
-                key_json, key_json
-            );
+            let script = keypress_operation_script(&key)?;
             let _ = crate::ipc::browser::eval_webview(webview, script).await?;
             Ok(serde_json::json!({ "dispatched": true }))
         }
@@ -2854,6 +2877,17 @@ mod tests {
     use crate::browser::{BrowserProfileId, BrowserSessionSummary, CreateBrowserRequest};
 
     #[test]
+    fn remote_operation_keypress_dispatches_the_validated_trimmed_key() {
+        let script = keypress_operation_script(" a ").expect("padded single char is allowed");
+        assert!(
+            script.contains(r#"key: "a","#),
+            "must dispatch the trimmed key that was validated, got {script}"
+        );
+        assert!(!script.contains(r#"" a ""#), "raw padded key must not be dispatched");
+        assert!(keypress_operation_script("\u{1b}").is_err());
+    }
+
+    #[test]
     fn selector_click_missing_target_maps_to_browser_target_not_found() {
         use crate::browser::remote_input::{build_selector_click_script, decode_point_click_result};
         let script = build_selector_click_script(r##""#btn""##);
@@ -3722,6 +3756,46 @@ mod tests {
             resp["code"], "BROWSER_URL_SCHEME_DENIED",
             "unexpected response: {resp:?}"
         );
+    }
+
+    /// A framed remote navigate is a remote operation: the Remote URL policy applies,
+    /// so a local file document is a scheme denial even though the desktop allows it.
+    #[tokio::test]
+    async fn test_remote_operation_navigate_denies_file_scheme() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-remote-op-nav".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        let op = RemoteBrowserOperation::Navigate {
+            browser_id: state.browser_id.clone(),
+            url: "file:///tmp/x.html".into(),
+        };
+        let err = execute_remote_operation(&app.handle().clone(), &manager, op)
+            .await
+            .expect_err("remote navigate to a local file must be refused");
+        assert_eq!(ipc_error_code_string(err.code.clone()), "BROWSER_FORBIDDEN", "{err:?}");
+        assert_eq!(manager.get_state(&state.browser_id).unwrap().url, state.url);
+
+        let credentialed = RemoteBrowserOperation::Navigate {
+            browser_id: state.browser_id.clone(),
+            url: "https://user:pw@example.com".into(),
+        };
+        let err = execute_remote_operation(&app.handle().clone(), &manager, credentialed)
+            .await
+            .expect_err("credentialed URL must be refused");
+        assert_eq!(ipc_error_code_string(err.code.clone()), "BROWSER_INVALID_REQUEST", "{err:?}");
     }
 
     #[tokio::test]

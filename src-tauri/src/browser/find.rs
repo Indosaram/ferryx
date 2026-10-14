@@ -51,9 +51,7 @@ pub fn browser_find_script(query: &str, backwards: bool) -> Result<String, Brows
 }
 
 pub fn parse_browser_find_callback(result: &str) -> Result<BrowserFindResult, BrowserError> {
-    let payload: String = serde_json::from_str(result).map_err(|error| {
-        BrowserError::FindFailed(format!("invalid find callback result: {error}"))
-    })?;
+    let payload = crate::browser::picker::unwrap_eval_json(result);
     serde_json::from_str(&payload)
         .map_err(|error| BrowserError::FindFailed(format!("invalid find response: {error}")))
 }
@@ -108,5 +106,24 @@ mod tests {
                 found: true,
             }
         );
+    }
+
+    /// Platform eval bridges return either the raw object or its JSON-string form;
+    /// the find parser must accept both, like the `picker::unwrap_eval_json` callers.
+    #[test]
+    fn parses_find_callback_in_raw_and_quoted_shapes() {
+        let expected = BrowserFindResult {
+            match_count: 2,
+            found: false,
+        };
+        assert_eq!(
+            parse_browser_find_callback(r#"{"matchCount":2,"found":false}"#).unwrap(),
+            expected
+        );
+        assert_eq!(
+            parse_browser_find_callback(r#""{\"matchCount\":2,\"found\":false}""#).unwrap(),
+            expected
+        );
+        assert!(parse_browser_find_callback("not json").is_err());
     }
 }

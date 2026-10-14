@@ -1146,6 +1146,29 @@ fn discard_failed_session(manager: &BrowserManager, browser_id: &str) {
     CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
 }
 
+/// Drops a session whose webview creation failed once the main-thread creation step was
+/// queued, which may already have installed the platform bridge for its webview label.
+fn discard_failed_creation<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+) {
+    discard_failed_creation_with(manager, browser_id, |label| {
+        crate::browser::bridge::forget_webview(app, label)
+    });
+}
+
+fn discard_failed_creation_with(
+    manager: &BrowserManager,
+    browser_id: &str,
+    forget_bridge: impl FnOnce(&str),
+) {
+    if let Ok(state) = manager.get_state(browser_id) {
+        forget_bridge(&state.webview_label);
+    }
+    discard_failed_session(manager, browser_id);
+}
+
 pub fn record_session_created(browser_id: &str) {
     let mut ids = CREATED_SESSION_IDS.lock();
     ids.retain(|id| id != browser_id);
@@ -1649,11 +1672,11 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                 match creation_result {
                     Ok(Ok(Ok(()))) => {}
                     Ok(Ok(Err(error))) => {
-                        discard_failed_session(manager, &state.browser_id);
+                        discard_failed_creation(app, manager, &state.browser_id);
                         return Err(BrowserError::CreateFailed(error).into());
                     }
                     Ok(Err(_)) | Err(_) => {
-                        discard_failed_session(manager, &state.browser_id);
+                        discard_failed_creation(app, manager, &state.browser_id);
                         return Err(BrowserError::CreateFailed(
                             "browser webview creation did not complete on the main thread".into(),
                         )
@@ -1662,7 +1685,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                 }
             }
             Err(error) => {
-                discard_failed_session(manager, &state.browser_id);
+                discard_failed_creation(app, manager, &state.browser_id);
                 return Err(BrowserError::CreateFailed(error.to_string()).into());
             }
         }
@@ -3634,6 +3657,31 @@ mod tests {
     use super::{windows_open_request, WindowsOpenRequest};
 
     #[test]
+    fn failed_creation_forgets_the_installed_bridge_world() {
+        let manager = BrowserManager::new();
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: Some("ws-forget".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        record_session_created(&state.browser_id);
+        let mut forgotten: Vec<String> = Vec::new();
+        discard_failed_creation_with(&manager, &state.browser_id, |label| {
+            forgotten.push(label.to_string())
+        });
+        assert_eq!(forgotten, vec![state.webview_label.clone()]);
+        assert!(manager.get_state(&state.browser_id).is_err());
+        assert!(!CREATED_SESSION_IDS.lock().iter().any(|id| id == &state.browser_id));
+    }
+
+    #[test]
     fn failed_creation_prunes_created_session_id() {
         let manager = BrowserManager::new();
         let state = manager
@@ -5202,7 +5250,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         RemoteBrowserError::InvalidRequest("keypress requires params".into())
                     })?;
                     let key = p.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                    crate::browser::remote_input::validate_page_key(key)
+                    let script = remote_keypress_script(key)
                         .map_err(|e| RemoteBrowserError::InvalidRequest(e.to_string()))?;
                     let state = self
                         .manager
@@ -5212,16 +5260,6 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         .app
                         .get_webview(&state.webview_label)
                         .ok_or_else(|| RemoteBrowserError::NotFound(state.webview_label.clone()))?;
-                    let key_json = serde_json::to_string(key).unwrap_or_default();
-                    let script = format!(
-                        r#"(function() {{
-                            const target = document.activeElement || document.body;
-                            target.dispatchEvent(new KeyboardEvent("keydown", {{ key: {}, bubbles: true }}));
-                            target.dispatchEvent(new KeyboardEvent("keyup", {{ key: {}, bubbles: true }}));
-                            return JSON.stringify({{ ok: true }});
-                        }})()"#,
-                        key_json, key_json
-                    );
                     let _ = eval_webview(webview, script)
                         .await
                         .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
@@ -5395,21 +5433,32 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
     }
 }
 
+/// Validates a remote page keypress against the page-key allowlist and builds the
+/// script that dispatches it to the focused element.
+pub(crate) fn remote_keypress_script(
+    key: &str,
+) -> Result<String, crate::browser::remote_input::RemoteInputError> {
+    let key = crate::browser::remote_input::validate_page_key(key)?;
+    let key_json = serde_json::to_string(&key).unwrap_or_default();
+    Ok(format!(
+        r#"(function() {{
+            const target = document.activeElement || document.body;
+            target.dispatchEvent(new KeyboardEvent("keydown", {{ key: {key_json}, bubbles: true }}));
+            target.dispatchEvent(new KeyboardEvent("keyup", {{ key: {key_json}, bubbles: true }}));
+            return JSON.stringify({{ ok: true }});
+        }})()"#
+    ))
+}
+
 /// Maps a decoded fill/type failure onto the remote error surface.
+///
+/// `decode_action_result` never yields `ActionDecodeError::Refused` (only the
+/// point-click decoder does), so fill shares the click mapping instead of carrying
+/// its own unreachable refusal arm; every reachable variant maps identically.
 fn fill_decode_error_to_remote(
     e: crate::browser::remote_input::ActionDecodeError,
 ) -> crate::remote::browser_backend::RemoteBrowserError {
-    use crate::remote::browser_backend::RemoteBrowserError;
-    use crate::browser::remote_input::ActionDecodeError;
-    match e {
-        ActionDecodeError::NotFound(message) => RemoteBrowserError::TargetNotFound(message),
-        ActionDecodeError::Failed(message) | ActionDecodeError::Malformed(message) => {
-            RemoteBrowserError::ExecutionFailed(message)
-        }
-        refused @ ActionDecodeError::Refused(_) => {
-            RemoteBrowserError::ExecutionFailed(refused.to_string())
-        }
-    }
+    point_click_decode_error_to_remote(e)
 }
 
 /// Maps a decoded click failure onto the remote error surface by variant only.
@@ -5819,6 +5868,30 @@ mod r6_fill_tests {
             matches!(res, Err(RemoteBrowserError::InvalidRequest(_))),
             "remote keypress with a control character must be InvalidRequest, got {res:?}"
         );
+    }
+
+    #[test]
+    fn remote_keypress_dispatches_the_validated_trimmed_key() {
+        let script = remote_keypress_script(" a ").expect("padded single char is allowed");
+        assert!(
+            script.contains(r#"key: "a","#),
+            "must dispatch the trimmed key that was validated, got {script}"
+        );
+        assert!(!script.contains(r#"" a ""#), "raw padded key must not be dispatched");
+        assert!(remote_keypress_script("\u{1b}").is_err());
+    }
+
+    /// Fill and click decode through one variant-based mapping: a typed refusal is
+    /// `InputRefused` on every path, never a generic execution failure.
+    #[test]
+    fn fill_decode_refusal_maps_like_click_refusal() {
+        use crate::browser::remote_input::{ActionDecodeError, RefusedInputToken};
+        use crate::remote::browser_backend::RemoteBrowserError;
+        let refused = ActionDecodeError::Refused(RefusedInputToken::Iframe.to_input_error());
+        assert!(matches!(
+            fill_decode_error_to_remote(refused),
+            RemoteBrowserError::InputRefused(_)
+        ));
     }
 
     #[test]
