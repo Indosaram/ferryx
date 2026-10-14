@@ -245,7 +245,8 @@ pub fn app_remote_files_root<R: tauri::Runtime>(
 ///   lookup returned.
 /// - A local session (`Ok`) keeps its live cwd.
 /// - An unknown or dead session (`SessionNotFound`) in a workspace the caller
-///   names as local does not block an absolute path, which opens directly; a
+///   names as local does not block an absolute or home-rooted (`~`, `~/x`) path,
+///   which opens directly; a
 ///   relative token falls back to the caller-supplied `fallback_cwd` and is
 ///   refused without one. Without a workspace id the session cannot be proven
 ///   local, so `SessionNotFound` stays a refusal.
@@ -302,13 +303,20 @@ pub fn admit_session_cwd_admission(
             Ok(SessionCwdAdmission::FetchedRemoteFile)
         }
         IpcErrorCode::SessionNotFound if workspace_id.is_none() => Err(error),
-        IpcErrorCode::SessionNotFound if absolute => Ok(SessionCwdAdmission::Cwd(None)),
+        // Home-rooted tokens (~, ~/x) resolve against this machine's home like an absolute path.
+        IpcErrorCode::SessionNotFound if absolute || is_home_rooted(path) => {
+            Ok(SessionCwdAdmission::Cwd(None))
+        }
         IpcErrorCode::SessionNotFound => match fallback_cwd {
             Some(cwd) => Ok(SessionCwdAdmission::Cwd(Some(cwd))),
             None => Err(error),
         },
         _ => Err(error),
     }
+}
+
+fn is_home_rooted(path: &str) -> bool {
+    path == "~" || path.starts_with("~/") || path.starts_with("~\\")
 }
 
 /// SSH (`ssh:`) and paired-host (`daemon:`) workspaces live on another machine.

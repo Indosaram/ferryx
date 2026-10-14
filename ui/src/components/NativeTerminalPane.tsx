@@ -71,6 +71,7 @@ import type { TerminalToken } from "../lib/linkRouting";
 import {
   tokenFromHyperlink,
   readLinkLine,
+  isLikelyRemoteFilePath,
   openRemoteFileToken,
   isSessionMouseTrackingEnabled,
   setSessionMouseTracking,
@@ -1121,6 +1122,9 @@ export function NativeTerminalPane({
             session?.workspaceId && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)),
           );
           if (isRemote) {
+            // No local stat is possible: only real path shapes get a hint ("I/O" is prose).
+            // An explicit Cmd+click still fetches and reports a failure.
+            if (!isLikelyRemoteFilePath(token.path)) return;
             kind = "file";
           } else {
             const resolved = await terminalLinkPathCache.check(token.path, targetSessionId, session?.workspaceId ?? null);

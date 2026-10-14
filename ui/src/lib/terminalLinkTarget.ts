@@ -141,6 +141,29 @@ export interface OpenRemoteFileTokenOptions {
   invokeFn: TerminalInvokeFn;
 }
 
+/**
+ * A remote (SSH or paired-host) pane cannot stat a printed path locally, so its hover
+ * hint relies on shape alone. Prose such as "I/O", "n/a" or "TCP/IP" must not look
+ * like a link there. Rooted paths (/, ~, ./, ../, C:\) always qualify; otherwise the
+ * token needs a file extension, two separators, or a final segment that reads as a
+ * name rather than an abbreviation.
+ */
+export function isLikelyRemoteFilePath(path: string): boolean {
+  if (/^(?:[/\\~]|\.{1,2}[/\\]|[a-zA-Z]:[/\\])/.test(path)) return true;
+  const segments = path.split(/[/\\]/).filter(Boolean);
+  const last = segments[segments.length - 1] ?? "";
+  if (/\.[a-zA-Z0-9_-]+$/.test(last) || last === "Makefile" || last === "Dockerfile") return true;
+  if (segments.length >= 3) return true;
+  if (segments.length < 2) return false;
+  // Two bare segments: "src/lib", "bin/ls", "docs/API" are paths; "I/O", "A/B", "TCP/IP",
+  // "24/7" (every segment upper-case or digits) and common slash words are prose.
+  const lower = segments.map((segment) => segment.toLowerCase()).join("/");
+  if (PROSE_SLASH_WORDS.has(lower)) return false;
+  return !segments.every((segment) => /^[A-Z0-9]+$/.test(segment));
+}
+
+const PROSE_SLASH_WORDS = new Set(["n/a", "w/o", "and/or", "yes/no", "on/off", "he/she", "his/her", "s/he", "c/o"]);
+
 export async function openRemoteFileToken(
   token: TerminalFileToken,
   opts: OpenRemoteFileTokenOptions,

@@ -8272,6 +8272,46 @@ describe("terminal link UX (U1-U3)", () => {
     unmount();
   });
 
+  it("shows no link hint for prose like I/O in an SSH pane but still hints a real remote path", async () => {
+    // One pane, one line: "I/O" at cols 0-2, "out/run.png" at cols 4-14. Hover the prose
+    // first, then the path; the path's hint proves the hover pipeline ran end to end, and
+    // the recorded hint history proves the prose token never produced one.
+    const session = { ...createSession("ssh-hint", "ssh-hint-backend"), workspaceId: "ssh:hint", cwd: "/srv/app" };
+    const line = "I/O out/run.png";
+    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+      if (command === "cmd_native_terminal_attach") {
+        return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
+      }
+      if (command === "cmd_native_terminal_hyperlink_at") return null;
+      if (command === "cmd_native_terminal_line_at") return { text: line, col: args.col, row: 0 };
+      return undefined;
+    });
+    const view = await renderNative(<NativeTerminalPane session={session} />);
+    vi.spyOn(view.getByTestId("native-terminal-viewport"), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
+    const pane = view.getByTestId("native-terminal-pane");
+    const hints: string[] = [];
+    const observer = new MutationObserver(() => {
+      const hint = view.queryByTestId("terminal-link-hint");
+      if (hint) hints.push(hint.getAttribute("style") ?? "");
+    });
+    observer.observe(pane, { childList: true, subtree: true, attributes: true });
+
+    await act(async () => {
+      fireEvent.pointerMove(pane, { pointerId: 1, clientX: 5, clientY: 10, metaKey: true, ctrlKey: true, buttons: 0 });
+    });
+    await act(async () => {
+      fireEvent.pointerMove(pane, { pointerId: 1, clientX: 85, clientY: 10, metaKey: true, ctrlKey: true, buttons: 0 });
+    });
+    await waitFor(() => expect(view.getByTestId("terminal-link-hint").textContent).toMatch(/click to open file/));
+    observer.disconnect();
+
+    // Every hint ever rendered started at the path's column (col 4), never at "I/O" (col 0).
+    expect(hints.length).toBeGreaterThan(0);
+    const lefts = hints.map((style) => Number(/left:\s*(-?\d+(?:\.\d+)?)px/.exec(style)?.[1] ?? NaN));
+    expect(lefts.every((left) => Number.isFinite(left) && left > 0)).toBe(true);
+    view.unmount();
+  });
+
   it("shows hover hint when resolve exists:true and hides underline when exists:false", async () => {
     const session1 = createSession("hover-hint-session-1", "hover-hint-backend-1");
     tauriCoreMocks.invoke.mockImplementation(async (command, _args: any) => {
