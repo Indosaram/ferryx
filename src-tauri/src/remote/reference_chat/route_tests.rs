@@ -22,7 +22,7 @@ use super::files as reference_files;
 use super::types::REFERENCE_CHAT_ROUTE_PREFIX;
 
 /// The frozen route table, as the plan and the contract name it.
-const REFERENCE_CHAT_ROUTES: [(&str, &str); 9] = [
+const REFERENCE_CHAT_ROUTES: [(&str, &str); 10] = [
     ("GET", "history"),
     ("GET", "screen"),
     ("GET", "prompt"),
@@ -30,6 +30,7 @@ const REFERENCE_CHAT_ROUTES: [(&str, &str); 9] = [
     ("POST", "stop"),
     ("POST", "answer"),
     ("POST", "files"),
+    ("GET", "files"),
     ("GET", "files/00000000-0000-0000-0000-000000000000"),
     ("DELETE", "files/00000000-0000-0000-0000-000000000000"),
 ];
@@ -1859,6 +1860,57 @@ async fn a_failed_staged_file_delete_is_not_204_and_keeps_the_entry() {
         .await;
     assert_eq!(third, 204, "a retried delete after the fault clears: {third_body}");
     assert!(!attachment_dir.exists(), "the retried delete removed the bytes");
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-r3-2: a staged file whose stage response the client never saw (an aborted
+/// upload, a page reload) is listed back to the client, so it can be deleted rather than
+/// holding a per-turn slot for the whole TTL.
+#[tokio::test]
+async fn orphaned_staged_files_are_listed_and_can_be_released() {
+    let fixture = fixture().await;
+    let max = crate::scoped_contracts::ATTACHMENT_MAX_FILES_PER_TURN;
+    for index in 0..max {
+        let (status, body) = fixture.stage(&format!("orphan-{index}.txt"), b"orphan").await;
+        assert_eq!(status, 200, "{body}");
+    }
+    let (status, body) = fixture.stage("blocked.txt", b"blocked").await;
+    assert_eq!(status, 413, "the per-turn cap holds: {body}");
+
+    let query = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    let (status, body) = fixture
+        .server
+        .request(
+            "GET",
+            &format!("{}?{query}", fixture.route("files")),
+            Some(&fixture.control),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "the target's staged files must be listable: {body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).expect("a file list");
+    let files = listed["files"].as_array().expect("files array");
+    assert_eq!(files.len(), max, "{body}");
+    for file in files {
+        assert!(file["displayName"].is_string(), "{body}");
+        assert!(file["mentionText"].as_str().is_some_and(|m| m.starts_with('@')), "{body}");
+        assert_eq!(file["receipt"]["hostId"], reference_files::reference_host_id(), "{body}");
+        let id = file["receipt"]["attachmentId"].as_str().expect("attachmentId");
+        let own = format!("{}?{query}", fixture.route(&format!("files/{id}")));
+        let (status, body) = fixture
+            .server
+            .request("DELETE", &own, Some(&fixture.control), None)
+            .await;
+        assert_eq!(status, 204, "a listed orphan can be released: {body}");
+    }
+
+    let (status, body) = fixture.stage("after-release.txt", b"after").await;
+    assert_eq!(status, 200, "released orphans free the per-turn bounds: {body}");
     fixture.server.stop().await;
 }
 

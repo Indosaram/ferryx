@@ -1953,7 +1953,7 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             // Reference chat (plan task 13). The relay only admits the frozen route table;
             // the machine's own gateway authenticates, fences the target and enforces the
             // read-only policy, exactly as it does for a direct caller.
-            | ("GET", ["reference-chat", _, "history" | "screen" | "prompt"])
+            | ("GET", ["reference-chat", _, "history" | "screen" | "prompt" | "files"])
             | ("POST", ["reference-chat", _, "submit" | "stop" | "answer" | "files"])
             | ("GET" | "DELETE", ["reference-chat", _, "files", _])
             | ("GET", ["attach"])
@@ -2046,6 +2046,7 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         // `ReferenceChatReadQuery`, so they admit exactly its fields. A mutation's target
         // travels in its own envelope body, so its query must stay empty.
         ["reference-chat", _, "history" | "screen" | "prompt"] => reference_chat_read_fields,
+        ["reference-chat", _, "files"] => reference_chat_read_fields,
         ["reference-chat", _, "files", _] => reference_chat_read_fields,
         _ => &[],
     };

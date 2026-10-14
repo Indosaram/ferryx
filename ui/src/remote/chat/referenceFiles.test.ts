@@ -28,6 +28,7 @@ import {
   referenceMentionPathIsSafe,
   referenceMentionPathOf,
   referenceMentionPathWithinRoot,
+  parseReferenceStagedFileList,
   stageReferenceChatFile,
   validateReferenceFileName,
   validateReferenceFileSize,
@@ -611,5 +612,57 @@ describe("reference file names carry whitespace-free mentions (ui-reference-logi
       "INVALID_REQUEST",
     );
     expect(fake.cancelled).toEqual(["att-bad"]);
+  });
+});
+
+describe("reference staged file list (rs-files-routes-r3-2)", () => {
+  const listed = (overrides: Record<string, unknown> = {}) => ({
+    receipt: {
+      hostId: "host-a",
+      attachmentId: "att-orphan",
+      sha256: FIXED_SHA,
+      sizeBytes: 3,
+      mediaType: "text/plain",
+    },
+    displayName: "orphan.txt",
+    mentionText: "@.ferryx-reference-chat-files/att-orphan/orphan.txt ",
+    ...overrides,
+  });
+
+  it("rehydrates the files the owning host still holds staged for this target", () => {
+    const files = parseReferenceStagedFileList({ files: [listed()] }, target());
+    expect(files).toEqual([
+      {
+        receipt: {
+          hostId: "host-a",
+          attachmentId: "att-orphan",
+          sha256: FIXED_SHA,
+          sizeBytes: 3,
+          mediaType: "text/plain",
+        },
+        displayName: "orphan.txt",
+        mentionText: "@.ferryx-reference-chat-files/att-orphan/orphan.txt ",
+      },
+    ]);
+  });
+
+  it("drops an entry from a foreign host, with an unsafe mention, or carrying a host path", () => {
+    const files = parseReferenceStagedFileList(
+      {
+        files: [
+          listed({ receipt: { ...listed().receipt, hostId: "host-b" } }),
+          listed({ mentionText: "@/etc/passwd " }),
+          listed({ path: "/Users/someone/secret" }),
+          "not an entry",
+        ],
+      },
+      target(),
+    );
+    expect(files).toEqual([]);
+  });
+
+  it("reads an unreadable list as empty", () => {
+    expect(parseReferenceStagedFileList(null, target())).toEqual([]);
+    expect(parseReferenceStagedFileList({ files: "nope" }, target())).toEqual([]);
   });
 });

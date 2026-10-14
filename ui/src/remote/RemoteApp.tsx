@@ -49,6 +49,7 @@ import { ReferencePromptCard } from "./chat/ReferencePromptCard";
 import {
   ReferenceFileError,
   cancelReferenceChatFile,
+  parseReferenceStagedFileList,
   referenceMentionInsertion,
   referenceMentionPathOf,
   stageReferenceChatFile,
@@ -2812,7 +2813,44 @@ export const RemoteHostConnection: React.FC<{
     referenceQueues.refresh(chatReferenceTarget);
     setChatDraftText(referenceDrafts.read(chatReferenceTarget).text);
     setChatHeld([...referenceQueues.read(chatReferenceTarget)]);
-  }, [chatTargetKey, resetChatLane]);
+    // Files the owning host still holds staged for this pane - an upload whose response was lost
+    // to an abort, or a reload - come back into the lane, so they can be seen and released
+    // instead of holding the per-turn slots until the host's TTL.
+    const rehydrateTarget = chatReferenceTarget;
+    const bearer = chatTokenRef.current;
+    if (!bearer) return;
+    const signal = chatLaneAbortRef.current.signal;
+    const query = referenceChatReadQuery(
+      { target: rehydrateTarget.target },
+      chatAgentTypeRef.current ?? "",
+      undefined,
+      null,
+    );
+    void fetch(
+      remoteApiUrl(
+        chatBaseUrlRef.current,
+        `${referenceChatRoute(rehydrateTarget.target.backendSessionId, "files")}?${query}`,
+      ),
+      { headers: { Authorization: `Bearer ${bearer}` }, signal },
+    )
+      .then(async (response) => (response.ok ? response.json() : null))
+      .then((raw: unknown) => {
+        if (signal.aborted || !chatTargetIsCurrent(rehydrateTarget)) return;
+        const listed = parseReferenceStagedFileList(raw, rehydrateTarget);
+        if (listed.length === 0) return;
+        const known = new Set(chatStagedFilesRef.current.map((file) => file.receipt.attachmentId));
+        const fresh = listed.filter((file) => !known.has(file.receipt.attachmentId));
+        if (fresh.length === 0) return;
+        chatStagedFilesRef.current = [...chatStagedFilesRef.current, ...fresh];
+        setChatStagedFiles((prev) => [
+          ...prev,
+          ...fresh.filter((file) => !prev.some((entry) => entry.receipt.attachmentId === file.receipt.attachmentId)),
+        ]);
+      })
+      .catch(() => {
+        /* the host prunes what the lane could not list on its own schedule */
+      });
+  }, [chatTargetKey, chatTargetIsCurrent, resetChatLane]);
 
   /* The newest page. A late answer for another generation is dropped, and an identity refusal
      clears the lane rather than browsing another transcript. The provider session the owning
