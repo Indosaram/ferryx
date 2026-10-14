@@ -80,6 +80,10 @@ export function referenceAnswerFromText(
     return label.toLowerCase() === lower || bareLabel(label) === lower || boundLetter(label) === lower;
   });
   if (named !== undefined) return { optionIndex: named };
+  // the backend refuses a typed answer with a control character (a newline from Shift+Enter):
+  // hold it so the composer keeps the text instead of clearing it for a certain refusal
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) return null;
   return prompt.customOptionIndex != null ? { customText: value } : null;
 }
 

@@ -185,17 +185,19 @@ export class ReferenceDraftStore {
     this.refreshKey(key);
     const current = this.readKey(key).text;
     const pending = this.pending.get(key);
+    const own = pending?.sent === sent;
     // a send that began while another was in flight never had a pending record, so nothing
     // tracked whether the draft still extends it: keep the draft rather than strip a prefix
-    const queued = pending?.sent === sent ? [] : (this.overlapped.get(key) ?? []);
+    const queued = own ? [] : (this.overlapped.get(key) ?? []);
     const overlapIndex = queued.indexOf(sent);
     if (overlapIndex >= 0) {
       const rest = queued.filter((_, index) => index !== overlapIndex);
       if (rest.length) this.overlapped.set(key, rest);
       else this.overlapped.delete(key);
     }
-    const editedMeanwhile = pending?.edited === true || overlapIndex >= 0;
-    this.pending.delete(key);
+    const editedMeanwhile = (own && pending.edited) || overlapIndex >= 0;
+    // the record of a later send in flight stays: its acknowledgement still needs it
+    if (own) this.pending.delete(key);
     const prefixEnd = sentPrefixEnd(current, sent);
     const edited = editedMeanwhile || prefixEnd === null;
     const text = prefixEnd === null || edited ? current : current.slice(prefixEnd);
