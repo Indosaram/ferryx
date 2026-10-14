@@ -5629,19 +5629,16 @@ async fn reference_chat_session_jsonl(
     let stream =
         reference_history::resolve_reference_history_stream(&home, identity, &siblings).ok()?;
     let path = stream.file_path()?.to_path_buf();
-    let bytes = crate::ipc::run_blocking(move || {
-        std::fs::read(&path).map_err(|error| crate::ipc::error::IpcError::internal(error.to_string()))
+    // Only the tail is read: the store has no size bound, and the prompt detectors need its end.
+    let bounded = crate::ipc::run_blocking(move || {
+        reference_history::read_reference_history_tail_file(&path, REFERENCE_PROMPT_SESSION_MAX_BYTES)
+            .map_err(|error| crate::ipc::error::IpcError::internal(error.to_string()))
     })
     .await
     .ok()?;
-    let bounded = if bytes.len() > REFERENCE_PROMPT_SESSION_MAX_BYTES {
-        &bytes[bytes.len() - REFERENCE_PROMPT_SESSION_MAX_BYTES..]
-    } else {
-        bytes.as_slice()
-    };
     // Lossy on purpose: the window may start mid-character, and the partial first record is not
     // a record the detectors may match anyway.
-    Some(String::from_utf8_lossy(bounded).into_owned())
+    Some(String::from_utf8_lossy(&bounded).into_owned())
 }
 
 /// What this route's own screen read says about a prompt the pane may be holding.

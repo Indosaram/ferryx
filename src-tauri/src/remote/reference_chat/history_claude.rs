@@ -73,7 +73,8 @@ pub fn parse_reference_claude_history(
             kind.as_str()
         ));
     }
-    parse_claude_transcript(text)
+    // The page bounds the turns: capping here would drop turns no older page could ever serve.
+    Ok(parse_claude_transcript_with_limit(text, 0))
 }
 
 /// Compile-time proof that the lane satisfies the frozen signature (contract §6).
