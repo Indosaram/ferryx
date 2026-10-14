@@ -5726,6 +5726,26 @@ fn reference_chat_input_response(
     }
 }
 
+/// The response for an input transaction run on its own task.
+///
+/// A task that did not finish (it panicked) may have typed part of its input, so its outcome is
+/// unknown, never a refusal that typed nothing.
+fn reference_chat_transaction_response(
+    request_id: &str,
+    joined: Result<reference_input::ReferenceInputOutcome, tokio::task::JoinError>,
+) -> Response {
+    match joined {
+        Ok(outcome) => reference_chat_input_response(request_id, outcome),
+        Err(error) => reference_chat_result_failure(
+            request_id,
+            &reference_chat_scope(
+                ScopeErrorCode::OperationOutcomeUnknown,
+                format!("the input transaction did not finish; its outcome is unknown: {error}"),
+            ),
+        ),
+    }
+}
+
 /// The staged-file registry key: this target's own file, never another pane's.
 fn reference_chat_staged_key(
     target: &reference_types::ReferenceTargetRef,
@@ -5934,7 +5954,7 @@ async fn reference_chat_prompt(
 // ---------------------------------------------------------------------------------------------
 
 /// POST /api/v1/reference-chat/{sessionId}/submit
-async fn reference_chat_submit(
+pub(crate) async fn reference_chat_submit(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath(session_id): AxumPath<String>,
     request: axum::extract::Request,
@@ -5961,45 +5981,64 @@ async fn reference_chat_submit(
     let runtime = reference_chat_runtime();
     // The pane's OWN bracketed-paste mode, as this host's output hub recorded it: the shaping in
     // input.rs is normative and must not assume a mode the pane never enabled.
-    let bracketed_paste = state
-        .terminal_service
-        .output_hub()
-        .is_bracketed_paste_enabled(&session_id);
+    let hub = state.terminal_service.output_hub();
+    // A pane this hub does not hold (a session still served by a legacy daemon after a handover)
+    // has a mode this host cannot read. Unbracketed, a multi-line message's inner CR would submit
+    // its first line as a turn of its own, so it is refused rather than typed in a guessed mode.
+    if hub.session_sequence_range(&session_id).is_none()
+        && reference_input::reference_composer_body(&body.params.text).contains('\r')
+    {
+        return reference_chat_result_failure(
+            &body.request_id,
+            &reference_chat_scope(
+                ScopeErrorCode::Unsupported,
+                "this pane's paste mode cannot be read on this host, so a multi-line message \
+                 cannot be typed as one turn; nothing was typed",
+            ),
+        );
+    }
+    let bracketed_paste = hub.is_bracketed_paste_enabled(&session_id);
     let authorize = reference_chat_authorize(&state, &headers);
-    let clock = reference_input::SystemReferenceClock;
-    let submit = reference_input::ReferenceSubmitRequest {
-        target: &target,
-        request_id: &body.request_id,
-        payload: &body.params,
-        bracketed_paste,
-        // The prompt guard reads the screen INSIDE the target's step (the probe below), so a
-        // prompt that appears while this message waits behind earlier input is still seen.
-        blocked_prompt: None,
-        arrived_at_ms: clock.now_ms(),
-        last_typed_at_ms: None,
-        authorize: &*authorize,
-    };
-    let registry_id = body.registry_id.as_deref();
-    let probe = || reference_chat_blocked_prompt(&state, &target, registry_id);
-    let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
-    let outcome = runtime
-        .input
-        .submit_with_probe(&submit, probe, &writer, &clock)
-        .await;
-    if matches!(outcome, reference_input::ReferenceInputOutcome::Accepted { .. }) {
-        let target_key = reference_types::reference_draft_key(&target);
-        for entry in runtime.staged.lock().values_mut() {
-            let mention = entry.mention_text.trim_end();
-            if entry.target_key == target_key
-                && !entry.pending
-                && !mention.is_empty()
-                && body.params.text.contains(mention)
-            {
-                entry.referenced = true;
+    let request_id = body.request_id.clone();
+    // The transaction runs on its own task: a caller that disconnects drops this handler, and
+    // must not cancel the transaction between its paste and its Enter.
+    let transaction = tokio::spawn(async move {
+        let clock = reference_input::SystemReferenceClock;
+        let submit = reference_input::ReferenceSubmitRequest {
+            target: &target,
+            request_id: &body.request_id,
+            payload: &body.params,
+            bracketed_paste,
+            // The prompt guard reads the screen INSIDE the target's step (the probe below), so a
+            // prompt that appears while this message waits behind earlier input is still seen.
+            blocked_prompt: None,
+            arrived_at_ms: clock.now_ms(),
+            last_typed_at_ms: None,
+            authorize: &*authorize,
+        };
+        let registry_id = body.registry_id.as_deref();
+        let probe = || reference_chat_blocked_prompt(&state, &target, registry_id);
+        let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+        let outcome = runtime
+            .input
+            .submit_with_probe(&submit, probe, &writer, &clock)
+            .await;
+        if matches!(outcome, reference_input::ReferenceInputOutcome::Accepted { .. }) {
+            let target_key = reference_types::reference_draft_key(&target);
+            for entry in runtime.staged.lock().values_mut() {
+                let mention = entry.mention_text.trim_end();
+                if entry.target_key == target_key
+                    && !entry.pending
+                    && !mention.is_empty()
+                    && body.params.text.contains(mention)
+                {
+                    entry.referenced = true;
+                }
             }
         }
-    }
-    reference_chat_input_response(&body.request_id, outcome)
+        outcome
+    });
+    reference_chat_transaction_response(&request_id, transaction.await)
 }
 
 /// POST /api/v1/reference-chat/{sessionId}/stop
@@ -6077,26 +6116,31 @@ async fn reference_chat_answer(
     let identity = reference_chat_identity(&state, &target, body.registry_id.as_deref()).await;
     let prompt_session = reference_chat_prompt_session(&state, &identity).await;
     let authorize = reference_chat_authorize(&state, &headers);
-    let alive = || true;
-    let answer = reference_prompts::ReferenceAnswerRequest {
-        target: &target,
-        request_id: &body.request_id,
-        payload: &body.params,
-        session: prompt_session.borrow(),
-        authorize: &*authorize,
-        alive: &alive,
-    };
-    let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
-    let screen = ReferenceGatewayScreenReader {
-        backend: Arc::clone(&state.session_backend),
-    };
-    let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
-    let clock = reference_input::SystemReferenceClock;
-    let outcome = runtime
-        .answers
-        .answer(&answer, &step, &screen, &writer, &clock)
-        .await;
-    reference_chat_input_response(&body.request_id, outcome)
+    let request_id = body.request_id.clone();
+    // Owned by its own task, like a submit: a caller that disconnects must not leave a menu moved
+    // but unconfirmed, or custom text typed without its Enter.
+    let transaction = tokio::spawn(async move {
+        let alive = || true;
+        let answer = reference_prompts::ReferenceAnswerRequest {
+            target: &target,
+            request_id: &body.request_id,
+            payload: &body.params,
+            session: prompt_session.borrow(),
+            authorize: &*authorize,
+            alive: &alive,
+        };
+        let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
+        let screen = ReferenceGatewayScreenReader {
+            backend: Arc::clone(&state.session_backend),
+        };
+        let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+        let clock = reference_input::SystemReferenceClock;
+        runtime
+            .answers
+            .answer(&answer, &step, &screen, &writer, &clock)
+            .await
+    });
+    reference_chat_transaction_response(&request_id, transaction.await)
 }
 
 /// POST /api/v1/reference-chat/{sessionId}/files
