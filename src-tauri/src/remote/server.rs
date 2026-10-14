@@ -6083,6 +6083,7 @@ async fn reference_chat_answer(
         request_id: &body.request_id,
         payload: &body.params,
         session: prompt_session.borrow(),
+        agent: identity.registry_id.as_str(),
         authorize: &*authorize,
         alive: &alive,
     };
