@@ -2260,18 +2260,17 @@ impl DaemonClient {
         // of the app and died with it leaving no record. The detached spawn below stays as the
         // fallback for platforms with no agent and for isolated runtimes, where installing one would
         // point the user's login autostart at a test build.
-        if crate::daemon::launchd::agent_management_supported() {
-            let agent_binary = binary_path.clone();
-            let agent = crate::ipc::run_blocking(move || {
-                crate::daemon::launchd::ensure_launchd_agent(&agent_binary)
+        if crate::daemon::supervisor::supported() {
+            let agent = crate::ipc::run_blocking(|| {
+                crate::daemon::supervisor::ensure()
                     .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
             })
             .await;
             match agent {
-                Ok(plist_path) => {
+                Ok(reinstalled) => {
                     tracing::info!(
-                        plist = %plist_path.display(),
-                        "Daemon lifetime handed to the launchd agent"
+                        reinstalled,
+                        "Daemon lifetime handed to the supervisor"
                     );
                     if let Ok(stream) = self.wait_for_supervised_daemon(SUPERVISED_START_WAIT).await
                     {
@@ -2281,12 +2280,9 @@ impl DaemonClient {
                     // the process is gone (a committed handover, a duplicate-endpoint exit, or a
                     // crash it is not configured to relaunch). Reloading re-runs `RunAtLoad`, which
                     // is what starts it again without waiting out the long readiness budget.
-                    let reload = crate::ipc::run_blocking({
-                        let plist_path = plist_path.clone();
-                        move || {
-                            crate::daemon::launchd::load_launchd_agent(&plist_path)
-                                .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
-                        }
+                    let reload = crate::ipc::run_blocking(|| {
+                        crate::daemon::supervisor::reload()
+                            .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
                     })
                     .await;
                     match reload {
@@ -2294,18 +2290,18 @@ impl DaemonClient {
                             Ok(stream) => return Ok(stream),
                             Err(error) => tracing::warn!(
                                 %error,
-                                "The launchd agent still published no daemon endpoint; spawning a detached daemon instead"
+                                "The supervisor still published no daemon endpoint; spawning a detached daemon instead"
                             ),
                         },
                         Err(error) => tracing::warn!(
                             %error,
-                            "Could not reload the launchd agent; spawning a detached daemon instead"
+                            "Could not reload the supervisor; spawning a detached daemon instead"
                         ),
                     }
                 }
                 Err(error) => tracing::warn!(
                     %error,
-                    "Could not hand the daemon lifetime to launchd; spawning a detached daemon instead"
+                    "Could not hand the daemon lifetime to the supervisor; spawning a detached daemon instead"
                 ),
             }
         }
