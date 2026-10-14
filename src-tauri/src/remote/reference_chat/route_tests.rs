@@ -1755,6 +1755,54 @@ async fn concurrent_stages_for_one_target_respect_the_file_cap() {
     fixture.server.stop().await;
 }
 
+/// rs-files-routes-r2-1: files a submitted turn already referenced no longer count against the
+/// per-turn bounds, so the next turn can attach a full set again; their bytes stay on disk.
+#[tokio::test]
+async fn files_a_submitted_turn_referenced_free_the_per_turn_bounds() {
+    let fixture = fixture().await;
+    let max = crate::scoped_contracts::ATTACHMENT_MAX_FILES_PER_TURN;
+    let mut mentions = String::new();
+    let mut paths = Vec::new();
+    for index in 0..max {
+        let (status, body) = fixture
+            .stage(&format!("turn-one-{index}.txt"), b"turn one body")
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+        let mention = staged["data"]["mentionText"].as_str().expect("mentionText");
+        paths.push(mention.trim_start_matches('@').trim_end().to_string());
+        mentions.push_str(mention);
+    }
+    let (status, body) = fixture
+        .server
+        .request(
+            "POST",
+            &fixture.route("submit"),
+            Some(&fixture.control),
+            Some(&fixture.mutation(
+                &uuid::Uuid::new_v4().to_string(),
+                serde_json::json!({ "text": format!("echo {mentions}"), "origin": "chat" }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"stage\":\"accepted\""), "{body}");
+
+    let (status, body) = fixture.stage("turn-two.txt", b"turn two body").await;
+    assert_eq!(
+        status, 200,
+        "a new turn must not be refused for files the previous turn already sent: {body}"
+    );
+    let worktree = fixture.worktree().await;
+    for path in &paths {
+        assert!(
+            worktree.join(path).exists(),
+            "a referenced file stays on disk for its TTL: {path}"
+        );
+    }
+    fixture.server.stop().await;
+}
+
 /// rs-files-routes-6: a DELETE whose removal fails is not reported as cleaned, and the entry
 /// stays addressable so a retry can still remove it.
 #[cfg(unix)]
