@@ -2889,8 +2889,14 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           const liveIncarnation = liveInfo.incarnation ?? null;
           const sessionIncarnation = session.incarnation ?? null;
           const sameIncarnationProven = sessionIncarnation && liveIncarnation && sessionIncarnation === liveIncarnation;
-          const isLegacyUnknown = !sessionIncarnation || !liveIncarnation;
-          if (epochChanged && !sameIncarnationProven) {
+          if (epochChanged && sessionIncarnation && liveIncarnation && sessionIncarnation !== liveIncarnation) {
+            // The id is live under another epoch, but both incarnations are known and differ: it is
+            // a different process, so the PTY this pane was bound to is gone.
+            sessions[id] = exitedLocalSession(session);
+            deadSessionIds.push(id);
+          } else if (epochChanged && !sameIncarnationProven) {
+            // Legacy records without an incarnation cannot prove either way; keep the binding so the
+            // pane can still reattach.
             sessions[id] = {
               ...session,
               remoteConnectionState: "disconnected",
@@ -2899,7 +2905,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           } else {
             sessions[id] = {
               ...session,
-              remoteConnectionState: isLegacyUnknown && epochChanged ? "disconnected" : undefined,
+              remoteConnectionState: undefined,
               lifecycle: "running",
               ...(liveInfo.daemonEpoch != null ? { daemonEpoch: liveInfo.daemonEpoch } : {}),
               ...(epochChanged ? { lastOutputSequence: null } : {}),
@@ -2907,11 +2913,12 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             };
           }
         } else {
-          sessions[id] = {
-            ...session,
-            remoteConnectionState: "disconnected",
-            reconnectLifecycle: "failed",
-          };
+          // The daemon answered with its full inventory, which includes the sessions of draining
+          // predecessor daemons. Absent or not running there means the PTY is gone, exactly as the
+          // authoritative restore path concludes; parking it as `disconnected` only offered a
+          // reattach that can never succeed.
+          sessions[id] = exitedLocalSession(session);
+          deadSessionIds.push(id);
         }
       }
       if (!changed) return state;
@@ -2926,13 +2933,15 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             return [id, { ...session, remoteConnectionState: "reconnecting", remoteGeneration: null }];
           }
           matchedSessionIds.push(id);
+          const dead = action.lifecycle === "exited" || action.lifecycle === "failed";
           return [
             id,
             {
               ...session,
               lifecycle: action.lifecycle,
-              backendSessionId: action.lifecycle === "exited" || action.lifecycle === "failed" ? null : session.backendSessionId,
-              reconnectLifecycle: action.lifecycle === "exited" || action.lifecycle === "failed" ? "idle" : session.reconnectLifecycle,
+              backendSessionId: dead ? null : session.backendSessionId,
+              reconnectLifecycle: dead ? "idle" : session.reconnectLifecycle,
+              ...(dead ? clearedTransportState(session) : {}),
             },
           ];
         }),
@@ -3003,6 +3012,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         lifecycle: "exited",
         backendSessionId: null,
         reconnectLifecycle: "idle",
+        ...clearedTransportState(session),
         // Keep the failure on the pane. Without it a failed spawn or attach leaves the pane on the
         // "Shell exited" overlay with no explanation of what went wrong.
         backendUnavailableReason: action.reason ?? null,
@@ -3409,6 +3419,36 @@ function settleActivityForDeadSessions(state: WorkspaceState, sessionIds: Iterab
     nextState = applySessionActivity(nextState, tabId, sessionId, { ...current, state: "done" });
   }
   return nextState;
+}
+
+/**
+ * Transport fields a session must drop once its PTY is confirmed gone.
+ *
+ * `remoteConnectionState` describes a live binding that may come back (`disconnected` invites a
+ * reattach); once the backend id is cleared there is nothing left to reattach to, so keeping it
+ * leaves an exited pane advertising a recoverable outage. `running` likewise cannot outlive the
+ * process; hibernated and suspended are deliberate user states and stay as they are.
+ */
+function clearedTransportState(session: TerminalSession): Partial<TerminalSession> {
+  return {
+    remoteConnectionState: undefined,
+    remoteGeneration: null,
+    remoteFailure: null,
+    remoteReplayGap: null,
+    ...(session.processState === "running" ? { processState: "standby" as const } : {}),
+  };
+}
+
+function exitedLocalSession(session: TerminalSession): TerminalSession {
+  return {
+    ...session,
+    lifecycle: "exited",
+    backendSessionId: null,
+    daemonEpoch: null,
+    lastOutputSequence: null,
+    reconnectLifecycle: "idle",
+    ...clearedTransportState(session),
+  };
 }
 
 /**

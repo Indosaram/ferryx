@@ -27,6 +27,7 @@ export async function formatPaneDebugInfoAsync(
     remoteGeneration: session?.remoteGeneration ?? null,
     agentType: session?.agentType ?? null,
     agentSessionId: session?.agentSessionId ?? null,
+    providerSession: session?.providerSession ?? null,
     liveness,
     nativeSnapshotDeadlineFired: observation?.nativeSnapshotDeadlineFired ?? null,
   });
@@ -55,6 +56,7 @@ export function formatPaneDebugInfo(leafId: string | null, session: TerminalSess
     remoteGeneration: session?.remoteGeneration ?? null,
     agentType: session?.agentType ?? null,
     agentSessionId: session?.agentSessionId ?? null,
+    providerSession: session?.providerSession ?? null,
     liveness,
   });
 }

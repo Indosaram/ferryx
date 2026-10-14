@@ -49,6 +49,52 @@ describe("workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer", (
     expect(next.sessions["term-1"].reconnectLifecycle).toBe("idle");
   });
 
+  it("drops a stale disconnected transport state when the local backend is confirmed gone", () => {
+    const session: TerminalSession = {
+      id: "term-1",
+      cwd: "/repo",
+      workspaceId: "ws-local",
+      worktree: { wsId: "ws-local", slug: "main" },
+      backendSessionId: "backend-live-1",
+      lifecycle: "working",
+      processState: "running",
+      remoteConnectionState: "disconnected",
+      reconnectLifecycle: "failed",
+    };
+
+    const next = workspaceReducer(createInitialState(session), {
+      type: "SESSION_BACKEND_UNAVAILABLE",
+      sessionId: "term-1",
+      backendSessionId: "backend-live-1",
+      reason: "daemon-attach-not-found",
+    });
+
+    expect(next.sessions["term-1"].remoteConnectionState).toBeUndefined();
+    expect(next.sessions["term-1"]).toMatchObject({ lifecycle: "exited", processState: "standby", reconnectLifecycle: "idle" });
+  });
+
+  it("drops a stale disconnected transport state when the local PTY exits", () => {
+    const session: TerminalSession = {
+      id: "term-1",
+      cwd: "/repo",
+      workspaceId: "ws-local",
+      worktree: { wsId: "ws-local", slug: "main" },
+      backendSessionId: "backend-live-1",
+      lifecycle: "working",
+      processState: "running",
+      remoteConnectionState: "disconnected",
+    };
+
+    const next = workspaceReducer(createInitialState(session), {
+      type: "SESSION_LIFECYCLE",
+      backendSessionId: "backend-live-1",
+      lifecycle: "exited",
+    });
+
+    expect(next.sessions["term-1"].remoteConnectionState).toBeUndefined();
+    expect(next.sessions["term-1"]).toMatchObject({ lifecycle: "exited", backendSessionId: null, processState: "standby" });
+  });
+
   it("is a no-op when backendSessionId has already re-bound to a different ID", () => {
     const session: TerminalSession = {
       id: "term-1",

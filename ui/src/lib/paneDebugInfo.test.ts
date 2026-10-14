@@ -39,6 +39,24 @@ describe("formatPaneDebugInfo", () => {
     expect(parsed).toHaveProperty("backendSessionId", null);
     expect(parsed).toHaveProperty("sessionId", null);
   });
+
+  it("reports the provider session that agent resume uses", () => {
+    const session = {
+      id: "session-c",
+      cwd: "/repo",
+      workspaceId: "ferryx",
+      worktree: null,
+      backendSessionId: null,
+      lifecycle: "exited",
+      agentType: "omo",
+      agentSessionId: null,
+      providerSession: { key: "session_id", id: "01a134da-cb1f-7998-90a3-3bce6322e0fd" },
+    } as TerminalSession;
+
+    const parsed = JSON.parse(formatPaneDebugInfo("leaf-c", session));
+
+    expect(parsed.providerSession).toEqual({ key: "session_id", id: "01a134da-cb1f-7998-90a3-3bce6322e0fd" });
+  });
   it("formats pane debug info asynchronously awaiting native observation", async () => {
     const session = {
       id: "session-async",

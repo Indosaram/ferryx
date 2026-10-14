@@ -66,20 +66,57 @@ describe("LOCAL_SESSIONS_RECONCILED", () => {
     expect(next.sessions.s1).toMatchObject({ lifecycle: "running", lastOutputSequence: "450" });
   });
 
-  it("preserves a missing local session identity as a failed reconnect", () => {
-    const state = stateWith([session("s1", "local", "b1")]);
+  it("exits a local session the daemon inventory does not list", () => {
+    const state = stateWith([{ ...session("s1", "local", "b1"), processState: "running" }]);
     const next = workspaceReducer(state, { type: "LOCAL_SESSIONS_RECONCILED", live: new Map() });
-    expect(next.sessions.s1.remoteConnectionState).toBe("disconnected");
-    expect(next.sessions.s1).toMatchObject({ backendSessionId: "b1", lifecycle: "working", reconnectLifecycle: "failed" });
+    expect(next.sessions.s1.remoteConnectionState).toBeUndefined();
+    expect(next.sessions.s1).toMatchObject({
+      backendSessionId: null,
+      lifecycle: "exited",
+      processState: "standby",
+      reconnectLifecycle: "idle",
+      daemonEpoch: null,
+      lastOutputSequence: null,
+    });
   });
 
-  it("preserves a listed but not running session identity as a failed reconnect", () => {
+  it("exits a listed but not running session", () => {
     const state = stateWith([session("s1", "local", "b1")]);
     const next = workspaceReducer(state, {
       type: "LOCAL_SESSIONS_RECONCILED",
       live: new Map([["b1", { daemonEpoch: null, running: false }]]),
     });
-    expect(next.sessions.s1).toMatchObject({ backendSessionId: "b1", lifecycle: "working", remoteConnectionState: "disconnected", reconnectLifecycle: "failed" });
+    expect(next.sessions.s1.remoteConnectionState).toBeUndefined();
+    expect(next.sessions.s1).toMatchObject({ backendSessionId: null, lifecycle: "exited" });
+  });
+
+  it("exits a session whose id is live under another epoch with a different incarnation", () => {
+    const state = stateWith([session("s1", "local", "b1")]);
+    const next = workspaceReducer(state, {
+      type: "LOCAL_SESSIONS_RECONCILED",
+      live: new Map([["b1", { daemonEpoch: "epoch-new", running: true, incarnation: "incarnation-2" }]]),
+    });
+    expect(next.sessions.s1.remoteConnectionState).toBeUndefined();
+    expect(next.sessions.s1).toMatchObject({ backendSessionId: null, lifecycle: "exited" });
+  });
+
+  it("keeps a legacy session without incarnation reattachable across an epoch change", () => {
+    const state = stateWith([{ ...session("s1", "local", "b1"), incarnation: undefined }]);
+    const next = workspaceReducer(state, {
+      type: "LOCAL_SESSIONS_RECONCILED",
+      live: new Map([["b1", { daemonEpoch: "epoch-new", running: true }]]),
+    });
+    expect(next.sessions.s1).toMatchObject({ backendSessionId: "b1", remoteConnectionState: "disconnected", reconnectLifecycle: "failed" });
+  });
+
+  it("settles the work claim of a session it exits", () => {
+    const base = stateWith([session("s1", "local", "b1")]);
+    const state: WorkspaceState = {
+      ...base,
+      activityBySessionId: { s1: { state: "working", title: "agent", isAgent: true } },
+    };
+    const next = workspaceReducer(state, { type: "LOCAL_SESSIONS_RECONCILED", live: new Map() });
+    expect(next.activityBySessionId?.s1?.state).toBe("done");
   });
 
   it("marks local sessions disconnected when reconciliation gave up", () => {
