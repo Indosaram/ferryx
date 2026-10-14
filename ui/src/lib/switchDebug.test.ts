@@ -184,7 +184,10 @@ describe("switchDebug", () => {
       expect(isReleasePersistedInputEvent("project.register.error")).toBe(true);
       expect(isReleasePersistedInputEvent("terminal.surface.attach.error")).toBe(true);
       expect(isReleasePersistedInputEvent("terminal.surface.bounds.error")).toBe(true);
-      expect(isReleasePersistedInputEvent("terminal.surface.bounds.start")).toBe(false);
+      expect(isReleasePersistedInputEvent("terminal.surface.bounds.start")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.detach.complete")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.cover")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.lifecycle.present")).toBe(false);
     });
   });
 });

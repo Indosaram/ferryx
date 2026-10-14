@@ -161,7 +161,10 @@ pub fn should_persist_entry(debug_enabled: bool, event: &str) -> bool {
         || event.starts_with("terminal.open.")
         || event.starts_with("project.register.")
         || event.starts_with("terminal.surface.attach.")
-        || event == "terminal.surface.bounds.error"
+        || event.starts_with("terminal.surface.bounds.")
+        || event.starts_with("terminal.surface.detach.")
+        || event == "terminal.surface.skipped"
+        || event == "terminal.surface.cover"
 }
 
 fn switch_debug_path(root: &std::path::Path) -> std::path::PathBuf {
@@ -216,6 +219,12 @@ pub fn is_allowlisted_detail_key(k: &str) -> bool {
             | "width"
             | "height"
             | "generation"
+            | "covered"
+            | "visible"
+            | "surfaceVisible"
+            | "interactive"
+            | "suspended"
+            | "isExited"
             | "totalBytes"
             | "dropReason"
             | "textLength"
@@ -698,7 +707,10 @@ mod tests {
         assert!(should_persist_entry(false, "project.register.error"));
         assert!(should_persist_entry(false, "terminal.surface.attach.error"));
         assert!(should_persist_entry(false, "terminal.surface.bounds.error"));
-        assert!(!should_persist_entry(false, "terminal.surface.bounds.start"));
+        assert!(should_persist_entry(false, "terminal.surface.bounds.start"));
+        assert!(should_persist_entry(false, "terminal.surface.detach.complete"));
+        assert!(should_persist_entry(false, "terminal.surface.cover"));
+        assert!(!should_persist_entry(false, "terminal.lifecycle.present"));
     }
 
     #[test]
