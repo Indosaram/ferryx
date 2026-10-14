@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { formatBindingLabel, isMacShortcutPlatform, matchesBinding, resolveBinding, SHORTCUTS, type ShortcutActionId } from "../lib/shortcuts";
+import { formatBindingLabel, isMacShortcutPlatform, matchesBinding, resolveBinding, resolvedShortcuts, type ShortcutActionId } from "../lib/shortcuts";
+import { useShortcutOverrides } from "../lib/shortcutOverrides";
 
 export type ShortcutHintContext = {
   readonly tabIds: readonly string[];
@@ -24,8 +25,11 @@ type Hint = {
 };
 
 export function ShortcutHints(props: ShortcutHintsProps) {
+  const { overrides } = useShortcutOverrides();
   const latest = useRef(props);
   latest.current = props;
+  const latestOverrides = useRef(overrides);
+  latestOverrides.current = overrides;
   const [hints, setHints] = useState<readonly Hint[]>([]);
 
   useEffect(() => {
@@ -42,6 +46,7 @@ export function ShortcutHints(props: ShortcutHintsProps) {
     };
     const show = (event: KeyboardEvent) => {
       const { getContext, enabledActions, isMac = isMacShortcutPlatform() } = latest.current;
+      const shortcuts = resolvedShortcuts(latestOverrides.current);
       const context = getContext();
       const enabled = new Set(enabledActions);
       const focus = document.activeElement;
@@ -85,7 +90,7 @@ export function ShortcutHints(props: ShortcutHintsProps) {
           );
           if (index >= 0 && index < 9) actions.push(`workspace.select${index + 1}`);
         }
-        for (const shortcut of SHORTCUTS) {
+        for (const shortcut of shortcuts) {
           if (!enabled.has(shortcut.id) || !actions.includes(shortcut.id)) continue;
           if (editing && shortcut.id !== "settings.toggle" && shortcut.id !== "commandPalette.open" && shortcut.id !== "notifications.toggle" && !shortcut.id.startsWith("browser.")) continue;
           const binding = [shortcut.binding, ...(shortcut.aliases ?? [])].map((candidate) => resolveBinding(candidate, isMac)).find((candidate) =>
@@ -100,7 +105,7 @@ export function ShortcutHints(props: ShortcutHintsProps) {
             ctrlKey: Boolean(binding.control || (binding.mod && !isMac)),
             altKey: Boolean(binding.alt), shiftKey: Boolean(binding.shift),
           });
-          const winner = SHORTCUTS.find((candidate) => enabled.has(candidate.id)
+          const winner = shortcuts.find((candidate) => enabled.has(candidate.id)
             && [candidate.binding, ...(candidate.aliases ?? [])].some((keys) => matchesBinding(chord, keys, isMac)));
           if (winner?.id !== shortcut.id) continue;
           const label = formatBindingLabel(binding, isMac);

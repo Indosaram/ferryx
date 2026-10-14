@@ -10,7 +10,8 @@ import {
 } from "lucide-react";
 
 import { cn } from "../../lib/cn";
-import { shortcutLabel } from "../../lib/shortcuts";
+import { shortcutLabel, type ShortcutOverrideMap } from "../../lib/shortcuts";
+import { useShortcutOverrides } from "../../lib/shortcutOverrides";
 import { Keycap } from "./WizardPrimitives";
 
 export const FEATURE_SHORTCUTS = [
@@ -151,7 +152,7 @@ function KeyboardIllustration(): JSX.Element {
   );
 }
 
-function buildFeatures(isMac: boolean): FeatureDef[] {
+function buildFeatures(isMac: boolean, overrides: ShortcutOverrideMap): FeatureDef[] {
   return [
     {
       id: "sessions",
@@ -204,7 +205,7 @@ function buildFeatures(isMac: boolean): FeatureDef[] {
               className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground"
             >
               <span>{shortcut.title}</span>
-              <Keycap>{shortcutLabel(shortcut.id, isMac)}</Keycap>
+              <Keycap>{shortcutLabel(shortcut.id, isMac, overrides) || "Unbound"}</Keycap>
             </span>
           ))}
         </span>
@@ -215,9 +216,10 @@ function buildFeatures(isMac: boolean): FeatureDef[] {
 }
 
 export function FeaturesStep({ isMac }: { isMac: boolean }): JSX.Element {
+  const { overrides } = useShortcutOverrides();
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      {buildFeatures(isMac).map((feature) => (
+      {buildFeatures(isMac, overrides).map((feature) => (
         <figure
           key={feature.id}
           data-testid={`onboarding-feature-${feature.id}`}
