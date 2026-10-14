@@ -3080,7 +3080,12 @@ export const RemoteHostConnection: React.FC<{
       setChatHasOlder(read.page.hasMore && nextCursor !== null);
       const mapped = mapReferenceTurns(read.page);
       setChatOlderMessages((prev) => [...mapped, ...prev]);
-      setChatWarnings((prev) => prev.filter((warning) => warning !== CHAT_OLDER_FAILED_WARNING));
+      // The oldest page a capped tail window holds is not the conversation's start: say so.
+      const disclosed = referenceHistoryNotice(read.page);
+      setChatWarnings((prev) => {
+        const cleared = prev.filter((warning) => warning !== CHAT_OLDER_FAILED_WARNING);
+        return disclosed === null ? cleared : withChatWarning(cleared, disclosed);
+      });
     } catch {
       if (signal.aborted || !chatTargetIsCurrent(target) || superseded()) return;
       setChatOlderFailed(true);

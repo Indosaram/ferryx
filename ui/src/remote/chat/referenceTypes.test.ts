@@ -72,6 +72,12 @@ describe("reference history page", () => {
     expect(referenceCanReachProviderRead(native, boundTarget("   "))).toBe(false);
   });
 
+  it("rs-history-r4-2: discloses a native page's reason when its window could not reach the beginning", () => {
+    const capped = page({ unavailableReason: "older history lies beyond the 4194304 byte read cap" });
+    expect(referenceHistoryIsNative(capped)).toBe(true);
+    expect(referenceHistoryDisclosure(capped)).toBe("older history lies beyond the 4194304 byte read cap");
+  });
+
   it("labels a scrollback page with the reference disclosure and never claims providerRead", () => {
     const scrollback = page({
       source: "scrollback",

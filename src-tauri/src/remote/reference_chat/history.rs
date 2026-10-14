@@ -556,7 +556,7 @@ fn reference_history_cwd_candidates(home: &Path, cwd: &str) -> Vec<PathBuf> {
         .join(".omo")
         .join("agent")
         .join("sessions")
-        .join(crate::agent_transcript::slug_for_cwd(cwd));
+        .join(super::history_omo::omo_session_folder(cwd));
     let Ok(entries) = std::fs::read_dir(&folder) else {
         return Vec::new();
     };
@@ -1181,6 +1181,14 @@ pub fn reference_history_page_from_window(
         stream_id: stream.stream_id.clone(),
         offset: window_start + starts[start_index] as u64,
     });
+    // A tail window's oldest page is not the conversation's beginning: the turns before the window
+    // were never read, so the page says so rather than passing its first turn off as the start.
+    let unavailable_reason = (window_start > 0 && start_index == 0).then(|| {
+        format!(
+            "older history lies beyond the {REFERENCE_HISTORY_MAX_BYTES} byte read cap; the {window_start} \
+             bytes before this window were not read"
+        )
+    });
 
     Ok(ReferenceHistoryPage {
         source: stream.source,
@@ -1189,7 +1197,7 @@ pub fn reference_history_page_from_window(
         cursor: next_cursor,
         has_more: start_index > 0,
         generation,
-        unavailable_reason: None,
+        unavailable_reason,
     })
 }
 
@@ -1496,6 +1504,53 @@ mod tests {
         let identity = identity("omo", "sess-z").with_cwd("/w");
         let stream = omo_stream(&home, &identity);
         assert_eq!(stream.file_path(), Some(only.as_path()));
+    }
+
+    // rs-history-r4-1
+    #[test]
+    fn resolve_binds_a_windows_cwd_to_the_folder_omo_names_for_it() {
+        let home = TempHome::new();
+        let only = home.write_session("--C--Users-me-app--", "2026-10-06_aaa.jsonl", THREE_TURNS);
+        let identity = identity("omo", "sess-z").with_cwd(r"C:\Users\me\app");
+        let stream = resolve_reference_history_stream(home.path(), &identity, &[])
+            .expect("a Windows cwd resolves to OmO's own folder for it");
+        assert_eq!(stream.file_path(), Some(only.as_path()));
+    }
+
+    // rs-history-r4-2
+    #[test]
+    fn the_oldest_page_of_a_tail_window_discloses_the_history_past_the_read_cap() {
+        let home = TempHome::new();
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", THREE_TURNS);
+        let identity = bound_identity("omo", "sess-1", "aaa");
+        let stream = omo_stream(&home, &identity);
+
+        // A whole-store read reaches the conversation's real beginning and says nothing.
+        let starts = reference_history_turn_starts(ReferenceNativeHistoryKind::Omo, THREE_TURNS.as_bytes());
+        let whole_oldest = reference_history_page_from_bytes(&stream, &identity, THREE_TURNS.as_bytes(), 3, None)
+            .expect("the whole store is one page");
+        assert!(whole_oldest.cursor.is_none());
+        assert_eq!(whole_oldest.unavailable_reason, None);
+
+        // A tail window that begins inside the first turn holds only turns two and three.
+        let window_start = starts[1] - 10;
+        let window = &THREE_TURNS.as_bytes()[window_start..];
+        let newest = reference_history_page_from_window(&stream, &identity, window_start as u64, window, 1, None)
+            .expect("the newest page of the window is served");
+        assert_eq!(newest.unavailable_reason, None, "a page with an older page in the window says nothing");
+        let cursor = newest.cursor.expect("the window holds an older turn");
+        let oldest =
+            reference_history_page_from_window(&stream, &identity, window_start as u64, window, 1, Some(&cursor))
+                .expect("the window's oldest page is served");
+        assert_eq!(first_text(&oldest.turns[0]), "second");
+        assert!(oldest.cursor.is_none(), "no byte below the window is reachable");
+        assert!(!oldest.has_more);
+        assert_eq!(oldest.availability, ReferenceHistoryAvailability::Native);
+        assert!(
+            oldest.unavailable_reason.as_deref().is_some_and(|reason| reason.contains("read cap")),
+            "the window's oldest page must disclose the older history it cannot reach: {:?}",
+            oldest.unavailable_reason
+        );
     }
 
     #[test]

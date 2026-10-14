@@ -324,11 +324,13 @@ export function referenceHistoryIsNative(page: ReferenceHistoryPage): boolean {
  *
  * A native page discloses nothing. Scrollback is same-pane output and a not-started session
  * is a conversation with no turns yet; both are labelled rather than passed off as native.
+ * The one native exception is a page whose bounded window could not reach the conversation's
+ * beginning: its reason says so, so that page is never passed off as the start.
  */
 export function referenceHistoryDisclosure(page: ReferenceHistoryPage): string | null {
   switch (page.availability) {
     case "native":
-      return null;
+      return page.unavailableReason ?? null;
     case "scrollback":
       return REFERENCE_SCROLLBACK_DISCLOSURE;
     case "notStarted":
