@@ -6152,7 +6152,7 @@ async fn reference_chat_answer(
 /// staging root INSIDE the pane's working directory, and the receipt names the host, an opaque
 /// id, the digest, the size and the media type. No absolute path is minted for the client: the
 /// mention the agent receives is the staged file's path relative to the pane's cwd.
-async fn reference_chat_stage_file(
+pub(crate) async fn reference_chat_stage_file(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath(session_id): AxumPath<String>,
     request: axum::extract::Request,
@@ -6174,6 +6174,16 @@ async fn reference_chat_stage_file(
         return reference_chat_error(
             ScopeErrorCode::Forbidden,
             "a view-only device cannot stage a file for a pane",
+        );
+    }
+    // An SSH-remote pane's working directory is on its paired host, not on this gateway: a path
+    // resolved here would stage the bytes on the wrong machine (or report a misleading
+    // NOT_FOUND), and the mention typed into the remote agent would name a file it cannot open.
+    if reference_chat_session_is_remote(&state, &session_id).await {
+        return reference_chat_error(
+            ScopeErrorCode::Unsupported,
+            "this session's working directory lives on its paired host; a file cannot be staged \
+             for it from this gateway",
         );
     }
     let runtime = reference_chat_runtime();
@@ -6236,37 +6246,40 @@ async fn reference_chat_stage_file(
         );
     }
     let payload = body.params.clone();
-    let host_id = reference_files::reference_host_id();
-    let stage_root = worktree.clone();
-    let staged = crate::ipc::run_blocking(move || {
-        Ok::<_, crate::ipc::error::IpcError>(reference_files::stage_reference_file_in(
-            &host_id,
-            &stage_root,
-            &payload,
-        ))
-    })
-    .await;
-    let receipt = match staged {
-        Ok(Ok(receipt)) => receipt,
-        Ok(Err(code)) => {
-            runtime.staged.lock().remove(&reservation);
-            return reference_chat_refusal(&reference_chat_scope(
-                code,
-                "the file could not be staged on this host",
+    // The write and its registration run on their own task: a caller that disconnects drops this
+    // handler, and must not cancel the stage between its reservation and its registration, which
+    // would leave a pending slot counted against the target's bounds but never listed.
+    let transaction = tokio::spawn(async move {
+        let host_id = reference_files::reference_host_id();
+        let stage_root = worktree.clone();
+        let staged = crate::ipc::run_blocking(move || {
+            Ok::<_, crate::ipc::error::IpcError>(reference_files::stage_reference_file_in(
+                &host_id,
+                &stage_root,
+                &payload,
             ))
-        }
-        Err(_) => {
-            runtime.staged.lock().remove(&reservation);
-            return reference_chat_error(
-                ScopeErrorCode::Unsupported,
-                "the staging thread did not finish",
-            )
-        }
-    };
-    let dir = reference_files::reference_staging_base_dir(&worktree)
-        .join(&receipt.receipt.attachment_id);
-    let path = dir.join(&receipt.display_name);
-    {
+        })
+        .await;
+        let receipt = match staged {
+            Ok(Ok(receipt)) => receipt,
+            Ok(Err(code)) => {
+                runtime.staged.lock().remove(&reservation);
+                return Err(reference_chat_refusal(&reference_chat_scope(
+                    code,
+                    "the file could not be staged on this host",
+                )));
+            }
+            Err(_) => {
+                runtime.staged.lock().remove(&reservation);
+                return Err(reference_chat_error(
+                    ScopeErrorCode::Unsupported,
+                    "the staging thread did not finish",
+                ));
+            }
+        };
+        let dir = reference_files::reference_staging_base_dir(&worktree)
+            .join(&receipt.receipt.attachment_id);
+        let path = dir.join(&receipt.display_name);
         let mut staged = runtime.staged.lock();
         staged.remove(&reservation);
         staged.insert(
@@ -6283,7 +6296,18 @@ async fn reference_chat_stage_file(
                 referenced: false,
             },
         );
-    }
+        Ok(receipt)
+    });
+    let receipt = match transaction.await {
+        Ok(Ok(receipt)) => receipt,
+        Ok(Err(response)) => return response,
+        Err(_) => {
+            return reference_chat_error(
+                ScopeErrorCode::Unsupported,
+                "the staging task did not finish",
+            )
+        }
+    };
     reference_chat_result_ok(
         &body.request_id,
         serde_json::json!({
