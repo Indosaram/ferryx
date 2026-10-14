@@ -118,6 +118,9 @@ pub struct NativeTerminal {
     gesture: SelectionGestureGuard,
     image_cache: std::cell::RefCell<super::images::ImageCache>,
     synchronized_output_deadline: Option<tokio::time::Instant>,
+    /// Monotonic count of primary-screen rows dropped from the top of the screen
+    /// (scrollback pruning or erasure) since this terminal was created.
+    scrollback_pruned_rows: u64,
 }
 
 // SAFETY: Category: Thread Transfer Safety.
@@ -149,6 +152,7 @@ impl NativeTerminal {
             gesture,
             image_cache: Default::default(),
             synchronized_output_deadline: None,
+            scrollback_pruned_rows: 0,
         })
     }
 
@@ -458,10 +462,30 @@ impl TerminalEngine for NativeTerminal {
             return Ok(());
         }
 
+        // Anchor the newest primary-screen row so the rows this write drops from the top
+        // can be counted: the anchor's screen row moves up by exactly that many.
+        let prune_anchor = if query_is_alternate_screen(self.handle)? {
+            None
+        } else {
+            Some(selection::bottom_screen_anchor(self.handle)?)
+        };
+
         // SAFETY: Category: Buffer Borrowing across FFI.
         // Invariant: data.as_ptr() is valid for data.len() bytes; borrowed only synchronously.
         unsafe {
             ghostty_terminal_vt_write(self.handle.as_ptr(), data.as_ptr(), data.len());
+        }
+        if let Some((anchor, before_row)) = prune_anchor {
+            if !query_is_alternate_screen(self.handle)? {
+                let dropped = match selection::screen_anchor_row(self.handle, &anchor) {
+                    Some(after_row) if after_row <= before_row => before_row - after_row,
+                    // The anchored page left the screen (pruned, or replaced by a capacity
+                    // adjustment). Over-counting is the safe direction: earlier coordinates
+                    // become invalid rather than silently pointing at different text.
+                    _ => before_row + 1,
+                };
+                self.scrollback_pruned_rows += u64::from(dropped);
+            }
         }
         if self.synchronized_output_enabled()? {
             // A missing DEC 2026 reset must not freeze the terminal indefinitely.
@@ -571,6 +595,19 @@ impl TerminalEngine for NativeTerminal {
 
     fn select_line_at(&mut self, row: u16) -> Result<(), NativeTerminalError> {
         select_line_at(self.handle, row)
+    }
+
+    fn select_range(
+        &mut self,
+        start: (u16, u32),
+        end: (u16, u32),
+        rectangle: bool,
+    ) -> Result<(), NativeTerminalError> {
+        selection::select_range(self.handle, start, end, rectangle)
+    }
+
+    fn scrollback_pruned_rows(&self) -> u64 {
+        self.scrollback_pruned_rows
     }
 
     fn selection_text(&self) -> Result<Option<String>, NativeTerminalError> {
@@ -1470,5 +1507,111 @@ mod tests {
             Some("file:///tmp/a.txt")
         );
         assert_eq!(terminal.hyperlink_uri_at(5, 0).unwrap(), None);
+    }
+
+    #[test]
+    fn select_range_selects_across_wrapped_rows() {
+        let mut terminal = NativeTerminal::new(10, 5).expect("create native terminal");
+        terminal.feed(b"abcdefghijklmnopqrstuvwxy").unwrap();
+
+        // (2,0) is 'c'; (4,2) is 'y' after two soft wraps. Endpoint order must not matter.
+        terminal.select_range((4, 2), (2, 0), false).unwrap();
+
+        assert_eq!(
+            terminal.selection_text().unwrap(),
+            Some("cdefghijklmnopqrstuvwxy".to_string())
+        );
+    }
+
+    #[test]
+    fn select_range_rectangle_selects_a_block() {
+        let mut terminal = NativeTerminal::new(10, 5).expect("create native terminal");
+        terminal.feed(b"abcdef\r\nghijkl\r\nmnopqr").unwrap();
+
+        terminal.select_range((1, 0), (3, 2), true).unwrap();
+
+        assert_eq!(
+            terminal.selection_text().unwrap(),
+            Some("bcd\nhij\nnop".to_string())
+        );
+    }
+
+    #[test]
+    fn select_range_reaches_into_scrollback() {
+        let mut terminal = NativeTerminal::new(20, 5).expect("create native terminal");
+        for i in 0..20 {
+            terminal.feed(format!("line {i:02}\r\n").as_bytes()).unwrap();
+        }
+        assert!(terminal.scrollback_rows().unwrap() > 1);
+        assert!(terminal.scrollbar().unwrap().offset > 1, "row 1 must be above the viewport");
+
+        terminal.select_range((0, 1), (6, 1), false).unwrap();
+
+        assert_eq!(terminal.selection_text().unwrap(), Some("line 01".to_string()));
+    }
+
+    #[test]
+    fn select_range_survives_scrollback_pruning() {
+        let mut terminal = NativeTerminal::new(20, 5).expect("create native terminal");
+        // Pruning is page-granular, so keep the limit well above one page; otherwise a
+        // single prune discards everything, including the line under test.
+        terminal.set_scrollback_limit_lines(Some(10_000)).unwrap();
+        let mut next = 0u64;
+        let mut emit = |terminal: &mut NativeTerminal, count: u64| {
+            for _ in 0..count {
+                terminal.feed(format!("row {next:06}\r\n").as_bytes()).unwrap();
+                next += 1;
+            }
+        };
+
+        // Fill scrollback past its limit so further lines prune from the top.
+        emit(&mut terminal, 40_000);
+        let pruned_before = terminal.scrollback_pruned_rows();
+        assert!(pruned_before > 0, "scrollback must be full and pruning");
+        // Every emitted line plus the trailing empty cursor row is either retained or pruned.
+        assert_eq!(pruned_before + terminal.total_rows().unwrap() as u64, 40_001);
+
+        // Line i was born at screen row i, so it now sits at i - pruned.
+        let target_line = 39_990u64;
+        let row = u32::try_from(target_line - pruned_before).unwrap();
+        terminal.select_range((0, row), (9, row), false).unwrap();
+        let expected = Some(format!("row {target_line:06}"));
+        assert_eq!(terminal.selection_text().unwrap(), expected);
+
+        // Emit lines until at least one more page is pruned.
+        let mut extra = 0u64;
+        while terminal.scrollback_pruned_rows() == pruned_before {
+            emit(&mut terminal, 1);
+            extra += 1;
+            assert!(extra < 20_000, "pruning never advanced");
+        }
+        let delta = terminal.scrollback_pruned_rows() - pruned_before;
+        assert_eq!(
+            terminal.scrollback_pruned_rows() + terminal.total_rows().unwrap() as u64,
+            40_001 + extra,
+            "the pruned count must equal the rows that left the screen"
+        );
+        assert!(u64::from(row) >= delta, "target line was itself pruned");
+
+        let shifted = row - u32::try_from(delta).unwrap();
+        terminal.select_range((0, shifted), (9, shifted), false).unwrap();
+        assert_eq!(terminal.selection_text().unwrap(), expected);
+    }
+
+    #[test]
+    fn select_range_rejects_out_of_bounds_cells() {
+        let mut terminal = NativeTerminal::new(10, 5).expect("create native terminal");
+        let total = terminal.total_rows().unwrap() as u32;
+
+        for (start, end) in [((10, 0), (0, 0)), ((0, 0), (0, total)), ((0, u32::MAX), (0, 0))] {
+            assert!(
+                matches!(
+                    terminal.select_range(start, end, false),
+                    Err(crate::native_terminal::NativeTerminalError::InvalidValue(_))
+                ),
+                "{start:?}..{end:?} must be a typed error"
+            );
+        }
+        assert_eq!(terminal.selection_text().unwrap(), None);
     }
 }

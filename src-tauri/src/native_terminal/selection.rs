@@ -158,6 +158,61 @@ pub fn select_line_at(
     install_selection(handle, &selection)
 }
 
+/// Select an arbitrary cell range given in screen (scrollback-inclusive) coordinates.
+///
+/// `start` and `end` are inclusive `(col, row)` cells; their order does not matter.
+/// With `rectangle` the selection is the column block between the two cells instead of
+/// the reading-order span. Coordinates outside the grid are rejected with a typed error.
+pub fn select_range(
+    handle: NonNull<GhosttyTerminalImpl>,
+    start: (u16, u32),
+    end: (u16, u32),
+    rectangle: bool,
+) -> Result<(), NativeTerminalError> {
+    let cols = super::queries::query_cols(handle)?;
+    let total_rows = super::queries::query_total_rows(handle)?;
+    for (col, row) in [start, end] {
+        if col >= cols || row as usize >= total_rows {
+            return Err(NativeTerminalError::InvalidValue(format!(
+                "selection cell ({col}, {row}) is outside the {cols}x{total_rows} screen"
+            )));
+        }
+    }
+    let selection = GhosttySelection {
+        size: std::mem::size_of::<GhosttySelection>(),
+        start: screen_ref(handle, start.0, start.1)?,
+        end: screen_ref(handle, end.0, end.1)?,
+        rectangle,
+    };
+    install_selection(handle, &selection)
+}
+
+/// Untracked reference to the last screen row plus that row's screen index.
+///
+/// Paired with [`screen_anchor_row`] after a VT write to measure how many rows were
+/// dropped from the top of the screen: rows only ever leave from the top, so the anchor's
+/// screen row moves up by exactly the dropped count.
+pub fn bottom_screen_anchor(
+    handle: NonNull<GhosttyTerminalImpl>,
+) -> Result<(GhosttyGridRef, u32), NativeTerminalError> {
+    let total_rows = super::queries::query_total_rows(handle)?;
+    let row = u32::try_from(total_rows.saturating_sub(1)).map_err(|_| {
+        NativeTerminalError::InvalidValue("screen row count exceeds u32".to_string())
+    })?;
+    Ok((screen_ref(handle, 0, row)?, row))
+}
+
+/// Current screen row of an anchor taken by [`bottom_screen_anchor`], or `None` when the
+/// anchored page no longer belongs to the active screen.
+pub fn screen_anchor_row(handle: NonNull<GhosttyTerminalImpl>, anchor: &GhosttyGridRef) -> Option<u32> {
+    // ghostty_terminal_point_from_grid_ref only compares the anchor's page pointer against the
+    // live page list (it never dereferences it), so a ref whose page was pruned resolves to
+    // NoValue instead of reading freed memory.
+    screen_point(handle, anchor, "ghostty_terminal_point_from_grid_ref(PruneAnchor)")
+        .ok()
+        .map(|point| point.y)
+}
+
 fn format_selection(
     handle: NonNull<GhosttyTerminalImpl>,
     selection: Option<&GhosttySelection>,
