@@ -220,6 +220,7 @@ function emitActivityTargets(): void {
 
 const markTabUnread = vi.fn();
 const markWorktreeUnread = vi.fn();
+const markSessionActivitySeen = vi.fn();
 const dispatchWorkspaceAction = vi.fn();
 // The real store memoizes this callback. Recreating it per render would restart
 // restoration whenever the subscribed restore status changes.
@@ -449,6 +450,7 @@ describe("App notification coordinator wiring", () => {
     native.playNotificationSound.mockReset();
     markTabUnread.mockReset();
     markWorktreeUnread.mockReset();
+    markSessionActivitySeen.mockReset();
     dispatchWorkspaceAction.mockReset();
     restoreWorkspace.mockReset();
     native.onNotificationActivated.mockClear();
@@ -474,6 +476,7 @@ describe("App notification coordinator wiring", () => {
       },
       markTabUnread,
       markWorktreeUnread,
+      markSessionActivitySeen,
       clearTabUnread: vi.fn(),
       clearWorktreeUnread: vi.fn(),
       activateTab: vi.fn(),
@@ -1052,6 +1055,18 @@ describe("App notification coordinator wiring", () => {
       expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
       expect(view.queryAllByTestId("attention-row")).toHaveLength(0);
       expect(paneFlashSessions()).toEqual([]);
+      // The pane frame reads activity.seen, so dismissing must clear it too.
+      expect(markSessionActivitySeen).toHaveBeenCalledWith("sess-1", "default");
+    });
+
+    it("dismiss-all clears every listed session's pane attention", async () => {
+      seedUnread("default", "sess-1");
+      seedUnread("other", "sess-2");
+      await act(async () => { render(<App />); });
+      markSessionActivitySeen.mockClear();
+      act(() => { sidebarProps.attention!.onDismissAll(); });
+      expect(inbox.getSnapshot().entries.every((entry) => "seen" in entry.read)).toBe(true);
+      expect(markSessionActivitySeen.mock.calls).toEqual(expect.arrayContaining([["sess-1", "default"], ["sess-2", "other"]]));
     });
 
     // Defect 2: non-mac platforms use ctrlKey instead of metaKey

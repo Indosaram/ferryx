@@ -59,6 +59,11 @@ export function noteObservationInteraction(at: number = Date.now()): void {
   lastInteractionAt = at;
 }
 
+/** Whether a human touched the app recently enough for a surfaced event to count as observed. */
+export function hasRecentObservationInteraction(now: number = Date.now()): boolean {
+  return now - lastInteractionAt <= OBSERVATION_INTERACTION_WINDOW_MS;
+}
+
 if (typeof window !== "undefined") {
   const note = () => {
     lastInteractionAt = Date.now();
@@ -77,7 +82,7 @@ if (typeof window !== "undefined") {
 export function isNotificationTargetObserved(state: WorkspaceState, target: RecordingTarget, focused: boolean): boolean {
   if (!focused || target.workspaceId !== state.workspaceId) return false;
   // Focus says the window is frontmost; interaction recency says a human is actually there.
-  if (Date.now() - lastInteractionAt > OBSERVATION_INTERACTION_WINDOW_MS) return false;
+  if (!hasRecentObservationInteraction()) return false;
   const visible = state.layout.activeTabId === target.tabId ||
     Object.values(state.layout.tabGroups ?? {}).some((group) => group.activeTabId === target.tabId);
   if (!visible) return false;

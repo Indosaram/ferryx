@@ -62,6 +62,7 @@ import { createLayoutState, getGroupForTab, getTabsForGroup, layoutReducer } fro
 import { collectLeafIds, type PaneDirection, type ResolvedSeam } from "./paneTree";
 import { moveTabIntoPaneSplit } from "./tabPaneDrop";
 import { notificationCenterStore, type NotificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
+import { hasRecentObservationInteraction } from "../lib/notificationCenter/activityRecording";
 import { countAttentionEntries, liveActivityLookup } from "../features/ferryx/attention/attentionModel";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
@@ -412,8 +413,10 @@ export function useWorkspaceStore({
   const dispatch = useCallback(
     (action: WorkspaceAction) => {
       const previous = stateRef.current;
+      // Same observation rule the inbox recorder applies: a frontmost window with nobody at it
+      // is not watching, so the pane must keep its frame exactly when the inbox keeps the row.
       const contextualAction = action.type === "SESSION_TITLE_ACTIVITY" || action.type === "SESSION_SCREEN_ACTIVITY" || action.type === "MARK_TAB_UNREAD"
-        ? { ...action, observed: getNativeWindowFocused() ?? isWindowForegroundFocused() }
+        ? { ...action, observed: (getNativeWindowFocused() ?? isWindowForegroundFocused()) && hasRecentObservationInteraction() }
         : action;
       const nextState = workspaceReducer(previous, contextualAction);
       stateRef.current = nextState;
@@ -536,10 +539,17 @@ export function useWorkspaceStore({
     const fallbackProbesByAgent = new Map<string, { inFlight: boolean; startedAt: number }>();
     let subscribed = true;
 
-    // Keystroke-rate, so it only touches the module-level clocks (no dispatch, no re-render).
+    // Keystroke-rate: it always touches the module-level clocks, and dispatches only when the pane
+    // still shows unseen attention, so typing into an already-active pane clears its frame (the
+    // inbox acknowledges the same event) without a re-render per keystroke.
     const onSessionInteractedForAttention = (event: Event) => {
       const sessionId = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
-      if (sessionId) markSessionEngagementForAttention(sessionId);
+      if (!sessionId) return;
+      markSessionEngagementForAttention(sessionId);
+      const activity = stateRef.current.activityBySessionId?.[sessionId];
+      if (activity && !activity.seen && (activity.state === "done" || activity.state === "waiting")) {
+        dispatch({ type: "MARK_SESSION_ACTIVITY_SEEN", sessionId });
+      }
     };
     window.addEventListener("ferryx:session-interacted", onSessionInteractedForAttention);
 
@@ -1992,6 +2002,9 @@ export function useWorkspaceStore({
     clearTabUnread: (tabId: string) => dispatch({ type: "CLEAR_TAB_UNREAD", tabId }),
     markWorktreeUnread: (worktreePath: string, owner?: string) => dispatchToOwner({ type: "MARK_WORKTREE_UNREAD", worktreePath }, owner),
     clearWorktreeUnread: (worktreePath: string) => dispatch({ type: "CLEAR_WORKTREE_UNREAD", worktreePath }),
+    /** Acknowledges one session's pane attention in whichever workspace owns it (mounted or parked). */
+    markSessionActivitySeen: (sessionId: string, owner?: string) =>
+      dispatchToOwner({ type: "MARK_SESSION_ACTIVITY_SEEN", sessionId }, owner),
   };
 }
 

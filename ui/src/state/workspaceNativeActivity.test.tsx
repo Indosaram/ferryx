@@ -4,6 +4,7 @@ import { clearWorkspaceSnapshot, getWorkspaceSnapshot } from "./workspaceSnapsho
 import { clearHmrWorkspaceState } from "./hmrWorkspaceState";
 import { setLocalSplitPersistence } from "../lib/localSplitLifecycle";
 import { emitNativeTerminalPresentation, getDurableNativeBinding, resetNativeTerminalLifecycleForTest } from "../lib/nativeTerminalLifecycle";
+import { noteObservationInteraction } from "../lib/notificationCenter/activityRecording";
 
 import type { NativeTerminalAgentStatePayload, NativeTerminalBellPayload, NativeTerminalTitlePayload, Worktree } from "../lib/types";
 
@@ -396,6 +397,56 @@ describe("workspace store native activity subscription", () => {
     });
 
     expect(result.current.state.activityBySessionId?.[session1Id]?.seen).toBe(true);
+  });
+
+  it("clears a pane's attention when the user interacts with it without re-navigating", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "interact", initialWorktrees: [worktree], services: services() }));
+    await act(async () => { await result.current.openTab(worktree); });
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "working", ruleId: "r1", manifestId: "omo" });
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "r2", manifestId: "omo" });
+    });
+    const sessionId = Object.keys(result.current.state.activityBySessionId ?? {})[0];
+    expect(result.current.state.activityBySessionId?.[sessionId]?.seen).toBe(false);
+
+    // Typing into the already-active pane is the only signal; no tab or pane navigation happens.
+    act(() => {
+      window.dispatchEvent(new CustomEvent("ferryx:session-interacted", { detail: { sessionId } }));
+    });
+
+    expect(result.current.state.activityBySessionId?.[sessionId]?.seen).toBe(true);
+  });
+
+  it("marks a parked workspace's session seen through markSessionActivitySeen", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "mounted", initialWorktrees: [worktree], services: services() }));
+    await act(async () => { await result.current.openTab(worktree); });
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "working", ruleId: "r1", manifestId: "omo" });
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "r2", manifestId: "omo" });
+    });
+    const sessionId = Object.keys(result.current.state.activityBySessionId ?? {})[0];
+
+    act(() => { result.current.markSessionActivitySeen(sessionId, "mounted"); });
+
+    expect(result.current.state.activityBySessionId?.[sessionId]?.seen).toBe(true);
+    expect(getWorkspaceSnapshot("mounted")?.activityBySessionId?.[sessionId]?.seen).toBe(true);
+  });
+
+  it.each([
+    ["nobody touched the app recently", -120_000, false],
+    ["the user just interacted", 0, true],
+  ] as const)("on a focused window, treats the active pane's completion as observed only when %s", async (_label, offsetMs, seen) => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    noteObservationInteraction(Date.now() + offsetMs);
+    const { result } = renderHook(() => useWorkspaceStore({ workspaceId: `observe${offsetMs}`, initialWorktrees: [worktree], services: services() }));
+    await act(async () => { await result.current.openTab(worktree); });
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "working", ruleId: "r1", manifestId: "omo" });
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "r2", manifestId: "omo" });
+    });
+    expect(Object.values(result.current.state.activityBySessionId ?? {})[0]?.seen).toBe(seen);
   });
 
   it("preserves independent terminal bell unread when quiet snapshot arrives", async () => {

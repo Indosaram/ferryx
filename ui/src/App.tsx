@@ -742,6 +742,7 @@ function WorkspaceApp({
     activityNotificationTargets,
     markTabUnread,
     markWorktreeUnread,
+    markSessionActivitySeen,
     subscribeTerminalBell,
     subscribeActivityNotification,
     parkedActivityVersion,
@@ -2157,17 +2158,22 @@ function WorkspaceApp({
     flashPane(row.sessionId);
   }, [handleNotificationTarget]);
 
+  // The pane frame reads activity.seen while the inbox reads entry.read: a dismissal must clear
+  // both, or the row disappears while the pane keeps glowing.
+  const dismissAttentionRows = useCallback((rows: readonly AttentionRow[]) => {
+    notificationCenterStore.markEntriesRead(rows.map((row) => ({ id: row.id, expectedRevision: row.revision })));
+    for (const row of rows) markSessionActivitySeen(row.sessionId, row.workspaceId);
+  }, [markSessionActivitySeen]);
+
   const sidebarAttention = useMemo<SidebarAttention>(() => ({
     rows: attentionRows,
     onOpen: handleOpenAttentionRow,
-    onDismiss: (row) => notificationCenterStore.markEntriesRead([{ id: row.id, expectedRevision: row.revision }]),
-    onDismissAll: () => notificationCenterStore.markEntriesRead(
-      attentionRows.map((row) => ({ id: row.id, expectedRevision: row.revision })),
-    ),
+    onDismiss: (row) => dismissAttentionRows([row]),
+    onDismissAll: () => dismissAttentionRows(attentionRows),
     openSessionCount,
     inboxOpen: isInboxOpen,
     onInboxOpenChange: setIsInboxOpen,
-  }), [attentionRows, handleOpenAttentionRow, isInboxOpen, openSessionCount]);
+  }), [attentionRows, dismissAttentionRows, handleOpenAttentionRow, isInboxOpen, openSessionCount]);
 
   useEffect(() => {
     if (!pendingNotificationTarget) return;
