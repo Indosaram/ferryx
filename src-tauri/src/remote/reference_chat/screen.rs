@@ -47,8 +47,9 @@ use super::types::ReferenceScreenSnapshot;
 /// Upper bound on the characters a single snapshot may carry.
 ///
 /// The screen read is a prompt-detection input, not a transcript: a pane-sized frame is at
-/// most `cols * rows` characters, and this bound keeps a caller that hands over an
-/// unexpectedly tall mirror from turning one read into an unbounded response.
+/// most `cols * rows` characters plus its line breaks. A snapshot is bounded by the larger of
+/// this constant and that pane-sized allowance, so a densely filled pane is never cut, while a
+/// small pane still cannot exceed this constant.
 pub const REFERENCE_SCREEN_MAX_CHARS: usize = 16_384;
 
 /// Upper bound on the lines a single snapshot may carry.
@@ -110,7 +111,11 @@ pub fn snapshot_reference_screen(
     // only beyond the bound must still be distinguishable, or a stale card could be accepted.
     let text = render_reference_screen_text(&frame);
     let revision = reference_screen_revision(cols, rows, &text);
-    let (text, truncated) = bound_reference_screen_text(&text);
+    // A whole pane-sized frame always fits: every cell plus one line break per row.
+    let max_chars = REFERENCE_SCREEN_MAX_CHARS
+        .max(usize::from(cols) * usize::from(rows) + usize::from(rows));
+    let max_lines = REFERENCE_SCREEN_MAX_LINES.max(usize::from(rows));
+    let (text, truncated) = bound_reference_screen_text_within(&text, max_lines, max_chars);
 
     Ok(ReferenceScreenSnapshot {
         revision,
@@ -156,6 +161,15 @@ pub fn render_reference_screen_text(frame: &RemoteGridFrame) -> String {
 /// the bottom of the screen, so the top is what a bound may drop. Cutting happens on character
 /// boundaries, so a multi-byte line (CJK, Hangul, emoji) is never split into invalid UTF-8.
 pub fn bound_reference_screen_text(text: &str) -> (String, bool) {
+    bound_reference_screen_text_within(text, REFERENCE_SCREEN_MAX_LINES, REFERENCE_SCREEN_MAX_CHARS)
+}
+
+/// [bound_reference_screen_text] with explicit line and character limits.
+fn bound_reference_screen_text_within(
+    text: &str,
+    max_lines: usize,
+    max_chars: usize,
+) -> (String, bool) {
     let mut truncated = false;
     let mut tail = text;
 
@@ -165,15 +179,15 @@ pub fn bound_reference_screen_text(text: &str) -> (String, bool) {
             line_starts.push(index + 1);
         }
     }
-    if line_starts.len() > REFERENCE_SCREEN_MAX_LINES {
-        let keep_from = line_starts.len() - REFERENCE_SCREEN_MAX_LINES;
+    if line_starts.len() > max_lines {
+        let keep_from = line_starts.len() - max_lines;
         tail = &tail[line_starts[keep_from]..];
         truncated = true;
     }
 
     let chars = tail.chars().count();
-    if chars > REFERENCE_SCREEN_MAX_CHARS {
-        let skip = chars - REFERENCE_SCREEN_MAX_CHARS;
+    if chars > max_chars {
+        let skip = chars - max_chars;
         let offset = tail
             .char_indices()
             .nth(skip)
@@ -396,6 +410,26 @@ mod tests {
         assert!(truncated);
         assert_eq!(bounded.chars().count(), REFERENCE_SCREEN_MAX_CHARS);
         assert!(bounded.chars().all(|ch| ch == '가'));
+    }
+
+    #[test]
+    fn a_densely_filled_pane_sized_screen_is_never_truncated() {
+        let (cols, rows) = (240u16, 80u16);
+        let mut mirror = RemoteTerminalMirror::new(cols, rows).expect("mirror");
+        let mut dense = Vec::new();
+        for row in 0..rows {
+            if row > 0 {
+                dense.extend_from_slice(b"\r\n");
+            }
+            dense.extend_from_slice("x".repeat(usize::from(cols) - 1).as_bytes());
+        }
+
+        let snapshot =
+            snapshot_reference_screen(&mut mirror, Some(&[dense])).expect("screen snapshot");
+
+        assert!(!snapshot.truncated, "a pane-sized frame was truncated");
+        assert!(snapshot.text.chars().count() > REFERENCE_SCREEN_MAX_CHARS);
+        assert!(snapshot.is_answerable());
     }
 
     #[test]

@@ -1368,6 +1368,7 @@ impl crate::remote::backend::RemoteSessionBackend for ScreenStubBackend {
                         bytes: self.screen.clone(),
                     }],
                     gap: None,
+                    history_incomplete: false,
                 },
                 receiver,
             })
@@ -1511,6 +1512,140 @@ async fn a_chat_submit_without_a_registry_id_is_still_delivered() {
     let writes = backend.writes.lock().expect("writes").clone();
     assert_eq!(writes.first().map(Vec::as_slice), Some(b"hello".as_slice()), "{writes:?}");
     assert_eq!(writes.last().map(Vec::as_slice), Some(b"\r".as_slice()), "{writes:?}");
+    server.stop().await;
+}
+
+/// A backend whose one pane is served by a real output hub, so a replay gap behaves as it does on
+/// an SSH-remote pane whose read reconnected.
+struct HubStubBackend {
+    session_id: String,
+    hub: crate::terminal::TerminalOutputHub,
+    writes: std::sync::Mutex<Vec<Vec<u8>>>,
+}
+
+impl crate::remote::backend::RemoteSessionBackend for HubStubBackend {
+    fn list_sessions(&self) -> futures_util::future::BoxFuture<'_, Vec<String>> {
+        Box::pin(async move { vec![self.session_id.clone()] })
+    }
+    fn describe_session<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<crate::remote::backend::RemoteSessionDetails, String>,
+    > {
+        Box::pin(async move {
+            if session_id != self.session_id {
+                return Err("unknown session".to_string());
+            }
+            Ok(crate::remote::backend::RemoteSessionDetails {
+                session_id: self.session_id.clone(),
+                workspace_id: None,
+                worktree_label: None,
+                worktree_path: None,
+                running: true,
+                cols: 80,
+                rows: 24,
+            })
+        })
+    }
+    fn attach_with_sequence<'a>(
+        &'a self,
+        session_id: &'a str,
+        after_sequence: Option<u64>,
+    ) -> futures_util::future::BoxFuture<'a, Result<crate::terminal::SessionAttachment, String>>
+    {
+        Box::pin(async move {
+            self.hub
+                .subscribe_with_sequence(session_id, after_sequence)
+                .ok_or_else(|| "unknown session".to_string())
+        })
+    }
+    fn write_input<'a>(
+        &'a self,
+        _session_id: &'a str,
+        data: &'a [u8],
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        self.writes.lock().expect("writes").push(data.to_vec());
+        Box::pin(async { Ok(()) })
+    }
+    fn resize<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _cols: u16,
+        _rows: u16,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("this stub never resizes".to_string()) })
+    }
+    fn signal<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _signal: crate::terminal::TerminalSignal,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("this stub never signals".to_string()) })
+    }
+}
+
+/// After a replay gap the hub holds only what the pane drew since, which is not the whole screen:
+/// a Claude menu drawn before the gap is still on the pane while the hub replays only a spinner
+/// line. A chat submit must not read that partial screen as "no prompt" and type into the menu.
+#[tokio::test]
+async fn a_chat_submit_is_refused_when_the_screen_history_has_a_replay_gap() {
+    let session_id = "reference-route-post-gap".to_string();
+    let hub = crate::terminal::TerminalOutputHub::default();
+    hub.register_session(&session_id);
+    hub.record_initial_size(&session_id, 80, 24);
+    let menu = include_str!("fixtures/claude/prompt/approval-command.screen");
+    hub.publish(&session_id, menu.trim_end().replace('\n', "\r\n").into_bytes())
+        .expect("menu published");
+    hub.publish_gap(&session_id).expect("gap published");
+    hub.publish(&session_id, "\r\u{273b} Thinking\u{2026} (esc to interrupt)".as_bytes().to_vec())
+        .expect("spinner published");
+    let backend = Arc::new(HubStubBackend {
+        session_id: session_id.clone(),
+        hub,
+        writes: std::sync::Mutex::new(Vec::new()),
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "reference-route-post-gap")
+        .expect("control token");
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let epoch = state
+        .daemon_epoch
+        .load(std::sync::atomic::Ordering::Acquire)
+        .to_string();
+    let body = serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(),
+        "target": {
+            "hostId": reference_files::reference_host_id(),
+            "ownerId": state.reference_owner_id,
+            "epoch": epoch,
+            "backendSessionId": session_id,
+        },
+        "registryId": "claude",
+        "params": { "text": "1", "origin": "chat" },
+    });
+    let (status, response) = server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"),
+            Some(&control),
+            Some(&body.to_string()),
+        )
+        .await;
+
+    assert_eq!(status, 409, "{response}");
+    assert!(response.contains("CONTROL_CONFLICT"), "{response}");
+    assert!(
+        backend.writes.lock().expect("writes").is_empty(),
+        "chat text was typed into a pane whose screen was read from post-gap bytes only"
+    );
     server.stop().await;
 }
 
