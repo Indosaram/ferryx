@@ -119,7 +119,12 @@ function referenceIsSpace(code: number): boolean {
 
 const REFERENCE_BACKSLASH = String.fromCharCode(92);
 
-/** A staged file's name, or the refusal that keeps it out of the staging root. */
+/**
+ * A staged file's name, or the refusal that keeps it out of the staging root.
+ *
+ * Whitespace is refused (the Rust twin refuses it too): an '@path ' mention ends at the first
+ * space, so a name carrying one could be staged on the host but never mentioned.
+ */
 export function validateReferenceFileName(rawName: string): string {
   const trimmed = rawName.trim();
   if (trimmed.length === 0) {
@@ -152,7 +157,22 @@ export function validateReferenceFileName(rawName: string): string {
       );
     }
   }
+  if (/\s/.test(trimmed)) {
+    throw new ReferenceFileError(
+      "INVALID_REQUEST",
+      "A staged file name must not contain whitespace",
+    );
+  }
   return trimmed;
+}
+
+/**
+ * The name a browser file is staged under: its own name with every whitespace run replaced by
+ * '_', so a desktop screenshot ('Screenshot 2026-10-13 at 10.00.00.png') stays attachable
+ * instead of being refused by the whitespace rule above.
+ */
+export function referenceStagedFileName(rawName: string): string {
+  return validateReferenceFileName(rawName.trim().replace(/\s+/g, "_"));
 }
 
 /**
@@ -549,7 +569,7 @@ export async function stageReferenceChatFile(
   usage: ReferenceFileTurnUsage = REFERENCE_EMPTY_TURN_USAGE,
 ): Promise<ReferenceFileReceipt> {
   const limits = deps.limits ?? REFERENCE_FILE_LIMITS;
-  const name = validateReferenceFileName(file.name);
+  const name = referenceStagedFileName(file.name);
   const mediaType = referenceMediaTypeFor(file.type, name);
   validateReferenceFileSize(file.size, limits);
   validateReferenceTurnBounds(usage.fileCount, usage.turnBytes, file.size, limits);
@@ -568,15 +588,34 @@ export async function stageReferenceChatFile(
   const payload = referenceFileStagePayload(name, mediaType, bytes);
   const raw = await deps.transport.stage(target.target, payload, signal);
 
-  return parseReferenceFileReceipt(raw, {
-    target: target.target,
-    displayName: name,
-    mediaType,
-    sizeBytes: file.size,
-    sha256,
-    root: deps.root,
-    resolvedPath: deps.resolvedPath,
-  });
+  try {
+    return parseReferenceFileReceipt(raw, {
+      target: target.target,
+      displayName: name,
+      mediaType,
+      sizeBytes: file.size,
+      sha256,
+      root: deps.root,
+      resolvedPath: deps.resolvedPath,
+    });
+  } catch (error) {
+    // The host already staged bytes under this id; a receipt this lane refuses must not leave
+    // them orphaned on the host, counting against the turn's file limit until the TTL.
+    const stagedId = referenceStagedAttachmentId(raw);
+    if (stagedId !== null) {
+      await deps.transport.cancel(target.target, stagedId).catch(() => false);
+    }
+    throw error;
+  }
+}
+
+/** The attachment id a raw stage response names, when it names one at all. */
+function referenceStagedAttachmentId(raw: unknown): string | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const receipt = (raw as Record<string, unknown>).receipt;
+  if (receipt === null || typeof receipt !== "object") return null;
+  const id = (receipt as Record<string, unknown>).attachmentId;
+  return typeof id === "string" && id.length > 0 ? id : null;
 }
 
 /** The outcome of an explicit cleanup: the id it acted on, and whether the host acknowledged it. */
