@@ -396,7 +396,104 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   },
 ] as const;
 
-const SHORTCUT_BY_ID = new Map<ShortcutActionId, ShortcutDefinition>(SHORTCUTS.map((shortcut) => [shortcut.id, shortcut]));
+/** Sparse user remaps: a binding replaces the primary chord and drops aliases; `null` unbinds. */
+export type ShortcutOverrideMap = Partial<Record<ShortcutActionId, ShortcutBinding | null>>;
+
+const NO_OVERRIDES: ShortcutOverrideMap = Object.freeze({});
+
+/** The live registry: defaults with user overrides applied and unbound actions removed. */
+export function resolvedShortcuts(overrides: ShortcutOverrideMap = NO_OVERRIDES): readonly ShortcutDefinition[] {
+  if (Object.keys(overrides).length === 0) return SHORTCUTS;
+  const resolved: ShortcutDefinition[] = [];
+  for (const shortcut of SHORTCUTS) {
+    if (!Object.prototype.hasOwnProperty.call(overrides, shortcut.id)) {
+      resolved.push(shortcut);
+      continue;
+    }
+    const binding = overrides[shortcut.id];
+    if (!binding) continue;
+    const { aliases: _aliases, ...rest } = shortcut;
+    resolved.push({ ...rest, binding });
+  }
+  return resolved;
+}
+
+function resolvedShortcut(id: ShortcutActionId, overrides: ShortcutOverrideMap): ShortcutDefinition | undefined {
+  return resolvedShortcuts(overrides).find((shortcut) => shortcut.id === id);
+}
+
+export type ReservedChord = {
+  readonly id: string;
+  readonly title: string;
+  readonly binding: ShortcutBinding;
+  readonly platform: "mac" | "nonMac" | "all";
+};
+
+/**
+ * Chords no action may be remapped onto: the terminal clipboard chords handled in
+ * NativeTerminalPane (isPasteShortcut / isCopyShortcut) and the predefined macOS app-menu
+ * items (Quit, Hide, Minimize). These stay fixed and are not themselves remappable.
+ */
+export const RESERVED_CHORDS: readonly ReservedChord[] = [
+  { id: "clipboard.copy", title: "Copy", binding: { key: "c", mod: true }, platform: "mac" },
+  { id: "clipboard.paste", title: "Paste", binding: { key: "v", mod: true }, platform: "mac" },
+  { id: "clipboard.pasteShift", title: "Paste", binding: { key: "v", mod: true, shift: true }, platform: "mac" },
+  { id: "clipboard.copyTerminal", title: "Copy", binding: { key: "c", control: true, shift: true }, platform: "all" },
+  { id: "clipboard.pasteTerminal", title: "Paste", binding: { key: "v", control: true }, platform: "nonMac" },
+  { id: "clipboard.pasteTerminalShift", title: "Paste", binding: { key: "v", control: true, shift: true }, platform: "nonMac" },
+  { id: "clipboard.pasteInsert", title: "Paste", binding: { key: "Insert", shift: true }, platform: "all" },
+  { id: "menu.quit", title: "Quit Ferryx", binding: { key: "q", mod: true }, platform: "mac" },
+  { id: "menu.hide", title: "Hide Ferryx", binding: { key: "h", mod: true }, platform: "mac" },
+  { id: "menu.minimize", title: "Minimize", binding: { key: "m", mod: true }, platform: "mac" },
+];
+
+export type ShortcutConflict =
+  | { readonly kind: "action"; readonly actionId: ShortcutActionId; readonly title: string }
+  | { readonly kind: "reserved"; readonly chord: ReservedChord };
+
+/** Terminal actions App disables while a browser surface owns shortcuts, so they may share browser chords. */
+const BROWSER_EXCLUSIVE_TERMINAL_ACTIONS = new Set<ShortcutActionId>(["terminal.focusNext", "terminal.focusPrevious", "terminal.search"]);
+
+function surfacesAreExclusive(a: ShortcutActionId, b: ShortcutActionId): boolean {
+  return (a.startsWith("browser.") && BROWSER_EXCLUSIVE_TERMINAL_ACTIONS.has(b))
+    || (b.startsWith("browser.") && BROWSER_EXCLUSIVE_TERMINAL_ACTIONS.has(a));
+}
+
+function effectiveChord(rawBinding: ShortcutBinding, isMac: boolean): string {
+  const binding = resolveBinding(rawBinding, isMac);
+  const key = binding.key === "+" ? "=" : normalizeKey(binding.key);
+  return [
+    binding.mod && isMac ? "meta" : "",
+    binding.control || (binding.mod && !isMac) ? "ctrl" : "",
+    binding.alt ? "alt" : "",
+    binding.shift ? "shift" : "",
+    key,
+  ].join("|");
+}
+
+/**
+ * Who already owns `binding` if `actionId` were bound to it: another live action (primary or
+ * alias, with `overrides` applied) or a reserved clipboard/menu chord. `null` means it is free.
+ */
+export function findConflict(
+  actionId: ShortcutActionId,
+  binding: ShortcutBinding,
+  overrides: ShortcutOverrideMap = NO_OVERRIDES,
+  isMac = detectMacPlatform(),
+): ShortcutConflict | null {
+  const chord = effectiveChord(binding, isMac);
+  const reserved = RESERVED_CHORDS.find((candidate) =>
+    (candidate.platform === "all" || (candidate.platform === "mac") === isMac)
+    && effectiveChord(candidate.binding, isMac) === chord);
+  if (reserved) return { kind: "reserved", chord: reserved };
+  for (const shortcut of resolvedShortcuts(overrides)) {
+    if (shortcut.id === actionId || surfacesAreExclusive(actionId, shortcut.id)) continue;
+    if ([shortcut.binding, ...(shortcut.aliases ?? [])].some((candidate) => effectiveChord(candidate, isMac) === chord)) {
+      return { kind: "action", actionId: shortcut.id, title: shortcut.title };
+    }
+  }
+  return null;
+}
 
 export function resolveBinding(binding: ShortcutBinding, isMac: boolean): ShortcutBinding {
   const { nonMac, ...base } = binding;
@@ -420,36 +517,38 @@ export function formatBindingLabel(rawBinding: ShortcutBinding, isMac = detectMa
     .join("+");
 }
 
-export function shortcutLabel(id: ShortcutActionId, isMac = detectMacPlatform()): string {
-  const shortcut = SHORTCUT_BY_ID.get(id);
+export function shortcutLabel(id: ShortcutActionId, isMac = detectMacPlatform(), overrides: ShortcutOverrideMap = NO_OVERRIDES): string {
+  const shortcut = resolvedShortcut(id, overrides);
   if (!shortcut) return "";
   return formatBindingLabel(shortcut.binding, isMac);
 }
 
-export function shortcutAliasesLabels(id: ShortcutActionId, isMac = detectMacPlatform()): string[] {
-  const shortcut = SHORTCUT_BY_ID.get(id);
+export function shortcutAliasesLabels(id: ShortcutActionId, isMac = detectMacPlatform(), overrides: ShortcutOverrideMap = NO_OVERRIDES): string[] {
+  const shortcut = resolvedShortcut(id, overrides);
   if (!shortcut?.aliases?.length) return [];
   return shortcut.aliases.map((alias) => formatBindingLabel(alias, isMac));
 }
 
 export function useShortcuts(
   handlers: Partial<Record<ShortcutActionId, () => void>>,
-  options: { isMac?: boolean } = {},
+  options: { isMac?: boolean; overrides?: ShortcutOverrideMap } = {},
 ) {
   const isMac = options.isMac ?? detectMacPlatform();
+  const overrides = options.overrides ?? NO_OVERRIDES;
 
   useEffect(() => {
     const registration = ++shortcutRegistration;
+    const shortcuts = resolvedShortcuts(overrides);
     switchDebug("shortcut.hook.register", { registration, isMac, ...shortcutContext(),
-      enabled: SHORTCUTS.filter(({ id }) => handlers[id]).map(({ id }) => id),
-      disabled: SHORTCUTS.filter(({ id }) => !handlers[id]).map(({ id }) => id) });
+      enabled: shortcuts.filter(({ id }) => handlers[id]).map(({ id }) => id),
+      disabled: shortcuts.filter(({ id }) => !handlers[id]).map(({ id }) => id) });
     const handleKeyDown = (event: KeyboardEvent) => {
       const chord = shortcutChord(event);
       const trace = (stage: string, details: Record<string, unknown> = {}) => {
         if (chord) switchDebug(`shortcut.hook.${stage}`, { registration, isMac, ...chord, ...details });
       };
       trace("receipt");
-      for (const shortcut of SHORTCUTS) {
+      for (const shortcut of shortcuts) {
         const handler = handlers[shortcut.id];
         if (!handler) {
           trace("reject", { action: shortcut.id, reason: "handler-disabled" });
@@ -494,7 +593,7 @@ export function useShortcuts(
       window.removeEventListener("keydown", handleKeyDown, true);
       switchDebug("shortcut.hook.unregister", { registration });
     };
-  }, [handlers, isMac]);
+  }, [handlers, isMac, overrides]);
 }
 
 export function isMacShortcutPlatform() {
