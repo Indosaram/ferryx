@@ -330,13 +330,34 @@ describe("reference tool part", () => {
     expect(container.textContent).toContain("failed");
   });
 
+  it("offers no whole-output button when nothing can fetch the cut output", () => {
+    render(
+      <MobileChatMessage
+        id="msg-tool-no-fetch"
+        role="assistant"
+        content=""
+        referenceContext={{}}
+        referenceParts={[
+          { kind: "tool", name: "bash", summary: "", input: "ls", output: "cut", outputRef: "r1", outputSize: 90000 },
+          { kind: "tool", name: "read", summary: "", input: "", output: "", outputRef: "r2" },
+        ]}
+      />,
+    );
+
+    const rows = screen.getAllByTestId("work-row");
+    fireEvent.click(rows[0]);
+    expect(screen.getByTestId("reference-tool-output")).toHaveTextContent("cut");
+    expect(screen.queryByTestId("reference-tool-whole-output")).not.toBeInTheDocument();
+    expect(rows[1].tagName).toBe("DIV");
+  });
+
   it("reads as busy while the whole output is being fetched", () => {
     render(
       <MobileChatMessage
         id="msg-tool-loading"
         role="assistant"
         content=""
-        referenceContext={{ loadingOutputRef: "out-2" }}
+        referenceContext={{ onRequestWholeOutput: vi.fn(), loadingOutputRef: "out-2" }}
         referenceParts={[{ kind: "tool", name: "read", summary: "", input: "", output: "", outputRef: "out-2" }]}
       />,
     );
