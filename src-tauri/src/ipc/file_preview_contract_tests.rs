@@ -238,6 +238,21 @@ fn unknown_session_in_a_local_workspace_does_not_block_an_absolute_path() {
 }
 
 #[test]
+fn unknown_session_in_a_local_workspace_does_not_block_a_home_rooted_path() {
+    // ~ and ~/x resolve against the home directory, so a dead local shell's cwd is irrelevant.
+    for path in ["~", "~/shots/run.png"] {
+        let admitted = admit_session_cwd(path, Err(session_not_found()), Some(LOCAL_WS), None, None)
+            .unwrap_or_else(|error| panic!("{path} must open without a live session: {error:?}"));
+        assert_eq!(admitted, None, "{path}");
+    }
+    // Remote workspaces and a missing workspace id still refuse it.
+    assert!(admit_session_cwd("~/x", Err(session_not_found()), Some(SSH_WS), None, None).is_err());
+    assert!(admit_session_cwd("~/x", Err(session_not_found()), None, None, None).is_err());
+    // "~user" is not home-rooted for this process and stays a relative token.
+    assert!(admit_session_cwd("~other/x", Err(session_not_found()), Some(LOCAL_WS), None, None).is_err());
+}
+
+#[test]
 fn unknown_session_in_a_local_workspace_relative_token_falls_back_to_caller_cwd_or_refuses() {
     let fallback = PathBuf::from("/work/repo");
     let admitted = admit_session_cwd(

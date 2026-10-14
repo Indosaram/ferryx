@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  isLikelyRemoteFilePath,
   isSessionMouseTrackingEnabled,
   openRemoteFileToken,
   readLinkLine,
@@ -10,6 +11,39 @@ import {
 import type { TerminalFileToken, TerminalInvokeFn } from "./terminalLinkTarget";
 
 describe("terminalLinkTarget", () => {
+  describe("isLikelyRemoteFilePath", () => {
+    // Remote panes cannot stat the path locally, so prose tokens must not look like links.
+    it("rejects short prose tokens that only happen to contain a slash", () => {
+      for (const path of ["I/O", "n/a", "w/o", "and/or", "A/B", "TCP/IP", "yes/no", "24/7"]) {
+        expect(isLikelyRemoteFilePath(path), path).toBe(false);
+      }
+    });
+
+    it("accepts real file shapes", () => {
+      for (const path of [
+        "out/run.png",
+        ".omo/evidence/ulw-neon-border/breathe-qa-release2/a.png",
+        "/etc/hosts",
+        "~/x",
+        "./build",
+        "../a",
+        "src/lib/linkRouting.ts",
+        "a/b/c",
+        "src/lib",
+        "bin/ls",
+        "out/v2",
+        "docs/API",
+        "ui/src",
+        "logs/2024",
+        "package.json",
+        "Makefile",
+        "C:\\Users\\x.txt",
+      ]) {
+        expect(isLikelyRemoteFilePath(path), path).toBe(true);
+      }
+    });
+  });
+
   describe("tokenFromHyperlink", () => {
     it("parses http urls", () => {
       expect(tokenFromHyperlink("http://example.com/guide")).toEqual({
