@@ -292,8 +292,12 @@ export function ReferencePromptCard({
             confirmLabel={prompt.options[twoOptionApproval[0] ?? 0]?.label ?? "Approve"}
             declineLabel={prompt.options[twoOptionApproval[1] ?? 1]?.label ?? "Decline"}
             allowCustomFeedback={false}
-            onAccept={() => void answer({ optionIndex: twoOptionApproval[0] ?? 0 })}
-            onDecline={() => void answer({ optionIndex: twoOptionApproval[1] ?? 1 })}
+            onAccept={(_feedback, event) =>
+              void answer({ optionIndex: twoOptionApproval[0] ?? 0 }, event)
+            }
+            onDecline={(_feedback, event) =>
+              void answer({ optionIndex: twoOptionApproval[1] ?? 1 }, event)
+            }
             isSubmitting={pending}
           />
         </>

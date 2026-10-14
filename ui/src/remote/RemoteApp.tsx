@@ -1133,6 +1133,9 @@ export const RemoteHostConnection: React.FC<{
   // Where the newest page started when the older pages were joined to it: a later newest page
   // that starts anywhere else no longer meets them, and they are dropped rather than left a gap.
   const chatNewestStartRef = useRef<ReferenceHistoryCursor | null>(null);
+  // Bumped whenever the older chain's anchor moves or the transcript clears: an older read that
+  // started under another generation joins nothing on screen and is dropped when it lands.
+  const chatOlderGenerationRef = useRef(0);
   const [chatPrompt, setChatPrompt] = useState<ReferencePrompt | null>(null);
   const chatPromptIdRef = useRef<string | null>(null);
   const chatComposerRef = useRef<MobileChatComposerHandle | null>(null);
@@ -2771,6 +2774,7 @@ export const RemoteHostConnection: React.FC<{
     setChatHasOlder(false);
     chatLoadedOlderRef.current = false;
     chatNewestStartRef.current = null;
+    chatOlderGenerationRef.current += 1;
     setChatPrompt(null);
     chatPromptIdRef.current = null;
     setChatScreenRevision(null);
@@ -2852,10 +2856,14 @@ export const RemoteHostConnection: React.FC<{
         setChatPage(read.page);
         const start = read.page.cursor ?? null;
         const anchor = chatNewestStartRef.current;
-        if (
-          chatLoadedOlderRef.current &&
-          (start === null || anchor === null || start.streamId !== anchor.streamId || start.offset !== anchor.offset)
-        ) {
+        const moved =
+          start === null || anchor === null || start.streamId !== anchor.streamId || start.offset !== anchor.offset;
+        if (moved) {
+          // an older read still out started from the old anchor: its page no longer joins this one
+          chatOlderGenerationRef.current += 1;
+          setChatOlderLoading(false);
+        }
+        if (chatLoadedOlderRef.current && moved) {
           chatLoadedOlderRef.current = false;
           setChatLoadedOlder(false);
           setChatOlderMessages([]);
@@ -3001,6 +3009,8 @@ export const RemoteHostConnection: React.FC<{
     const cursor = chatOlderCursor;
     if (!target || !sessionId || !bearer || cursor === null) return;
     const signal = chatLaneAbortRef.current.signal;
+    const generation = chatOlderGenerationRef.current;
+    const superseded = () => generation !== chatOlderGenerationRef.current;
     setChatOlderLoading(true);
     setChatOlderFailed(false);
     try {
@@ -3016,6 +3026,9 @@ export const RemoteHostConnection: React.FC<{
       });
       // A page for a pane that is no longer current belongs to nobody on screen.
       if (signal.aborted || !chatTargetIsCurrent(target)) return;
+      // The newest page re-anchored while this read was out: its turns end before the old anchor
+      // and would join the new page with a silent gap, so the chain restarts from the new anchor.
+      if (superseded()) return;
       // A cursor only names a position while its stream is still the live one: a foreign one is
       // dropped rather than re-anchored, and the control then says there is no more to reach.
       // The stream is the one the newest page's cursor named, which this request carried.
@@ -3031,11 +3044,11 @@ export const RemoteHostConnection: React.FC<{
       setChatOlderMessages((prev) => [...mapped, ...prev]);
       setChatWarnings((prev) => prev.filter((warning) => warning !== CHAT_OLDER_FAILED_WARNING));
     } catch {
-      if (signal.aborted || !chatTargetIsCurrent(target)) return;
+      if (signal.aborted || !chatTargetIsCurrent(target) || superseded()) return;
       setChatOlderFailed(true);
       setChatWarnings((prev) => withChatWarning(prev, CHAT_OLDER_FAILED_WARNING));
     } finally {
-      if (!signal.aborted && chatTargetIsCurrent(target)) setChatOlderLoading(false);
+      if (!signal.aborted && chatTargetIsCurrent(target) && !superseded()) setChatOlderLoading(false);
     }
   }, [chatOlderCursor, chatTargetIsCurrent]);
 

@@ -1456,4 +1456,46 @@ describe("reference chat lane review fixes", () => {
     expect(screen.queryByText("OLD-1")).not.toBeInTheDocument();
     expect(screen.getByTestId("reference-older-button")).toBeInTheDocument();
   });
+
+  it("ui-workspace-wiring-r3-1: an older page still in flight when the newest page re-anchors is dropped", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let newestOffset = 500;
+    const older = deferred<Response>();
+    const calls = installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      return url.includes("cursor=")
+        ? older.promise
+        : jsonResponse(nativePage({ cursor: { streamId: "omo:abc", offset: newestOffset }, hasMore: true }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+
+    // while the older read is out, the agent writes more turns and the newest page starts later
+    newestOffset = 600;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await drainSettledResponses();
+    await act(async () => {
+      older.resolve(jsonResponse(nativePage({
+        turns: [{ role: "user", parts: [{ kind: "text", text: "BEFORE-C0" }], startedAt: "2026-10-05T00:00:00Z" }],
+        cursor: { streamId: "omo:abc", offset: 100 },
+        hasMore: true,
+      })));
+    });
+    await drainSettledResponses();
+
+    // turns before the old anchor would sit directly on the new page with a silent gap between
+    expect(screen.queryByText("BEFORE-C0")).not.toBeInTheDocument();
+    const again = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(again);
+    });
+    const paged = calls.filter((call) => call.url.includes("cursor="));
+    expect(paged).toHaveLength(2);
+    expect(paged[1].url).toContain("cursor=600");
+  });
 });

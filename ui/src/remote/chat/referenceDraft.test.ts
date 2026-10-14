@@ -256,4 +256,19 @@ describe("reference draft overlapping sends", () => {
     store.settle(paneA, "fix");
     expect(store.read(paneA).text).toBe("fix the test");
   });
+
+  it("keeps the pending record of a later send when an overlapped send is acknowledged", () => {
+    const { store } = fixture();
+    expect(store.begin(paneA, "a")).toBe(true);
+    expect(store.begin(paneA, "b")).toBe(false);
+    store.settle(paneA, "a");
+    store.end(paneA);
+    expect(store.begin(paneA, "continue")).toBe(true);
+    store.set(paneA, "");
+    store.set(paneA, "continue with tests");
+    store.settle(paneA, "b");
+    expect(store.read(paneA).text).toBe("continue with tests");
+    store.settle(paneA, "continue");
+    expect(store.read(paneA).text).toBe("continue with tests");
+  });
 });

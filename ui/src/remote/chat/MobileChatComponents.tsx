@@ -442,8 +442,9 @@ export interface ApprovalActionCardProps {
   declineLabel?: string;
   allowCustomFeedback?: boolean;
   feedbackPlaceholder?: string;
-  onAccept: (feedback?: string) => void;
-  onDecline: (feedback?: string) => void;
+  /** `event`: the button's click, so a caller can tell a tap from a key press */
+  onAccept: (feedback?: string, event?: React.MouseEvent<HTMLButtonElement>) => void;
+  onDecline: (feedback?: string, event?: React.MouseEvent<HTMLButtonElement>) => void;
   isSubmitting?: boolean;
   className?: string;
 }
@@ -463,12 +464,12 @@ export const ApprovalActionCard: React.FC<ApprovalActionCardProps> = ({
   const [feedback, setFeedback] = useState("");
   const [showFeedbackInput, setShowFeedbackInput] = useState(false);
 
-  const handleConfirm = () => {
-    onAccept(feedback.trim() ? feedback.trim() : undefined);
+  const handleConfirm = (event: React.MouseEvent<HTMLButtonElement>) => {
+    onAccept(feedback.trim() ? feedback.trim() : undefined, event);
   };
 
-  const handleDecline = () => {
-    onDecline(feedback.trim() ? feedback.trim() : undefined);
+  const handleDecline = (event: React.MouseEvent<HTMLButtonElement>) => {
+    onDecline(feedback.trim() ? feedback.trim() : undefined, event);
   };
 
   return (
