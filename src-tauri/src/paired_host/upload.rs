@@ -18,13 +18,17 @@ pub async fn resolve_paired_host(
     data_dir: &Path,
     workspace_id: &str,
 ) -> Result<HostView, IpcError> {
-    let stored = crate::paired_host::projects::resolve_stored_project(data_dir, workspace_id)
-        .ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::WorkspaceNotFound,
-                "Paired daemon project not found. Re-select or re-pair this project.",
-            )
-        })?;
+    let (dir, id) = (data_dir.to_path_buf(), workspace_id.to_string());
+    let stored = crate::ipc::run_blocking(move || {
+        Ok(crate::paired_host::projects::resolve_stored_project(&dir, &id))
+    })
+    .await?
+    .ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::WorkspaceNotFound,
+            "Paired daemon project not found. Re-select or re-pair this project.",
+        )
+    })?;
 
     let host_id = match stored.target {
         RunTarget::PairedDaemon { host_id } => host_id,

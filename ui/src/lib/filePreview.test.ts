@@ -138,6 +138,7 @@ describe("filePreview controller", () => {
     expect(h.invoke).toHaveBeenCalledWith(FILE_PREVIEW_COMMANDS.open, {
       path: REQUEST.path,
       backendSessionId: REQUEST.backendSessionId,
+      workspaceId: SOURCE.workspaceId,
       line: REQUEST.line,
       col: REQUEST.col,
     });
@@ -264,6 +265,7 @@ describe("filePreview controller", () => {
     expect(h.openExternalFile).toHaveBeenCalledWith({
       path: REQUEST.path,
       backendSessionId: SOURCE.backendSessionId,
+      workspaceId: SOURCE.workspaceId,
       line: REQUEST.line,
       col: REQUEST.col,
     });

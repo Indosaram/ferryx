@@ -76,6 +76,11 @@ pub trait RemoteSessionBackend: Send + Sync {
         &'a self,
         session_id: &'a str,
     ) -> BoxFuture<'a, Result<RemoteSessionDetails, String>>;
+    /// The session shell's live working directory, when the backend owns a local PTY
+    /// process it can inspect. `None` means unknown; callers fall back to `worktree_path`.
+    fn live_cwd<'a>(&'a self, _session_id: &'a str) -> BoxFuture<'a, Option<PathBuf>> {
+        Box::pin(async { None })
+    }
     fn attach_with_sequence<'a>(
         &'a self,
         session_id: &'a str,
@@ -142,6 +147,19 @@ impl RemoteSessionBackend for crate::daemon::session_service::DaemonSessionServi
             let mut details = self.router().describe_session(id).await?;
             self.project_session_metadata(&mut details);
             Ok(details)
+        })
+    }
+    fn live_cwd<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Option<PathBuf>> {
+        // Only a local PTY has a process this host can inspect; legacy peers and SSH
+        // sessions fall back to their worktree path.
+        let pid = self.machine_pty(id).and_then(|session| session.pid());
+        Box::pin(async move {
+            let pid = pid?;
+            crate::ipc::run_blocking(move || Ok(crate::ipc::terminal::process_cwd(pid)))
+                .await
+                .ok()
+                .flatten()
+                .map(|cwd| crate::daemon::session_service::normalize_process_cwd(&cwd))
         })
     }
     fn attach_with_sequence<'a>(

@@ -1,10 +1,14 @@
 import { useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Copy, ExternalLink, FileText, FolderOpen, Globe, X } from "lucide-react";
 
 import { copyTextToClipboard } from "../lib/clipboard";
 import { extractIpcErrorMessage } from "../lib/sshHosts";
 import { revealPath } from "../lib/tauri";
-import { TERMINAL_FILE_LINK_ACTION_EVENT } from "../lib/terminalLinkTarget";
+import {
+  TERMINAL_FILE_LINK_ACTION_EVENT,
+  type TerminalLinkOpenOverrides,
+} from "../lib/terminalLinkTarget";
 import { toast } from "./ui/sonner";
 
 export type TerminalFileLinkToken =
@@ -13,7 +17,9 @@ export type TerminalFileLinkToken =
 
 export interface TerminalFileLinkActionDetail {
   token: TerminalFileLinkToken;
-  open: (shiftKey: boolean) => Promise<void>;
+  open: (shiftKey: boolean, overrides?: TerminalLinkOpenOverrides) => Promise<void>;
+  /** The file lives on an SSH/paired host: hide actions that act on the local disk. */
+  remote?: boolean;
 }
 
 export function TerminalFileLinkActions() {
@@ -25,6 +31,7 @@ export function TerminalFileLinkActions() {
       const token = detail.token;
       const isFile = token.type === "file";
       const isUrl = token.type === "url";
+      const isRemoteFile = isFile && detail.remote === true;
 
       if (!isFile && !isUrl) return;
 
@@ -39,10 +46,28 @@ export function TerminalFileLinkActions() {
 
       toast.custom(
         (t) => {
-          const handleOpen = async (shiftKey: boolean) => {
+          const handleOpen = async (shiftKey: boolean, overrides?: TerminalLinkOpenOverrides) => {
             toast.dismiss(t);
             try {
-              await detail.open(shiftKey);
+              await (overrides ? detail.open(shiftKey, overrides) : detail.open(shiftKey));
+            } catch (error) {
+              toast.error(extractIpcErrorMessage(error, "Could not open terminal link."));
+            }
+          };
+
+          // "Open with default app" must bypass the configured file-link editor: detail.open
+          // forwards that preference, so a resolved local path goes straight to the system opener.
+          const handleOpenWithDefaultApp = async () => {
+            if (!isFile || !token.absolutePath) {
+              await handleOpen(true, { editor: "system" });
+              return;
+            }
+            toast.dismiss(t);
+            try {
+              await invoke<boolean>("cmd_open_file_path", {
+                path: token.absolutePath,
+                editor: "system",
+              });
             } catch (error) {
               toast.error(extractIpcErrorMessage(error, "Could not open terminal link."));
             }
@@ -128,26 +153,30 @@ export function TerminalFileLinkActions() {
                       <Copy className="size-3.5" />
                       Copy path
                     </button>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      aria-label="Reveal in folder"
-                      onClick={() => void handleReveal(token.absolutePath ?? token.path)}
-                      className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] hover:bg-accent"
-                    >
-                      <FolderOpen className="size-3.5" />
-                      Reveal in folder
-                    </button>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      aria-label="Open with default app"
-                      onClick={() => void handleOpen(true)}
-                      className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] hover:bg-accent"
-                    >
-                      <ExternalLink className="size-3.5" />
-                      Open with default app
-                    </button>
+                    {isRemoteFile ? null : (
+                      <>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          aria-label="Reveal in folder"
+                          onClick={() => void handleReveal(token.absolutePath ?? token.path)}
+                          className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] hover:bg-accent"
+                        >
+                          <FolderOpen className="size-3.5" />
+                          Reveal in folder
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          aria-label="Open with default app"
+                          onClick={() => void handleOpenWithDefaultApp()}
+                          className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] hover:bg-accent"
+                        >
+                          <ExternalLink className="size-3.5" />
+                          Open with default app
+                        </button>
+                      </>
+                    )}
                     <button
                       type="button"
                       role="menuitem"

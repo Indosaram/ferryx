@@ -46,6 +46,19 @@ describe("terminalLinkTarget", () => {
       expect(tokenFromHyperlink("file://192.168.1.5/share/file.txt")).toBeNull();
     });
 
+    it("accepts any authority for remote sessions and uses the absolute pathname", () => {
+      expect(tokenFromHyperlink("file://remote-box/srv/app/out/run.png", { remote: true })).toEqual({
+        type: "file",
+        path: "/srv/app/out/run.png",
+        raw: "file://remote-box/srv/app/out/run.png",
+      });
+      expect(tokenFromHyperlink("file://remote-box/srv/my%20dir/a.txt", { remote: true })).toMatchObject({
+        type: "file",
+        path: "/srv/my dir/a.txt",
+      });
+      expect(tokenFromHyperlink("file://remote-box/srv/a.txt", { remote: false })).toBeNull();
+    });
+
     it("returns null for non-http and non-file schemes", () => {
       expect(tokenFromHyperlink("mailto:dev@ferryx.dev")).toBeNull();
       expect(tokenFromHyperlink("ssh://user@host/path")).toBeNull();
@@ -228,6 +241,66 @@ describe("terminalLinkTarget", () => {
         workspaceId: "ws-ssh-2",
         path: "/remote/file.txt",
         cwd: null,
+      });
+    });
+
+    it("fetches a paired-host file through cmd_paired_file_fetch with the backend session id", async () => {
+      const token: TerminalFileToken = {
+        type: "file",
+        path: "src/main.rs",
+        raw: "src/main.rs:7",
+        line: 7,
+      };
+
+      const fakeInvoke = vi.fn(async () => ({
+        localPath: "/cache/paired-files/main.rs",
+        remotePath: "/home/u/proj/src/main.rs",
+        byteLength: 12,
+      }));
+      const openLocal = vi.fn(async (_localToken: TerminalFileToken) => true);
+
+      const success = await openRemoteFileToken(token, {
+        workspaceId: "daemon:host-1:proj",
+        cwd: "/home/u/proj",
+        sessionId: "daemon-session:host-1:abc",
+        shiftKey: false,
+        openLocal,
+        invokeFn: fakeInvoke as unknown as TerminalInvokeFn,
+      });
+
+      expect(success).toBe(true);
+      expect(fakeInvoke).toHaveBeenCalledTimes(1);
+      expect(fakeInvoke).toHaveBeenCalledWith("cmd_paired_file_fetch", {
+        workspaceId: "daemon:host-1:proj",
+        path: "src/main.rs",
+        cwd: "/home/u/proj",
+        sessionId: "daemon-session:host-1:abc",
+      });
+      expect(openLocal).toHaveBeenCalledWith({
+        type: "file",
+        path: "/cache/paired-files/main.rs",
+        raw: "src/main.rs:7",
+        line: 7,
+      });
+    });
+
+    it("keeps ssh workspaces on cmd_remote_file_fetch without a session id", async () => {
+      const token: TerminalFileToken = { type: "file", path: "a.txt", raw: "a.txt" };
+      const fakeInvoke = vi.fn(async () => ({ localPath: "/cache/a.txt", remotePath: "/r/a.txt", byteLength: 1 }));
+
+      await openRemoteFileToken(token, {
+        workspaceId: "ssh:abc",
+        cwd: "/r",
+        sessionId: "backend-1",
+        shiftKey: false,
+        openLocal: vi.fn(async () => true),
+        invokeFn: fakeInvoke as unknown as TerminalInvokeFn,
+      });
+
+      expect(fakeInvoke).toHaveBeenCalledWith("cmd_remote_file_fetch", {
+        workspaceId: "ssh:abc",
+        path: "a.txt",
+        cwd: "/r",
       });
     });
 

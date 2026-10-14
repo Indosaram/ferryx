@@ -4337,6 +4337,7 @@ impl DaemonServer {
                 Ok(DaemonRequest::GetCapabilities) => {
                     let mut capabilities = vec!["machinePairingV1".into(), "sshPasswordV1".into(), "dagStreamingV1".into()];
                     if self.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1".into()); }
+                    capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY.into());
                     #[cfg(unix)]
                     capabilities.push("sessionOwnershipTransferV1".into());
                     DaemonResponse::CapabilitiesOk { capabilities }

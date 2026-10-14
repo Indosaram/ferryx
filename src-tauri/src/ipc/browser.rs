@@ -3073,23 +3073,27 @@ pub async fn cmd_browser_open_external(url: String) -> Result<(), IpcError> {
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn cmd_open_file_path(
+pub async fn cmd_open_file_path<R: tauri::Runtime>(
+    app: AppHandle<R>,
     daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::DaemonClient>>,
     path: String,
     cwd: Option<String>,
     session_id: Option<String>,
+    workspace_id: Option<String>,
     line: Option<u32>,
     col: Option<u32>,
     editor: Option<String>,
 ) -> Result<bool, IpcError> {
-    open_file_path_request(
+    open_file_path_admitted(
         Some(daemon_client.inner()),
         path,
         cwd,
         session_id,
+        workspace_id,
         line,
         col,
         editor,
+        crate::ipc::file_preview_contract::app_remote_files_root(&app),
     )
     .await
 }
@@ -3102,6 +3106,10 @@ pub async fn cmd_open_file_path(
 ///    refused here rather than resolved against an unrelated local path.
 /// 2. `cwd` — the caller-supplied directory.
 /// 3. neither — the path must be absolute or `~`-rooted to resolve.
+///
+/// Session lookup failures pass through
+/// [`crate::ipc::file_preview_contract::admit_session_cwd`]; without a
+/// remote-files cache root no remote session may open an absolute path.
 pub async fn open_file_path_request(
     daemon_client: Option<&std::sync::Arc<crate::daemon::DaemonClient>>,
     path: String,
@@ -3111,12 +3119,80 @@ pub async fn open_file_path_request(
     col: Option<u32>,
     editor: Option<String>,
 ) -> Result<bool, IpcError> {
-    let editor = crate::ipc::file_link::EditorTarget::parse(editor.as_deref())?;
+    open_file_path_admitted(daemon_client, path, cwd, session_id, None, line, col, editor, None)
+        .await
+}
 
-    let resolved_cwd = match session_id.as_deref() {
-        Some(session_id) => resolve_session_cwd(daemon_client, session_id).await?,
-        None => None,
+/// [`open_file_path_request`] with the remote-files cache root that remote
+/// sessions may open fetched files from, and the caller's workspace id that
+/// decides whether a failed session lookup may fall back to the local disk.
+#[allow(clippy::too_many_arguments)]
+pub async fn open_file_path_admitted(
+    daemon_client: Option<&std::sync::Arc<crate::daemon::DaemonClient>>,
+    path: String,
+    cwd: Option<String>,
+    session_id: Option<String>,
+    workspace_id: Option<String>,
+    line: Option<u32>,
+    col: Option<u32>,
+    editor: Option<String>,
+    remote_files_root: Option<std::path::PathBuf>,
+) -> Result<bool, IpcError> {
+    let editor = crate::ipc::file_link::EditorTarget::parse(editor.as_deref())?;
+    let cwd = admit_file_open(
+        daemon_client,
+        &path,
+        cwd,
+        session_id,
+        workspace_id,
+        editor,
+        remote_files_root,
+    )
+    .await?;
+
+    crate::ipc::run_blocking::<bool, _>(move || {
+        crate::ipc::file_link::open_file_link_blocking(&path, cwd.as_deref(), line, col, editor)
+    })
+    .await
+}
+
+/// Admission half of [`open_file_path_admitted`]: resolves the cwd the open may
+/// use and refuses OS-opener launches of fetched remote-files cache files that
+/// are not passive documents. Never launches anything.
+pub async fn admit_file_open(
+    daemon_client: Option<&std::sync::Arc<crate::daemon::DaemonClient>>,
+    path: &str,
+    cwd: Option<String>,
+    session_id: Option<String>,
+    workspace_id: Option<String>,
+    editor: crate::ipc::file_link::EditorTarget,
+    remote_files_root: Option<std::path::PathBuf>,
+) -> Result<Option<String>, IpcError> {
+    let session_id = session_id.filter(|id| !id.is_empty());
+    let path = path.to_string();
+
+    let admission = match session_id.as_deref() {
+        Some(session_id) => {
+            let session = resolve_session_cwd(daemon_client, session_id).await;
+            let admit_path = path.clone();
+            let fallback_cwd = cwd.clone().map(std::path::PathBuf::from);
+            let root = remote_files_root.clone();
+            crate::ipc::run_blocking(move || {
+                crate::ipc::file_preview_contract::admit_session_cwd_admission(
+                    &admit_path,
+                    session,
+                    workspace_id.as_deref(),
+                    fallback_cwd,
+                    root.as_deref(),
+                )
+            })
+            .await?
+        }
+        None => crate::ipc::file_preview_contract::SessionCwdAdmission::Cwd(None),
     };
+    let admitted_from_cache =
+        admission == crate::ipc::file_preview_contract::SessionCwdAdmission::FetchedRemoteFile;
+    let resolved_cwd = admission.cwd();
     let cwd =
         if session_id.is_some() {
             if resolved_cwd.is_none()
@@ -3131,10 +3207,26 @@ pub async fn open_file_path_request(
             cwd
         };
 
-    crate::ipc::run_blocking::<bool, _>(move || {
-        crate::ipc::file_link::open_file_link_blocking(&path, cwd.as_deref(), line, col, editor)
+    let guard_cwd = cwd.clone();
+    crate::ipc::run_blocking(move || {
+        let Ok(token) = crate::ipc::file_link::sanitize_path_token(&path) else {
+            // An invalid token is refused by the launch itself.
+            return Ok(());
+        };
+        let candidate = crate::ipc::file_link::resolve_file_link(
+            token,
+            guard_cwd.as_deref(),
+            crate::ipc::file_link::home_dir(),
+        );
+        crate::ipc::file_preview_contract::ensure_remote_cache_launchable(
+            &candidate,
+            editor,
+            remote_files_root.as_deref(),
+            admitted_from_cache,
+        )
     })
-    .await
+    .await?;
+    Ok(cwd)
 }
 
 /// Live cwd of a local backend terminal session.

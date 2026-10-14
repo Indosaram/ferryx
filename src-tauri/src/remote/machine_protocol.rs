@@ -6,6 +6,10 @@ use sha2::{Digest, Sha256};
 pub const MACHINE_JSON_MAX_BYTES: usize = 64 * 1024;
 pub const DIRECTORY_JSON_MAX_BYTES: usize = 256 * 1024;
 pub const CONTROL_JSON_MAX_BYTES: usize = 16 * 1024;
+/// Raw bytes one paired file-read chunk may carry.
+pub const FILE_READ_CHUNK_MAX_BYTES: u32 = 256 * 1024;
+/// Response cap for one file-read chunk: base64 of [FILE_READ_CHUNK_MAX_BYTES] plus envelope.
+pub const FILE_READ_JSON_MAX_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
@@ -426,6 +430,38 @@ pub struct PasteUploadChunkRequest {
 pub struct PasteUploadChunkResult {
     pub remote_path: Option<String>,
     pub chunk_index: u32,
+}
+
+/// Reads one byte range of a regular file on the paired host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileReadRequest {
+    #[serde(deserialize_with = "request_id")]
+    pub request_id: String,
+    /// Host-side session id whose working tree anchors a relative path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Absolute host-side directory anchoring a relative path; wins over the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub path: String,
+    pub offset: u64,
+    pub length: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileReadResult {
+    pub resolved_path: String,
+    pub total_bytes: u64,
+    pub offset: u64,
+    /// Base64 of the bytes at `offset`.
+    pub data: String,
+    pub eof: bool,
+    /// Host-side content version stamp (size, mtime, inode); every page of one read must
+    /// carry the same value. Older hosts omit it and send an empty string.
+    #[serde(default)]
+    pub version: String,
 }
 
 #[cfg(test)]

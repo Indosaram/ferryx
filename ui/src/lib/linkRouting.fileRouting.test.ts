@@ -62,12 +62,59 @@ describe("openTerminalToken file routing", () => {
       );
 
       expect(res).toBe(true);
-      expect(resolveFilePreviewPath).toHaveBeenCalledWith("/repo/a b/x.html", "b");
+      expect(resolveFilePreviewPath).toHaveBeenCalledWith("/repo/a b/x.html", "b", null);
       expect(opener).toHaveBeenCalledTimes(1);
       expect(opener).toHaveBeenCalledWith("file:///repo/a%20b/x.html");
       expect(events).toHaveLength(0);
     } finally {
       unregister();
+      window.removeEventListener("ferryx:open-file-preview", onOpenFilePreview);
+    }
+  });
+
+  it("never hands a file fetched from an SSH or paired host to the built-in browser or the folder openers (R4-UI-1)", async () => {
+    const opener = vi.fn();
+    const worktreeOpener = vi.fn(() => true);
+    const unregister = registerBuiltInBrowserLinkOpener(opener);
+    const unregisterWorktree = registerWorktreePathOpener(worktreeOpener);
+    const events: CustomEvent[] = [];
+    const onOpenFilePreview = (event: Event) => events.push(event as CustomEvent);
+    window.addEventListener("ferryx:open-file-preview", onOpenFilePreview);
+
+    try {
+      for (const workspaceId of ["ssh:host-a", "daemon:host-b"]) {
+        events.length = 0;
+        const remoteSource: FilePreviewSource = { ...source, workspaceId };
+        const cached = "/cache/remote-files/abc/report.html";
+        vi.mocked(resolveFilePreviewPath).mockResolvedValueOnce({
+          resolvedPath: cached,
+          exists: true,
+          isDirectory: false,
+        });
+        const res = await openTerminalToken(
+          { type: "file", path: cached, raw: cached },
+          { source: remoteSource },
+        );
+        expect(res).toBe(true);
+        expect(opener).not.toHaveBeenCalled();
+        expect(events).toHaveLength(1);
+        expect(events[0]!.detail.request.path).toBe(cached);
+
+        vi.mocked(resolveFilePreviewPath).mockResolvedValueOnce({
+          resolvedPath: "/cache/remote-files/abc",
+          exists: true,
+          isDirectory: true,
+        });
+        await openTerminalToken(
+          { type: "file", path: "/cache/remote-files/abc", raw: "/cache/remote-files/abc" },
+          { source: remoteSource },
+        );
+        expect(worktreeOpener).not.toHaveBeenCalled();
+        expect(revealPath).not.toHaveBeenCalled();
+      }
+    } finally {
+      unregister();
+      unregisterWorktree();
       window.removeEventListener("ferryx:open-file-preview", onOpenFilePreview);
     }
   });
@@ -90,7 +137,7 @@ describe("openTerminalToken file routing", () => {
       );
 
       expect(res).toBe(true);
-      expect(resolveFilePreviewPath).toHaveBeenCalledWith("/repo/src", "b");
+      expect(resolveFilePreviewPath).toHaveBeenCalledWith("/repo/src", "b", null);
       expect(revealPath).toHaveBeenCalledWith("/repo/src");
       expect(events).toHaveLength(0);
     } finally {
@@ -116,7 +163,7 @@ describe("openTerminalToken file routing", () => {
       );
 
       expect(res).toBe(true);
-      expect(resolveFilePreviewPath).toHaveBeenCalledWith("/repo/missing.ts", "b");
+      expect(resolveFilePreviewPath).toHaveBeenCalledWith("/repo/missing.ts", "b", null);
       expect(toast.error).toHaveBeenCalledWith("File not found: /repo/missing.ts");
       expect(events).toHaveLength(0);
     } finally {
@@ -124,7 +171,7 @@ describe("openTerminalToken file routing", () => {
     }
   });
 
-  it("dispatches open-file-preview event with detail.request.path equal to original token path for regular file", async () => {
+  it("dispatches open-file-preview event with detail.request.path equal to the resolved absolute path for regular file", async () => {
     const events: CustomEvent[] = [];
     const onOpenFilePreview = (event: Event) => events.push(event as CustomEvent);
     window.addEventListener("ferryx:open-file-preview", onOpenFilePreview);
@@ -142,18 +189,43 @@ describe("openTerminalToken file routing", () => {
       );
 
       expect(res).toBe(true);
-      expect(resolveFilePreviewPath).toHaveBeenCalledWith("src/main.ts", "b");
+      expect(resolveFilePreviewPath).toHaveBeenCalledWith("src/main.ts", "b", null);
       expect(events).toHaveLength(1);
       expect(events[0]?.detail).toEqual({
         source,
         request: {
-          path: "src/main.ts",
+          path: "/repo/src/main.ts",
           backendSessionId: "b",
           line: null,
           col: null,
         },
       });
-      expect(events[0]?.detail.request.path).toBe("src/main.ts");
+      expect(events[0]?.detail.request.path).toBe("/repo/src/main.ts");
+    } finally {
+      window.removeEventListener("ferryx:open-file-preview", onOpenFilePreview);
+    }
+  });
+
+  it("keys preview requests by resolved absolute path so cwd changes and spellings do not collide", async () => {
+    const events: CustomEvent[] = [];
+    const onOpenFilePreview = (event: Event) => events.push(event as CustomEvent);
+    window.addEventListener("ferryx:open-file-preview", onOpenFilePreview);
+
+    try {
+      vi.mocked(resolveFilePreviewPath)
+        .mockResolvedValueOnce({ resolvedPath: "/a/out.png", exists: true, isDirectory: false })
+        .mockResolvedValueOnce({ resolvedPath: "/b/out.png", exists: true, isDirectory: false })
+        .mockResolvedValueOnce({ resolvedPath: "/b/out.png", exists: true, isDirectory: false });
+
+      await openTerminalToken({ type: "file", path: "out.png", line: 3, col: 7, raw: "out.png:3:7" }, { source });
+      await openTerminalToken({ type: "file", path: "out.png", raw: "out.png" }, { source });
+      await openTerminalToken({ type: "file", path: "./out.png", raw: "./out.png" }, { source });
+
+      expect(events.map((event) => event.detail.request)).toEqual([
+        { path: "/a/out.png", backendSessionId: "b", line: 3, col: 7 },
+        { path: "/b/out.png", backendSessionId: "b", line: null, col: null },
+        { path: "/b/out.png", backendSessionId: "b", line: null, col: null },
+      ]);
     } finally {
       window.removeEventListener("ferryx:open-file-preview", onOpenFilePreview);
     }
@@ -173,7 +245,7 @@ describe("openTerminalToken file routing", () => {
       );
 
       expect(res).toBe(true);
-      expect(resolveFilePreviewPath).toHaveBeenCalledWith("src/fallback.ts", "b");
+      expect(resolveFilePreviewPath).toHaveBeenCalledWith("src/fallback.ts", "b", null);
       expect(events).toHaveLength(1);
       expect(events[0]?.detail).toEqual({
         source,
@@ -207,6 +279,7 @@ describe("openTerminalToken file routing", () => {
         path: "src/main.ts",
         cwd: undefined,
         sessionId: "b",
+        workspaceId: null,
         editor: undefined,
         line: undefined,
         col: undefined,
@@ -243,12 +316,13 @@ describe("openTerminalToken file routing", () => {
       );
 
       expect(res).toBe(true);
-      expect(resolveFilePreviewPath).toHaveBeenCalledWith("shot.png", "b");
+      expect(resolveFilePreviewPath).toHaveBeenCalledWith("shot.png", "b", null);
       expect(events).toHaveLength(0);
       expect(invoke).toHaveBeenCalledWith("cmd_open_file_path", {
         path: "shot.png",
         cwd: undefined,
         sessionId: "b",
+        workspaceId: null,
         editor: undefined,
         line: undefined,
         col: undefined,
@@ -257,6 +331,30 @@ describe("openTerminalToken file routing", () => {
       window.removeEventListener("ferryx:open-file-preview", onOpenFilePreview);
       localStorage.clear();
     }
+  });
+
+  it("passes the source workspaceId to the resolve and external-open invokes (RS-F1)", async () => {
+    const sshSource: FilePreviewSource = { ...source, workspaceId: "ssh:0123abcd" };
+    vi.mocked(resolveFilePreviewPath).mockResolvedValueOnce({
+      resolvedPath: "/srv/app/main.rs",
+      exists: true,
+      isDirectory: false,
+    });
+
+    await openTerminalToken(
+      { type: "file", path: "src/main.rs", raw: "src/main.rs" },
+      { source: sshSource, preview: true },
+    );
+    expect(resolveFilePreviewPath).toHaveBeenCalledWith("src/main.rs", "b", "ssh:0123abcd");
+
+    await openTerminalToken(
+      { type: "file", path: "src/main.rs", raw: "src/main.rs" },
+      { source: sshSource, shiftKey: true },
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "cmd_open_file_path",
+      expect.objectContaining({ sessionId: "b", workspaceId: "ssh:0123abcd" }),
+    );
   });
 });
 
@@ -288,7 +386,7 @@ describe("openTerminalToken worktree root routing", () => {
       );
 
       expect(res).toBe(true);
-      expect(resolveFilePreviewPath).toHaveBeenCalledWith("/repo/worktree-a", "b");
+      expect(resolveFilePreviewPath).toHaveBeenCalledWith("/repo/worktree-a", "b", null);
       expect(opener).toHaveBeenCalledTimes(1);
       expect(opener).toHaveBeenCalledWith("/repo/worktree-a");
       expect(revealPath).not.toHaveBeenCalled();
@@ -314,7 +412,7 @@ describe("openTerminalToken worktree root routing", () => {
       );
 
       expect(res).toBe(true);
-      expect(resolveFilePreviewPath).toHaveBeenCalledWith("/repo/worktree-b", "b");
+      expect(resolveFilePreviewPath).toHaveBeenCalledWith("/repo/worktree-b", "b", null);
       expect(opener).toHaveBeenCalledTimes(1);
       expect(opener).toHaveBeenCalledWith("/repo/worktree-b");
       expect(revealPath).toHaveBeenCalledTimes(1);
@@ -337,7 +435,7 @@ describe("openTerminalToken worktree root routing", () => {
     );
 
     expect(res).toBe(true);
-    expect(resolveFilePreviewPath).toHaveBeenCalledWith("/repo/worktree-c", "b");
+    expect(resolveFilePreviewPath).toHaveBeenCalledWith("/repo/worktree-c", "b", null);
     expect(revealPath).toHaveBeenCalledTimes(1);
     expect(revealPath).toHaveBeenCalledWith("/repo/worktree-c");
   });

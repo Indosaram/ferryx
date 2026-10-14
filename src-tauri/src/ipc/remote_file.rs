@@ -12,11 +12,42 @@ fn invalid_remote_path(message: impl Into<String>) -> IpcError {
         .with_details(serde_json::json!({ "reason": "invalidRemotePath" }))
 }
 
+/// Normalizes a terminal path token into the remote file it names.
+///
+/// Absolute and cwd-relative inputs yield a normalized absolute POSIX path.
+/// Home-relative inputs (`~` or `~/...`) yield `~` or `~/<normalized suffix>`,
+/// which only [`remote_read_command`] expands, as `"$HOME"`, on the remote host;
+/// the suffix may not climb above the home directory.
 pub fn remote_target_path(input: &str, base: &str) -> Result<String, IpcError> {
     if input.is_empty() || input.chars().any(char::is_control) {
         return Err(invalid_remote_path(
             "Remote path cannot be empty or contain control characters",
         ));
+    }
+
+    if input == "~" || input.starts_with("~/") {
+        let mut segments: Vec<&str> = Vec::new();
+        for segment in input[1..].split('/') {
+            match segment {
+                "" | "." => continue,
+                ".." => {
+                    if segments.pop().is_none() {
+                        return Err(invalid_remote_path(
+                            "Remote path climbs above the home directory",
+                        ));
+                    }
+                }
+                s => segments.push(s),
+            }
+        }
+        let suffix = segments.join("/");
+        crate::ssh::direct::validate_remote_path(&format!("/{suffix}"))
+            .map_err(|e| invalid_remote_path(e.message))?;
+        return Ok(if suffix.is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{suffix}")
+        });
     }
 
     let raw = if input.starts_with('/') {
@@ -61,6 +92,74 @@ pub fn remote_target_path(input: &str, base: &str) -> Result<String, IpcError> {
     Ok(normalized)
 }
 
+/// Directory under the app cache that holds every fetched remote file.
+pub fn remote_files_root(cache_root: &Path) -> PathBuf {
+    cache_root.join("remote-files")
+}
+
+/// Marks a fetched cache file as downloaded from another machine so the OS
+/// treats it like any download: `com.apple.quarantine` on macOS, a
+/// `Zone.Identifier` (Mark of the Web) stream on Windows, nothing elsewhere.
+/// Failures are logged, never fatal: the fetch itself already succeeded.
+pub fn mark_downloaded(path: &Path) {
+    if let Err(error) = quarantine::mark(path) {
+        tracing::warn!(%error, path = %path.display(), "Failed to mark fetched remote file as downloaded");
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod quarantine {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    pub fn mark(path: &Path) -> std::io::Result<()> {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // 0081: downloaded, user has not yet approved it.
+        let value = format!("0081;{seconds:x};Ferryx;");
+        let c_path = CString::new(path.as_os_str().as_bytes())?;
+        let name = CString::new("com.apple.quarantine")?;
+        // SAFETY: both strings are NUL-terminated and outlive the call; the value
+        // pointer/length describe an initialized buffer.
+        let result = unsafe {
+            libc::setxattr(
+                c_path.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+                0,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod quarantine {
+    use std::path::Path;
+
+    pub fn mark(path: &Path) -> std::io::Result<()> {
+        let mut stream = path.as_os_str().to_os_string();
+        stream.push(":Zone.Identifier");
+        std::fs::write(stream, b"[ZoneTransfer]\r\nZoneId=3\r\n")
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod quarantine {
+    pub fn mark(_path: &std::path::Path) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 pub fn remote_cache_path(cache_root: &Path, workspace_id: &str, remote_path: &str) -> PathBuf {
     let mut hasher = Sha256::new();
     hasher.update(workspace_id.as_bytes());
@@ -87,14 +186,19 @@ pub fn remote_cache_path(cache_root: &Path, workspace_id: &str, remote_path: &st
         &sanitized
     };
 
-    cache_root
-        .join("remote-files")
-        .join(dir_name)
-        .join(file_name)
+    remote_files_root(cache_root).join(dir_name).join(file_name)
 }
 
+/// Shell command reading one remote file. Only the home-relative form produced
+/// by [`remote_target_path`] expands anything: `"$HOME"`, never a quoted suffix.
 pub fn remote_read_command(remote_path: &str) -> String {
-    let q = crate::ssh::direct::quote_posix(remote_path);
+    let q = if remote_path == "~" {
+        "\"$HOME\"".to_string()
+    } else if let Some(suffix) = remote_path.strip_prefix("~/") {
+        format!("\"$HOME\"/{}", crate::ssh::direct::quote_posix(suffix))
+    } else {
+        crate::ssh::direct::quote_posix(remote_path)
+    };
     format!(
         "test -f {q} || exit 3; head -c {} -- {q}",
         REMOTE_FILE_MAX_BYTES + 1
@@ -235,6 +339,7 @@ pub async fn cmd_remote_file_fetch<R: Runtime>(
             ));
         }
 
+        mark_downloaded(&target_for_write);
         Ok(())
     })
     .await?;
@@ -369,6 +474,48 @@ mod tests {
     }
 
     #[test]
+    fn test_remote_target_path_home_relative_stays_home_relative() {
+        assert_eq!(
+            remote_target_path("~/logs/run.png", "/home/u/proj").unwrap(),
+            "~/logs/run.png"
+        );
+        assert_eq!(remote_target_path("~", "/home/u/proj").unwrap(), "~");
+        assert_eq!(remote_target_path("~/", "/home/u/proj").unwrap(), "~");
+        assert_eq!(
+            remote_target_path("~/a/./b/../c.txt", "/home/u/proj").unwrap(),
+            "~/a/c.txt"
+        );
+    }
+
+    #[test]
+    fn test_remote_target_path_home_relative_cannot_climb_above_home() {
+        for input in ["~/..", "~/../etc/passwd", "~/a/../../b"] {
+            let err = remote_target_path(input, "/home/u/proj").unwrap_err();
+            assert_eq!(err.code, IpcErrorCode::InvalidRequest, "{input}");
+            assert_eq!(
+                err.details.as_ref().unwrap().get("reason").unwrap(),
+                "invalidRemotePath"
+            );
+        }
+    }
+
+    #[test]
+    fn test_remote_read_command_expands_only_home() {
+        let cmd = remote_read_command("~/logs/run $(id)'x.png");
+        let target = "\"$HOME\"/'logs/run $(id)'\\''x.png'";
+        assert_eq!(
+            cmd,
+            format!(
+                "test -f {target} || exit 3; head -c {} -- {target}",
+                REMOTE_FILE_MAX_BYTES + 1
+            )
+        );
+        assert!(remote_read_command("~").starts_with("test -f \"$HOME\" || exit 3;"));
+        // A "~" that is not the leading home marker stays inside single quotes.
+        assert!(remote_read_command("/srv/~/x").starts_with("test -f '/srv/~/x' "));
+    }
+
+    #[test]
     fn test_remote_cache_path_deterministic() {
         let cache_root = Path::new("/var/cache/ferryx");
         let p1 = remote_cache_path(cache_root, "ssh:ws-1", "/home/user/project/file.txt");
@@ -430,6 +577,34 @@ mod tests {
                 REMOTE_FILE_MAX_BYTES + 1
             )
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mark_downloaded_sets_the_quarantine_xattr() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("run.command");
+        std::fs::write(&file, b"echo hi").unwrap();
+        mark_downloaded(&file);
+        let c_path = CString::new(file.as_os_str().as_bytes()).unwrap();
+        let name = CString::new("com.apple.quarantine").unwrap();
+        let mut buf = vec![0u8; 256];
+        let len = unsafe {
+            libc::getxattr(
+                c_path.as_ptr(),
+                name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                0,
+                0,
+            )
+        };
+        assert!(len > 0, "com.apple.quarantine must be set on a fetched cache file");
+        let value = String::from_utf8_lossy(&buf[..len as usize]).into_owned();
+        assert!(value.starts_with("0081;"), "{value}");
+        assert!(value.contains(";Ferryx;"), "{value}");
     }
 
     #[test]

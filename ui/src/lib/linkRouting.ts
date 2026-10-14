@@ -5,6 +5,7 @@ import { isHttpUrl, loadBrowserSettings } from "./browserSettings";
 import { openExternalUrl } from "./browserTauri";
 import { resolveFilePreviewPath } from "./filePreviewCommands";
 import { fileOpenTargetFor } from "./fileOpenTargets";
+import { isPairedWorkspaceId, isRemoteWorkspaceId } from "./remoteProject";
 import { revealPath } from "./tauri";
 
 export const TERMINAL_LINK_ACTION_EVENT = "ferryx:terminal-link-actions";
@@ -274,13 +275,24 @@ export function resolveTokenAtCol(line: string, col: number): TerminalToken | nu
   }
 
   // 4. Check unquoted paths with slashes (supports apostrophes and escaped spaces)
+  // The dot-leading first segment (".omo/", ".github/", "..cache/") only starts at a token
+  // boundary so ellipsis text like "wait...src/a.ts" still resolves to "src/a.ts".
+  // '@' is allowed inside segments ("x@2x.png") but never as the first character.
   const PATH_PATTERN =
-    /(?:[a-zA-Z]:[\\/]|\\\\|~[\\/]|\.\.?[\\/]|\/|[\p{L}\p{N}_-]+[\\/])(?:[\p{L}\p{N}\p{M}_.'-]|\\ |[\\/])+[\p{L}\p{N}\p{M}_.-]+(?::\d+(?::\d+)?|\(\d+(?:,\s*\d+)?\)|#[Ll]\d+(?:-[Ll]?\d+|[Cc]\d+)?)?/gu;
+    /(?:(?<![\p{L}\p{N}_@.-])[a-zA-Z]:[\\/]|\\\\|~[\\/]|\.\.?[\\/]|\/|(?<=^|[\s([{<=:,;'"`])\.{1,2}[\p{L}\p{N}_-][\p{L}\p{N}_@-]*[\\/]|[\p{L}\p{N}_-][\p{L}\p{N}_@-]*[\\/])(?:[\p{L}\p{N}\p{M}_.'@-]|\\ |[\\/])*[\p{L}\p{N}\p{M}_.@-]+(?::\d+(?::\d+)?|\(\d+(?:,\s*\d+)?\)|#[Ll]\d+(?:-[Ll]?\d+|[Cc]\d+)?)?/gu;
+  // scp-style remote specs ("user@host:/srv/repo.git", "git@github.com:org/repo.git") are not local files.
+  const SCP_PREFIX = /(?:^|\s)[\p{L}\p{N}_.-]+@[\p{L}\p{N}_.-]+:$/u;
   let pathMatch: RegExpExecArray | null;
   while ((pathMatch = PATH_PATTERN.exec(line)) !== null) {
-    const full = pathMatch[0];
+    // Drop sentence punctuation after a named final segment ("see out/foo.png." -> "out/foo.png"),
+    // but keep pure dot segments such as "../..".
+    const full = pathMatch[0].replace(/(?<=[\p{L}\p{N}\p{M}_@-])[.,;:!?]+$/u, "");
     const start = pathMatch.index;
     const end = start + full.length;
+    if (SCP_PREFIX.test(line.slice(0, start))) {
+      if (targetCharIndex >= start && targetCharIndex < end) return null;
+      continue;
+    }
     if (targetCharIndex >= start && targetCharIndex < end) {
       const unescaped = full.replace(/\\ /g, " ");
       const candidate = parseFilePathCandidate(unescaped);
@@ -289,8 +301,9 @@ export function resolveTokenAtCol(line: string, col: number): TerminalToken | nu
   }
 
   // 5. Fallback: single file names with known extensions (e.g. package.json:12)
+  // The extension class excludes punctuation, so a trailing sentence "." is never captured here.
   const SINGLE_FILE_PATTERN =
-    /[\p{L}\p{N}\p{M}_.'-]+\.[a-zA-Z0-9_-]+(?::\d+(?::\d+)?|\(\d+(?:,\s*\d+)?\)|#[Ll]\d+(?:-[Ll]?\d+|[Cc]\d+)?)?/gu;
+    /[\p{L}\p{N}\p{M}_.'-][\p{L}\p{N}\p{M}_.'@-]*\.[a-zA-Z0-9_-]+(?::\d+(?::\d+)?|\(\d+(?:,\s*\d+)?\)|#[Ll]\d+(?:-[Ll]?\d+|[Cc]\d+)?)?/gu;
   let fileMatch: RegExpExecArray | null;
   while ((fileMatch = SINGLE_FILE_PATTERN.exec(line)) !== null) {
     const full = fileMatch[0];
@@ -369,7 +382,7 @@ export async function openTerminalToken(
 
       let resolved;
       try {
-        resolved = await resolveFilePreviewPath(token.path, source.backendSessionId);
+        resolved = await resolveFilePreviewPath(token.path, source.backendSessionId, source.workspaceId);
       } catch {
         // If it throws, fall back to the current dispatch unchanged.
       }
@@ -380,14 +393,20 @@ export async function openTerminalToken(
           return true;
         }
 
-        if (resolved.isDirectory) {
+        // A file fetched from an SSH or paired host is host-controlled content: it
+        // opens only in the read-only preview, never as a trusted local file:// page
+        // in the built-in browser or through the local folder openers.
+        const remoteSource =
+          isRemoteWorkspaceId(source.workspaceId) || isPairedWorkspaceId(source.workspaceId);
+
+        if (resolved.isDirectory && !remoteSource) {
           if (worktreePathOpener?.(resolved.resolvedPath)) return true;
           await revealPath(resolved.resolvedPath);
           return true;
         }
 
         const ext = resolved.resolvedPath.slice(resolved.resolvedPath.lastIndexOf(".")).toLowerCase();
-        if ((ext === ".html" || ext === ".htm") && builtInBrowserOpener) {
+        if (!remoteSource && (ext === ".html" || ext === ".htm") && builtInBrowserOpener) {
           await builtInBrowserOpener(filePathToFileUrl(resolved.resolvedPath));
           return true;
         }
@@ -398,7 +417,9 @@ export async function openTerminalToken(
           detail: {
             source,
             request: {
-              path: token.path,
+              // Tab identity keys on request.path: use the absolute resolved path so the same
+              // relative token from different cwds (or "./x" vs "x") maps to the right single tab.
+              path: resolved?.resolvedPath ?? token.path,
               backendSessionId: source.backendSessionId,
               line: token.line ?? null,
               col: token.col ?? null,
@@ -413,6 +434,7 @@ export async function openTerminalToken(
       path: token.path,
       cwd: options.cwd,
       sessionId: options.source?.backendSessionId ?? options.sessionId,
+      workspaceId: options.source?.workspaceId ?? null,
       editor: options.editor,
       line: token.line,
       col: token.col,

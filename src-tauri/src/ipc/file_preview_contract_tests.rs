@@ -171,3 +171,260 @@ fn frozen_limits_match_the_plan() {
     assert_eq!(limits::MAX_CONCURRENT_MEDIA_REQUESTS, 8);
     assert_eq!(limits::STREAM_CHUNK_BYTES, 64 * 1024);
 }
+
+// --- admit_session_cwd: session-failure policy for file-link opens ---
+
+/// A local (non-SSH, non-paired) workspace id as the UI sends it.
+const LOCAL_WS: &str = "ws-local-1";
+const SSH_WS: &str = "ssh:0123abcd";
+const PAIRED_WS: &str = "daemon:host-1/ws";
+
+fn session_not_found() -> IpcError {
+    IpcError::new(IpcErrorCode::SessionNotFound, "terminal session 'cli' is not available")
+}
+
+fn ssh_refusal() -> IpcError {
+    IpcError::new(IpcErrorCode::Unsupported, "session belongs to an SSH workspace")
+        .with_details(json!({ "kind": "ssh" }))
+}
+
+fn paired_refusal() -> IpcError {
+    IpcError::new(IpcErrorCode::Unsupported, "session is relayed from a paired host")
+        .with_details(json!({ "kind": "pairedHost" }))
+}
+
+struct RemoteCache {
+    _dir: tempfile::TempDir,
+    cache_root: PathBuf,
+    fetched: PathBuf,
+    outside: PathBuf,
+}
+
+fn remote_cache() -> RemoteCache {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache_root = dir.path().join("cache");
+    let fetched = crate::ipc::remote_file::remote_cache_path(&cache_root, "ssh:ws", "/srv/a.png");
+    std::fs::create_dir_all(fetched.parent().unwrap()).unwrap();
+    std::fs::write(&fetched, b"png").unwrap();
+    let outside = dir.path().join("elsewhere.png");
+    std::fs::write(&outside, b"png").unwrap();
+    RemoteCache {
+        _dir: dir,
+        cache_root,
+        fetched,
+        outside,
+    }
+}
+
+#[test]
+fn local_session_keeps_its_live_cwd() {
+    let cwd = PathBuf::from("/work/repo");
+    let admitted =
+        admit_session_cwd("src/a.rs", Ok(Some(cwd.clone())), Some(LOCAL_WS), None, None).unwrap();
+    assert_eq!(admitted, Some(cwd));
+}
+
+#[test]
+fn unknown_session_in_a_local_workspace_does_not_block_an_absolute_path() {
+    let admitted = admit_session_cwd(
+        "/tmp/report.png",
+        Err(session_not_found()),
+        Some(LOCAL_WS),
+        None,
+        None,
+    )
+    .expect("absolute path must open without a live session in a local workspace");
+    assert_eq!(admitted, None);
+}
+
+#[test]
+fn unknown_session_in_a_local_workspace_relative_token_falls_back_to_caller_cwd_or_refuses() {
+    let fallback = PathBuf::from("/work/repo");
+    let admitted = admit_session_cwd(
+        "src/a.rs",
+        Err(session_not_found()),
+        Some(LOCAL_WS),
+        Some(fallback.clone()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(admitted, Some(fallback));
+
+    let error =
+        admit_session_cwd("src/a.rs", Err(session_not_found()), Some(LOCAL_WS), None, None)
+            .expect_err("relative token without any cwd must stay an error");
+    assert_eq!(error.code, IpcErrorCode::SessionNotFound);
+}
+
+#[test]
+fn remote_sessions_open_only_fetched_cache_files() {
+    let cache = remote_cache();
+    let root = crate::ipc::remote_file::remote_files_root(&cache.cache_root);
+    let fetched = cache.fetched.to_string_lossy().into_owned();
+
+    for refusal in [ssh_refusal, paired_refusal] {
+        let admitted = admit_session_cwd(&fetched, Err(refusal()), None, None, Some(&root))
+            .expect("a fetched cache file opens as a local file");
+        assert_eq!(admitted, None);
+    }
+}
+
+#[test]
+fn remote_sessions_refuse_absolute_paths_outside_the_cache() {
+    let cache = remote_cache();
+    let root = crate::ipc::remote_file::remote_files_root(&cache.cache_root);
+    let outside = cache.outside.to_string_lossy().into_owned();
+    let escape = format!("{}/../../elsewhere.png", cache.fetched.parent().unwrap().display());
+    let root_itself = root.to_string_lossy().into_owned();
+
+    for refusal in [ssh_refusal, paired_refusal] {
+        for path in [
+            "/srv/app/x.png",
+            outside.as_str(),
+            escape.as_str(),
+            root_itself.as_str(),
+        ] {
+            let error = admit_session_cwd(path, Err(refusal()), None, None, Some(&root))
+                .expect_err("remote-printed absolute paths must not open locally");
+            assert_eq!(error.code, IpcErrorCode::Unsupported, "{path}");
+        }
+        let error = admit_session_cwd(
+            &cache.fetched.to_string_lossy(),
+            Err(refusal()),
+            None,
+            None,
+            None,
+        )
+        .expect_err("no cache root means no remote exception");
+        assert_eq!(error.code, IpcErrorCode::Unsupported);
+    }
+}
+
+#[test]
+fn remote_sessions_refuse_relative_tokens_even_with_caller_cwd() {
+    let cache = remote_cache();
+    let root = crate::ipc::remote_file::remote_files_root(&cache.cache_root);
+    for refusal in [ssh_refusal, paired_refusal] {
+        let error = admit_session_cwd(
+            "src/a.rs",
+            Err(refusal()),
+            None,
+            Some(PathBuf::from("/work/repo")),
+            Some(&root),
+        )
+        .expect_err("relative remote tokens must not resolve locally");
+        assert_eq!(error.code, IpcErrorCode::Unsupported);
+    }
+}
+
+// --- RS-F1: a failed lookup must never reopen a remote path from the local disk ---
+
+#[test]
+fn remote_workspace_session_whose_lookup_failed_refuses_local_paths() {
+    for workspace in [SSH_WS, PAIRED_WS] {
+        for (path, fallback) in [
+            ("/etc/hosts", None),
+            ("/etc/hosts", Some(PathBuf::from("/work/repo"))),
+            ("src/a.rs", Some(PathBuf::from("/work/repo"))),
+        ] {
+            let error = admit_session_cwd(
+                path,
+                Err(session_not_found()),
+                Some(workspace),
+                fallback,
+                None,
+            )
+            .expect_err("a remote-printed path must not open from the local disk");
+            assert_eq!(error.code, IpcErrorCode::Unsupported, "{workspace} {path}");
+        }
+    }
+}
+
+#[test]
+fn remote_workspace_refuses_even_a_successful_local_lookup() {
+    for workspace in [SSH_WS, PAIRED_WS] {
+        let error = admit_session_cwd(
+            "src/a.rs",
+            Ok(Some(PathBuf::from("/work/repo"))),
+            Some(workspace),
+            None,
+            None,
+        )
+        .expect_err("a remote workspace never resolves against a local cwd");
+        assert_eq!(error.code, IpcErrorCode::Unsupported, "{workspace}");
+    }
+}
+
+#[test]
+fn unknown_session_without_a_workspace_id_refuses() {
+    for (path, fallback) in [
+        ("/etc/hosts", None),
+        ("src/a.rs", Some(PathBuf::from("/work/repo"))),
+    ] {
+        let error = admit_session_cwd(path, Err(session_not_found()), None, fallback, None)
+            .expect_err("a session id without a workspace id cannot prove the session is local");
+        assert_eq!(error.code, IpcErrorCode::SessionNotFound, "{path}");
+    }
+}
+
+#[test]
+fn fetched_cache_file_is_admitted_whatever_the_workspace_or_lookup() {
+    let cache = remote_cache();
+    let root = crate::ipc::remote_file::remote_files_root(&cache.cache_root);
+    let fetched = cache.fetched.to_string_lossy().into_owned();
+    for workspace in [None, Some(SSH_WS), Some(PAIRED_WS)] {
+        for session in [
+            Err(session_not_found()),
+            Err(ssh_refusal()),
+            Ok(Some(PathBuf::from("/work/repo"))),
+        ] {
+            let local_lookup = session.is_ok();
+            let admitted = admit_session_cwd(&fetched, session, workspace, None, Some(&root))
+                .expect("a fetched remote-files cache file opens locally");
+            if !local_lookup {
+                assert_eq!(admitted, None, "{workspace:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn admission_reports_when_only_the_fetched_cache_admitted_the_path() {
+    let cache = remote_cache();
+    let root = crate::ipc::remote_file::remote_files_root(&cache.cache_root);
+    let fetched = cache.fetched.to_string_lossy().into_owned();
+    for (workspace, session) in [
+        (Some(SSH_WS), Err(session_not_found())),
+        (Some(PAIRED_WS), Ok(Some(PathBuf::from("/work/repo")))),
+        (None, Err(ssh_refusal())),
+        (Some(LOCAL_WS), Err(paired_refusal())),
+    ] {
+        let admitted =
+            admit_session_cwd_admission(&fetched, session, workspace, None, Some(&root)).unwrap();
+        assert_eq!(admitted, SessionCwdAdmission::FetchedRemoteFile, "{workspace:?}");
+    }
+
+    let local =
+        admit_session_cwd_admission("/tmp/report.png", Err(session_not_found()), Some(LOCAL_WS), None, Some(&root))
+            .unwrap();
+    assert_eq!(local, SessionCwdAdmission::Cwd(None));
+    let live = PathBuf::from("/work/repo");
+    let local_cwd =
+        admit_session_cwd_admission("src/a.rs", Ok(Some(live.clone())), Some(LOCAL_WS), None, Some(&root))
+            .unwrap();
+    assert_eq!(local_cwd, SessionCwdAdmission::Cwd(Some(live)));
+}
+
+#[test]
+fn interpreter_run_script_types_are_not_passive_documents() {
+    for name in [
+        "evil.py", "EVIL.PY", "x.rb", "x.lua", "x.jsx", "x.mjs", "x.cjs", "x.r", "x.ex", "x.exs",
+        "x.hs", "x.scala", "x.kt", "x.swift", "x.xml", "x.bat", "x.command", "x.terminal",
+        "x.exe", "x.png.exe", "x.jar", "x.svg", "noext",
+    ] {
+        assert!(!is_passive_document(Path::new(name)), "{name} must not be launchable");
+    }
+    for name in ["a.png", "A.PNG", "a.pdf", "a.md", "a.txt", "a.log", "a.json", "a.mp4", "a.mp3", "a.csv"] {
+        assert!(is_passive_document(Path::new(name)), "{name} stays launchable");
+    }
+}

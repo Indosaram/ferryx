@@ -4158,6 +4158,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
           path: "src/components/App.tsx",
           cwd: "/Users/indo/code/project",
           sessionId: "daemon-file-click",
+          workspaceId: "ws-main",
           editor: "system",
           line: 42,
           col: 10,
@@ -4346,6 +4347,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
           path: "alpha/one.ts",
           cwd: "/Users/indo/code/project",
           sessionId: "daemon-indented-click",
+          workspaceId: "ws-main",
           editor: "system",
           line: 1,
           col: 1,
@@ -7826,6 +7828,311 @@ describe("terminal link UX (U1-U3)", () => {
 
     expect(toastMocks.error).not.toHaveBeenCalledWith("Remote files cannot be opened on this machine.");
     unmount();
+  });
+
+  it("opens an SSH-fetched image from the local cache while the backend refuses remote-printed paths", async () => {
+    toastMocks.error.mockClear();
+    const events: Array<CustomEvent> = [];
+    const previewOpens: Array<Promise<unknown>> = [];
+    // Stand-in for App's preview tab: it opens the request through cmd_file_preview_open.
+    const onOpen = (event: Event) => {
+      events.push(event as CustomEvent);
+      const { request } = (event as CustomEvent).detail;
+      previewOpens.push(tauriCoreMocks.invoke("cmd_file_preview_open", { ...request, ownerId: "tab" }));
+    };
+    window.addEventListener("ferryx:open-file-preview", onOpen);
+    const cachePath = "/Users/me/Library/Caches/ferryx/remote-files/0123abcd/run.png";
+    const session = {
+      ...createSession("term-session-ssh-png", "daemon-ssh-png"),
+      workspaceId: "ssh:png",
+      cwd: "/srv/app",
+    };
+    // Real backend policy: an SSH session's id is refused for every path except a
+    // file fetched into the remote-files cache.
+    const sshRefusal = { code: "Unsupported", message: "session belongs to an SSH workspace", details: { kind: "ssh" } };
+    const refusesRemote = (args: any) =>
+      (args?.backendSessionId ?? args?.sessionId) === "daemon-ssh-png" && !String(args?.path).includes("/remote-files/");
+    // The open-with-default-app outcome, settled by the mock itself so the test awaits
+    // the real result instead of sleeping.
+    let resolveExternalOpen!: (outcome: unknown) => void;
+    const externalOpen = new Promise((resolve) => { resolveExternalOpen = resolve; });
+    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+      if (command === "cmd_native_terminal_attach") {
+        return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
+      }
+      if (command === "cmd_native_terminal_hyperlink_at") return null;
+      if (command === "cmd_native_terminal_line_at") return { text: "out/run.png", col: 0, row: 0 };
+      if (command === "cmd_remote_file_fetch") {
+        return { localPath: cachePath, remotePath: "/srv/app/out/run.png", byteLength: 3 };
+      }
+      if (command === "cmd_file_preview_resolve" || command === "cmd_file_preview_open" || command === "cmd_open_file_path") {
+        if (refusesRemote(args)) {
+          if (command === "cmd_open_file_path") resolveExternalOpen({ refused: true });
+          throw sshRefusal;
+        }
+        if (command === "cmd_file_preview_resolve") return { resolvedPath: args.path, exists: true, isDirectory: false };
+        if (command === "cmd_open_file_path") resolveExternalOpen({ opened: args.path });
+        return true;
+      }
+      return undefined;
+    });
+
+    const { getByTestId, unmount } = await renderNative(<NativeTerminalPane session={session} />);
+    const pane = getByTestId("native-terminal-pane");
+    vi.spyOn(getByTestId("native-terminal-viewport"), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
+    act(() => {
+      fireEvent.pointerDown(pane, { button: 0, clientX: 20, clientY: 20, metaKey: true, ctrlKey: true, shiftKey: false });
+      window.dispatchEvent(new PointerEvent("pointerup", { button: 0, clientX: 20, clientY: 20, metaKey: true, ctrlKey: true, shiftKey: false, bubbles: true }));
+    });
+
+    await waitFor(() => expect(events).toHaveLength(1));
+    expect(events[0]?.detail).toMatchObject({
+      request: expect.objectContaining({ path: cachePath, backendSessionId: "daemon-ssh-png" }),
+    });
+    await expect(previewOpens[0]).resolves.toBe(true);
+
+    // Shift+click opens the cached file with the default app through cmd_open_file_path.
+    act(() => {
+      fireEvent.pointerDown(pane, { button: 0, clientX: 20, clientY: 20, metaKey: true, ctrlKey: true, shiftKey: true });
+      window.dispatchEvent(new PointerEvent("pointerup", { button: 0, clientX: 20, clientY: 20, metaKey: true, ctrlKey: true, shiftKey: true, bubbles: true }));
+    });
+    await expect(externalOpen).resolves.toEqual({ opened: cachePath });
+
+    const opened = tauriCoreMocks.invoke.mock.calls.filter(([command]) =>
+      command === "cmd_file_preview_resolve" || command === "cmd_file_preview_open" || command === "cmd_open_file_path");
+    expect(opened.length).toBeGreaterThan(0);
+    for (const [, args] of opened) expect((args as any)?.path).toBe(cachePath);
+    expect(toastMocks.error).not.toHaveBeenCalled();
+
+    window.removeEventListener("ferryx:open-file-preview", onOpen);
+    unmount();
+  });
+
+  it("fetches a paired-host file through cmd_paired_file_fetch on Cmd+click and opens the cache copy", async () => {
+    toastMocks.error.mockClear();
+    const events: Array<CustomEvent> = [];
+    const onOpen = (event: Event) => events.push(event as CustomEvent);
+    window.addEventListener("ferryx:open-file-preview", onOpen);
+    const cachePath = "/Users/me/Library/Caches/ferryx/paired-files/0123abcd/main.rs";
+    const session = {
+      ...createSession("term-session-paired", "daemon-paired"),
+      workspaceId: "daemon:host-1:proj",
+      cwd: "/home/u/proj",
+    };
+    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+      if (command === "cmd_native_terminal_attach") {
+        return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
+      }
+      if (command === "cmd_native_terminal_hyperlink_at") return null;
+      if (command === "cmd_native_terminal_line_at") return { text: "src/main.rs", col: 0, row: 0 };
+      if (command === "cmd_paired_file_fetch") {
+        return { localPath: cachePath, remotePath: "/home/u/proj/src/main.rs", byteLength: 3 };
+      }
+      if (command === "cmd_file_preview_resolve") return { resolvedPath: args.path, exists: true, isDirectory: false };
+      return undefined;
+    });
+
+    const { getByTestId, unmount } = await renderNative(<NativeTerminalPane session={session} />);
+    try {
+      const pane = getByTestId("native-terminal-pane");
+      vi.spyOn(getByTestId("native-terminal-viewport"), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
+      act(() => {
+        fireEvent.pointerDown(pane, { button: 0, clientX: 20, clientY: 20, metaKey: true, ctrlKey: true, shiftKey: false });
+        window.dispatchEvent(new PointerEvent("pointerup", { button: 0, clientX: 20, clientY: 20, metaKey: true, ctrlKey: true, shiftKey: false, bubbles: true }));
+      });
+
+      await waitFor(() => expect(events).toHaveLength(1));
+      const fetchCalls = tauriCoreMocks.invoke.mock.calls.filter(([command]) => command === "cmd_paired_file_fetch");
+      expect(fetchCalls).toHaveLength(1);
+      expect(fetchCalls[0]?.[1]).toEqual({
+        workspaceId: "daemon:host-1:proj",
+        path: "src/main.rs",
+        cwd: "/home/u/proj",
+        sessionId: "daemon-paired",
+      });
+      expect(tauriCoreMocks.invoke.mock.calls.some(([command]) => command === "cmd_remote_file_fetch")).toBe(false);
+      expect(events[0]?.detail).toMatchObject({ request: expect.objectContaining({ path: cachePath }) });
+      expect(toastMocks.error).not.toHaveBeenCalled();
+
+    } finally {
+      window.removeEventListener("ferryx:open-file-preview", onOpen);
+      unmount();
+    }
+  });
+
+  it("offers remote Open/Copy actions (no local-disk actions) for a path printed by a paired-host shell", async () => {
+    saveBrowserSettings({ showTerminalLinkActions: true });
+    const actionEvents: Array<CustomEvent<TerminalFileLinkActionDetail>> = [];
+    const onAction = (e: Event) => actionEvents.push(e as CustomEvent<TerminalFileLinkActionDetail>);
+    window.addEventListener("ferryx:terminal-file-link-actions", onAction);
+    const cachePath = "/Users/me/Library/Caches/ferryx/paired-files/0123abcd/main.rs";
+    const session = { ...createSession("session-paired-actions", "daemon-paired-actions"), workspaceId: "daemon:host-1:proj", cwd: "/home/u/proj" };
+    setSessionMouseTracking("daemon-paired-actions", false);
+    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+      if (command === "cmd_native_terminal_attach") {
+        return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
+      }
+      if (command === "cmd_native_terminal_hyperlink_at") return null;
+      if (command === "cmd_native_terminal_line_at") return { text: "/home/u/proj/src/main.rs", col: 2, row: 0 };
+      if (command === "cmd_paired_file_fetch") {
+        return { localPath: cachePath, remotePath: "/home/u/proj/src/main.rs", byteLength: 3 };
+      }
+      if (command === "cmd_file_preview_resolve") return { resolvedPath: args.path, exists: true, isDirectory: false };
+      return undefined;
+    });
+
+    const { getByTestId, unmount } = await renderNative(<NativeTerminalPane session={session} />);
+    try {
+      const pane = getByTestId("native-terminal-pane");
+      vi.spyOn(getByTestId("native-terminal-viewport"), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
+      act(() => {
+        fireEvent.pointerDown(pane, { button: 0, clientX: 20, clientY: 20, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false });
+        window.dispatchEvent(new PointerEvent("pointerup", { button: 0, clientX: 20, clientY: 20, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, bubbles: true }));
+      });
+
+      await waitFor(() => expect(actionEvents).toHaveLength(1));
+      const detail = actionEvents[0]!.detail;
+      expect(detail.remote).toBe(true);
+      expect(detail.token).toMatchObject({ type: "file", path: "/home/u/proj/src/main.rs" });
+      expect((detail.token as any).absolutePath).toBeUndefined();
+      // No local-disk resolution and no fetch until the user picks Open.
+      expect(tauriCoreMocks.invoke.mock.calls.some(([command]) => command === "cmd_file_preview_resolve")).toBe(false);
+      expect(tauriCoreMocks.invoke.mock.calls.some(([command]) => command === "cmd_paired_file_fetch")).toBe(false);
+
+      await act(async () => { await detail.open(false); });
+      const fetchCalls = tauriCoreMocks.invoke.mock.calls.filter(([command]) => command === "cmd_paired_file_fetch");
+      expect(fetchCalls).toHaveLength(1);
+      expect(fetchCalls[0]?.[1]).toMatchObject({ workspaceId: "daemon:host-1:proj", path: "/home/u/proj/src/main.rs" });
+    } finally {
+      window.removeEventListener("ferryx:terminal-file-link-actions", onAction);
+      unmount();
+    }
+  });
+
+  it("offers remote Open/Copy actions (no local-disk actions) for a path printed by an SSH shell", async () => {
+    saveBrowserSettings({ showTerminalLinkActions: true });
+    const actionEvents: Array<CustomEvent<TerminalFileLinkActionDetail>> = [];
+    const onAction = (e: Event) => actionEvents.push(e as CustomEvent<TerminalFileLinkActionDetail>);
+    window.addEventListener("ferryx:terminal-file-link-actions", onAction);
+    const cachePath = "/Users/me/Library/Caches/ferryx/remote-files/0123abcd/run.png";
+    const session = { ...createSession("session-ssh-actions", "daemon-ssh-actions"), workspaceId: "ssh:act", cwd: "/srv/app" };
+    setSessionMouseTracking("daemon-ssh-actions", false);
+    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+      if (command === "cmd_native_terminal_attach") {
+        return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
+      }
+      if (command === "cmd_native_terminal_hyperlink_at") return null;
+      if (command === "cmd_native_terminal_line_at") return { text: "/srv/app/out/run.png", col: 2, row: 0 };
+      if (command === "cmd_remote_file_fetch") {
+        return { localPath: cachePath, remotePath: "/srv/app/out/run.png", byteLength: 3 };
+      }
+      if (command === "cmd_file_preview_resolve") return { resolvedPath: args.path, exists: true, isDirectory: false };
+      return undefined;
+    });
+
+    const { getByTestId, unmount } = await renderNative(<NativeTerminalPane session={session} />);
+    try {
+      const pane = getByTestId("native-terminal-pane");
+      vi.spyOn(getByTestId("native-terminal-viewport"), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
+      act(() => {
+        fireEvent.pointerDown(pane, { button: 0, clientX: 20, clientY: 20, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false });
+        window.dispatchEvent(new PointerEvent("pointerup", { button: 0, clientX: 20, clientY: 20, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, bubbles: true }));
+      });
+
+      await waitFor(() => expect(actionEvents).toHaveLength(1));
+      const detail = actionEvents[0]!.detail;
+      expect(detail.remote).toBe(true);
+      expect((detail.token as any).absolutePath).toBeUndefined();
+      expect(tauriCoreMocks.invoke.mock.calls.some(([command]) => command === "cmd_remote_file_fetch")).toBe(false);
+
+      await act(async () => { await detail.open(false); });
+      const fetchCalls = tauriCoreMocks.invoke.mock.calls.filter(([command]) => command === "cmd_remote_file_fetch");
+      expect(fetchCalls).toHaveLength(1);
+      expect(fetchCalls[0]?.[1]).toEqual({ workspaceId: "ssh:act", path: "/srv/app/out/run.png", cwd: "/srv/app" });
+    } finally {
+      window.removeEventListener("ferryx:terminal-file-link-actions", onAction);
+      unmount();
+    }
+  });
+
+  it("fetches an OSC 8 file://<remote-host>/abs hyperlink in an SSH session by its absolute path", async () => {
+    toastMocks.error.mockClear();
+    const session = { ...createSession("term-session-ssh-osc8", "daemon-ssh-osc8"), workspaceId: "ssh:osc", cwd: "/srv/app" };
+    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+      if (command === "cmd_native_terminal_attach") {
+        return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
+      }
+      if (command === "cmd_native_terminal_hyperlink_at") return "file://remote-box/srv/app/out/run.png";
+      if (command === "cmd_native_terminal_line_at") return { text: "plain", col: 0, row: 0 };
+      if (command === "cmd_remote_file_fetch") {
+        return { localPath: "/cache/remote-files/x/run.png", remotePath: "/srv/app/out/run.png", byteLength: 3 };
+      }
+      if (command === "cmd_file_preview_resolve") return { resolvedPath: args.path, exists: true, isDirectory: false };
+      return undefined;
+    });
+
+    const { getByTestId, unmount } = await renderNative(<NativeTerminalPane session={session} />);
+    try {
+      const pane = getByTestId("native-terminal-pane");
+      vi.spyOn(getByTestId("native-terminal-viewport"), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
+      act(() => {
+        fireEvent.pointerDown(pane, { button: 0, clientX: 20, clientY: 20, metaKey: true, ctrlKey: true, shiftKey: false });
+        window.dispatchEvent(new PointerEvent("pointerup", { button: 0, clientX: 20, clientY: 20, metaKey: true, ctrlKey: true, shiftKey: false, bubbles: true }));
+      });
+
+      await waitFor(() => {
+        const fetchCalls = tauriCoreMocks.invoke.mock.calls.filter(([command]) => command === "cmd_remote_file_fetch");
+        expect(fetchCalls).toHaveLength(1);
+        expect(fetchCalls[0]?.[1]).toMatchObject({ workspaceId: "ssh:osc", path: "/srv/app/out/run.png" });
+      });
+    } finally {
+      unmount();
+    }
+  });
+
+  it("lets the actions popover override the configured editor with the system app", async () => {
+    saveBrowserSettings({ showTerminalLinkActions: true });
+    window.localStorage.setItem("ferryx.terminal.fileLinkEditor", "vscode");
+    const actionEvents: Array<CustomEvent<TerminalFileLinkActionDetail>> = [];
+    const onAction = (e: Event) => actionEvents.push(e as CustomEvent<TerminalFileLinkActionDetail>);
+    window.addEventListener("ferryx:terminal-file-link-actions", onAction);
+    const session = createSession("session-editor-override", "daemon-editor-override");
+    setSessionMouseTracking("daemon-editor-override", false);
+    tauriCoreMocks.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_attach") {
+        return { cellWidthPx: 10, cellHeightPx: 20, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
+      }
+      if (command === "cmd_native_terminal_hyperlink_at") return null;
+      if (command === "cmd_native_terminal_line_at") return { text: "src/a.ts", col: 0, row: 0 };
+      if (command === "cmd_file_preview_resolve") throw new Error("unresolvable");
+      if (command === "cmd_open_file_path") return true;
+      return undefined;
+    });
+
+    const { getByTestId, unmount } = await renderNative(<NativeTerminalPane session={session} />);
+    try {
+      const pane = getByTestId("native-terminal-pane");
+      vi.spyOn(getByTestId("native-terminal-viewport"), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
+      act(() => {
+        fireEvent.pointerDown(pane, { button: 0, clientX: 20, clientY: 20, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false });
+        window.dispatchEvent(new PointerEvent("pointerup", { button: 0, clientX: 20, clientY: 20, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, bubbles: true }));
+      });
+      await waitFor(() => expect(actionEvents).toHaveLength(1));
+      expect((actionEvents[0]!.detail.token as any).absolutePath).toBeUndefined();
+
+      await act(async () => { await actionEvents[0]!.detail.open(true, { editor: "system" }); });
+      const openCalls = tauriCoreMocks.invoke.mock.calls.filter(([command]) => command === "cmd_open_file_path");
+      expect(openCalls).toHaveLength(1);
+      expect(openCalls[0]?.[1]).toMatchObject({ path: "src/a.ts", editor: "system" });
+
+      await act(async () => { await actionEvents[0]!.detail.open(true); });
+      const after = tauriCoreMocks.invoke.mock.calls.filter(([command]) => command === "cmd_open_file_path");
+      expect(after[1]?.[1]).toMatchObject({ editor: "vscode" });
+    } finally {
+      window.localStorage.removeItem("ferryx.terminal.fileLinkEditor");
+      window.removeEventListener("ferryx:terminal-file-link-actions", onAction);
+      unmount();
+    }
   });
 
   it("dispatches terminal link actions on plain click unless mouse tracking is enabled", async () => {

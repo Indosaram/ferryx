@@ -1240,15 +1240,14 @@ fn open_blocking(
     let token = crate::ipc::file_link::sanitize_path_token(token)?;
     crate::ipc::file_link::reject_remote_path_spec(token).map_err(map_session_error)?;
     let cwd = cwd.map(|cwd| cwd.to_string_lossy().into_owned());
-    let resolved = crate::ipc::file_link::resolve_file_link(token, cwd.as_deref(), home_dir());
+    let resolved = crate::ipc::file_link::resolve_file_link(
+        token,
+        cwd.as_deref(),
+        crate::ipc::file_link::home_dir(),
+    );
     open_blocking_path(&resolved, line, col)
 }
 
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-}
 
 /// Canonicalizes once, verifies a regular file, retains the descriptor and
 /// applies the per-kind bounds. Symlinks are resolved exactly here.
@@ -1836,18 +1835,21 @@ pub async fn cmd_file_preview_open<R: tauri::Runtime>(
     daemon_client: tauri::State<'_, Arc<crate::daemon::DaemonClient>>,
     owner_id: Option<String>,
     path: String,
-    backend_session_id: String,
+    backend_session_id: Option<String>,
+    workspace_id: Option<String>,
     line: Option<u32>,
     col: Option<u32>,
 ) -> Result<FilePreviewPayload, IpcError> {
     let window_label = webview.label().to_string();
     ensure_trusted_window(&window_label)?;
-    let cwd = crate::ipc::file_preview_contract::resolve_local_session_cwd(
-        Some(daemon_client.inner()),
-        &backend_session_id,
+    let cwd = admitted_session_cwd(
+        &webview,
+        &daemon_client,
+        &path,
+        backend_session_id.as_deref(),
+        workspace_id,
     )
-    .await
-    .map_err(map_session_error)?;
+    .await?;
     if cwd.is_none() && !crate::ipc::file_link::is_absolute_token(&path) && !path.starts_with('~') {
         return Err(preview_error(
             FilePreviewErrorReason::MissingFile,
@@ -1865,6 +1867,41 @@ pub async fn cmd_file_preview_open<R: tauri::Runtime>(
             col,
         })
         .await
+}
+
+/// Session cwd for a preview request, admitted through the shared policy in
+/// [`crate::ipc::file_preview_contract::admit_session_cwd`].
+///
+/// An absent or empty `backend_session_id` (the `ferryx open` CLI) skips the
+/// session lookup entirely: the path must then be absolute or `~`-rooted.
+async fn admitted_session_cwd<R: tauri::Runtime>(
+    webview: &tauri::Webview<R>,
+    daemon_client: &tauri::State<'_, Arc<crate::daemon::DaemonClient>>,
+    path: &str,
+    backend_session_id: Option<&str>,
+    workspace_id: Option<String>,
+) -> Result<Option<PathBuf>, IpcError> {
+    let Some(backend_session_id) = backend_session_id.filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    let session = crate::ipc::file_preview_contract::resolve_local_session_cwd(
+        Some(daemon_client.inner()),
+        backend_session_id,
+    )
+    .await;
+    let remote_files_root = crate::ipc::file_preview_contract::app_remote_files_root(webview);
+    let path = path.to_string();
+    crate::ipc::run_blocking(move || {
+        crate::ipc::file_preview_contract::admit_session_cwd(
+            &path,
+            session,
+            workspace_id.as_deref(),
+            None,
+            remote_files_root.as_deref(),
+        )
+    })
+    .await
+    .map_err(map_session_error)
 }
 
 /// Markdown child image capability under the open document's directory.
@@ -1929,16 +1966,19 @@ pub async fn cmd_file_preview_resolve<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
     daemon_client: tauri::State<'_, Arc<crate::daemon::DaemonClient>>,
     path: String,
-    backend_session_id: String,
+    backend_session_id: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<FilePreviewResolved, IpcError> {
     let window_label = webview.label().to_string();
     ensure_trusted_window(&window_label)?;
-    let cwd = crate::ipc::file_preview_contract::resolve_local_session_cwd(
-        Some(daemon_client.inner()),
-        &backend_session_id,
+    let cwd = admitted_session_cwd(
+        &webview,
+        &daemon_client,
+        &path,
+        backend_session_id.as_deref(),
+        workspace_id,
     )
-    .await
-    .map_err(map_session_error)?;
+    .await?;
     if cwd.is_none() && !crate::ipc::file_link::is_absolute_token(&path) && !path.starts_with('~') {
         return Err(preview_error(
             FilePreviewErrorReason::MissingFile,
@@ -1947,7 +1987,7 @@ pub async fn cmd_file_preview_resolve<R: tauri::Runtime>(
         ));
     }
     crate::ipc::run_blocking(move || {
-        Ok(resolve_preview_target(&path, cwd.as_deref(), home_dir()))
+        Ok(resolve_preview_target(&path, cwd.as_deref(), crate::ipc::file_link::home_dir()))
     })
     .await
 }
