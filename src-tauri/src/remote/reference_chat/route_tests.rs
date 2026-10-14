@@ -1320,6 +1320,8 @@ struct ScreenStubBackend {
     rows: u16,
     screen: Vec<u8>,
     writes: std::sync::Mutex<Vec<Vec<u8>>>,
+    /// Every write, as it is handed over, for a test that waits on a specific one.
+    written: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
 }
 
 impl crate::remote::backend::RemoteSessionBackend for ScreenStubBackend {
@@ -1380,6 +1382,9 @@ impl crate::remote::backend::RemoteSessionBackend for ScreenStubBackend {
         data: &'a [u8],
     ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
         self.writes.lock().expect("writes").push(data.to_vec());
+        if let Some(written) = self.written.as_ref() {
+            let _ = written.send(data.to_vec());
+        }
         Box::pin(async { Ok(()) })
     }
     fn resize<'a>(
@@ -1418,6 +1423,7 @@ async fn a_chat_submit_is_refused_when_the_screen_cannot_be_read_whole() {
         rows,
         screen,
         writes: std::sync::Mutex::new(Vec::new()),
+        written: None,
     });
     let state = Arc::new(RemoteGatewayState::new_with_backend(
         Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
@@ -1473,6 +1479,7 @@ async fn a_chat_submit_without_a_registry_id_is_still_delivered() {
         rows: 24,
         screen: b"$ ".to_vec(),
         writes: std::sync::Mutex::new(Vec::new()),
+        written: None,
     });
     let state = Arc::new(RemoteGatewayState::new_with_backend(
         Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
@@ -1513,6 +1520,115 @@ async fn a_chat_submit_without_a_registry_id_is_still_delivered() {
     assert_eq!(writes.first().map(Vec::as_slice), Some(b"hello".as_slice()), "{writes:?}");
     assert_eq!(writes.last().map(Vec::as_slice), Some(b"\r".as_slice()), "{writes:?}");
     server.stop().await;
+}
+
+/// A gateway whose one pane this host's output hub does not hold, as a session still served by a
+/// legacy daemon after a handover is: the hub cannot say whether that pane has bracketed paste
+/// on, and a control device on it.
+fn unhubbed_pane(
+    session_id: &str,
+    written: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+) -> (Arc<ScreenStubBackend>, Arc<RemoteGatewayState>, String) {
+    let backend = Arc::new(ScreenStubBackend {
+        session_id: session_id.to_string(),
+        cols: 80,
+        rows: 24,
+        screen: b"$ ".to_vec(),
+        writes: std::sync::Mutex::new(Vec::new()),
+        written,
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, session_id)
+        .expect("control token");
+    (backend, state, control)
+}
+
+/// The submit envelope for an unhubbed pane, naming no registry id so no screen probe runs.
+fn unhubbed_submit(state: &RemoteGatewayState, session_id: &str, text: &str) -> String {
+    let epoch = state
+        .daemon_epoch
+        .load(std::sync::atomic::Ordering::Acquire)
+        .to_string();
+    serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(),
+        "target": {
+            "hostId": reference_files::reference_host_id(),
+            "ownerId": state.reference_owner_id,
+            "epoch": epoch,
+            "backendSessionId": session_id,
+        },
+        "params": { "text": text, "origin": "chat" },
+    })
+    .to_string()
+}
+
+/// rs-input-screen-r3-1: a pane whose bracketed-paste mode this host cannot read (a legacy-peer
+/// session after a handover) must not have a multi-line message typed unbracketed, where its
+/// inner CR would submit the first line as a turn of its own.
+#[tokio::test]
+async fn a_multi_line_submit_to_a_pane_whose_paste_mode_is_unknown_types_nothing() {
+    let session_id = "reference-route-legacy-peer";
+    let (backend, state, control) = unhubbed_pane(session_id, None);
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let (status, response) = server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"),
+            Some(&control),
+            Some(&unhubbed_submit(&state, session_id, "fix A\nthen B")),
+        )
+        .await;
+    let writes = backend.writes.lock().expect("writes").clone();
+    assert!(
+        writes.is_empty(),
+        "a multi-line message was typed into a pane whose paste mode is unknown: {writes:?}"
+    );
+    assert_eq!(status, 422, "{response}");
+    assert!(response.contains("UNSUPPORTED"), "{response}");
+    server.stop().await;
+}
+
+/// rs-input-screen-r3-2: a caller that goes away between the paste and its Enter must not leave
+/// the paste unsent in the pane. The handler future is dropped exactly as hyper drops it on a
+/// disconnect, right after the paste is written.
+#[tokio::test]
+async fn a_submit_whose_caller_leaves_after_the_paste_still_writes_its_enter() {
+    let session_id = "reference-route-caller-left";
+    let (written_tx, mut written) = tokio::sync::mpsc::unbounded_channel();
+    let (_backend, state, control) = unhubbed_pane(session_id, Some(written_tx));
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"))
+        .header("authorization", format!("Bearer {control}"))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(unhubbed_submit(&state, session_id, "deploy now")))
+        .expect("request");
+    let handler = crate::remote::server::reference_chat_submit(
+        axum::extract::State(Arc::clone(&state)),
+        axum::extract::Path(session_id.to_string()),
+        request,
+    );
+    let paste = tokio::select! {
+        response = handler => panic!("the submit finished before its caller left: {:?}", response.status()),
+        paste = written.recv() => paste.expect("the paste was written"),
+    };
+    // The handler future is gone here: the caller left during the gap before the Enter.
+    assert_eq!(paste, b"deploy now".to_vec());
+    let enter = tokio::time::timeout(std::time::Duration::from_secs(5), written.recv())
+        .await
+        .ok()
+        .flatten();
+    assert_eq!(
+        enter.as_deref(),
+        Some(b"\r".as_slice()),
+        "the paste was left unsent in the pane after its caller left"
+    );
 }
 
 /// A backend whose one pane is served by a real output hub, so a replay gap behaves as it does on
