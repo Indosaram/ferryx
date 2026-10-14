@@ -1197,14 +1197,18 @@ async fn staged_reference_files_round_trip_on_the_owning_host() {
         "the receipt names the owning host: {body}"
     );
     assert_eq!(staged["data"]["receipt"]["sizeBytes"], bytes.len(), "{body}");
-    assert_eq!(
-        staged["data"]["mentionText"], "@reference-fixture.txt ",
-        "the mention is editable text, not an opaque attachment: {body}"
-    );
     let attachment_id = staged["data"]["receipt"]["attachmentId"]
         .as_str()
         .expect("attachmentId")
         .to_string();
+    assert_eq!(
+        staged["data"]["mentionText"],
+        format!(
+            "@{}/{attachment_id}/reference-fixture.txt ",
+            reference_files::REFERENCE_STAGING_DIR_NAME
+        ),
+        "the mention is editable text naming the worktree-relative staged path: {body}"
+    );
 
     let query = fixture.read_query(
         "codex",
@@ -1331,3 +1335,146 @@ async fn an_unknown_reference_chat_suffix_is_not_a_route() {
     );
     fixture.server.stop().await;
 }
+
+impl ReferenceRouteFixture {
+    /// The pane's own working directory, as this gateway's backend reports it.
+    async fn worktree(&self) -> std::path::PathBuf {
+        self.state
+            .session_backend
+            .describe_session(&self.session_id)
+            .await
+            .expect("describe the fixture session")
+            .worktree_path
+            .expect("the fixture session has a working directory")
+    }
+
+    async fn stage(&self, name: &str, bytes: &[u8]) -> (u16, String) {
+        use base64::Engine as _;
+        let content = base64::engine::general_purpose::STANDARD.encode(bytes);
+        self.server
+            .request(
+                "POST",
+                &self.route("files"),
+                Some(&self.control),
+                Some(&self.mutation(
+                    &uuid::Uuid::new_v4().to_string(),
+                    serde_json::json!({
+                        "name": name,
+                        "mediaType": "text/plain",
+                        "sizeBytes": bytes.len(),
+                        "contentBase64": content,
+                    }),
+                )),
+            )
+            .await
+    }
+}
+
+/// rs-files-routes-1: the mention the agent receives names a path it can open from the pane's
+/// own working directory, and that path holds exactly the uploaded bytes.
+#[tokio::test]
+async fn a_staged_mention_resolves_to_the_uploaded_bytes_under_the_pane_worktree() {
+    let fixture = fixture().await;
+    let bytes = b"notes staged for the agent\n";
+    let (status, body) = fixture.stage("notes.txt", bytes).await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+    let mention = staged["data"]["mentionText"].as_str().expect("mentionText").to_string();
+    let path = mention
+        .strip_prefix('@')
+        .expect("an @ mention")
+        .trim_end()
+        .to_string();
+    assert!(
+        reference_files::reference_mention_path_is_safe(&path),
+        "the mention must be a safe relative path: {mention:?}"
+    );
+    let worktree = fixture.worktree().await;
+    let resolved = worktree.join(&path);
+    assert_eq!(
+        std::fs::read(&resolved).ok().as_deref(),
+        Some(&bytes[..]),
+        "<worktree>/{path} must hold the uploaded bytes (worktree {})",
+        worktree.display()
+    );
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-5: the per-target file cap holds under concurrent uploads.
+#[tokio::test]
+async fn concurrent_stages_for_one_target_respect_the_file_cap() {
+    let fixture = fixture().await;
+    let attempts = (0..8).map(|index| {
+        let fixture = &fixture;
+        async move { fixture.stage(&format!("parallel-{index}.txt"), b"parallel body").await }
+    });
+    let results = futures_util::future::join_all(attempts).await;
+    let ok = results.iter().filter(|(status, _)| *status == 200).count();
+    assert!(
+        ok <= crate::scoped_contracts::ATTACHMENT_MAX_FILES_PER_TURN,
+        "at most {} concurrent stages may succeed, {ok} did: {results:?}",
+        crate::scoped_contracts::ATTACHMENT_MAX_FILES_PER_TURN
+    );
+    assert!(ok >= 1, "at least one stage must succeed: {results:?}");
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-6: a DELETE whose removal fails is not reported as cleaned, and the entry
+/// stays addressable so a retry can still remove it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_staged_file_delete_is_not_204_and_keeps_the_entry() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = fixture().await;
+    let (status, body) = fixture.stage("locked.txt", b"locked body").await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+    let attachment_id = staged["data"]["receipt"]["attachmentId"]
+        .as_str()
+        .expect("attachmentId")
+        .to_string();
+    let path = staged["data"]["mentionText"]
+        .as_str()
+        .expect("mentionText")
+        .trim_start_matches('@')
+        .trim_end()
+        .to_string();
+    let worktree = fixture.worktree().await;
+    let staged_file = worktree.join(&path);
+    // Make the attachment directory unremovable: its parent loses write permission.
+    let attachment_dir = staged_file.parent().expect("attachment dir").to_path_buf();
+    let base = attachment_dir.parent().expect("staging base").to_path_buf();
+    let original = std::fs::metadata(&base).expect("base metadata").permissions();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o500)).expect("lock base");
+
+    let query = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    let own = format!("{}?{query}", fixture.route(&format!("files/{attachment_id}")));
+    let (first, first_body) = fixture
+        .server
+        .request("DELETE", &own, Some(&fixture.control), None)
+        .await;
+    let (second, second_body) = fixture
+        .server
+        .request("DELETE", &own, Some(&fixture.control), None)
+        .await;
+    std::fs::set_permissions(&base, original).expect("unlock base");
+    assert_ne!(first, 204, "a delete that could not remove the file: {first_body}");
+    assert_ne!(
+        second, 404,
+        "the entry must survive a failed delete so a retry can remove it: {second_body}"
+    );
+    let (third, third_body) = fixture
+        .server
+        .request("DELETE", &own, Some(&fixture.control), None)
+        .await;
+    assert_eq!(third, 204, "a retried delete after the fault clears: {third_body}");
+    assert!(!attachment_dir.exists(), "the retried delete removed the bytes");
+    fixture.server.stop().await;
+}
+

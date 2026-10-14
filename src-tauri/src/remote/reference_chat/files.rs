@@ -20,8 +20,9 @@
 //!
 //! * Staging happens on the OWNING host. The receipt is the existing owner-private
 //!   'AttachmentReceipt' (host, opaque id, sha256, size, media type) and carries NO filesystem
-//!   path; the path the agent receives is the editable '@name ' mention built from the staged
-//!   file's own name, resolved against the pane's own working directory.
+//!   path; the path the agent receives is the editable '@<dir>/<id>/<name> ' mention. The bytes
+//!   are staged INSIDE the pane's own working directory (under 'REFERENCE_STAGING_DIR_NAME'),
+//!   so that relative mention resolves, from the pane's cwd, to exactly the uploaded bytes.
 //! * The bytes never travel through a managed turn and no child process is launched anywhere in
 //!   this file. 'reference_file_send_plan' returns an ordinary 'ReferenceSubmitPayload' whose
 //!   'attachment_ids' is EMPTY: the mention is text the user can still edit, and it reaches the
@@ -66,10 +67,8 @@ use super::types::{
     ReferenceSubmitPayload,
 };
 
-/// Directory under the host temp root that holds this lane's staged files.
-pub const REFERENCE_STAGING_DIR_NAME: &str = "ferryx-reference-chat-files";
-/// Environment override for the staging root (a host with its own layout, and tests).
-pub const REFERENCE_STAGING_DIR_ENV: &str = "FERRYX_REFERENCE_FILES_DIR";
+/// Directory under the pane's working directory that holds this lane's staged files.
+pub const REFERENCE_STAGING_DIR_NAME: &str = ".ferryx-reference-chat-files";
 /// Environment override for the owning host id reported on the receipt.
 pub const REFERENCE_HOST_ID_ENV: &str = "FERRYX_HOST_ID";
 /// Host id used when the host did not name itself.
@@ -79,15 +78,9 @@ pub const REFERENCE_FILE_MAX_NAME_BYTES: usize = 255;
 /// Route suffix for the file routes, under the frozen reference-chat prefix.
 pub const REFERENCE_FILE_ROUTE_SUFFIX: &str = "files";
 
-/// The owning host's staging root: the environment override, else the host temp root.
-pub fn reference_staging_base_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os(REFERENCE_STAGING_DIR_ENV) {
-        return PathBuf::from(dir);
-    }
-    let tmp = std::env::var_os("TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    tmp.join(REFERENCE_STAGING_DIR_NAME)
+/// The staging base inside one pane's working directory.
+pub fn reference_staging_base_dir(worktree: &Path) -> PathBuf {
+    worktree.join(REFERENCE_STAGING_DIR_NAME)
 }
 
 /// The owning host's id, as the receipt reports it.
@@ -118,7 +111,8 @@ pub fn reference_file_route(session_id: &str, attachment_id: &str) -> String {
 
 /// A staged file's name, or the refusal that keeps it out of the staging root.
 ///
-/// A name is a NAME: no directory component, no parent, no control byte, bounded length.
+/// A name is a NAME: no directory component, no parent, no control byte, no whitespace (an
+/// '@path ' mention cannot carry it; the TS twin refuses it too), bounded length.
 pub fn validate_reference_file_name(raw: &str) -> Result<String, ScopeErrorCode> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.len() > REFERENCE_FILE_MAX_NAME_BYTES {
@@ -131,6 +125,9 @@ pub fn validate_reference_file_name(raw: &str) -> Result<String, ScopeErrorCode>
         return Err(ScopeErrorCode::InvalidRequest);
     }
     if trimmed.chars().any(char::is_control) {
+        return Err(ScopeErrorCode::InvalidRequest);
+    }
+    if trimmed.chars().any(char::is_whitespace) {
         return Err(ScopeErrorCode::InvalidRequest);
     }
     Ok(trimmed.to_string())
@@ -305,7 +302,12 @@ pub fn reference_file_send_plan(
 ) -> ReferenceSubmitPayload {
     let mut text = draft_text.to_string();
     for receipt in receipts {
-        text = reference_append_mention(&text, &receipt.display_name);
+        let path = receipt
+            .mention_text
+            .strip_prefix('@')
+            .unwrap_or(&receipt.mention_text)
+            .trim_end();
+        text = reference_append_mention(&text, path);
     }
     ReferenceSubmitPayload {
         text,
@@ -314,31 +316,27 @@ pub fn reference_file_send_plan(
     }
 }
 
-/// Stage a payload on this host, using the host's own staging root and host id.
-pub fn stage_reference_file(
-    payload: &ReferenceFileStagePayload,
-) -> Result<ReferenceFileReceipt, ScopeErrorCode> {
-    stage_reference_file_in(
-        &reference_host_id(),
-        &reference_staging_base_dir(),
-        payload,
-    )
-}
-
-/// Stage a payload under an explicit host id and staging root.
+/// Stage a payload under an explicit host id, inside the pane working directory 'worktree'.
 ///
-/// The bytes are written once, into a per-attachment directory created 0700, as a file created
-/// 0600 on unix. The receipt is opaque: it names the host, an id, the digest, the size and the
-/// media type, and no path. A refused payload leaves the staging root untouched, and a write
-/// that fails removes the directory it created rather than leaving a partial file behind.
+/// The bytes are written once, into '<worktree>/REFERENCE_STAGING_DIR_NAME/<id>/<name>': the
+/// base is verified to be a real directory this user owns with no group/other access (never a
+/// symlink), the per-attachment directory is created 0700 and the file 0600 on unix. The
+/// receipt names no absolute path; its mention is the path RELATIVE to the worktree. A refused
+/// payload leaves the worktree untouched, and a write that fails removes the directory it
+/// created rather than leaving a partial file behind.
 pub fn stage_reference_file_in(
     host_id: &str,
-    base_dir: &Path,
+    worktree: &Path,
     payload: &ReferenceFileStagePayload,
 ) -> Result<ReferenceFileReceipt, ScopeErrorCode> {
     let name = validate_reference_file_name(&payload.name)?;
     let bytes = decode_reference_file_payload(payload)?;
 
+    if !worktree.is_dir() {
+        return Err(ScopeErrorCode::NotFound);
+    }
+    let base_dir = reference_staging_base_dir(worktree);
+    ensure_reference_staging_base(&base_dir)?;
     let attachment_id = uuid::Uuid::new_v4().to_string();
     let staging_dir = base_dir.join(&attachment_id);
     create_reference_staging_dir(&staging_dir)?;
@@ -353,6 +351,7 @@ pub fn stage_reference_file_in(
     hasher.update(&bytes);
     let sha256 = format!("{:x}", hasher.finalize());
 
+    let mention_path = format!("{REFERENCE_STAGING_DIR_NAME}/{attachment_id}/{name}");
     Ok(ReferenceFileReceipt {
         receipt: AttachmentReceipt {
             host_id: host_id.to_string(),
@@ -362,7 +361,7 @@ pub fn stage_reference_file_in(
             media_type: payload.media_type,
         },
         display_name: name.clone(),
-        mention_text: ReferenceFileReceipt::mention_for(&name),
+        mention_text: ReferenceFileReceipt::mention_for(&mention_path),
     })
 }
 
@@ -390,14 +389,83 @@ pub fn reference_staging_failure_code() -> ScopeErrorCode {
     ScopeErrorCode::Unsupported
 }
 
-fn create_reference_staging_dir(dir: &Path) -> Result<(), ScopeErrorCode> {
-    std::fs::create_dir_all(dir).map_err(|_| reference_staging_failure_code())?;
+/// Remove staging directories older than the TTL, whether or not this process registered them.
+///
+/// The in-memory registry is process-local, so after a restart only the directory mtime says
+/// how old a staged file is. Only '<uuid>' directories are considered; anything else is kept.
+pub fn reference_prune_staging_root(base: &Path, ttl_ms: u64) -> usize {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return 0;
+    };
+    let ttl = std::time::Duration::from_millis(ttl_ms);
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let is_attachment = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| uuid::Uuid::parse_str(name).is_ok());
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !is_attachment || !metadata.is_dir() {
+            continue;
+        }
+        let stale = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > ttl);
+        if stale && std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Create (0700) or verify the staging base: a real directory, never a symlink, owned by this
+/// user and closed to group/other on unix. A base that fails any check is refused, never fixed
+/// up, because someone else may already control it.
+fn ensure_reference_staging_base(base: &Path) -> Result<(), ScopeErrorCode> {
+    if std::fs::symlink_metadata(base).is_err() {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder
+            .create(base)
+            .map_err(|_| reference_staging_failure_code())?;
+        // Keep staged uploads out of the pane's git status.
+        let _ = std::fs::write(base.join(".gitignore"), b"*\n");
+    }
+    let metadata = std::fs::symlink_metadata(base).map_err(|_| reference_staging_failure_code())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ScopeErrorCode::Forbidden);
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        use std::os::unix::fs::MetadataExt as _;
+        // SAFETY: geteuid has no arguments, pointers, or caller preconditions.
+        let uid = unsafe { libc::geteuid() };
+        if metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
+            return Err(ScopeErrorCode::Forbidden);
+        }
     }
     Ok(())
+}
+
+fn create_reference_staging_dir(dir: &Path) -> Result<(), ScopeErrorCode> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .map_err(|_| reference_staging_failure_code())
 }
 
 fn write_reference_staged_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -423,7 +491,13 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     fn scratch_dir() -> PathBuf {
-        std::env::temp_dir().join(format!("ferryx-ref-files-{}", uuid::Uuid::new_v4()))
+        let dir = std::env::temp_dir().join(format!("ferryx-ref-files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn staged_dir(root: &Path, attachment_id: &str) -> PathBuf {
+        root.join(REFERENCE_STAGING_DIR_NAME).join(attachment_id)
     }
 
     fn payload(name: &str, bytes: &[u8]) -> ReferenceFileStagePayload {
@@ -453,13 +527,19 @@ mod tests {
             .expect("staged");
 
         assert_eq!(receipt.display_name, "shot.png");
-        assert_eq!(receipt.mention_text, "@shot.png ");
+        assert_eq!(
+            receipt.mention_text,
+            format!(
+                "@{REFERENCE_STAGING_DIR_NAME}/{}/shot.png ",
+                receipt.receipt.attachment_id
+            )
+        );
         assert_eq!(receipt.receipt.host_id, "host-test");
         assert_eq!(receipt.receipt.size_bytes, bytes.len() as u64);
         assert_eq!(receipt.receipt.sha256, sha256_hex(bytes));
         assert!(!receipt.receipt.attachment_id.is_empty());
 
-        let staged = dir.join(&receipt.receipt.attachment_id).join("shot.png");
+        let staged = staged_dir(&dir, &receipt.receipt.attachment_id).join("shot.png");
         assert!(staged.is_file());
         assert_eq!(std::fs::read(&staged).expect("read back"), bytes);
 
@@ -664,7 +744,10 @@ mod tests {
         refused.name = "../escape.png".to_string();
 
         assert!(stage_reference_file_in("host-test", &dir, &refused).is_err());
-        assert!(!dir.exists(), "a refused payload must not create the staging root");
+        assert!(
+            !dir.join(REFERENCE_STAGING_DIR_NAME).exists(),
+            "a refused payload must not create the staging root"
+        );
     }
 
     #[test]
@@ -672,7 +755,7 @@ mod tests {
         let dir = scratch_dir();
         let receipt = stage_reference_file_in("host-test", &dir, &payload("shot.png", b"body"))
             .expect("staged");
-        let attachment_dir = dir.join(&receipt.receipt.attachment_id);
+        let attachment_dir = staged_dir(&dir, &receipt.receipt.attachment_id);
         let staged = attachment_dir.join("shot.png");
         assert!(staged.is_file());
 
@@ -697,19 +780,20 @@ mod tests {
 
         let plan = reference_file_send_plan("look at this", &[first.clone(), second.clone()]);
 
-        assert_eq!(plan.text, "look at this @one.png @two.txt ");
+        assert_eq!(
+            plan.text,
+            format!("look at this {}{}", first.mention_text, second.mention_text)
+        );
         assert!(
             plan.attachment_ids.is_empty(),
             "no managed-turn attachment id may be set"
         );
         assert_eq!(plan.origin, ReferenceSubmitOrigin::Chat);
 
-        assert!(dir
-            .join(&first.receipt.attachment_id)
+        assert!(staged_dir(&dir, &first.receipt.attachment_id)
             .join("one.png")
             .is_file());
-        assert!(dir
-            .join(&second.receipt.attachment_id)
+        assert!(staged_dir(&dir, &second.receipt.attachment_id)
             .join("two.txt")
             .is_file());
 
@@ -738,9 +822,8 @@ mod tests {
         let dir = scratch_dir();
         let receipt = stage_reference_file_in("host-test", &dir, &payload("shot.png", b"body"))
             .expect("staged");
-        let staged = dir.join(&receipt.receipt.attachment_id).join("shot.png");
-
         let draft = "still typing";
+        let staged = staged_dir(&dir, &receipt.receipt.attachment_id).join("shot.png");
         let plan = reference_file_send_plan(draft, std::slice::from_ref(&receipt));
         assert!(plan.text.starts_with(draft));
         assert!(plan.attachment_ids.is_empty());
@@ -750,6 +833,91 @@ mod tests {
         assert!(!staged.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ui-reference-logic-2: the Rust validator refuses whitespace exactly as the TS twin does,
+    /// because a mention cannot carry it.
+    #[test]
+    fn file_names_with_whitespace_are_refused_like_the_ts_twin() {
+        for bad in ["two words.png", "Screenshot 2026-10-13 at 10.00.00.png"] {
+            assert_eq!(
+                validate_reference_file_name(bad),
+                Err(ScopeErrorCode::InvalidRequest),
+                "name {bad:?} must be refused: its mention could not carry it"
+            );
+        }
+        assert_eq!(
+            validate_reference_file_name("~notes.txt"),
+            Ok("~notes.txt".to_string())
+        );
+    }
+
+    /// rs-files-routes-7: a staging directory older than the TTL is removed by a fresh prune
+    /// pass, even though no in-memory registry of this process ever knew it.
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_staging_directory_is_pruned_without_the_registry() {
+        let base = scratch_dir();
+        let stale = base.join(uuid::Uuid::new_v4().to_string());
+        let fresh = base.join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&stale).expect("stale dir");
+        std::fs::write(stale.join("old.png"), b"old").expect("stale file");
+        std::fs::create_dir_all(&fresh).expect("fresh dir");
+        let old = std::time::SystemTime::now()
+            - std::time::Duration::from_millis(ATTACHMENT_UNREFERENCED_TTL_MS + 60_000);
+        std::fs::File::open(&stale)
+            .expect("open stale dir")
+            .set_modified(old)
+            .expect("age stale dir");
+
+        let removed = reference_prune_staging_root(&base, ATTACHMENT_UNREFERENCED_TTL_MS);
+
+        assert!(
+            !stale.exists(),
+            "a staging directory older than the TTL must be removed after a restart"
+        );
+        assert!(fresh.exists(), "a fresh staging directory must be kept");
+        assert_eq!(removed, 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// rs-files-routes-9: a staging base this user does not exclusively own is refused, whether
+    /// it is a symlink planted by someone else or a directory other users can write into.
+    #[cfg(unix)]
+    #[test]
+    fn a_staging_base_that_is_a_symlink_or_shared_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = scratch_dir();
+        let elsewhere = scratch_dir();
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, root.join(REFERENCE_STAGING_DIR_NAME))
+            .expect("plant symlink");
+        assert!(
+            stage_reference_file_in("host-test", &root, &payload("shot.png", b"x")).is_err(),
+            "a staging base that is a symlink must be refused"
+        );
+        assert_eq!(
+            std::fs::read_dir(&elsewhere).expect("read elsewhere").count(),
+            0,
+            "nothing may be written through a planted symlink"
+        );
+
+        let shared_root = scratch_dir();
+        let shared_base = shared_root.join(REFERENCE_STAGING_DIR_NAME);
+        std::fs::create_dir_all(&shared_base).expect("shared base");
+        std::fs::set_permissions(&shared_base, std::fs::Permissions::from_mode(0o777))
+            .expect("chmod 0777");
+        assert!(
+            stage_reference_file_in("host-test", &shared_root, &payload("shot.png", b"x"))
+                .is_err(),
+            "a staging base other users can write into must be refused"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        let _ = std::fs::remove_dir_all(&shared_root);
     }
 
     #[test]

@@ -1860,6 +1860,15 @@ async fn host_http_handler(
 
 const MAX_HTTP_SIZE: usize = 8 * 1024 * 1024;
 
+/// How large a forwarded response one reference-chat route may return.
+///
+/// A staged-file preview is JSON carrying base64 of up to ATTACHMENT_MAX_FILE_BYTES, which the
+/// generic 8 MiB response bound refuses with 502. The bound is derived from that frozen limit,
+/// rounded up to whole base64 quads, plus headroom for the JSON envelope and response headers,
+/// and applies only to the reference-chat paths the allowlist admits.
+const REFERENCE_CHAT_RELAY_RESPONSE_MAX: usize =
+    (crate::scoped_contracts::ATTACHMENT_MAX_FILE_BYTES as usize).div_ceil(3) * 4 + 64 * 1024;
+
 // This literal HTTP endpoint must outrank /terminal/{terminal_id}. Reuse the
 // same method/query/body checks; no other terminal path becomes an HTTP proxy.
 async fn terminal_preferences_handler(
@@ -2152,6 +2161,14 @@ async fn proxy_http(
     raw.extend_from_slice(b"\r\n");
     raw.extend(body);
     let head = method == Method::HEAD;
+    let max_response = if path
+        .strip_prefix("/api/v1/")
+        .is_some_and(reference_chat_http_path)
+    {
+        REFERENCE_CHAT_RELAY_RESPONSE_MAX
+    } else {
+        MAX_HTTP_SIZE
+    };
     let transfer = async {
         // Only safe methods ride an idle channel: if it turns out to be dead
         // before any response byte arrives, the request is replayed on a fresh
@@ -2160,7 +2177,7 @@ async fn proxy_http(
             if let Some((socket, control_generation)) =
                 state.take_pooled_data(machine, expected_generation)
             {
-                match http_round_trip(socket, &raw, head).await {
+                match http_round_trip(socket, &raw, head, max_response).await {
                     Ok((response, reusable)) => {
                         if let Some(socket) = reusable {
                             state.return_pooled_data(machine, control_generation, socket);
@@ -2175,7 +2192,7 @@ async fn proxy_http(
         let (socket, _guard, control_generation) = state
             .open_session_channel_at(machine, expected_generation)
             .await?;
-        match http_round_trip(socket, &raw, head).await {
+        match http_round_trip(socket, &raw, head, max_response).await {
             Ok((response, reusable)) => {
                 if let Some(socket) = reusable {
                     state.return_pooled_data(machine, control_generation, socket);
@@ -2212,6 +2229,7 @@ async fn http_round_trip(
     mut socket: WebSocket,
     raw: &[u8],
     head: bool,
+    max_response: usize,
 ) -> Result<(Response, Option<WebSocket>), RoundTripError> {
     for chunk in raw.chunks(MAX_MESSAGE_SIZE) {
         socket
@@ -2241,11 +2259,12 @@ async fn http_round_trip(
             Some(Ok(_)) => continue,
             Some(Err(_)) => return Err(lost(&response)),
         };
-        if response.len() > MAX_HTTP_SIZE {
+        if response.len() > max_response {
             return Err(RoundTripError::Failed(StatusCode::BAD_GATEWAY));
         }
         if let Some(parsed) =
-            parse_http_response(&response, head, eof).map_err(RoundTripError::Failed)?
+            parse_http_response_within(&response, head, eof, max_response)
+                .map_err(RoundTripError::Failed)?
         {
             let reusable = !eof && response_is_reusable(&response, head);
             return Ok((parsed, reusable.then_some(socket)));
@@ -2312,6 +2331,16 @@ fn response_is_reusable(raw: &[u8], head: bool) -> bool {
 
 /// Decode HTTP framing independently of WebSocket message boundaries.
 fn parse_http_response(raw: &[u8], head: bool, eof: bool) -> Result<Option<Response>, StatusCode> {
+    parse_http_response_within(raw, head, eof, MAX_HTTP_SIZE)
+}
+
+/// Decode HTTP framing with an explicit body bound (see REFERENCE_CHAT_RELAY_RESPONSE_MAX).
+fn parse_http_response_within(
+    raw: &[u8],
+    head: bool,
+    eof: bool,
+    max_body: usize,
+) -> Result<Option<Response>, StatusCode> {
     let bad = StatusCode::BAD_GATEWAY;
     let Some(end) = raw.windows(4).position(|b| b == b"\r\n\r\n") else {
         return Ok(None);
@@ -2328,7 +2357,7 @@ fn parse_http_response(raw: &[u8], head: bool, eof: bool) -> Result<Option<Respo
         if status == StatusCode::SWITCHING_PROTOCOLS {
             return Err(bad);
         }
-        return parse_http_response(&raw[end + 4..], head, eof);
+        return parse_http_response_within(&raw[end + 4..], head, eof, max_body);
     }
     let mut headers = HeaderMap::new();
     for line in lines {
@@ -2366,7 +2395,7 @@ fn parse_http_response(raw: &[u8], head: bool, eof: bool) -> Result<Option<Respo
                 }
                 break;
             }
-            if size > MAX_HTTP_SIZE {
+            if size > max_body {
                 return Err(bad);
             }
             if remaining.len() < size + 2 {
@@ -2381,7 +2410,7 @@ fn parse_http_response(raw: &[u8], head: bool, eof: bool) -> Result<Option<Respo
         decoded
     } else if let Some(length) = headers.get("content-length") {
         let length: usize = length.to_str().map_err(|_| bad)?.parse().map_err(|_| bad)?;
-        if length > MAX_HTTP_SIZE {
+        if length > max_body {
             return Err(bad);
         }
         if data.len() < length {
@@ -3621,6 +3650,55 @@ mod tests {
         proxy_http(state, machine, Some(generation), Method::GET, "/api/v1/capabilities",
             HeaderMap::new(), Vec::new()).await.unwrap().status()
     }
+
+    /// rs-files-routes-8: a staged-file preview is base64 of up to ATTACHMENT_MAX_FILE_BYTES,
+    /// so the relay must return a reference-chat response well past the generic 8 MiB bound.
+    #[tokio::test]
+    async fn a_reference_chat_file_preview_larger_than_the_generic_cap_is_relayed() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, mut notices, _grants) =
+            state.register_control_channel("preview-host".into());
+        let body = vec![b'A'; 11 * 1024 * 1024];
+        let path = "/api/v1/reference-chat/sess-1/files/att-1?hostId=h";
+        let http = proxy_http(&state, "preview-host", Some(generation), Method::GET, path,
+            HeaderMap::new(), Vec::new());
+        let peer = async {
+            let notice = notices.recv().await.unwrap();
+            let (mut data, _) = tokio_tungstenite::connect_async(format!(
+                "{base}/tunnel/data/{}",
+                notice.session_id
+            ))
+            .await
+            .unwrap();
+            let request = data.next().await.unwrap().unwrap().into_data();
+            assert!(request.starts_with(b"GET /api/v1/reference-chat/sess-1/files/att-1"));
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            // The relay may hang up mid-body when it refuses the response; that refusal is what
+            // the status assertion below reports, so a send error here only ends the upload.
+            let _ = data.send(TMessage::Binary(head.into_bytes().into())).await;
+            for chunk in body.chunks(MAX_MESSAGE_SIZE) {
+                if data.send(TMessage::Binary(chunk.to_vec().into())).await.is_err() {
+                    break;
+                }
+            }
+            data
+        };
+        let (response, _data) =
+            timeout(Duration::from_secs(30), async { tokio::join!(http, peer) }).await.unwrap();
+        let status = response.map(|response| response.status());
+        assert_eq!(
+            status,
+            Ok(StatusCode::OK),
+            "an 11 MB reference-chat preview must be relayed, not refused"
+        );
+        state.unregister_control_channel("preview-host", generation);
+        server.abort();
+    }
+
 
     #[tokio::test]
     async fn data_channel_is_reused_across_http_requests() {

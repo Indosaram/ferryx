@@ -4984,6 +4984,9 @@ struct ReferenceStagedFile {
     display_name: String,
     receipt: AttachmentReceipt,
     staged_at_ms: u64,
+    /// A slot reserved under the registry lock while its bytes are still being written, so
+    /// concurrent stages for one target count it against the frozen per-turn bounds.
+    pending: bool,
 }
 
 /// Process-local state every reference-chat route shares.
@@ -5726,7 +5729,10 @@ fn reference_chat_staged_key(
 }
 
 /// Drop the staged files nothing has referenced for the frozen TTL, and their directories.
-fn reference_chat_prune_staged(runtime: &ReferenceChatRuntime) {
+///
+/// The registry is process-local, so the pane's own staging root is swept by mtime as well:
+/// directories a previous gateway process staged are removed once they outlive the TTL.
+async fn reference_chat_prune_staged(runtime: &ReferenceChatRuntime, worktree: &Path) {
     let now = reference_input::SystemReferenceClock.now_ms();
     let ttl = reference_files::reference_unreferenced_ttl_ms();
     let mut expired = Vec::new();
@@ -5734,15 +5740,21 @@ fn reference_chat_prune_staged(runtime: &ReferenceChatRuntime) {
         let mut staged = runtime.staged.lock();
         staged.retain(|_, entry| {
             let stale = now.saturating_sub(entry.staged_at_ms) > ttl;
-            if stale {
+            if stale && !entry.pending {
                 expired.push(entry.dir.clone());
             }
             !stale
         });
     }
-    for dir in expired {
-        let _ = reference_files::reference_cancel_staged_file(&dir);
-    }
+    let base = reference_files::reference_staging_base_dir(worktree);
+    let _ = crate::ipc::run_blocking(move || {
+        for dir in expired {
+            let _ = reference_files::reference_cancel_staged_file(&dir);
+        }
+        reference_files::reference_prune_staging_root(&base, ttl);
+        Ok::<_, crate::ipc::error::IpcError>(())
+    })
+    .await;
 }
 
 /// Read one bounded mutation envelope off the wire, after authentication.
@@ -6063,9 +6075,9 @@ async fn reference_chat_answer(
 /// POST /api/v1/reference-chat/{sessionId}/files
 ///
 /// The bytes are staged on the OWNING host — this gateway — into the lane's owner-private
-/// staging root, and the receipt names the host, an opaque id, the digest, the size and the media
-/// type. No path is minted for the client: the mention the agent receives is built from the
-/// staged file's own name.
+/// staging root INSIDE the pane's working directory, and the receipt names the host, an opaque
+/// id, the digest, the size and the media type. No absolute path is minted for the client: the
+/// mention the agent receives is the staged file's path relative to the pane's cwd.
 async fn reference_chat_stage_file(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath(session_id): AxumPath<String>,
@@ -6091,60 +6103,109 @@ async fn reference_chat_stage_file(
         );
     }
     let runtime = reference_chat_runtime();
-    reference_chat_prune_staged(runtime);
+    let worktree = match state
+        .session_backend
+        .describe_session(target.target.backend_session_id.as_str())
+        .await
+        .ok()
+        .and_then(|details| details.worktree_path)
+    {
+        Some(worktree) => worktree,
+        None => {
+            return reference_chat_error(
+                ScopeErrorCode::Unsupported,
+                "this pane has no working directory a staged file could be opened from",
+            )
+        }
+    };
+    reference_chat_prune_staged(runtime, &worktree).await;
     let target_key = reference_types::reference_draft_key(&target);
-    let (existing_files, existing_turn_bytes) = {
-        let staged = runtime.staged.lock();
-        staged
+    // Check and reserve under ONE lock, so concurrent stages cannot all observe a free slot.
+    let reservation = format!("{target_key}\u{1f}pending-{}", uuid::Uuid::new_v4());
+    {
+        let mut staged = runtime.staged.lock();
+        let (existing_files, existing_turn_bytes) = staged
             .values()
             .filter(|entry| entry.target_key == target_key)
             .fold((0usize, 0u64), |(count, bytes), entry| {
                 (count + 1, bytes + entry.receipt.size_bytes)
-            })
-    };
-    if let Err(code) = reference_files::reference_file_bounds_check(
-        body.params.size_bytes,
-        existing_files,
-        existing_turn_bytes,
-    ) {
-        return reference_chat_refusal(&reference_chat_scope(
-            code,
-            "the staged set for this target is at its limit",
-        ));
+            });
+        if let Err(code) = reference_files::reference_file_bounds_check(
+            body.params.size_bytes,
+            existing_files,
+            existing_turn_bytes,
+        ) {
+            return reference_chat_refusal(&reference_chat_scope(
+                code,
+                "the staged set for this target is at its limit",
+            ));
+        }
+        staged.insert(
+            reservation.clone(),
+            ReferenceStagedFile {
+                target_key: target_key.clone(),
+                dir: PathBuf::new(),
+                path: PathBuf::new(),
+                display_name: String::new(),
+                receipt: AttachmentReceipt {
+                    host_id: String::new(),
+                    attachment_id: String::new(),
+                    sha256: String::new(),
+                    size_bytes: body.params.size_bytes,
+                    media_type: body.params.media_type,
+                },
+                staged_at_ms: reference_input::SystemReferenceClock.now_ms(),
+                pending: true,
+            },
+        );
     }
     let payload = body.params.clone();
+    let host_id = reference_files::reference_host_id();
+    let stage_root = worktree.clone();
     let staged = crate::ipc::run_blocking(move || {
-        Ok::<_, crate::ipc::error::IpcError>(reference_files::stage_reference_file(&payload))
+        Ok::<_, crate::ipc::error::IpcError>(reference_files::stage_reference_file_in(
+            &host_id,
+            &stage_root,
+            &payload,
+        ))
     })
     .await;
     let receipt = match staged {
         Ok(Ok(receipt)) => receipt,
         Ok(Err(code)) => {
+            runtime.staged.lock().remove(&reservation);
             return reference_chat_refusal(&reference_chat_scope(
                 code,
                 "the file could not be staged on this host",
             ))
         }
         Err(_) => {
+            runtime.staged.lock().remove(&reservation);
             return reference_chat_error(
                 ScopeErrorCode::Unsupported,
                 "the staging thread did not finish",
             )
         }
     };
-    let dir = reference_files::reference_staging_base_dir().join(&receipt.receipt.attachment_id);
+    let dir = reference_files::reference_staging_base_dir(&worktree)
+        .join(&receipt.receipt.attachment_id);
     let path = dir.join(&receipt.display_name);
-    runtime.staged.lock().insert(
-        reference_chat_staged_key(&target, &receipt.receipt.attachment_id),
-        ReferenceStagedFile {
-            target_key,
-            dir,
-            path,
-            display_name: receipt.display_name.clone(),
-            receipt: receipt.receipt.clone(),
-            staged_at_ms: reference_input::SystemReferenceClock.now_ms(),
-        },
-    );
+    {
+        let mut staged = runtime.staged.lock();
+        staged.remove(&reservation);
+        staged.insert(
+            reference_chat_staged_key(&target, &receipt.receipt.attachment_id),
+            ReferenceStagedFile {
+                target_key,
+                dir,
+                path,
+                display_name: receipt.display_name.clone(),
+                receipt: receipt.receipt.clone(),
+                staged_at_ms: reference_input::SystemReferenceClock.now_ms(),
+                pending: false,
+            },
+        );
+    }
     reference_chat_result_ok(
         &body.request_id,
         serde_json::json!({
@@ -6176,6 +6237,7 @@ async fn reference_chat_preview_file(
         let staged = runtime.staged.lock();
         staged
             .get(&reference_chat_staged_key(&read.target, &file_id))
+            .filter(|entry| !entry.pending)
             .map(|entry| {
                 (
                     entry.path.clone(),
@@ -6244,22 +6306,35 @@ async fn reference_chat_delete_file(
         );
     }
     let runtime = reference_chat_runtime();
-    let entry = runtime
-        .staged
-        .lock()
-        .remove(&reference_chat_staged_key(&read.target, &file_id));
+    let key = reference_chat_staged_key(&read.target, &file_id);
+    let entry = {
+        let mut staged = runtime.staged.lock();
+        match staged.get(&key) {
+            Some(entry) if !entry.pending => staged.remove(&key),
+            _ => None,
+        }
+    };
     let Some(entry) = entry else {
         return reference_chat_error(
             ScopeErrorCode::NotFound,
             "no staged file of that id belongs to this target",
         );
     };
-    let dir = entry.dir;
-    let _ = crate::ipc::run_blocking(move || {
-        reference_files::reference_cancel_staged_file(&dir);
-        Ok::<_, crate::ipc::error::IpcError>(())
+    let dir = entry.dir.clone();
+    let removed = crate::ipc::run_blocking(move || {
+        Ok::<_, crate::ipc::error::IpcError>(reference_files::reference_cancel_staged_file(&dir))
     })
-    .await;
+    .await
+    .unwrap_or(false);
+    if !removed {
+        // Keep the entry: the bytes are still on disk, so a retried DELETE (or the TTL prune)
+        // must still be able to find and remove them.
+        runtime.staged.lock().insert(key, entry);
+        return reference_chat_error(
+            ScopeErrorCode::Unsupported,
+            "the staged file could not be removed from this host",
+        );
+    }
     (
         StatusCode::NO_CONTENT,
         [(header::CACHE_CONTROL, "no-store")],

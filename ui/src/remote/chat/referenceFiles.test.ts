@@ -518,3 +518,98 @@ describe("reference file routes", () => {
     });
   });
 });
+
+describe("reference file names carry whitespace-free mentions (ui-reference-logic-2, r2-1)", () => {
+  // The Rust host stages into the pane's worktree and mints this mention shape.
+  function rustShapedTransport() {
+    return fakeTransport({
+      stage: async (_target, payload) => ({
+        receipt: {
+          hostId: "host-a",
+          attachmentId: "att-ws",
+          sha256: FIXED_SHA,
+          sizeBytes: payload.sizeBytes,
+          mediaType: payload.mediaType,
+        },
+        displayName: payload.name,
+        mentionText: "@.ferryx-reference-chat-files/att-ws/" + payload.name + " ",
+      }),
+    });
+  }
+
+  it("a name with whitespace is never staged under a name its mention cannot carry", async () => {
+    const fake = rustShapedTransport();
+    const sent: string[] = [];
+    const stage = fake.transport.stage;
+    const transport: ReferenceFileStagingTransport = {
+      ...fake.transport,
+      stage: async (t, payload, s) => {
+        sent.push(payload.name);
+        return stage(t, payload, s);
+      },
+    };
+    let receipt: Awaited<ReturnType<typeof stageReferenceChatFile>> | null = null;
+    let refused: unknown = null;
+    try {
+      receipt = await stageReferenceChatFile(
+        { transport, digest: async () => FIXED_SHA },
+        target(),
+        source("Screenshot 2026-10-13 at 10.00.00.png", "image/png", [1, 2, 3]),
+        signal,
+      );
+    } catch (error) {
+      refused = error;
+    }
+    // Either refused before stage, or staged under a name whose mention parses; never orphaned.
+    if (refused !== null) {
+      expect(sent.length === 0 || fake.cancelled.includes("att-ws")).toBe(true);
+    }
+    expect(refused).toBeNull();
+    expect(sent).toEqual(["Screenshot_2026-10-13_at_10.00.00.png"]);
+    expect(referenceMentionPathOf(receipt!.mentionText)).toBe(
+      ".ferryx-reference-chat-files/att-ws/Screenshot_2026-10-13_at_10.00.00.png",
+    );
+    expect(fake.cancelled).toEqual([]);
+  });
+
+  it("the TS validator refuses whitespace exactly as the Rust validator does", () => {
+    expectCode(() => validateReferenceFileName("two words.png"), "INVALID_REQUEST");
+    expectCode(() => validateReferenceFileName("tab" + String.fromCharCode(9) + "x.png"), "INVALID_REQUEST");
+    expect(validateReferenceFileName("~notes.txt")).toBe("~notes.txt");
+  });
+
+  it("a leading tilde stages and its prefixed mention parses", async () => {
+    const fake = rustShapedTransport();
+    const receipt = await stageReferenceChatFile(
+      deps(fake.transport),
+      target(),
+      source("~notes.txt", "text/plain", [1]),
+      signal,
+    );
+    expect(referenceMentionPathOf(receipt.mentionText)).toBe(
+      ".ferryx-reference-chat-files/att-ws/~notes.txt",
+    );
+  });
+
+  it("cancels the staged id when the receipt fails validation after stage succeeded", async () => {
+    const fake = fakeTransport({
+      stage: async (_target, payload) => ({
+        receipt: {
+          hostId: "host-a",
+          attachmentId: "att-bad",
+          sha256: FIXED_SHA,
+          sizeBytes: payload.sizeBytes,
+          mediaType: payload.mediaType,
+        },
+        displayName: payload.name,
+        // An older host that still mints a bare, space-carrying mention.
+        mentionText: "@my " + payload.name + " ",
+      }),
+    });
+    await expectCodeAsync(
+      () => stageReferenceChatFile(deps(fake.transport), target(), source("shot.png", "image/png", [1]), signal),
+      "INVALID_REQUEST",
+    );
+    expect(fake.cancelled).toEqual(["att-bad"]);
+  });
+});
