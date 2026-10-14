@@ -644,6 +644,10 @@ pub struct ReferenceAnswerRequest<'a> {
     pub payload: &'a ReferencePromptAnswerPayload,
     /// What the caller read about the pane's own session, for the OmO arm.
     pub session: ReferencePromptSession<'a>,
+    /// The registry id of the pane the answer is sent to, as the route reads it for that pane.
+    /// The card is re-detected under this agent, never under the agent stored on the card, so
+    /// the OmO arm's trust rule for a `claude` or unnamed pane applies again at answer time.
+    pub agent: &'a str,
     /// Whether this caller may mutate at all. Asked before the read and again before the first
     /// key, so a revoke that lands mid-flight cannot be ignored.
     pub authorize: &'a (dyn Fn() -> Result<(), ScopeError> + Send + Sync),
@@ -743,13 +747,13 @@ impl ReferencePromptAnswers {
             );
         }
 
-        let Some(known) = reference_prompt_card(&request.payload.prompt_id) else {
+        if reference_prompt_card(&request.payload.prompt_id).is_none() {
             return refused(
                 ScopeErrorCode::InvalidRequest,
                 false,
                 REFERENCE_PROMPT_UNKNOWN_CARD_MESSAGE,
             );
-        };
+        }
 
         // A custom answer is typed into the pane as it stands: a newline or any other control
         // byte inside it would act as a key (an early Enter submits part of the answer and the
@@ -811,10 +815,12 @@ impl ReferencePromptAnswers {
 
         // The card is detected again on the screen as it is now: every family's registry is
         // refreshed, and the card the user answered must still be the card on the screen.
-        let agent = known.prompt().agent.clone();
+        // The pane's own agent, never the card's: a card read on another pane must pass this
+        // pane's trust rule again.
+        let agent = request.agent;
         let mut screen_text = fresh.text;
         let mut card =
-            match detect_reference_prompt_card_in_session(&agent, &screen_text, &request.session) {
+            match detect_reference_prompt_card_in_session(agent, &screen_text, &request.session) {
                 Some(card) if card.prompt().id == request.payload.prompt_id => card,
                 _ => {
                     return refused(
@@ -828,6 +834,12 @@ impl ReferencePromptAnswers {
         // A folded OmO widget is not answerable where it stands. Its own key opens the form, and
         // the form the screen then shows — verified to be the same asking — is what is answered.
         if card.is_folded_omo() {
+            // Validate first: an answer the folded card already refuses must not open the form.
+            if let Err(code) =
+                plan_answer_keys(&card, card.prompt(), &request.payload.answer, None)
+            {
+                return refused(code, false, REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE);
+            }
             let open_key =
                 reference_key_bytes(REFERENCE_OMO_OPEN_FORM_KEY).expect("the open key is mapped");
             if let Err(message) = writer.write(session_id(request), open_key).await {
@@ -835,7 +847,7 @@ impl ReferencePromptAnswers {
                     "the form's open key may have reached the pane and could not be confirmed: {message}"
                 ));
             }
-            match wait_for_open_form(request, screen, clock, &agent).await {
+            match wait_for_open_form(request, screen, clock, agent).await {
                 Ok((opened, text)) => {
                     card = opened;
                     screen_text = text;
@@ -1639,6 +1651,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1678,6 +1691,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1705,6 +1719,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1735,6 +1750,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1760,6 +1776,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1787,6 +1804,7 @@ mod tests {
             let request = ReferenceAnswerRequest {
                 target: &target,
                 request_id: "req-1",
+                agent: &prompt.agent,
                 payload: &payload,
                 session: ReferencePromptSession::default(),
                 authorize: &allow(),
@@ -1847,6 +1865,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1879,6 +1898,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: session(OMO_ASKS_FOLDED),
             authorize: &allow(),
@@ -1922,6 +1942,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: session(OMO_ASKS_FOLDED),
             authorize: &allow(),
@@ -1945,6 +1966,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_folded_answer_that_does_not_fit_sends_no_open_key() {
+        // rs-prompts-r3-1: an answer the folded card already refuses must not open the form.
+        let prompt =
+            detect_reference_prompt_in_session("omo", OMO_WIDGET, &session(OMO_ASKS_FOLDED))
+                .expect("the folded widget is a card");
+        let target = target("sess-1");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader =
+            ScriptedScreen::many(vec![Ok(snapshot(OMO_WIDGET)), Ok(snapshot(OMO_FORM_OPENED))]);
+        let answers = ReferencePromptAnswers::new();
+        let payload = payload(&prompt.id, REVISION, option(7));
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-1",
+            payload: &payload,
+            agent: "omo",
+            session: session(OMO_ASKS_FOLDED),
+            authorize: &allow(),
+            alive: &alive(),
+        };
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert!(
+            writer.log().is_empty(),
+            "an answer the folded card refuses sends no key, not even the open key: {:?}",
+            writer.text()
+        );
+        assert_not_typed(&outcome, ScopeErrorCode::InvalidRequest);
+        assert_eq!(outcome.wire_message(), Some(REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn an_omo_card_is_not_answered_on_an_untrusted_claude_pane() {
+        // rs-prompts-r3-2: a card detected on an omo pane is re-detected under the target pane's
+        // own agent, so a claude pane that is not blocked and has no matching call is refused.
+        let prompt = detect_reference_prompt("omo", OMO_FORM).expect("the omo form is a card");
+        assert!(
+            detect_reference_prompt("claude", OMO_FORM).is_none(),
+            "the claude pane does not trust the same form on its own"
+        );
+        let target = target("sess-b");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader = ScriptedScreen::one(OMO_FORM);
+        let answers = ReferencePromptAnswers::new();
+        let payload = payload(&prompt.id, REVISION, option(0));
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-1",
+            payload: &payload,
+            agent: "claude",
+            session: ReferencePromptSession::default(),
+            authorize: &allow(),
+            alive: &alive(),
+        };
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert!(
+            writer.log().is_empty(),
+            "an untrusted claude pane receives no answer key: {:?}",
+            writer.text()
+        );
+        assert_not_typed(&outcome, ScopeErrorCode::RequestConflict);
+    }
+
+    #[tokio::test]
     async fn a_gapped_screen_can_never_validate_a_revision() {
         let prompt = detect_reference_prompt("claude", CLAUDE_QUESTION).expect("a claude card");
         let target = target("sess-1");
@@ -1959,6 +2047,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1983,6 +2072,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -2007,6 +2097,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &refusal(),
@@ -2021,6 +2112,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-2",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -2050,6 +2142,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -2076,6 +2169,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -2133,6 +2227,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -2165,6 +2260,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -2234,6 +2330,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),

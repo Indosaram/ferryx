@@ -6117,6 +6117,7 @@ async fn reference_chat_answer(
     let prompt_session = reference_chat_prompt_session(&state, &identity).await;
     let authorize = reference_chat_authorize(&state, &headers);
     let request_id = body.request_id.clone();
+    let agent = identity.registry_id.clone();
     // Owned by its own task, like a submit: a caller that disconnects must not leave a menu moved
     // but unconfirmed, or custom text typed without its Enter.
     let transaction = tokio::spawn(async move {
@@ -6126,6 +6127,7 @@ async fn reference_chat_answer(
             request_id: &body.request_id,
             payload: &body.params,
             session: prompt_session.borrow(),
+            agent: agent.as_str(),
             authorize: &*authorize,
             alive: &alive,
         };
