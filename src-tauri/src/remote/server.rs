@@ -4987,6 +4987,11 @@ struct ReferenceStagedFile {
     /// A slot reserved under the registry lock while its bytes are still being written, so
     /// concurrent stages for one target count it against the frozen per-turn bounds.
     pending: bool,
+    /// The `@path` mention the agent receives for this file.
+    mention_text: String,
+    /// An accepted submit already sent this file's mention: it belongs to a finished turn and no
+    /// longer counts against the next turn's bounds, though its bytes stay on disk for the TTL.
+    referenced: bool,
 }
 
 /// Process-local state every reference-chat route shares.
@@ -5977,6 +5982,19 @@ async fn reference_chat_submit(
         .input
         .submit_with_probe(&submit, probe, &writer, &clock)
         .await;
+    if matches!(outcome, reference_input::ReferenceInputOutcome::Accepted { .. }) {
+        let target_key = reference_types::reference_draft_key(&target);
+        for entry in runtime.staged.lock().values_mut() {
+            let mention = entry.mention_text.trim_end();
+            if entry.target_key == target_key
+                && !entry.pending
+                && !mention.is_empty()
+                && body.params.text.contains(mention)
+            {
+                entry.referenced = true;
+            }
+        }
+    }
     reference_chat_input_response(&body.request_id, outcome)
 }
 
@@ -6131,7 +6149,7 @@ async fn reference_chat_stage_file(
         let mut staged = runtime.staged.lock();
         let (existing_files, existing_turn_bytes) = staged
             .values()
-            .filter(|entry| entry.target_key == target_key)
+            .filter(|entry| entry.target_key == target_key && !entry.referenced)
             .fold((0usize, 0u64), |(count, bytes), entry| {
                 (count + 1, bytes + entry.receipt.size_bytes)
             });
@@ -6161,6 +6179,8 @@ async fn reference_chat_stage_file(
                 },
                 staged_at_ms: reference_input::SystemReferenceClock.now_ms(),
                 pending: true,
+                mention_text: String::new(),
+                referenced: false,
             },
         );
     }
@@ -6208,6 +6228,8 @@ async fn reference_chat_stage_file(
                 receipt: receipt.receipt.clone(),
                 staged_at_ms: reference_input::SystemReferenceClock.now_ms(),
                 pending: false,
+                mention_text: receipt.mention_text.clone(),
+                referenced: false,
             },
         );
     }
