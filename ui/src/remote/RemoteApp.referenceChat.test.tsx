@@ -127,7 +127,7 @@ interface Harness {
    * URL the app actually requested, so a bounded wait that is never satisfied reports what
    * happened instead of collapsing into "expected undefined to be defined".
    */
-  readonly whenCalled: (fragment: string, timeoutMs?: number) => Promise<HarnessCall>;
+  readonly whenCalled: (fragment: string, timeoutMs?: number, method?: string) => Promise<HarnessCall>;
 }
 
 function installFetch(options: {
@@ -145,6 +145,7 @@ function installFetch(options: {
   const calls: HarnessCall[] = [];
   interface Waiter {
     readonly fragment: string;
+    readonly method?: string;
     readonly resolve: (call: HarnessCall) => void;
     readonly timer: ReturnType<typeof setTimeout>;
   }
@@ -153,13 +154,16 @@ function installFetch(options: {
     calls.push(call);
     for (let index = waiters.length - 1; index >= 0; index -= 1) {
       if (!call.url.includes(waiters[index].fragment)) continue;
+      if (waiters[index].method !== undefined && waiters[index].method !== call.method) continue;
       const [waiter] = waiters.splice(index, 1);
       clearTimeout(waiter.timer);
       waiter.resolve(call);
     }
   };
-  const whenCalled = (fragment: string, timeoutMs = 2000): Promise<HarnessCall> => {
-    const existing = calls.find((call) => call.url.includes(fragment));
+  const whenCalled = (fragment: string, timeoutMs = 2000, method?: string): Promise<HarnessCall> => {
+    const existing = calls.find(
+      (call) => call.url.includes(fragment) && (method === undefined || call.method === method),
+    );
     if (existing) return Promise.resolve(existing);
     return new Promise<HarnessCall>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -172,7 +176,7 @@ function installFetch(options: {
           ),
         );
       }, timeoutMs);
-      waiters.push({ fragment, resolve, timer });
+      waiters.push({ fragment, method, resolve, timer });
     });
   };
   const impl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -504,7 +508,8 @@ describe("reference chat lane (task 12)", () => {
 
     // Armed only once readiness is settled, so one bounded wait is outstanding at a time and a
     // readiness failure cannot leave a second rejection unhandled.
-    const stagedRequest = harness.whenCalled("/files");
+    // The lane's own staged-file rehydrate is a GET on the same route; the upload is the POST.
+    const stagedRequest = harness.whenCalled("/files", 2000, "POST");
 
     const file = readableFile("abc", "notes.txt", "text/plain");
     await act(async () => {
