@@ -351,8 +351,29 @@ pub fn resolve_reference_history_stream(
         }
     }
 
-    // 5. The cwd, only when this pane owns it alone and it holds exactly one candidate.
-    if let Some(cwd) = identity.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
+    // A reader-identified session with nothing written yet is a conversation with zero turns,
+    // which is a different answer from "this pane has no store at all". It is answered before the
+    // cwd fallback: a known session must never be bound to another (older) session's file.
+    if identity.provider_session_id().is_some()
+        || identity.agent_session_id.is_some()
+        || identity.provider_transcript_path.is_some()
+    {
+        return Ok(not_started_stream(identity, kind));
+    }
+
+    // 5. The cwd, only when nothing identifies the session, this pane owns the cwd alone, it
+    //    holds exactly one candidate, and the candidate store is this reader's (`.omo`) store.
+    let reads_omo_store = matches!(
+        kind,
+        ReferenceNativeHistoryKind::Omo
+            | ReferenceNativeHistoryKind::Omp
+            | ReferenceNativeHistoryKind::Gjc
+    );
+    if let Some(cwd) = identity
+        .cwd
+        .as_deref()
+        .filter(|cwd| reads_omo_store && !cwd.trim().is_empty())
+    {
         let backend = identity.target.target.backend_session_id.as_str();
         if let Some(other) = siblings
             .iter()
@@ -381,12 +402,6 @@ pub fn resolve_reference_history_stream(
                 ))
             }
         }
-    }
-
-    // A reader-identified session with nothing written yet is a conversation with zero turns,
-    // which is a different answer from "this pane has no store at all".
-    if identity.provider_session_id().is_some() || identity.agent_session_id.is_some() {
-        return Ok(not_started_stream(identity, kind));
     }
 
     Err(history_error(
@@ -655,6 +670,27 @@ pub fn read_reference_history_window(
     }
 }
 
+/// The last `max` bytes of a store, read without holding the rest.
+///
+/// Synchronous by design: every caller runs it through [`crate::ipc::run_blocking`].
+pub fn read_reference_history_tail<R: Read + Seek>(
+    reader: &mut R,
+    max: usize,
+) -> std::io::Result<Vec<u8>> {
+    let length = reader.seek(SeekFrom::End(0))?;
+    let start = length.saturating_sub(max as u64);
+    reader.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity((length - start) as usize);
+    reader.by_ref().take(max as u64).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// [`read_reference_history_tail`] over a file on the owning host.
+pub fn read_reference_history_tail_file(path: &Path, max: usize) -> std::io::Result<Vec<u8>> {
+    let mut file = File::open(path)?;
+    read_reference_history_tail(&mut file, max)
+}
+
 /// Does this raw line open a turn?
 ///
 /// Each family's own `opensTurn` predicate decides, so a page never starts mid-turn. omp, gjc and
@@ -765,6 +801,25 @@ struct ReferenceStreamState {
     provider_session_id: Option<String>,
     fingerprints: Vec<String>,
     incarnation: u64,
+    /// The stream offset the observed turns were read from (`0` for a whole-store read).
+    window_start: u64,
+    /// When this stream was last observed, for least-recently-observed eviction.
+    last_seen: u64,
+}
+
+#[derive(Debug, Default)]
+struct ReferenceTrackerInner {
+    streams: HashMap<String, ReferenceStreamState>,
+    clock: u64,
+}
+
+/// Does `current` continue `previous` after its head moved forward? True when some non-empty
+/// suffix of the previous turns is exactly the start of the current ones.
+fn reference_history_head_shifted(previous: &[String], current: &[String]) -> bool {
+    (1..previous.len()).any(|drop| {
+        let kept = &previous[drop..];
+        current.len() >= kept.len() && current[..kept.len()] == *kept
+    })
 }
 
 /// Tracks a stream's incarnation so `generation` changes exactly when the answer could have.
@@ -780,15 +835,20 @@ struct ReferenceStreamState {
 /// 4. **Truncation rotates** — a stream shorter than the known one rotates it.
 /// 5. **Head removal rotates** — dropping the first turn shifts the chain and rotates it.
 /// 6. **Provider change rotates** — a different provider session identity rotates it.
+///
+/// A bounded window whose head moved forward (the store outgrew the read cap and the oldest turns
+/// fell out of the window) is an append, not a head removal: the turns it still holds continue the
+/// known ones, so the token is kept. At most [`REFERENCE_HISTORY_MAX_TRACKED_STREAMS`] streams are
+/// remembered; the least recently observed one is forgotten first.
 #[derive(Debug, Default)]
 pub struct ReferenceHistoryGenerationTracker {
-    streams: Mutex<HashMap<String, ReferenceStreamState>>,
+    inner: Mutex<ReferenceTrackerInner>,
 }
 
 impl ReferenceHistoryGenerationTracker {
     /// A tracker with no observed stream.
     pub fn new() -> Self {
-        Self { streams: Mutex::new(HashMap::new()) }
+        Self::default()
     }
 
     /// Observe a stream's whole turn list and answer its current generation.
@@ -798,14 +858,37 @@ impl ReferenceHistoryGenerationTracker {
         provider_session_id: Option<&str>,
         turns: &[ReferenceTurn],
     ) -> String {
+        self.observe_window(stream_id, provider_session_id, 0, turns)
+    }
+
+    /// Observe the turns of a stream read from `window_start` onward.
+    pub fn observe_window(
+        &self,
+        stream_id: &str,
+        provider_session_id: Option<&str>,
+        window_start: u64,
+        turns: &[ReferenceTurn],
+    ) -> String {
         let fingerprints: Vec<String> =
             turns.iter().map(reference_turn_fingerprint).collect();
-        let mut streams = self
-            .streams
+        let mut inner = self
+            .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.clock += 1;
+        let now = inner.clock;
+        let streams = &mut inner.streams;
 
         let Some(state) = streams.get_mut(stream_id) else {
+            if streams.len() >= REFERENCE_HISTORY_MAX_TRACKED_STREAMS {
+                let oldest = streams
+                    .iter()
+                    .min_by_key(|(_, state)| state.last_seen)
+                    .map(|(id, _)| id.clone());
+                if let Some(oldest) = oldest {
+                    streams.remove(&oldest);
+                }
+            }
             let incarnation = 1;
             streams.insert(
                 stream_id.to_string(),
@@ -813,14 +896,18 @@ impl ReferenceHistoryGenerationTracker {
                     provider_session_id: provider_session_id.map(str::to_string),
                     fingerprints,
                     incarnation,
+                    window_start,
+                    last_seen: now,
                 },
             );
             return format!("{stream_id}:inc-{incarnation}");
         };
+        state.last_seen = now;
 
         if state.provider_session_id.as_deref() != provider_session_id {
             state.provider_session_id = provider_session_id.map(str::to_string);
             state.fingerprints = fingerprints;
+            state.window_start = window_start;
             state.incarnation += 1;
             return format!("{stream_id}:inc-{}", state.incarnation);
         }
@@ -831,15 +918,33 @@ impl ReferenceHistoryGenerationTracker {
             .iter()
             .zip(fingerprints.iter())
             .any(|(previous, current)| previous != current);
-        if truncated || rewritten {
+        let head_moved = window_start > state.window_start
+            && reference_history_head_shifted(&state.fingerprints, &fingerprints);
+        if (truncated || rewritten) && !head_moved {
             state.incarnation += 1;
         }
         state.fingerprints = fingerprints;
+        state.window_start = window_start;
         format!("{stream_id}:inc-{}", state.incarnation)
     }
 }
 
 static REFERENCE_HISTORY_GENERATIONS: OnceLock<ReferenceHistoryGenerationTracker> = OnceLock::new();
+
+/// How many streams the process-wide tracker remembers before it forgets the least recently
+/// observed one.
+pub const REFERENCE_HISTORY_MAX_TRACKED_STREAMS: usize = 1024;
+
+impl ReferenceHistoryGenerationTracker {
+    /// How many streams the tracker currently remembers.
+    pub fn tracked_stream_count(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .streams
+            .len()
+    }
+}
 
 /// The process-wide tracker the page reader uses.
 pub fn global_reference_history_generation_tracker() -> &'static ReferenceHistoryGenerationTracker {
@@ -861,6 +966,81 @@ pub fn reference_history_generation(
         }
         None => reference_history_genesis_generation(stream_id, turns.first()),
     }
+}
+
+/// The generation of a stream read as a bounded window starting at `window_start`.
+///
+/// A whole-store read is [`reference_history_generation`]. A tail window's first turn moves with
+/// every append, so a genesis digest over it would rotate on every poll; such a window is tracked
+/// by incarnation instead, which tolerates the head moving forward.
+fn reference_history_window_generation(
+    stream_id: &str,
+    provider_session_id: Option<&str>,
+    window_start: u64,
+    turns: &[ReferenceTurn],
+) -> String {
+    if window_start == 0 {
+        return reference_history_generation(stream_id, provider_session_id, turns);
+    }
+    global_reference_history_generation_tracker().observe_window(
+        stream_id,
+        provider_session_id,
+        window_start,
+        turns,
+    )
+}
+
+/// The byte offset just past the last `context_clear` reset in an omp-shaped stream, if any.
+///
+/// Every turn before it was cleared, so no page boundary may lie before it.
+fn reference_history_reset_end(kind: ReferenceNativeHistoryKind, bytes: &[u8]) -> Option<usize> {
+    if !matches!(
+        kind,
+        ReferenceNativeHistoryKind::Omo
+            | ReferenceNativeHistoryKind::Omp
+            | ReferenceNativeHistoryKind::Gjc
+            | ReferenceNativeHistoryKind::Pi
+    ) {
+        return None;
+    }
+    let mut reset = None;
+    let mut line_start = 0usize;
+    while line_start < bytes.len() {
+        let line_end = bytes[line_start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| line_start + index)
+            .unwrap_or(bytes.len());
+        let line = &bytes[line_start..line_end];
+        if line.windows(b"context_clear".len()).any(|window| window == b"context_clear") {
+            let cleared = serde_json::from_slice::<serde_json::Value>(line)
+                .map(|entry| super::history_omo::is_omo_context_clear(&entry))
+                .unwrap_or(false);
+            if cleared {
+                reset = Some(line_end);
+            }
+        }
+        line_start = line_end + 1;
+    }
+    reset
+}
+
+/// The task titles OmO's `task` calls recorded in these bytes, so a page inherits the titles its
+/// older pages named (as `conversation.ts` carries `taskTitles` across pages).
+fn reference_history_task_titles(bytes: &[u8]) -> HashMap<String, String> {
+    let mut titles = HashMap::new();
+    for line in String::from_utf8_lossy(bytes).split('\n') {
+        if !line.contains("\"task\"") {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(message) = super::history_omo::omo_pi_message(&entry) {
+            super::history_omo::omo_task_titles(&message, &mut titles);
+        }
+    }
+    titles
 }
 
 /// The page size a caller's `limit` resolves to.
@@ -911,7 +1091,12 @@ pub fn reference_history_page_from_window(
         _ => bytes.to_vec(),
     };
 
-    let starts = reference_history_turn_starts(stream.kind, &view);
+    let mut starts = reference_history_turn_starts(stream.kind, &view);
+    // A reset clears every turn before it: no page may start before it, so no cursor can reach
+    // the cleared conversation.
+    if let Some(reset) = reference_history_reset_end(stream.kind, &view) {
+        starts.retain(|start| *start > reset);
+    }
     let stream_length = window_start + view.len() as u64;
 
     let end = match cursor {
@@ -957,13 +1142,39 @@ pub fn reference_history_page_from_window(
     } else {
         &[]
     };
-    let turns = parse_reference_history_turns(stream.kind, page_bytes)?;
+    let turns = match stream.kind {
+        // A task's title is recorded where it was started; a page that only holds its result
+        // inherits the titles every older byte named.
+        ReferenceNativeHistoryKind::Omo | ReferenceNativeHistoryKind::Omp
+            if start_index < end_index =>
+        {
+            let mut titles = reference_history_task_titles(&view[..starts[start_index]]);
+            let text = String::from_utf8_lossy(page_bytes);
+            if stream.kind == ReferenceNativeHistoryKind::Omo {
+                super::history_omo::parse_omo_transcript(&text, usize::MAX, false, &mut titles)
+            } else {
+                super::history_omp::parse_omp_transcript_with_titles(&text, titles)
+            }
+        }
+        _ => parse_reference_history_turns(stream.kind, page_bytes)?,
+    };
 
     // The generation is computed over the whole stream, never the page: asking for an older page
     // must not look like a change to the client's fence.
-    let whole = parse_reference_history_turns(stream.kind, &view)?;
-    let generation =
-        reference_history_generation(&stream.stream_id, identity.provider_session_id(), &whole);
+    // A tail window begins mid-stream, so what precedes its first boundary is a torn piece of an
+    // older turn and is left out.
+    let whole_from = if window_start > 0 {
+        reference_history_turn_starts(stream.kind, &view).first().copied().unwrap_or(view.len())
+    } else {
+        0
+    };
+    let whole = parse_reference_history_turns(stream.kind, &view[whole_from..])?;
+    let generation = reference_history_window_generation(
+        &stream.stream_id,
+        identity.provider_session_id(),
+        window_start,
+        &whole,
+    );
 
     let next_cursor = (start_index > 0).then(|| ReferenceHistoryCursor {
         stream_id: stream.stream_id.clone(),
@@ -1729,6 +1940,277 @@ mod tests {
             .expect("the page is served");
         assert!(page.is_native());
         assert!(!page.can_reach_provider_read(&stream.owner), "an unbound target stops at accepted");
+    }
+
+    fn omo_line(role: &str, text: &str) -> String {
+        serde_json::json!({
+            "type": "message",
+            "message": {"role": role, "content": [{"type": "text", "text": text}]}
+        })
+        .to_string()
+    }
+
+    fn joined(lines: &[String]) -> String {
+        lines.iter().map(|line| format!("{line}\n")).collect()
+    }
+
+    // rs-history-core-1
+    #[test]
+    fn a_claude_page_keeps_every_turn_its_boundaries_hold() {
+        let home = TempHome::new();
+        let mut body = String::new();
+        for index in 1..=150 {
+            body.push_str(
+                &serde_json::json!({
+                    "type": "user",
+                    "message": {"role": "user", "content": format!("prompt {index}")}
+                })
+                .to_string(),
+            );
+            body.push('\n');
+            body.push_str(
+                &serde_json::json!({
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": format!("answer {index}")}]}
+                })
+                .to_string(),
+            );
+            body.push('\n');
+        }
+        let path = home.path().join("aaa.jsonl");
+        std::fs::write(&path, &body).expect("a claude store is writable");
+        let identity =
+            bound_identity("claude", "sess-1", "aaa").with_provider_transcript_path(&path);
+        let stream = resolve_reference_history_stream(home.path(), &identity, &[])
+            .expect("the named claude store resolves");
+        assert_eq!(stream.kind, ReferenceNativeHistoryKind::Claude);
+
+        let page = reference_history_page_from_bytes(&stream, &identity, body.as_bytes(), 200, None)
+            .expect("the page is served");
+        assert_eq!(page.turns.len(), 300, "every turn the page's boundaries hold is served");
+        assert_eq!(first_text(&page.turns[0]), "prompt 1");
+        assert!(!page.has_more);
+    }
+
+    // rs-history-core-2
+    #[test]
+    fn the_cwd_fallback_never_binds_a_store_when_the_session_is_known_or_the_reader_differs() {
+        let home = TempHome::new();
+        let old = home.write_session("--w--", "2026-10-06_old.jsonl", THREE_TURNS);
+
+        let known = identity("omo", "sess-z").with_cwd("/w").with_agent_session_id("new-sess");
+        let stream = resolve_reference_history_stream(home.path(), &known, &[])
+            .expect("a known, unwritten session resolves");
+        assert_eq!(
+            stream.availability,
+            ReferenceHistoryAvailability::NotStarted,
+            "bound {:?} instead of reporting the unwritten session",
+            stream.file_path()
+        );
+
+        let named = identity("omo", "sess-z")
+            .with_cwd("/w")
+            .with_provider_transcript_path(home.path().join("not-written-yet.jsonl"));
+        let stream = resolve_reference_history_stream(home.path(), &named, &[])
+            .expect("a named, unwritten store resolves");
+        assert_eq!(stream.availability, ReferenceHistoryAvailability::NotStarted);
+
+        let claude = identity("claude", "sess-z").with_cwd("/w");
+        match resolve_reference_history_stream(home.path(), &claude, &[]) {
+            Ok(stream) => assert_ne!(
+                stream.file_path(),
+                Some(old.as_path()),
+                "a claude pane must not read an omo store"
+            ),
+            Err(error) => assert_eq!(error.code, ScopeErrorCode::NotFound),
+        }
+    }
+
+    // rs-history-core-4
+    #[test]
+    fn a_window_whose_head_moves_with_an_append_keeps_the_generation() {
+        let home = TempHome::new();
+        let lines: Vec<String> = (0..11)
+            .map(|index| omo_line(if index % 2 == 0 { "user" } else { "assistant" }, &format!("line {index}")))
+            .collect();
+        let first = joined(&lines[..10]);
+        let second = joined(&lines[1..11]);
+        let shifted = 1000 + lines[0].len() as u64 + 1;
+        let mut rewritten_lines = lines[1..11].to_vec();
+        rewritten_lines[3] = omo_line("user", "rewritten");
+        let rewritten = joined(&rewritten_lines);
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", &first);
+
+        for identity in [bound_identity("omo", "sess-1", "aaa"), identity("omo", "aaa")] {
+            let stream = omo_stream(&home, &identity);
+            let before =
+                reference_history_page_from_window(&stream, &identity, 1000, first.as_bytes(), 50, None)
+                    .expect("the first window is served")
+                    .generation;
+            let after =
+                reference_history_page_from_window(&stream, &identity, shifted, second.as_bytes(), 50, None)
+                    .expect("the shifted window is served")
+                    .generation;
+            assert_eq!(after, before, "an append that moves the window head is not a change");
+            let rotated =
+                reference_history_page_from_window(&stream, &identity, shifted, rewritten.as_bytes(), 50, None)
+                    .expect("the rewritten window is served")
+                    .generation;
+            assert_ne!(rotated, before, "a rewrite inside the window still rotates");
+        }
+    }
+
+    // rs-history-core-5
+    #[test]
+    fn the_generation_tracker_forgets_streams_past_its_bound() {
+        let tracker = ReferenceHistoryGenerationTracker::new();
+        for index in 0..10_000u32 {
+            tracker.observe(&format!("omo:{index:016x}"), Some("provider-1"), &[]);
+        }
+        assert!(
+            tracker.tracked_stream_count() <= REFERENCE_HISTORY_MAX_TRACKED_STREAMS,
+            "the tracker holds {} streams",
+            tracker.tracked_stream_count()
+        );
+        let newest = format!("omo:{:016x}", 9_999u32);
+        assert_eq!(
+            tracker.observe(&newest, Some("provider-1"), &[]),
+            format!("{newest}:inc-1"),
+            "the most recently observed stream is still tracked"
+        );
+    }
+
+    /// A store of any size whose bytes are generated on demand, counting what was read.
+    struct SyntheticStore {
+        length: u64,
+        position: u64,
+        delivered: u64,
+    }
+
+    impl SyntheticStore {
+        fn byte_at(position: u64) -> u8 {
+            if position % 97 == 96 {
+                b'\n'
+            } else {
+                b'a' + (position % 26) as u8
+            }
+        }
+    }
+
+    impl Read for SyntheticStore {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let remaining = self.length.saturating_sub(self.position);
+            let count = (buffer.len() as u64).min(remaining) as usize;
+            for (index, slot) in buffer[..count].iter_mut().enumerate() {
+                *slot = Self::byte_at(self.position + index as u64);
+            }
+            self.position += count as u64;
+            self.delivered += count as u64;
+            Ok(count)
+        }
+    }
+
+    impl Seek for SyntheticStore {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            let next = match position {
+                SeekFrom::Start(offset) => offset as i128,
+                SeekFrom::End(delta) => self.length as i128 + delta as i128,
+                SeekFrom::Current(delta) => self.position as i128 + delta as i128,
+            };
+            if next < 0 {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "before the start"));
+            }
+            self.position = next as u64;
+            Ok(self.position)
+        }
+    }
+
+    // rs-history-core-6
+    #[test]
+    fn the_prompt_session_tail_reads_only_the_bytes_it_keeps() {
+        let max = 4 * 1024 * 1024;
+        let length = 50 * 1024 * 1024u64;
+        let mut store = SyntheticStore { length, position: 0, delivered: 0 };
+        let tail = read_reference_history_tail(&mut store, max).expect("the tail is readable");
+        assert_eq!(tail.len(), max);
+        assert_eq!(tail[0], SyntheticStore::byte_at(length - max as u64));
+        assert_eq!(tail[max - 1], SyntheticStore::byte_at(length - 1));
+        assert!(store.delivered <= max as u64, "read {} bytes to keep {max}", store.delivered);
+
+        let mut small = SyntheticStore { length: 10, position: 0, delivered: 0 };
+        let whole = read_reference_history_tail(&mut small, max).expect("a small store is read whole");
+        assert_eq!(whole.len(), 10);
+    }
+
+    // rs-history-other-3
+    #[test]
+    fn a_context_clear_ends_paging_so_no_older_page_serves_the_cleared_conversation() {
+        let home = TempHome::new();
+        let body = joined(&[
+            omo_line("user", "A"),
+            omo_line("assistant", "answer A"),
+            omo_line("user", "A2"),
+            omo_line("assistant", "answer A2"),
+            r#"{"type":"custom","customType":"context_clear"}"#.to_string(),
+            omo_line("user", "B"),
+            omo_line("assistant", "answer B"),
+        ]);
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", &body);
+        for registry in ["omo", "omp", "gjc"] {
+            let identity = bound_identity(registry, "sess-1", "aaa");
+            let stream = omo_stream(&home, &identity);
+            let page = reference_history_page_from_bytes(&stream, &identity, body.as_bytes(), 1, None)
+                .expect("the newest page is served");
+            assert_eq!(first_text(&page.turns[0]), "B", "{registry}");
+            let mut served: Vec<String> = page.turns.iter().map(first_text).collect();
+            let mut cursor = page.cursor.clone();
+            let mut pages = 0;
+            while let Some(older) = cursor.take() {
+                pages += 1;
+                assert!(pages < 5, "{registry}: paging must terminate");
+                let older =
+                    reference_history_page_from_bytes(&stream, &identity, body.as_bytes(), 1, Some(&older))
+                        .expect("the older page is served");
+                served.extend(older.turns.iter().map(first_text));
+                cursor = older.cursor;
+            }
+            assert_eq!(
+                served,
+                vec!["B".to_string(), "answer B".to_string()],
+                "{registry}: the cleared conversation came back"
+            );
+            assert!(!page.has_more, "{registry}: nothing before the reset is reachable");
+        }
+    }
+
+    // rs-history-other-4
+    #[test]
+    fn a_task_title_from_an_earlier_page_still_names_its_result() {
+        let home = TempHome::new();
+        let body = joined(&[
+            omo_line("user", "spawn a worker"),
+            serde_json::json!({"type": "message", "message": {"role": "assistant", "stopReason": "toolUse", "content": [{"type": "toolCall", "id": "c9", "name": "task", "arguments": {"task_summary": "audit parser", "prompt": "audit"}}]}}).to_string(),
+            serde_json::json!({"type": "message", "message": {"role": "toolResult", "toolName": "task", "toolCallId": "c9", "content": [{"type": "text", "text": "started"}], "details": {"task_id": "st-1", "task_summary": "audit parser"}}}).to_string(),
+            omo_line("user", "next"),
+            serde_json::json!({"type": "custom_message", "customType": "omo-senpi:wake", "display": false, "details": [{"customType": "senpi-task.completion", "details": [{"task_id": "st-1", "status": "completed", "name": "worker-a", "final_response": "clean"}]}]}).to_string(),
+        ]);
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", &body);
+        for registry in ["omo", "omp"] {
+            let identity = bound_identity(registry, "sess-1", "aaa");
+            let stream = omo_stream(&home, &identity);
+            let page = reference_history_page_from_bytes(&stream, &identity, body.as_bytes(), 1, None)
+                .expect("the newest page is served");
+            let title = page
+                .turns
+                .iter()
+                .flat_map(|turn| turn.parts.iter())
+                .find_map(|part| match part {
+                    ReferencePart::TaskResult { tasks } => Some(tasks[0].title.clone()),
+                    _ => None,
+                })
+                .expect("the wake is on the newest page");
+            assert_eq!(title, "audit parser", "{registry}");
+        }
     }
 
     #[tokio::test]
