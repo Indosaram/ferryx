@@ -155,6 +155,8 @@ pub struct OmoMultiPlan {
     pub cursor: Option<usize>,
     /// The rows the walk counts to the end from, when the cursor was out of view.
     pub rows: usize,
+    /// The options shown checked, or `None` when not every option row was in view.
+    pub checked: Option<Vec<usize>>,
 }
 
 /// A parsed OmO card: the public prompt plus the plan its answer needs.
@@ -1156,6 +1158,17 @@ fn parse_omo_question(lines: &[String], ask: Option<&OmoAsk>, trusted: bool) -> 
     let selected_index = if own_selected { Some(options.len()) } else { highlighted.map(|row| row.number - 1) };
     let option_count = options.len();
     let rows = option_count + 1;
+    // A row's checked state is known only when every option row is in view.
+    let checked = (view.rows.len() == option_count
+        && view.rows.iter().enumerate().all(|(at, row)| row.number == at + 1))
+    .then(|| {
+        view.rows
+            .iter()
+            .zip(&shown_labels)
+            .filter(|(_, label)| ends_with_answered(label))
+            .map(|(row, _)| row.number - 1)
+            .collect::<Vec<usize>>()
+    });
     let option_plans: Vec<Vec<ReferenceKeyStep>> = (0..option_count)
         .map(|option| {
             let mut keys = omo_walk(option, selected_index, rows);
@@ -1183,7 +1196,7 @@ fn parse_omo_question(lines: &[String], ask: Option<&OmoAsk>, trusted: bool) -> 
         call: known.map(|ask| ask.id.as_str()),
         option_plans,
         custom_plan: Some(OmoCustomPlan { lead: custom_lead, tail: key_steps(&["enter"]) }),
-        multi_plan: Some(OmoMultiPlan { cursor: selected_index, rows }),
+        multi_plan: Some(OmoMultiPlan { cursor: selected_index, rows, checked }),
         reject_with_escape_index: None,
     }))
 }
@@ -1528,7 +1541,7 @@ fn parse_omo_pending(lines: &[String], pending: &[OmoAsk]) -> Option<OmoCard> {
         // Validation only: execution requires the opened form and its freshly read cursor.
         option_plans: vec![Vec::new(); option_count],
         custom_plan: Some(OmoCustomPlan { lead: Vec::new(), tail: Vec::new() }),
-        multi_plan: Some(OmoMultiPlan { cursor: None, rows: option_count }),
+        multi_plan: Some(OmoMultiPlan { cursor: None, rows: option_count, checked: None }),
         reject_with_escape_index: None,
     }))
 }
@@ -1878,14 +1891,18 @@ pub fn omo_answer_plan(card: &OmoCard, answer: &ReferencePromptAnswer) -> Result
         if card.responder == OmoResponder::Pending {
             return Ok(Vec::new());
         }
+        // Toggle only the rows whose shown state differs from the answer; a row out of view has
+        // an unknown state, so the answer is refused rather than guessed.
+        let checked = multi.checked.as_ref().ok_or(ScopeErrorCode::InvalidRequest)?;
         let mut keys: Vec<&'static str> = vec!["backspace"];
         let mut at = multi.cursor;
-        let mut sorted = choices.clone();
-        sorted.sort_unstable();
-        for option in sorted {
-            keys.extend(omo_walk(option as usize, at, multi.rows));
+        for option in 0..prompt.options.len() {
+            if choices.contains(&(option as u32)) == checked.contains(&option) {
+                continue;
+            }
+            keys.extend(omo_walk(option, at, multi.rows));
             keys.push("space");
-            at = Some(option as usize);
+            at = Some(option);
         }
         keys.push("tab");
         return Ok(key_steps(&keys));
@@ -2084,11 +2101,48 @@ mod tests {
         assert!(prompt.steps.is_empty(), "one question: the card shows no steps");
         assert_eq!(card.option_plans[0], key_steps(&["enter"]));
         assert_eq!(card.option_plans[1], key_steps(&["down", "enter"]));
-        assert_eq!(card.multi_plan, Some(OmoMultiPlan { cursor: Some(0), rows: 3 }));
+        assert_eq!(card.multi_plan, Some(OmoMultiPlan { cursor: Some(0), rows: 3, checked: Some(vec![1]) }));
         assert_eq!(
             omo_answer_plan(&card, &ReferencePromptAnswer { option_indices: Some(vec![0, 1]), ..Default::default() }),
+            Ok(key_steps(&["backspace", "space", "tab"])),
+            "the unchecked row is toggled on, the checked one kept, then the form moves on"
+        );
+    }
+
+    #[test]
+    fn a_multi_select_answer_leaves_already_checked_rows_ticked() {
+        let card = card_for("omo", FORM_MULTI, ASKS_MULTI).expect("the multiple choice is a card");
+        let both = ReferencePromptAnswer { option_indices: Some(vec![0, 1]), ..Default::default() };
+        assert_eq!(
+            omo_answer_plan(&card, &both),
+            Ok(key_steps(&["backspace", "space", "tab"])),
+            "row 2 is already checked: only row 1 is toggled on"
+        );
+        let first_only = ReferencePromptAnswer { option_indices: Some(vec![0]), ..Default::default() };
+        assert_eq!(
+            omo_answer_plan(&card, &first_only),
             Ok(key_steps(&["backspace", "space", "down", "space", "tab"])),
-            "the chosen row is toggled off, the other on, then the form moves on"
+            "row 1 is toggled on and the checked row 2 toggled off"
+        );
+        let second_only = ReferencePromptAnswer { option_indices: Some(vec![1]), ..Default::default() };
+        assert_eq!(
+            omo_answer_plan(&card, &second_only),
+            Ok(key_steps(&["backspace", "tab"])),
+            "the screen already shows the answer: nothing is toggled"
+        );
+    }
+
+    #[test]
+    fn a_multi_select_answer_is_refused_when_an_option_row_is_out_of_view() {
+        let mut card = card_for("omo", FORM_MULTI, ASKS_MULTI).expect("the multiple choice is a card");
+        let multi = card.multi_plan.as_mut().expect("a multiple choice has a plan");
+        assert_eq!(multi.checked, Some(vec![1]), "every row is in view: row 2 reads as checked");
+        multi.checked = None;
+        let both = ReferencePromptAnswer { option_indices: Some(vec![0, 1]), ..Default::default() };
+        assert_eq!(
+            omo_answer_plan(&card, &both),
+            Err(ScopeErrorCode::InvalidRequest),
+            "a row out of view has an unknown checked state"
         );
     }
 
