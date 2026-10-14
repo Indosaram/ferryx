@@ -1499,6 +1499,9 @@ pub struct DaemonServer {
     /// the endpoint above is `None` in both cases, so a caller reporting an absent endpoint needs
     /// this flag to know whether it is looking at a degradation.
     agent_state_ingress_unavailable: std::sync::atomic::AtomicBool,
+    /// Whether panes get the agent-state endpoint and boot installs the extension. Shared with
+    /// the PTY manager, so a change applies to the next pane without a restart.
+    agent_integration: Arc<crate::daemon::agent_extension::AgentIntegration>,
     /// Bearer token every connection must present before a request is dispatched. Windows has no
     /// filesystem ownership boundary on the transport, so the published port alone cannot
     /// authenticate a client.
@@ -1733,6 +1736,98 @@ mod agent_state_transport_tests {
         assert!(!runtime_dir.join("agent-state.token").exists());
 
         fs::remove_dir_all(&runtime_dir).ok();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod agent_integration_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+    use tokio::net::UnixStream;
+
+    async fn exchange(
+        write_half: &mut OwnedWriteHalf,
+        reader: &mut BufReader<OwnedReadHalf>,
+        request: DaemonRequest,
+    ) -> DaemonResponse {
+        let mut json = serde_json::to_string(&request).unwrap();
+        json.push('\n');
+        write_half.write_all(json.as_bytes()).await.unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        serde_json::from_str(line.trim()).unwrap()
+    }
+
+    /// Runs \`env\` in a new pane of \`server\` and returns everything it printed. The variable is
+    /// seeded as an inherited value so its absence proves Ferryx withheld it.
+    async fn pane_env(server: &DaemonServer) -> String {
+        let mut cmd = portable_pty::CommandBuilder::new("/usr/bin/env");
+        cmd.env("FERRYX_AGENT_STATE_SOCKET", "/inherited/should-not-survive.sock");
+        let (_id, mut rx) = server
+            .terminal_service
+            .pty_manager()
+            .spawn(cmd, 200, 50)
+            .expect("spawn env pane");
+        let mut out = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while let Some(chunk) = rx.recv().await {
+                out.extend_from_slice(&chunk);
+            }
+        })
+        .await
+        .expect("env pane output ends when env exits");
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn server_at(dir: &Path) -> DaemonServer {
+        DaemonServer::new_with_paths(
+            Some(dir.join("remote-config.json")),
+            Some(dir.join("remote-auth.json")),
+        )
+    }
+
+    #[tokio::test]
+    async fn set_agent_integration_applies_to_new_panes_without_restart() {
+        let data = tempfile::tempdir().unwrap();
+        let server = Arc::new(server_at(data.path()));
+        let (client, server_side) = UnixStream::pair().unwrap();
+        let handler = Arc::clone(&server);
+        let task = tokio::spawn(async move { handler.handle_client(server_side).await });
+        let (read_half, mut write_half) = client.into_split();
+        let mut reader = BufReader::new(read_half);
+
+        let resp = exchange(&mut write_half, &mut reader, DaemonRequest::GetAgentIntegration).await;
+        assert!(matches!(resp, DaemonResponse::AgentIntegrationOk { enabled: true }), "{resp:?}");
+        let env = pane_env(&server).await;
+        assert!(
+            env.contains(&format!("FERRYX_AGENT_STATE_SOCKET={}", agent_state_socket_path())),
+            "{env}"
+        );
+
+        let resp = exchange(
+            &mut write_half,
+            &mut reader,
+            DaemonRequest::SetAgentIntegration { enabled: false },
+        )
+        .await;
+        assert!(matches!(resp, DaemonResponse::AgentIntegrationOk { enabled: false }), "{resp:?}");
+        let resp = exchange(&mut write_half, &mut reader, DaemonRequest::GetAgentIntegration).await;
+        assert!(matches!(resp, DaemonResponse::AgentIntegrationOk { enabled: false }), "{resp:?}");
+
+        // Same daemon, no restart: the very next pane has no endpoint.
+        let env = pane_env(&server).await;
+        assert!(env.contains("FERRYX_SESSION_ID="), "the pane ran env: {env}");
+        assert!(!env.contains("FERRYX_AGENT_STATE_SOCKET"), "{env}");
+
+        // The opt-out sits beside remote-config.json and survives a restart.
+        let saved: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(data.path().join("agent-integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved, serde_json::json!({ "enabled": false }));
+        assert!(!server_at(data.path()).agent_integration.enabled());
+        task.abort();
     }
 }
 
@@ -2205,7 +2300,15 @@ impl DaemonServer {
                     .expect("daemon requires a private data directory")
             }),
         );
-        let pty_manager = Arc::new(PtyManager::new());
+        let agent_integration = Arc::new(crate::daemon::agent_extension::AgentIntegration::load(
+            isolated_dir
+                .as_ref()
+                .map(|dir| dir.join(crate::daemon::agent_extension::AGENT_INTEGRATION_FILE_NAME))
+                .or_else(crate::daemon::agent_extension::agent_integration_path),
+        ));
+        let pty_manager = Arc::new(
+            PtyManager::new().with_agent_integration(Arc::clone(&agent_integration)),
+        );
         let output_hub = Arc::new(TerminalOutputHub::default());
         let terminal_service = Arc::new(TerminalService::new(
             Arc::clone(&pty_manager),
@@ -2397,6 +2500,7 @@ impl DaemonServer {
             session_service,
             agent_state_endpoint: Mutex::new(None),
             agent_state_ingress_unavailable: std::sync::atomic::AtomicBool::new(false),
+            agent_integration,
             #[cfg(not(unix))]
             transport_token: generate_transport_token(),
             #[cfg(test)]
@@ -3480,7 +3584,9 @@ impl DaemonServer {
         // that pane with no endpoint for its whole lifetime.
         let agent_state_ingress = self.spawn_agent_state_listener();
         self.spawn_foreground_observer();
-        crate::daemon::agent_extension::install_agent_state_extension();
+        crate::daemon::agent_extension::install_agent_state_extension_if_enabled(
+            &self.agent_integration,
+        );
 
         // The ingress outcome is observed and recorded before readiness is released, so a boot
         // that announces itself ready without a usable ingress is reported rather than inferred.
@@ -4342,6 +4448,27 @@ impl DaemonServer {
                     capabilities.push("sessionOwnershipTransferV1".into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
+                Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
+                    enabled: self.agent_integration.enabled(),
+                },
+                Ok(DaemonRequest::SetAgentIntegration { enabled }) => {
+                    let setting = Arc::clone(&self.agent_integration);
+                    let failure = match tokio::task::spawn_blocking(move || setting.set(enabled)).await {
+                        Ok(Ok(())) => None,
+                        Ok(Err(error)) => {
+                            Some(format!("Failed to save the agent integration setting: {error}"))
+                        }
+                        Err(error) => Some(format!("Agent integration setting task failed: {error}")),
+                    };
+                    match failure {
+                        None => DaemonResponse::AgentIntegrationOk { enabled },
+                        Some(message) => DaemonResponse::Error {
+                            message,
+                            code: Some(crate::daemon::protocol::AGENT_INTEGRATION_ERROR_CODE.into()),
+                            details: None,
+                        },
+                    }
+                }
                 Ok(DaemonRequest::RemoteAllocateAttachSession) => {
                     let client = self.remote_state.relay_client.read().clone();
                     let relay_origin = self
