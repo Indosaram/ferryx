@@ -1248,6 +1248,28 @@ describe("reference chat lane review fixes", () => {
     expect(screen.getByTestId("reference-older-button")).toBeInTheDocument();
   });
 
+  it("rs-history-r4-2: the oldest page of a capped tail window discloses the history past the read cap", async () => {
+    const capReason = "older history lies beyond the 4194304 byte read cap; the 7000000 bytes before this window were not read";
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      return url.includes("cursor=")
+        ? jsonResponse(nativePage({
+            turns: [{ role: "user", parts: [{ kind: "text", text: "WINDOW-OLDEST" }], startedAt: "2026-10-05T00:00:00Z" }],
+            cursor: null,
+            hasMore: false,
+            unavailableReason: capReason,
+          }))
+        : jsonResponse(nativePage({ cursor: { streamId: "omo:abc", offset: 500 }, hasMore: true }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+    await screen.findByText("WINDOW-OLDEST");
+    expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(capReason);
+  });
+
   it("rs-files-routes-4: leaving a pane releases the files it staged and never sent", async () => {
     const calls = installLane();
     render(<RemoteApp />);
