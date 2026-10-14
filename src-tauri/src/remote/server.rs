@@ -5095,9 +5095,11 @@ impl reference_prompts::ReferenceAnswerScreenReader for ReferenceGatewayScreenRe
             let mut mirror = RemoteTerminalMirror::new(details.cols, details.rows)
                 .map_err(|error| error.to_string())?;
             // A replay gap means the history could not be reconstructed: the snapshot is marked
-            // gapped rather than rendered from a hole. Each segment replays at the size it was
+            // gapped rather than rendered from a hole, and so is history that lost output to a
+            // gap without a full-screen reset since. Each segment replays at the size it was
             // recorded at, then the mirror returns to the pane's live geometry.
-            let segments = (attachment.snapshot.gap.is_none())
+            let segments = (attachment.snapshot.gap.is_none()
+                && !attachment.snapshot.history_incomplete)
                 .then_some(attachment.snapshot.history_segments.as_slice());
             reference_screen::snapshot_reference_screen_segments(&mut mirror, segments)
         })
@@ -5600,7 +5602,9 @@ async fn reference_chat_snapshot_screen(
         .map_err(|message| reference_chat_scope(ScopeErrorCode::Timeout, message))?;
     let mut mirror = RemoteTerminalMirror::new(details.cols, details.rows)
         .map_err(|error| reference_chat_scope(ScopeErrorCode::Unsupported, error.to_string()))?;
-    let segments = (attachment.snapshot.gap.is_none())
+    // History that lost output to a replay gap, with no full-screen reset since, is not the
+    // whole screen even on a full attach: it is read as gapped.
+    let segments = (attachment.snapshot.gap.is_none() && !attachment.snapshot.history_incomplete)
         .then_some(attachment.snapshot.history_segments.as_slice());
     reference_screen::snapshot_reference_screen_segments(&mut mirror, segments)
         .map_err(|message| reference_chat_scope(ScopeErrorCode::Unsupported, message))

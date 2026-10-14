@@ -16,6 +16,15 @@ const BROADCAST_CAPACITY: usize = 64;
 const RAW_BROADCAST_CAPACITY: usize = 1024;
 const RESIZE_LEDGER_CAPACITY: usize = 4096;
 
+/// Output after which the screen holds nothing drawn earlier: a full reset (RIS), an erase of
+/// the whole display (ED 2), or entering the alternate screen, which starts blank.
+fn resets_whole_screen(bytes: &[u8]) -> bool {
+    const RESETS: [&[u8]; 3] = [b"\x1bc", b"\x1b[2J", b"\x1b[?1049h"];
+    RESETS
+        .iter()
+        .any(|reset| bytes.windows(reset.len()).any(|window| window == *reset))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResizePoint {
     pub sequence: u64,
@@ -68,6 +77,10 @@ pub struct AttachmentSnapshot {
     #[serde(default)]
     pub history_segments: Vec<HistorySegment>,
     pub gap: Option<ReplayGap>,
+    /// The hub lost output to a replay gap and has seen no full-screen reset since, so even a
+    /// full replay (`after_sequence = None`) carries only part of what the pane shows.
+    #[serde(default)]
+    pub history_incomplete: bool,
 }
 
 #[derive(Debug)]
@@ -127,6 +140,10 @@ pub struct SessionHubSnapshot {
     /// screen instead of re-deriving it from a ring that starts mid-stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_seed: Option<super::screen_mirror::ScreenSeed>,
+    /// [SessionHub::history_incomplete], carried so a successor does not mistake post-gap
+    /// history for the whole screen.
+    #[serde(default)]
+    pub history_incomplete: bool,
 }
 
 impl SessionHubSnapshot {
@@ -729,6 +746,9 @@ pub struct SessionHub {
     pub(crate) raw_sender: broadcast::Sender<Vec<u8>>,
     pub(crate) resize_ledger: Vec<ResizePoint>,
     pub(crate) replay_gap: Option<ReplayGap>,
+    /// Set by `publish_gap`; cleared only by output that redraws the whole screen. Unlike
+    /// `replay_gap`, ordinary output after the gap does not clear it.
+    pub(crate) history_incomplete: bool,
     /// Someone subscribed to this session at least once.
     pub(crate) subscribed: bool,
     /// The PTY output ended before the first subscription: the session is kept only so that
@@ -754,6 +774,7 @@ impl SessionHub {
             screen_seed: self
                 .screen_seed()
                 .filter(|seed| seed.bytes.len() <= super::screen_mirror::MAX_HANDOVER_SEED_BYTES),
+            history_incomplete: self.history_incomplete,
         }
     }
 
@@ -851,6 +872,7 @@ impl TerminalOutputHub {
             raw_sender: raw_tx,
             resize_ledger: Vec::new(),
             replay_gap: None,
+            history_incomplete: false,
             subscribed: false,
             ended: false,
             published_bytes: 0,
@@ -884,6 +906,7 @@ impl TerminalOutputHub {
             hub.resize_ledger.push(size);
         }
         hub.replay_gap = Some(gap.clone());
+        hub.history_incomplete = true;
         let boundary = OutputChunk {
             sequence,
             bytes: Arc::from([]),
@@ -915,6 +938,9 @@ impl TerminalOutputHub {
             screen.lock().feed(&chunk.bytes);
         }
         hub.replay_gap = None;
+        if hub.history_incomplete && resets_whole_screen(&chunk.bytes) {
+            hub.history_incomplete = false;
+        }
         hub.published_bytes = hub
             .published_bytes
             .checked_add(chunk.bytes.len() as u64)
@@ -1067,6 +1093,7 @@ impl TerminalOutputHub {
             history,
             history_segments: Vec::new(),
             gap,
+            history_incomplete: hub.history_incomplete,
         };
         let ended = hub.ended;
         drop(hub);
@@ -1236,6 +1263,7 @@ impl TerminalOutputHub {
             sender: tx,
             raw_sender: raw_tx,
             resize_ledger: snapshot.resize_ledger,
+            history_incomplete: snapshot.history_incomplete,
             replay_gap: snapshot.replay_gap,
             subscribed: false,
             ended: false,
@@ -2130,6 +2158,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          history_incomplete: false,
         };
         assert_eq!(
             snap_zero_next.validate(),
@@ -2152,6 +2181,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          history_incomplete: false,
         };
         assert_eq!(
             snap_zero_chunk_seq.validate(),
@@ -2174,6 +2204,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          history_incomplete: false,
         };
         assert_eq!(
             snap_chunk_seq_exceeds.validate(),
@@ -2204,6 +2235,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          history_incomplete: false,
         };
         assert_eq!(
             snap_non_monotonic.validate(),
@@ -2225,6 +2257,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          history_incomplete: false,
         };
         assert_eq!(
             snap_resize_exceeds.validate(),
@@ -2253,6 +2286,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          history_incomplete: false,
         };
         assert_eq!(
             snap_resize_unordered.validate(),
@@ -2275,6 +2309,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          history_incomplete: false,
         };
         assert_eq!(
             snap_bytes_exceed.validate(),
@@ -2298,6 +2333,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          history_incomplete: false,
         };
         assert_eq!(
             snap_invalid_gap.validate(),
@@ -2321,6 +2357,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          history_incomplete: false,
         };
         assert_eq!(
             snap_gap_future.validate(),

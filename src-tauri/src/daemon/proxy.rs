@@ -531,6 +531,7 @@ impl LegacyPeer {
                     history_start_sequence: start_sequence,
                     history_end_sequence: end_sequence,
                     gap,
+                    history_incomplete: false,
                 };
                 let (tx, rx) = broadcast::channel(2048);
                 (snapshot, tx, rx)

@@ -501,6 +501,7 @@ mod tests {
             transport_owner: false,
             retained_state: None,
             screen_seed: None,
+            history_incomplete: false,
         };
 
         let snapshot = crate::terminal::session::PtySessionSnapshot {
