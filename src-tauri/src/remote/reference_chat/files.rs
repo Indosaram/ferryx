@@ -394,6 +394,11 @@ pub fn reference_staging_failure_code() -> ScopeErrorCode {
 /// The in-memory registry is process-local, so after a restart only the directory mtime says
 /// how old a staged file is. Only '<uuid>' directories are considered; anything else is kept.
 pub fn reference_prune_staging_root(base: &Path, ttl_ms: u64) -> usize {
+    // Never follow a planted symlink or sweep a base someone else controls: the same checks a
+    // stage applies, without creating anything.
+    if verify_reference_staging_base(base).is_err() {
+        return 0;
+    }
     let Ok(entries) = std::fs::read_dir(base) else {
         return 0;
     };
@@ -440,6 +445,12 @@ fn ensure_reference_staging_base(base: &Path) -> Result<(), ScopeErrorCode> {
         // Keep staged uploads out of the pane's git status.
         let _ = std::fs::write(base.join(".gitignore"), b"*\n");
     }
+    verify_reference_staging_base(base)
+}
+
+/// Verify an existing staging base: a real directory, never a symlink, owned by this user and
+/// closed to group/other on unix.
+fn verify_reference_staging_base(base: &Path) -> Result<(), ScopeErrorCode> {
     let metadata = std::fs::symlink_metadata(base).map_err(|_| reference_staging_failure_code())?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(ScopeErrorCode::Forbidden);
@@ -861,6 +872,11 @@ mod tests {
         let stale = base.join(uuid::Uuid::new_v4().to_string());
         let fresh = base.join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&stale).expect("stale dir");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
+                .expect("owner-private base");
+        }
         std::fs::write(stale.join("old.png"), b"old").expect("stale file");
         std::fs::create_dir_all(&fresh).expect("fresh dir");
         let old = std::time::SystemTime::now()
@@ -879,6 +895,35 @@ mod tests {
         assert!(fresh.exists(), "a fresh staging directory must be kept");
         assert_eq!(removed, 1);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// rs-files-routes-r3-1: a staging base that is a symlink is never followed by the TTL
+    /// prune, so stale UUID-named directories outside the worktree survive.
+    #[cfg(unix)]
+    #[test]
+    fn the_ttl_prune_never_follows_a_symlinked_staging_base() {
+        let outside = scratch_dir();
+        let victim = outside.join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&victim).expect("outside dir");
+        std::fs::write(victim.join("keep.txt"), b"not ours").expect("outside file");
+        let old = std::time::SystemTime::now()
+            - std::time::Duration::from_millis(ATTACHMENT_UNREFERENCED_TTL_MS + 60_000);
+        std::fs::File::open(&victim)
+            .expect("open outside dir")
+            .set_modified(old)
+            .expect("age outside dir");
+        let worktree = scratch_dir();
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let base = reference_staging_base_dir(&worktree);
+        std::os::unix::fs::symlink(&outside, &base).expect("plant symlink base");
+
+        let removed = reference_prune_staging_root(&base, ATTACHMENT_UNREFERENCED_TTL_MS);
+
+        let survived = victim.exists();
+        let _ = std::fs::remove_dir_all(&worktree);
+        let _ = std::fs::remove_dir_all(&outside);
+        assert!(survived, "a prune must not delete through a symlinked staging base");
+        assert_eq!(removed, 0);
     }
 
     /// rs-files-routes-9: a staging base this user does not exclusively own is refused, whether

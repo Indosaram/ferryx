@@ -618,6 +618,54 @@ function referenceStagedAttachmentId(raw: unknown): string | null {
   return typeof id === "string" && id.length > 0 ? id : null;
 }
 
+/**
+ * Read the GET /files answer: the files the owning host still holds staged, unsent, for this
+ * target. A stage whose response the client never saw (an aborted upload, a reload) is rehydrated
+ * from here so it can be released. An entry this lane cannot prove - a foreign host, a raw host
+ * path, a mention that is not a safe relative path naming its own file - is dropped.
+ */
+export function parseReferenceStagedFileList(
+  raw: unknown,
+  target: ReferenceTargetRef,
+): ReferenceFileReceipt[] {
+  if (raw === null || typeof raw !== "object") return [];
+  const files = (raw as Record<string, unknown>).files;
+  if (!Array.isArray(files)) return [];
+  const out: ReferenceFileReceipt[] = [];
+  for (const entry of files) {
+    try {
+      const receipt = (entry as Record<string, unknown> | null)?.receipt as
+        | Record<string, unknown>
+        | undefined;
+      if (receipt === undefined || receipt === null || typeof receipt !== "object") continue;
+      const sha256 = receipt.sha256;
+      const sizeBytes = receipt.sizeBytes;
+      const mediaType = receipt.mediaType;
+      const displayName = (entry as Record<string, unknown>).displayName;
+      if (
+        typeof sha256 !== "string" ||
+        typeof sizeBytes !== "number" ||
+        typeof mediaType !== "string" ||
+        typeof displayName !== "string"
+      ) {
+        continue;
+      }
+      out.push(
+        parseReferenceFileReceipt(entry, {
+          target: target.target,
+          displayName,
+          mediaType: mediaType as AttachmentMediaType,
+          sizeBytes,
+          sha256,
+        }),
+      );
+    } catch {
+      // Not provable as this target's own staged file: never surfaced.
+    }
+  }
+  return out;
+}
+
 /** The outcome of an explicit cleanup: the id it acted on, and whether the host acknowledged it. */
 export interface ReferenceFileCleanupReceipt {
   readonly attachmentId: string;

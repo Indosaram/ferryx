@@ -4936,6 +4936,7 @@ async fn remote_method_not_allowed() -> Response {
 //   POST   /api/v1/reference-chat/{sessionId}/stop
 //   POST   /api/v1/reference-chat/{sessionId}/answer
 //   POST   /api/v1/reference-chat/{sessionId}/files
+//   GET    /api/v1/reference-chat/{sessionId}/files
 //   GET    /api/v1/reference-chat/{sessionId}/files/{fileId}
 //   DELETE /api/v1/reference-chat/{sessionId}/files/{fileId}
 //
@@ -6293,6 +6294,53 @@ async fn reference_chat_stage_file(
     )
 }
 
+/// GET /api/v1/reference-chat/{sessionId}/files
+///
+/// The target's own staged files that no submitted turn has referenced yet: exactly the set the
+/// per-turn bounds count. A client whose stage response was lost (an aborted upload, a reload)
+/// rehydrates from here and can then release them explicitly.
+async fn reference_chat_list_files(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
+    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
+    {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    let target_key = reference_types::reference_draft_key(&read.target);
+    let mut files = {
+        let staged = reference_chat_runtime().staged.lock();
+        staged
+            .values()
+            .filter(|entry| entry.target_key == target_key && !entry.pending && !entry.referenced)
+            .map(|entry| {
+                (
+                    entry.staged_at_ms,
+                    serde_json::json!({
+                        "receipt": entry.receipt,
+                        "displayName": entry.display_name,
+                        "mentionText": entry.mention_text,
+                    }),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    files.sort_by_key(|(staged_at, _)| *staged_at);
+    let files: Vec<_> = files.into_iter().map(|(_, file)| file).collect();
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "files": files })),
+    )
+        .into_response()
+}
+
 /// GET /api/v1/reference-chat/{sessionId}/files/{fileId}
 async fn reference_chat_preview_file(
     State(state): State<Arc<RemoteGatewayState>>,
@@ -6489,7 +6537,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )
         .route(
             "/api/v1/reference-chat/{sessionId}/files",
-            post(reference_chat_stage_file),
+            post(reference_chat_stage_file).get(reference_chat_list_files),
         )
         .route(
             "/api/v1/reference-chat/{sessionId}/files/{fileId}",
