@@ -43,6 +43,7 @@ export type ShortcutActionId =
   | "terminal.focusNext"
   | "terminal.focusPrevious"
   | "terminal.search"
+  | "terminal.copyMode"
   | "sidebar.left.toggle"
   | "project.add"
   | "commandPalette.open"
@@ -333,6 +334,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     group: "Terminal Panes",
     binding: { key: "f", mod: true },
     source: "original",
+  },
+  {
+    id: "terminal.copyMode",
+    title: "Toggle terminal copy mode",
+    group: "Terminal Panes",
+    binding: { key: "x", mod: true, shift: true, nonMac: { mod: false, control: true } },
+    source: "ferryx",
   },
   {
     id: "sidebar.left.toggle",

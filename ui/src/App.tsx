@@ -11,6 +11,7 @@ import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./comp
 import { Sidebar, type SidebarAttention } from "./components/Sidebar";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
+import { TERMINAL_COPY_MODE_EVENT, type TerminalCopyModeEventDetail } from "./components/TerminalCopyMode";
 import { RemoteHostConnection } from "./remote/RemoteApp";
 import { RemoteBrowserSharingIndicator } from "./components/RemoteBrowserSharingIndicator";
 import { remoteHostStore, selectActiveHost } from "./state/remoteHostStore";
@@ -2547,6 +2548,19 @@ function WorkspaceApp({
     setSearchLeafId(leafId);
   }, []);
 
+  // Desktop only: the remote web client has no native surface to select on.
+  const handleToggleTerminalCopyMode = useCallback(() => {
+    if (activeRemoteHostRef.current) return;
+    const currentState = stateRef.current;
+    const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
+    if (!activeTab || !isTerminalTab(activeTab)) return;
+    const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
+    const leafId = activeLayout?.activeLeafId ?? (activeLayout?.root ? collectLeafIds(activeLayout.root)[0] : null);
+    const sessionId = (leafId && activeLayout?.sessionIdsByLeafId?.[leafId]) || activeTab.sessionId;
+    if (!sessionId) return;
+    window.dispatchEvent(new CustomEvent<TerminalCopyModeEventDetail>(TERMINAL_COPY_MODE_EVENT, { detail: { sessionId } }));
+  }, []);
+
   const handleSelectWorktreeByIndex = useCallback(
     (index: number) => {
       if (activeRemoteHostRef.current) return;
@@ -3386,6 +3400,7 @@ function WorkspaceApp({
         "terminal.focusNext": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(1),
         "terminal.focusPrevious": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(-1),
         "terminal.search": browserShortcutsActive ? undefined : handleOpenTerminalSearch,
+        "terminal.copyMode": browserShortcutsActive ? undefined : handleToggleTerminalCopyMode,
         "sidebar.left.toggle": toggleSidebar,
         "project.add": handleOpenAddProject,
         "commandPalette.open": handleOpenCommandPalette,
@@ -3408,6 +3423,7 @@ function WorkspaceApp({
       handleOpenAddProject,
       handleOpenCommandPalette,
       handleOpenTerminalSearch,
+      handleToggleTerminalCopyMode,
       handleSelectTerminalTabByIndex,
       handleSelectWorktreeByIndex,
       handleSplitActive,
