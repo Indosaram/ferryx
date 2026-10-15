@@ -50,6 +50,13 @@ extern "C" {
     ) -> c_int;
     pub fn ghostty_terminal_vt_write(terminal: GhosttyTerminal, data: *const u8, len: usize);
     pub fn ghostty_terminal_get(terminal: GhosttyTerminal, data: c_int, out: *mut c_void) -> c_int;
+    // Color scheme report encoding matching `ghostty/vt/color_scheme.h`.
+    pub fn ghostty_color_scheme_report_encode(
+        scheme: c_int,
+        buf: *mut std::ffi::c_char,
+        buf_len: usize,
+        out_written: *mut usize,
+    ) -> c_int;
     pub fn ghostty_terminal_scroll_viewport(
         terminal: GhosttyTerminal,
         behavior: GhosttyTerminalScrollViewport,
