@@ -1618,6 +1618,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_terminal_list,
         cmd_terminal_preferences,
         cmd_terminal_apply_overrides,
+        cmd_terminal_set_appearance,
         cmd_native_terminal_attach,
         cmd_native_terminal_detach,
         cmd_native_terminal_close,

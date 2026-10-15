@@ -953,17 +953,21 @@ pub fn terminal_preference_overrides() -> TerminalPreferenceOverrides {
         .unwrap_or_default()
 }
 
+/// Serializes tests, across modules, that mutate the process-wide preference cache.
+#[cfg(test)]
+pub(crate) fn preference_cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+    CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Serializes tests that mutate the process-wide preference cache.
-    static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
-
     fn cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        preference_cache_test_lock()
     }
 
     #[test]

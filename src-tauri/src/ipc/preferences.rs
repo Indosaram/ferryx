@@ -17,7 +17,8 @@ use crate::native_terminal::surface_host::{
     NativeTerminalBoundsRequest, NativeTerminalSurfaceHostState,
 };
 use crate::terminal::{
-    reload_terminal_preferences, set_terminal_preference_overrides, TerminalPreferenceOverrides,
+    cached_terminal_preferences, reload_terminal_preferences, set_terminal_appearance,
+    set_terminal_preference_overrides, TerminalAppearance, TerminalPreferenceOverrides,
     TerminalPreferences,
 };
 
@@ -160,4 +161,144 @@ pub async fn cmd_terminal_apply_overrides(
             .clone())
     })
     .await
+}
+
+/// Records the appearance and returns whether it changed plus the effective preferences.
+///
+/// Re-imports the Ghostty theme from disk on change, so it always runs on a blocking thread.
+async fn push_terminal_appearance(
+    appearance: TerminalAppearance,
+) -> Result<(bool, TerminalPreferences), IpcError> {
+    run_blocking(move || {
+        let changed = set_terminal_appearance(appearance);
+        Ok((changed, cached_terminal_preferences().as_ref().clone()))
+    })
+    .await
+}
+
+/// Repaints the macOS window backing with the current theme background.
+///
+/// `apply_viewport` already does this on every viewport update, but with no visible session no
+/// update arrives, so the backing would keep the previous appearance's color.
+#[cfg(all(feature = "native-terminal", target_os = "macos"))]
+fn refresh_window_background<R: Runtime>(app: &AppHandle<R>) -> Result<(), IpcError> {
+    let Some(window) = app.get_window("main") else {
+        tracing::warn!("Main Ferryx window is unavailable; window background not refreshed");
+        return Ok(());
+    };
+    let background = crate::native_terminal::renderer::RendererTheme::from(
+        cached_terminal_preferences().as_ref(),
+    )
+    .background;
+    let target = window.clone();
+    window
+        .run_on_main_thread(move || {
+            let Ok(raw_window) = target.ns_window() else {
+                return;
+            };
+            if raw_window.is_null() {
+                return;
+            }
+            // SAFETY: the pointer comes from Tauri for a live window and is used on the main
+            // thread, matching the setup path in lib.rs.
+            let native_window = unsafe { &*(raw_window as *const objc2_app_kit::NSWindow) };
+            crate::native_terminal::platform::macos::configure_window_background(
+                native_window,
+                background,
+            );
+        })
+        .map_err(|error| {
+            IpcError::internal(format!(
+                "Could not dispatch native terminal window background refresh: {error}"
+            ))
+        })
+}
+
+/// Pushes the resolved app appearance and re-themes every live native session when it changed.
+#[cfg(feature = "native-terminal")]
+#[tauri::command]
+pub async fn cmd_terminal_set_appearance<R: Runtime>(
+    app: AppHandle<R>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    appearance: TerminalAppearance,
+) -> Result<TerminalPreferences, IpcError> {
+    let (changed, effective) = push_terminal_appearance(appearance).await?;
+    if changed {
+        rerender_native_sessions(&app, daemon_client.inner(), state.inner()).await?;
+        #[cfg(target_os = "macos")]
+        refresh_window_background(&app)?;
+    }
+    Ok(effective)
+}
+
+#[cfg(not(feature = "native-terminal"))]
+#[tauri::command]
+pub async fn cmd_terminal_set_appearance(
+    appearance: TerminalAppearance,
+) -> Result<TerminalPreferences, IpcError> {
+    push_terminal_appearance(appearance)
+        .await
+        .map(|(_, effective)| effective)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use super::*;
+    use crate::terminal::{
+        load_terminal_preferences_from_path_for, preference_cache_test_lock, terminal_appearance,
+    };
+
+    fn write_theme(dir: &Path, name: &str, background: &str) -> String {
+        let path = dir.join(name);
+        fs::write(&path, format!("background = {background}\n")).expect("write theme");
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn set_appearance_rethemes_only_on_change() {
+        let _lock = preference_cache_test_lock();
+        let previous = terminal_appearance();
+
+        set_terminal_appearance(TerminalAppearance::Dark);
+        assert!(set_terminal_appearance(TerminalAppearance::Light));
+        assert!(!set_terminal_appearance(TerminalAppearance::Light));
+        assert_eq!(terminal_appearance(), TerminalAppearance::Light);
+
+        // Absolute theme paths keep the lookup inside the temp dir.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let light = write_theme(temp.path(), "bright", "#fafafa");
+        let dark = write_theme(temp.path(), "night", "#101010");
+        let config = temp.path().join("config");
+        fs::write(&config, format!("theme = light:{light},dark:{dark}\n")).expect("write config");
+
+        let light_prefs =
+            load_terminal_preferences_from_path_for(&config, TerminalAppearance::Light);
+        let dark_prefs = load_terminal_preferences_from_path_for(&config, TerminalAppearance::Dark);
+        assert_eq!(light_prefs.theme.background, "#fafafa");
+        assert_eq!(dark_prefs.theme.background, "#101010");
+        assert_ne!(light_prefs.theme.background, dark_prefs.theme.background);
+
+        set_terminal_appearance(previous);
+    }
+
+    #[test]
+    fn appearance_argument_rejects_unknown_values_with_a_typed_error() {
+        assert_eq!(
+            serde_json::from_value::<TerminalAppearance>(serde_json::json!("light"))
+                .expect("light deserializes"),
+            TerminalAppearance::Light
+        );
+        assert_eq!(
+            serde_json::from_value::<TerminalAppearance>(serde_json::json!("dark"))
+                .expect("dark deserializes"),
+            TerminalAppearance::Dark
+        );
+        let error = serde_json::from_value::<TerminalAppearance>(serde_json::json!("blue"))
+            .expect_err("unknown appearance must not deserialize");
+        assert!(error.is_data(), "expected a data error, got {error:?}");
+    }
 }
