@@ -11,11 +11,17 @@
 //!
 //! `NOTIFY_SOCKET` is taken out of the daemon's environment at startup, so a program running in a
 //! terminal pane cannot retarget the unit's main PID; only the daemon's own successors get it back.
+//!
+//! Secrets the daemon needs at startup (`FERRYX_MACHINE_TOKEN`) never go into the unit file. They
+//! go into a 0600 file in `$XDG_RUNTIME_DIR` (a per-user tmpfs, cleared on logout), which the unit
+//! reads through an optional `EnvironmentFile=-`, so a systemd restart still sees them.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Write as _;
 use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -74,7 +80,8 @@ pub(crate) fn daemon_executable(appimage: Option<&OsStr>, current_exe: &Path) ->
 /// that prefix stays out: a GUI launched from inside a Ferryx pane carries per-session variables
 /// (`FERRYX_SESSION_ID`, `FERRYX_PTY_INCARNATION`) and secrets (`FERRYX_AGENT_STATE_TOKEN`,
 /// `FERRYX_MACHINE_TOKEN`) that must never be written into a unit file on disk.
-const FORWARDED_FERRYX_KEYS: [&str; 6] = [
+const FORWARDED_FERRYX_KEYS: [&str; 7] = [
+    "FERRYX_ALLOW_INSECURE_RELAY",
     "FERRYX_DATA_DIR",
     "FERRYX_RUNTIME_DIR",
     "FERRYX_SESSION_DIR",
@@ -83,29 +90,182 @@ const FORWARDED_FERRYX_KEYS: [&str; 6] = [
     "FERRYX_RELAY_URL",
 ];
 
+/// Secrets the daemon reads at startup. They reach the unit only through the runtime env file
+/// ([`secret_env_path`]), never through `Environment=`.
+const SECRET_FERRYX_KEYS: [&str; 1] = ["FERRYX_MACHINE_TOKEN"];
+
+/// Subdirectory of `$XDG_RUNTIME_DIR` (systemd's `%t` in a user unit) holding the secret env file.
+const SECRET_ENV_SUBDIR: &str = "ferryx";
+
 fn forwarded_key(key: &str) -> bool {
     let locale = key == "LANG" || key == "LANGUAGE" || key.starts_with("LC_");
     let locale = locale && key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
     locale || FORWARDED_FERRYX_KEYS.contains(&key)
 }
 
-/// Only the allowlisted `FERRYX_*` and locale variables reach the unit; `PATH` is rebuilt for every
-/// PTY child, and anything else would freeze one GUI session's environment into the user's login
-/// service.
-pub(crate) fn forwarded_env(vars: &[(OsString, OsString)]) -> Vec<(String, String)> {
+/// The non-empty single-line UTF-8 entries of `vars` whose key `keep` accepts, sorted so an
+/// unchanged environment renders byte-identical output and nothing is rewritten.
+fn filtered_env(vars: &[(OsString, OsString)], keep: fn(&str) -> bool) -> Vec<(String, String)> {
     let mut forwarded: Vec<(String, String)> = vars
         .iter()
         .filter_map(|(key, value)| {
-            let key = key.to_str().filter(|key| forwarded_key(key))?;
+            let key = key.to_str().filter(|key| keep(key))?;
             let value = value
                 .to_str()
                 .filter(|value| !value.is_empty() && !value.contains(['\n', '\r']))?;
             Some((key.to_string(), value.to_string()))
         })
         .collect();
-    // Sorted, so an unchanged environment renders a byte-identical unit and is not rewritten.
     forwarded.sort();
     forwarded
+}
+
+/// Only the allowlisted `FERRYX_*` and locale variables reach the unit; `PATH` is rebuilt for every
+/// PTY child, and anything else would freeze one GUI session's environment into the user's login
+/// service.
+pub(crate) fn forwarded_env(vars: &[(OsString, OsString)]) -> Vec<(String, String)> {
+    filtered_env(vars, forwarded_key)
+}
+
+/// The secrets of `vars` the daemon needs after a supervisor restart.
+pub(crate) fn secret_env(vars: &[(OsString, OsString)]) -> Vec<(String, String)> {
+    filtered_env(vars, |key| SECRET_FERRYX_KEYS.contains(&key))
+}
+
+/// `$XDG_RUNTIME_DIR/ferryx/<name>.env`, the file the unit's `EnvironmentFile=-%t/ferryx/%N.env`
+/// reads. `None` when the runtime dir is unset or not absolute: secrets then stay out of the unit's
+/// environment rather than falling back to persistent storage.
+pub(crate) fn secret_env_path(runtime_dir: Option<&OsStr>, name: &str) -> Option<PathBuf> {
+    let runtime_dir = runtime_dir.map(Path::new).filter(|dir| dir.is_absolute())?;
+    Some(runtime_dir.join(SECRET_ENV_SUBDIR).join(format!("{name}.env")))
+}
+
+/// A double-quoted `EnvironmentFile=` value: inside double quotes systemd unescapes a backslash,
+/// a double quote, `$` and a backtick. Specifiers (`%`) are not expanded in an env file.
+fn env_file_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '"' | '$' | '`') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
+
+/// The secret env file's content, or `None` when `vars` carries no secret (the file is removed).
+pub(crate) fn render_secret_env(vars: &[(OsString, OsString)]) -> Option<String> {
+    let secrets = secret_env(vars);
+    if secrets.is_empty() {
+        return None;
+    }
+    let mut content = String::from("# Managed by Ferryx: daemon secrets for supervisor restarts.\n");
+    for (key, value) in secrets {
+        content.push_str(&format!("{key}={}\n", env_file_quoted(&value)));
+    }
+    Some(content)
+}
+
+fn remove_if_present(path: &Path) -> Result<bool, String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "Failed to remove the daemon secret env file {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+/// Makes `path` hold `content` with mode 0600, or removes it when `content` is `None`. Returns
+/// whether the file changed: an identical 0600 regular file is left alone. A new file is written to
+/// a 0600 temp file in the same directory and renamed over `path`, so a reader never sees a partial
+/// or wider-permission file. Errors name the path only, never the content.
+pub(crate) fn write_secret_env(content: Option<&str>, path: &Path) -> Result<bool, String> {
+    let Some(content) = content else {
+        return remove_if_present(path);
+    };
+    let unchanged = fs::symlink_metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o777 == 0o600)
+        && fs::read_to_string(path).is_ok_and(|existing| existing == content);
+    if unchanged {
+        return Ok(false);
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Invalid daemon secret env path: {}", path.display()))?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
+        .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("Invalid daemon secret env path: {}", path.display()))?;
+    let temp = parent.join(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+    let written = (|| -> std::io::Result<()> {
+        if let Err(error) = fs::remove_file(&temp) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error);
+            }
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)?;
+        // `mode` is filtered by the umask; set it explicitly before any secret byte lands.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temp, path)
+    })();
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(format!(
+            "Failed to write the daemon secret env file {}: {error}",
+            path.display()
+        ));
+    }
+    Ok(true)
+}
+
+/// Writes or removes this process's secret env file for unit `name`. Without `XDG_RUNTIME_DIR` the
+/// secrets are skipped (logged once) rather than stored on persistent disk.
+#[cfg(target_os = "linux")]
+fn sync_secret_env(name: &str, vars: &[(OsString, OsString)]) -> Result<bool, String> {
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
+    let content = render_secret_env(vars);
+    match secret_env_path(runtime_dir.as_deref(), name) {
+        Some(path) => write_secret_env(content.as_deref(), &path),
+        None => {
+            if content.is_some() {
+                static SKIPPED: std::sync::Once = std::sync::Once::new();
+                SKIPPED.call_once(|| {
+                    tracing::warn!(
+                        "XDG_RUNTIME_DIR is unset; daemon secrets will not survive a supervisor restart"
+                    );
+                });
+            }
+            Ok(false)
+        }
+    }
+}
+
+/// Removes the secret env file for unit `name`, if any. Used when the unit is disabled or removed.
+#[cfg(target_os = "linux")]
+pub(crate) fn remove_secret_env(name: &str) -> Result<(), String> {
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
+    match secret_env_path(runtime_dir.as_deref(), name) {
+        Some(path) => remove_if_present(&path).map(|_| ()),
+        None => Ok(()),
+    }
 }
 
 /// A double-quoted systemd unit value. `%` starts a specifier everywhere; `$` expands a variable
@@ -126,7 +286,10 @@ fn quoted(value: &str, escape_dollar: bool) -> String {
     out
 }
 
-/// Renders the user unit for `executable`, forwarding the allowed subset of `vars`.
+/// Renders the user unit for `executable`, forwarding the allowed subset of `vars`. Secrets are
+/// never rendered here: the unit always names the optional runtime env file (`%t` is
+/// `$XDG_RUNTIME_DIR`, `%N` the unit name without `.service`), so a secret appearing, changing or
+/// going away never rewrites the unit.
 pub(crate) fn render_unit(executable: &Path, vars: &[(OsString, OsString)]) -> Result<String, String> {
     let exe = executable
         .to_str()
@@ -144,8 +307,10 @@ pub(crate) fn render_unit(executable: &Path, vars: &[(OsString, OsString)]) -> R
          Restart=on-failure\n\
          RestartSec=1\n\
          KillMode=process\n\
-         LimitNOFILE=4096\n",
-        quoted(exe, true)
+         LimitNOFILE=4096\n\
+         EnvironmentFile=-%t/{}/%N.env\n",
+        quoted(exe, true),
+        SECRET_ENV_SUBDIR
     );
     for (key, value) in forwarded_env(vars) {
         unit.push_str(&format!("Environment={}\n", quoted(&format!("{key}={value}"), false)));
@@ -256,6 +421,11 @@ fn unit_is_running(name: &str) -> bool {
 pub(crate) fn ensure(name: &str, path: &Path, executable: &Path) -> Result<bool, String> {
     let vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     let content = render_unit(executable, &vars)?;
+    // Before any start below, so a freshly started daemon already sees the secrets. A failure only
+    // costs the token after a restart, so it does not stop the unit from supervising the daemon.
+    if let Err(error) = sync_secret_env(name, &vars) {
+        tracing::warn!(%error, unit = %name, "Could not update the daemon secret env file");
+    }
     let rewritten = write_unit(&content, path)?;
     if rewritten {
         systemctl(&["daemon-reload"])?;
@@ -289,6 +459,7 @@ pub(crate) fn uninstall(name: &str, path: &Path) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("Failed to remove the systemd user unit: {error}")),
     }
+    remove_secret_env(name)?;
     systemctl(&["daemon-reload"]).map(|_| ())
 }
 
@@ -528,6 +699,129 @@ mod tests {
             "ferryx-daemon-qa"
         );
         assert!(unit_name(Some(OsStr::new("../escape"))).is_err());
+    }
+
+    #[test]
+    fn allow_insecure_relay_is_forwarded() {
+        let env = vars(&[
+            ("FERRYX_RELAY_URL", "ws://relay.test:8080"),
+            ("FERRYX_ALLOW_INSECURE_RELAY", "1"),
+        ]);
+        let keys: Vec<String> = forwarded_env(&env).into_iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, ["FERRYX_ALLOW_INSECURE_RELAY", "FERRYX_RELAY_URL"]);
+        let unit = render_unit(Path::new("/opt/ferryx/ferryx"), &env).unwrap();
+        let environment: Vec<&str> = unit
+            .lines()
+            .filter(|line| line.starts_with("Environment="))
+            .collect();
+        assert_eq!(
+            environment,
+            [
+                "Environment=\"FERRYX_ALLOW_INSECURE_RELAY=1\"",
+                "Environment=\"FERRYX_RELAY_URL=ws://relay.test:8080\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn machine_token_never_rendered_into_unit() {
+        let base = vars(&[("FERRYX_DATA_DIR", "/home/u/.ferryx")]);
+        let mut with_token = base.clone();
+        with_token.push((
+            OsString::from("FERRYX_MACHINE_TOKEN"),
+            OsString::from("mt-super-secret-value"),
+        ));
+        let exe = Path::new("/opt/ferryx/ferryx");
+        let unit = render_unit(exe, &with_token).unwrap();
+        assert!(!unit.contains("FERRYX_MACHINE_TOKEN"), "{unit}");
+        assert!(!unit.contains("mt-super-secret-value"), "{unit}");
+        assert!(
+            service_lines(&unit).contains(&"EnvironmentFile=-%t/ferryx/%N.env"),
+            "the unit must read secrets from the optional runtime env file: {unit}"
+        );
+        assert_eq!(
+            render_unit(exe, &base).unwrap(),
+            unit,
+            "a secret appearing or changing must not rewrite the unit"
+        );
+        let secret_keys: Vec<String> =
+            secret_env(&with_token).into_iter().map(|(key, _)| key).collect();
+        assert_eq!(secret_keys, ["FERRYX_MACHINE_TOKEN"]);
+        let agent = vars(&[("FERRYX_AGENT_STATE_TOKEN", "per-session")]);
+        assert!(secret_env(&agent).is_empty(), "per-session tokens are not daemon secrets");
+    }
+
+    #[test]
+    fn secret_env_file_renders_0600_under_runtime_dir() {
+        assert_eq!(
+            secret_env_path(Some(OsStr::new("/run/user/1000")), "ferryx-daemon"),
+            Some(PathBuf::from("/run/user/1000/ferryx/ferryx-daemon.env"))
+        );
+        assert_eq!(secret_env_path(None, "ferryx-daemon"), None);
+        assert_eq!(secret_env_path(Some(OsStr::new("")), "ferryx-daemon"), None);
+        assert_eq!(
+            secret_env_path(Some(OsStr::new("run/user/1000")), "ferryx-daemon"),
+            None,
+            "a relative runtime dir must not fall back to a persistent path"
+        );
+
+        let env = vars(&[
+            ("FERRYX_DATA_DIR", "/home/u/.ferryx"),
+            ("FERRYX_MACHINE_TOKEN", "a$b\"c\\d`e"),
+        ]);
+        let content = render_secret_env(&env).unwrap();
+        assert_eq!(
+            content,
+            "# Managed by Ferryx: daemon secrets for supervisor restarts.\n\
+             FERRYX_MACHINE_TOKEN=\"a\\$b\\\"c\\\\d\\`e\"\n"
+        );
+        assert!(!content.contains("FERRYX_DATA_DIR"), "{content}");
+
+        let runtime = tempfile::tempdir().unwrap();
+        let path = secret_env_path(Some(runtime.path().as_os_str()), "ferryx-daemon").unwrap();
+        assert!(write_secret_env(Some(&content), &path).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "secret env file mode {mode:o}");
+        let dir_mode = fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "secret env dir mode {dir_mode:o}");
+        let entries: Vec<OsString> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, [OsString::from("ferryx-daemon.env")], "no temp file left behind");
+
+        let without = vars(&[("FERRYX_DATA_DIR", "/home/u/.ferryx")]);
+        assert_eq!(render_secret_env(&without), None);
+        assert!(write_secret_env(render_secret_env(&without).as_deref(), &path).unwrap());
+        assert!(!path.exists(), "a secret that went away must remove the file");
+        assert!(!write_secret_env(None, &path).unwrap(), "removing a missing file is a no-op");
+    }
+
+    #[test]
+    fn unchanged_secret_env_is_not_rewritten() {
+        use std::os::unix::fs::MetadataExt as _;
+        let runtime = tempfile::tempdir().unwrap();
+        let path = secret_env_path(Some(runtime.path().as_os_str()), "ferryx-daemon").unwrap();
+        let content = render_secret_env(&vars(&[("FERRYX_MACHINE_TOKEN", "mt-1")])).unwrap();
+        assert!(write_secret_env(Some(&content), &path).unwrap());
+        let inode = fs::metadata(&path).unwrap().ino();
+        assert!(
+            !write_secret_env(Some(&content), &path).unwrap(),
+            "an unchanged secret env must not be rewritten"
+        );
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode, "the file was replaced");
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            write_secret_env(Some(&content), &path).unwrap(),
+            "a widened mode must be repaired"
+        );
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+
+        let next = render_secret_env(&vars(&[("FERRYX_MACHINE_TOKEN", "mt-2")])).unwrap();
+        assert!(write_secret_env(Some(&next), &path).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), next);
     }
 
     #[test]

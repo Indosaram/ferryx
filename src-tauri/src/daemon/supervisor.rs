@@ -497,6 +497,7 @@ mod backend {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("Failed to remove the systemd user unit: {e}")),
         }
+        supervisor_linux::remove_secret_env(&name)?;
         if !systemctl(&["--user", "daemon-reload"])? {
             return Err("systemctl --user daemon-reload failed".to_string());
         }
