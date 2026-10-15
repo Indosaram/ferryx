@@ -6,7 +6,9 @@
 //!
 //! * macOS - the `launchd` LaunchAgent in [`crate::daemon::launchd`] (same plist, same
 //!   `KeepAlive { SuccessfulExit = false }`).
-//! * Linux and Windows - no backend wired yet; [`supported`] is `false`.
+//! * Windows - a per-user scheduled task that runs the `--daemon-supervisor` watchdog
+//!   ([`crate::daemon::supervisor_windows`]); Store (MSIX) installs are unsupported.
+//! * Linux - no backend wired yet; [`supported`] is `false`.
 //! * Any other target - [`supported`] is always `false`.
 //!
 //! Where no backend is supported the daemon client keeps its detached-spawn fallback, which already
@@ -32,13 +34,13 @@ pub const ISOLATED_RUNTIME_ENV: [&str; 3] =
     ["FERRYX_DATA_DIR", "FERRYX_RUNTIME_DIR", "FERRYX_SESSION_DIR"];
 
 /// Environment lookup, injectable so the policy is testable without mutating the process env.
-type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
+pub(crate) type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 
 fn process_env(key: &str) -> Option<OsString> {
     std::env::var_os(key)
 }
 
-fn non_empty(env: Env<'_>, key: &str) -> Option<OsString> {
+pub(crate) fn non_empty(env: Env<'_>, key: &str) -> Option<OsString> {
     env(key).filter(|value| !value.is_empty())
 }
 
@@ -66,7 +68,7 @@ fn supported_for(
 
 fn supported_in(env: Env<'_>, dev_runtime: bool) -> bool {
     supported_for(
-        backend::TARGET_HAS_BACKEND,
+        backend::TARGET_HAS_BACKEND && backend::install_supported(),
         dev_runtime,
         isolated_runtime(env),
         non_empty(env, SUPERVISOR_NAME_ENV).is_some(),
@@ -117,6 +119,18 @@ pub fn uninstall() -> Result<()> {
     backend::uninstall(&process_env)
 }
 
+/// Points the scheduled task at this executable without starting it. The protocol-mismatch path
+/// calls this before it replaces an older daemon, so the watchdog's next respawn runs this build.
+#[cfg(windows)]
+pub fn retarget() -> Result<bool> {
+    if !supported() {
+        return Ok(false);
+    }
+    let executable =
+        std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
+    crate::daemon::supervisor_windows::retarget(&process_env, &executable)
+}
+
 #[cfg(target_os = "macos")]
 mod backend {
     use super::{non_empty, Env, Result, SUPERVISOR_NAME_ENV};
@@ -126,6 +140,10 @@ mod backend {
     use std::process::{Command, Stdio};
 
     pub const TARGET_HAS_BACKEND: bool = true;
+
+    pub fn install_supported() -> bool {
+        true
+    }
 
     fn label(env: Env<'_>) -> String {
         non_empty(env, SUPERVISOR_NAME_ENV)
@@ -232,14 +250,44 @@ mod backend {
     }
 }
 
-/// Linux and Windows backends are not wired yet, and other targets never get one: callers fall back
-/// to the detached spawn.
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod backend {
+    use super::{Env, Result};
+    use crate::daemon::supervisor_windows as task;
+    use std::path::Path;
+
+    pub const TARGET_HAS_BACKEND: bool = true;
+
+    /// The Store owns an MSIX install's lifecycle, so it never gets a task.
+    pub fn install_supported() -> bool {
+        task::supported_for_install(crate::ipc::updater::updater_managed_externally())
+    }
+
+    pub fn ensure(env: Env<'_>, executable: &Path) -> Result<bool> {
+        task::ensure(env, executable)
+    }
+
+    pub fn reload(env: Env<'_>) -> Result<()> {
+        task::reload(env)
+    }
+
+    pub fn uninstall(env: Env<'_>) -> Result<()> {
+        task::uninstall(env)
+    }
+}
+
+/// The Linux backend is not wired yet, and other targets never get one: callers fall back to the
+/// detached spawn.
+#[cfg(not(any(target_os = "macos", windows)))]
 mod backend {
     use super::{Env, Result};
     use std::path::Path;
 
     pub const TARGET_HAS_BACKEND: bool = false;
+
+    pub fn install_supported() -> bool {
+        true
+    }
 
     pub fn ensure(_env: Env<'_>, _executable: &Path) -> Result<bool> {
         Ok(false)

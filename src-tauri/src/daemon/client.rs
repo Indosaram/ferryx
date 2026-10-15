@@ -2548,6 +2548,7 @@ impl DaemonClient {
                         drop(reader);
                         drop(write_half);
 
+                        Self::retarget_supervisor_before_replacing_daemon().await;
                         let termination =
                             Self::terminate_stale_daemon_process_windows(pid).await;
                         if !stale_daemon_endpoint_files_removable(termination) {
@@ -2612,6 +2613,7 @@ impl DaemonClient {
                     drop(reader);
                     drop(write_half);
 
+                    Self::retarget_supervisor_before_replacing_daemon().await;
                     if let Err(error) = self.spawn_successor_daemon().await {
                         tracing::warn!(
                             %error,
@@ -2639,6 +2641,28 @@ impl DaemonClient {
                 IpcErrorCode::InternalError,
                 "Unexpected handshake response from daemon",
             )),
+        }
+    }
+
+    /// Points the Windows supervisor task at this build before an incompatible daemon is replaced.
+    ///
+    /// The watchdog respawns whatever executable the task names. Retargeting first means a crash of
+    /// the replacement, or of the old daemon while it is being replaced, is restarted with the new
+    /// build instead of the incompatible one. A failure is logged and does not block the
+    /// replacement: the task keeps its previous definition and the GUI retargets it on next start.
+    #[cfg(not(unix))]
+    async fn retarget_supervisor_before_replacing_daemon() {
+        let retarget = crate::ipc::run_blocking(|| {
+            crate::daemon::supervisor::retarget()
+                .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
+        })
+        .await;
+        match retarget {
+            Ok(changed) => tracing::info!(changed, "Supervisor task points at this build"),
+            Err(error) => tracing::warn!(
+                %error,
+                "Could not retarget the supervisor task before replacing the incompatible daemon"
+            ),
         }
     }
 

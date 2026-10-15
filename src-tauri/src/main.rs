@@ -116,5 +116,6 @@ fn main() {
             let _ = raised_limit;
             ferryx_lib::run();
         }
+        LaunchMode::DaemonSupervisor => std::process::exit(run_daemon_supervisor(&args)),
     }
 }
