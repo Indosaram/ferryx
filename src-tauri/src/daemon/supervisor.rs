@@ -206,14 +206,30 @@ pub fn uninstall() -> Result<()> {
 
 /// Points the scheduled task at this executable without starting it. The protocol-mismatch path
 /// calls this before it replaces an older daemon, so the watchdog's next respawn runs this build.
+/// A user who turned autostart off ([`user_opted_out`]) is a no-op that returns `false`, so the
+/// scheduled task is never re-registered behind their back.
 #[cfg(windows)]
 pub fn retarget() -> Result<bool> {
-    if !supported() {
+    retarget_unless_opted_out(user_opted_out(), || {
+        if !supported() {
+            return Ok(false);
+        }
+        let executable =
+            std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
+        crate::daemon::supervisor_windows::retarget(&process_env, &executable)
+    })
+}
+
+/// [`retarget`] behind the user's opt-out: the backend is never touched for an opted-out user.
+#[cfg(any(windows, test))]
+fn retarget_unless_opted_out(
+    opted_out: bool,
+    retarget: impl FnOnce() -> Result<bool>,
+) -> Result<bool> {
+    if opted_out {
         return Ok(false);
     }
-    let executable =
-        std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
-    crate::daemon::supervisor_windows::retarget(&process_env, &executable)
+    retarget()
 }
 
 #[cfg(target_os = "macos")]
@@ -625,7 +641,30 @@ mod tests {
     }
 
     #[test]
-    fn remove_autostart_never_stops_running_daemon() {
+    fn retarget_is_noop_when_user_opted_out() {
+        let mut called = false;
+        assert_eq!(
+            retarget_unless_opted_out(true, || {
+                called = true;
+                Ok(true)
+            }),
+            Ok(false)
+        );
+        assert!(!called, "an opted-out user must never reach the retarget backend");
+
+        let mut called = false;
+        assert_eq!(
+            retarget_unless_opted_out(false, || {
+                called = true;
+                Ok(true)
+            }),
+            Ok(true)
+        );
+        assert!(called, "without the opt-out the backend still runs");
+    }
+
+    #[test]
+    fn linux_remove_autostart_args_never_stop_the_daemon() {
         let args = linux_remove_autostart_args("ferryx-daemon.service");
         assert!(args.contains(&"disable"));
         assert!(args.contains(&"--user"));

@@ -2262,7 +2262,9 @@ impl DaemonClient {
         // of the app and died with it leaving no record. The detached spawn below stays as the
         // fallback for platforms with no agent and for isolated runtimes, where installing one would
         // point the user's login autostart at a test build.
-        if crate::daemon::supervisor::supported() {
+        // A user who turned autostart off gets the detached spawn directly: no agent install, no
+        // supervised wait and no reload.
+        if crate::daemon::supervisor::supported() && !crate::daemon::supervisor::user_opted_out() {
             let agent = crate::ipc::run_blocking(|| {
                 crate::daemon::supervisor::ensure()
                     .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
