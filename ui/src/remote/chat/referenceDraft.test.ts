@@ -271,4 +271,20 @@ describe("reference draft overlapping sends", () => {
     store.settle(paneA, "continue");
     expect(store.read(paneA).text).toBe("continue with tests");
   });
+
+  it("ui-reference-logic-r6-1: ending an overlapped send keeps the pending record of a newer send", () => {
+    const { store } = fixture();
+    expect(store.begin(paneA, "a")).toBe(true);
+    expect(store.begin(paneA, "b")).toBe(false);
+    store.settle(paneA, "a");
+    store.end(paneA, "a");
+    expect(store.begin(paneA, "yes")).toBe(true);
+    store.set(paneA, "");
+    store.settle(paneA, "b");
+    store.end(paneA, "b");
+    // the user types the same words again while the newer send is still on its way
+    store.set(paneA, "yes");
+    store.settle(paneA, "yes");
+    expect(store.read(paneA).text).toBe("yes");
+  });
 });

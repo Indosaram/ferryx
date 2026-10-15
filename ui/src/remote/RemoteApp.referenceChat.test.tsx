@@ -1458,13 +1458,21 @@ describe("reference chat lane review fixes", () => {
     let newestOffset = 500;
     installLane(({ url }) => {
       if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
-      return url.includes("cursor=")
-        ? jsonResponse(nativePage({
-            turns: [{ role: "user", parts: [{ kind: "text", text: "OLD-1" }], startedAt: "2026-10-05T00:00:00Z" }],
-            cursor: null,
-            hasMore: false,
-          }))
-        : jsonResponse(nativePage({ cursor: { streamId: "omo:abc", offset: newestOffset }, hasMore: true }));
+      if (url.includes("cursor=")) {
+        return jsonResponse(nativePage({
+          turns: [{ role: "user", parts: [{ kind: "text", text: "OLD-1" }], startedAt: "2026-10-05T00:00:00Z" }],
+          cursor: null,
+          hasMore: false,
+        }));
+      }
+      // a window that shares no turn with the one the older page joined: what lies between is unknown
+      return newestOffset === 500
+        ? jsonResponse(nativePage({ cursor: { streamId: "omo:abc", offset: newestOffset }, hasMore: true }))
+        : jsonResponse(nativePage({
+            turns: [{ role: "user", parts: [{ kind: "text", text: "FAR-LATER" }], startedAt: "2026-10-07T00:00:00Z" }],
+            cursor: { streamId: "omo:abc", offset: newestOffset },
+            hasMore: true,
+          }));
     });
     render(<RemoteApp />);
     const olderButton = await screen.findByTestId("reference-older-button");
@@ -1482,6 +1490,50 @@ describe("reference chat lane review fixes", () => {
 
     expect(screen.queryByText("OLD-1")).not.toBeInTheDocument();
     expect(screen.getByTestId("reference-older-button")).toBeInTheDocument();
+  });
+
+  it("ui-workspace-wiring-r6-2: a newest window that slides forward keeps the older pages and the turns it slid past", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const t1 = { role: "user", parts: [{ kind: "text", text: "SLID-OUT" }], startedAt: "2026-10-06T00:00:00Z" };
+    const t2 = { role: "assistant", parts: [{ kind: "text", text: "The parser now streams line by line." }], startedAt: "2026-10-06T00:00:01Z" };
+    const t3 = { role: "assistant", parts: [{ kind: "text", text: "NEW-3" }], startedAt: "2026-10-06T00:00:02Z" };
+    let slid = false;
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      if (url.includes("cursor=")) {
+        return jsonResponse(nativePage({
+          turns: [{ role: "user", parts: [{ kind: "text", text: "OLD-1" }], startedAt: "2026-10-05T00:00:00Z" }],
+          cursor: null,
+          hasMore: false,
+        }));
+      }
+      return slid
+        ? jsonResponse(nativePage({ turns: [t2, t3], cursor: { streamId: "omo:abc", offset: 600 }, hasMore: true }))
+        : jsonResponse(nativePage({ turns: [t1, t2], cursor: { streamId: "omo:abc", offset: 500 }, hasMore: true }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+    await screen.findByText("OLD-1");
+
+    // the agent appended a turn: the newest window now starts one turn later on the same stream
+    slid = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await drainSettledResponses();
+    await screen.findByText("NEW-3");
+
+    expect(screen.getByText("OLD-1")).toBeInTheDocument();
+    const slidOut = screen.getByText("SLID-OUT");
+    expect(screen.getByText("OLD-1").compareDocumentPosition(slidOut) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(
+      slidOut.compareDocumentPosition(screen.getByText("The parser now streams line by line.")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.getAllByText("SLID-OUT")).toHaveLength(1);
   });
 
   it("ui-workspace-wiring-r3-1: an older page still in flight when the newest page re-anchors is dropped", async () => {
@@ -1591,6 +1643,35 @@ describe("reference chat lane review fixes", () => {
     });
     await drainSettledResponses();
     expect(screen.getAllByText("continue")).toHaveLength(2);
+  });
+
+  it("ui-workspace-wiring-r6-1: an echo retires when its turn lands even though the window slid the earlier same-text turn out", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const earlier = { role: "user", parts: [{ kind: "text", text: "continue" }], startedAt: "2026-10-06T00:00:00Z" };
+    const reply = { role: "assistant", parts: [{ kind: "text", text: "The parser now streams line by line." }], startedAt: "2026-10-06T00:00:01Z" };
+    const delivered = { role: "user", parts: [{ kind: "text", text: "continue" }], startedAt: "2026-10-06T00:00:02Z" };
+    let landed = false;
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      // a full newest window: the delivered turn pushes the earlier "continue" out of it
+      return jsonResponse(nativePage({ turns: landed ? [reply, delivered] : [earlier, reply] }));
+    });
+    render(<RemoteApp />);
+    await laneReady();
+
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "continue" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await drainSettledResponses();
+    expect(screen.getAllByText("continue")).toHaveLength(2);
+
+    landed = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await drainSettledResponses();
+    expect(screen.getAllByText("continue")).toHaveLength(1);
   });
 
   it("ui-composer-prompt-r5-1: a typed free-text answer the host refuses comes back to the message box", async () => {
