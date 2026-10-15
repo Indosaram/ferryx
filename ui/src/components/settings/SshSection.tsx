@@ -26,6 +26,7 @@ import {
   importSshConfig,
   prepareSshIntegration,
   readSystemSshConfig,
+  removeSshIntegration,
   setSshConfigPathOverride,
   testSshConnection,
   updateSshHost,
@@ -36,7 +37,9 @@ import {
   type SshRemoteEnvironment,
   type SystemSshConfig,
 } from "../../lib/sshHosts";
+import { getAgentIntegration } from "../../lib/tauri";
 import { safeRandomUUID } from "../../lib/uuid";
+import { useModalDialog } from "../useModalDialog";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -94,6 +97,64 @@ function sameConnection(left: SshHost, right: SshHost): boolean {
     left.authMethod === right.authMethod && left.disabled === right.disabled;
 }
 
+function RemoveSshIntegrationDialog({
+  hostLabel,
+  onCancel,
+  onConfirm,
+}: {
+  hostLabel: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { dialogRef } = useModalDialog({ onEscape: onCancel });
+  const title = `Remove agent integration from ${hostLabel}?`;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        event.stopPropagation();
+        onCancel();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-label={title}
+        aria-modal="true"
+        className="w-full max-w-md animate-enter overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center gap-2 border-b border-border px-4 py-3 text-sm font-semibold text-foreground">
+          <Trash2 className="size-4 text-destructive" />
+          {title}
+        </header>
+        <div className="space-y-4 p-4 text-xs">
+          <p className="text-muted-foreground">
+            Ferryx will remove the agent state hooks it installed on this host. Files you
+            modified after installation are kept.
+          </p>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="rounded-md px-3 py-2 text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onConfirm}
+              className="rounded-md bg-destructive px-3 py-2 font-semibold text-destructive-foreground"
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export type SshSectionProps = {
   onOpenProject?: (hostId: string) => void;
   searchQuery?: string;
@@ -132,7 +193,24 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
   const [busyHostId, setBusyHostId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestState>>({});
   const [preparedHosts, setPreparedHosts] = useState<Record<string, boolean>>({});
+  const [removalResults, setRemovalResults] = useState<Record<string, string>>({});
+  const [pendingRemoveHost, setPendingRemoveHost] = useState<SshHost | null>(null);
+  const [agentIntegrationEnabled, setAgentIntegrationEnabled] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    getAgentIntegration()
+      .then((state) => {
+        if (active) setAgentIntegrationEnabled(state.enabled);
+      })
+      .catch((error: unknown) => {
+        if (active) setActionError(extractIpcErrorMessage(error, "Failed to read the agent integration setting."));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const stale = hostsRef.current.filter((previous) => !hosts.some((host) => sameConnection(previous, host)));
@@ -504,6 +582,26 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
     } catch (error) {
       if (!isCurrentHost(host)) return;
       setActionError(extractIpcErrorMessage(error, "Agent integration preparation failed."));
+    } finally {
+      setBusyHostId(null);
+    }
+  };
+
+  const handleRemoveIntegration = async (host: SshHost) => {
+    if (isFormOpen || busyHostId) return;
+    setBusyHostId(host.id);
+    setActionError(null);
+    try {
+      const result = await removeSshIntegration(host.id);
+      if (!isCurrentHost(host)) return;
+      setPreparedHosts((previous) => ({ ...previous, [host.id]: false }));
+      setRemovalResults((previous) => ({
+        ...previous,
+        [host.id]: `Removed ${result.removed.length}, kept ${result.keptModified.length} modified`,
+      }));
+    } catch (error) {
+      if (!isCurrentHost(host)) return;
+      setActionError(extractIpcErrorMessage(error, "Agent integration removal failed."));
     } finally {
       setBusyHostId(null);
     }
@@ -1118,16 +1216,31 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
                             {test.provisioning ? (test.decision === "install" ? "Installing…" : "Updating…") : test.decision === "install" ? "Install helper" : "Update helper"}
                           </Button>
                         ) : null}
+                        {agentIntegrationEnabled ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={isBusy || test.testing || !!host.disabled || isFormOpen}
+                            onClick={() => handlePrepareIntegration(host)}
+                            aria-label={`Prepare agent integration on ${host.label}`}
+                          >
+                            {isBusy ? "Preparing…" : preparedHosts[host.id] ? "Reinstall agent integration" : "Prepare agent integration"}
+                          </Button>
+                        ) : null}
                         <Button
                           type="button"
                           variant="ghost"
                           size="sm"
                           disabled={isBusy || test.testing || !!host.disabled || isFormOpen}
-                          onClick={() => handlePrepareIntegration(host)}
-                          aria-label={`Prepare agent integration on ${host.label}`}
+                          onClick={() => setPendingRemoveHost(host)}
+                          aria-label={`Remove agent integration on ${host.label}`}
                         >
-                          {isBusy ? "Preparing…" : preparedHosts[host.id] ? "Reinstall agent integration" : "Prepare agent integration"}
+                          Remove integration
                         </Button>
+                        {removalResults[host.id] ? (
+                          <div data-testid={`ssh-integration-removed-${host.id}`}>{removalResults[host.id]}</div>
+                        ) : null}
                         <div>{preparedHosts[host.id] ? "Extension installed. Open a new remote agent session to use it." : "Optional: installs the Ferryx state extension in remote agent folders."}</div>
                       </div>
                     ) : null}
@@ -1216,6 +1329,17 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
           </div>
         )}
       </SettingsGroup>
+      {pendingRemoveHost ? (
+        <RemoveSshIntegrationDialog
+          hostLabel={pendingRemoveHost.label}
+          onCancel={() => setPendingRemoveHost(null)}
+          onConfirm={() => {
+            const host = pendingRemoveHost;
+            setPendingRemoveHost(null);
+            void handleRemoveIntegration(host);
+          }}
+        />
+      ) : null}
     </section>
   );
 }

@@ -11,6 +11,7 @@ import {
   LogOut,
   Plus,
   Server,
+  Trash2,
   X,
 } from "lucide-react";
 import type { MachineProjectTarget, RemoteContext } from "../../lib/machineNavigation";
@@ -27,6 +28,7 @@ import {
   deleteSshHost,
   extractIpcErrorMessage,
   prepareSshIntegration,
+  removeSshIntegration,
   resetSshHostsCache,
   setSshPassword,
   testSshConnection,
@@ -61,11 +63,12 @@ import {
   type AccountMachineView,
 } from "../../remote/accountSession";
 import { getOrCreateAttachKey } from "../../remote/accountAttach";
-import { toIpcError } from "../../lib/tauri";
+import { getAgentIntegration, toIpcError } from "../../lib/tauri";
 import { AccountSignIn } from "./AccountSignIn";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { AddMachineModal, type HostFormData } from "./AddMachineModal";
 import { RemoteAccessSection } from "./RemoteAccessSection";
+import { useModalDialog } from "../useModalDialog";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -123,6 +126,64 @@ function describeAccountError(err: unknown): string {
     return typed.message || typed.code;
   }
   return err instanceof Error ? err.message : String(err);
+}
+
+function RemoveSshIntegrationDialog({
+  hostLabel,
+  onCancel,
+  onConfirm,
+}: {
+  hostLabel: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { dialogRef } = useModalDialog({ onEscape: onCancel });
+  const title = `Remove agent integration from ${hostLabel}?`;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        event.stopPropagation();
+        onCancel();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-label={title}
+        aria-modal="true"
+        className="w-full max-w-md animate-enter overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center gap-2 border-b border-border px-4 py-3 text-sm font-semibold text-foreground">
+          <Trash2 className="size-4 text-destructive" />
+          {title}
+        </header>
+        <div className="space-y-4 p-4 text-xs">
+          <p className="text-muted-foreground">
+            Ferryx will remove the agent state hooks it installed on this host. Files you
+            modified after installation are kept.
+          </p>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="rounded-md px-3 py-2 text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onConfirm}
+              className="rounded-md bg-destructive px-3 py-2 font-semibold text-destructive-foreground"
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 interface SshTestState {
@@ -357,6 +418,9 @@ export function RemoteSection({
   // SSH host states
   const [sshTestResults, setSshTestResults] = useState<Record<string, SshTestState>>({});
   const [sshPreparedHosts, setSshPreparedHosts] = useState<Record<string, boolean>>({});
+  const [sshRemovalResults, setSshRemovalResults] = useState<Record<string, string>>({});
+  const [pendingRemoveSshHost, setPendingRemoveSshHost] = useState<SshHost | null>(null);
+  const [agentIntegrationEnabled, setAgentIntegrationEnabled] = useState(true);
   const [editingSshHost, setEditingSshHost] = useState<SshHost | null>(null);
   const [editFormData, setEditFormData] = useState<HostFormData | null>(null);
   const [editPassword, setEditPassword] = useState("");
@@ -388,6 +452,20 @@ export function RemoteSection({
 
   const isCurrentHost = (host: SshHost) =>
     hostsRef.current.some(cur => sameConnection(cur, host));
+
+  useEffect(() => {
+    let active = true;
+    getAgentIntegration()
+      .then(state => {
+        if (active) setAgentIntegrationEnabled(state.enabled);
+      })
+      .catch((err: unknown) => {
+        if (active) setActionError(extractIpcErrorMessage(err, "Failed to read the agent integration setting."));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -575,6 +653,26 @@ export function RemoteSection({
     } catch (err) {
       if (!isCurrentHost(host)) return;
       setActionError(extractIpcErrorMessage(err, "Agent integration preparation failed."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRemoveSshIntegration = async (host: SshHost) => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const result = await removeSshIntegration(host.id);
+      if (!isCurrentHost(host)) return;
+      setSshPreparedHosts(prev => ({ ...prev, [host.id]: false }));
+      setSshRemovalResults(prev => ({
+        ...prev,
+        [host.id]: `Removed ${result.removed.length}, kept ${result.keptModified.length} modified`,
+      }));
+    } catch (err) {
+      if (!isCurrentHost(host)) return;
+      setActionError(extractIpcErrorMessage(err, "Agent integration removal failed."));
     } finally {
       setBusy(false);
     }
@@ -1516,16 +1614,31 @@ export function RemoteSection({
                                 >
                                   Test connection
                                 </Button>
+                                {agentIntegrationEnabled ? (
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    aria-label={`Prepare agent integration on ${host.label}`}
+                                    disabled={busy || Boolean(host.disabled)}
+                                    onClick={() => void handlePrepareSsh(host)}
+                                  >
+                                    Prepare agent integration
+                                  </Button>
+                                ) : null}
                                 <Button
                                   type="button"
                                   variant="outline"
                                   size="sm"
-                                  aria-label={`Prepare agent integration on ${host.label}`}
+                                  aria-label={`Remove agent integration on ${host.label}`}
                                   disabled={busy || Boolean(host.disabled)}
-                                  onClick={() => void handlePrepareSsh(host)}
+                                  onClick={() => setPendingRemoveSshHost(host)}
                                 >
-                                  Prepare agent integration
+                                  Remove integration
                                 </Button>
+                                {sshRemovalResults[host.id] ? (
+                                  <span className="self-center text-[11px] text-muted-foreground">{sshRemovalResults[host.id]}</span>
+                                ) : null}
                                 <Button
                                   type="button"
                                   variant="outline"
@@ -1652,6 +1765,17 @@ export function RemoteSection({
           setSelectedKey(`ssh:${importedHostId}`);
         }}
       />
+      {pendingRemoveSshHost ? (
+        <RemoveSshIntegrationDialog
+          hostLabel={pendingRemoveSshHost.label}
+          onCancel={() => setPendingRemoveSshHost(null)}
+          onConfirm={() => {
+            const host = pendingRemoveSshHost;
+            setPendingRemoveSshHost(null);
+            void handleRemoveSshIntegration(host);
+          }}
+        />
+      ) : null}
     </section>
   );
 }
