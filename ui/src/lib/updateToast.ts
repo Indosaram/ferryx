@@ -1,6 +1,7 @@
 import { toast } from "../components/ui/sonner";
 import { DISMISSED_UPDATE_VERSION_STORAGE_KEY } from "./storageKeys";
 import {
+  cancelUpdateDownload,
   downloadAndInstallUpdate,
   getUpdateStatus,
   relaunchApp,
@@ -10,6 +11,11 @@ import {
 } from "./updater";
 
 export const UPDATE_TOAST_ID = "update-available";
+
+async function installAndRelaunch(): Promise<void> {
+  await downloadAndInstallUpdate();
+  if (getUpdateStatus().state === "downloaded") await relaunchApp();
+}
 
 function browserStorage(): Storage | null {
   if (typeof window === "undefined") return null;
@@ -49,19 +55,31 @@ export function handleUpdateStatusChange(
   switch (status.state) {
     case "available": {
       if (!version) return;
+      if (status.lastFailure === "stalled") {
+        toast.error("Update download stalled", {
+          id: UPDATE_TOAST_ID,
+          description: `Ferryx v${version} stopped downloading. Nothing was installed.`,
+          duration: Infinity,
+          action: {
+            label: "Retry",
+            onClick: () => installAndRelaunch(),
+          },
+        });
+        return;
+      }
       const dismissed = loadDismissedUpdateVersion(storage);
       if (dismissed === version) return;
 
       toast.info("Update available", {
         id: UPDATE_TOAST_ID,
-        description: `Ferryx v${version} is ready. Sessions won't be interrupted.`,
+        description:
+          status.lastFailure === "cancelled"
+            ? `Download of Ferryx v${version} was cancelled. Nothing was installed.`
+            : `Ferryx v${version} is ready. Sessions won't be interrupted.`,
         duration: Infinity,
         action: {
           label: "Update",
-          onClick: async () => {
-            await downloadAndInstallUpdate();
-            if (getUpdateStatus().state === "downloaded") await relaunchApp();
-          },
+          onClick: () => installAndRelaunch(),
         },
         onDismiss: () => {
           saveDismissedUpdateVersion(version, storage);
@@ -70,14 +88,34 @@ export function handleUpdateStatusChange(
       break;
     }
     case "downloading": {
+      if (status.installing) {
+        // Installation cannot be cancelled, so the toast offers no action here.
+        toast.loading("Installing update", {
+          id: UPDATE_TOAST_ID,
+          description: version ? `Installing version ${version}…` : "Installing update…",
+          duration: Infinity,
+          action: undefined,
+        });
+        break;
+      }
       const percent = Math.round((status.downloadProgress ?? 0) * 100);
-      const description = version
-        ? `Downloading version ${version}… ${percent}%`
-        : `Downloading update… ${percent}%`;
+      const description = status.cancelRequested
+        ? "Cancelling download…"
+        : version
+          ? `Downloading version ${version}… ${percent}%`
+          : `Downloading update… ${percent}%`;
       toast.loading("Downloading update", {
         id: UPDATE_TOAST_ID,
         description,
         duration: Infinity,
+        action: status.cancelRequested
+          ? undefined
+          : {
+              label: "Cancel",
+              onClick: () => {
+                void cancelUpdateDownload();
+              },
+            },
       });
       break;
     }
@@ -87,6 +125,8 @@ export function handleUpdateStatusChange(
         {
           id: UPDATE_TOAST_ID,
           duration: 8000,
+          // Toast updates merge into the existing toast, so drop the downloading Cancel action.
+          action: undefined,
         },
       );
       break;
@@ -96,6 +136,7 @@ export function handleUpdateStatusChange(
         toast.error(status.error, {
           id: UPDATE_TOAST_ID,
           duration: Infinity,
+          action: undefined,
         });
       }
       break;

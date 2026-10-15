@@ -6,6 +6,7 @@ import type { UpdateStatus } from "../lib/updater";
 
 const checkForUpdate = vi.fn(async () => {});
 const downloadAndInstallUpdate = vi.fn(async () => {});
+const cancelUpdateDownload = vi.fn(async () => {});
 const relaunchApp = vi.fn(async () => {});
 const getCurrentVersion = vi.fn(async () => "2026.08.25");
 
@@ -28,6 +29,7 @@ vi.mock("../lib/updater", async (importOriginal) => {
     },
     checkForUpdate: () => checkForUpdate(),
     downloadAndInstallUpdate: () => downloadAndInstallUpdate(),
+    cancelUpdateDownload: () => cancelUpdateDownload(),
     relaunchApp: () => relaunchApp(),
     getCurrentVersion: () => getCurrentVersion(),
   };
@@ -55,11 +57,12 @@ describe("Settings > General software update control", () => {
     listeners.clear();
     checkForUpdate.mockClear();
     downloadAndInstallUpdate.mockClear();
+    cancelUpdateDownload.mockClear();
     relaunchApp.mockClear();
     getCurrentVersion.mockClear();
   });
 
-  it("shows running version, renders exactly two update buttons, and checks for updates on demand", async () => {
+  it("shows running version, renders two update buttons when idle, and checks for updates on demand", async () => {
     await renderGeneralSection();
 
     expect(await screen.findByText(/2026\.08\.25/)).toBeInTheDocument();
@@ -70,6 +73,7 @@ describe("Settings > General software update control", () => {
     expect(within(card).getByRole("button", { name: /check for updates/i })).toBeEnabled();
     expect(within(card).getByRole("button", { name: /install and relaunch/i })).toBeDisabled();
     expect(within(card).queryByRole("button", { name: /download update/i })).not.toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: /^cancel$/i })).not.toBeInTheDocument();
 
     fireEvent.click(within(card).getByRole("button", { name: /check for updates/i }));
     expect(checkForUpdate).toHaveBeenCalledTimes(1);
@@ -122,7 +126,7 @@ describe("Settings > General software update control", () => {
     expect(relaunchApp).toHaveBeenCalledTimes(1);
   });
 
-  it("disables Install and Relaunch during download while keeping two-action layout and reporting progress", async () => {
+  it("disables Install and Relaunch during download, adds Cancel only while downloading, and reports progress", async () => {
     await renderGeneralSection();
     await screen.findByRole("button", { name: /check for updates/i });
 
@@ -130,7 +134,7 @@ describe("Settings > General software update control", () => {
 
     const card = getSoftwareUpdateCard();
     const buttons = within(card).getAllByRole("button");
-    expect(buttons).toHaveLength(2);
+    expect(buttons).toHaveLength(3);
     expect(within(card).queryByRole("button", { name: /download update/i })).not.toBeInTheDocument();
 
     const checkBtn = within(card).getByRole("button", { name: /check for updates/i });
@@ -144,6 +148,56 @@ describe("Settings > General software update control", () => {
     const progress = await screen.findByRole("progressbar");
     expect(progress).toBeInTheDocument();
     expect(progress.firstElementChild).toHaveStyle({ transform: "translateX(-58%)" });
+
+    const cancel = within(card).getByRole("button", { name: /^cancel$/i });
+    expect(cancel).toBeEnabled();
+    fireEvent.click(cancel);
+    expect(cancelUpdateDownload).toHaveBeenCalledTimes(1);
+
+    // A pending cancel cannot be sent twice.
+    act(() =>
+      emit({ state: "downloading", version: "2026.08.26.1", downloadProgress: 0.42, cancelRequested: true }),
+    );
+    expect(within(card).getByRole("button", { name: /^cancel$/i })).toBeDisabled();
+    expect(screen.getByTestId("settings-update-status")).toHaveTextContent(/Cancelling download/);
+  });
+
+  it("offers no Cancel while the downloaded update is installing", async () => {
+    await renderGeneralSection();
+    await screen.findByRole("button", { name: /check for updates/i });
+
+    act(() =>
+      emit({ state: "downloading", version: "2026.08.26.1", downloadProgress: 1, installing: true }),
+    );
+
+    const card = getSoftwareUpdateCard();
+    expect(within(card).getAllByRole("button")).toHaveLength(2);
+    expect(within(card).queryByRole("button", { name: /^cancel$/i })).not.toBeInTheDocument();
+    expect(screen.getByTestId("settings-update-status")).toHaveTextContent(/Installing version 2026\.08\.26\.1/);
+  });
+
+  it("explains a stalled or cancelled download and offers a retry", async () => {
+    await renderGeneralSection();
+    await screen.findByRole("button", { name: /check for updates/i });
+
+    act(() => emit({ state: "available", version: "2026.08.26.1", lastFailure: "stalled" }));
+
+    const card = getSoftwareUpdateCard();
+    const status = screen.getByTestId("settings-update-status");
+    expect(status).toHaveTextContent(/Download of version 2026\.08\.26\.1 stalled/);
+    expect(status).toHaveClass("text-destructive");
+    expect(within(card).getAllByRole("button")).toHaveLength(2);
+    expect(within(card).getByRole("button", { name: /check for updates/i })).toBeEnabled();
+    const retry = within(card).getByRole("button", { name: /retry install and relaunch/i });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    expect(downloadAndInstallUpdate).toHaveBeenCalledTimes(1);
+
+    act(() => emit({ state: "available", version: "2026.08.26.1", lastFailure: "cancelled" }));
+    expect(screen.getByTestId("settings-update-status")).toHaveTextContent(
+      /Download of version 2026\.08\.26\.1 was cancelled\./,
+    );
+    expect(within(card).getByRole("button", { name: /retry install and relaunch/i })).toBeEnabled();
   });
 
   it("keeps Install and Relaunch as primary action when downloaded and relaunches on click", async () => {
