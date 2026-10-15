@@ -3301,6 +3301,7 @@ export const RemoteHostConnection: React.FC<{
    * Stop the pane's own turn. `refused` is an answer, not a reason to send a killing signal: an
    * unknown capability sends nothing and says so, and the explicit terminal keeps Ctrl-C.
    */
+  const chatStopInFlightRef = useRef(false);
   const stopChatExecution = useCallback(async () => {
     const target = chatTargetRef.current;
     const sessionId = chatSessionIdRef.current;
@@ -3315,14 +3316,23 @@ export const RemoteHostConnection: React.FC<{
       setChatWarnings((prev) => withChatWarning(prev, CHAT_STOP_REFUSED_WARNING));
       return;
     }
+    // Each request carries a fresh requestId, so the host would send a second interrupt for a
+    // second tap; in Claude Code that second Escape opens the rewind picker on the idle prompt.
+    if (chatStopInFlightRef.current) return;
+    chatStopInFlightRef.current = true;
     const payload: ReferenceStopPayload = { capability };
-    const outcome = await postChatMutation(
-      chatBaseUrlRef.current,
-      sessionId,
-      bearer,
-      "stop",
-      chatMutationBody(target, payload),
-    );
+    let outcome: Awaited<ReturnType<typeof postChatMutation>>;
+    try {
+      outcome = await postChatMutation(
+        chatBaseUrlRef.current,
+        sessionId,
+        bearer,
+        "stop",
+        chatMutationBody(target, payload),
+      );
+    } finally {
+      chatStopInFlightRef.current = false;
+    }
     if (!outcome.ok) {
       setChatWarnings((prev) => withChatWarning(prev, CHAT_STOP_FAILED_WARNING));
     }

@@ -346,9 +346,17 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   );
 
   if (isUser) {
-    // A runtime turn, or a native user turn with no prose (a compaction), was not typed by the
-    // user: its parts are drawn on their own, never inside a user bubble.
-    if (isRuntime || (hasRichParts && !hasProse && attachments.length === 0)) {
+    // A runtime turn, or a native user turn made only of parts nobody typed (a compaction, a
+    // notice, a task result), is drawn on its own, never inside a user bubble. A pasted image
+    // without prose is still the user's own message.
+    const nobodyTyped =
+      hasRichParts &&
+      !hasProse &&
+      attachments.length === 0 &&
+      visibleParts.every(
+        (part) => part.kind === "compact" || part.kind === "notice" || part.kind === "taskResult",
+      );
+    if (isRuntime || nobodyTyped) {
       return (
         <div className={cn("mb-5 flex flex-col items-start gap-1 w-full", className)}>
           {isRuntime && <span className="sr-only">Runtime message</span>}

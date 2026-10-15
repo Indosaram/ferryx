@@ -753,6 +753,21 @@ describe("native turn props as mapReferenceTurns builds them", () => {
     expect(screen.getByTestId("reference-compaction")).toHaveTextContent("S");
   });
 
+  it("ui-messages-r8-1: a user turn with only a pasted image stays the user's own bubble", () => {
+    render(
+      <MobileChatMessage
+        id="msg-image-only-user"
+        role="user"
+        content=""
+        referenceParts={[{ kind: "image", mediaType: "image/png", ref: "img-1" }]}
+      />,
+    );
+
+    const bubble = screen.getByTestId("user-message-bubble");
+    expect(bubble.childElementCount).toBeGreaterThan(0);
+    expect(screen.getByTestId("message-copy-button")).toBeInTheDocument();
+  });
+
   it("ui-messages-2: marks a runtime user turn and draws no empty user bubble", () => {
     render(
       <MobileChatMessage
