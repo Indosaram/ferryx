@@ -737,6 +737,32 @@ pub fn reference_history_turn_starts(kind: ReferenceNativeHistoryKind, bytes: &[
     starts
 }
 
+/// A position in pi's branch view as its offset in the file.
+fn pi_view_to_file(segments: &[super::history_pi::PiTranscriptSegment], view_offset: usize) -> usize {
+    let mut base = 0usize;
+    for segment in segments {
+        let len = segment.end - segment.start;
+        if view_offset < base + len {
+            return segment.start + (view_offset - base);
+        }
+        base += len;
+    }
+    segments.last().map_or(view_offset, |segment| segment.end)
+}
+
+/// A file offset as its position in pi's branch view, or `None` when the active branch no longer
+/// holds it (the entry it named was left behind by `/tree`).
+fn pi_file_to_view(segments: &[super::history_pi::PiTranscriptSegment], file_offset: usize) -> Option<usize> {
+    let mut base = 0usize;
+    for segment in segments {
+        if (segment.start..segment.end).contains(&file_offset) {
+            return Some(base + (file_offset - segment.start));
+        }
+        base += segment.end - segment.start;
+    }
+    (segments.last().map(|segment| segment.end) == Some(file_offset)).then_some(base)
+}
+
 /// The bytes of pi's projected active branch, concatenated in order.
 fn branch_bytes(bytes: &[u8], segments: &[super::history_pi::PiTranscriptSegment]) -> Vec<u8> {
     let mut branch: Vec<u8> = Vec::new();
@@ -1084,14 +1110,20 @@ pub fn reference_history_page_from_window(
     }
 
     // pi's stream is its projected active branch; every other family's stream is its own bytes.
-    let view: Vec<u8> = match stream.kind {
+    // pi's cursor offsets are file offsets, not view offsets: a view offset names a different
+    // entry once `/tree` moves the branch, so it is mapped through the segments both ways.
+    let pi_segments = match stream.kind {
         ReferenceNativeHistoryKind::Pi => match super::history_pi::pi_transcript_segments(bytes) {
-            Some(segments) => branch_bytes(bytes, &segments),
+            Some(segments) => Some(segments),
             None => {
                 return Ok(unreadable_page(stream, super::history_pi::PI_BRANCH_UNREADABLE));
             }
         },
-        _ => bytes.to_vec(),
+        _ => None,
+    };
+    let view: Vec<u8> = match &pi_segments {
+        Some(segments) => branch_bytes(bytes, segments),
+        None => bytes.to_vec(),
     };
 
     let mut starts = reference_history_turn_starts(stream.kind, &view);
@@ -1114,25 +1146,44 @@ pub fn reference_history_page_from_window(
                     ),
                 ));
             }
-            if cursor.offset > stream_length {
-                return Err(history_error(
-                    ScopeErrorCode::TargetExpired,
-                    format!(
-                        "the stream is {stream_length} bytes; the cursor names offset {}",
-                        cursor.offset
-                    ),
-                ));
+            if let Some(segments) = &pi_segments {
+                let mapped = cursor
+                    .offset
+                    .checked_sub(window_start)
+                    .and_then(|offset| pi_file_to_view(segments, offset as usize));
+                match mapped {
+                    Some(view_offset) => window_start + view_offset as u64,
+                    None => {
+                        return Err(history_error(
+                            ScopeErrorCode::TargetExpired,
+                            format!(
+                                "the cursor names offset {}, which is not on the active pi branch",
+                                cursor.offset
+                            ),
+                        ));
+                    }
+                }
+            } else {
+                if cursor.offset > stream_length {
+                    return Err(history_error(
+                        ScopeErrorCode::TargetExpired,
+                        format!(
+                            "the stream is {stream_length} bytes; the cursor names offset {}",
+                            cursor.offset
+                        ),
+                    ));
+                }
+                if cursor.offset < window_start {
+                    return Err(history_error(
+                        ScopeErrorCode::TargetExpired,
+                        format!(
+                            "the cursor names offset {}, below the readable window at {window_start}",
+                            cursor.offset
+                        ),
+                    ));
+                }
+                cursor.offset
             }
-            if cursor.offset < window_start {
-                return Err(history_error(
-                    ScopeErrorCode::TargetExpired,
-                    format!(
-                        "the cursor names offset {}, below the readable window at {window_start}",
-                        cursor.offset
-                    ),
-                ));
-            }
-            cursor.offset
         }
         None => stream_length,
     };
@@ -1197,7 +1248,11 @@ pub fn reference_history_page_from_window(
 
     let next_cursor = (start_index > 0).then(|| ReferenceHistoryCursor {
         stream_id: stream.stream_id.clone(),
-        offset: window_start + starts[start_index] as u64,
+        offset: window_start
+            + match &pi_segments {
+                Some(segments) => pi_view_to_file(segments, starts[start_index]),
+                None => starts[start_index],
+            } as u64,
     });
     // A tail window's oldest page is not the conversation's beginning: the turns before the window
     // were never read, so the page says so rather than passing its first turn off as the start.
@@ -1867,6 +1922,73 @@ mod tests {
         assert!(page.cursor.is_none());
         assert!(!page.has_more);
         assert!(page.disclosure().is_some());
+    }
+
+    fn pi_entry(id: &str, parent: &str, role: &str, text: &str) -> String {
+        let content = if role == "user" {
+            serde_json::json!(text)
+        } else {
+            serde_json::json!([{ "type": "text", "text": text }])
+        };
+        let mut line = serde_json::json!({
+            "type": "message",
+            "id": id,
+            "parentId": parent,
+            "timestamp": "2026-10-06T10:00:01.000Z",
+            "message": { "role": role, "content": content, "stopReason": "stop" },
+        })
+        .to_string();
+        line.push('\n');
+        line
+    }
+
+    #[test]
+    fn a_pi_cursor_minted_before_a_tree_is_refused_not_reanchored_onto_the_new_branch() {
+        let home = TempHome::new();
+        let mut store = String::from(
+            "{\"type\":\"session\",\"version\":\"0.87.1\",\"cwd\":\"/w\",\"timestamp\":\"2026-10-06T10:00:00.000Z\"}\n",
+        );
+        store += &pi_entry("u1", "session", "user", "one");
+        store += &pi_entry("a1", "u1", "assistant", "answer one");
+        store += &pi_entry("u2", "a1", "user", "two");
+        store += &pi_entry("a2", "u2", "assistant", "answer two");
+        store += &pi_entry("u3", "a2", "user", "three");
+        store += &pi_entry("a3", "u3", "assistant", "answer three");
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", &store);
+        let identity = bound_identity("pi", "sess-1", "aaa");
+        let stream = omo_stream(&home, &identity);
+        assert_eq!(stream.kind, ReferenceNativeHistoryKind::Pi);
+
+        let newest = reference_history_page_from_bytes(&stream, &identity, store.as_bytes(), 1, None)
+            .expect("the newest page is served");
+        let cursor = newest.cursor.expect("an older page exists");
+        // The cursor still works while the branch it was minted on is the live one.
+        let older = reference_history_page_from_bytes(&stream, &identity, store.as_bytes(), 1, Some(&cursor))
+            .expect("an unchanged branch keeps its cursor");
+        assert_eq!(first_text(&older.turns[0]), "two");
+
+        // `/tree` back to a1, then a new exchange long enough that the new branch view reaches
+        // past the old cursor's offset.
+        store += &pi_entry("u4", "a1", "user", &"four ".repeat(80));
+        store += &pi_entry("a4", "u4", "assistant", &"answer four ".repeat(80));
+        let after = reference_history_page_from_bytes(&stream, &identity, store.as_bytes(), 1, Some(&cursor));
+        match after {
+            Err(refusal) => assert_eq!(refusal.code, ScopeErrorCode::TargetExpired),
+            Ok(page) => panic!(
+                "a cursor from the abandoned branch was re-anchored onto the new one: {:?}",
+                page.turns.iter().map(first_text).collect::<Vec<_>>()
+            ),
+        }
+
+        // A cursor minted on the new branch pages it exactly.
+        let newest = reference_history_page_from_bytes(&stream, &identity, store.as_bytes(), 1, None)
+            .expect("the new branch is served");
+        assert_eq!(first_text(&newest.turns[0]), "four ".repeat(80));
+        let cursor = newest.cursor.expect("the new branch has older turns");
+        let older = reference_history_page_from_bytes(&stream, &identity, store.as_bytes(), 1, Some(&cursor))
+            .expect("the live branch's own cursor is honoured");
+        assert_eq!(first_text(&older.turns[0]), "one");
+        assert!(!older.has_more);
     }
 
     #[test]

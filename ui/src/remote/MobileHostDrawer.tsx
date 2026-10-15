@@ -166,6 +166,15 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
         <div className="flex items-center gap-2">
           {confirmDisconnect ? (
             <>
+              {/* Cancel takes the slot the arm button had and Confirm the one Sign out has: a quick
+                  second tap on Cancel lands on the harmless arm button, never on Sign out. */}
+              <button
+                type="button"
+                onClick={() => setConfirmDisconnect(false)}
+                className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                Cancel
+              </button>
               <button
                 key="confirm"
                 type="button"
@@ -178,13 +187,6 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
                 className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 Confirm disconnect
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmDisconnect(false)}
-                className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                Cancel
               </button>
             </>
           ) : (

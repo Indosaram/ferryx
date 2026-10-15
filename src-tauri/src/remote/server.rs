@@ -6334,7 +6334,10 @@ pub(crate) async fn reference_chat_submit(
             ),
         );
     }
-    let bracketed_paste = hub.is_bracketed_paste_enabled(&session_id);
+    // The mode is read inside the target's step (input.rs), not here: a message queued behind
+    // another is typed after that one's Enter may have changed it.
+    let paste_hub = Arc::clone(hub);
+    let paste_session = session_id.clone();
     let authorize = reference_chat_authorize(&state, &headers);
     let request_id = body.request_id.clone();
     // The transaction runs on its own task: a caller that disconnects drops this handler, and
@@ -6345,7 +6348,7 @@ pub(crate) async fn reference_chat_submit(
             target: &target,
             request_id: &body.request_id,
             payload: &body.params,
-            bracketed_paste,
+            bracketed_paste: &move || paste_hub.is_bracketed_paste_enabled(&paste_session),
             // The prompt guard reads the screen INSIDE the target's step (the probe below), so a
             // prompt that appears while this message waits behind earlier input is still seen.
             blocked_prompt: None,

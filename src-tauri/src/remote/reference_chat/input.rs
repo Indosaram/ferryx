@@ -461,6 +461,9 @@ impl ReferenceInputClock for SystemReferenceClock {
     }
 }
 
+const REFERENCE_SUBMIT_TOO_LARGE_MESSAGE: &str =
+    "the message is larger than one submit may carry; nothing was typed";
+
 /// One submit the route layer has authorized and wants typed.
 pub struct ReferenceSubmitRequest<'a> {
     /// The owning target: host + owner + daemon incarnation + backend session.
@@ -470,8 +473,10 @@ pub struct ReferenceSubmitRequest<'a> {
     /// The submit payload. The text is what gets shaped; attachment ids reach the agent as @path
     /// mentions inside it, never as a managed-turn attachment.
     pub payload: &'a ReferenceSubmitPayload,
-    /// The pane's OWN bracketed-paste mode, as the caller read it from the pane.
-    pub bracketed_paste: bool,
+    /// Reads the pane's OWN bracketed-paste mode. It is asked inside the target's step, right
+    /// before the first byte, so a message that waited behind another is shaped for the mode the
+    /// pane is in when it is typed, not the one it was in when the request arrived.
+    pub bracketed_paste: &'a (dyn Fn() -> bool + Send + Sync),
     /// The prompt the pane is holding, when the caller's screen read saw one. A chat message is
     /// not typed into it; the explicit terminal is how the user answers.
     pub blocked_prompt: Option<&'a str>,
@@ -546,16 +551,15 @@ impl ReferenceInputQueue {
     {
         // Validation is pure and comes first: a malformed request is malformed whatever its id, and
         // it must never be recorded as if something had been attempted.
-        let shaped = match shape_reference_submit(&request.payload.text, request.bracketed_paste) {
-            Ok(shaped) => shaped,
-            Err(code) => {
-                return ReferenceInputOutcome::not_typed(
-                    code,
-                    false,
-                    "the message is larger than one submit may carry; nothing was typed",
-                );
-            }
-        };
+        // The paste mode is read under the step (see run_submit), so only the character cap, which
+        // does not depend on it, is checked here.
+        if request.payload.text.chars().count() > REFERENCE_SUBMIT_MAX_CHARS {
+            return ReferenceInputOutcome::not_typed(
+                ScopeErrorCode::PayloadTooLarge,
+                false,
+                REFERENCE_SUBMIT_TOO_LARGE_MESSAGE,
+            );
+        }
 
         let key = submit_record_key(request.target, request.request_id);
         let fingerprint = reference_submit_fingerprint(request.payload);
@@ -583,7 +587,7 @@ impl ReferenceInputQueue {
         // nothing did.
         let dispatched = AtomicBool::new(false);
         let guard = SettleOnDrop { queue: self, key: &key, dispatched: &dispatched, armed: true };
-        let outcome = self.run_submit(request, &probe, &shaped, writer, clock, &dispatched).await;
+        let outcome = self.run_submit(request, &probe, writer, clock, &dispatched).await;
         guard.settle(&outcome);
         outcome
     }
@@ -636,7 +640,6 @@ impl ReferenceInputQueue {
         &self,
         request: &ReferenceSubmitRequest<'_>,
         probe: &P,
-        shaped: &str,
         writer: &dyn ReferenceInputWriter,
         clock: &dyn ReferenceInputClock,
         dispatched: &AtomicBool,
@@ -697,6 +700,15 @@ impl ReferenceInputQueue {
                 }
             }
         }
+
+        // Shaped here, under the step and right before the first byte: an earlier message's Enter
+        // may have moved the pane in or out of bracketed paste while this one waited.
+        let shaped = match shape_reference_submit(&request.payload.text, (request.bracketed_paste)()) {
+            Ok(shaped) => shaped,
+            Err(code) => {
+                return ReferenceInputOutcome::not_typed(code, false, REFERENCE_SUBMIT_TOO_LARGE_MESSAGE);
+            }
+        };
 
         let session_id = request.target.target.backend_session_id.as_str();
         dispatched.store(true, Ordering::SeqCst);
@@ -1010,7 +1022,7 @@ mod tests {
             target: &target,
             request_id,
             payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1046,6 +1058,63 @@ mod tests {
                 REFERENCE_SUBMIT_ENTER.to_vec(),
             ],
             "the queued message was typed into the menu"
+        );
+    }
+
+    // rs-input-screen-r11-1
+    #[tokio::test]
+    async fn a_queued_submit_is_shaped_for_the_paste_mode_the_pane_is_in_when_it_is_typed() {
+        let queue = ReferenceInputQueue::new();
+        let (writer, started, release) = RecordingWriter::gated();
+        let clock = ManualClock::at(0);
+        let target = target("sess-a");
+        let authorize = allow();
+        let first_payload = submit_payload("make test");
+        let second_payload = submit_payload("y\nn");
+        let bracketed = AtomicBool::new(true);
+        let mode = || bracketed.load(Ordering::SeqCst);
+        let request = |request_id, payload| ReferenceSubmitRequest {
+            target: &target,
+            request_id,
+            payload,
+            bracketed_paste: &mode,
+            blocked_prompt: None,
+            arrived_at_ms: 0,
+            last_typed_at_ms: None,
+            authorize: &authorize,
+        };
+        let first_request = request("r1", &first_payload);
+        let second_request = request("r2", &second_payload);
+
+        let first = queue.submit(&first_request, writer.as_ref(), &clock);
+        let second = async {
+            started.await.expect("the first paste write started");
+            // The second message arrives while the pane still has bracketed paste on.
+            let second = queue.submit(&second_request, writer.as_ref(), &clock);
+            tokio::pin!(second);
+            tokio::select! {
+                biased;
+                outcome = &mut second => panic!("the second submit ran while the first held the step: {outcome:?}"),
+                _ = tokio::task::yield_now() => {}
+            }
+            // The first message's Enter makes zle leave bracketed paste (ESC[?2004l) and run it.
+            bracketed.store(false, Ordering::SeqCst);
+            release.send(()).expect("the first paste is released");
+            second.await
+        };
+        let (first, second) = tokio::join!(first, second);
+
+        assert!(first.is_typed(), "{first:?}");
+        assert!(second.is_typed(), "{second:?}");
+        assert_eq!(
+            writer.writes(),
+            vec![
+                format!("{REFERENCE_PASTE_START}make test{REFERENCE_PASTE_END}").into_bytes(),
+                REFERENCE_SUBMIT_ENTER.to_vec(),
+                b"y\rn".to_vec(),
+                REFERENCE_SUBMIT_ENTER.to_vec(),
+            ],
+            "the queued message was shaped for a paste mode the pane had already left"
         );
     }
 
@@ -1094,7 +1163,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1137,6 +1206,10 @@ mod tests {
 
     fn stop_payload(capability: ReferenceStopCapability) -> ReferenceStopPayload {
         ReferenceStopPayload { capability }
+    }
+
+    fn paste_on() -> bool {
+        true
     }
 
     fn allow() -> impl Fn() -> Result<(), ScopeError> + Send + Sync {
@@ -1274,7 +1347,7 @@ mod tests {
             target,
             request_id,
             payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1479,7 +1552,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: Some("Would you like to run the following command?"),
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1496,7 +1569,7 @@ mod tests {
             target: &target,
             request_id: "r2",
             payload: &terminal_payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: Some("Would you like to run the following command?"),
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1520,7 +1593,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1546,7 +1619,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 1_000,
             last_typed_at_ms: Some(900),
@@ -1577,7 +1650,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1720,7 +1793,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1784,7 +1857,7 @@ mod tests {
             target: &held,
             request_id: "r1",
             payload: &held_payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1877,7 +1950,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: Some("Approve?"),
             arrived_at_ms: 0,
             last_typed_at_ms: None,

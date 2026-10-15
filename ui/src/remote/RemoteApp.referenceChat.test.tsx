@@ -1795,6 +1795,66 @@ describe("reference chat lane review fixes", () => {
     expect(screen.queryByTestId("chat-history-warning")?.textContent ?? "").not.toMatch(/not available/);
   });
 
+  it("ui-workspace-wiring-r11-1: an answer refused after a pane switch leaves the new pane's prompt card alone", async () => {
+    const answer = deferred<Response>();
+    installLane(({ url }) => {
+      if (url.includes("/prompt")) return jsonResponse(promptBody(url.includes(SECOND_SESSION_ID) ? "B" : "A", false));
+      if (url.includes("/answer")) return answer.promise;
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await screen.findByText("Question A");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("reference-prompt-option-0"));
+    });
+
+    await switchToSecondTab();
+    await screen.findByText("Question B");
+    await act(async () => {
+      answer.resolve(
+        jsonResponse(
+          { ok: false, error: { code: "INTERNAL", message: "pane A answer failed", retryable: true }, requestId: "r11" },
+          false,
+          500,
+        ),
+      );
+    });
+    await drainSettledResponses();
+
+    expect(screen.getByText("Question B")).toBeInTheDocument();
+    expect(screen.queryByText("pane A answer failed")).not.toBeInTheDocument();
+  });
+
+  it("ui-workspace-wiring-r11-1: an answer accepted after a pane switch keeps the new pane's typed answer waiting for Confirm", async () => {
+    const answer = deferred<Response>();
+    const menuB = { ...promptBody("B", false), prompt: { ...(promptBody("B", false).prompt as object), kind: "menu" } };
+    installLane(({ url }) => {
+      if (url.includes("/prompt")) return jsonResponse(url.includes(SECOND_SESSION_ID) ? menuB : promptBody("A", false));
+      if (url.includes("/answer")) return answer.promise;
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await screen.findByText("Question A");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("reference-prompt-option-0"));
+    });
+
+    await switchToSecondTab();
+    await screen.findByText("Question B");
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "1" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await screen.findByTestId("reference-prompt-confirm");
+    await act(async () => {
+      answer.resolve(jsonResponse({ ok: true, data: {}, requestId: "r11" }));
+    });
+    await drainSettledResponses();
+
+    expect(screen.getByText("Question B")).toBeInTheDocument();
+    expect(screen.getByTestId("reference-prompt-confirm")).toBeInTheDocument();
+  });
+
   it("ui-workspace-wiring-r5-1: a pane switch that releases staged files also drops their mentions from the pane's draft", async () => {
     installLane(({ url, method }) =>
       url.includes("/files") && method === "GET" ? jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" }) : undefined,
