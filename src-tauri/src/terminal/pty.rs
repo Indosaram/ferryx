@@ -315,6 +315,11 @@ impl PtyManager {
         self
     }
 
+    /// Whether the daemon-held agent integration setting is currently on.
+    pub fn agent_integration_enabled(&self) -> bool {
+        self.agent_integration.enabled()
+    }
+
     pub fn set_output_hub(&self, hub: Arc<TerminalOutputHub>) {
         *self.output_hub.write() = Some(hub);
     }

@@ -1666,6 +1666,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::ssh::cmd_ssh_set_password,
         ipc::ssh::cmd_ssh_clear_password,
         ipc::ssh::cmd_ssh_prepare_integration,
+        ipc::ssh::cmd_ssh_remove_integration,
         ipc::ssh::cmd_ssh_install_project_helper,
         ipc::ssh::cmd_ssh_provision_helper,
         ipc::ssh::cmd_ssh_helper_update_state,
