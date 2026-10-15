@@ -308,7 +308,7 @@ pub fn reference_stop_fingerprint(payload: &ReferenceStopPayload) -> String {
     reference_fingerprint(&[b"ferryx.reference-chat.stop.v1", capability.as_bytes()])
 }
 
-fn reference_fingerprint(parts: &[&[u8]]) -> String {
+pub(super) fn reference_fingerprint(parts: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     // Every part is length-prefixed, so "ab" and "a"+"b" cannot collide.
     for part in parts {
@@ -586,7 +586,7 @@ impl ReferenceInputQueue {
         // forever: the guard settles it as unknown once a write went out, or frees the id when
         // nothing did.
         let dispatched = AtomicBool::new(false);
-        let guard = SettleOnDrop { queue: self, key: &key, dispatched: &dispatched, armed: true };
+        let guard = SettleOnDrop::new(&self.records, &key, &dispatched);
         let outcome = self.run_submit(request, &probe, writer, clock, &dispatched).await;
         guard.settle(&outcome);
         outcome
@@ -630,7 +630,7 @@ impl ReferenceInputQueue {
         }
 
         let dispatched = AtomicBool::new(false);
-        let guard = SettleOnDrop { queue: self, key: &key, dispatched: &dispatched, armed: true };
+        let guard = SettleOnDrop::new(&self.records, &key, &dispatched);
         let outcome = self.run_stop(request, keys, writer, &dispatched).await;
         guard.settle(&outcome);
         outcome
@@ -809,24 +809,28 @@ impl ReferenceInputQueue {
     fn claim(&self, key: &str, fingerprint: &str) -> Claim {
         self.records.lock().claim(key, fingerprint)
     }
-
-    fn settle(&self, key: &str, outcome: &ReferenceInputOutcome) {
-        self.records.lock().settle(key, outcome);
-    }
 }
 
 /// Settles one claimed request record even when its transaction future is dropped.
-struct SettleOnDrop<'a> {
-    queue: &'a ReferenceInputQueue,
+pub(super) struct SettleOnDrop<'a> {
+    records: &'a parking_lot::Mutex<ReferenceInputRecords>,
     key: &'a str,
     dispatched: &'a AtomicBool,
     armed: bool,
 }
 
-impl SettleOnDrop<'_> {
-    fn settle(mut self, outcome: &ReferenceInputOutcome) {
+impl<'a> SettleOnDrop<'a> {
+    pub(super) fn new(
+        records: &'a parking_lot::Mutex<ReferenceInputRecords>,
+        key: &'a str,
+        dispatched: &'a AtomicBool,
+    ) -> Self {
+        Self { records, key, dispatched, armed: true }
+    }
+
+    pub(super) fn settle(mut self, outcome: &ReferenceInputOutcome) {
         self.armed = false;
-        self.queue.settle(self.key, outcome);
+        self.records.lock().settle(self.key, outcome);
     }
 }
 
@@ -844,18 +848,19 @@ impl Drop for SettleOnDrop<'_> {
                 "the request was abandoned before anything was typed",
             )
         };
-        self.queue.settle(self.key, &outcome);
+        self.records.lock().settle(self.key, &outcome);
     }
 }
 
+/// The bounded per-request records submit, Stop and prompt answers dedupe their request ids by.
 #[derive(Debug, Default)]
-struct ReferenceInputRecords {
+pub(super) struct ReferenceInputRecords {
     entries: HashMap<String, ReferenceInputRecord>,
     order: VecDeque<String>,
 }
 
 impl ReferenceInputRecords {
-    fn claim(&mut self, key: &str, fingerprint: &str) -> Claim {
+    pub(super) fn claim(&mut self, key: &str, fingerprint: &str) -> Claim {
         match self.entries.get(key) {
             Some(record) if record.fingerprint != fingerprint => Claim::Conflict,
             Some(record) => match &record.settled {
@@ -920,13 +925,13 @@ struct ReferenceInputRecord {
 }
 
 #[derive(Debug, Clone)]
-enum ReferenceInputRecordState {
+pub(super) enum ReferenceInputRecordState {
     Accepted(DeliveryReceipt),
     Unknown(String),
 }
 
 impl ReferenceInputRecordState {
-    fn into_outcome(self) -> ReferenceInputOutcome {
+    pub(super) fn into_outcome(self) -> ReferenceInputOutcome {
         match self {
             Self::Accepted(receipt) => ReferenceInputOutcome::Accepted { receipt },
             Self::Unknown(message) => ReferenceInputOutcome::outcome_unknown(message),
@@ -934,7 +939,7 @@ impl ReferenceInputRecordState {
     }
 }
 
-enum Claim {
+pub(super) enum Claim {
     Fresh,
     Duplicate(ReferenceInputRecordState),
     InFlight,
@@ -959,6 +964,11 @@ fn submit_record_key(target: &ReferenceTargetRef, request_id: &str) -> String {
 /// The record key for a STOP's dedupe/conflict rule.
 fn stop_record_key(target: &ReferenceTargetRef, request_id: &str) -> String {
     format!("stop\u{1f}{}", record_key(target, request_id))
+}
+
+/// The record key for a prompt ANSWER's dedupe/conflict rule.
+pub(super) fn answer_record_key(target: &ReferenceTargetRef, request_id: &str) -> String {
+    format!("answer\u{1f}{}", record_key(target, request_id))
 }
 
 #[cfg(test)]

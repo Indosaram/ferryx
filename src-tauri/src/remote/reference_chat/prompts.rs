@@ -66,6 +66,7 @@
 //! bytes: an integrator verifying against a live herdr should confirm those four.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
 
 use futures_util::future::BoxFuture;
@@ -74,8 +75,10 @@ use regex::Regex;
 use crate::scoped_contracts::{DeliveryReceipt, DeliveryStage, ScopeError, ScopeErrorCode};
 
 use super::input::{
-    ReferenceInputClock, ReferenceInputOutcome, ReferenceInputQueue, ReferenceInputWriter,
-    REFERENCE_CALLER_GONE_MESSAGE,
+    answer_record_key, reference_fingerprint, Claim, ReferenceInputClock, ReferenceInputOutcome,
+    ReferenceInputQueue, ReferenceInputRecords, ReferenceInputWriter, SettleOnDrop,
+    REFERENCE_CALLER_GONE_MESSAGE, REFERENCE_REQUEST_CONFLICT_MESSAGE,
+    REFERENCE_REQUEST_IN_FLIGHT_MESSAGE,
 };
 use super::prompt_claude::{parse_claude_prompt, plan_claude_answer, ClaudePrompt};
 use super::prompt_codex::{
@@ -684,6 +687,8 @@ impl ReferenceAnswerLedger {
 #[derive(Debug, Default)]
 pub struct ReferencePromptAnswers {
     ledger: Mutex<ReferenceAnswerLedger>,
+    /// The per-request records an answer's request id is deduped by, bounded like submit's.
+    records: parking_lot::Mutex<ReferenceInputRecords>,
 }
 
 impl ReferencePromptAnswers {
@@ -723,10 +728,50 @@ impl ReferencePromptAnswers {
             );
         }
         let target = request.target;
-        let work: Box<dyn FnOnce() -> ReferenceAnswerFuture<'r> + Send + 'r> = Box::new(move || {
+        // The request id is deduped like submit's and Stop's: an identical retry of an answer that
+        // was delivered returns its recorded receipt (the card's single-use ledger would refuse it),
+        // and the same id with another answer is a conflict.
+        let key = answer_record_key(target, request.request_id);
+        let fingerprint = reference_answer_fingerprint(request.payload);
+        let claim = self.records.lock().claim(&key, &fingerprint);
+        match claim {
+            Claim::Fresh => {}
+            Claim::Duplicate(state) => return state.into_outcome(),
+            Claim::InFlight => {
+                return refused(
+                    ScopeErrorCode::RequestConflict,
+                    false,
+                    REFERENCE_REQUEST_IN_FLIGHT_MESSAGE,
+                );
+            }
+            Claim::Conflict => {
+                return refused(
+                    ScopeErrorCode::RequestConflict,
+                    false,
+                    REFERENCE_REQUEST_CONFLICT_MESSAGE,
+                );
+            }
+        }
+        let dispatched = AtomicBool::new(false);
+        let guard = SettleOnDrop::new(&self.records, &key, &dispatched);
+        let tracked = DispatchTrackingWriter { inner: writer, dispatched: &dispatched };
+        let outcome = self.answer_in_step(request, step, screen, &tracked, clock).await;
+        guard.settle(&outcome);
+        outcome
+    }
+
+    fn answer_in_step<'a>(
+        &'a self,
+        request: &'a ReferenceAnswerRequest<'a>,
+        step: &'a dyn ReferencePaneStep,
+        screen: &'a dyn ReferenceAnswerScreenReader,
+        writer: &'a dyn ReferenceInputWriter,
+        clock: &'a dyn ReferenceInputClock,
+    ) -> ReferenceAnswerFuture<'a> {
+        let work: Box<dyn FnOnce() -> ReferenceAnswerFuture<'a> + Send + 'a> = Box::new(move || {
             Box::pin(async move { self.answer_under_step(request, screen, writer, clock).await })
         });
-        step.run(target, work).await
+        step.run(request.target, work)
     }
 
     async fn answer_under_step(
@@ -998,6 +1043,47 @@ async fn wait_for_open_form(
             }
         }
         clock.sleep_ms(REFERENCE_PROMPT_OPEN_POLL_MS).await;
+    }
+}
+
+/// The fingerprint an answer's request-id dedupe compares: the card, the screen it was rendered
+/// from and the answer, so a retry that changed any of them is a conflict.
+fn reference_answer_fingerprint(payload: &ReferencePromptAnswerPayload) -> String {
+    let answer = &payload.answer;
+    let option_index = answer.option_index.map(|index| index.to_string()).unwrap_or_default();
+    let option_indices = answer
+        .option_indices
+        .as_ref()
+        .map(|indices| indices.iter().map(u32::to_string).collect::<Vec<_>>().join(","))
+        .unwrap_or_default();
+    let shape = format!(
+        "{}{}{}",
+        u8::from(answer.option_index.is_some()),
+        u8::from(answer.option_indices.is_some()),
+        u8::from(answer.custom_text.is_some())
+    );
+    reference_fingerprint(&[
+        b"ferryx.reference-chat.answer.v1",
+        payload.prompt_id.as_bytes(),
+        payload.screen_revision.as_bytes(),
+        shape.as_bytes(),
+        option_index.as_bytes(),
+        option_indices.as_bytes(),
+        answer.custom_text.as_deref().unwrap_or_default().as_bytes(),
+    ])
+}
+
+/// Marks the answer's record as dispatched the moment any key is handed to the pane, so a dropped
+/// answer settles as unknown after a write and frees its id before one.
+struct DispatchTrackingWriter<'a> {
+    inner: &'a dyn ReferenceInputWriter,
+    dispatched: &'a AtomicBool,
+}
+
+impl ReferenceInputWriter for DispatchTrackingWriter<'_> {
+    fn write<'a>(&'a self, session_id: &'a str, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+        self.dispatched.store(true, AtomicOrdering::SeqCst);
+        self.inner.write(session_id, data)
     }
 }
 
@@ -1837,10 +1923,10 @@ mod tests {
         let payload = payload(&prompt.id, REVISION, option(1));
 
         let mut answered_bytes = 0;
-        for attempt in 0..2 {
+        for (attempt, request_id) in ["req-1", "req-2"].into_iter().enumerate() {
             let request = ReferenceAnswerRequest {
                 target: &target,
-                request_id: "req-1",
+                request_id,
                 agent: &prompt.agent,
                 payload: &payload,
                 session: ReferencePromptSession::default(),
@@ -1862,6 +1948,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    // rs-input-screen-r14-1
+    #[tokio::test]
+    async fn an_identical_retry_of_a_delivered_answer_returns_its_receipt_and_types_nothing() {
+        let prompt = detect_reference_prompt("claude", CLAUDE_QUESTION).expect("a claude card");
+        let target = target("sess-retry");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader = ScriptedScreen::one(CLAUDE_QUESTION);
+        let answers = ReferencePromptAnswers::new();
+        let payload = payload(&prompt.id, REVISION, option(1));
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-retry",
+            agent: &prompt.agent,
+            payload: &payload,
+            session: ReferencePromptSession::default(),
+            authorize: &allow(),
+            alive: &alive(),
+        };
+
+        let first = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        let ReferenceInputOutcome::Accepted { receipt: first_receipt } = &first else {
+            panic!("the first answer is delivered: {first:?}");
+        };
+        let delivered = writer.log().len();
+
+        // The response was lost and the client retries the identical request.
+        let retry = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        match &retry {
+            ReferenceInputOutcome::Accepted { receipt } => assert_eq!(receipt, first_receipt),
+            other => panic!("an identical retry of a delivered answer returns its receipt: {other:?}"),
+        }
+        assert_eq!(writer.log().len(), delivered, "the retry typed nothing again");
+    }
+
+    // rs-input-screen-r14-1
+    #[tokio::test]
+    async fn a_reused_answer_request_id_with_another_payload_is_a_conflict() {
+        let prompt = detect_reference_prompt("claude", CLAUDE_QUESTION).expect("a claude card");
+        let target = target("sess-reuse");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader = ScriptedScreen::one(CLAUDE_QUESTION);
+        let answers = ReferencePromptAnswers::new();
+        let first_payload = payload(&prompt.id, REVISION, option(1));
+        let other_payload = payload(&prompt.id, REVISION, option(2));
+        let authorize = allow();
+        let alive = alive();
+        let request = |payload| ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-reuse",
+            agent: &prompt.agent,
+            payload,
+            session: ReferencePromptSession::default(),
+            authorize: &authorize,
+            alive: &alive,
+        };
+
+        let first_request = request(&first_payload);
+        let first = answer_once(&answers, &first_request, &step, &reader, &writer, &clock).await;
+        assert!(first.is_typed(), "{first:?}");
+        let delivered = writer.log().len();
+
+        let other_request = request(&other_payload);
+        let other = answer_once(&answers, &other_request, &step, &reader, &writer, &clock).await;
+        assert_not_typed(&other, ScopeErrorCode::RequestConflict);
+        assert_eq!(other.wire_message(), Some(REFERENCE_REQUEST_CONFLICT_MESSAGE));
+        assert_eq!(writer.log().len(), delivered, "the conflicting reuse typed nothing");
     }
 
     #[tokio::test]
