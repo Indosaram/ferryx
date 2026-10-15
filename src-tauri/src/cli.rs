@@ -13,6 +13,8 @@ use crate::ipc::browser_cli::{send_browser_cli_request, BrowserCliRequest, Brows
 pub enum LaunchMode {
     Gui,
     Daemon,
+    /// `--daemon-supervisor`: the Windows watchdog the per-user scheduled task runs.
+    DaemonSupervisor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2829,11 +2831,50 @@ where
     T: AsRef<str>,
 {
     for arg in args {
+        if arg.as_ref() == crate::daemon::supervisor_windows::SUPERVISOR_ARG {
+            return LaunchMode::DaemonSupervisor;
+        }
         if arg.as_ref() == "--daemon" {
             return LaunchMode::Daemon;
         }
     }
     LaunchMode::Gui
+}
+
+/// Runs the `--daemon-supervisor` watchdog and returns its exit code.
+///
+/// `args` is the full command line. The task forwards the isolation variables as `--env KEY=VALUE`
+/// because a scheduled task has no environment block; they are applied here, while the process is
+/// still single-threaded, so the watchdog and every daemon it spawns use the same runtime dir.
+pub fn run_daemon_supervisor(args: &[String]) -> i32 {
+    let forwarded = match crate::daemon::supervisor_windows::parse_supervisor_args(
+        args.get(1..).unwrap_or_default(),
+    ) {
+        Some(Ok(forwarded)) => forwarded,
+        Some(Err(error)) => {
+            eprintln!("Ferryx daemon supervisor error: {error}");
+            return 2;
+        }
+        None => {
+            eprintln!(
+                "Ferryx daemon supervisor error: {} must be the first argument",
+                crate::daemon::supervisor_windows::SUPERVISOR_ARG
+            );
+            return 2;
+        }
+    };
+    for (key, value) in forwarded {
+        std::env::set_var(key, value);
+    }
+    #[cfg(windows)]
+    {
+        crate::daemon::supervisor_windows::run_watchdog()
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!("Ferryx daemon supervisor error: the watchdog only runs on Windows");
+        2
+    }
 }
 
 /// Parses `--handover-from <path>`.
@@ -3332,6 +3373,14 @@ mod tests {
             "--other".to_string(),
         ];
         assert_eq!(parse_launch_mode(&args), LaunchMode::Gui);
+    }
+
+    #[test]
+    fn test_parse_launch_mode_detects_daemon_supervisor_flag() {
+        let args = vec!["ferryx".to_string(), "--daemon-supervisor".to_string()];
+        assert_eq!(parse_launch_mode(&args), LaunchMode::DaemonSupervisor);
+        let malformed = vec!["ferryx".to_string(), "--daemon-supervisor".to_string(), "--bogus".to_string()];
+        assert_eq!(run_daemon_supervisor(&malformed), 2);
     }
 
     #[test]
