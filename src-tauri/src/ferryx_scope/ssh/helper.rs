@@ -289,7 +289,10 @@ impl Runtime {
                     return Err("FORBIDDEN".into());
                 }
                 let destination = base.join(format!("wt-{slug}"));
-                let output = std::process::Command::new("git")
+                let mut command = std::process::Command::new("git");
+                #[cfg(windows)]
+                std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
+                let output = command
                     .arg("-C")
                     .arg(repo)
                     .args(["worktree", "add", "-b", &format!("orca/{slug}"), "--"])

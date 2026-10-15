@@ -355,7 +355,7 @@ fn spawn_child_with_stdout(
     stdin: Stdio,
     stdout: Stdio,
 ) -> Result<tokio::process::Child, IpcError> {
-    tokio::process::Command::new(&plan.program)
+    crate::util::no_window_tokio_command(&plan.program)
         .args(&plan.args)
         .envs(super::password::environment(&plan.args)?)
         .stdin(stdin)
