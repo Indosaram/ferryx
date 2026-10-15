@@ -22,7 +22,7 @@
 //! manager without colliding with the user's own unit.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -81,6 +81,87 @@ pub fn supported() -> bool {
     supported_in(&process_env, crate::daemon::server::is_dev_runtime()) && backend::available()
 }
 
+/// Name of the marker file that records the user's "do not autostart the daemon" choice.
+const OPTOUT_FILE_NAME: &str = "daemon-supervisor.optout";
+
+/// The opt-out marker inside a given data directory (test seam).
+fn optout_path_in(dir: &Path) -> PathBuf {
+    dir.join(OPTOUT_FILE_NAME)
+}
+
+/// Where the opt-out marker lives. It must survive restarts, so it sits in the same canonical
+/// `<data>/remote` directory as the agent-integration setting: `FERRYX_DATA_DIR` relocates it, and
+/// the cross-platform resolver falls back to the per-user data dir on every target.
+fn optout_path() -> Option<PathBuf> {
+    crate::remote::auth::resolve_canonical_remote_dir(|key| std::env::var_os(key))
+        .map(|dir| optout_path_in(&dir))
+}
+
+fn user_opted_out_at(path: &Path) -> bool {
+    path.exists()
+}
+
+fn set_user_opt_out_at(path: &Path, on: bool) -> Result<()> {
+    if on {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create the data directory: {e}"))?;
+        }
+        std::fs::write(path, b"").map_err(|e| format!("Failed to write the opt-out marker: {e}"))
+    } else {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("Failed to remove the opt-out marker: {e}")),
+        }
+    }
+}
+
+/// Whether the user turned daemon autostart off; [`ensure`] then never (re)installs the unit.
+pub fn user_opted_out() -> bool {
+    optout_path().is_some_and(|path| user_opted_out_at(&path))
+}
+
+/// Records (or clears) the user's autostart opt-out so it survives app and daemon restarts.
+pub fn set_user_opt_out(on: bool) -> Result<()> {
+    let path = optout_path().ok_or("Cannot determine the Ferryx data directory")?;
+    set_user_opt_out_at(&path, on)
+}
+
+/// Whether the supervisor unit/task is currently installed for this user.
+pub fn installed() -> bool {
+    supported() && backend::installed(&process_env)
+}
+
+/// Removes the autostart unit without stopping the running daemon (its PTYs stay alive); the
+/// daemon simply is not started again at the next login. A missing unit is success.
+pub fn remove_autostart() -> Result<()> {
+    if !supported() {
+        return Ok(());
+    }
+    backend::remove_autostart(&process_env)
+}
+
+/// `systemctl` arguments that drop the unit from login autostart. Never `--now` or `stop`: the
+/// running daemon owns every PTY and must keep running.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn linux_remove_autostart_args(unit: &str) -> Vec<&str> {
+    vec!["--user", "disable", unit]
+}
+
+/// [`ensure_in`] behind the user's opt-out: an opted-out user never gets the unit back.
+fn ensure_unless_opted_out(
+    opted_out: bool,
+    env: Env<'_>,
+    dev_runtime: bool,
+    executable: &Path,
+) -> Result<bool> {
+    if opted_out {
+        return Ok(false);
+    }
+    ensure_in(env, dev_runtime, executable)
+}
+
 fn ensure_in(env: Env<'_>, dev_runtime: bool, executable: &Path) -> Result<bool> {
     if !supported_in(env, dev_runtime) {
         return Ok(false);
@@ -91,13 +172,16 @@ fn ensure_in(env: Env<'_>, dev_runtime: bool, executable: &Path) -> Result<bool>
 /// Makes the supervisor own the daemon: removes a stale unit whose executable no longer exists,
 /// writes the unit when it changed, and (re)loads it when needed. Returns `true` when it
 /// (re)installed or reloaded the unit, `false` when nothing changed or the runtime is unsupported.
+/// A user who turned autostart off ([`user_opted_out`]) is a no-op that returns `false`.
 pub fn ensure() -> Result<bool> {
-    if !supported() {
+    let opted_out = user_opted_out();
+    if opted_out || !supported() {
         return Ok(false);
     }
     let executable =
         std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
-    ensure_in(
+    ensure_unless_opted_out(
+        opted_out,
         &process_env,
         crate::daemon::server::is_dev_runtime(),
         &executable,
@@ -253,6 +337,20 @@ mod backend {
     pub fn uninstall(env: Env<'_>) -> Result<()> {
         launchd::uninstall_launchd_agent_from_path(&plist_path(env, &label(env))?)
     }
+
+    pub fn installed(env: Env<'_>) -> bool {
+        plist_path(env, &label(env)).is_ok_and(|path| path.exists())
+    }
+
+    /// Deletes the plist only. No `launchctl unload`/`bootout`: that would stop the running daemon.
+    pub fn remove_autostart(env: Env<'_>) -> Result<()> {
+        let path = plist_path(env, &label(env))?;
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("Failed to remove the LaunchAgent plist: {e}")),
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -283,6 +381,30 @@ mod backend {
 
     pub fn uninstall(env: Env<'_>) -> Result<()> {
         task::uninstall(env)
+    }
+
+    fn schtasks(args: &[&str]) -> Result<bool> {
+        crate::util::no_window_command("schtasks")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .map_err(|e| format!("Failed to run schtasks: {e}"))
+    }
+
+    pub fn installed(env: Env<'_>) -> bool {
+        schtasks(&["/Query", "/TN", &task::task_name(env)]).unwrap_or(false)
+    }
+
+    /// Deletes the task definition only (no `/End`), so the running watchdog and daemon stay up.
+    pub fn remove_autostart(env: Env<'_>) -> Result<()> {
+        let name = task::task_name(env);
+        if schtasks(&["/Query", "/TN", &name])? && !schtasks(&["/Delete", "/TN", &name, "/F"])? {
+            return Err(format!("schtasks /Delete failed for task {name}"));
+        }
+        Ok(())
     }
 }
 
@@ -330,6 +452,40 @@ mod backend {
         let (name, path) = unit(env)?;
         supervisor_linux::uninstall(&name, &path)
     }
+
+    pub fn installed(env: Env<'_>) -> bool {
+        unit(env).is_ok_and(|(_, path)| path.exists())
+    }
+
+    fn systemctl(args: &[&str]) -> Result<bool> {
+        std::process::Command::new("systemctl")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .map_err(|e| format!("Failed to run systemctl: {e}"))
+    }
+
+    /// Disables the unit (no `--now`, so the running daemon keeps its PTYs), deletes the unit file,
+    /// then reloads the user manager. Disable runs first because systemd cannot resolve the unit's
+    /// install links once its file is gone.
+    pub fn remove_autostart(env: Env<'_>) -> Result<()> {
+        let (name, path) = unit(env)?;
+        if !systemctl(&super::linux_remove_autostart_args(&name))? {
+            tracing::warn!(unit = %name, "systemctl --user disable failed; removing the unit file anyway");
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Failed to remove the systemd user unit: {e}")),
+        }
+        if !systemctl(&["--user", "daemon-reload"])? {
+            return Err("systemctl --user daemon-reload failed".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// Other targets never get a backend: callers fall back to the detached spawn.
@@ -357,6 +513,14 @@ mod backend {
     }
 
     pub fn uninstall(_env: Env<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn installed(_env: Env<'_>) -> bool {
+        false
+    }
+
+    pub fn remove_autostart(_env: Env<'_>) -> Result<()> {
         Ok(())
     }
 }
@@ -424,6 +588,50 @@ mod tests {
             0,
             "an isolated runtime must not create any unit or log file"
         );
+    }
+
+    #[test]
+    fn ensure_is_noop_when_user_opted_out() {
+        let home = tempfile::tempdir().unwrap();
+        // The QA name override makes the backend supported, so only the opt-out stops the install.
+        let env = env_of(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", home.path().join("config").to_str().unwrap()),
+            ("LOCALAPPDATA", home.path().join("local").to_str().unwrap()),
+            (SUPERVISOR_NAME_ENV, "com.ferryx.optout-test"),
+        ]);
+        assert_eq!(
+            ensure_unless_opted_out(true, &env, false, Path::new("/opt/ferryx/bin/ferryx")),
+            Ok(false)
+        );
+        assert_eq!(
+            std::fs::read_dir(home.path()).unwrap().count(),
+            0,
+            "an opted-out user must not get any unit or log file"
+        );
+
+        let data = tempfile::tempdir().unwrap();
+        let marker = optout_path_in(data.path());
+        assert!(!user_opted_out_at(&marker));
+        set_user_opt_out_at(&marker, true).unwrap();
+        assert!(user_opted_out_at(&marker), "the opt-out persists as a file");
+        set_user_opt_out_at(&marker, false).unwrap();
+        assert!(!user_opted_out_at(&marker));
+        assert_eq!(
+            set_user_opt_out_at(&marker, false),
+            Ok(()),
+            "clearing a missing opt-out is success"
+        );
+    }
+
+    #[test]
+    fn remove_autostart_never_stops_running_daemon() {
+        let args = linux_remove_autostart_args("ferryx-daemon.service");
+        assert!(args.contains(&"disable"));
+        assert!(args.contains(&"--user"));
+        assert!(!args.contains(&"--now"), "--now would stop the running daemon");
+        assert!(!args.contains(&"stop"));
+        assert_eq!(args.last(), Some(&"ferryx-daemon.service"));
     }
 
     /// The facade must hand launchd exactly the plist the launchd module renders, and point the

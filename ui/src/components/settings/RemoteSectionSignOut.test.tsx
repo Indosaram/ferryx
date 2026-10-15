@@ -28,6 +28,9 @@ describe("RemoteSection Sign-out & Auth Error Handling", () => {
     localStorage.clear();
     sessionStorage.clear();
     vi.restoreAllMocks();
+    invokeMock.mockImplementation(async (command: string) =>
+      command === "cmd_agent_integration_get" ? { enabled: true } : undefined,
+    );
   });
 
   afterEach(() => {

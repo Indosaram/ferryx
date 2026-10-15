@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetSshHostsCache, updateSshHost, type SshHost, type SshTargetSummary } from "../../lib/sshHosts";
@@ -75,7 +75,7 @@ describe("SshSection Settings Component", () => {
 
   afterEach(cleanup);
 
-  it("toggle off persists via IPC and hides Prepare", async () => {
+  it("hides Prepare while integration is off", async () => {
     getAgentIntegrationMock.mockResolvedValue({ enabled: false });
     const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
     invokeMock.mockImplementation(async (command: string) => {
@@ -105,6 +105,14 @@ describe("SshSection Settings Component", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Test connection to Bastion Box" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Remove agent integration on Bastion Box" })); });
+    const cancelDialog = screen.getByRole("dialog", { name: "Remove agent integration from Bastion Box?" });
+    await act(async () => { fireEvent.click(within(cancelDialog).getByRole("button", { name: "Cancel" })); });
+    expect(screen.queryByRole("dialog", { name: "Remove agent integration from Bastion Box?" })).not.toBeInTheDocument();
+    expect(removeSshIntegrationMock).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Remove agent integration on Bastion Box" })); });
+    expect(removeSshIntegrationMock).not.toHaveBeenCalled();
+    const confirmDialog = screen.getByRole("dialog", { name: "Remove agent integration from Bastion Box?" });
+    await act(async () => { fireEvent.click(within(confirmDialog).getByRole("button", { name: "Remove" })); });
     expect(removeSshIntegrationMock).toHaveBeenCalledTimes(1);
     expect(removeSshIntegrationMock).toHaveBeenCalledWith("host-2");
     expect(screen.getByTestId("ssh-integration-removed-host-2")).toHaveTextContent("Removed 2, kept 1 modified");

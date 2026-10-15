@@ -223,6 +223,21 @@ describe("AgentsSection", () => {
     expect(screen.getByText("No custom agents registered yet.")).toBeInTheDocument();
   });
 
+  it("toggle off persists via IPC and hides Prepare", async () => {
+    native.getAgentIntegration.mockResolvedValue({ enabled: true });
+
+    render(<AgentsSection />);
+
+    const toggle = await screen.findByRole("switch", { name: "Agent state integration" });
+    await waitFor(() => expect(toggle).toBeChecked());
+
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(native.setAgentIntegration).toHaveBeenCalledWith(false));
+    // Turning the integration off must never remove installed files.
+    expect(native.removeLocalAgentIntegration).not.toHaveBeenCalled();
+  });
+
   it("older daemon shows takes-effect-after-restart note", async () => {
     native.setAgentIntegration.mockRejectedValue({
       code: "DAEMON_UPGRADE_REQUIRED",

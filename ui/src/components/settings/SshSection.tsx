@@ -39,6 +39,7 @@ import {
 } from "../../lib/sshHosts";
 import { getAgentIntegration } from "../../lib/tauri";
 import { safeRandomUUID } from "../../lib/uuid";
+import { useModalDialog } from "../useModalDialog";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -96,6 +97,64 @@ function sameConnection(left: SshHost, right: SshHost): boolean {
     left.authMethod === right.authMethod && left.disabled === right.disabled;
 }
 
+function RemoveSshIntegrationDialog({
+  hostLabel,
+  onCancel,
+  onConfirm,
+}: {
+  hostLabel: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { dialogRef } = useModalDialog({ onEscape: onCancel });
+  const title = `Remove agent integration from ${hostLabel}?`;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        event.stopPropagation();
+        onCancel();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-label={title}
+        aria-modal="true"
+        className="w-full max-w-md animate-enter overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center gap-2 border-b border-border px-4 py-3 text-sm font-semibold text-foreground">
+          <Trash2 className="size-4 text-destructive" />
+          {title}
+        </header>
+        <div className="space-y-4 p-4 text-xs">
+          <p className="text-muted-foreground">
+            Ferryx will remove the agent state hooks it installed on this host. Files you
+            modified after installation are kept.
+          </p>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="rounded-md px-3 py-2 text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onConfirm}
+              className="rounded-md bg-destructive px-3 py-2 font-semibold text-destructive-foreground"
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export type SshSectionProps = {
   onOpenProject?: (hostId: string) => void;
   searchQuery?: string;
@@ -135,6 +194,7 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
   const [testResults, setTestResults] = useState<Record<string, TestState>>({});
   const [preparedHosts, setPreparedHosts] = useState<Record<string, boolean>>({});
   const [removalResults, setRemovalResults] = useState<Record<string, string>>({});
+  const [pendingRemoveHost, setPendingRemoveHost] = useState<SshHost | null>(null);
   const [agentIntegrationEnabled, setAgentIntegrationEnabled] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -1173,7 +1233,7 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
                           variant="ghost"
                           size="sm"
                           disabled={isBusy || test.testing || !!host.disabled || isFormOpen}
-                          onClick={() => handleRemoveIntegration(host)}
+                          onClick={() => setPendingRemoveHost(host)}
                           aria-label={`Remove agent integration on ${host.label}`}
                         >
                           Remove integration
@@ -1269,6 +1329,17 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
           </div>
         )}
       </SettingsGroup>
+      {pendingRemoveHost ? (
+        <RemoveSshIntegrationDialog
+          hostLabel={pendingRemoveHost.label}
+          onCancel={() => setPendingRemoveHost(null)}
+          onConfirm={() => {
+            const host = pendingRemoveHost;
+            setPendingRemoveHost(null);
+            void handleRemoveIntegration(host);
+          }}
+        />
+      ) : null}
     </section>
   );
 }
