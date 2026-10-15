@@ -225,7 +225,10 @@ pub async fn cmd_terminal_set_appearance<R: Runtime>(
 ) -> Result<TerminalPreferences, IpcError> {
     let (changed, effective) = push_terminal_appearance(appearance).await?;
     if changed {
-        rerender_native_sessions(&app, daemon_client.inner(), state.inner()).await?;
+        let rerendered = rerender_native_sessions(&app, daemon_client.inner(), state.inner()).await;
+        // After the theme is re-applied, so an OSC 11 query answering the report sees new colors.
+        state.report_color_scheme_to_sessions(appearance);
+        rerendered?;
         #[cfg(target_os = "macos")]
         refresh_window_background(&app)?;
     }

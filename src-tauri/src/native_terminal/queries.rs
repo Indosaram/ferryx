@@ -8,12 +8,14 @@ use super::cursor::CursorState;
 use super::error::NativeTerminalError;
 use super::sys::ffi::ghostty_terminal_get;
 use super::sys::types::{
-    GhosttyColorRgb, GhosttyString, GhosttyTerminalImpl, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN,
-    GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND, GHOSTTY_TERMINAL_DATA_COLOR_CURSOR,
+    GhosttyColorRgb, GhosttyString, GhosttyTerminalImpl, GhosttyTerminalModeConfig,
+    GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND,
+    GHOSTTY_TERMINAL_DATA_COLOR_CURSOR,
     GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND, GHOSTTY_TERMINAL_DATA_COLOR_PALETTE,
     GHOSTTY_TERMINAL_DATA_COLS, GHOSTTY_TERMINAL_DATA_CURSOR_PENDING_WRAP,
     GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE, GHOSTTY_TERMINAL_DATA_CURSOR_X,
-    GHOSTTY_TERMINAL_DATA_CURSOR_Y, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING,
+    GHOSTTY_TERMINAL_DATA_CURSOR_Y, GHOSTTY_TERMINAL_DATA_MODE,
+    GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING,
     GHOSTTY_TERMINAL_DATA_ROWS, GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS, GHOSTTY_TERMINAL_DATA_TITLE,
     GHOSTTY_TERMINAL_DATA_TOTAL_ROWS, GHOSTTY_TERMINAL_SCREEN_ALTERNATE,
 };
@@ -114,6 +116,25 @@ pub fn query_is_alternate_screen(
     };
     NativeTerminalError::from_c_result(result, "ghostty_terminal_get(ActiveScreen)")?;
     Ok(screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE)
+}
+
+/// Reads whether the packed DEC private `mode` is currently set (libghostty-vt mode getter).
+pub fn query_dec_mode_enabled(
+    handle: NonNull<GhosttyTerminalImpl>,
+    mode: u16,
+) -> Result<bool, NativeTerminalError> {
+    let mut config = GhosttyTerminalModeConfig { mode, value: false };
+    // SAFETY: Category: Foreign Data Extraction. The initialized in/out struct matches the C
+    // mode ABI and lives on the stack for the duration of the call.
+    let result = unsafe {
+        ghostty_terminal_get(
+            handle.as_ptr(),
+            GHOSTTY_TERMINAL_DATA_MODE,
+            &mut config as *mut GhosttyTerminalModeConfig as *mut c_void,
+        )
+    };
+    NativeTerminalError::from_c_result(result, "ghostty_terminal_get(Mode)")?;
+    Ok(config.value)
 }
 
 fn query_color(

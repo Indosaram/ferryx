@@ -197,6 +197,25 @@ impl NativeTerminal {
         self.context.write_pty_buffer.lock().clone()
     }
 
+    /// Sends the unsolicited DEC 2031 color scheme report for `appearance` when the running
+    /// program enabled mode 2031, through the same PTY write path VT query replies use.
+    ///
+    /// Returns whether a report was queued. Nothing is written when mode 2031 is off or while PTY
+    /// writes are suppressed (history replay, Lagged recovery).
+    pub fn report_color_scheme_change(
+        &self,
+        appearance: crate::terminal::TerminalAppearance,
+    ) -> Result<bool, NativeTerminalError> {
+        if !super::queries::query_dec_mode_enabled(
+            self.handle,
+            super::sys::constants::GHOSTTY_MODE_COLOR_SCHEME_REPORT,
+        )? {
+            return Ok(false);
+        }
+        let report = super::bell::encode_color_scheme_report(appearance)?;
+        Ok(super::bell::queue_pty_write(&self.context, report))
+    }
+
     pub(crate) fn synchronized_output_enabled(&self) -> Result<bool, NativeTerminalError> {
         let mut config = GhosttyTerminalModeConfig {
             mode: GHOSTTY_MODE_SYNCHRONIZED_OUTPUT,
