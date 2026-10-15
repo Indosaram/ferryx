@@ -569,7 +569,24 @@ pub fn resolve_startup_command(
         is_on_path,
         |var| std::env::var(var).ok(),
     )?;
-    if !plan.program.contains('/') && !plan.program.contains('\\') {
+    if let Some(TerminalStartup::AgentResume { .. }) = startup {
+        if !plan.program.contains('/') && !plan.program.contains('\\') {
+            if let Some(resolved) =
+                crate::ipc::agents::resolve_binary(&plan.program, &legacy_search_paths())
+            {
+                plan.program = resolved.to_string_lossy().to_string();
+            }
+        }
+        let return_shell = resolve_shell_command_pure(
+            preference,
+            TargetPlatform::CURRENT,
+            is_on_path,
+            |var| std::env::var(var).ok(),
+        );
+        plan = wrap_agent_with_return_shell(plan, return_shell, TargetPlatform::CURRENT, |path| {
+            std::path::Path::new(path).exists()
+        });
+    } else if !plan.program.contains('/') && !plan.program.contains('\\') {
         if let Some(resolved) =
             crate::ipc::agents::resolve_binary(&plan.program, &legacy_search_paths())
         {
@@ -581,6 +598,88 @@ pub fn resolve_startup_command(
         cmd.arg(arg);
     }
     Ok(cmd)
+}
+
+/// POSIX wrapper that runs a resumed agent and then replaces itself with the user's shell.
+///
+/// `$1` is the return shell, `$2` is non-empty when that shell must start as a login shell, and
+/// the rest is the agent argv, passed as positional parameters so no argument is ever re-parsed.
+/// `trap : INT QUIT` keeps the wrapper alive when Ctrl+C reaches the whole foreground process
+/// group; a caught (not ignored) signal is reset to its default in the agent, so the agent still
+/// receives Ctrl+C normally.
+const POSIX_RETURN_SHELL_SCRIPT: &str = r#"shell="$1"; login="$2"; shift 2; trap : INT QUIT; "$@"; trap - INT QUIT; if [ -n "$login" ]; then exec "$shell" -l; fi; exec "$shell""#;
+
+/// Run a resumed agent so that quitting it (Ctrl+C, `/quit`) lands the pane in a shell in the same
+/// directory, exactly like an agent the user typed at a prompt, instead of ending the PTY.
+///
+/// Platforms or shells without a safe wrapper keep the direct agent launch.
+pub fn wrap_agent_with_return_shell<X>(
+    agent: ShellCommandPlan,
+    shell: ShellCommandPlan,
+    platform: TargetPlatform,
+    exists: X,
+) -> ShellCommandPlan
+where
+    X: Fn(&str) -> bool,
+{
+    match platform {
+        TargetPlatform::MacOS | TargetPlatform::Linux => {
+            if !exists("/bin/sh") {
+                return agent;
+            }
+            let login = if shell.args.iter().any(|arg| arg == "-l") { "1" } else { "" };
+            let mut args = vec![
+                "-c".to_string(),
+                POSIX_RETURN_SHELL_SCRIPT.to_string(),
+                "ferryx-agent".to_string(),
+                shell.program,
+                login.to_string(),
+                agent.program,
+            ];
+            args.extend(agent.args);
+            ShellCommandPlan {
+                program: "/bin/sh".to_string(),
+                args,
+            }
+        }
+        TargetPlatform::Windows => {
+            let name = shell
+                .program
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let is_powershell = matches!(
+                name.as_str(),
+                "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe"
+            );
+            // A double quote would be re-escaped by the Windows command-line builder, which
+            // PowerShell's -Command parser does not reliably undo; keep the direct launch then.
+            let has_quote = std::iter::once(&agent.program)
+                .chain(agent.args.iter())
+                .any(|value| value.contains('"'));
+            if !is_powershell || has_quote {
+                return agent;
+            }
+            let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+            let mut command = format!("& {}", quote(&agent.program));
+            for arg in &agent.args {
+                command.push(' ');
+                command.push_str(&quote(arg));
+            }
+            let mut args = shell.args;
+            args.extend([
+                "-NoLogo".to_string(),
+                "-NoExit".to_string(),
+                "-Command".to_string(),
+                command,
+            ]);
+            ShellCommandPlan {
+                program: shell.program,
+                args,
+            }
+        }
+    }
 }
 
 pub fn resolve_shell_command(preference: Option<&str>) -> CommandBuilder {
@@ -1323,5 +1422,100 @@ mod tests {
                 .expect("shell startup fallback");
         assert_eq!(plan.program, "/bin/zsh");
         assert_eq!(plan.args, vec!["-l".to_string()]);
+    }
+
+    fn plan(program: &str, args: &[&str]) -> ShellCommandPlan {
+        ShellCommandPlan {
+            program: program.to_string(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn resumed_agent_on_unix_returns_to_a_login_shell_with_argv_passed_verbatim() {
+        let wrapped = wrap_agent_with_return_shell(
+            plan("/usr/local/bin/claude", &["--resume", "id with 'quote' $HOME"]),
+            plan("/bin/zsh", &["-l"]),
+            TargetPlatform::MacOS,
+            |_| true,
+        );
+        assert_eq!(wrapped.program, "/bin/sh");
+        assert_eq!(
+            wrapped.args,
+            vec![
+                "-c".to_string(),
+                POSIX_RETURN_SHELL_SCRIPT.to_string(),
+                "ferryx-agent".to_string(),
+                "/bin/zsh".to_string(),
+                "1".to_string(),
+                "/usr/local/bin/claude".to_string(),
+                "--resume".to_string(),
+                "id with 'quote' $HOME".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resumed_agent_without_posix_sh_keeps_the_direct_launch() {
+        let agent = plan("claude", &["--resume", "x"]);
+        let wrapped = wrap_agent_with_return_shell(
+            agent.clone(),
+            plan("/bin/bash", &["-l"]),
+            TargetPlatform::Linux,
+            |_| false,
+        );
+        assert_eq!(wrapped, agent);
+    }
+
+    #[test]
+    fn resumed_agent_on_windows_powershell_stays_in_the_shell_after_exit() {
+        let wrapped = wrap_agent_with_return_shell(
+            plan("C:\\Tools\\codex.cmd", &["resume", "it's"]),
+            plan("pwsh.exe", &[]),
+            TargetPlatform::Windows,
+            |_| true,
+        );
+        assert_eq!(wrapped.program, "pwsh.exe");
+        assert_eq!(
+            wrapped.args,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoExit".to_string(),
+                "-Command".to_string(),
+                "& 'C:\\Tools\\codex.cmd' 'resume' 'it''s'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resumed_agent_on_windows_cmd_or_with_double_quotes_keeps_the_direct_launch() {
+        let agent = plan("codex", &["resume", "x"]);
+        assert_eq!(
+            wrap_agent_with_return_shell(agent.clone(), plan("cmd.exe", &[]), TargetPlatform::Windows, |_| true),
+            agent
+        );
+        let quoted = plan("codex", &["resume", "a\"b"]);
+        assert_eq!(
+            wrap_agent_with_return_shell(quoted.clone(), plan("pwsh.exe", &[]), TargetPlatform::Windows, |_| true),
+            quoted
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_wrapper_runs_the_agent_then_execs_the_return_shell() {
+        let wrapped = wrap_agent_with_return_shell(
+            plan("/bin/echo", &["agent-ran", "it's $HOME"]),
+            plan("/bin/echo", &[]),
+            TargetPlatform::Linux,
+            |_| true,
+        );
+        let output = std::process::Command::new(&wrapped.program)
+            .args(&wrapped.args)
+            .output()
+            .expect("run wrapper");
+        assert!(output.status.success());
+        // The agent saw its argument unexpanded, then the wrapper exec'd the return "shell".
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "agent-ran it's $HOME\n\n");
     }
 }

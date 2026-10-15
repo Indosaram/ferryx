@@ -2907,6 +2907,7 @@ impl DaemonServer {
                                         match edge {
                                         Some(crate::terminal::foreground::AgentProcessEdge::Released) => {
                                             server.agent_states.release_foreground(&id);
+                                            server.session_service.release_provider_claim(&id);
                                         }
                                         Some(crate::terminal::foreground::AgentProcessEdge::Observed) => {
                                             server.agent_states.observe_foreground_agent(&id);

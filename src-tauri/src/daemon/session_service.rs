@@ -2860,6 +2860,21 @@ impl DaemonSessionService {
         }
     }
 
+    /// A resumed agent that exits hands its PTY back to a shell; the conversation is no longer
+    /// running there, so the pane must stop claiming it or a later resume would adopt the shell.
+    pub(super) fn release_provider_claim(&self, session_id: &str) {
+        let mut metadata = self.session_metadata.write();
+        let Some(claim) = metadata
+            .get_mut(session_id)
+            .and_then(|meta| meta.provider_claim.take())
+        else {
+            return;
+        };
+        self.provider_session_claims
+            .lock()
+            .retain(|key, owner| key != &claim || owner != session_id);
+    }
+
     pub(super) fn prune_dead_spawn_ownership(&self, now: Instant) {
         let dead_sessions: Vec<String> = self
             .session_metadata
