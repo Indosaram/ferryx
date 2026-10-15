@@ -8448,3 +8448,82 @@ describe("terminal link UX (U1-U3)", () => {
     });
   });
 });
+
+
+describe("NativeTerminalPane keyboard copy mode", () => {
+  let restorePaneRect: () => void;
+  beforeEach(() => {
+    resetNativeTerminalPaneForTest();
+    resetNativeTerminalLifecycleForTest();
+    restorePaneRect = stubPaneRect();
+    tauriCoreMocks.invoke.mockReset();
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_cursor") {
+        return { col: 0, row: 3, screenRow: 3, viewportTopRow: 0, scrollbackPrunedRows: 0 };
+      }
+      return undefined;
+    });
+    tauriCoreMocks.isTauri.mockReset();
+    tauriCoreMocks.isTauri.mockReturnValue(true);
+    tauriWindowMocks.reset();
+    vi.stubGlobal("ResizeObserver", MockResizeObserver);
+  });
+
+  afterEach(() => {
+    restorePaneRect();
+    cleanup();
+    resetNativeTerminalPaneForTest();
+    resetNativeTerminalLifecycleForTest();
+    vi.unstubAllGlobals();
+  });
+
+  const commandCalls = (cmd: string) => tauriCoreMocks.invoke.mock.calls.filter(([name]) => name === cmd);
+
+  async function renderInCopyMode(id: string) {
+    const session = createSession(id);
+    const view = await renderNative(<NativeTerminalPane sessionId={id} session={session} />);
+    const sink = view.getByTestId("native-terminal-focus-sink");
+    sink.focus();
+    act(() => {
+      window.dispatchEvent(new CustomEvent("ferryx:terminal-copy-mode", { detail: { sessionId: id } }));
+    });
+    await waitFor(() => expect(commandCalls("cmd_native_terminal_select")).toHaveLength(1));
+    expect(view.getByTestId("terminal-copy-mode-badge").textContent).toBe("COPY");
+    tauriCoreMocks.invoke.mockClear();
+    return { ...view, sink };
+  }
+
+  it("entering copy mode stops PTY forwarding", async () => {
+    const { sink } = await renderInCopyMode("term-session-copy-mode-forwarding");
+
+    act(() => {
+      fireEvent.keyDown(sink, { key: "j" });
+      fireEvent.keyDown(sink, { key: "Enter" });
+      fireEvent.keyDown(sink, { key: "c", ctrlKey: true });
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "x", bubbles: true, cancelable: true }));
+      fireEvent.input(sink, { target: { value: "z" } });
+    });
+
+    // "j" is a motion: it moves the selection instead of reaching the PTY.
+    await waitFor(() => expect(commandCalls("cmd_native_terminal_select").length).toBeGreaterThanOrEqual(1));
+    expect(commandCalls("cmd_native_terminal_send_input")).toEqual([]);
+  });
+
+  it("IME composition keys never act as motions", async () => {
+    const { sink } = await renderInCopyMode("term-session-copy-mode-ime");
+
+    act(() => {
+      fireEvent.compositionStart(sink);
+      fireEvent.keyDown(sink, { key: "j", isComposing: true });
+      fireEvent.keyDown(sink, { key: "k", keyCode: 229 });
+      fireEvent.compositionEnd(sink, { data: "ㅓ" });
+    });
+    await act(async () => undefined);
+
+    expect(commandCalls("cmd_native_terminal_cursor")).toEqual([]);
+    expect(commandCalls("cmd_native_terminal_select")).toEqual([]);
+    // The committed text is not PTY input either while copy mode owns the keyboard.
+    expect(commandCalls("cmd_native_terminal_send_input")).toEqual([]);
+  });
+});
+
