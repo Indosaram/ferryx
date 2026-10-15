@@ -13,28 +13,43 @@ vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => core.isTauri(),
 }));
 
-vi.mock("../lib/shortcuts", () => ({ isMacShortcutPlatform: () => true }));
-
-type Terminal = { cursorCol: number; cursorRow: number; viewTop: number; pruned: number; lines: Record<number, string> };
+type Terminal = {
+  cursorCol: number;
+  cursorRow: number;
+  viewTop: number;
+  /** Top row of the active screen (total_rows - rows). */
+  bottomTop: number;
+  /** True while the viewport follows active output, as libghostty does for Row(n >= bottomTop). */
+  follow: boolean;
+  pruned: number;
+  lines: Record<number, string>;
+};
 
 const GRID: CopyModeGridSize = { cols: 10, rows: 6 };
 
 /** A fake native terminal: live screen rows 100..105, cursor at screen row 102 col 2. */
 function installTerminal(overrides: Partial<Terminal> = {}): Terminal {
-  const term: Terminal = { cursorCol: 2, cursorRow: 102, viewTop: 100, pruned: 0, lines: {}, ...overrides };
+  const term: Terminal = { cursorCol: 2, cursorRow: 102, viewTop: 100, bottomTop: 100, follow: true, pruned: 0, lines: {}, ...overrides };
   core.invoke.mockImplementation(async (cmd, args) => {
     switch (cmd) {
       case "cmd_native_terminal_cursor":
         return {
           col: term.cursorCol,
-          row: term.cursorRow - 100,
+          row: term.cursorRow - term.bottomTop,
           screenRow: term.cursorRow,
           viewportTopRow: term.viewTop,
           scrollbackPrunedRows: term.pruned,
         };
       case "cmd_native_terminal_scroll":
-        if (args?.behavior?.type === "row") term.viewTop = args.behavior.offset;
-        if (args?.behavior?.type === "bottom") term.viewTop = 100;
+        if (args?.behavior?.type === "row") {
+          // libghostty-vt: Row(n) with n >= total_rows - rows means "follow active output".
+          term.follow = args.behavior.offset >= term.bottomTop;
+          term.viewTop = term.follow ? term.bottomTop : args.behavior.offset;
+        }
+        if (args?.behavior?.type === "bottom") {
+          term.follow = true;
+          term.viewTop = term.bottomTop;
+        }
         return undefined;
       case "cmd_native_terminal_line_at":
         return { text: term.lines[term.viewTop + args.row] ?? "", col: args.col, row: args.row };
@@ -45,6 +60,13 @@ function installTerminal(overrides: Partial<Terminal> = {}): Terminal {
     }
   });
   return term;
+}
+
+/** Appends output rows: the active screen and its cursor move down; a following viewport moves with them. */
+function appendOutput(term: Terminal, rows: number) {
+  term.bottomTop += rows;
+  term.cursorRow += rows;
+  if (term.follow) term.viewTop = term.bottomTop;
 }
 
 function calls(cmd: string) {
@@ -154,6 +176,34 @@ describe("useTerminalCopyMode", () => {
     term.viewTop = 99;
     await press(hook, key("l"));
     expect(lastSelection()).toEqual({ type: "range", startCol: 2, startRow: 101, endCol: 3, endRow: 101, rectangle: false });
+  });
+
+  it("viewport stays frozen when entered at the bottom while output streams", async () => {
+    const term = installTerminal();
+    const hook = await enterCopyMode();
+    // Entry at the bottom pins Row(100), which the terminal treats as follow-active.
+    expect(calls("cmd_native_terminal_scroll")).toEqual([{ sessionId: "sess-1", behavior: { type: "row", offset: 100 } }]);
+    expect(term.follow).toBe(true);
+    const screenRowBefore = 102 - term.viewTop;
+
+    appendOutput(term, 3);
+    expect(term.viewTop).toBe(103);
+    act(() => hook.result.current.onOutput());
+    await waitFor(() => expect(calls("cmd_native_terminal_scroll")).toHaveLength(2));
+    expect(fromEnd(calls("cmd_native_terminal_scroll"), 1)).toEqual({ sessionId: "sess-1", behavior: { type: "row", offset: 100 } });
+    expect(term.viewTop).toBe(100);
+    expect(term.follow).toBe(false);
+
+    // The copy cursor still sits on screen row 102, at the same row of the frozen viewport.
+    expect(lastSelection()).toMatchObject({ startRow: 102, endRow: 102 });
+    expect(lastSelection()!.startRow - term.viewTop).toBe(screenRowBefore);
+
+    // Further output no longer drags the viewport, so no further re-pin is needed.
+    appendOutput(term, 2);
+    expect(term.viewTop).toBe(100);
+    await press(hook, key("j"));
+    expect(lastSelection()).toMatchObject({ startRow: 103, endRow: 103 });
+    expect(calls("cmd_native_terminal_scroll")).toHaveLength(2);
   });
 });
 

@@ -2,8 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { MutableRefObject, ReactElement } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
-import { isMacShortcutPlatform } from "../lib/shortcuts";
-
 /** Window event App dispatches to toggle copy mode in the pane owning `detail.sessionId`. */
 export const TERMINAL_COPY_MODE_EVENT = "ferryx:terminal-copy-mode";
 
@@ -148,6 +146,8 @@ export function useTerminalCopyMode(
   const activeRef = useRef(false);
   const stateRef = useRef<CopyModeState | null>(null);
   const prunedRef = useRef(0);
+  /** Viewport top row copy mode holds; re-pinned on output since Row(n) at the bottom follows output. */
+  const frozenTopRef = useRef(0);
   const bottomRowRef = useRef(0);
   const pendingGRef = useRef(false);
   const chainRef = useRef<Promise<void>>(Promise.resolve());
@@ -171,6 +171,7 @@ export function useTerminalCopyMode(
     prunedRef.current = receipt.scrollbackPrunedRows;
     bottomRowRef.current = Math.max(0, receipt.screenRow - receipt.row + gridSizeRef.current.rows - 1);
     if (delta === 0) return false;
+    frozenTopRef.current = Math.max(0, frozenTopRef.current - delta);
     state.cursor = { col: state.cursor.col, row: Math.max(0, state.cursor.row - delta) };
     if (state.anchor) {
       if (state.anchor.row - delta < 0) {
@@ -222,7 +223,9 @@ export function useTerminalCopyMode(
       bottomRowRef.current = Math.max(0, receipt.screenRow - receipt.row + gridSizeRef.current.rows - 1);
       const state: CopyModeState = { cursor: { col: receipt.col, row: receipt.screenRow }, anchor: null, mode: "none" };
       stateRef.current = state;
-      // Pin the viewport at its current top so new output does not drag it along.
+      // Pin the viewport at its current top. At the bottom libghostty treats Row(top) as
+      // "follow active output", so onOutput re-pins frozenTop once output has moved it.
+      frozenTopRef.current = receipt.viewportTopRow;
       await invoke("cmd_native_terminal_scroll", { sessionId: sid, behavior: { type: "row", offset: receipt.viewportTopRow } });
       await applySelection(sid, state);
     });
@@ -241,13 +244,8 @@ export function useTerminalCopyMode(
 
   const yank = useCallback(async (sid: string, state: CopyModeState) => {
     await applySelection(sid, state);
-    const text = await invoke<string | null>("cmd_native_terminal_copy_selection", { sessionId: sid });
-    // macOS writes the pasteboard natively inside the command; elsewhere the webview does.
-    if (text && !isMacShortcutPlatform() && typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text).catch((error: unknown) => {
-        console.error("Terminal copy mode clipboard write failed", error);
-      });
-    }
+    // The native copy command writes the system clipboard on every platform.
+    await invoke("cmd_native_terminal_copy_selection", { sessionId: sid });
     await finish(sid);
   }, [applySelection, finish]);
 
@@ -381,6 +379,7 @@ export function useTerminalCopyMode(
       if (cursor.row < viewTop) nextTop = cursor.row;
       else if (cursor.row > viewTop + rows - 1) nextTop = cursor.row - rows + 1;
       if (nextTop !== viewTop) {
+        frozenTopRef.current = nextTop;
         await invoke("cmd_native_terminal_scroll", { sessionId: sid, behavior: { type: "row", offset: nextTop } });
       }
       await applySelection(sid, state);
@@ -394,7 +393,15 @@ export function useTerminalCopyMode(
       const state = stateRef.current;
       if (!activeRef.current || !sid || !state) return;
       const receipt = await readCursor(sid);
-      if (receipt && syncReceipt(receipt, state)) {
+      if (!receipt) return;
+      const shifted = syncReceipt(receipt, state);
+      if (receipt.viewportTopRow !== frozenTopRef.current) {
+        await invoke("cmd_native_terminal_scroll", {
+          sessionId: sid,
+          behavior: { type: "row", offset: frozenTopRef.current },
+        });
+      }
+      if (shifted) {
         await applySelection(sid, state);
       }
     });
