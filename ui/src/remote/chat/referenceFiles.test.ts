@@ -29,6 +29,7 @@ import {
   referenceMentionPathOf,
   referenceMentionPathWithinRoot,
   parseReferenceStagedFileList,
+  referenceSha256Hex,
   stageReferenceChatFile,
   validateReferenceFileName,
   validateReferenceFileSize,
@@ -41,6 +42,26 @@ import {
 
 const FIXED_SHA = "a".repeat(64);
 const BACKSLASH = String.fromCharCode(92);
+
+describe("reference file digest outside a secure context (ui-reference-logic-r4-1)", () => {
+  it("hashes without WebCrypto, as a plain-HTTP remote origin has none", async () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    const long = new Uint8Array(1000).map((_, index) => index & 0xff);
+    const expectedLong = await referenceSha256Hex(long);
+    Object.defineProperty(globalThis, "crypto", { value: {}, configurable: true });
+    try {
+      await expect(referenceSha256Hex(new TextEncoder().encode("abc"))).resolves.toBe(
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      );
+      await expect(referenceSha256Hex(new Uint8Array(0))).resolves.toBe(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      );
+      await expect(referenceSha256Hex(long)).resolves.toBe(expectedLong);
+    } finally {
+      if (original) Object.defineProperty(globalThis, "crypto", original);
+    }
+  });
+});
 
 const base: TargetRef = {
   hostId: "host-a",

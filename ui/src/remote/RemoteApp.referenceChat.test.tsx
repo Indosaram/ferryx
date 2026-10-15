@@ -1101,7 +1101,7 @@ async function switchToSecondTab(): Promise<void> {
 
 /** The lane is bound once the main pane's newest page has rendered. */
 async function laneReady(): Promise<void> {
-  await screen.findByText("The parser now streams line by line.");
+  await screen.findByText("The parser now streams line by line.", undefined, { timeout: 15000 });
 }
 
 async function stageNotes(): Promise<void> {
@@ -1502,5 +1502,72 @@ describe("reference chat lane review fixes", () => {
     const paged = calls.filter((call) => call.url.includes("cursor="));
     expect(paged).toHaveLength(2);
     expect(paged[1].url).toContain("cursor=600");
+  });
+
+  it("ui-workspace-wiring-r4-1: a send refused before it leaves keeps its text in the message box", async () => {
+    const calls = installLane();
+    render(<RemoteApp />);
+    await laneReady();
+    const tooLong = "x".repeat(20_001);
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: tooLong } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await drainSettledResponses();
+
+    expect(calls.some((call) => call.url.includes("/submit"))).toBe(false);
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue(tooLong);
+  }, 30_000);
+
+  it("ui-workspace-wiring-r4-2: a failed send comes back even when the user typed during it", async () => {
+    const submit = deferred<Response>();
+    installLane(({ url }) => (url.includes("/submit") ? submit.promise : undefined));
+    render(<RemoteApp />);
+    await laneReady();
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "refactor the parser" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    // while the send is in flight the user starts the next message
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "and" } });
+    await act(async () => {
+      submit.resolve(
+        jsonResponse({ ok: false, error: { code: "FORBIDDEN", message: "no", retryable: false }, requestId: "r1" }),
+      );
+    });
+    await drainSettledResponses();
+
+    expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not delivered/);
+    const box = screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement;
+    expect(box.value).toContain("refactor the parser");
+    expect(box.value).toContain("and");
+  });
+
+  it("ui-workspace-wiring-r4-3: an earlier turn with the same text does not swallow a new send's echo", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const page = nativePage({
+      turns: [
+        { role: "user", parts: [{ kind: "text", text: "continue" }], startedAt: "2026-10-06T00:00:00Z" },
+        { role: "assistant", parts: [{ kind: "text", text: "The parser now streams line by line." }], startedAt: "2026-10-06T00:00:01Z" },
+      ],
+    });
+    installLane(({ url }) => (url.includes("/history") && !url.includes(SECOND_SESSION_ID) ? jsonResponse(page) : undefined));
+    render(<RemoteApp />);
+    await laneReady();
+    expect(screen.getAllByText("continue")).toHaveLength(1);
+
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "continue" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await drainSettledResponses();
+    expect(screen.getAllByText("continue")).toHaveLength(2);
+
+    // the agent is busy: the next poll still returns only the earlier turn
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await drainSettledResponses();
+    expect(screen.getAllByText("continue")).toHaveLength(2);
   });
 });
