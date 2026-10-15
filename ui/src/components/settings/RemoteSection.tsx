@@ -159,7 +159,7 @@ function RemoveSshIntegrationDialog({
           <Trash2 className="size-4 text-destructive" />
           {title}
         </header>
-        <div className="space-y-4 p-4 text-xs">
+        <div className="space-y-4 p-4 text-[12px]">
           <p className="text-muted-foreground">
             Ferryx will remove the agent state hooks it installed on this host. Files you
             modified after installation are kept.
