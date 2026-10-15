@@ -1766,6 +1766,68 @@ async fn a_chat_submit_is_refused_when_the_screen_history_has_a_replay_gap() {
     server.stop().await;
 }
 
+/// An agent with no prompt detector can never be holding a prompt this route would detect, so a
+/// gapped screen must not refuse its chat submit: refusing would lock chat out of the pane for
+/// good, since nothing it draws later restores a whole-screen read.
+#[tokio::test]
+async fn a_chat_submit_to_an_agent_without_a_prompt_detector_ignores_a_replay_gap() {
+    let session_id = "reference-route-post-gap-no-detector".to_string();
+    assert!(super::prompts::ReferencePromptFamily::of_agent("opencode").is_none());
+    let hub = crate::terminal::TerminalOutputHub::default();
+    hub.register_session(&session_id);
+    hub.record_initial_size(&session_id, 80, 24);
+    hub.publish(&session_id, b"opencode ready\r\n".to_vec())
+        .expect("output published");
+    hub.publish_gap(&session_id).expect("gap published");
+    hub.publish(&session_id, b"\rworking...".to_vec())
+        .expect("post-gap output published");
+    let backend = Arc::new(HubStubBackend {
+        session_id: session_id.clone(),
+        hub,
+        writes: std::sync::Mutex::new(Vec::new()),
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "reference-route-post-gap-no-detector")
+        .expect("control token");
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let epoch = state
+        .daemon_epoch
+        .load(std::sync::atomic::Ordering::Acquire)
+        .to_string();
+    let body = serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(),
+        "target": {
+            "hostId": reference_files::reference_host_id(),
+            "ownerId": state.reference_owner_id,
+            "epoch": epoch,
+            "backendSessionId": session_id,
+        },
+        "registryId": "opencode",
+        "params": { "text": "hello", "origin": "chat" },
+    });
+    let (status, response) = server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"),
+            Some(&control),
+            Some(&body.to_string()),
+        )
+        .await;
+
+    assert_eq!(status, 200, "{response}");
+    assert!(
+        !backend.writes.lock().expect("writes").is_empty(),
+        "chat text to an agent without a prompt detector was refused over a replay gap"
+    );
+    server.stop().await;
+}
+
 /// No control router is mounted under the prefix, and an unknown suffix is not a route.
 #[tokio::test]
 async fn an_unknown_reference_chat_suffix_is_not_a_route() {

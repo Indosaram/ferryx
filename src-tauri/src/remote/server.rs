@@ -5673,6 +5673,10 @@ async fn reference_chat_blocked_prompt(
     let Some(agent) = registry_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return ReferencePromptProbe::Clear;
     };
+    // No detector runs for this agent, so no screen could ever hold a prompt this guard detects.
+    if reference_prompts::ReferencePromptFamily::of_agent(agent).is_none() {
+        return ReferencePromptProbe::Clear;
+    }
     let snapshot = match reference_chat_snapshot_screen(state, target).await {
         Ok(snapshot) => snapshot,
         Err(error) => return ReferencePromptProbe::Unknown(error.message),
