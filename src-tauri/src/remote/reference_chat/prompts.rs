@@ -2473,7 +2473,7 @@ mod tests {
             target: &target,
             request_id: "submit-1",
             payload: &submit_payload,
-            bracketed_paste: false,
+            bracketed_paste: &|| false,
             blocked_prompt: None,
             arrived_at_ms: clock.now(),
             last_typed_at_ms: None,
