@@ -1550,6 +1550,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::file_open_with::cmd_webview_print,
         crate::ipc::updater::cmd_updater_managed_externally,
         crate::ipc::updater::cmd_distribution_channel,
+        crate::ipc::updater::cmd_updater_check,
         crate::ipc::updater::cmd_updater_download,
         crate::ipc::updater::cmd_updater_cancel,
         crate::ipc::updater::cmd_updater_install,

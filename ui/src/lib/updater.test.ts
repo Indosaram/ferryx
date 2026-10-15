@@ -9,6 +9,7 @@ const registeredUpdaterCommands = new Set(
   ),
 );
 
+// Fake backend for `cmd_updater_check`: resolves to an offer or null.
 const check = vi.fn();
 const relaunch = vi.fn();
 const getVersion = vi.fn();
@@ -37,12 +38,12 @@ const installCommand = vi.fn(async () => {});
 
 const UPDATER_COMMANDS: Record<string, (args: unknown) => Promise<unknown>> = {
   cmd_updater_managed_externally: () => invoke("cmd_updater_managed_externally"),
+  cmd_updater_check: () => check(),
   cmd_updater_download: (args) => downloadCommand(args as DownloadArgs),
   cmd_updater_cancel: () => cancelCommand(),
   cmd_updater_install: () => installCommand(),
 };
 
-vi.mock("@tauri-apps/plugin-updater", () => ({ check: (...args: unknown[]) => check(...args) }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: (...args: unknown[]) => relaunch(...args) }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: (...args: unknown[]) => getVersion(...args) }));
 vi.mock("@tauri-apps/api/core", () => ({
@@ -58,7 +59,9 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (!handler || !registeredUpdaterCommands.has(command)) {
       throw new Error(`Unregistered updater command: ${command}`);
     }
-    if (command !== "cmd_updater_managed_externally") backendLog.push(command);
+    if (command !== "cmd_updater_managed_externally" && command !== "cmd_updater_check") {
+      backendLog.push(command);
+    }
     return handler(args);
   },
 }));
@@ -149,7 +152,7 @@ describe("updater status machine", () => {
     resetBackend();
   });
 
-  it.each(["installer", "native"])("offers plugin updates when the channel is %s", async () => {
+  it.each(["installer", "native"])("offers backend-checked updates when the channel is %s", async () => {
     // Given: both non-Store channels report updater-owned in the Rust command.
     invoke.mockResolvedValue(false);
     check.mockResolvedValue(updateHandle([]));
@@ -204,6 +207,15 @@ describe("updater status machine", () => {
       state: "error",
       error: "network unreachable",
     });
+  });
+
+  it("surfaces a structured backend check error by its message", async () => {
+    check.mockRejectedValue({ code: "INTERNAL", message: "endpoint returned 500", details: null });
+    const updater = await freshModule();
+
+    await updater.checkForUpdate();
+
+    expect(updater.getUpdateStatus()).toEqual({ state: "error", error: "endpoint returned 500" });
   });
 
   it("reports monotonic download progress and stages installation without automatic relaunch", async () => {

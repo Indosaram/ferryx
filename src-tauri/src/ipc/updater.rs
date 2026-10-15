@@ -360,6 +360,42 @@ fn build_updater<R: Runtime>(app: &AppHandle<R>) -> Result<Updater, IpcError> {
     builder.build().map_err(IpcError::internal)
 }
 
+/// Update offered by [`cmd_updater_check`], in the shape the UI shows to the user.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdaterOffer {
+    pub version: String,
+    pub current_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+impl From<&Update> for UpdaterOffer {
+    fn from(update: &Update) -> Self {
+        Self {
+            version: update.version.clone(),
+            current_version: update.current_version.clone(),
+            // Same rendering as the plugin's own `check` command.
+            date: update.date.map(|date| date.to_string()),
+            body: update.body.clone(),
+        }
+    }
+}
+
+/// Availability check through the same [`build_updater`] as [`cmd_updater_download`], so the
+/// debug-only `FERRYX_UPDATER_ENDPOINT` override covers the offer as well as the download. In
+/// release builds this queries exactly the configured plugin endpoints.
+#[tauri::command]
+pub async fn cmd_updater_check<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Option<UpdaterOffer>, IpcError> {
+    let updater = gate_updater(updater_managed_externally(), || build_updater(&app))??;
+    let offered = updater.check().await.map_err(IpcError::internal)?;
+    Ok(offered.as_ref().map(UpdaterOffer::from))
+}
+
 /// Checks for the update the UI expects and downloads it under a cancel token and a no-progress
 /// watchdog. The outcome arrives on `on_event`; verified bytes stay in managed state for
 /// [`cmd_updater_install`].

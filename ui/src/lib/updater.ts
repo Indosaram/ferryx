@@ -1,9 +1,16 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { check, type Update } from "@tauri-apps/plugin-updater";
 
 export type UpdateFailure = "cancelled" | "stalled";
+
+/** Offer returned by `cmd_updater_check` (`UpdaterOffer` in ipc/updater.rs). */
+type UpdateOffer = {
+  version: string;
+  currentVersion: string;
+  date?: string;
+  body?: string;
+};
 
 export type UpdateStatus = {
   state: "idle" | "checking" | "available" | "downloading" | "downloaded" | "error";
@@ -43,7 +50,7 @@ type StatusListener = (status: UpdateStatus) => void;
 
 const statusListeners = new Set<StatusListener>();
 let status: UpdateStatus = { state: "idle" };
-let pendingUpdate: Update | null = null;
+let pendingUpdate: UpdateOffer | null = null;
 
 function setStatus(next: UpdateStatus): void {
   status = next;
@@ -112,7 +119,9 @@ export async function checkForUpdate(): Promise<void> {
 
   setStatus({ state: "checking" });
   try {
-    const update = await check();
+    // The Rust command builds the same updater as the download, so a debug endpoint override
+    // applies to the offer too.
+    const update = await invoke<UpdateOffer | null>("cmd_updater_check");
     if (!update) {
       pendingUpdate = null;
       setStatus({ state: "idle" });
