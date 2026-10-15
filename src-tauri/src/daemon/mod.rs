@@ -26,6 +26,9 @@ pub mod session_service;
 pub mod split_journal;
 // Portable facade over the OS service manager that owns the daemon's lifetime (macOS: `launchd`).
 pub mod supervisor;
+// systemd user unit and sd_notify for the Linux supervisor backend.
+#[cfg(unix)]
+pub mod supervisor_linux;
 pub mod workspace_service;
 
 /// Shared headless authority supplied only by the session-owning daemon.

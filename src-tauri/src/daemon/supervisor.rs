@@ -6,7 +6,9 @@
 //!
 //! * macOS - the `launchd` LaunchAgent in [`crate::daemon::launchd`] (same plist, same
 //!   `KeepAlive { SuccessfulExit = false }`).
-//! * Linux and Windows - no backend wired yet; [`supported`] is `false`.
+//! * Linux - the systemd user unit in [`crate::daemon::supervisor_linux`] (`Restart=on-failure`,
+//!   `KillMode=process`); [`supported`] is `false` where no systemd user manager runs.
+//! * Windows - no backend wired yet; [`supported`] is `false`.
 //! * Any other target - [`supported`] is always `false`.
 //!
 //! Where no backend is supported the daemon client keeps its detached-spawn fallback, which already
@@ -75,7 +77,7 @@ fn supported_in(env: Env<'_>, dev_runtime: bool) -> bool {
 
 /// Whether this process may manage the daemon's supervisor unit on this target.
 pub fn supported() -> bool {
-    supported_in(&process_env, crate::daemon::server::is_dev_runtime())
+    supported_in(&process_env, crate::daemon::server::is_dev_runtime()) && backend::available()
 }
 
 fn ensure_in(env: Env<'_>, dev_runtime: bool, executable: &Path) -> Result<bool> {
@@ -126,6 +128,10 @@ mod backend {
     use std::process::{Command, Stdio};
 
     pub const TARGET_HAS_BACKEND: bool = true;
+
+    pub fn available() -> bool {
+        true
+    }
 
     fn label(env: Env<'_>) -> String {
         non_empty(env, SUPERVISOR_NAME_ENV)
@@ -232,14 +238,60 @@ mod backend {
     }
 }
 
-/// Linux and Windows backends are not wired yet, and other targets never get one: callers fall back
-/// to the detached spawn.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+mod backend {
+    use super::{Env, Result, SUPERVISOR_NAME_ENV};
+    use crate::daemon::supervisor_linux;
+    use std::path::{Path, PathBuf};
+
+    pub const TARGET_HAS_BACKEND: bool = true;
+
+    /// No systemd user manager (WSL, containers, another init) means no supervisor; the daemon logs
+    /// the reason once at startup.
+    pub fn available() -> bool {
+        supervisor_linux::availability().is_none()
+    }
+
+    fn unit(env: Env<'_>) -> Result<(String, PathBuf)> {
+        let name = supervisor_linux::unit_name(env(SUPERVISOR_NAME_ENV).as_deref())?;
+        let path = supervisor_linux::unit_path(
+            env("XDG_CONFIG_HOME").as_deref(),
+            env("HOME").as_deref(),
+            &name,
+        )
+        .ok_or("Cannot determine the systemd user unit path")?;
+        Ok((name, path))
+    }
+
+    pub fn ensure(env: Env<'_>, executable: &Path) -> Result<bool> {
+        let (name, path) = unit(env)?;
+        let executable =
+            supervisor_linux::daemon_executable(env("APPIMAGE").as_deref(), executable);
+        supervisor_linux::ensure(&name, &path, &executable)
+    }
+
+    pub fn reload(env: Env<'_>) -> Result<()> {
+        supervisor_linux::start(&unit(env)?.0)
+    }
+
+    pub fn uninstall(env: Env<'_>) -> Result<()> {
+        let (name, path) = unit(env)?;
+        supervisor_linux::uninstall(&name, &path)
+    }
+}
+
+/// The Windows backend is not wired yet, and other targets never get one: callers fall back to the
+/// detached spawn.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod backend {
     use super::{Env, Result};
     use std::path::Path;
 
     pub const TARGET_HAS_BACKEND: bool = false;
+
+    pub fn available() -> bool {
+        false
+    }
 
     pub fn ensure(_env: Env<'_>, _executable: &Path) -> Result<bool> {
         Ok(false)
