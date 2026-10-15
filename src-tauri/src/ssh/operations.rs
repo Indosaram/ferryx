@@ -523,7 +523,7 @@ mod forwarding_tests {
             hostname: "example.test".into(),
             username: Some("user".into()),
             port: Some(2200),
-            identity_file: None,
+            identity_file: Some("~/.ssh/id_ed25519".into()),
             jump_host: None,
             source: crate::ssh::SshHostSource::Manual,
             auth_method: crate::ssh::SshAuthMethod::Key,
