@@ -40,14 +40,16 @@
 
 use crate::remote::mirror::RemoteTerminalMirror;
 use crate::remote::protocol::{RemoteGridFrame, RemoteGridLine};
+use crate::terminal::output_hub::HistorySegment;
 
 use super::types::ReferenceScreenSnapshot;
 
 /// Upper bound on the characters a single snapshot may carry.
 ///
 /// The screen read is a prompt-detection input, not a transcript: a pane-sized frame is at
-/// most `cols * rows` characters, and this bound keeps a caller that hands over an
-/// unexpectedly tall mirror from turning one read into an unbounded response.
+/// most `cols * rows` characters plus its line breaks. A snapshot is bounded by the larger of
+/// this constant and that pane-sized allowance, so a densely filled pane is never cut, while a
+/// small pane still cannot exceed this constant.
 pub const REFERENCE_SCREEN_MAX_CHARS: usize = 16_384;
 
 /// Upper bound on the lines a single snapshot may carry.
@@ -60,6 +62,28 @@ const FNV1A_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 
 /// FNV-1a 64-bit prime.
 const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// [snapshot_reference_screen] over the backend's own segmented history, each segment with the
+/// geometry it was recorded at.
+///
+/// Each segment is replayed at the size it was produced at ([RemoteTerminalMirror::feed_segments]),
+/// then the mirror is returned to the geometry the caller created it at - the pane's live size -
+/// before the frame is read. Replaying wide history into a narrow grid would wrap and misplace
+/// what the prompt detectors read. The gap semantics are [snapshot_reference_screen]'s.
+pub fn snapshot_reference_screen_segments(
+    mirror: &mut RemoteTerminalMirror,
+    segments: Option<&[HistorySegment]>,
+) -> Result<ReferenceScreenSnapshot, String> {
+    let Some(segments) = segments else {
+        return snapshot_reference_screen(mirror, None);
+    };
+    let (cols, rows) = mirror.dimensions().map_err(|err| err.to_string())?;
+    mirror.feed_segments(segments).map_err(|err| err.to_string())?;
+    if mirror.dimensions().map_err(|err| err.to_string())? != (cols, rows) {
+        mirror.resize(cols, rows).map_err(|err| err.to_string())?;
+    }
+    snapshot_reference_screen(mirror, Some(&[]))
+}
 
 /// Take a bounded, read-only snapshot of the original pane.
 ///
@@ -87,7 +111,11 @@ pub fn snapshot_reference_screen(
     // only beyond the bound must still be distinguishable, or a stale card could be accepted.
     let text = render_reference_screen_text(&frame);
     let revision = reference_screen_revision(cols, rows, &text);
-    let (text, truncated) = bound_reference_screen_text(&text);
+    // A whole pane-sized frame always fits: every cell plus one line break per row.
+    let max_chars = REFERENCE_SCREEN_MAX_CHARS
+        .max(usize::from(cols) * usize::from(rows) + usize::from(rows));
+    let max_lines = REFERENCE_SCREEN_MAX_LINES.max(usize::from(rows));
+    let (text, truncated) = bound_reference_screen_text_within(&text, max_lines, max_chars);
 
     Ok(ReferenceScreenSnapshot {
         revision,
@@ -133,6 +161,15 @@ pub fn render_reference_screen_text(frame: &RemoteGridFrame) -> String {
 /// the bottom of the screen, so the top is what a bound may drop. Cutting happens on character
 /// boundaries, so a multi-byte line (CJK, Hangul, emoji) is never split into invalid UTF-8.
 pub fn bound_reference_screen_text(text: &str) -> (String, bool) {
+    bound_reference_screen_text_within(text, REFERENCE_SCREEN_MAX_LINES, REFERENCE_SCREEN_MAX_CHARS)
+}
+
+/// [bound_reference_screen_text] with explicit line and character limits.
+fn bound_reference_screen_text_within(
+    text: &str,
+    max_lines: usize,
+    max_chars: usize,
+) -> (String, bool) {
     let mut truncated = false;
     let mut tail = text;
 
@@ -142,15 +179,15 @@ pub fn bound_reference_screen_text(text: &str) -> (String, bool) {
             line_starts.push(index + 1);
         }
     }
-    if line_starts.len() > REFERENCE_SCREEN_MAX_LINES {
-        let keep_from = line_starts.len() - REFERENCE_SCREEN_MAX_LINES;
+    if line_starts.len() > max_lines {
+        let keep_from = line_starts.len() - max_lines;
         tail = &tail[line_starts[keep_from]..];
         truncated = true;
     }
 
     let chars = tail.chars().count();
-    if chars > REFERENCE_SCREEN_MAX_CHARS {
-        let skip = chars - REFERENCE_SCREEN_MAX_CHARS;
+    if chars > max_chars {
+        let skip = chars - max_chars;
         let offset = tail
             .char_indices()
             .nth(skip)
@@ -376,6 +413,26 @@ mod tests {
     }
 
     #[test]
+    fn a_densely_filled_pane_sized_screen_is_never_truncated() {
+        let (cols, rows) = (240u16, 80u16);
+        let mut mirror = RemoteTerminalMirror::new(cols, rows).expect("mirror");
+        let mut dense = Vec::new();
+        for row in 0..rows {
+            if row > 0 {
+                dense.extend_from_slice(b"\r\n");
+            }
+            dense.extend_from_slice("x".repeat(usize::from(cols) - 1).as_bytes());
+        }
+
+        let snapshot =
+            snapshot_reference_screen(&mut mirror, Some(&[dense])).expect("screen snapshot");
+
+        assert!(!snapshot.truncated, "a pane-sized frame was truncated");
+        assert!(snapshot.text.chars().count() > REFERENCE_SCREEN_MAX_CHARS);
+        assert!(snapshot.is_answerable());
+    }
+
+    #[test]
     fn short_screen_is_returned_unbounded() {
         let (bounded, truncated) = bound_reference_screen_text("short screen");
         assert_eq!(bounded, "short screen");
@@ -386,5 +443,36 @@ mod tests {
         let (bounded, truncated) = bound_reference_screen_text(&exact);
         assert_eq!(bounded, exact);
         assert!(!truncated);
+    }
+
+    #[test]
+    fn segmented_history_replays_at_its_recorded_geometry() {
+        let segments = vec![
+            HistorySegment {
+                cols: Some(120),
+                rows: Some(6),
+                bytes: b"\x1b[1;1H\xed\x95\x9c\xea\xb8\x80\x1b[110GX".to_vec(),
+            },
+            HistorySegment { cols: Some(50), rows: Some(6), bytes: b"\x1b[2;1Hnext".to_vec() },
+        ];
+        let mut expected = RemoteTerminalMirror::new(50, 6).expect("mirror");
+        expected.feed_segments(&segments).expect("feed_segments");
+        let expected_text =
+            render_reference_screen_text(&expected.full_frame().expect("full frame"));
+
+        let mut mirror = RemoteTerminalMirror::new(50, 6).expect("mirror");
+        let snapshot = snapshot_reference_screen_segments(&mut mirror, Some(&segments))
+            .expect("screen snapshot");
+
+        assert_eq!(snapshot.text, expected_text, "history replayed at the wrong geometry");
+        assert_eq!((snapshot.cols, snapshot.rows), (50, 6));
+
+        // History that ends at another size is read back at the pane's live geometry.
+        let mut mirror = RemoteTerminalMirror::new(50, 6).expect("mirror");
+        let wide = &segments[..1];
+        let snapshot = snapshot_reference_screen_segments(&mut mirror, Some(wide))
+            .expect("screen snapshot");
+        assert_eq!((snapshot.cols, snapshot.rows), (50, 6));
+        assert_eq!(mirror.dimensions().expect("dimensions"), (50, 6));
     }
 }

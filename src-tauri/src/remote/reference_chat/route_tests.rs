@@ -22,7 +22,7 @@ use super::files as reference_files;
 use super::types::REFERENCE_CHAT_ROUTE_PREFIX;
 
 /// The frozen route table, as the plan and the contract name it.
-const REFERENCE_CHAT_ROUTES: [(&str, &str); 9] = [
+const REFERENCE_CHAT_ROUTES: [(&str, &str); 10] = [
     ("GET", "history"),
     ("GET", "screen"),
     ("GET", "prompt"),
@@ -30,6 +30,7 @@ const REFERENCE_CHAT_ROUTES: [(&str, &str); 9] = [
     ("POST", "stop"),
     ("POST", "answer"),
     ("POST", "files"),
+    ("GET", "files"),
     ("GET", "files/00000000-0000-0000-0000-000000000000"),
     ("DELETE", "files/00000000-0000-0000-0000-000000000000"),
 ];
@@ -1197,14 +1198,18 @@ async fn staged_reference_files_round_trip_on_the_owning_host() {
         "the receipt names the owning host: {body}"
     );
     assert_eq!(staged["data"]["receipt"]["sizeBytes"], bytes.len(), "{body}");
-    assert_eq!(
-        staged["data"]["mentionText"], "@reference-fixture.txt ",
-        "the mention is editable text, not an opaque attachment: {body}"
-    );
     let attachment_id = staged["data"]["receipt"]["attachmentId"]
         .as_str()
         .expect("attachmentId")
         .to_string();
+    assert_eq!(
+        staged["data"]["mentionText"],
+        format!(
+            "@{}/{attachment_id}/reference-fixture.txt ",
+            reference_files::REFERENCE_STAGING_DIR_NAME
+        ),
+        "the mention is editable text naming the worktree-relative staged path: {body}"
+    );
 
     let query = fixture.read_query(
         "codex",
@@ -1309,6 +1314,458 @@ fn the_relay_allowlist_admits_exactly_the_reference_chat_route_table() {
     assert!(validate_http_query(&format!("reference-chat/{session}/submit"), None).is_ok());
 }
 
+/// A backend whose one pane shows a fixed screen and records every write it is handed.
+struct ScreenStubBackend {
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    screen: Vec<u8>,
+    writes: std::sync::Mutex<Vec<Vec<u8>>>,
+    /// Every write, as it is handed over, for a test that waits on a specific one.
+    written: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+}
+
+impl crate::remote::backend::RemoteSessionBackend for ScreenStubBackend {
+    fn list_sessions(&self) -> futures_util::future::BoxFuture<'_, Vec<String>> {
+        Box::pin(async move { vec![self.session_id.clone()] })
+    }
+    fn describe_session<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<crate::remote::backend::RemoteSessionDetails, String>,
+    > {
+        Box::pin(async move {
+            if session_id != self.session_id {
+                return Err("unknown session".to_string());
+            }
+            Ok(crate::remote::backend::RemoteSessionDetails {
+                session_id: self.session_id.clone(),
+                workspace_id: None,
+                worktree_label: None,
+                worktree_path: None,
+                running: true,
+                cols: self.cols,
+                rows: self.rows,
+            })
+        })
+    }
+    fn attach_with_sequence<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _after_sequence: Option<u64>,
+    ) -> futures_util::future::BoxFuture<'a, Result<crate::terminal::SessionAttachment, String>>
+    {
+        Box::pin(async move {
+            let (_sender, receiver) = tokio::sync::broadcast::channel(1);
+            Ok(crate::terminal::SessionAttachment {
+                snapshot: crate::terminal::AttachmentSnapshot {
+                    session_id: self.session_id.clone(),
+                    history_start_sequence: Some(1),
+                    history_end_sequence: Some(1),
+                    history: self.screen.clone(),
+                    history_segments: vec![crate::terminal::HistorySegment {
+                        cols: Some(self.cols),
+                        rows: Some(self.rows),
+                        bytes: self.screen.clone(),
+                    }],
+                    gap: None,
+                    history_incomplete: false,
+                },
+                receiver,
+            })
+        })
+    }
+    fn write_input<'a>(
+        &'a self,
+        _session_id: &'a str,
+        data: &'a [u8],
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        self.writes.lock().expect("writes").push(data.to_vec());
+        if let Some(written) = self.written.as_ref() {
+            let _ = written.send(data.to_vec());
+        }
+        Box::pin(async { Ok(()) })
+    }
+    fn resize<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _cols: u16,
+        _rows: u16,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("this stub never resizes".to_string()) })
+    }
+    fn signal<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _signal: crate::terminal::TerminalSignal,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("this stub never signals".to_string()) })
+    }
+}
+
+/// A screen too large to answer from must not read as "no prompt": a chat message is not typed
+/// into the Claude menu at its bottom.
+#[tokio::test]
+async fn a_chat_submit_is_refused_when_the_screen_cannot_be_read_whole() {
+    let session_id = "reference-route-truncated".to_string();
+    let (cols, rows) = (300u16, 70u16);
+    let mut screen = Vec::new();
+    for _ in 0..56 {
+        screen.extend_from_slice("x".repeat(usize::from(cols) - 1).as_bytes());
+        screen.extend_from_slice(b"\r\n");
+    }
+    let menu = include_str!("fixtures/claude/prompt/approval-command.screen");
+    screen.extend_from_slice(menu.trim_end().replace('\n', "\r\n").as_bytes());
+    let backend = Arc::new(ScreenStubBackend {
+        session_id: session_id.clone(),
+        cols,
+        rows,
+        screen,
+        writes: std::sync::Mutex::new(Vec::new()),
+        written: None,
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "reference-route-truncated")
+        .expect("control token");
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let epoch = state
+        .daemon_epoch
+        .load(std::sync::atomic::Ordering::Acquire)
+        .to_string();
+    let body = serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(),
+        "target": {
+            "hostId": reference_files::reference_host_id(),
+            "ownerId": state.reference_owner_id,
+            "epoch": epoch,
+            "backendSessionId": session_id,
+        },
+        "registryId": "claude",
+        "params": { "text": "1", "origin": "chat" },
+    });
+    let (status, response) = server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"),
+            Some(&control),
+            Some(&body.to_string()),
+        )
+        .await;
+
+    assert_eq!(status, 409, "{response}");
+    assert!(response.contains("CONTROL_CONFLICT"), "{response}");
+    assert!(
+        backend.writes.lock().expect("writes").is_empty(),
+        "chat text was typed into a menu the gateway could not rule out"
+    );
+    server.stop().await;
+}
+
+/// A chat submit that names no registry id (the mobile client omits it when the pane's agent is
+/// unknown) has no prompt detector to run, so it is still delivered.
+#[tokio::test]
+async fn a_chat_submit_without_a_registry_id_is_still_delivered() {
+    let session_id = "reference-route-no-registry".to_string();
+    let backend = Arc::new(ScreenStubBackend {
+        session_id: session_id.clone(),
+        cols: 80,
+        rows: 24,
+        screen: b"$ ".to_vec(),
+        writes: std::sync::Mutex::new(Vec::new()),
+        written: None,
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "reference-route-no-registry")
+        .expect("control token");
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let epoch = state
+        .daemon_epoch
+        .load(std::sync::atomic::Ordering::Acquire)
+        .to_string();
+    let body = serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(),
+        "target": {
+            "hostId": reference_files::reference_host_id(),
+            "ownerId": state.reference_owner_id,
+            "epoch": epoch,
+            "backendSessionId": session_id,
+        },
+        "params": { "text": "hello", "origin": "chat" },
+    });
+    let (status, response) = server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"),
+            Some(&control),
+            Some(&body.to_string()),
+        )
+        .await;
+
+    assert_eq!(status, 200, "{response}");
+    assert!(response.contains("\"stage\":\"accepted\""), "{response}");
+    let writes = backend.writes.lock().expect("writes").clone();
+    assert_eq!(writes.first().map(Vec::as_slice), Some(b"hello".as_slice()), "{writes:?}");
+    assert_eq!(writes.last().map(Vec::as_slice), Some(b"\r".as_slice()), "{writes:?}");
+    server.stop().await;
+}
+
+/// A gateway whose one pane this host's output hub does not hold, as a session still served by a
+/// legacy daemon after a handover is: the hub cannot say whether that pane has bracketed paste
+/// on, and a control device on it.
+fn unhubbed_pane(
+    session_id: &str,
+    written: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+) -> (Arc<ScreenStubBackend>, Arc<RemoteGatewayState>, String) {
+    let backend = Arc::new(ScreenStubBackend {
+        session_id: session_id.to_string(),
+        cols: 80,
+        rows: 24,
+        screen: b"$ ".to_vec(),
+        writes: std::sync::Mutex::new(Vec::new()),
+        written,
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, session_id)
+        .expect("control token");
+    (backend, state, control)
+}
+
+/// The submit envelope for an unhubbed pane, naming no registry id so no screen probe runs.
+fn unhubbed_submit(state: &RemoteGatewayState, session_id: &str, text: &str) -> String {
+    let epoch = state
+        .daemon_epoch
+        .load(std::sync::atomic::Ordering::Acquire)
+        .to_string();
+    serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(),
+        "target": {
+            "hostId": reference_files::reference_host_id(),
+            "ownerId": state.reference_owner_id,
+            "epoch": epoch,
+            "backendSessionId": session_id,
+        },
+        "params": { "text": text, "origin": "chat" },
+    })
+    .to_string()
+}
+
+/// rs-input-screen-r3-1: a pane whose bracketed-paste mode this host cannot read (a legacy-peer
+/// session after a handover) must not have a multi-line message typed unbracketed, where its
+/// inner CR would submit the first line as a turn of its own.
+#[tokio::test]
+async fn a_multi_line_submit_to_a_pane_whose_paste_mode_is_unknown_types_nothing() {
+    let session_id = "reference-route-legacy-peer";
+    let (backend, state, control) = unhubbed_pane(session_id, None);
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let (status, response) = server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"),
+            Some(&control),
+            Some(&unhubbed_submit(&state, session_id, "fix A\nthen B")),
+        )
+        .await;
+    let writes = backend.writes.lock().expect("writes").clone();
+    assert!(
+        writes.is_empty(),
+        "a multi-line message was typed into a pane whose paste mode is unknown: {writes:?}"
+    );
+    assert_eq!(status, 422, "{response}");
+    assert!(response.contains("UNSUPPORTED"), "{response}");
+    server.stop().await;
+}
+
+/// rs-input-screen-r3-2: a caller that goes away between the paste and its Enter must not leave
+/// the paste unsent in the pane. The handler future is dropped exactly as hyper drops it on a
+/// disconnect, right after the paste is written.
+#[tokio::test]
+async fn a_submit_whose_caller_leaves_after_the_paste_still_writes_its_enter() {
+    let session_id = "reference-route-caller-left";
+    let (written_tx, mut written) = tokio::sync::mpsc::unbounded_channel();
+    let (_backend, state, control) = unhubbed_pane(session_id, Some(written_tx));
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"))
+        .header("authorization", format!("Bearer {control}"))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(unhubbed_submit(&state, session_id, "deploy now")))
+        .expect("request");
+    let handler = crate::remote::server::reference_chat_submit(
+        axum::extract::State(Arc::clone(&state)),
+        axum::extract::Path(session_id.to_string()),
+        request,
+    );
+    let paste = tokio::select! {
+        response = handler => panic!("the submit finished before its caller left: {:?}", response.status()),
+        paste = written.recv() => paste.expect("the paste was written"),
+    };
+    // The handler future is gone here: the caller left during the gap before the Enter.
+    assert_eq!(paste, b"deploy now".to_vec());
+    let enter = tokio::time::timeout(std::time::Duration::from_secs(5), written.recv())
+        .await
+        .ok()
+        .flatten();
+    assert_eq!(
+        enter.as_deref(),
+        Some(b"\r".as_slice()),
+        "the paste was left unsent in the pane after its caller left"
+    );
+}
+
+/// A backend whose one pane is served by a real output hub, so a replay gap behaves as it does on
+/// an SSH-remote pane whose read reconnected.
+struct HubStubBackend {
+    session_id: String,
+    hub: crate::terminal::TerminalOutputHub,
+    writes: std::sync::Mutex<Vec<Vec<u8>>>,
+}
+
+impl crate::remote::backend::RemoteSessionBackend for HubStubBackend {
+    fn list_sessions(&self) -> futures_util::future::BoxFuture<'_, Vec<String>> {
+        Box::pin(async move { vec![self.session_id.clone()] })
+    }
+    fn describe_session<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<crate::remote::backend::RemoteSessionDetails, String>,
+    > {
+        Box::pin(async move {
+            if session_id != self.session_id {
+                return Err("unknown session".to_string());
+            }
+            Ok(crate::remote::backend::RemoteSessionDetails {
+                session_id: self.session_id.clone(),
+                workspace_id: None,
+                worktree_label: None,
+                worktree_path: None,
+                running: true,
+                cols: 80,
+                rows: 24,
+            })
+        })
+    }
+    fn attach_with_sequence<'a>(
+        &'a self,
+        session_id: &'a str,
+        after_sequence: Option<u64>,
+    ) -> futures_util::future::BoxFuture<'a, Result<crate::terminal::SessionAttachment, String>>
+    {
+        Box::pin(async move {
+            self.hub
+                .subscribe_with_sequence(session_id, after_sequence)
+                .ok_or_else(|| "unknown session".to_string())
+        })
+    }
+    fn write_input<'a>(
+        &'a self,
+        _session_id: &'a str,
+        data: &'a [u8],
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        self.writes.lock().expect("writes").push(data.to_vec());
+        Box::pin(async { Ok(()) })
+    }
+    fn resize<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _cols: u16,
+        _rows: u16,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("this stub never resizes".to_string()) })
+    }
+    fn signal<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _signal: crate::terminal::TerminalSignal,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("this stub never signals".to_string()) })
+    }
+}
+
+/// After a replay gap the hub holds only what the pane drew since, which is not the whole screen:
+/// a Claude menu drawn before the gap is still on the pane while the hub replays only a spinner
+/// line. A chat submit must not read that partial screen as "no prompt" and type into the menu.
+#[tokio::test]
+async fn a_chat_submit_is_refused_when_the_screen_history_has_a_replay_gap() {
+    let session_id = "reference-route-post-gap".to_string();
+    let hub = crate::terminal::TerminalOutputHub::default();
+    hub.register_session(&session_id);
+    hub.record_initial_size(&session_id, 80, 24);
+    let menu = include_str!("fixtures/claude/prompt/approval-command.screen");
+    hub.publish(&session_id, menu.trim_end().replace('\n', "\r\n").into_bytes())
+        .expect("menu published");
+    hub.publish_gap(&session_id).expect("gap published");
+    hub.publish(&session_id, "\r\u{273b} Thinking\u{2026} (esc to interrupt)".as_bytes().to_vec())
+        .expect("spinner published");
+    let backend = Arc::new(HubStubBackend {
+        session_id: session_id.clone(),
+        hub,
+        writes: std::sync::Mutex::new(Vec::new()),
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "reference-route-post-gap")
+        .expect("control token");
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let epoch = state
+        .daemon_epoch
+        .load(std::sync::atomic::Ordering::Acquire)
+        .to_string();
+    let body = serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(),
+        "target": {
+            "hostId": reference_files::reference_host_id(),
+            "ownerId": state.reference_owner_id,
+            "epoch": epoch,
+            "backendSessionId": session_id,
+        },
+        "registryId": "claude",
+        "params": { "text": "1", "origin": "chat" },
+    });
+    let (status, response) = server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"),
+            Some(&control),
+            Some(&body.to_string()),
+        )
+        .await;
+
+    assert_eq!(status, 409, "{response}");
+    assert!(response.contains("CONTROL_CONFLICT"), "{response}");
+    assert!(
+        backend.writes.lock().expect("writes").is_empty(),
+        "chat text was typed into a pane whose screen was read from post-gap bytes only"
+    );
+    server.stop().await;
+}
+
 /// No control router is mounted under the prefix, and an unknown suffix is not a route.
 #[tokio::test]
 async fn an_unknown_reference_chat_suffix_is_not_a_route() {
@@ -1331,3 +1788,455 @@ async fn an_unknown_reference_chat_suffix_is_not_a_route() {
     );
     fixture.server.stop().await;
 }
+
+impl ReferenceRouteFixture {
+    /// The pane's own working directory, as this gateway's backend reports it.
+    async fn worktree(&self) -> std::path::PathBuf {
+        self.state
+            .session_backend
+            .describe_session(&self.session_id)
+            .await
+            .expect("describe the fixture session")
+            .worktree_path
+            .expect("the fixture session has a working directory")
+    }
+
+    async fn stage(&self, name: &str, bytes: &[u8]) -> (u16, String) {
+        use base64::Engine as _;
+        let content = base64::engine::general_purpose::STANDARD.encode(bytes);
+        self.server
+            .request(
+                "POST",
+                &self.route("files"),
+                Some(&self.control),
+                Some(&self.mutation(
+                    &uuid::Uuid::new_v4().to_string(),
+                    serde_json::json!({
+                        "name": name,
+                        "mediaType": "text/plain",
+                        "sizeBytes": bytes.len(),
+                        "contentBase64": content,
+                    }),
+                )),
+            )
+            .await
+    }
+}
+
+/// rs-files-routes-1: the mention the agent receives names a path it can open from the pane's
+/// own working directory, and that path holds exactly the uploaded bytes.
+#[tokio::test]
+async fn a_staged_mention_resolves_to_the_uploaded_bytes_under_the_pane_worktree() {
+    let fixture = fixture().await;
+    let bytes = b"notes staged for the agent\n";
+    let (status, body) = fixture.stage("notes.txt", bytes).await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+    let mention = staged["data"]["mentionText"].as_str().expect("mentionText").to_string();
+    let path = mention
+        .strip_prefix('@')
+        .expect("an @ mention")
+        .trim_end()
+        .to_string();
+    assert!(
+        reference_files::reference_mention_path_is_safe(&path),
+        "the mention must be a safe relative path: {mention:?}"
+    );
+    let worktree = fixture.worktree().await;
+    let resolved = worktree.join(&path);
+    assert_eq!(
+        std::fs::read(&resolved).ok().as_deref(),
+        Some(&bytes[..]),
+        "<worktree>/{path} must hold the uploaded bytes (worktree {})",
+        worktree.display()
+    );
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-r7-1: a pane whose shell has moved since it was spawned stages into the
+/// directory it is in NOW, so the relative mention resolves from the agent's live cwd.
+#[tokio::test]
+async fn a_staged_mention_resolves_from_the_panes_live_cwd_after_a_cd() {
+    let fixture = fixture().await;
+    // The shell is up (and, on Windows, its cursor query answered) before it is asked to move.
+    fixture.submit_and_await_marker("CWDREADY_ONE").await;
+    let worktree = fixture.worktree().await;
+    let nested = worktree.join("nested");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+    let marker = "CWDMOVED_TWO";
+    let command = if cfg!(windows) {
+        "Set-Location nested; [Environment]::CurrentDirectory = (Get-Location).ProviderPath; Write-Output ('CWDMOVED_' + 'TWO')\r".to_string()
+    } else {
+        "cd nested && printf 'CWDMOVED_%s\\n' 'TWO'\r".to_string()
+    };
+    let attachment = fixture
+        .state
+        .session_backend
+        .attach_with_sequence(&fixture.session_id, None)
+        .await
+        .expect("attach the pane");
+    let mut seen = attachment.snapshot.history;
+    let mut watch = attachment.receiver;
+    fixture
+        .state
+        .session_backend
+        .write_input(&fixture.session_id, command.as_bytes())
+        .await
+        .expect("type the cd");
+    let moved = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            match watch.recv().await {
+                Ok(chunk) => {
+                    seen.extend_from_slice(&chunk.bytes);
+                    if seen.windows(marker.len()).any(|window| window == marker.as_bytes()) {
+                        return true;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+            }
+        }
+    })
+    .await;
+    assert_eq!(moved.ok(), Some(true), "the pane must run the cd: {}", escaped_bytes(&seen, 4096));
+
+    let bytes = b"staged after a cd\n";
+    let (status, body) = fixture.stage("moved.txt", bytes).await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+    let mention = staged["data"]["mentionText"].as_str().expect("mentionText").to_string();
+    let path = mention.strip_prefix('@').expect("an @ mention").trim_end().to_string();
+    assert!(reference_files::reference_mention_path_is_safe(&path), "{mention:?}");
+    assert_eq!(
+        std::fs::read(nested.join(&path)).ok().as_deref(),
+        Some(&bytes[..]),
+        "<live cwd>/{path} must hold the uploaded bytes (live cwd {})",
+        nested.display()
+    );
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-5: the per-target file cap holds under concurrent uploads.
+#[tokio::test]
+async fn concurrent_stages_for_one_target_respect_the_file_cap() {
+    let fixture = fixture().await;
+    let attempts = (0..8).map(|index| {
+        let fixture = &fixture;
+        async move { fixture.stage(&format!("parallel-{index}.txt"), b"parallel body").await }
+    });
+    let results = futures_util::future::join_all(attempts).await;
+    let ok = results.iter().filter(|(status, _)| *status == 200).count();
+    assert!(
+        ok <= crate::scoped_contracts::ATTACHMENT_MAX_FILES_PER_TURN,
+        "at most {} concurrent stages may succeed, {ok} did: {results:?}",
+        crate::scoped_contracts::ATTACHMENT_MAX_FILES_PER_TURN
+    );
+    assert!(ok >= 1, "at least one stage must succeed: {results:?}");
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-r2-1: files a submitted turn already referenced no longer count against the
+/// per-turn bounds, so the next turn can attach a full set again; their bytes stay on disk.
+#[tokio::test]
+async fn files_a_submitted_turn_referenced_free_the_per_turn_bounds() {
+    let fixture = fixture().await;
+    let max = crate::scoped_contracts::ATTACHMENT_MAX_FILES_PER_TURN;
+    let mut mentions = String::new();
+    let mut paths = Vec::new();
+    for index in 0..max {
+        let (status, body) = fixture
+            .stage(&format!("turn-one-{index}.txt"), b"turn one body")
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+        let mention = staged["data"]["mentionText"].as_str().expect("mentionText");
+        paths.push(mention.trim_start_matches('@').trim_end().to_string());
+        mentions.push_str(mention);
+    }
+    let (status, body) = fixture
+        .server
+        .request(
+            "POST",
+            &fixture.route("submit"),
+            Some(&fixture.control),
+            Some(&fixture.mutation(
+                &uuid::Uuid::new_v4().to_string(),
+                serde_json::json!({ "text": format!("echo {mentions}"), "origin": "chat" }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"stage\":\"accepted\""), "{body}");
+
+    let (status, body) = fixture.stage("turn-two.txt", b"turn two body").await;
+    assert_eq!(
+        status, 200,
+        "a new turn must not be refused for files the previous turn already sent: {body}"
+    );
+    let worktree = fixture.worktree().await;
+    for path in &paths {
+        assert!(
+            worktree.join(path).exists(),
+            "a referenced file stays on disk for its TTL: {path}"
+        );
+    }
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-6: a DELETE whose removal fails is not reported as cleaned, and the entry
+/// stays addressable so a retry can still remove it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_staged_file_delete_is_not_204_and_keeps_the_entry() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = fixture().await;
+    let (status, body) = fixture.stage("locked.txt", b"locked body").await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+    let attachment_id = staged["data"]["receipt"]["attachmentId"]
+        .as_str()
+        .expect("attachmentId")
+        .to_string();
+    let path = staged["data"]["mentionText"]
+        .as_str()
+        .expect("mentionText")
+        .trim_start_matches('@')
+        .trim_end()
+        .to_string();
+    let worktree = fixture.worktree().await;
+    let staged_file = worktree.join(&path);
+    // Make the attachment directory unremovable: its parent loses write permission.
+    let attachment_dir = staged_file.parent().expect("attachment dir").to_path_buf();
+    let base = attachment_dir.parent().expect("staging base").to_path_buf();
+    let original = std::fs::metadata(&base).expect("base metadata").permissions();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o500)).expect("lock base");
+
+    let query = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    let own = format!("{}?{query}", fixture.route(&format!("files/{attachment_id}")));
+    let (first, first_body) = fixture
+        .server
+        .request("DELETE", &own, Some(&fixture.control), None)
+        .await;
+    let (second, second_body) = fixture
+        .server
+        .request("DELETE", &own, Some(&fixture.control), None)
+        .await;
+    std::fs::set_permissions(&base, original).expect("unlock base");
+    assert_ne!(first, 204, "a delete that could not remove the file: {first_body}");
+    assert_ne!(
+        second, 404,
+        "the entry must survive a failed delete so a retry can remove it: {second_body}"
+    );
+    let (third, third_body) = fixture
+        .server
+        .request("DELETE", &own, Some(&fixture.control), None)
+        .await;
+    assert_eq!(third, 204, "a retried delete after the fault clears: {third_body}");
+    assert!(!attachment_dir.exists(), "the retried delete removed the bytes");
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-r3-2: a staged file whose stage response the client never saw (an aborted
+/// upload, a page reload) is listed back to the client, so it can be deleted rather than
+/// holding a per-turn slot for the whole TTL.
+#[tokio::test]
+async fn orphaned_staged_files_are_listed_and_can_be_released() {
+    let fixture = fixture().await;
+    let max = crate::scoped_contracts::ATTACHMENT_MAX_FILES_PER_TURN;
+    for index in 0..max {
+        let (status, body) = fixture.stage(&format!("orphan-{index}.txt"), b"orphan").await;
+        assert_eq!(status, 200, "{body}");
+    }
+    let (status, body) = fixture.stage("blocked.txt", b"blocked").await;
+    assert_eq!(status, 413, "the per-turn cap holds: {body}");
+
+    let query = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    let (status, body) = fixture
+        .server
+        .request(
+            "GET",
+            &format!("{}?{query}", fixture.route("files")),
+            Some(&fixture.control),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "the target's staged files must be listable: {body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).expect("a file list");
+    let files = listed["files"].as_array().expect("files array");
+    assert_eq!(files.len(), max, "{body}");
+    for file in files {
+        assert!(file["displayName"].is_string(), "{body}");
+        assert!(file["mentionText"].as_str().is_some_and(|m| m.starts_with('@')), "{body}");
+        assert_eq!(file["receipt"]["hostId"], reference_files::reference_host_id(), "{body}");
+        let id = file["receipt"]["attachmentId"].as_str().expect("attachmentId");
+        let own = format!("{}?{query}", fixture.route(&format!("files/{id}")));
+        let (status, body) = fixture
+            .server
+            .request("DELETE", &own, Some(&fixture.control), None)
+            .await;
+        assert_eq!(status, 204, "a listed orphan can be released: {body}");
+    }
+
+    let (status, body) = fixture.stage("after-release.txt", b"after").await;
+    assert_eq!(status, 200, "released orphans free the per-turn bounds: {body}");
+    fixture.server.stop().await;
+}
+
+/// The attachment directories under a pane's staging root, if the root exists yet.
+fn staged_attachment_dirs(worktree: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(reference_files::reference_staging_base_dir(worktree))
+        .map(|entries| entries.filter_map(|entry| entry.ok().map(|entry| entry.path())).collect())
+        .unwrap_or_default()
+}
+
+/// rs-files-routes-r4-1: a stage whose caller leaves while its bytes are being written must not
+/// leave a hidden reservation behind. The handler future is dropped exactly as hyper drops it on
+/// a disconnect, while the write is in flight; afterwards every slot the target holds is either
+/// listed (and so releasable) or free, so a full set can be staged again.
+#[tokio::test]
+async fn a_stage_whose_caller_leaves_mid_write_leaves_no_hidden_reservation() {
+    use base64::Engine as _;
+
+    let fixture = fixture().await;
+    let worktree = fixture.worktree().await;
+    let bytes = vec![b'x'; 4 * 1024 * 1024];
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(fixture.route("files"))
+        .header("authorization", format!("Bearer {}", fixture.control))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(fixture.mutation(
+            &uuid::Uuid::new_v4().to_string(),
+            serde_json::json!({
+                "name": "aborted.bin",
+                "mediaType": "text/plain",
+                "sizeBytes": bytes.len(),
+                "contentBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }),
+        )))
+        .expect("request");
+    let mut handler = Box::pin(crate::remote::server::reference_chat_stage_file(
+        axum::extract::State(Arc::clone(&fixture.state)),
+        axum::extract::Path(fixture.session_id.clone()),
+        request,
+    ));
+    // Drive the handler only until its write has begun on disk; the disk is checked BEFORE each
+    // poll, so the handler can never run past the write without this loop seeing it first.
+    let mid_write = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if !staged_attachment_dirs(&worktree).is_empty() {
+                return;
+            }
+            if let std::task::Poll::Ready(response) = futures_util::poll!(handler.as_mut()) {
+                panic!("the stage finished before its caller left: {:?}", response.status());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(mid_write.is_ok(), "the stage never began writing its bytes");
+    // The caller leaves while the write is in flight.
+    drop(handler);
+
+    let query = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    // The stage the caller left must become visible (and so releasable): there is no event for
+    // it, so the list is re-read until it shows the file, within a bound.
+    let listed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let (status, body) = fixture
+                .server
+                .request(
+                    "GET",
+                    &format!("{}?{query}", fixture.route("files")),
+                    Some(&fixture.control),
+                    None,
+                )
+                .await;
+            assert_eq!(status, 200, "{body}");
+            let listed: serde_json::Value = serde_json::from_str(&body).expect("a file list");
+            if !listed["files"].as_array().expect("files array").is_empty() {
+                return listed;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the stage whose caller left never became listable, so it cannot be released");
+    for file in listed["files"].as_array().expect("files array") {
+        let id = file["receipt"]["attachmentId"].as_str().expect("attachmentId");
+        let own = format!("{}?{query}", fixture.route(&format!("files/{id}")));
+        let (status, body) = fixture
+            .server
+            .request("DELETE", &own, Some(&fixture.control), None)
+            .await;
+        assert_eq!(status, 204, "a listed slot can be released: {body}");
+    }
+    for index in 0..crate::scoped_contracts::ATTACHMENT_MAX_FILES_PER_TURN {
+        let (status, body) = fixture.stage(&format!("after-abort-{index}.txt"), b"after").await;
+        assert_eq!(
+            status, 200,
+            "an aborted stage left a reservation that is neither listed nor free: {body}"
+        );
+    }
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-r4-2: a pane whose session runs on an SSH remote must not have its file staged
+/// on this gateway's own disk at the remote's project path; the stage is refused, typed, and no
+/// bytes land locally.
+#[tokio::test]
+async fn a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally() {
+    let fixture = fixture().await;
+    let worktree = fixture.worktree().await;
+    let store_path = fixture
+        .state
+        .machine_services
+        .as_ref()
+        .expect("machine services")
+        .sessions
+        .remote_sessions_store_path()
+        .to_path_buf();
+    // The remote's project path exists on this host too, the case where a local write would
+    // silently succeed at the wrong place.
+    let store = serde_json::json!({
+        "version": 3,
+        "remoteSessions": [{
+            "descriptor": {
+                "backendSessionId": fixture.session_id,
+                "config": {
+                    "host": { "authMethod": "agent", "hostname": "203.0.113.7", "id": "ssh-test" },
+                    "environment": { "home": "/home/remote", "platform": "posix" },
+                    "projectPath": worktree.to_string_lossy(),
+                },
+            },
+        }],
+    });
+    std::fs::create_dir_all(store_path.parent().expect("store dir")).expect("store dir");
+    std::fs::write(&store_path, store.to_string()).expect("write remote session store");
+
+    let (status, body) = fixture.stage("remote.txt", b"remote body").await;
+    assert!(
+        staged_attachment_dirs(&worktree).is_empty(),
+        "an SSH-remote pane's file was staged on this gateway's disk: {body}"
+    );
+    assert_eq!(status, 422, "{body}");
+    assert!(body.contains("UNSUPPORTED"), "{body}");
+    fixture.server.stop().await;
+}
+

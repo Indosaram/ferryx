@@ -324,11 +324,13 @@ export function referenceHistoryIsNative(page: ReferenceHistoryPage): boolean {
  *
  * A native page discloses nothing. Scrollback is same-pane output and a not-started session
  * is a conversation with no turns yet; both are labelled rather than passed off as native.
+ * The one native exception is a page whose bounded window could not reach the conversation's
+ * beginning: its reason says so, so that page is never passed off as the start.
  */
 export function referenceHistoryDisclosure(page: ReferenceHistoryPage): string | null {
   switch (page.availability) {
     case "native":
-      return null;
+      return page.unavailableReason ?? null;
     case "scrollback":
       return REFERENCE_SCROLLBACK_DISCLOSURE;
     case "notStarted":
@@ -427,9 +429,46 @@ export function referenceMentionFor(path: string): string {
   return `@${path} `;
 }
 
-/** The durable draft key for a target, owner- and epoch-scoped. */
+/**
+ * The durable draft/held-queue key for a target: host + daemon incarnation + backend session.
+ *
+ * The owner authority is deliberately NOT part of it. The gateway mints a new owner id every time
+ * it starts, so a desktop relaunch over a still-running daemon would otherwise orphan the user's
+ * own text; the owner keeps fencing requests through `referenceTargetKey`.
+ */
 export function referenceDraftKey(target: ReferenceTargetRef): string {
-  return referenceTargetKey(target);
+  const { hostId, epoch, backendSessionId } = target.target;
+  return `${hostId}|${epoch}|${backendSessionId}`;
+}
+
+/** Storage that can also be enumerated; a shim without `key`/`length` skips legacy lookup. */
+type EnumerableStorage = Pick<Storage, "getItem"> & Partial<Pick<Storage, "key" | "length">>;
+
+/**
+ * Every storage key an earlier build used for the same durable key, which still carried the
+ * gateway's owner id (`host|owner|epoch|session`). A gateway restart under that build minted a
+ * new owner, so several owners can hold text for one session; storage order says nothing about
+ * which is newest, so callers must migrate all of them.
+ */
+export function legacyReferenceStorageKeys(
+  storage: EnumerableStorage,
+  prefix: string,
+  durableKey: string,
+): string[] {
+  if (typeof storage.key !== "function" || typeof storage.length !== "number") return [];
+  const parts = durableKey.split("|");
+  if (parts.length !== 3) return [];
+  const [hostId, epoch, backendSessionId] = parts;
+  const keys: string[] = [];
+  for (let index = 0; index < storage.length; index += 1) {
+    const candidate = storage.key(index);
+    if (candidate === null || !candidate.startsWith(prefix)) continue;
+    const legacy = candidate.slice(prefix.length).split("|");
+    if (legacy.length === 4 && legacy[0] === hostId && legacy[2] === epoch && legacy[3] === backendSessionId) {
+      keys.push(candidate);
+    }
+  }
+  return keys;
 }
 
 /**

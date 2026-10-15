@@ -5268,6 +5268,7 @@ async fn remote_method_not_allowed() -> Response {
 //   POST   /api/v1/reference-chat/{sessionId}/stop
 //   POST   /api/v1/reference-chat/{sessionId}/answer
 //   POST   /api/v1/reference-chat/{sessionId}/files
+//   GET    /api/v1/reference-chat/{sessionId}/files
 //   GET    /api/v1/reference-chat/{sessionId}/files/{fileId}
 //   DELETE /api/v1/reference-chat/{sessionId}/files/{fileId}
 //
@@ -5316,6 +5317,14 @@ struct ReferenceStagedFile {
     display_name: String,
     receipt: AttachmentReceipt,
     staged_at_ms: u64,
+    /// A slot reserved under the registry lock while its bytes are still being written, so
+    /// concurrent stages for one target count it against the frozen per-turn bounds.
+    pending: bool,
+    /// The `@path` mention the agent receives for this file.
+    mention_text: String,
+    /// An accepted submit already sent this file's mention: it belongs to a finished turn and no
+    /// longer counts against the next turn's bounds, though its bytes stay on disk for the TTL.
+    referenced: bool,
 }
 
 /// Process-local state every reference-chat route shares.
@@ -5424,20 +5433,13 @@ impl reference_prompts::ReferenceAnswerScreenReader for ReferenceGatewayScreenRe
             let mut mirror = RemoteTerminalMirror::new(details.cols, details.rows)
                 .map_err(|error| error.to_string())?;
             // A replay gap means the history could not be reconstructed: the snapshot is marked
-            // gapped rather than rendered from a hole.
-            let segments: Option<Vec<Vec<u8>>> = if attachment.snapshot.gap.is_some() {
-                None
-            } else {
-                Some(
-                    attachment
-                        .snapshot
-                        .history_segments
-                        .iter()
-                        .map(|segment| segment.bytes.clone())
-                        .collect(),
-                )
-            };
-            reference_screen::snapshot_reference_screen(&mut mirror, segments.as_deref())
+            // gapped rather than rendered from a hole, and so is history that lost output to a
+            // gap without a full-screen reset since. Each segment replays at the size it was
+            // recorded at, then the mirror returns to the pane's live geometry.
+            let segments = (attachment.snapshot.gap.is_none()
+                && !attachment.snapshot.history_incomplete)
+                .then_some(attachment.snapshot.history_segments.as_slice());
+            reference_screen::snapshot_reference_screen_segments(&mut mirror, segments)
         })
     }
 }
@@ -5938,19 +5940,11 @@ async fn reference_chat_snapshot_screen(
         .map_err(|message| reference_chat_scope(ScopeErrorCode::Timeout, message))?;
     let mut mirror = RemoteTerminalMirror::new(details.cols, details.rows)
         .map_err(|error| reference_chat_scope(ScopeErrorCode::Unsupported, error.to_string()))?;
-    let segments: Option<Vec<Vec<u8>>> = if attachment.snapshot.gap.is_some() {
-        None
-    } else {
-        Some(
-            attachment
-                .snapshot
-                .history_segments
-                .iter()
-                .map(|segment| segment.bytes.clone())
-                .collect(),
-        )
-    };
-    reference_screen::snapshot_reference_screen(&mut mirror, segments.as_deref())
+    // History that lost output to a replay gap, with no full-screen reset since, is not the
+    // whole screen even on a full attach: it is read as gapped.
+    let segments = (attachment.snapshot.gap.is_none() && !attachment.snapshot.history_incomplete)
+        .then_some(attachment.snapshot.history_segments.as_slice());
+    reference_screen::snapshot_reference_screen_segments(&mut mirror, segments)
         .map_err(|message| reference_chat_scope(ScopeErrorCode::Unsupported, message))
 }
 
@@ -5980,40 +5974,59 @@ async fn reference_chat_session_jsonl(
     let stream =
         reference_history::resolve_reference_history_stream(&home, identity, &siblings).ok()?;
     let path = stream.file_path()?.to_path_buf();
-    let bytes = crate::ipc::run_blocking(move || {
-        std::fs::read(&path).map_err(|error| crate::ipc::error::IpcError::internal(error.to_string()))
+    // Only the tail is read: the store has no size bound, and the prompt detectors need its end.
+    let bounded = crate::ipc::run_blocking(move || {
+        reference_history::read_reference_history_tail_file(&path, REFERENCE_PROMPT_SESSION_MAX_BYTES)
+            .map_err(|error| crate::ipc::error::IpcError::internal(error.to_string()))
     })
     .await
     .ok()?;
-    let bounded = if bytes.len() > REFERENCE_PROMPT_SESSION_MAX_BYTES {
-        &bytes[bytes.len() - REFERENCE_PROMPT_SESSION_MAX_BYTES..]
-    } else {
-        bytes.as_slice()
-    };
     // Lossy on purpose: the window may start mid-character, and the partial first record is not
     // a record the detectors may match anyway.
-    Some(String::from_utf8_lossy(bounded).into_owned())
+    Some(String::from_utf8_lossy(&bounded).into_owned())
 }
 
-/// The prompt the pane is holding, when this route's own screen read saw one.
+/// What this route's own screen read says about a prompt the pane may be holding.
+///
+/// A request that names no registry id has no detector to run (the mobile client omits it when
+/// the pane's agent is unknown), so the stale-prompt guard does not apply and the read is
+/// [Clear]. Otherwise a screen read that failed, and a screen that is gapped, truncated or empty,
+/// are [Unknown], so the submit guard refuses rather than typing into a menu it could not rule
+/// out.
+///
+/// [Clear]: reference_input::ReferencePromptProbe::Clear
+/// [Unknown]: reference_input::ReferencePromptProbe::Unknown
 async fn reference_chat_blocked_prompt(
     state: &Arc<RemoteGatewayState>,
     target: &reference_types::ReferenceTargetRef,
     registry_id: Option<&str>,
-) -> Option<String> {
-    let agent = registry_id.map(str::trim).filter(|value| !value.is_empty())?;
-    let snapshot = reference_chat_snapshot_screen(state, target).await.ok()?;
+) -> reference_input::ReferencePromptProbe {
+    use reference_input::ReferencePromptProbe;
+    let Some(agent) = registry_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return ReferencePromptProbe::Clear;
+    };
+    let snapshot = match reference_chat_snapshot_screen(state, target).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return ReferencePromptProbe::Unknown(error.message),
+    };
     if !snapshot.is_answerable() {
-        return None;
+        return ReferencePromptProbe::Unknown(format!(
+            "the screen is not readable whole (gap {}, truncated {}, empty {})",
+            snapshot.gap,
+            snapshot.truncated,
+            snapshot.text.is_empty()
+        ));
     }
     let identity = reference_chat_identity(state, target, Some(agent)).await;
     let session = reference_chat_prompt_session(state, &identity).await;
-    let prompt = reference_prompts::detect_reference_prompt_in_session(
+    match reference_prompts::detect_reference_prompt_in_session(
         agent,
         &snapshot.text,
         &session.borrow(),
-    )?;
-    Some(prompt.id)
+    ) {
+        Some(prompt) => ReferencePromptProbe::Blocked(prompt.id),
+        None => ReferencePromptProbe::Clear,
+    }
 }
 
 /// The response one ordered input transaction produces.
@@ -6046,6 +6059,26 @@ fn reference_chat_input_response(
     }
 }
 
+/// The response for an input transaction run on its own task.
+///
+/// A task that did not finish (it panicked) may have typed part of its input, so its outcome is
+/// unknown, never a refusal that typed nothing.
+fn reference_chat_transaction_response(
+    request_id: &str,
+    joined: Result<reference_input::ReferenceInputOutcome, tokio::task::JoinError>,
+) -> Response {
+    match joined {
+        Ok(outcome) => reference_chat_input_response(request_id, outcome),
+        Err(error) => reference_chat_result_failure(
+            request_id,
+            &reference_chat_scope(
+                ScopeErrorCode::OperationOutcomeUnknown,
+                format!("the input transaction did not finish; its outcome is unknown: {error}"),
+            ),
+        ),
+    }
+}
+
 /// The staged-file registry key: this target's own file, never another pane's.
 fn reference_chat_staged_key(
     target: &reference_types::ReferenceTargetRef,
@@ -6058,7 +6091,10 @@ fn reference_chat_staged_key(
 }
 
 /// Drop the staged files nothing has referenced for the frozen TTL, and their directories.
-fn reference_chat_prune_staged(runtime: &ReferenceChatRuntime) {
+///
+/// The registry is process-local, so the pane's own staging root is swept by mtime as well:
+/// directories a previous gateway process staged are removed once they outlive the TTL.
+async fn reference_chat_prune_staged(runtime: &ReferenceChatRuntime, worktree: &Path) {
     let now = reference_input::SystemReferenceClock.now_ms();
     let ttl = reference_files::reference_unreferenced_ttl_ms();
     let mut expired = Vec::new();
@@ -6066,15 +6102,21 @@ fn reference_chat_prune_staged(runtime: &ReferenceChatRuntime) {
         let mut staged = runtime.staged.lock();
         staged.retain(|_, entry| {
             let stale = now.saturating_sub(entry.staged_at_ms) > ttl;
-            if stale {
+            if stale && !entry.pending {
                 expired.push(entry.dir.clone());
             }
             !stale
         });
     }
-    for dir in expired {
-        let _ = reference_files::reference_cancel_staged_file(&dir);
-    }
+    let base = reference_files::reference_staging_base_dir(worktree);
+    let _ = crate::ipc::run_blocking(move || {
+        for dir in expired {
+            let _ = reference_files::reference_cancel_staged_file(&dir);
+        }
+        reference_files::reference_prune_staging_root(&base, ttl);
+        Ok::<_, crate::ipc::error::IpcError>(())
+    })
+    .await;
 }
 
 /// Read one bounded mutation envelope off the wire, after authentication.
@@ -6245,7 +6287,7 @@ async fn reference_chat_prompt(
 // ---------------------------------------------------------------------------------------------
 
 /// POST /api/v1/reference-chat/{sessionId}/submit
-async fn reference_chat_submit(
+pub(crate) async fn reference_chat_submit(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath(session_id): AxumPath<String>,
     request: axum::extract::Request,
@@ -6272,27 +6314,64 @@ async fn reference_chat_submit(
     let runtime = reference_chat_runtime();
     // The pane's OWN bracketed-paste mode, as this host's output hub recorded it: the shaping in
     // input.rs is normative and must not assume a mode the pane never enabled.
-    let bracketed_paste = state
-        .terminal_service
-        .output_hub()
-        .is_bracketed_paste_enabled(&session_id);
-    let blocked_prompt =
-        reference_chat_blocked_prompt(&state, &target, body.registry_id.as_deref()).await;
+    let hub = state.terminal_service.output_hub();
+    // A pane this hub does not hold (a session still served by a legacy daemon after a handover)
+    // has a mode this host cannot read. Unbracketed, a multi-line message's inner CR would submit
+    // its first line as a turn of its own, so it is refused rather than typed in a guessed mode.
+    if hub.session_sequence_range(&session_id).is_none()
+        && reference_input::reference_composer_body(&body.params.text).contains('\r')
+    {
+        return reference_chat_result_failure(
+            &body.request_id,
+            &reference_chat_scope(
+                ScopeErrorCode::Unsupported,
+                "this pane's paste mode cannot be read on this host, so a multi-line message \
+                 cannot be typed as one turn; nothing was typed",
+            ),
+        );
+    }
+    let bracketed_paste = hub.is_bracketed_paste_enabled(&session_id);
     let authorize = reference_chat_authorize(&state, &headers);
-    let clock = reference_input::SystemReferenceClock;
-    let submit = reference_input::ReferenceSubmitRequest {
-        target: &target,
-        request_id: &body.request_id,
-        payload: &body.params,
-        bracketed_paste,
-        blocked_prompt: blocked_prompt.as_deref(),
-        arrived_at_ms: clock.now_ms(),
-        last_typed_at_ms: None,
-        authorize: &*authorize,
-    };
-    let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
-    let outcome = runtime.input.submit(&submit, &writer, &clock).await;
-    reference_chat_input_response(&body.request_id, outcome)
+    let request_id = body.request_id.clone();
+    // The transaction runs on its own task: a caller that disconnects drops this handler, and
+    // must not cancel the transaction between its paste and its Enter.
+    let transaction = tokio::spawn(async move {
+        let clock = reference_input::SystemReferenceClock;
+        let submit = reference_input::ReferenceSubmitRequest {
+            target: &target,
+            request_id: &body.request_id,
+            payload: &body.params,
+            bracketed_paste,
+            // The prompt guard reads the screen INSIDE the target's step (the probe below), so a
+            // prompt that appears while this message waits behind earlier input is still seen.
+            blocked_prompt: None,
+            arrived_at_ms: clock.now_ms(),
+            last_typed_at_ms: None,
+            authorize: &*authorize,
+        };
+        let registry_id = body.registry_id.as_deref();
+        let probe = || reference_chat_blocked_prompt(&state, &target, registry_id);
+        let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+        let outcome = runtime
+            .input
+            .submit_with_probe(&submit, probe, &writer, &clock)
+            .await;
+        if matches!(outcome, reference_input::ReferenceInputOutcome::Accepted { .. }) {
+            let target_key = reference_types::reference_draft_key(&target);
+            for entry in runtime.staged.lock().values_mut() {
+                let mention = entry.mention_text.trim_end();
+                if entry.target_key == target_key
+                    && !entry.pending
+                    && !mention.is_empty()
+                    && body.params.text.contains(mention)
+                {
+                    entry.referenced = true;
+                }
+            }
+        }
+        outcome
+    });
+    reference_chat_transaction_response(&request_id, transaction.await)
 }
 
 /// POST /api/v1/reference-chat/{sessionId}/stop
@@ -6370,35 +6449,42 @@ async fn reference_chat_answer(
     let identity = reference_chat_identity(&state, &target, body.registry_id.as_deref()).await;
     let prompt_session = reference_chat_prompt_session(&state, &identity).await;
     let authorize = reference_chat_authorize(&state, &headers);
-    let alive = || true;
-    let answer = reference_prompts::ReferenceAnswerRequest {
-        target: &target,
-        request_id: &body.request_id,
-        payload: &body.params,
-        session: prompt_session.borrow(),
-        authorize: &*authorize,
-        alive: &alive,
-    };
-    let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
-    let screen = ReferenceGatewayScreenReader {
-        backend: Arc::clone(&state.session_backend),
-    };
-    let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
-    let clock = reference_input::SystemReferenceClock;
-    let outcome = runtime
-        .answers
-        .answer(&answer, &step, &screen, &writer, &clock)
-        .await;
-    reference_chat_input_response(&body.request_id, outcome)
+    let request_id = body.request_id.clone();
+    let agent = identity.registry_id.clone();
+    // Owned by its own task, like a submit: a caller that disconnects must not leave a menu moved
+    // but unconfirmed, or custom text typed without its Enter.
+    let transaction = tokio::spawn(async move {
+        let alive = || true;
+        let answer = reference_prompts::ReferenceAnswerRequest {
+            target: &target,
+            request_id: &body.request_id,
+            payload: &body.params,
+            session: prompt_session.borrow(),
+            agent: agent.as_str(),
+            authorize: &*authorize,
+            alive: &alive,
+        };
+        let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
+        let screen = ReferenceGatewayScreenReader {
+            backend: Arc::clone(&state.session_backend),
+        };
+        let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+        let clock = reference_input::SystemReferenceClock;
+        runtime
+            .answers
+            .answer(&answer, &step, &screen, &writer, &clock)
+            .await
+    });
+    reference_chat_transaction_response(&request_id, transaction.await)
 }
 
 /// POST /api/v1/reference-chat/{sessionId}/files
 ///
 /// The bytes are staged on the OWNING host — this gateway — into the lane's owner-private
-/// staging root, and the receipt names the host, an opaque id, the digest, the size and the media
-/// type. No path is minted for the client: the mention the agent receives is built from the
-/// staged file's own name.
-async fn reference_chat_stage_file(
+/// staging root INSIDE the pane's working directory, and the receipt names the host, an opaque
+/// id, the digest, the size and the media type. No absolute path is minted for the client: the
+/// mention the agent receives is the staged file's path relative to the pane's cwd.
+pub(crate) async fn reference_chat_stage_file(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath(session_id): AxumPath<String>,
     request: axum::extract::Request,
@@ -6422,61 +6508,164 @@ async fn reference_chat_stage_file(
             "a view-only device cannot stage a file for a pane",
         );
     }
-    let runtime = reference_chat_runtime();
-    reference_chat_prune_staged(runtime);
-    let target_key = reference_types::reference_draft_key(&target);
-    let (existing_files, existing_turn_bytes) = {
-        let staged = runtime.staged.lock();
-        staged
-            .values()
-            .filter(|entry| entry.target_key == target_key)
-            .fold((0usize, 0u64), |(count, bytes), entry| {
-                (count + 1, bytes + entry.receipt.size_bytes)
-            })
-    };
-    if let Err(code) = reference_files::reference_file_bounds_check(
-        body.params.size_bytes,
-        existing_files,
-        existing_turn_bytes,
-    ) {
-        return reference_chat_refusal(&reference_chat_scope(
-            code,
-            "the staged set for this target is at its limit",
-        ));
+    // An SSH-remote pane's working directory is on its paired host, not on this gateway: a path
+    // resolved here would stage the bytes on the wrong machine (or report a misleading
+    // NOT_FOUND), and the mention typed into the remote agent would name a file it cannot open.
+    if reference_chat_session_is_remote(&state, &session_id).await {
+        return reference_chat_error(
+            ScopeErrorCode::Unsupported,
+            "this session's working directory lives on its paired host; a file cannot be staged \
+             for it from this gateway",
+        );
     }
-    let payload = body.params.clone();
-    let staged = crate::ipc::run_blocking(move || {
-        Ok::<_, crate::ipc::error::IpcError>(reference_files::stage_reference_file(&payload))
-    })
-    .await;
-    let receipt = match staged {
-        Ok(Ok(receipt)) => receipt,
-        Ok(Err(code)) => {
-            return reference_chat_refusal(&reference_chat_scope(
-                code,
-                "the file could not be staged on this host",
-            ))
-        }
-        Err(_) => {
+    let runtime = reference_chat_runtime();
+    // The mention is resolved by the agent from the directory it runs in NOW, which a `cd` after
+    // the spawn moves away from the session's spawn worktree. The live cwd of the pane's
+    // foreground job (its process group on unix; the shell itself where there is none) is the
+    // staging root, and the spawn worktree is only the fallback when that cannot be read.
+    let live_cwd = match state
+        .terminal_service
+        .get_session(target.target.backend_session_id.as_str())
+    {
+        Some(session) => crate::ipc::run_blocking(move || {
+            #[cfg(unix)]
+            let foreground = session.foreground_process_group().ok().flatten();
+            #[cfg(not(unix))]
+            let foreground: Option<u32> = None;
+            Ok::<_, crate::ipc::error::IpcError>(
+                foreground
+                    .and_then(crate::ipc::terminal::process_cwd)
+                    .or_else(|| session.pid().and_then(crate::ipc::terminal::process_cwd))
+                    .map(|cwd| crate::daemon::server::normalize_process_cwd(&cwd))
+                    .filter(|cwd| cwd.is_dir()),
+            )
+        })
+        .await
+        .ok()
+        .flatten(),
+        None => None,
+    };
+    let spawn_worktree = state
+        .session_backend
+        .describe_session(target.target.backend_session_id.as_str())
+        .await
+        .ok()
+        .and_then(|details| details.worktree_path);
+    let worktree = match live_cwd.or(spawn_worktree) {
+        Some(worktree) => worktree,
+        None => {
             return reference_chat_error(
                 ScopeErrorCode::Unsupported,
-                "the staging thread did not finish",
+                "this pane has no working directory a staged file could be opened from",
             )
         }
     };
-    let dir = reference_files::reference_staging_base_dir().join(&receipt.receipt.attachment_id);
-    let path = dir.join(&receipt.display_name);
-    runtime.staged.lock().insert(
-        reference_chat_staged_key(&target, &receipt.receipt.attachment_id),
-        ReferenceStagedFile {
-            target_key,
-            dir,
-            path,
-            display_name: receipt.display_name.clone(),
-            receipt: receipt.receipt.clone(),
-            staged_at_ms: reference_input::SystemReferenceClock.now_ms(),
-        },
-    );
+    reference_chat_prune_staged(runtime, &worktree).await;
+    let target_key = reference_types::reference_draft_key(&target);
+    // Check and reserve under ONE lock, so concurrent stages cannot all observe a free slot.
+    let reservation = format!("{target_key}\u{1f}pending-{}", uuid::Uuid::new_v4());
+    {
+        let mut staged = runtime.staged.lock();
+        let (existing_files, existing_turn_bytes) = staged
+            .values()
+            .filter(|entry| entry.target_key == target_key && !entry.referenced)
+            .fold((0usize, 0u64), |(count, bytes), entry| {
+                (count + 1, bytes + entry.receipt.size_bytes)
+            });
+        if let Err(code) = reference_files::reference_file_bounds_check(
+            body.params.size_bytes,
+            existing_files,
+            existing_turn_bytes,
+        ) {
+            return reference_chat_refusal(&reference_chat_scope(
+                code,
+                "the staged set for this target is at its limit",
+            ));
+        }
+        staged.insert(
+            reservation.clone(),
+            ReferenceStagedFile {
+                target_key: target_key.clone(),
+                dir: PathBuf::new(),
+                path: PathBuf::new(),
+                display_name: String::new(),
+                receipt: AttachmentReceipt {
+                    host_id: String::new(),
+                    attachment_id: String::new(),
+                    sha256: String::new(),
+                    size_bytes: body.params.size_bytes,
+                    media_type: body.params.media_type,
+                },
+                staged_at_ms: reference_input::SystemReferenceClock.now_ms(),
+                pending: true,
+                mention_text: String::new(),
+                referenced: false,
+            },
+        );
+    }
+    let payload = body.params.clone();
+    // The write and its registration run on their own task: a caller that disconnects drops this
+    // handler, and must not cancel the stage between its reservation and its registration, which
+    // would leave a pending slot counted against the target's bounds but never listed.
+    let transaction = tokio::spawn(async move {
+        let host_id = reference_files::reference_host_id();
+        let stage_root = worktree.clone();
+        let staged = crate::ipc::run_blocking(move || {
+            Ok::<_, crate::ipc::error::IpcError>(reference_files::stage_reference_file_in(
+                &host_id,
+                &stage_root,
+                &payload,
+            ))
+        })
+        .await;
+        let receipt = match staged {
+            Ok(Ok(receipt)) => receipt,
+            Ok(Err(code)) => {
+                runtime.staged.lock().remove(&reservation);
+                return Err(reference_chat_refusal(&reference_chat_scope(
+                    code,
+                    "the file could not be staged on this host",
+                )));
+            }
+            Err(_) => {
+                runtime.staged.lock().remove(&reservation);
+                return Err(reference_chat_error(
+                    ScopeErrorCode::Unsupported,
+                    "the staging thread did not finish",
+                ));
+            }
+        };
+        let dir = reference_files::reference_staging_base_dir(&worktree)
+            .join(&receipt.receipt.attachment_id);
+        let path = dir.join(&receipt.display_name);
+        let mut staged = runtime.staged.lock();
+        staged.remove(&reservation);
+        staged.insert(
+            reference_chat_staged_key(&target, &receipt.receipt.attachment_id),
+            ReferenceStagedFile {
+                target_key,
+                dir,
+                path,
+                display_name: receipt.display_name.clone(),
+                receipt: receipt.receipt.clone(),
+                staged_at_ms: reference_input::SystemReferenceClock.now_ms(),
+                pending: false,
+                mention_text: receipt.mention_text.clone(),
+                referenced: false,
+            },
+        );
+        Ok(receipt)
+    });
+    let receipt = match transaction.await {
+        Ok(Ok(receipt)) => receipt,
+        Ok(Err(response)) => return response,
+        Err(_) => {
+            return reference_chat_error(
+                ScopeErrorCode::Unsupported,
+                "the staging task did not finish",
+            )
+        }
+    };
     reference_chat_result_ok(
         &body.request_id,
         serde_json::json!({
@@ -6485,6 +6674,53 @@ async fn reference_chat_stage_file(
             "mentionText": receipt.mention_text,
         }),
     )
+}
+
+/// GET /api/v1/reference-chat/{sessionId}/files
+///
+/// The target's own staged files that no submitted turn has referenced yet: exactly the set the
+/// per-turn bounds count. A client whose stage response was lost (an aborted upload, a reload)
+/// rehydrates from here and can then release them explicitly.
+async fn reference_chat_list_files(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
+    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
+    {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    let target_key = reference_types::reference_draft_key(&read.target);
+    let mut files = {
+        let staged = reference_chat_runtime().staged.lock();
+        staged
+            .values()
+            .filter(|entry| entry.target_key == target_key && !entry.pending && !entry.referenced)
+            .map(|entry| {
+                (
+                    entry.staged_at_ms,
+                    serde_json::json!({
+                        "receipt": entry.receipt,
+                        "displayName": entry.display_name,
+                        "mentionText": entry.mention_text,
+                    }),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    files.sort_by_key(|(staged_at, _)| *staged_at);
+    let files: Vec<_> = files.into_iter().map(|(_, file)| file).collect();
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "files": files })),
+    )
+        .into_response()
 }
 
 /// GET /api/v1/reference-chat/{sessionId}/files/{fileId}
@@ -6508,6 +6744,7 @@ async fn reference_chat_preview_file(
         let staged = runtime.staged.lock();
         staged
             .get(&reference_chat_staged_key(&read.target, &file_id))
+            .filter(|entry| !entry.pending)
             .map(|entry| {
                 (
                     entry.path.clone(),
@@ -6522,14 +6759,26 @@ async fn reference_chat_preview_file(
             "no staged file of that id belongs to this target",
         );
     };
+    // The staged path sits in the pane's worktree, where the agent may have swapped it for a
+    // symlink or a device: the read refuses a non-regular file, caps the bytes, and requires the
+    // receipt's size.
+    let expected_size = receipt.size_bytes;
     let bytes = crate::ipc::run_blocking(move || {
-        std::fs::read(&path)
-            .map_err(|error| crate::ipc::error::IpcError::internal(error.to_string()))
+        Ok::<_, crate::ipc::error::IpcError>(reference_files::read_reference_staged_file(
+            &path,
+            expected_size,
+        ))
     })
     .await;
     let bytes = match bytes {
-        Ok(bytes) => bytes,
-        Err(_) => {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(ScopeErrorCode::PayloadTooLarge)) => {
+            return reference_chat_error(
+                ScopeErrorCode::PayloadTooLarge,
+                "the staged file is larger than a preview may carry",
+            )
+        }
+        _ => {
             return reference_chat_error(
                 ScopeErrorCode::NotFound,
                 "the staged file is no longer readable",
@@ -6576,22 +6825,35 @@ async fn reference_chat_delete_file(
         );
     }
     let runtime = reference_chat_runtime();
-    let entry = runtime
-        .staged
-        .lock()
-        .remove(&reference_chat_staged_key(&read.target, &file_id));
+    let key = reference_chat_staged_key(&read.target, &file_id);
+    let entry = {
+        let mut staged = runtime.staged.lock();
+        match staged.get(&key) {
+            Some(entry) if !entry.pending => staged.remove(&key),
+            _ => None,
+        }
+    };
     let Some(entry) = entry else {
         return reference_chat_error(
             ScopeErrorCode::NotFound,
             "no staged file of that id belongs to this target",
         );
     };
-    let dir = entry.dir;
-    let _ = crate::ipc::run_blocking(move || {
-        reference_files::reference_cancel_staged_file(&dir);
-        Ok::<_, crate::ipc::error::IpcError>(())
+    let dir = entry.dir.clone();
+    let removed = crate::ipc::run_blocking(move || {
+        Ok::<_, crate::ipc::error::IpcError>(reference_files::reference_cancel_staged_file(&dir))
     })
-    .await;
+    .await
+    .unwrap_or(false);
+    if !removed {
+        // Keep the entry: the bytes are still on disk, so a retried DELETE (or the TTL prune)
+        // must still be able to find and remove them.
+        runtime.staged.lock().insert(key, entry);
+        return reference_chat_error(
+            ScopeErrorCode::Unsupported,
+            "the staged file could not be removed from this host",
+        );
+    }
     (
         StatusCode::NO_CONTENT,
         [(header::CACHE_CONTROL, "no-store")],
@@ -6669,7 +6931,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )
         .route(
             "/api/v1/reference-chat/{sessionId}/files",
-            post(reference_chat_stage_file),
+            post(reference_chat_stage_file).get(reference_chat_list_files),
         )
         .route(
             "/api/v1/reference-chat/{sessionId}/files/{fileId}",

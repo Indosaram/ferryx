@@ -339,6 +339,28 @@ describe("ReferencePromptCard existing shells and disclosures", () => {
     expect(onAnswer.mock.calls[1]?.[0]?.answer).toEqual({ optionIndex: 1 });
   });
 
+  it("keeps the keyboard out of the message box after a tap on the approval shell", async () => {
+    const onAnswered = vi.fn();
+    renderCard({
+      prompt: prompt({
+        kind: "approval",
+        title: "Action Required",
+        question: "Action Required",
+        options: [{ label: "Approve" }, { label: "Decline" }],
+      }),
+      onAnswered,
+    });
+    const approve = screen.getByRole("button", { name: /Approve/ });
+    const down = new MouseEvent("pointerdown", { bubbles: true, cancelable: true });
+    Object.defineProperty(down, "pointerType", { value: "touch" });
+    fireEvent(approve, down);
+    // Android Chrome focuses the tapped button, so the press starts inside the card
+    approve.focus();
+    fireEvent.click(approve, { detail: 1 });
+    await waitFor(() => expect(onAnswered).toHaveBeenCalledTimes(1));
+    expect(onAnswered).toHaveBeenCalledWith(false);
+  });
+
   it("lists the questions of a multi-step prompt and marks the answered ones", () => {
     renderCard({
       prompt: prompt({

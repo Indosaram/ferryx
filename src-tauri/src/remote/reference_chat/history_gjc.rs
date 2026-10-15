@@ -161,17 +161,15 @@ pub fn parse_reference_gjc_history(text: &str) -> Vec<ReferenceTurn> {
             }
             continue;
         }
-        if record.get("type").and_then(Value::as_str) != Some("message") {
-            continue;
-        }
-        let Some(message) = record.get("message").and_then(Value::as_object) else {
+        // gjc writes omp's shape, so it is read through the same piMessage normalization: string
+        // content becomes a text block and the tool call/result alias spellings fold onto
+        // name / id / arguments / toolCallId / content.
+        let Some(normalized) = super::history_omo::omo_pi_message(&record) else {
             continue;
         };
-        if record.get("display").and_then(Value::as_bool) == Some(false)
-            || message.get("display").and_then(Value::as_bool) == Some(false)
-        {
+        let Some(message) = normalized.as_object() else {
             continue;
-        }
+        };
         let ts = timestamp(&record);
         match message.get("role").and_then(Value::as_str).unwrap_or("") {
             "user" => {
@@ -454,6 +452,7 @@ fn user_text(content: Option<&Value>) -> String {
             .iter()
             .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
             .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
@@ -922,6 +921,64 @@ mod tests {
         assert_eq!(invocation.skills[0].name, "tidy");
         assert_eq!(invocation.request, "do it");
         assert!(gjc_skill_invocation("please use the frontend skill").is_none());
+    }
+
+    const OMP_RECORD_ALIASES: &str = include_str!("fixtures/omp/record-aliases.jsonl");
+
+    fn tools_of(turns: &[ReferenceTurn]) -> Vec<ReferencePart> {
+        turns
+            .iter()
+            .flat_map(|turn| turn.parts.iter())
+            .filter(|part| matches!(part, ReferencePart::Tool { .. }))
+            .cloned()
+            .collect()
+    }
+
+    // rs-history-other-1
+    #[test]
+    fn omp_alias_spellings_read_as_the_omp_reader_reads_them() {
+        let gjc = parse(OMP_RECORD_ALIASES);
+        let omp = super::super::history_omp::parse_omp_transcript(
+            ReferenceNativeHistoryKind::Omp,
+            OMP_RECORD_ALIASES,
+        )
+        .expect("omp reads its own fixture");
+        let tools = tools_of(&gjc);
+        assert_eq!(tools, tools_of(&omp), "gjc's tool parts match omp's");
+        assert!(
+            tools.iter().any(|part| matches!(
+                part,
+                ReferencePart::Tool { name, summary, output, .. }
+                    if name == "bash" && summary == "pwd" && output == "/tmp"
+            )),
+            "{tools:?}"
+        );
+
+        let string_answer = r#"{"type":"message","message":{"role":"assistant","content":"done"}}"#;
+        let turns = parse(string_answer);
+        assert_eq!(turns.len(), 1, "a string answer is a turn");
+        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "done".into(), phase: None }]);
+    }
+
+    // rs-history-other-2
+    #[test]
+    fn empty_user_text_blocks_are_not_text() {
+        let blank = r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":""},{"type":"text","text":""}]}}"#;
+        assert!(parse(blank).is_empty(), "two empty blocks are not a prompt");
+
+        let envelope = "The user explicitly invoked the \"release\" skill. Follow the instructions in <skill-instruction> as binding for this request, while respecting higher-priority instructions.\n\n<skill-instruction name=\"release\" location=\"/home/dev/.agents/skills/release/SKILL.md\">\n# release\nsteps\n</skill-instruction>\n\n<user-request>\nship 2026.10.7\n</user-request>";
+        let record = serde_json::json!({
+            "type": "message",
+            "message": {"role": "user", "content": [{"type": "text", "text": ""}, {"type": "text", "text": envelope}]}
+        })
+        .to_string();
+        let turns = parse(&record);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].parts[0],
+            ReferencePart::Text { text: "ship 2026.10.7".into(), phase: None }
+        );
+        assert!(matches!(turns[0].parts.get(1), Some(ReferencePart::Skill { .. })));
     }
 
     #[test]

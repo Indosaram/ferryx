@@ -43,6 +43,66 @@ const texts = (queue: ReferenceQueueStore, owner: ReferenceTargetRef) =>
   queue.read(owner).map((message) => message.text);
 
 describe("reference held queue persistence", () => {
+  it("ui-reference-logic-r7-1: held rows saved under an older owner-bearing key are found after a gateway restart", () => {
+    const { data } = fixture();
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const legacyKey = `${REFERENCE_QUEUE_STORAGE_PREFIX}${base.hostId}|owner-before-restart|${base.epoch}|${base.backendSessionId}`;
+    data.set(
+      legacyKey,
+      JSON.stringify({ version: 1, messages: [{ id: "h1", text: "first" }, { id: "h2", text: "second" }] }),
+    );
+    const queue = new ReferenceQueueStore(() => storage);
+
+    expect(texts(queue, target({ ownerId: "owner-after-restart" }))).toEqual(["first", "second"]);
+    expect(queue.storageKey(paneA).startsWith("ferryx.")).toBe(true);
+    expect(data.has(queue.storageKey(paneA))).toBe(true);
+    expect(data.has(legacyKey)).toBe(false);
+    expect(texts(queue, paneB)).toEqual([]);
+  });
+
+  it("ui-reference-logic-r9-1: held rows under every older owner-bearing key are merged, and every legacy key is removed", () => {
+    const data = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const legacyA = `${REFERENCE_QUEUE_STORAGE_PREFIX}${base.hostId}|owner-a-old|${base.epoch}|${base.backendSessionId}`;
+    const legacyB = `${REFERENCE_QUEUE_STORAGE_PREFIX}${base.hostId}|owner-b-old|${base.epoch}|${base.backendSessionId}`;
+    const otherPane = `${REFERENCE_QUEUE_STORAGE_PREFIX}${base.hostId}|owner-b-old|${base.epoch}|sess-other`;
+    data.set(legacyA, JSON.stringify({ version: 1, messages: [{ id: "a1", text: "deploy later" }, { id: "dup", text: "shared" }] }));
+    data.set(otherPane, JSON.stringify({ version: 1, messages: [{ id: "o1", text: "other pane" }] }));
+    data.set(legacyB, JSON.stringify({ version: 1, messages: [{ id: "dup", text: "shared" }, { id: "b1", text: "run tests" }] }));
+    const queue = new ReferenceQueueStore(() => storage);
+
+    expect(texts(queue, target({ ownerId: "owner-c" }))).toEqual(["deploy later", "shared", "run tests"]);
+    expect(queue.storageKey(paneA).startsWith("ferryx.")).toBe(true);
+    expect(data.has(queue.storageKey(paneA))).toBe(true);
+    expect(data.has(legacyA)).toBe(false);
+    expect(data.has(legacyB)).toBe(false);
+    expect(data.has(otherPane)).toBe(true);
+  });
+
   it("keys the queue on the frozen target key under the canonical prefix", () => {
     const { queue } = fixture();
     expect(queue.storageKey(paneA)).toBe(REFERENCE_QUEUE_STORAGE_PREFIX + referenceDraftKey(paneA));
@@ -66,14 +126,18 @@ describe("reference held queue persistence", () => {
     expect(data.has(queue.storageKey(paneA))).toBe(false);
   });
 
-  it("migrates the previous plain-text queue without losing JSON-like messages", () => {
-    for (const text of ["legacy", '{"message":"legacy"}']) {
+  it("migrates the previous plain-text queue, including a legacy primitive that parses as JSON", () => {
+    for (const text of ["legacy", "42"]) {
       const { queue, data, storage } = fixture();
       data.set(queue.storageKey(paneA), text);
       expect(queue.read(paneA)[0]!.text).toBe(text);
       queue.add(paneA, "next");
       expect(texts(new ReferenceQueueStore(() => storage), paneA)).toEqual([text, "next"]);
     }
+    const { queue, data } = fixture();
+    data.set(queue.storageKey(paneA), '{"message":"legacy"}');
+    expect(queue.read(paneA)).toEqual([]);
+    expect(data.get(queue.storageKey(paneA))).toBe('{"message":"legacy"}');
   });
 });
 
@@ -234,5 +298,30 @@ describe("reference held queue storage failure", () => {
       },
     }));
     expect(texts(reopened, paneA)).toEqual(["held", "held again"]);
+  });
+});
+
+describe("reference held queue unrecognised storage", () => {
+  it("does not turn parseable non-v1 JSON into a sendable held message", () => {
+    const { queue, data } = fixture();
+    const raw = JSON.stringify({ version: 2, messages: [] });
+    data.set(queue.storageKey(paneA), raw);
+    expect(queue.read(paneA)).toEqual([]);
+    expect(data.get(queue.storageKey(paneA))).toBe(raw);
+  });
+
+  it("does not turn a parseable non-envelope value into a held message", () => {
+    for (const raw of ["[1]", JSON.stringify({ version: 2, messages: [] })]) {
+      const { queue, data } = fixture();
+      data.set(queue.storageKey(paneA), raw);
+      expect(queue.read(paneA)).toEqual([]);
+      expect(data.get(queue.storageKey(paneA))).toBe(raw);
+    }
+  });
+
+  it("still reads a legacy plain-text value as one held message", () => {
+    const { queue, data } = fixture();
+    data.set(queue.storageKey(paneA), "legacy text");
+    expect(texts(queue, paneA)).toEqual(["legacy text"]);
   });
 });

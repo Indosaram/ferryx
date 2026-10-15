@@ -84,7 +84,7 @@ use super::prompt_codex::{
 };
 use super::prompt_omo::{
     omo_card_for_screen, omo_form_is_trusted, omo_form_on_screen, omo_reads_forms, open_omo_asks,
-    pending_omo_ask, reference_omo_answer_keys, OmoCard, OmoResponder,
+    omo_answer_plan, pending_omo_ask, OmoCard, OmoResponder,
     REFERENCE_OMO_OPEN_FORM_KEY,
 };
 use super::prompt_omp::{detect_omp_prompt_card, remember_omp_prompt, OmpPromptCard};
@@ -483,18 +483,30 @@ fn plan_answer_keys(
                     ReferenceCodexAnswerStep::Text(text) => {
                         planned.push(ReferenceKeyStep::typed(text.clone()));
                     }
-                    // The row's own key is the screen's to name: read it off the screen this
-                    // answer was planned against — never a guessed Enter, never a dropped step.
+                    // The row's own key is the screen's to name, but the screen read here is
+                    // the one before the moves: its footer belongs to the row the cursor is
+                    // leaving. Only the card's own `row_key` (resolved for the rows it offers)
+                    // names the key of the row the moves land on, and the screen must still say
+                    // the same. A list whose cursor row only opens another list has no
+                    // `row_key`, and is refused rather than answered with that row's Enter,
+                    // which on a level row saves the level as the default.
                     ReferenceCodexAnswerStep::Pick => {
                         let footer = screen.and_then(codex_row_key_on_screen);
-                        planned.push(footer.ok_or(ScopeErrorCode::Unsupported)?);
+                        match (&parsed.row_key, footer) {
+                            (Some(row_key), Some(footer)) if *row_key == footer => {
+                                planned.push(footer);
+                            }
+                            _ => return Err(ScopeErrorCode::Unsupported),
+                        }
                     }
                 }
             }
             Ok(planned)
         }
-        ReferencePromptCard::Omo(_) => reference_omo_answer_keys(prompt, answer),
-        ReferencePromptCard::Omp(_) => super::prompt_omp::reference_answer_keys(prompt, answer),
+        // Planned from the card in hand: the lanes' registries are keyed by a cursor-free id, so
+        // another pane's (or an older) read of the same card could supply the cursor.
+        ReferencePromptCard::Omo(card) => omo_answer_plan(card, answer),
+        ReferencePromptCard::Omp(card) => card.answer_steps(answer),
         ReferencePromptCard::Pi(_) => {
             plan_pi_answer(prompt, answer).map_err(|_| pi_answer_error_code())
         }
@@ -632,6 +644,10 @@ pub struct ReferenceAnswerRequest<'a> {
     pub payload: &'a ReferencePromptAnswerPayload,
     /// What the caller read about the pane's own session, for the OmO arm.
     pub session: ReferencePromptSession<'a>,
+    /// The registry id of the pane the answer is sent to, as the route reads it for that pane.
+    /// The card is re-detected under this agent, never under the agent stored on the card, so
+    /// the OmO arm's trust rule for a `claude` or unnamed pane applies again at answer time.
+    pub agent: &'a str,
     /// Whether this caller may mutate at all. Asked before the read and again before the first
     /// key, so a revoke that lands mid-flight cannot be ignored.
     pub authorize: &'a (dyn Fn() -> Result<(), ScopeError> + Send + Sync),
@@ -731,13 +747,30 @@ impl ReferencePromptAnswers {
             );
         }
 
-        let Some(known) = reference_prompt_card(&request.payload.prompt_id) else {
+        if reference_prompt_card(&request.payload.prompt_id).is_none() {
             return refused(
                 ScopeErrorCode::InvalidRequest,
                 false,
                 REFERENCE_PROMPT_UNKNOWN_CARD_MESSAGE,
             );
-        };
+        }
+
+        // A custom answer is typed into the pane as it stands: a newline or any other control
+        // byte inside it would act as a key (an early Enter submits part of the answer and the
+        // rest lands in whatever the agent shows next), so such text is refused untyped.
+        if request
+            .payload
+            .answer
+            .custom_text
+            .as_deref()
+            .is_some_and(|text| text.trim().chars().any(char::is_control))
+        {
+            return refused(
+                ScopeErrorCode::InvalidRequest,
+                false,
+                REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE,
+            );
+        }
 
         // Single use: a card already answered is refused before the pane is read again.
         let ledger_key = answer_ledger_key(request);
@@ -782,10 +815,12 @@ impl ReferencePromptAnswers {
 
         // The card is detected again on the screen as it is now: every family's registry is
         // refreshed, and the card the user answered must still be the card on the screen.
-        let agent = known.prompt().agent.clone();
+        // The pane's own agent, never the card's: a card read on another pane must pass this
+        // pane's trust rule again.
+        let agent = request.agent;
         let mut screen_text = fresh.text;
         let mut card =
-            match detect_reference_prompt_card_in_session(&agent, &screen_text, &request.session) {
+            match detect_reference_prompt_card_in_session(agent, &screen_text, &request.session) {
                 Some(card) if card.prompt().id == request.payload.prompt_id => card,
                 _ => {
                     return refused(
@@ -798,7 +833,28 @@ impl ReferencePromptAnswers {
 
         // A folded OmO widget is not answerable where it stands. Its own key opens the form, and
         // the form the screen then shows — verified to be the same asking — is what is answered.
+        // Once its open key went out the pane has changed, so no later refusal may claim that
+        // nothing was typed.
+        let mut opened = false;
         if card.is_folded_omo() {
+            // Validate first: an answer the folded card already refuses must not open the form.
+            if let Err(code) =
+                plan_answer_keys(&card, card.prompt(), &request.payload.answer, None)
+            {
+                return refused(code, false, REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE);
+            }
+            // A revoke or a disconnect that landed while the screen was read stops here, before
+            // the open key.
+            if let Err(error) = (request.authorize)() {
+                return ReferenceInputOutcome::NotTyped { error };
+            }
+            if !(request.alive)() {
+                return refused(
+                    ScopeErrorCode::Unauthorized,
+                    false,
+                    REFERENCE_CALLER_GONE_MESSAGE,
+                );
+            }
             let open_key =
                 reference_key_bytes(REFERENCE_OMO_OPEN_FORM_KEY).expect("the open key is mapped");
             if let Err(message) = writer.write(session_id(request), open_key).await {
@@ -806,19 +862,24 @@ impl ReferencePromptAnswers {
                     "the form's open key may have reached the pane and could not be confirmed: {message}"
                 ));
             }
-            match wait_for_open_form(request, screen, clock, &agent).await {
+            opened = true;
+            match wait_for_open_form(request, screen, clock, agent).await {
                 Ok((opened, text)) => {
                     card = opened;
                     screen_text = text;
                 }
-                Err(outcome) => return outcome,
+                Err(outcome) => return typed_after_open(outcome),
             }
         }
 
         // Reauthorize before the first key: a revoke that landed while the screen was read stops
         // here, with nothing typed.
         if let Err(error) = (request.authorize)() {
-            return ReferenceInputOutcome::NotTyped { error };
+            return if opened {
+                outcome_unknown(error.message)
+            } else {
+                ReferenceInputOutcome::NotTyped { error }
+            };
         }
 
         let prompt = card.prompt().clone();
@@ -826,14 +887,18 @@ impl ReferencePromptAnswers {
         {
             Ok(steps) => steps,
             Err(code) => {
-                return refused(code, false, REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE);
+                return if opened {
+                    outcome_unknown(REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE)
+                } else {
+                    refused(code, false, REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE)
+                };
             }
         };
 
         let mut wrote = false;
         for (index, step) in steps.iter().enumerate() {
             if !(request.alive)() {
-                return if wrote {
+                return if wrote || opened {
                     outcome_unknown(REFERENCE_CALLER_GONE_MESSAGE)
                 } else {
                     refused(
@@ -846,7 +911,7 @@ impl ReferencePromptAnswers {
             let bytes = match reference_key_step_bytes(step) {
                 Ok(bytes) => bytes,
                 Err(code) => {
-                    return if wrote {
+                    return if wrote || opened {
                         outcome_unknown(REFERENCE_PROMPT_UNKNOWN_KEY_MESSAGE)
                     } else {
                         refused(code, false, REFERENCE_PROMPT_UNKNOWN_KEY_MESSAGE)
@@ -867,11 +932,15 @@ impl ReferencePromptAnswers {
             }
         }
         if !wrote {
-            return refused(
-                ScopeErrorCode::InvalidRequest,
-                false,
-                REFERENCE_PROMPT_EMPTY_PLAN_MESSAGE,
-            );
+            return if opened {
+                outcome_unknown(REFERENCE_PROMPT_EMPTY_PLAN_MESSAGE)
+            } else {
+                refused(
+                    ScopeErrorCode::InvalidRequest,
+                    false,
+                    REFERENCE_PROMPT_EMPTY_PLAN_MESSAGE,
+                )
+            };
         }
 
         // Committed: this card is not answered twice. The record is taken under the pane's step,
@@ -969,6 +1038,15 @@ fn outcome_unknown(message: impl Into<String>) -> ReferenceInputOutcome {
     }
 }
 
+/// A refusal that came after the folded form's open key reached the pane: the pane moved, so the
+/// outcome is unknown rather than "nothing typed".
+fn typed_after_open(outcome: ReferenceInputOutcome) -> ReferenceInputOutcome {
+    match outcome {
+        ReferenceInputOutcome::NotTyped { error } => outcome_unknown(error.message),
+        other => other,
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The codex lane's private line helpers, for the one key it leaves to the screen
 // ---------------------------------------------------------------------------------------------
@@ -1049,6 +1127,8 @@ mod tests {
     const CLAUDE_QUESTION: &str = include_str!("fixtures/claude/prompt/question.screen");
     const CODEX_MENU: &str = include_str!("fixtures/codex/menu.txt");
     const CODEX_MODEL_LIST: &str = include_str!("fixtures/codex/model-list.txt");
+    const CODEX_MODEL_LEVELS_MORE: &str = include_str!("fixtures/codex/model-levels-more-row.txt");
+    const OMP_QUESTION_MOVED: &str = include_str!("fixtures/omp-prompt/question-single-moved.txt");
     const OMP_QUESTION: &str = include_str!("fixtures/omp-prompt/question-single.txt");
     const PI_DIALOG: &str = include_str!("fixtures/prompt-pi/dialog-select.txt");
     const OMO_FORM: &str = include_str!("fixtures/prompt-omo/form-tabbed.screen");
@@ -1531,6 +1611,22 @@ mod tests {
     }
 
     #[test]
+    fn the_route_plans_an_omp_answer_from_the_card_in_hand_not_the_registry() {
+        let moved = detect_omp_prompt_card("omp", OMP_QUESTION_MOVED).expect("the moved menu is a card");
+        let older = detect_omp_prompt_card("omp", OMP_QUESTION).expect("the menu is a card");
+        assert_eq!(moved.prompt.id, older.prompt.id, "the cursor is not part of the id");
+        // another pane's (or an older) read lands in the registry under the same id
+        remember_omp_prompt(&older);
+        let card = ReferencePromptCard::Omp(moved.clone());
+        let planned = plan_answer_keys(&card, &moved.prompt, &option(0), None).unwrap();
+        assert_eq!(
+            planned.iter().map(keys_of).collect::<Vec<_>>(),
+            vec![vec!["up".to_string()], vec!["up".to_string()], vec!["enter".to_string()]],
+            "the moves count from the cursor of the card being answered"
+        );
+    }
+
+    #[test]
     fn every_key_the_five_families_plan_has_bytes() {
         for (agent, screen, answer) in [
             ("claude", CLAUDE_QUESTION, option(1)),
@@ -1592,6 +1688,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1618,6 +1715,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_codex_level_picked_from_the_opener_row_never_sends_enter() {
+        let prompt =
+            detect_reference_prompt("codex", CODEX_MODEL_LEVELS_MORE).expect("the levels list is a card");
+        let target = target("sess-1");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader = ScriptedScreen::one(CODEX_MODEL_LEVELS_MORE);
+        let answers = ReferencePromptAnswers::new();
+        let payload = payload(&prompt.id, REVISION, option(2));
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-1",
+            agent: &prompt.agent,
+            payload: &payload,
+            session: ReferencePromptSession::default(),
+            authorize: &allow(),
+            alive: &alive(),
+        };
+        let _ = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert!(
+            !writer.text().iter().any(|write| write.contains('\r')),
+            "Enter on a level row saves it as the default: {:?}",
+            writer.text()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_custom_answer_with_a_newline_is_refused_rather_than_typed_as_keys() {
+        let prompt = detect_reference_prompt("claude", CLAUDE_QUESTION).expect("a claude card");
+        let target = target("sess-1");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader = ScriptedScreen::one(CLAUDE_QUESTION);
+        let answers = ReferencePromptAnswers::new();
+        let answer = ReferencePromptAnswer { custom_text: Some("a\nb".to_string()), ..Default::default() };
+        let payload = payload(&prompt.id, REVISION, answer);
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-1",
+            agent: &prompt.agent,
+            payload: &payload,
+            session: ReferencePromptSession::default(),
+            authorize: &allow(),
+            alive: &alive(),
+        };
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert!(
+            !writer.log().iter().any(|write| write.contains(&b'\n')),
+            "a newline inside the answer reaches the pane as a key: {:?}",
+            writer.text()
+        );
+        assert_not_typed(&outcome, ScopeErrorCode::InvalidRequest);
+        assert!(writer.log().is_empty(), "a refused answer types nothing");
+    }
+
+    #[tokio::test]
     async fn a_screen_that_moved_since_the_card_was_rendered_is_refused_with_nothing_sent() {
         let prompt = detect_reference_prompt("claude", CLAUDE_QUESTION).expect("a claude card");
         let target = target("sess-1");
@@ -1632,6 +1787,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1657,6 +1813,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1684,6 +1841,7 @@ mod tests {
             let request = ReferenceAnswerRequest {
                 target: &target,
                 request_id: "req-1",
+                agent: &prompt.agent,
                 payload: &payload,
                 session: ReferencePromptSession::default(),
                 authorize: &allow(),
@@ -1744,6 +1902,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1776,6 +1935,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: session(OMO_ASKS_FOLDED),
             authorize: &allow(),
@@ -1819,13 +1979,16 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: session(OMO_ASKS_FOLDED),
             authorize: &allow(),
             alive: &alive(),
         };
         let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
-        assert_not_typed(&outcome, ScopeErrorCode::RequestConflict);
+        // rs-input-screen-r6-1: the open key already reached the pane, so the outcome is unknown,
+        // never "nothing typed".
+        assert!(outcome.is_outcome_unknown(), "the open key went out: {outcome:?}");
         assert_eq!(outcome.wire_message(), Some(REFERENCE_PROMPT_FOLDED_FORM_MESSAGE));
         assert_eq!(
             writer.text(),
@@ -1839,6 +2002,186 @@ mod tests {
             REFERENCE_PROMPT_SETTLE_MS,
             "the settle window is measured on the clock, and it ended it"
         );
+    }
+
+    /// Authorize passes for the first `passes` calls, then the device is revoked.
+    fn allow_first(passes: usize) -> impl Fn() -> Result<(), ScopeError> + Send + Sync {
+        let calls = AtomicUsize::new(0);
+        move || {
+            if calls.fetch_add(1, Ordering::SeqCst) < passes {
+                Ok(())
+            } else {
+                refusal()()
+            }
+        }
+    }
+
+    /// The caller is present for the first `passes` checks, then leaves.
+    fn alive_first(passes: usize) -> impl Fn() -> bool + Send + Sync {
+        let calls = AtomicUsize::new(0);
+        move || calls.fetch_add(1, Ordering::SeqCst) < passes
+    }
+
+    #[tokio::test]
+    async fn a_folded_open_key_is_not_sent_for_a_caller_revoked_or_gone_during_the_read() {
+        // rs-prompts-r6-1: authorize and alive are checked again after the screen read and
+        // before the open key, so a revoke or disconnect during the read sends nothing.
+        let prompt =
+            detect_reference_prompt_in_session("omo", OMO_WIDGET, &session(OMO_ASKS_FOLDED))
+                .expect("the folded widget is a card");
+        let target = target("sess-1");
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let answers = ReferencePromptAnswers::new();
+        let payload = payload(&prompt.id, REVISION, option(0));
+
+        let writer = RecordingWriter::new();
+        let reader =
+            ScriptedScreen::many(vec![Ok(snapshot(OMO_WIDGET)), Ok(snapshot(OMO_FORM_OPENED))]);
+        let revoked = allow_first(1);
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-1",
+            agent: &prompt.agent,
+            payload: &payload,
+            session: session(OMO_ASKS_FOLDED),
+            authorize: &revoked,
+            alive: &alive(),
+        };
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert!(
+            writer.log().is_empty(),
+            "a caller revoked during the read gets no open key: {:?}",
+            writer.text()
+        );
+        assert_not_typed(&outcome, ScopeErrorCode::Unauthorized);
+
+        let writer = RecordingWriter::new();
+        let reader =
+            ScriptedScreen::many(vec![Ok(snapshot(OMO_WIDGET)), Ok(snapshot(OMO_FORM_OPENED))]);
+        let leaving = alive_first(1);
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-2",
+            agent: &prompt.agent,
+            payload: &payload,
+            session: session(OMO_ASKS_FOLDED),
+            authorize: &allow(),
+            alive: &leaving,
+        };
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert!(
+            writer.log().is_empty(),
+            "a caller gone during the read gets no open key: {:?}",
+            writer.text()
+        );
+        assert_not_typed(&outcome, ScopeErrorCode::Unauthorized);
+        assert_eq!(outcome.wire_message(), Some(REFERENCE_CALLER_GONE_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn a_folded_answer_refused_after_the_open_key_reports_an_unknown_outcome() {
+        // rs-input-screen-r6-1: once alt+up reached the pane, a later refusal (here a revoke
+        // after the form opened) must not claim nothing was typed.
+        let prompt =
+            detect_reference_prompt_in_session("omo", OMO_WIDGET, &session(OMO_ASKS_FOLDED))
+                .expect("the folded widget is a card");
+        let target = target("sess-1");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader =
+            ScriptedScreen::many(vec![Ok(snapshot(OMO_WIDGET)), Ok(snapshot(OMO_FORM_OPENED))]);
+        let answers = ReferencePromptAnswers::new();
+        let payload = payload(&prompt.id, REVISION, option(0));
+        // the entry check and the pre-open check pass; the revoke lands while the form opens
+        let revoked = allow_first(2);
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-1",
+            agent: &prompt.agent,
+            payload: &payload,
+            session: session(OMO_ASKS_FOLDED),
+            authorize: &revoked,
+            alive: &alive(),
+        };
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert_eq!(
+            writer.text(),
+            vec!["\u{1b}\u{1b}[A".to_string()],
+            "only the open key went out"
+        );
+        assert!(
+            outcome.is_outcome_unknown(),
+            "the open key reached the pane, so nothing-typed is false: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_folded_answer_that_does_not_fit_sends_no_open_key() {
+        // rs-prompts-r3-1: an answer the folded card already refuses must not open the form.
+        let prompt =
+            detect_reference_prompt_in_session("omo", OMO_WIDGET, &session(OMO_ASKS_FOLDED))
+                .expect("the folded widget is a card");
+        let target = target("sess-1");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader =
+            ScriptedScreen::many(vec![Ok(snapshot(OMO_WIDGET)), Ok(snapshot(OMO_FORM_OPENED))]);
+        let answers = ReferencePromptAnswers::new();
+        let payload = payload(&prompt.id, REVISION, option(7));
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-1",
+            payload: &payload,
+            agent: "omo",
+            session: session(OMO_ASKS_FOLDED),
+            authorize: &allow(),
+            alive: &alive(),
+        };
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert!(
+            writer.log().is_empty(),
+            "an answer the folded card refuses sends no key, not even the open key: {:?}",
+            writer.text()
+        );
+        assert_not_typed(&outcome, ScopeErrorCode::InvalidRequest);
+        assert_eq!(outcome.wire_message(), Some(REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn an_omo_card_is_not_answered_on_an_untrusted_claude_pane() {
+        // rs-prompts-r3-2: a card detected on an omo pane is re-detected under the target pane's
+        // own agent, so a claude pane that is not blocked and has no matching call is refused.
+        let prompt = detect_reference_prompt("omo", OMO_FORM).expect("the omo form is a card");
+        assert!(
+            detect_reference_prompt("claude", OMO_FORM).is_none(),
+            "the claude pane does not trust the same form on its own"
+        );
+        let target = target("sess-b");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader = ScriptedScreen::one(OMO_FORM);
+        let answers = ReferencePromptAnswers::new();
+        let payload = payload(&prompt.id, REVISION, option(0));
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-1",
+            payload: &payload,
+            agent: "claude",
+            session: ReferencePromptSession::default(),
+            authorize: &allow(),
+            alive: &alive(),
+        };
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert!(
+            writer.log().is_empty(),
+            "an untrusted claude pane receives no answer key: {:?}",
+            writer.text()
+        );
+        assert_not_typed(&outcome, ScopeErrorCode::RequestConflict);
     }
 
     #[tokio::test]
@@ -1856,6 +2199,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1880,6 +2224,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1904,6 +2249,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &refusal(),
@@ -1918,6 +2264,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-2",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1947,6 +2294,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -1973,6 +2321,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -2030,6 +2379,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -2062,6 +2412,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),
@@ -2131,6 +2482,7 @@ mod tests {
         let request = ReferenceAnswerRequest {
             target: &target,
             request_id: "req-1",
+            agent: &prompt.agent,
             payload: &payload,
             session: ReferencePromptSession::default(),
             authorize: &allow(),

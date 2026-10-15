@@ -330,13 +330,34 @@ describe("reference tool part", () => {
     expect(container.textContent).toContain("failed");
   });
 
+  it("offers no whole-output button when nothing can fetch the cut output", () => {
+    render(
+      <MobileChatMessage
+        id="msg-tool-no-fetch"
+        role="assistant"
+        content=""
+        referenceContext={{}}
+        referenceParts={[
+          { kind: "tool", name: "bash", summary: "", input: "ls", output: "cut", outputRef: "r1", outputSize: 90000 },
+          { kind: "tool", name: "read", summary: "", input: "", output: "", outputRef: "r2" },
+        ]}
+      />,
+    );
+
+    const rows = screen.getAllByTestId("work-row");
+    fireEvent.click(rows[0]);
+    expect(screen.getByTestId("reference-tool-output")).toHaveTextContent("cut");
+    expect(screen.queryByTestId("reference-tool-whole-output")).not.toBeInTheDocument();
+    expect(rows[1].tagName).toBe("DIV");
+  });
+
   it("reads as busy while the whole output is being fetched", () => {
     render(
       <MobileChatMessage
         id="msg-tool-loading"
         role="assistant"
         content=""
-        referenceContext={{ loadingOutputRef: "out-2" }}
+        referenceContext={{ onRequestWholeOutput: vi.fn(), loadingOutputRef: "out-2" }}
         referenceParts={[{ kind: "tool", name: "read", summary: "", input: "", output: "", outputRef: "out-2" }]}
       />,
     );
@@ -398,6 +419,10 @@ describe("reference tool part", () => {
     );
 
     expect(screen.getByTestId("worked-for-toggle")).toHaveAttribute("aria-expanded", "false");
+    // folded work hides the tool row, but the skill chip is turn level and stays visible
+    expect(screen.queryByTestId("reference-tool-part")).not.toBeInTheDocument();
+    expect(screen.getByTestId("reference-turn-skills")).toHaveTextContent("debugging");
+    fireEvent.click(screen.getByTestId("worked-for-toggle"));
     const row = screen.getByTestId("reference-tool-part").querySelector("[data-testid='work-row']");
     expect(row).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByTestId("reference-tool-input")).not.toBeInTheDocument();
@@ -709,5 +734,106 @@ describe("reference timestamp formatting", () => {
 
   it("leaves text it cannot read as a date alone", () => {
     expect(formatReferenceTimestamp("not a date")).toBe("not a date");
+  });
+});
+
+describe("native turn props as mapReferenceTurns builds them", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("ui-messages-1: shows a compaction summary once and never inside the user bubble", () => {
+    const { container } = render(
+      <MobileChatMessage id="msg-compact-user" role="user" content="S" referenceParts={[{ kind: "compact", text: "S" }]} />,
+    );
+
+    expect(screen.queryByTestId("user-message-bubble")?.textContent ?? "").not.toContain("S");
+    expect(container.textContent?.match(/S/g)).toHaveLength(1);
+    expect(screen.getByTestId("reference-compaction")).toHaveTextContent("S");
+  });
+
+  it("ui-messages-r8-1: a user turn with only a pasted image stays the user's own bubble", () => {
+    render(
+      <MobileChatMessage
+        id="msg-image-only-user"
+        role="user"
+        content=""
+        referenceParts={[{ kind: "image", mediaType: "image/png", ref: "img-1" }]}
+      />,
+    );
+
+    const bubble = screen.getByTestId("user-message-bubble");
+    expect(bubble.childElementCount).toBeGreaterThan(0);
+    expect(screen.getByTestId("message-copy-button")).toBeInTheDocument();
+  });
+
+  it("ui-messages-2: marks a runtime user turn and draws no empty user bubble", () => {
+    render(
+      <MobileChatMessage
+        id="msg-runtime-user"
+        role="user"
+        content=""
+        referenceSource="runtime"
+        referenceParts={[{ kind: "notice", text: "done", source: "async-result" }]}
+      />,
+    );
+
+    expect(screen.getByText("Runtime message")).toBeInTheDocument();
+    expect(screen.queryByTestId("user-message-bubble")).not.toBeInTheDocument();
+    expect(screen.getByTestId("reference-notice")).toBeInTheDocument();
+    expect(screen.queryByTestId("message-copy-button")).not.toBeInTheDocument();
+  });
+
+  it("ui-messages-3: folds a native turn's tool rows behind the Worked for toggle", () => {
+    render(
+      <MobileChatMessage
+        id="msg-worked"
+        role="assistant"
+        content="Done."
+        durationLabel="2m"
+        referenceParts={[
+          { kind: "tool", name: "read", summary: "Read src/app.ts", input: "src/app.ts", output: "body" },
+          { kind: "text", text: "Done." },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByTestId("reference-tool-part")).not.toBeInTheDocument();
+    expect(screen.getByTestId("assistant-reference-body")).toHaveTextContent("Done.");
+    fireEvent.click(screen.getByTestId("worked-for-toggle"));
+    expect(screen.getByTestId("reference-tool-part")).toHaveTextContent("Read src/app.ts");
+  });
+
+  it("ui-messages-4: prints a native turn's ISO start as a local time", () => {
+    render(
+      <MobileChatMessage
+        id="msg-iso"
+        role="assistant"
+        content="Hi"
+        timestamp="2026-10-06T00:00:00.000Z"
+        referenceParts={[{ kind: "text", text: "Hi" }]}
+      />,
+    );
+
+    expect(screen.queryByText("2026-10-06T00:00:00.000Z")).not.toBeInTheDocument();
+  });
+
+  it("ui-messages-5: copies only the visible prose, not thinking", () => {
+    const copySpy = vi.spyOn(clipboardModule, "copyTextToClipboard").mockResolvedValue(true);
+    render(
+      <MobileChatMessage
+        id="msg-copy-thinking"
+        role="assistant"
+        content={"plan\n\nDone."}
+        referenceParts={[
+          { kind: "thinking", text: "plan" },
+          { kind: "text", text: "Done." },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("message-copy-button"));
+    expect(copySpy).toHaveBeenCalledWith("Done.");
   });
 });

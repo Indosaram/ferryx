@@ -72,6 +72,12 @@ describe("reference history page", () => {
     expect(referenceCanReachProviderRead(native, boundTarget("   "))).toBe(false);
   });
 
+  it("rs-history-r4-2: discloses a native page's reason when its window could not reach the beginning", () => {
+    const capped = page({ unavailableReason: "older history lies beyond the 4194304 byte read cap" });
+    expect(referenceHistoryIsNative(capped)).toBe(true);
+    expect(referenceHistoryDisclosure(capped)).toBe("older history lies beyond the 4194304 byte read cap");
+  });
+
   it("labels a scrollback page with the reference disclosure and never claims providerRead", () => {
     const scrollback = page({
       source: "scrollback",
@@ -187,8 +193,19 @@ describe("reference target identity", () => {
     };
     for (const wrong of [otherOwner, otherEpoch, otherSession]) {
       expect(sameReferenceTarget(base, wrong)).toBe(false);
+    }
+    for (const wrong of [otherEpoch, otherSession]) {
       expect(referenceDraftKey(base)).not.toBe(referenceDraftKey(wrong));
     }
+  });
+
+  it("ui-reference-logic-r7-1: the durable draft key outlives a gateway restart that mints a new owner", () => {
+    const before = boundTarget("provider-7");
+    const afterRestart = { target: { ...target, ownerId: "owner-after-restart" }, providerSessionId: "provider-7" };
+    // the owner still fences requests ...
+    expect(referenceTargetKey(before)).not.toBe(referenceTargetKey(afterRestart));
+    // ... but the user's draft and held rows stay with the same host, incarnation and session
+    expect(referenceDraftKey(afterRestart)).toBe(referenceDraftKey(before));
   });
 });
 

@@ -561,7 +561,8 @@ fn parse_omp_question(screen: &str) -> Option<OmpPromptCard> {
     if option_rows.is_empty() {
         return None;
     }
-    let multi_select = patterns.multi_hint.is_match(&clean_line(&lines[hint_index]));
+    // The same wrapped window the hint was found with: a narrow pane wraps the toggle hint.
+    let multi_select = patterns.multi_hint.is_match(&wrapped(&lines, hint_index, HINT_SPAN));
     let question = nearest_question(&lines, start_divider)?;
 
     let options: Vec<ReferencePromptOption> = option_rows
@@ -744,6 +745,8 @@ mod tests {
     const QUESTION_SINGLE_MOVED: &str = include_str!("fixtures/omp-prompt/question-single-moved.txt");
     const QUESTION_MULTI: &str = include_str!("fixtures/omp-prompt/question-multi.txt");
     const QUESTION_WRAPPED_HINT: &str = include_str!("fixtures/omp-prompt/question-wrapped-hint.txt");
+    const QUESTION_MULTI_WRAPPED_HINT: &str =
+        include_str!("fixtures/omp-prompt/question-multi-wrapped-hint.txt");
     const QUESTION_NO_CUSTOM_ROW: &str = include_str!("fixtures/omp-prompt/question-no-custom-row.txt");
     const QUESTION_STALE: &str = include_str!("fixtures/omp-prompt/question-stale.txt");
     const APPROVAL: &str = include_str!("fixtures/omp-prompt/approval.txt");
@@ -1067,6 +1070,14 @@ mod tests {
         assert_eq!(multi.answer_steps(&pick_many(&[0, 7])).unwrap_err(), ScopeErrorCode::InvalidRequest);
         // A multiple choice's options are not single picks.
         assert_eq!(multi.answer_steps(&pick(0)).unwrap_err(), ScopeErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn a_multiple_choice_stays_multiple_when_a_narrow_pane_wraps_its_hint() {
+        let card = card(QUESTION_MULTI_WRAPPED_HINT);
+        assert!(card.prompt.multi_select, "the wrapped hint is still a toggle hint");
+        assert_eq!(card.prompt.title, "Multiple choice");
+        assert_eq!(card.prompt.custom_option_index, None);
     }
 
     #[test]
