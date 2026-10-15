@@ -3357,6 +3357,12 @@ export const RemoteHostConnection: React.FC<{
         "answer",
         chatMutationBody(target, payload),
       );
+      // The pane may have changed while the answer was on its way: its outcome belongs to the pane
+      // it answered, never to the prompt, typed answer or error of the pane now on screen.
+      if (!chatTargetIsCurrent(target)) {
+        if (!outcome.ok) throw new ReferencePromptRefused(outcome.code, outcome.message);
+        return true;
+      }
       if (!outcome.ok) {
         setChatPromptError(outcome.message);
         throw new ReferencePromptRefused(outcome.code, outcome.message);
@@ -3368,7 +3374,7 @@ export const RemoteHostConnection: React.FC<{
       setChatPromptRefresh((generation) => generation + 1);
       return true;
     },
-    [chatMutationBody],
+    [chatMutationBody, chatTargetIsCurrent],
   );
 
   /** The owning host's own routes, as the file lane's transport. Nothing is staged locally. */
