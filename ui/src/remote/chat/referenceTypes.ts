@@ -445,27 +445,30 @@ export function referenceDraftKey(target: ReferenceTargetRef): string {
 type EnumerableStorage = Pick<Storage, "getItem"> & Partial<Pick<Storage, "key" | "length">>;
 
 /**
- * The storage key an earlier build used for the same durable key, which still carried the
- * gateway's owner id (`host|owner|epoch|session`), or null when there is none.
+ * Every storage key an earlier build used for the same durable key, which still carried the
+ * gateway's owner id (`host|owner|epoch|session`). A gateway restart under that build minted a
+ * new owner, so several owners can hold text for one session; storage order says nothing about
+ * which is newest, so callers must migrate all of them.
  */
-export function legacyReferenceStorageKey(
+export function legacyReferenceStorageKeys(
   storage: EnumerableStorage,
   prefix: string,
   durableKey: string,
-): string | null {
-  if (typeof storage.key !== "function" || typeof storage.length !== "number") return null;
+): string[] {
+  if (typeof storage.key !== "function" || typeof storage.length !== "number") return [];
   const parts = durableKey.split("|");
-  if (parts.length !== 3) return null;
+  if (parts.length !== 3) return [];
   const [hostId, epoch, backendSessionId] = parts;
+  const keys: string[] = [];
   for (let index = 0; index < storage.length; index += 1) {
     const candidate = storage.key(index);
     if (candidate === null || !candidate.startsWith(prefix)) continue;
     const legacy = candidate.slice(prefix.length).split("|");
     if (legacy.length === 4 && legacy[0] === hostId && legacy[2] === epoch && legacy[3] === backendSessionId) {
-      return candidate;
+      keys.push(candidate);
     }
   }
-  return null;
+  return keys;
 }
 
 /**

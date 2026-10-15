@@ -18,7 +18,7 @@
  * Pure state plus a `Storage` shim: no fetch, no DOM beyond the optional `storage`
  * listener that lets another tab's write reconcile before an acknowledgement lands.
  */
-import { legacyReferenceStorageKey, referenceDraftKey, type ReferenceTargetRef } from "./referenceTypes";
+import { legacyReferenceStorageKeys, referenceDraftKey, type ReferenceTargetRef } from "./referenceTypes";
 
 /** Canonical `ferryx.*` prefix; the frozen target key is appended verbatim. */
 export const REFERENCE_DRAFT_STORAGE_PREFIX = "ferryx.referenceChat.draft:";
@@ -126,15 +126,15 @@ export class ReferenceDraftStore {
     return draft;
   }
 
-  /** Move a draft saved under the older owner-bearing key to the durable key, once. */
+  /** Move drafts saved under every older owner-bearing key to the durable key, once. */
   private migrateLegacy(key: string): string | null {
     const storage = this.storage();
-    const legacy = legacyReferenceStorageKey(storage, REFERENCE_DRAFT_STORAGE_PREFIX, key);
-    if (legacy === null) return null;
-    const text = storage.getItem(legacy);
-    if (text === null) return null;
+    const legacy = legacyReferenceStorageKeys(storage, REFERENCE_DRAFT_STORAGE_PREFIX, key);
+    const texts = legacy.map((candidate) => storage.getItem(candidate)).filter((text): text is string => !!text);
+    if (!texts.length) return null;
+    const text = texts.join("\n");
     storage.setItem(REFERENCE_DRAFT_STORAGE_PREFIX + key, text);
-    storage.removeItem(legacy);
+    for (const candidate of legacy) storage.removeItem(candidate);
     return text;
   }
 
