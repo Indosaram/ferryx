@@ -330,6 +330,14 @@ export async function applyTerminalOverrides(
   });
 }
 
+/** Pushes the resolved app appearance so the native terminal follows it; returns the effective preferences. */
+export async function setTerminalAppearance(
+  appearance: "light" | "dark",
+): Promise<TerminalPreferences | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<TerminalPreferences>("cmd_terminal_set_appearance", { appearance });
+}
+
 export async function listWorktrees(workspaceId: string) {
   if (!isTauri()) {
     if (getRemoteAuthToken()) {
