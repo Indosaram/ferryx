@@ -1592,4 +1592,73 @@ describe("reference chat lane review fixes", () => {
     await drainSettledResponses();
     expect(screen.getAllByText("continue")).toHaveLength(2);
   });
+
+  it("ui-composer-prompt-r5-1: a typed free-text answer the host refuses comes back to the message box", async () => {
+    const freeForm = {
+      prompt: {
+        promptId: "Q",
+        agent: "codex",
+        kind: "question",
+        title: "Question Q",
+        question: "Question Q",
+        options: [],
+        customOptionIndex: 0,
+        multiSelect: false,
+      },
+      screenRevision: "rev-Q",
+      cols: 80,
+      rows: 24,
+    };
+    const calls = installLane(({ url }) => {
+      if (url.includes("/prompt")) return jsonResponse(freeForm);
+      if (url.includes("/answer")) {
+        return jsonResponse(
+          { ok: false, error: { code: "INTERNAL", message: "host failed", retryable: true }, requestId: "r5" },
+          500,
+        );
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await screen.findByText("Question Q");
+    const reply = "please keep the parser streaming and add a test for it";
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: reply } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await drainSettledResponses();
+
+    expect(calls.some((call) => call.url.includes("/answer"))).toBe(true);
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue(reply);
+  });
+
+  it("ui-workspace-wiring-r5-1: a pane switch that releases staged files also drops their mentions from the pane's draft", async () => {
+    installLane(({ url, method }) =>
+      url.includes("/files") && method === "GET" ? jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" }) : undefined,
+    );
+    render(<RemoteApp />);
+    await laneReady();
+    await stageNotes();
+    await screen.findByTestId("attachment-preview-att-1");
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("@notes.txt ");
+    });
+
+    await switchToSecondTab();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+    });
+    const sheet = screen.getByRole("tablist", { name: /terminal tabs/i });
+    await act(async () => {
+      fireEvent.click(within(sheet).getByRole("tab", { name: /claude/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
+    });
+    await laneReady();
+    await drainSettledResponses();
+
+    expect(screen.queryByTestId("attachment-preview-att-1")).not.toBeInTheDocument();
+    expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).not.toContain("@notes.txt");
+  });
 });

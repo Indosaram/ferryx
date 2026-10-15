@@ -2793,7 +2793,19 @@ export const RemoteHostConnection: React.FC<{
     chatLaneAbortRef.current.abort();
     chatLaneAbortRef.current = new AbortController();
     const previous = chatLaneTargetRef.current;
-    if (previous !== null) releaseStagedChatFiles(previous, chatStagedFilesRef.current);
+    if (previous !== null) {
+      const released = chatStagedFilesRef.current;
+      releaseStagedChatFiles(previous, released);
+      // A released file no longer exists on the host: its mention leaves the pane's saved draft
+      // with it, as removing the chip does, so returning to the pane never sends a dead mention.
+      const draft = referenceDrafts.read(previous).text;
+      let stripped = draft;
+      for (const file of released) {
+        const path = referenceMentionPathOf(file.mentionText);
+        if (path !== null) stripped = stripped.split(referenceMentionFor(path)).join("");
+      }
+      if (stripped !== draft) referenceDrafts.set(previous, stripped);
+    }
     chatStagedFilesRef.current = [];
     clearChatTranscript();
     setChatWarnings([]);
@@ -3521,12 +3533,20 @@ export const RemoteHostConnection: React.FC<{
           setChatPromptError(REFERENCE_PROMPT_STALE_MESSAGE);
           return false;
         }
+        const target = chatTargetRef.current;
         void answerChatPrompt({
           promptId: chatPrompt.id,
           screenRevision: revision,
           answer: typed,
         }).catch(() => {
-          /* the card reports the refusal it was given */
+          // The card reports the refusal it was given; the composer cleared the box on send, so
+          // the typed answer comes back in front of anything typed since.
+          if (target === null || !chatTargetIsCurrent(target)) return;
+          const current = referenceDrafts.read(target).text;
+          if (current.startsWith(text)) return;
+          const restored = current.length === 0 ? text : `${text}\n${current}`;
+          referenceDrafts.set(target, restored);
+          setChatDraftText(restored);
         });
         return true;
       }
@@ -3544,7 +3564,7 @@ export const RemoteHostConnection: React.FC<{
       void sendChatMessage(text);
       return true;
     },
-    [answerChatPrompt, chatPrompt, chatScreenRevision, holdChatMessage, sendChatMessage],
+    [answerChatPrompt, chatPrompt, chatScreenRevision, chatTargetIsCurrent, holdChatMessage, sendChatMessage],
   );
 
   const chatPartContext = useMemo<ReferencePartRenderContext>(
