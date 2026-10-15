@@ -1097,7 +1097,8 @@ pub fn reference_history_page_from_window(
     let mut starts = reference_history_turn_starts(stream.kind, &view);
     // A reset clears every turn before it: no page may start before it, so no cursor can reach
     // the cleared conversation.
-    if let Some(reset) = reference_history_reset_end(stream.kind, &view) {
+    let reset = reference_history_reset_end(stream.kind, &view);
+    if let Some(reset) = reset {
         starts.retain(|start| *start > reset);
     }
     let stream_length = window_start + view.len() as u64;
@@ -1140,8 +1141,20 @@ pub fn reference_history_page_from_window(
     let end_index = starts.partition_point(|start| *start < end_relative);
     let start_index = end_index.saturating_sub(limit);
 
-    let page_bytes: &[u8] = if start_index < end_index {
-        &view[starts[start_index]..end_relative]
+    // The oldest page also carries what precedes the first boundary: the records after a reset
+    // (or the head of a whole store) that no prompt opened still belong to the conversation. A
+    // tail window's head is a torn older turn, so there it starts at the first boundary.
+    let page_start = if start_index == 0 {
+        match reset {
+            Some(reset) => (reset + 1).min(end_relative),
+            None if window_start == 0 => 0,
+            None => starts.first().copied().unwrap_or(end_relative).min(end_relative),
+        }
+    } else {
+        starts[start_index]
+    };
+    let page_bytes: &[u8] = if page_start < end_relative {
+        &view[page_start..end_relative]
     } else {
         &[]
     };
@@ -1149,9 +1162,9 @@ pub fn reference_history_page_from_window(
         // A task's title is recorded where it was started; a page that only holds its result
         // inherits the titles every older byte named.
         ReferenceNativeHistoryKind::Omo | ReferenceNativeHistoryKind::Omp
-            if start_index < end_index =>
+            if page_start < end_relative =>
         {
-            let mut titles = reference_history_task_titles(&view[..starts[start_index]]);
+            let mut titles = reference_history_task_titles(&view[..page_start]);
             let text = String::from_utf8_lossy(page_bytes);
             if stream.kind == ReferenceNativeHistoryKind::Omo {
                 super::history_omo::parse_omo_transcript(&text, usize::MAX, false, &mut titles)
@@ -2288,6 +2301,33 @@ mod tests {
             );
             assert!(!page.has_more, "{registry}: nothing before the reset is reachable");
         }
+    }
+
+    // rs-history-r6-1
+    #[test]
+    fn the_oldest_page_keeps_records_after_a_reset_that_no_prompt_opened() {
+        let home = TempHome::new();
+        let body = joined(&[
+            omo_line("user", "A"),
+            omo_line("assistant", "answer A"),
+            r#"{"type":"custom","customType":"context_clear"}"#.to_string(),
+            omo_line("assistant", "done"),
+        ]);
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", &body);
+        let identity = bound_identity("omo", "sess-1", "aaa");
+        let stream = omo_stream(&home, &identity);
+        let page = reference_history_page_from_bytes(&stream, &identity, body.as_bytes(), 10, None)
+            .expect("the page is served");
+        let texts: Vec<String> = page.turns.iter().map(first_text).collect();
+        assert_eq!(texts, vec!["done".to_string()], "the answer after the reset is served");
+        assert!(!page.has_more, "nothing before the reset is reachable");
+
+        // A whole store whose first record precedes any turn opener keeps that record too.
+        let body = joined(&[omo_line("assistant", "hello"), omo_line("user", "B")]);
+        let page = reference_history_page_from_bytes(&stream, &identity, body.as_bytes(), 10, None)
+            .expect("the page is served");
+        let texts: Vec<String> = page.turns.iter().map(first_text).collect();
+        assert_eq!(texts, vec!["hello".to_string(), "B".to_string()]);
     }
 
     // rs-history-other-4
