@@ -11,7 +11,3 @@
 - **Keyboard copy mode**: <kbd>Cmd+Shift+X</kbd> (macOS) / <kbd>Ctrl+Shift+X</kbd> (Windows, Linux) enters a vi-style copy mode (`hjkl`, `w b e`, `0 ^ $`, `gg G`, `Ctrl-u Ctrl-d`, `H M L`, `v V Ctrl-v`, `y`, `Esc`/`q`). The viewport stays frozen and paste is disabled while it is active.
 - **Update download Cancel and Retry**: a **Cancel** button stops an in-progress update download; a stalled or cancelled download explains what happened and offers **Retry Install and Relaunch**.
 - **Remappable shortcuts**: Settings > Shortcuts offers Edit, Unbind, Reset, and Reset all per action. Conflicting chords are refused with the owning action named; terminal clipboard chords and macOS app-menu chords stay fixed. Native key interception follows the user's bindings.
-
-## Verification
-
-- Docs-only change for this note; tests NOT executed per user directive; final clippy runs once at the end of the plan.

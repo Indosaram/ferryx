@@ -21,11 +21,11 @@ The Ferryx background service (the daemon) owns your terminal sessions. On Linux
 
 Turn off **Restart background service automatically** in **Settings > General**.
 
-To remove the unit or task by hand:
+To remove the unit or task by hand (these commands remove autostart only; they do not stop the running daemon):
 
 ```bash
 # Linux
-systemctl --user disable --now ferryx-daemon
+systemctl --user disable ferryx-daemon
 rm ~/.config/systemd/user/ferryx-daemon.service
 systemctl --user daemon-reload
 ```
@@ -34,6 +34,8 @@ systemctl --user daemon-reload
 # Windows
 schtasks /Delete /TN "Ferryx\Daemon" /F
 ```
+
+The running background service keeps your terminal sessions until you quit it; removing autostart only stops it from starting at next login.
 
 ## Agent state integration
 
