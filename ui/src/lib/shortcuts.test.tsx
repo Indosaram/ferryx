@@ -368,6 +368,27 @@ describe("shortcut registry", () => {
     expect(handlers["notifications.toggle"]).toHaveBeenCalledOnce();
     input.remove();
   });
+
+  it("ignores chords typed into the shortcut recorder", () => {
+    const handlers = { "settings.toggle": vi.fn() };
+    renderHook(() => useShortcuts(handlers, { isMac: false }));
+    const recorder = document.createElement("div");
+    recorder.setAttribute("data-shortcut-recorder", "");
+    const recorderInput = document.createElement("input");
+    recorder.appendChild(recorderInput);
+    const plain = document.createElement("div");
+    document.body.append(recorder, plain);
+
+    const recorded = new KeyboardEvent("keydown", { key: ",", ctrlKey: true, bubbles: true, cancelable: true });
+    recorderInput.dispatchEvent(recorded);
+    expect(handlers["settings.toggle"]).not.toHaveBeenCalled();
+    expect(recorded.defaultPrevented).toBe(false);
+
+    fireEvent.keyDown(plain, { key: ",", ctrlKey: true });
+    expect(handlers["settings.toggle"]).toHaveBeenCalledOnce();
+    recorder.remove();
+    plain.remove();
+  });
 });
 
 type ImeEventInit = KeyboardEventInit & { keyCode?: number };
