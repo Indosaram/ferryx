@@ -3861,7 +3861,9 @@ mod tests {
     // install and, when it is gone, closes the child and forgets its bridge state.
     #[test]
     fn creation_error_exits_discard_the_installed_bridge() {
-        let source = include_str!("browser.rs");
+        // Normalise line endings: a Windows checkout with core.autocrlf has CRLF sources.
+        let source = include_str!("browser.rs").replace("\r\n", "\n");
+        let source = source.as_str();
         let tests_at = source.find(&["mod ", "tests {"].concat()).unwrap();
         let start = source.find("match run_result {").unwrap();
         let end = start + source[start..].find("if let Some(link) = opener.as_ref()").unwrap();
@@ -3896,6 +3898,33 @@ mod tests {
                 discard_body.contains(call),
                 "the post-install discard must run: {call}"
             );
+        }
+        // The timeout exit hands the close to the main thread, and the close releases the
+        // Linux overlay entry and Windows bridge world before closing the webview.
+        let fn_body = |name: &str| {
+            let at = source.find(&["fn ", name, "<R: tauri::Runtime>("].concat()).unwrap();
+            assert!(at < tests_at);
+            let body = &source[at..];
+            &body[..body.find("\n}\n").unwrap()]
+        };
+        let timed_out = fn_body("discard_timed_out_creation");
+        let hop = timed_out.find("app.run_on_main_thread(move || {").unwrap();
+        let hop_body = &timed_out[hop..];
+        let hop_body = &hop_body[..hop_body.find("});").unwrap()];
+        assert!(
+            hop_body.contains("close_abandoned_webview(&handle, &webview_label, &browser_id);"),
+            "the timed-out close must run close_abandoned_webview inside run_on_main_thread"
+        );
+        let close = fn_body("close_abandoned_webview");
+        let mut last = 0;
+        for call in [
+            "#[cfg(target_os = \"linux\")]\n    {\n        let _ = crate::browser::linux::implementation::detach_child(browser_id);",
+            "#[cfg(target_os = \"windows\")]\n    crate::browser::bridge::windows::forget_webview(webview_label);",
+            "if let Some(webview) = app.get_webview(webview_label) {\n        let _ = webview.close();",
+        ] {
+            let at = close.find(call).unwrap_or_else(|| panic!("close_abandoned_webview must run: {call}"));
+            assert!(at >= last, "close_abandoned_webview must release before it closes: {call}");
+            last = at;
         }
     }
 
