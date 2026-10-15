@@ -44,7 +44,7 @@ impl AgentIntegration {
     /// Loads the setting from \`path\`. An absent, unreadable or malformed file means enabled: the
     /// integration is on by default and only an explicit, readable opt-out turns it off.
     pub fn load(path: Option<PathBuf>) -> Self {
-        let enabled = path.as_deref().map_or(true, read_enabled);
+        let enabled = path.as_deref().is_none_or(read_enabled);
         Self {
             enabled: AtomicBool::new(enabled),
             path,

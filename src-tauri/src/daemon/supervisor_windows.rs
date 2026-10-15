@@ -95,18 +95,18 @@ pub fn quote_windows_arg(arg: &str) -> String {
         match ch {
             '\\' => backslashes += 1,
             '"' => {
-                quoted.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+                quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
                 quoted.push('"');
                 backslashes = 0;
             }
             other => {
-                quoted.extend(std::iter::repeat('\\').take(backslashes));
+                quoted.extend(std::iter::repeat_n('\\', backslashes));
                 quoted.push(other);
                 backslashes = 0;
             }
         }
     }
-    quoted.extend(std::iter::repeat('\\').take(backslashes * 2));
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
     quoted.push('"');
     quoted
 }

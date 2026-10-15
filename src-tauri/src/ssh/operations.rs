@@ -353,7 +353,7 @@ pub struct RemoteRemovalReport {
 impl RemoteRemovalReport {
     fn record(&mut self, agent: &str, output: &[u8]) -> Result<(), IpcError> {
         let text = String::from_utf8_lossy(output);
-        let line = text.lines().map(str::trim).filter(|line| !line.is_empty()).next_back();
+        let line = text.lines().map(str::trim).rfind(|line| !line.is_empty());
         let slot = match line.and_then(|line| line.split_once(' ')) {
             Some(("removed", reported)) if reported == agent => &mut self.removed,
             Some(("kept_modified", reported)) if reported == agent => &mut self.kept_modified,
