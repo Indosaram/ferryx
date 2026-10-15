@@ -1183,6 +1183,76 @@ fn discard_failed_creation_with(
     discard_failed_session(manager, browser_id);
 }
 
+/// Queues a main-thread close of the webview of a session whose main-thread creation
+/// step did not report back in time, then drops the session.
+///
+/// Ordering: the creation closure and this close are both `run_on_main_thread` tasks
+/// on the one event-loop proxy (`send_user_message(Message::Task)` in tauri-runtime-wry),
+/// which runs tasks in FIFO order. The close is queued after the timeout fired, so after
+/// the creation closure was queued, and runs only once that closure has finished:
+/// - If the closure was still pending or running, it may have passed its re-check and
+///   navigated, attached (Linux overlay) and shown the child; the close then removes the
+///   child and its overlay entry.
+/// - If the closure had already closed the child itself or never created it,
+///   `get_webview` misses and `detach_child` finds nothing, so the close is a no-op.
+///
+/// The close is queued before the session is dropped. The Linux overlay entry is keyed
+/// by `browser_id`, which a caller may supply, and a create reusing it is refused while
+/// this session still exists. So any later create with the same id queues its own
+/// creation closure after this close, and the close cannot detach that new session's
+/// overlay entry.
+/// Neither step holds a lock while the other runs: queueing takes no lock, and
+/// `discard` takes and releases its own locks.
+fn discard_timed_out_creation_with(
+    webview_label: &str,
+    browser_id: &str,
+    discard: impl FnOnce(),
+    queue_main_thread_close: impl FnOnce(String, String),
+) {
+    queue_main_thread_close(webview_label.to_string(), browser_id.to_string());
+    discard();
+}
+
+fn discard_timed_out_creation<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    state: &BrowserState,
+) {
+    discard_timed_out_creation_with(
+        &state.webview_label,
+        &state.browser_id,
+        || discard_failed_creation(app, manager, &state.browser_id),
+        |webview_label, browser_id| {
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                close_abandoned_webview(&handle, &webview_label, &browser_id);
+            });
+        },
+    );
+}
+
+/// Main thread only. Closes a webview whose session is already gone and releases its
+/// Linux overlay entry and Windows bridge world; each step is a no-op when nothing is
+/// left. The Windows world can outlive `remove_session` when a stale creation closure
+/// installs it after the session was dropped.
+fn close_abandoned_webview<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    webview_label: &str,
+    browser_id: &str,
+) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = crate::browser::linux::implementation::detach_child(browser_id);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = browser_id;
+    #[cfg(target_os = "windows")]
+    crate::browser::bridge::windows::forget_webview(webview_label);
+    if let Some(webview) = app.get_webview(webview_label) {
+        let _ = webview.close();
+    }
+}
+
 pub fn record_session_created(browser_id: &str) {
     let mut ids = CREATED_SESSION_IDS.lock();
     ids.retain(|id| id != browser_id);
@@ -1703,7 +1773,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                         return Err(BrowserError::CreateFailed(error).into());
                     }
                     Ok(Err(_)) | Err(_) => {
-                        discard_failed_creation(app, manager, &state.browser_id);
+                        discard_timed_out_creation(app, manager, &state);
                         return Err(BrowserError::CreateFailed(
                             "browser webview creation did not complete on the main thread".into(),
                         )
@@ -3767,9 +3837,28 @@ mod tests {
         assert_eq!(discarded, 1, "an abandoned session must close and forget its webview");
     }
 
+    #[test]
+    fn timed_out_creation_queues_a_close_of_its_webview_before_discarding() {
+        let calls = std::cell::RefCell::new(Vec::<String>::new());
+        discard_timed_out_creation_with(
+            "browser-label-1",
+            "browser-id-1",
+            || calls.borrow_mut().push("discard".into()),
+            |label, browser_id| {
+                calls.borrow_mut().push(format!("close {label} {browser_id}"))
+            },
+        );
+        assert_eq!(
+            calls.into_inner(),
+            vec!["close browser-label-1 browser-id-1".to_string(), "discard".to_string()],
+            "a timed-out creation must queue its webview close before it drops the session"
+        );
+    }
+
     // The seam tests above cannot reach the main-thread creation path, so pin its wiring
-    // in source: every error exit after the queue discards the installed bridge, and the
-    // closure re-checks the session after install.
+    // in source: every error exit after the queue discards the installed bridge, the
+    // timeout exit also closes the webview, and the closure re-checks the session after
+    // install and, when it is gone, closes the child and forgets its bridge state.
     #[test]
     fn creation_error_exits_discard_the_installed_bridge() {
         let source = include_str!("browser.rs");
@@ -3781,18 +3870,33 @@ mod tests {
             .split("return Err(BrowserError::CreateFailed(")
             .collect();
         assert_eq!(exits.len(), 4, "expected three CreateFailed exits after the queue");
-        for before in &exits[..3] {
+        let discards = [
+            "discard_failed_creation(app, manager, &state.browser_id);",
+            "discard_timed_out_creation(app, manager, &state);",
+            "discard_failed_creation(app, manager, &state.browser_id);",
+        ];
+        for (before, discard) in exits[..3].iter().zip(discards) {
             assert!(
-                before
-                    .trim_end()
-                    .ends_with("discard_failed_creation(app, manager, &state.browser_id);"),
-                "a creation error exit must call discard_failed_creation first"
+                before.trim_end().ends_with(discard),
+                "a creation error exit must call {discard} first"
             );
         }
         let closure = &source[source.find("let bridge_kind =").unwrap()..start];
         let install = closure.find("set_trusted_bridge(&browser_id, bridge_kind)").unwrap();
         let recheck = closure.find("discard_if_abandoned_after_install(").unwrap();
         assert!(install < recheck, "the session must be re-checked after the bridge install");
+        let discard_body = &closure[recheck..];
+        let discard_body = &discard_body[..discard_body.find("break 'kept Err(message);").unwrap()];
+        for call in [
+            "let _ = child.close();",
+            "crate::browser::bridge::forget_webview(child.app_handle(), &label);",
+            "#[cfg(target_os = \"windows\")]\n                                    crate::browser::bridge::windows::forget_webview(&label);",
+        ] {
+            assert!(
+                discard_body.contains(call),
+                "the post-install discard must run: {call}"
+            );
+        }
     }
 
     #[test]
