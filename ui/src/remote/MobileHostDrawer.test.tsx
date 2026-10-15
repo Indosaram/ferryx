@@ -219,6 +219,26 @@ describe("MobileHostDrawer", () => {
     expect(screen.getByTestId("mobile-host-drawer-confirm-disconnect")).toBeInTheDocument();
   });
 
+  it("ui-shell-sheets-r11-1: a double tap on Cancel never lands on Sign out", () => {
+    const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn(), onSignOut: vi.fn() };
+    render(<MobileHostDrawer open isAccountSession {...props} />);
+
+    fireEvent.click(screen.getByTestId("mobile-host-drawer-disconnect"));
+    // both taps land on the same slot of the row, whatever button occupies it by then
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    const row = cancel.parentElement!;
+    const slot = Array.from(row.children).indexOf(cancel);
+    fireEvent.click(cancel);
+    fireEvent.click(row.children[slot]!);
+
+    expect(props.onSignOut).not.toHaveBeenCalled();
+    expect(props.onDisconnect).not.toHaveBeenCalled();
+
+    if (screen.queryByRole("button", { name: "Cancel" })) fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByTestId("mobile-host-drawer-signout"));
+    expect(props.onSignOut).toHaveBeenCalledTimes(1);
+  });
+
   it("disarms the disconnect confirmation when the drawer closes", () => {
     const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn() };
     const { rerender } = render(<MobileHostDrawer open {...props} />);
