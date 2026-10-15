@@ -493,7 +493,7 @@ pub fn execute(plan: LaunchPlan) -> Result<(), IpcError> {
         }
         LaunchPlan::Cli { program, args } => {
             // argv only: no shell, so metacharacters in the path are literal.
-            std::process::Command::new(&program)
+            crate::util::no_window_command(&program)
                 .args(&args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())

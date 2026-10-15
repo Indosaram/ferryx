@@ -15,6 +15,7 @@ pub fn private_file(path: &std::path::Path) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt as _;
         let user = std::env::var("USERNAME").map_err(|e| e.to_string())?;
         let grant = if path.is_dir() {
             format!("{user}:(OI)(CI)(F)")
@@ -22,6 +23,7 @@ pub fn private_file(path: &std::path::Path) -> Result<(), String> {
             format!("{user}:(F)")
         };
         let result = std::process::Command::new("icacls")
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .arg(path)
             .args(["/inheritance:r", "/grant:r", &grant])
             .output()
