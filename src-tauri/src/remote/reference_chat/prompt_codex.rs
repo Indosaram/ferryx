@@ -583,6 +583,9 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
     let menu_row_count: usize;
     let selected_index: usize;
     let mut position: Option<(String, String)> = None;
+    // The last row already holds typed text: Codex has no clear-line key for it, so a custom
+    // answer typed there would be appended to that text. Such a row takes no custom answer.
+    let mut typed_row_holds_text = false;
 
     if rows.is_empty() {
         // free form: the answer line sits right above the hint
@@ -642,6 +645,10 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
                 Some(normalized)
             };
         }
+        if header.is_some() {
+            let last = labels.last().map(|label| label.trim()).unwrap_or("");
+            typed_row_holds_text = !last.is_empty() && !re_other_row().is_match(last);
+        }
         options = labels[..labels.len() - 1]
             .iter()
             .map(|label| ReferencePromptOption {
@@ -658,8 +665,8 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
         Some((asked, total)) => format!("Question {asked} of {total}"),
         None => "Question".to_string(),
     };
-    let custom_menu_index = menu_row_count.saturating_sub(1);
-    let custom_option_index = Some(options.len() as u32);
+    let custom_menu_index = (!typed_row_holds_text).then(|| menu_row_count.saturating_sub(1));
+    let custom_option_index = (!typed_row_holds_text).then(|| options.len() as u32);
     let parsed = finish_codex_prompt(FinishCodexPrompt {
         kind: ReferencePromptKind::Question,
         title,
@@ -671,7 +678,7 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
         queued: Some(ReferencePromptQueueState::Open),
         responder: ReferenceCodexResponder::AsyncQuestion,
         selected_index,
-        custom_menu_index: Some(custom_menu_index),
+        custom_menu_index,
         reject_with_escape_index: None,
         option_steps: None,
         row_key: None,
@@ -1971,12 +1978,24 @@ mod tests {
     fn the_open_queue_question_reads_a_row_already_typed_over() {
         let parsed = parse_reference_codex_prompt(ASYNC_TYPED_ROW).expect("the typed row parses");
         assert_eq!(labels(&parsed), vec!["train", "test"]);
-        assert_eq!(parsed.prompt.custom_option_index, Some(2));
         assert_eq!(parsed.selected_index, 2);
         assert_eq!(
             texts(&plan_reference_codex_answer(&parsed, &answer(Some(0), None, None)).unwrap()),
             vec![keys_of(&["up"]), keys_of(&["up"]), keys_of(&["enter"])]
         );
+    }
+
+    /// A typed row that already holds text cannot take a custom answer: Codex has no clear-line
+    /// key here, so the answer would be appended to what is already typed.
+    #[test]
+    fn a_custom_answer_is_refused_on_a_row_already_typed_over() {
+        let parsed = parse_reference_codex_prompt(ASYNC_TYPED_ROW).expect("the typed row parses");
+        assert_eq!(parsed.prompt.custom_option_index, None);
+        assert_eq!(parsed.custom_menu_index, None);
+        assert!(
+            plan_reference_codex_answer(&parsed, &answer(None, None, Some("validation"))).is_err()
+        );
+        assert!(plan_reference_codex_answer(&parsed, &answer(Some(2), None, None)).is_err());
     }
 
     /// The collapsed queue is not a screen card at all: only the rollout-backed card answers it.
