@@ -625,6 +625,9 @@ pub fn perform_daemon_exec_with_path(exe: &std::path::Path) -> Result<(), std::i
     cmd.arg("--daemon")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null());
+    // The re-executed image keeps this pid, so it is still the unit's main process and reports
+    // `READY=1` again at readiness.
+    crate::daemon::supervisor_linux::forward_notify_socket(&mut cmd);
     let err = cmd.exec();
     tracing::error!("Daemon exec failed: {err}");
     Err(err)
@@ -3345,6 +3348,9 @@ impl DaemonServer {
                     if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
                         return Err(format!("CommitHandover failed: {commit_resp:?}"));
                     }
+                    // The predecessor retires with exit 0 right after confirming; systemd must be
+                    // supervising this successor before then, or it would stop tracking the daemon.
+                    crate::daemon::supervisor_linux::notify_main_pid_ready();
                     let commit_latency_ms = commit_started_at.elapsed().as_millis() as u64;
                     Ok::<(usize, usize, usize, u64), String>((
                         offered,
@@ -3402,6 +3408,9 @@ impl DaemonServer {
                                 .await.map_err(|error| error.to_string())?;
                             if decision == Some(super::handover_transaction::HandoverState::Retired) {
                                 tracing::info!("Recovered committed handover from recorded transaction decision");
+                                // The predecessor committed and is retiring with exit 0; take over as
+                                // the unit's main process exactly as the confirmed path does.
+                                crate::daemon::supervisor_linux::notify_main_pid_ready();
                             } else {
                                 release_after_unconfirmed_commit(async {
                                     for session_id in &adopted_sessions {
@@ -3516,6 +3525,7 @@ impl DaemonServer {
                 if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
                     return Err(format!("CommitHandover failed: {commit_resp:?}"));
                 }
+                crate::daemon::supervisor_linux::notify_main_pid_ready();
                 self.session_router.add_legacy_peer(legacy_peer);
             }
         }
@@ -5160,6 +5170,8 @@ impl DaemonServer {
             // commits; a successor left inside the predecessor's process group would be killed by
             // whatever teardown reaches that group.
             crate::util::detach_launched_child(&mut cmd);
+            // Lets the successor take over as the systemd unit's main process once it commits.
+            crate::daemon::supervisor_linux::forward_notify_socket(&mut cmd);
             match successor_stdout {
                 Some(target) => {
                     cmd.stdout(target);
