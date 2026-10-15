@@ -608,6 +608,37 @@ describe("reference chat lane (task 12)", () => {
     }
   });
 
+  it("QA-06: a second Stop tap while the first is in flight sends no second interrupt", async () => {
+    setWidth(390);
+    const prompt = {
+      prompt: {
+        promptId: "prompt-stop-twice",
+        agent: "claude",
+        kind: "question",
+        title: "Which file?",
+        question: "Which file?",
+        options: [{ label: "src/main.rs" }, { label: "src/lib.rs" }],
+        multiSelect: false,
+      },
+      screenRevision: "rev-stop-twice",
+      cols: 80,
+      rows: 24,
+    };
+    const harness = installFetch({ prompt: () => prompt });
+    render(<RemoteApp />);
+    await screen.findByTestId("reference-prompt-card");
+
+    // Both taps land before the first POST settles: a second Escape would open the rewind picker.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("stop-button"));
+      fireEvent.click(screen.getByTestId("stop-button"));
+    });
+    await harness.whenCalled("/stop", 2000, "POST");
+
+    const stopCalls = harness.calls.filter((call) => call.url.includes("/stop"));
+    expect(stopCalls).toHaveLength(1);
+  });
+
   it("QA-06: a pane the chat cannot stop refuses instead of sending a signal", async () => {
     setWidth(390);
     const state = {
