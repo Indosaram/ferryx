@@ -161,6 +161,10 @@ pub struct SpawnParams {
     pub env: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
+    /// The daemon-held agent integration setting. `Some(false)` tells the helper to give the
+    /// pane no agent-state registration, port, or token; absent keeps the helper's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_integration: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
