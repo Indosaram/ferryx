@@ -1853,6 +1853,69 @@ async fn a_staged_mention_resolves_to_the_uploaded_bytes_under_the_pane_worktree
     fixture.server.stop().await;
 }
 
+/// rs-files-routes-r7-1: a pane whose shell has moved since it was spawned stages into the
+/// directory it is in NOW, so the relative mention resolves from the agent's live cwd.
+#[tokio::test]
+async fn a_staged_mention_resolves_from_the_panes_live_cwd_after_a_cd() {
+    let fixture = fixture().await;
+    // The shell is up (and, on Windows, its cursor query answered) before it is asked to move.
+    fixture.submit_and_await_marker("CWDREADY_ONE").await;
+    let worktree = fixture.worktree().await;
+    let nested = worktree.join("nested");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+    let marker = "CWDMOVED_TWO";
+    let command = if cfg!(windows) {
+        "Set-Location nested; [Environment]::CurrentDirectory = (Get-Location).ProviderPath; Write-Output ('CWDMOVED_' + 'TWO')\r".to_string()
+    } else {
+        "cd nested && printf 'CWDMOVED_%s\\n' 'TWO'\r".to_string()
+    };
+    let attachment = fixture
+        .state
+        .session_backend
+        .attach_with_sequence(&fixture.session_id, None)
+        .await
+        .expect("attach the pane");
+    let mut seen = attachment.snapshot.history;
+    let mut watch = attachment.receiver;
+    fixture
+        .state
+        .session_backend
+        .write_input(&fixture.session_id, command.as_bytes())
+        .await
+        .expect("type the cd");
+    let moved = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            match watch.recv().await {
+                Ok(chunk) => {
+                    seen.extend_from_slice(&chunk.bytes);
+                    if seen.windows(marker.len()).any(|window| window == marker.as_bytes()) {
+                        return true;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+            }
+        }
+    })
+    .await;
+    assert_eq!(moved.ok(), Some(true), "the pane must run the cd: {}", escaped_bytes(&seen, 4096));
+
+    let bytes = b"staged after a cd\n";
+    let (status, body) = fixture.stage("moved.txt", bytes).await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+    let mention = staged["data"]["mentionText"].as_str().expect("mentionText").to_string();
+    let path = mention.strip_prefix('@').expect("an @ mention").trim_end().to_string();
+    assert!(reference_files::reference_mention_path_is_safe(&path), "{mention:?}");
+    assert_eq!(
+        std::fs::read(nested.join(&path)).ok().as_deref(),
+        Some(&bytes[..]),
+        "<live cwd>/{path} must hold the uploaded bytes (live cwd {})",
+        nested.display()
+    );
+    fixture.server.stop().await;
+}
+
 /// rs-files-routes-5: the per-target file cap holds under concurrent uploads.
 #[tokio::test]
 async fn concurrent_stages_for_one_target_respect_the_file_cap() {

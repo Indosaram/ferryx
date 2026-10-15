@@ -6187,13 +6187,39 @@ pub(crate) async fn reference_chat_stage_file(
         );
     }
     let runtime = reference_chat_runtime();
-    let worktree = match state
+    // The mention is resolved by the agent from the directory it runs in NOW, which a `cd` after
+    // the spawn moves away from the session's spawn worktree. The live cwd of the pane's
+    // foreground job (its process group on unix; the shell itself where there is none) is the
+    // staging root, and the spawn worktree is only the fallback when that cannot be read.
+    let live_cwd = match state
+        .terminal_service
+        .get_session(target.target.backend_session_id.as_str())
+    {
+        Some(session) => crate::ipc::run_blocking(move || {
+            #[cfg(unix)]
+            let foreground = session.foreground_process_group().ok().flatten();
+            #[cfg(not(unix))]
+            let foreground: Option<u32> = None;
+            Ok::<_, crate::ipc::error::IpcError>(
+                foreground
+                    .and_then(crate::ipc::terminal::process_cwd)
+                    .or_else(|| session.pid().and_then(crate::ipc::terminal::process_cwd))
+                    .map(|cwd| crate::daemon::server::normalize_process_cwd(&cwd))
+                    .filter(|cwd| cwd.is_dir()),
+            )
+        })
+        .await
+        .ok()
+        .flatten(),
+        None => None,
+    };
+    let spawn_worktree = state
         .session_backend
         .describe_session(target.target.backend_session_id.as_str())
         .await
         .ok()
-        .and_then(|details| details.worktree_path)
-    {
+        .and_then(|details| details.worktree_path);
+    let worktree = match live_cwd.or(spawn_worktree) {
         Some(worktree) => worktree,
         None => {
             return reference_chat_error(

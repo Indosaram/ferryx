@@ -215,8 +215,10 @@ pub fn shape_reference_submit(text: &str, bracketed_paste: bool) -> Result<Strin
         return Err(ScopeErrorCode::PayloadTooLarge);
     }
     let body = reference_composer_body(text);
+    // Chat text is typed, never pressed: a control byte in it (ESC, Ctrl-C, ...) would act as a key
+    // whether or not the pane is in bracketed-paste mode, so both branches carry the safe body.
+    let body = reference_paste_safe_body(&body);
     let shaped = if bracketed_paste {
-        let body = reference_paste_safe_body(&body);
         format!("{REFERENCE_PASTE_START}{body}{REFERENCE_PASTE_END}")
     } else {
         body
@@ -959,6 +961,19 @@ mod tests {
     use crate::scoped_contracts::{Epoch, TargetRef};
 
     // ---- review regressions: stale prompt guard, paste escape, cancellation -------------------
+
+    // rs-input-screen-r7-1
+    #[test]
+    fn a_plain_submit_body_cannot_press_a_control_key() {
+        for text in ["see log \u{1b}[31mERR", "stop\u{3}here", "a\u{4}b\u{1a}c"] {
+            let shaped = shape_reference_submit(text, false).expect("a short message is shaped");
+            assert!(
+                !shaped.chars().any(|ch| ch.is_ascii_control() && !matches!(ch, '\r' | '\t')),
+                "a plain submit must not write a control key from chat text: {shaped:?}"
+            );
+        }
+        assert_eq!(shape_reference_submit("one\ttwo\nthree", false).unwrap(), "one\ttwo\rthree");
+    }
 
     #[test]
     fn a_bracketed_paste_body_cannot_end_the_paste_or_carry_control_keys() {
