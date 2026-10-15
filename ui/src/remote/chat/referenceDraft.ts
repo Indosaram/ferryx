@@ -95,8 +95,8 @@ export class ReferenceDraftStore {
     return this.beginKey(referenceDraftKey(target), sent);
   }
 
-  end(target: ReferenceTargetRef): void {
-    this.endKey(referenceDraftKey(target));
+  end(target: ReferenceTargetRef, sent?: string): void {
+    this.endKey(referenceDraftKey(target), sent);
   }
 
   /** Remove only the acknowledged prefix; edits within the sent text stay unsent. */
@@ -175,7 +175,11 @@ export class ReferenceDraftStore {
     return true;
   }
 
-  private endKey(key: string): void {
+  private endKey(key: string, sent?: string): void {
+    // the pending record of a newer send in flight is not this send's to end: its
+    // acknowledgement still needs it, and the box stays sending until it lands
+    const pending = this.pending.get(key);
+    if (sent !== undefined && pending !== undefined && pending.sent !== sent) return;
     this.pending.delete(key);
     this.drafts.set(key, { ...this.readKey(key), sending: false });
     this.notify();

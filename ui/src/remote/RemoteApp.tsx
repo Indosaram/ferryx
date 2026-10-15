@@ -1134,6 +1134,9 @@ export const RemoteHostConnection: React.FC<{
   // Where the newest page started when the older pages were joined to it: a later newest page
   // that starts anywhere else no longer meets them, and they are dropped rather than left a gap.
   const chatNewestStartRef = useRef<ReferenceHistoryCursor | null>(null);
+  // The turns the last newest page held: a window that slid forward hands the ones it dropped to
+  // the older block instead of leaving them out.
+  const chatNewestTurnsRef = useRef<MobileChatMessageProps[]>([]);
   // Bumped whenever the older chain's anchor moves or the transcript clears: an older read that
   // started under another generation joins nothing on screen and is dropped when it lands.
   const chatOlderGenerationRef = useRef(0);
@@ -1152,9 +1155,9 @@ export const RemoteHostConnection: React.FC<{
   // The fence the newest read was issued under: a response for another one is dropped.
   const chatFenceRef = useRef<ReferenceHistoryFence | null>(null);
   const chatRetentionTruncatedRef = useRef(false);
-  // How many history turns already carried an echo's exact words when it was sent: only a turn
-  // beyond that count is the echo's delivery.
-  const chatEchoBaselineRef = useRef<Map<string, number>>(new Map());
+  // How many history turns already carried an echo's exact words when it was sent, and which ones:
+  // only a turn beyond that count, or one not on screen then, is the echo's delivery.
+  const chatEchoBaselineRef = useRef<Map<string, { ids: Set<string>; count: number }>>(new Map());
 
   const [browserSessions, setBrowserSessions] = useState<Array<{ browserId: string; title?: string; url?: string }>>([]);
   const [selectedBrowserId, setSelectedBrowserId] = useState<string | null>(null);
@@ -2778,6 +2781,7 @@ export const RemoteHostConnection: React.FC<{
     setChatHasOlder(false);
     chatLoadedOlderRef.current = false;
     chatNewestStartRef.current = null;
+    chatNewestTurnsRef.current = [];
     chatOlderGenerationRef.current += 1;
     setChatPrompt(null);
     chatPromptIdRef.current = null;
@@ -2909,8 +2913,32 @@ export const RemoteHostConnection: React.FC<{
         setChatPage(read.page);
         const start = read.page.cursor ?? null;
         const anchor = chatNewestStartRef.current;
+        const mapped = mapReferenceTurns(read.page);
+        const previousTurns = chatNewestTurnsRef.current;
+        chatNewestTurnsRef.current = mapped;
+        // The window slid forward on the same stream: the turns it slid past join the end of the
+        // older block, so the older pages stay and nothing goes missing between them. That holds
+        // only while the new window still starts inside the old one; past that the gap is unknown.
+        let slidOut: MobileChatMessageProps[] | null = null;
+        if (
+          chatLoadedOlderRef.current &&
+          start !== null &&
+          anchor !== null &&
+          start.streamId === anchor.streamId &&
+          start.offset > anchor.offset &&
+          mapped.length > 0
+        ) {
+          const joinAt = previousTurns.findIndex((turn) => turn.id === mapped[0].id);
+          if (joinAt >= 0) slidOut = previousTurns.slice(0, joinAt);
+        }
+        if (slidOut !== null) {
+          chatNewestStartRef.current = start;
+          const absorbed = slidOut;
+          if (absorbed.length > 0) setChatOlderMessages((prev) => [...prev, ...absorbed]);
+        }
         const moved =
-          start === null || anchor === null || start.streamId !== anchor.streamId || start.offset !== anchor.offset;
+          slidOut === null &&
+          (start === null || anchor === null || start.streamId !== anchor.streamId || start.offset !== anchor.offset);
         if (moved) {
           // an older read still out started from the old anchor: its page no longer joins this one
           chatOlderGenerationRef.current += 1;
@@ -2927,18 +2955,23 @@ export const RemoteHostConnection: React.FC<{
           setChatOlderCursor(read.page.cursor ?? null);
           setChatHasOlder(read.page.hasMore && read.page.cursor != null);
         }
-        const mapped = mapReferenceTurns(read.page);
         setChatMessages((prev) => {
           const pending = prev.filter((message) => message.id.startsWith("pending-"));
           // An echo retires only against a turn that is new since it was sent: an earlier turn with
-          // the same words is not its delivery. Each new matching turn retires at most one echo.
+          // the same words is not its delivery. A turn is new when its id was not on screen at send
+          // time (the window may have slid the earlier one out) or when the count grew past the
+          // baseline. Each new matching turn retires at most one echo.
           const spent = new Map<string, number>();
           const kept = pending.filter((echo) => {
             const key = `${echo.role}\u0000${echo.content}`;
-            const seen = mapped.filter((turn) => turn.role === echo.role && turn.content === echo.content).length;
-            const baseline = chatEchoBaselineRef.current.get(echo.id) ?? 0;
+            const matching = mapped.filter((turn) => turn.role === echo.role && turn.content === echo.content);
+            const baseline = chatEchoBaselineRef.current.get(echo.id) ?? { ids: new Set<string>(), count: 0 };
+            const fresh = Math.max(
+              matching.filter((turn) => !baseline.ids.has(turn.id)).length,
+              matching.length - baseline.count,
+            );
             const used = spent.get(key) ?? 0;
-            if (seen - baseline > used) {
+            if (fresh > used) {
               spent.set(key, used + 1);
               chatEchoBaselineRef.current.delete(echo.id);
               return false;
@@ -3174,12 +3207,13 @@ export const RemoteHostConnection: React.FC<{
         timestamp: Date.now(),
       };
       setChatMessages((prev) => {
-        chatEchoBaselineRef.current.set(
-          pending.id,
-          prev.filter(
-            (message) => !message.id.startsWith("pending-") && message.role === "user" && message.content === text,
-          ).length,
+        const matching = prev.filter(
+          (message) => !message.id.startsWith("pending-") && message.role === "user" && message.content === text,
         );
+        chatEchoBaselineRef.current.set(pending.id, {
+          ids: new Set(matching.map((message) => message.id)),
+          count: matching.length,
+        });
         return [...prev, pending];
       });
       const payload: ReferenceSubmitPayload = { text, attachmentIds: [], origin: "chat" };
@@ -3212,7 +3246,7 @@ export const RemoteHostConnection: React.FC<{
           // the acknowledgement settles the SENT PREFIX only: an edit made while it was in
           // flight survives, and so does everything typed after it
           const settled = referenceDrafts.settle(target, text);
-          referenceDrafts.end(target);
+          referenceDrafts.end(target, text);
           if (stillCurrent) setChatDraftText(settled.text);
         } else {
           referenceQueues.remove(target, heldId);
@@ -3229,7 +3263,7 @@ export const RemoteHostConnection: React.FC<{
           const current = referenceDrafts.read(target).text;
           if (current.length === 0) referenceDrafts.set(target, text);
           else if (!current.startsWith(text)) referenceDrafts.set(target, `${text}\n${current}`);
-          referenceDrafts.end(target);
+          referenceDrafts.end(target, text);
         }
         return false;
       }
