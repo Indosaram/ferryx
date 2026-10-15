@@ -136,7 +136,12 @@ export function validateReferenceFileName(rawName: string): string {
       "A staged file name must not exceed " + REFERENCE_FILE_MAX_NAME_BYTES + " bytes",
     );
   }
-  if (trimmed.includes("/") || trimmed.includes(REFERENCE_BACKSLASH)) {
+  if (
+    trimmed.includes("/") ||
+    trimmed.includes(REFERENCE_BACKSLASH) ||
+    // a drive-relative 'a:x.png' leaves the staging root when the host joins it on Windows
+    trimmed.includes(":")
+  ) {
     throw new ReferenceFileError(
       "INVALID_REQUEST",
       "A staged file name must not contain a path separator",
@@ -172,7 +177,7 @@ export function validateReferenceFileName(rawName: string): string {
  * instead of being refused by the whitespace rule above.
  */
 export function referenceStagedFileName(rawName: string): string {
-  return validateReferenceFileName(rawName.trim().replace(/\s+/g, "_"));
+  return validateReferenceFileName(rawName.trim().replace(/\s+/g, "_").replace(/:/g, "_"));
 }
 
 /**

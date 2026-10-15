@@ -118,7 +118,9 @@ pub fn validate_reference_file_name(raw: &str) -> Result<String, ScopeErrorCode>
     if trimmed.is_empty() || trimmed.len() > REFERENCE_FILE_MAX_NAME_BYTES {
         return Err(ScopeErrorCode::InvalidRequest);
     }
-    if trimmed.contains('/') || trimmed.contains(char::from(92)) {
+    // ':' is refused too: on Windows 'a:x.png' is a drive-relative path, and joining it replaces
+    // the staging root instead of naming a file inside it.
+    if trimmed.contains('/') || trimmed.contains(char::from(92)) || trimmed.contains(':') {
         return Err(ScopeErrorCode::InvalidRequest);
     }
     if trimmed == "." || trimmed == ".." {
@@ -844,6 +846,19 @@ mod tests {
         assert!(!staged.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// rs-files-routes-r5-1: a drive-prefixed name ('a:x.png') would replace the staging root on
+    /// Windows when joined, so ':' is refused like a separator.
+    #[test]
+    fn file_names_with_a_drive_prefix_are_refused() {
+        for bad in ["a:x.png", "C:shot.png", "note:stream"] {
+            assert_eq!(
+                validate_reference_file_name(bad),
+                Err(ScopeErrorCode::InvalidRequest),
+                "name {bad:?} must be refused: joining it can leave the staging root"
+            );
+        }
     }
 
     /// ui-reference-logic-2: the Rust validator refuses whitespace exactly as the TS twin does,

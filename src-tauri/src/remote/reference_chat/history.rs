@@ -165,7 +165,10 @@ impl ReferenceHistoryIdentity {
     ///
     /// The provider session identity leads (it is what the reader identified), then the agent's
     /// own session id, then the backend session id — which is the agent session id in the common
-    /// case and is why the existing reader looks it up too.
+    /// case and is why the existing reader looks it up too. The backend id is only a stand-in: it
+    /// is used when neither the provider nor the agent session is known (a known, unwritten
+    /// session must never bind an older session's store), and only for the `.omo` reader, the
+    /// only store that lives under the root the lookup searches.
     fn exact_session_ids(&self) -> Vec<&str> {
         let mut ids: Vec<&str> = Vec::new();
         if let Some(id) = self.provider_session_id() {
@@ -176,9 +179,8 @@ impl ReferenceHistoryIdentity {
                 ids.push(id);
             }
         }
-        let backend = self.target.target.backend_session_id.as_str();
-        if !ids.contains(&backend) {
-            ids.push(backend);
+        if ids.is_empty() && self.native_kind() == ReferenceNativeHistoryKind::Omo {
+            ids.push(self.target.target.backend_session_id.as_str());
         }
         ids
     }
@@ -2057,6 +2059,44 @@ mod tests {
         assert_eq!(page.turns.len(), 300, "every turn the page's boundaries hold is served");
         assert_eq!(first_text(&page.turns[0]), "prompt 1");
         assert!(!page.has_more);
+    }
+
+    // rs-history-r5-1
+    #[test]
+    fn the_backend_id_never_binds_an_older_store_when_the_current_session_is_known() {
+        let home = TempHome::new();
+        let old = home.write_session("--w--", "2026-10-06_sess-b.jsonl", THREE_TURNS);
+
+        // The pane's backend id names the first session's store; the current one is unwritten.
+        let provider = bound_identity("omo", "sess-b", "sess-x");
+        let stream = resolve_reference_history_stream(home.path(), &provider, &[])
+            .expect("a known, unwritten provider session resolves");
+        assert_eq!(
+            stream.availability,
+            ReferenceHistoryAvailability::NotStarted,
+            "bound {:?} for an unwritten provider session",
+            stream.file_path()
+        );
+
+        let agent = identity("omo", "sess-b").with_agent_session_id("sess-x");
+        let stream = resolve_reference_history_stream(home.path(), &agent, &[])
+            .expect("a known, unwritten agent session resolves");
+        assert_eq!(stream.availability, ReferenceHistoryAvailability::NotStarted);
+
+        // Another reader's pane whose backend id matches an `.omo` file never reads it.
+        let codex = identity("codex", "sess-b");
+        match resolve_reference_history_stream(home.path(), &codex, &[]) {
+            Ok(stream) => assert_ne!(
+                stream.file_path(),
+                Some(old.as_path()),
+                "a codex pane must not read an omo store"
+            ),
+            Err(error) => assert_eq!(error.code, ScopeErrorCode::NotFound),
+        }
+
+        // The common case still binds: nothing but the backend id identifies the omo pane.
+        let backend_only = identity("omo", "sess-b");
+        assert_eq!(omo_stream(&home, &backend_only).file_path(), Some(old.as_path()));
     }
 
     // rs-history-core-2

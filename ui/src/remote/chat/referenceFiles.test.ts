@@ -30,6 +30,7 @@ import {
   referenceMentionPathWithinRoot,
   parseReferenceStagedFileList,
   referenceSha256Hex,
+  referenceStagedFileName,
   stageReferenceChatFile,
   validateReferenceFileName,
   validateReferenceFileSize,
@@ -598,6 +599,13 @@ describe("reference file names carry whitespace-free mentions (ui-reference-logi
     expectCode(() => validateReferenceFileName("two words.png"), "INVALID_REQUEST");
     expectCode(() => validateReferenceFileName("tab" + String.fromCharCode(9) + "x.png"), "INVALID_REQUEST");
     expect(validateReferenceFileName("~notes.txt")).toBe("~notes.txt");
+  });
+
+  it("the TS validator refuses a drive-prefixed name like the Rust validator does", () => {
+    for (const bad of ["a:x.png", "C:shot.png", "note:stream"]) {
+      expectCode(() => validateReferenceFileName(bad), "INVALID_REQUEST");
+    }
+    expect(referenceStagedFileName("a:x.png")).toBe("a_x.png");
   });
 
   it("a leading tilde stages and its prefixed mention parses", async () => {
