@@ -548,6 +548,12 @@ export function useShortcuts(
         if (chord) switchDebug(`shortcut.hook.${stage}`, { registration, isMac, ...chord, ...details });
       };
       trace("receipt");
+      // The Settings shortcut recorder captures raw chords; dispatching app actions while the
+      // user records (e.g. Mod+, closing Settings, Mod+K opening the palette) would hijack it.
+      if (event.target instanceof Element && event.target.closest("[data-shortcut-recorder]")) {
+        trace("reject", { reason: "shortcut-recorder" });
+        return;
+      }
       for (const shortcut of shortcuts) {
         const handler = handlers[shortcut.id];
         if (!handler) {
