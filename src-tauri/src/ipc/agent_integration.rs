@@ -66,6 +66,44 @@ pub async fn cmd_agent_integration_remove_local() -> Result<RemovalReport, IpcEr
         .await
 }
 
+/// Whether the OS service manager owns the daemon's lifetime on this target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonSupervisorStatus {
+    pub supported: bool,
+    pub enabled: bool,
+}
+
+#[tauri::command]
+pub async fn cmd_daemon_supervisor_get() -> Result<DaemonSupervisorStatus, IpcError> {
+    super::run_blocking(|| {
+        let supported = crate::daemon::supervisor::supported();
+        Ok(DaemonSupervisorStatus {
+            supported,
+            enabled: supported,
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_daemon_supervisor_set(enabled: bool) -> Result<DaemonSupervisorStatus, IpcError> {
+    super::run_blocking(move || {
+        if enabled {
+            crate::daemon::supervisor::ensure().map(|_| ())
+        } else {
+            crate::daemon::supervisor::uninstall()
+        }
+        .map_err(|e| IpcError::internal(format!("daemon supervisor: {e}")))?;
+        let supported = crate::daemon::supervisor::supported();
+        Ok(DaemonSupervisorStatus {
+            supported,
+            enabled: supported && enabled,
+        })
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

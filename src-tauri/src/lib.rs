@@ -1716,6 +1716,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_agent_session_discover,
         cmd_agent_state_reset,
         ipc::agent_integration::cmd_agent_integration_get,
+        ipc::agent_integration::cmd_daemon_supervisor_get,
+        ipc::agent_integration::cmd_daemon_supervisor_set,
         ipc::agent_integration::cmd_agent_integration_set,
         ipc::agent_integration::cmd_agent_integration_remove_local,
         cmd_browser_create,

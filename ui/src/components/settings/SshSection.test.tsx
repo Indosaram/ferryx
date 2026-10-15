@@ -7,6 +7,8 @@ import { SshSection } from "./SshSection";
 const invokeMock = vi.fn();
 const isTauriMock = vi.fn(() => true);
 const openDialogMock = vi.fn();
+const getAgentIntegrationMock = vi.fn();
+const removeSshIntegrationMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
@@ -15,6 +17,16 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: (...args: unknown[]) => openDialogMock(...args),
+}));
+
+vi.mock("../../lib/tauri", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/tauri")>()),
+  getAgentIntegration: (...args: unknown[]) => getAgentIntegrationMock(...args),
+}));
+
+vi.mock("../../lib/sshHosts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/sshHosts")>()),
+  removeSshIntegration: (...args: unknown[]) => removeSshIntegrationMock(...args),
 }));
 
 function deferred<T>() {
@@ -57,9 +69,47 @@ describe("SshSection Settings Component", () => {
     resetSshHostsCache();
     localStorage.clear();
     isTauriMock.mockReturnValue(true);
+    getAgentIntegrationMock.mockResolvedValue({ enabled: true });
+    removeSshIntegrationMock.mockResolvedValue({ removed: [], keptModified: [], absent: [] });
   });
 
   afterEach(cleanup);
+
+  it("toggle off persists via IPC and hides Prepare", async () => {
+    getAgentIntegrationMock.mockResolvedValue({ enabled: false });
+    const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_list_hosts") return [mockHost1];
+      if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
+      if (command === "cmd_ssh_test_connection") return { host: mockHost1, reachable: true, checkedAt: 1, environment };
+      throw new Error(`Unexpected command ${command}`);
+    });
+    await act(async () => { render(<SshSection />); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" })); });
+    expect(getAgentIntegrationMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Prepare agent integration on Dev Server" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove agent integration on Dev Server" })).toBeInTheDocument();
+  });
+
+  it("remote remove calls cmd_ssh_remove_integration for that host only", async () => {
+    const enabledHost2: SshHost = { ...mockHost2, disabled: false };
+    const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
+    removeSshIntegrationMock.mockResolvedValue({ removed: ["a", "b"], keptModified: ["c"], absent: [] });
+    invokeMock.mockImplementation(async (command: string, args?: { host?: SshHost }) => {
+      if (command === "cmd_ssh_list_hosts") return [mockHost1, enabledHost2];
+      if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
+      if (command === "cmd_ssh_test_connection") return { host: args?.host, reachable: true, checkedAt: 1, environment };
+      throw new Error(`Unexpected command ${command}`);
+    });
+    await act(async () => { render(<SshSection />); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Test connection to Bastion Box" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Remove agent integration on Bastion Box" })); });
+    expect(removeSshIntegrationMock).toHaveBeenCalledTimes(1);
+    expect(removeSshIntegrationMock).toHaveBeenCalledWith("host-2");
+    expect(screen.getByTestId("ssh-integration-removed-host-2")).toHaveTextContent("Removed 2, kept 1 modified");
+    expect(screen.queryByTestId("ssh-integration-removed-host-1")).not.toBeInTheDocument();
+  });
 
   it("opens a project on the chosen enabled host without installing integration", async () => {
     invokeMock.mockImplementation(async (command: string) => {

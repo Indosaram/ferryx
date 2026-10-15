@@ -27,6 +27,7 @@ import {
   deleteSshHost,
   extractIpcErrorMessage,
   prepareSshIntegration,
+  removeSshIntegration,
   resetSshHostsCache,
   setSshPassword,
   testSshConnection,
@@ -61,7 +62,7 @@ import {
   type AccountMachineView,
 } from "../../remote/accountSession";
 import { getOrCreateAttachKey } from "../../remote/accountAttach";
-import { toIpcError } from "../../lib/tauri";
+import { getAgentIntegration, toIpcError } from "../../lib/tauri";
 import { AccountSignIn } from "./AccountSignIn";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { AddMachineModal, type HostFormData } from "./AddMachineModal";
@@ -357,6 +358,8 @@ export function RemoteSection({
   // SSH host states
   const [sshTestResults, setSshTestResults] = useState<Record<string, SshTestState>>({});
   const [sshPreparedHosts, setSshPreparedHosts] = useState<Record<string, boolean>>({});
+  const [sshRemovalResults, setSshRemovalResults] = useState<Record<string, string>>({});
+  const [agentIntegrationEnabled, setAgentIntegrationEnabled] = useState(true);
   const [editingSshHost, setEditingSshHost] = useState<SshHost | null>(null);
   const [editFormData, setEditFormData] = useState<HostFormData | null>(null);
   const [editPassword, setEditPassword] = useState("");
@@ -388,6 +391,20 @@ export function RemoteSection({
 
   const isCurrentHost = (host: SshHost) =>
     hostsRef.current.some(cur => sameConnection(cur, host));
+
+  useEffect(() => {
+    let active = true;
+    getAgentIntegration()
+      .then(state => {
+        if (active) setAgentIntegrationEnabled(state.enabled);
+      })
+      .catch((err: unknown) => {
+        if (active) setActionError(extractIpcErrorMessage(err, "Failed to read the agent integration setting."));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -575,6 +592,26 @@ export function RemoteSection({
     } catch (err) {
       if (!isCurrentHost(host)) return;
       setActionError(extractIpcErrorMessage(err, "Agent integration preparation failed."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRemoveSshIntegration = async (host: SshHost) => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const result = await removeSshIntegration(host.id);
+      if (!isCurrentHost(host)) return;
+      setSshPreparedHosts(prev => ({ ...prev, [host.id]: false }));
+      setSshRemovalResults(prev => ({
+        ...prev,
+        [host.id]: `Removed ${result.removed.length}, kept ${result.keptModified.length} modified`,
+      }));
+    } catch (err) {
+      if (!isCurrentHost(host)) return;
+      setActionError(extractIpcErrorMessage(err, "Agent integration removal failed."));
     } finally {
       setBusy(false);
     }
@@ -1516,16 +1553,31 @@ export function RemoteSection({
                                 >
                                   Test connection
                                 </Button>
+                                {agentIntegrationEnabled ? (
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    aria-label={`Prepare agent integration on ${host.label}`}
+                                    disabled={busy || Boolean(host.disabled)}
+                                    onClick={() => void handlePrepareSsh(host)}
+                                  >
+                                    Prepare agent integration
+                                  </Button>
+                                ) : null}
                                 <Button
                                   type="button"
                                   variant="outline"
                                   size="sm"
-                                  aria-label={`Prepare agent integration on ${host.label}`}
+                                  aria-label={`Remove agent integration on ${host.label}`}
                                   disabled={busy || Boolean(host.disabled)}
-                                  onClick={() => void handlePrepareSsh(host)}
+                                  onClick={() => void handleRemoveSshIntegration(host)}
                                 >
-                                  Prepare agent integration
+                                  Remove integration
                                 </Button>
+                                {sshRemovalResults[host.id] ? (
+                                  <span className="self-center text-[11px] text-muted-foreground">{sshRemovalResults[host.id]}</span>
+                                ) : null}
                                 <Button
                                   type="button"
                                   variant="outline"

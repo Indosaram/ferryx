@@ -28,7 +28,9 @@ import {
 } from "../../lib/updater";
 import {
   getCliLauncherStatus,
+  getDaemonSupervisor,
   installCliLauncher,
+  setDaemonSupervisor,
 } from "../../lib/tauri";
 import { classifyNavigatorPlatform } from "../../lib/platform";
 import type { CliLauncherStatus } from "../../lib/types";
@@ -328,16 +330,47 @@ export function GeneralSection() {
   const { settings, updateSettings } = useGeneralSettings();
   const [managedExternally, setManagedExternally] = useState<boolean>(false);
   const [sidebarOpenStartup, setSidebarOpenStartup] = useState<boolean>(() => loadSidebarOpenStartup());
+  const [supervisor, setSupervisor] = useState<{ supported: boolean; enabled: boolean } | null>(null);
+  const [supervisorBusy, setSupervisorBusy] = useState(false);
+  const [supervisorError, setSupervisorError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     void updatesManagedExternally().then((managed) => {
       if (active) setManagedExternally(managed);
     });
+    getDaemonSupervisor()
+      .then((state) => {
+        if (active) setSupervisor(state);
+      })
+      .catch(() => {
+        // Hosts or daemons that cannot report a supervisor do not offer the switch.
+        if (active) setSupervisor(null);
+      });
     return () => {
       active = false;
     };
   }, []);
+
+  const toggleSupervisor = async (enabled: boolean) => {
+    const previous = supervisor;
+    if (!previous) return;
+    setSupervisor({ ...previous, enabled });
+    setSupervisorBusy(true);
+    setSupervisorError(null);
+    try {
+      await setDaemonSupervisor(enabled);
+    } catch (err) {
+      setSupervisor(previous);
+      const message =
+        typeof err === "object" && err !== null && "message" in err && typeof err.message === "string"
+          ? err.message
+          : "Failed to update background service setting";
+      setSupervisorError(message);
+    } finally {
+      setSupervisorBusy(false);
+    }
+  };
 
   return (
     <section aria-labelledby="settings-general-heading" aria-label="General">
@@ -396,6 +429,30 @@ export function GeneralSection() {
               </SelectContent>
             </Select>
           </SettingRow>
+          {supervisor?.supported ? (
+            <SettingRow
+              label="Restart background service automatically"
+              description={
+                <>
+                  Let the operating system restart the Ferryx background service if it stops, so
+                  terminal sessions come back without opening the app.
+                  {supervisorError ? (
+                    <span role="alert" className="mt-1 block text-destructive">
+                      {supervisorError}
+                    </span>
+                  ) : null}
+                </>
+              }
+            >
+              <Switch
+                id="general-daemon-supervisor"
+                aria-label="Restart background service automatically"
+                checked={supervisor.enabled}
+                disabled={supervisorBusy}
+                onCheckedChange={(checked) => void toggleSupervisor(checked)}
+              />
+            </SettingRow>
+          ) : null}
         </div>
         <CliLauncherCard />
         <SoftwareUpdateCard />
