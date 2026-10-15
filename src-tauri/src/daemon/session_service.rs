@@ -1843,6 +1843,10 @@ impl DaemonSessionService {
                 crate::ssh::bridge::SpawnParams {
                     cols: Some(cols),
                     rows: Some(rows),
+                    // The user's opt-out must stop forwarding on real remote panes too.
+                    agent_integration: Some(
+                        self.terminal_service.pty_manager().agent_integration_enabled(),
+                    ),
                     ..Default::default()
                 },
                 request.into(),
