@@ -67,6 +67,36 @@ describe("reference draft target scoping", () => {
     expect(store.read(paneB).text).toBe("");
   });
 
+  it("ui-reference-logic-r9-1: drafts under every older owner-bearing key are kept, and every legacy key is removed", () => {
+    const data = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const legacyA = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-a-old|${base.epoch}|${base.backendSessionId}`;
+    const legacyB = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-b-old|${base.epoch}|${base.backendSessionId}`;
+    const otherPane = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-b-old|${base.epoch}|sess-other`;
+    data.set(legacyA, "deploy later");
+    data.set(otherPane, "other pane");
+    data.set(legacyB, "run tests");
+    const store = new ReferenceDraftStore(() => storage);
+
+    expect(store.read(target({ ownerId: "owner-c" })).text).toBe("deploy later\nrun tests");
+    expect(data.get(store.storageKey(paneA))).toBe("deploy later\nrun tests");
+    expect(data.has(legacyA)).toBe(false);
+    expect(data.has(legacyB)).toBe(false);
+    expect(data.get(otherPane)).toBe("other pane");
+  });
+
   it("keys a draft on the frozen target key, ignoring the provider session", () => {
     const { store } = fixture();
     expect(store.storageKey(paneA)).toBe(REFERENCE_DRAFT_STORAGE_PREFIX + referenceDraftKey(paneA));

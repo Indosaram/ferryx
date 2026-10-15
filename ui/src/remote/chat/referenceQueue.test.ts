@@ -72,6 +72,37 @@ describe("reference held queue persistence", () => {
     expect(texts(queue, paneB)).toEqual([]);
   });
 
+  it("ui-reference-logic-r9-1: held rows under every older owner-bearing key are merged, and every legacy key is removed", () => {
+    const data = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const legacyA = `${REFERENCE_QUEUE_STORAGE_PREFIX}${base.hostId}|owner-a-old|${base.epoch}|${base.backendSessionId}`;
+    const legacyB = `${REFERENCE_QUEUE_STORAGE_PREFIX}${base.hostId}|owner-b-old|${base.epoch}|${base.backendSessionId}`;
+    const otherPane = `${REFERENCE_QUEUE_STORAGE_PREFIX}${base.hostId}|owner-b-old|${base.epoch}|sess-other`;
+    data.set(legacyA, JSON.stringify({ version: 1, messages: [{ id: "a1", text: "deploy later" }, { id: "dup", text: "shared" }] }));
+    data.set(otherPane, JSON.stringify({ version: 1, messages: [{ id: "o1", text: "other pane" }] }));
+    data.set(legacyB, JSON.stringify({ version: 1, messages: [{ id: "dup", text: "shared" }, { id: "b1", text: "run tests" }] }));
+    const queue = new ReferenceQueueStore(() => storage);
+
+    expect(texts(queue, target({ ownerId: "owner-c" }))).toEqual(["deploy later", "shared", "run tests"]);
+    expect(queue.storageKey(paneA).startsWith("ferryx.")).toBe(true);
+    expect(data.has(queue.storageKey(paneA))).toBe(true);
+    expect(data.has(legacyA)).toBe(false);
+    expect(data.has(legacyB)).toBe(false);
+    expect(data.has(otherPane)).toBe(true);
+  });
+
   it("keys the queue on the frozen target key under the canonical prefix", () => {
     const { queue } = fixture();
     expect(queue.storageKey(paneA)).toBe(REFERENCE_QUEUE_STORAGE_PREFIX + referenceDraftKey(paneA));
