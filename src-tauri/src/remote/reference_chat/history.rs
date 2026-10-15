@@ -1148,7 +1148,10 @@ pub fn reference_history_page_from_window(
         match reset {
             Some(reset) => (reset + 1).min(end_relative),
             None if window_start == 0 => 0,
-            None => starts.first().copied().unwrap_or(end_relative).min(end_relative),
+            // A window no prompt opens is one long turn in progress: its records ARE the live
+            // turn, so they are parsed rather than dropped (the torn head line was already cut by
+            // the window reader, and the parsers skip unopened tool results).
+            None => starts.first().copied().unwrap_or(0).min(end_relative),
         }
     } else {
         starts[start_index]
@@ -1180,7 +1183,7 @@ pub fn reference_history_page_from_window(
     // A tail window begins mid-stream, so what precedes its first boundary is a torn piece of an
     // older turn and is left out.
     let whole_from = if window_start > 0 {
-        reference_history_turn_starts(stream.kind, &view).first().copied().unwrap_or(view.len())
+        reference_history_turn_starts(stream.kind, &view).first().copied().unwrap_or(0)
     } else {
         0
     };
@@ -1566,6 +1569,29 @@ mod tests {
             "the window's oldest page must disclose the older history it cannot reach: {:?}",
             oldest.unavailable_reason
         );
+    }
+
+    // rs-history-r7-1
+    #[test]
+    fn a_tail_window_without_a_turn_boundary_still_serves_the_turn_it_read() {
+        let home = TempHome::new();
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", THREE_TURNS);
+        let identity = bound_identity("omo", "sess-1", "aaa");
+        let stream = omo_stream(&home, &identity);
+
+        // The window opens on the last line, an assistant record: one long turn that no prompt in
+        // the window opened (the torn head line was already dropped by the window reader).
+        let window_start = THREE_TURNS.rfind(r#"{"type":"message","id":"m6""#).expect("m6 is in the fixture");
+        let window = &THREE_TURNS.as_bytes()[window_start..];
+        assert!(
+            reference_history_turn_starts(ReferenceNativeHistoryKind::Omo, window).is_empty(),
+            "the fixture window must hold no turn boundary"
+        );
+        let newest = reference_history_page_from_window(&stream, &identity, window_start as u64, window, 1, None)
+            .expect("the newest page of the window is served");
+        assert!(!newest.turns.is_empty(), "the live turn the window read must be shown: {:?}", newest.turns);
+        assert!(newest.cursor.is_none());
+        assert!(newest.unavailable_reason.as_deref().is_some_and(|reason| reason.contains("read cap")));
     }
 
     #[test]
