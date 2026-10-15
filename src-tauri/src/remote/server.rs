@@ -5969,6 +5969,11 @@ async fn reference_chat_session_jsonl(
     state: &Arc<RemoteGatewayState>,
     identity: &reference_history::ReferenceHistoryIdentity,
 ) -> Option<String> {
+    // A remote session's store is on its own host: no local cwd or backend-id fallback may stand
+    // in for it, or the prompt detectors plan from an unrelated session's records.
+    if reference_chat_session_is_remote(state, &identity.target.target.backend_session_id).await {
+        return None;
+    }
     let home = reference_chat_history_home(state)?;
     let siblings = reference_chat_siblings(state, &identity.target.target.backend_session_id).await;
     let stream =
@@ -10796,5 +10801,83 @@ mod tests {
             task.abort();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
         }
+    }
+
+    /// rs-history-r12-2: an SSH-remote pane's prompt detectors must never be fed a gateway-local
+    /// transcript, even when the remote project path matches a local cwd folder holding exactly one
+    /// store and nothing else identifies the session.
+    #[tokio::test]
+    async fn reference_chat_session_jsonl_never_binds_a_local_store_for_an_ssh_remote_session() {
+        let root = tempfile::tempdir().unwrap();
+        let server = crate::daemon::server::DaemonServer::new_with_paths(
+            Some(root.path().join("data/config")),
+            Some(root.path().join("data/auth")),
+        );
+        let state = server.remote_state().clone();
+        let home = root.path().join("home");
+        *state.agent_history_home.write() = Some(home.clone());
+
+        let backend_session_id = "b6a4d1c9-2e77-4f3a-9c58-0d5a7e91b2aa";
+        let cwd = "/Users/me/app";
+        let folder = home
+            .join(".omo")
+            .join("agent")
+            .join("sessions")
+            .join(crate::remote::reference_chat::history_omo::omo_session_folder(cwd));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("2026-01-01T00-00-00-000Z_01a0d650-db7a-7817-a21b-7be552a81e89.jsonl"),
+            "{\"type\":\"session\",\"id\":\"01a0d650-db7a-7817-a21b-7be552a81e89\",\"cwd\":\"/Users/me/app\"}\n",
+        )
+        .unwrap();
+
+        let identity = reference_history::ReferenceHistoryIdentity::new(
+            reference_types::ReferenceTargetRef::without_provider_session(
+                crate::scoped_contracts::TargetRef {
+                    host_id: "host-a".into(),
+                    owner_id: "owner-a".into(),
+                    epoch: crate::scoped_contracts::Epoch(1),
+                    backend_session_id: backend_session_id.into(),
+                },
+            ),
+            "omo",
+        )
+        .with_cwd(cwd);
+
+        // Control: a local pane with this cwd still binds the lone store via the cwd fallback.
+        assert!(
+            reference_chat_session_jsonl(&state, &identity).await.is_some(),
+            "the fixture must reach the cwd fallback for a local session"
+        );
+
+        let store_path = state
+            .machine_services
+            .as_ref()
+            .expect("machine services")
+            .sessions
+            .remote_sessions_store_path()
+            .to_path_buf();
+        let store = serde_json::json!({
+            "version": 3,
+            "remoteSessions": [{
+                "descriptor": {
+                    "backendSessionId": backend_session_id,
+                    "config": {
+                        "host": { "authMethod": "agent", "hostname": "203.0.113.7", "id": "ssh-test" },
+                        "environment": { "home": "/home/remote", "platform": "posix" },
+                        "projectPath": cwd,
+                    },
+                },
+            }],
+        });
+        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        std::fs::write(&store_path, store.to_string()).unwrap();
+        assert!(reference_chat_session_is_remote(&state, backend_session_id).await);
+
+        assert_eq!(
+            reference_chat_session_jsonl(&state, &identity).await,
+            None,
+            "an SSH-remote session was handed a gateway-local transcript"
+        );
     }
 }
