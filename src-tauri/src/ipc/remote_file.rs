@@ -97,6 +97,151 @@ pub fn remote_files_root(cache_root: &Path) -> PathBuf {
     cache_root.join("remote-files")
 }
 
+/// Windows counterpart of [`remote_target_path`].
+///
+/// Absolute inputs (drive `C:\...` or UNC `\\server\share\...`, either separator)
+/// and base-relative inputs yield a normalized absolute path joined with `\`; `..`
+/// may not climb above the drive or UNC share root. Home-relative inputs (`~`,
+/// `~\...`, `~/...`) yield `~` or `~\<normalized suffix>`, which only
+/// [`windows_remote_read_script`] resolves, against `$HOME`, on the remote host.
+/// Drive-relative (`C:foo`) and root-relative (`\foo`) forms are rejected: their
+/// meaning depends on per-drive state the remote shell does not share with us.
+pub fn windows_remote_target_path(input: &str, base: &str) -> Result<String, IpcError> {
+    use crate::ssh::runtime::RemotePlatform;
+
+    if input.is_empty() || input.chars().any(char::is_control) {
+        return Err(invalid_remote_path(
+            "Remote path cannot be empty or contain control characters",
+        ));
+    }
+
+    let normalize = |rest: &str, floor: &str| -> Result<Vec<String>, IpcError> {
+        let mut segments: Vec<String> = Vec::new();
+        for segment in rest.split(['\\', '/']) {
+            match segment {
+                "" | "." => continue,
+                ".." => {
+                    if segments.pop().is_none() {
+                        return Err(invalid_remote_path(format!(
+                            "Remote path climbs above the {floor}"
+                        )));
+                    }
+                }
+                s => segments.push(s.to_string()),
+            }
+        }
+        Ok(segments)
+    };
+
+    if input == "~" || input.starts_with("~\\") || input.starts_with("~/") {
+        let segments = normalize(&input[1..], "home directory")?;
+        return Ok(if segments.is_empty() {
+            "~".to_string()
+        } else {
+            format!("~\\{}", segments.join("\\"))
+        });
+    }
+
+    let is_drive_absolute = |p: &str| {
+        let b = p.as_bytes();
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/')
+    };
+    let is_unc = |p: &str| p.starts_with("\\\\") || p.starts_with("//");
+
+    let raw = if is_drive_absolute(input) || is_unc(input) {
+        input.to_string()
+    } else if input.starts_with(['\\', '/']) || input.as_bytes().get(1) == Some(&b':') {
+        return Err(invalid_remote_path(
+            "Remote path must be absolute (drive or UNC) or relative to the working directory",
+        ));
+    } else {
+        if RemotePlatform::Windows.validate_path(base).is_err() {
+            return Err(invalid_remote_path(
+                "Base path must be an absolute Windows path without control characters",
+            ));
+        }
+        format!("{}\\{input}", base.trim_end_matches(['\\', '/']))
+    };
+
+    let normalized = if is_unc(&raw) {
+        let mut parts = raw[2..].split(['\\', '/']).filter(|s| !s.is_empty());
+        let (server, share) = match (parts.next(), parts.next()) {
+            (Some(server), Some(share)) if server != "?" && server != "." => (server, share),
+            _ => {
+                return Err(invalid_remote_path(
+                    "UNC path must name a server and a share",
+                ))
+            }
+        };
+        let rest: Vec<&str> = parts.collect();
+        let segments = normalize(&rest.join("\\"), "UNC share root")?;
+        let root = format!("\\\\{server}\\{share}");
+        if segments.is_empty() {
+            root
+        } else {
+            format!("{root}\\{}", segments.join("\\"))
+        }
+    } else {
+        let drive = raw[..1].to_ascii_uppercase();
+        let segments = normalize(&raw[3..], "drive root")?;
+        format!("{drive}:\\{}", segments.join("\\"))
+    };
+
+    RemotePlatform::Windows
+        .validate_path(&normalized)
+        .map_err(|e| invalid_remote_path(e.message))?;
+    Ok(normalized)
+}
+
+/// Byte length of the base64 text [`windows_remote_read_script`] prints for a
+/// file read up to its `REMOTE_FILE_MAX_BYTES + 1` byte cap.
+pub fn windows_remote_wire_limit() -> usize {
+    (REMOTE_FILE_MAX_BYTES + 1).div_ceil(3) * 4
+}
+
+/// PowerShell script reading one remote file on a Windows host. Exits 3 when the
+/// target is not a regular file (matching [`remote_read_command`]), reads at most
+/// `REMOTE_FILE_MAX_BYTES + 1` bytes, and prints them base64-encoded so the
+/// PowerShell text pipeline cannot transcode binary content. The path is passed as
+/// base64 data, never interpolated as PowerShell source.
+pub fn windows_remote_read_script(remote_path: &str) -> String {
+    use crate::ssh::runtime::powershell_data;
+
+    let resolve = if remote_path == "~" {
+        "$p=$HOME".to_string()
+    } else if let Some(suffix) = remote_path.strip_prefix("~\\") {
+        format!("$p=Join-Path $HOME {}", powershell_data(suffix))
+    } else {
+        format!("$p={}", powershell_data(remote_path))
+    };
+    format!(
+        "{resolve}; \
+         if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {{ exit 3 }}; \
+         $n={}; $buf=New-Object byte[] $n; $t=0; \
+         $f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite); \
+         try {{ while ($t -lt $n) {{ $r=$f.Read($buf,$t,$n-$t); if ($r -le 0) {{ break }}; $t+=$r }} }} \
+         finally {{ $f.Dispose() }}; \
+         [Console]::Out.Write([Convert]::ToBase64String($buf,0,$t))",
+        REMOTE_FILE_MAX_BYTES + 1
+    )
+}
+
+fn decode_windows_payload(bytes: &[u8]) -> Result<Vec<u8>, IpcError> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let text: Vec<u8> = bytes
+        .iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    STANDARD.decode(text).map_err(|e| {
+        IpcError::new(
+            IpcErrorCode::ParseError,
+            format!("Remote file response is not valid base64: {e}"),
+        )
+    })
+}
+
 /// Marks a fetched cache file as downloaded from another machine so the OS
 /// treats it like any download: `com.apple.quarantine` on macOS, a
 /// `Zone.Identifier` (Mark of the Web) stream on Windows, nothing elsewhere.
@@ -168,7 +313,7 @@ pub fn remote_cache_path(cache_root: &Path, workspace_id: &str, remote_path: &st
     let hex_digest = format!("{:x}", hasher.finalize());
     let dir_name = &hex_digest[..32];
 
-    let raw_basename = remote_path.rsplit('/').next().unwrap_or("");
+    let raw_basename = remote_path.rsplit(['/', '\\']).next().unwrap_or("");
     let sanitized: String = raw_basename
         .chars()
         .map(|c| {
@@ -241,30 +386,37 @@ pub async fn cmd_remote_file_fetch<R: Runtime>(
     })
     .await?;
 
-    if let Some(platform) = project.platform {
-        if platform != crate::ssh::runtime::RemotePlatform::Posix {
-            return Err(IpcError::new(
-                IpcErrorCode::Unsupported,
-                "Remote file fetch is only supported on POSIX remote platforms",
-            )
-            .with_details(serde_json::json!({
-                "reason": "unsupportedRemotePlatform",
-                "platform": platform,
-            })));
-        }
-    }
+    let windows = project.platform == Some(crate::ssh::runtime::RemotePlatform::Windows);
 
-    let base = match cwd.as_deref() {
-        Some(c) if c.starts_with('/') => c,
-        _ => &project.repo_root,
+    let (remote_path, command, max_wire_bytes) = if windows {
+        let base = match cwd.as_deref() {
+            Some(c)
+                if crate::ssh::runtime::RemotePlatform::Windows
+                    .validate_path(c)
+                    .is_ok() =>
+            {
+                c
+            }
+            _ => &project.repo_root,
+        };
+        let remote_path = windows_remote_target_path(&path, base)?;
+        // powershell.exe ships with every supported Windows release and runs
+        // regardless of the host's OpenSSH DefaultShell (cmd, powershell or pwsh).
+        let command = crate::ssh::runtime::RemoteExecutor::Powershell
+            .command(&windows_remote_read_script(&remote_path));
+        (remote_path, command, windows_remote_wire_limit())
+    } else {
+        let base = match cwd.as_deref() {
+            Some(c) if c.starts_with('/') => c,
+            _ => &project.repo_root,
+        };
+        let remote_path = remote_target_path(&path, base)?;
+        let command = remote_read_command(&remote_path);
+        (remote_path, command, REMOTE_FILE_MAX_BYTES + 1)
     };
-
-    let remote_path = remote_target_path(&path, base)?;
-    let command = remote_read_command(&remote_path);
     let plan = crate::ssh::direct::ssh_plan(&host, command, false)?;
 
     let deadline = Duration::from_secs(30);
-    let max_wire_bytes = REMOTE_FILE_MAX_BYTES + 1;
     let bytes_res =
         crate::ssh::direct::bounded_output_with_limit(&plan, deadline, max_wire_bytes).await;
 
@@ -286,6 +438,11 @@ pub async fn cmd_remote_file_fetch<R: Runtime>(
             }
             return Err(err);
         }
+    };
+    let bytes = if windows {
+        decode_windows_payload(&bytes)?
+    } else {
+        bytes
     };
 
     ensure_within_limit(bytes.len(), REMOTE_FILE_MAX_BYTES)?;
@@ -578,6 +735,96 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn windows_target_path_normalizes_absolute_and_relative_inputs() {
+        let base = r"C:\Users\sook\repo";
+        assert_eq!(
+            windows_remote_target_path(r"src\lib.rs", base).unwrap(),
+            r"C:\Users\sook\repo\src\lib.rs"
+        );
+        assert_eq!(
+            windows_remote_target_path("src/../docs/a.md", r"C:\Users\sook\repo\").unwrap(),
+            r"C:\Users\sook\repo\docs\a.md"
+        );
+        assert_eq!(
+            windows_remote_target_path("d:/logs/./run.txt", base).unwrap(),
+            r"D:\logs\run.txt"
+        );
+        assert_eq!(
+            windows_remote_target_path(r"\\srv\share\a\..\b.txt", base).unwrap(),
+            r"\\srv\share\b.txt"
+        );
+        assert_eq!(windows_remote_target_path("~", base).unwrap(), "~");
+        assert_eq!(
+            windows_remote_target_path("~/a/./b/../c.txt", base).unwrap(),
+            r"~\a\c.txt"
+        );
+    }
+
+    #[test]
+    fn windows_target_path_rejects_escapes_and_ambiguous_forms() {
+        let base = r"C:\repo";
+        for input in [
+            r"C:\..",
+            r"..\..\x",
+            r"\\srv\share\..\other",
+            r"~\..",
+            r"\rooted",
+            "C:drive-relative",
+            r"\\?\C:\x",
+            r"\\srv",
+            "",
+            "a\nb",
+        ] {
+            let err = windows_remote_target_path(input, base).unwrap_err();
+            assert_eq!(err.code, IpcErrorCode::InvalidRequest, "{input:?}");
+            assert_eq!(
+                err.details.as_ref().unwrap().get("reason").unwrap(),
+                "invalidRemotePath",
+                "{input:?}"
+            );
+        }
+        assert!(windows_remote_target_path("rel.txt", "/home/u").is_err());
+    }
+
+    #[test]
+    fn windows_read_script_passes_path_as_data_and_caps_read() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let hostile = r"C:\x\a'; Remove-Item -Recurse C:\ ;'.txt";
+        let script = windows_remote_read_script(hostile);
+        assert!(!script.contains("Remove-Item"), "{script}");
+        assert!(script.contains(&STANDARD.encode(hostile)));
+        assert!(script.contains("exit 3"));
+        assert!(script.contains(&format!("$n={};", REMOTE_FILE_MAX_BYTES + 1)));
+
+        let home = windows_remote_read_script(r"~\logs\run.png");
+        assert!(home.starts_with("$p=Join-Path $HOME "), "{home}");
+        assert!(home.contains(&STANDARD.encode(r"logs\run.png")));
+        assert!(windows_remote_read_script("~").starts_with("$p=$HOME;"));
+    }
+
+    #[test]
+    fn windows_payload_round_trips_binary_and_bounds_wire() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let data: Vec<u8> = (0..=255u8).collect();
+        let wire = format!("{}\r\n", STANDARD.encode(&data));
+        assert_eq!(decode_windows_payload(wire.as_bytes()).unwrap(), data);
+        assert_eq!(
+            decode_windows_payload(b"not base64!").unwrap_err().code,
+            IpcErrorCode::ParseError
+        );
+        let max = vec![0u8; REMOTE_FILE_MAX_BYTES + 1];
+        assert_eq!(STANDARD.encode(max).len(), windows_remote_wire_limit());
+    }
+
+    #[test]
+    fn cache_path_uses_windows_basename() {
+        let cache_root = Path::new("/var/cache/ferryx");
+        let path = remote_cache_path(cache_root, "ssh:ws-1", r"C:\Users\sook\run.png");
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), "run.png");
+    }
+
 
     #[cfg(target_os = "macos")]
     #[test]
