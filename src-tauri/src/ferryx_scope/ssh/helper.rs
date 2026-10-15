@@ -499,7 +499,14 @@ impl Runtime {
                     Condvar::new(),
                 ));
 
-                let (agent_token_opt, mut registration_guard) = if let Some(server) = &self.agent_state {
+                // The daemon's integration opt-out arrives as `agentIntegration: false`; the pane
+                // then gets no agent-state registration, port, or token.
+                let agent_state = if agent_integration_requested(p) {
+                    self.agent_state.as_ref()
+                } else {
+                    None
+                };
+                let (agent_token_opt, mut registration_guard) = if let Some(server) = agent_state {
                     let tok = format!("{:032x}", rand::random::<u128>());
                     server.register(&id, &tok, output.clone());
                     let guard = agent_state::AgentRegistrationGuard::new(server.clone(), id.clone());
@@ -533,7 +540,7 @@ impl Runtime {
                 scrub_reserved_env_vars(&mut command);
 
                 command.env("FERRYX_SESSION_ID", &id);
-                if let (Some(server), Some(tok)) = (&self.agent_state, &agent_token_opt) {
+                if let (Some(server), Some(tok)) = (agent_state, &agent_token_opt) {
                     command.env("FERRYX_AGENT_STATE_PORT", server.port().to_string());
                     command.env("FERRYX_AGENT_STATE_TOKEN", tok);
                 } else {
@@ -985,6 +992,14 @@ fn parse_canonical_u64(val: &Value, name: &str) -> Result<u64, String> {
             .ok_or_else(|| format!("INVALID_REQUEST: {name} must be non-negative integer")),
         _ => Err(format!("INVALID_REQUEST: {name} must be string or integer")),
     }
+}
+
+/// Whether a `pty.spawn` request wants agent-state forwarding. Only an explicit
+/// `agentIntegration: false` turns it off, so requests from older daemons keep forwarding.
+fn agent_integration_requested(p: &Value) -> bool {
+    p.get("agentIntegration")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 fn spawn_params_match(a: &Value, b: &Value) -> bool {
