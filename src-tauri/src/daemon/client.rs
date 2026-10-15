@@ -535,6 +535,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SubscribeDag { .. } => "subscribeDag",
         DaemonRequest::UnsubscribeDag { .. } => "unsubscribeDag",
         DaemonRequest::Shutdown => "shutdown",
+        DaemonRequest::GetAgentIntegration => "getAgentIntegration",
+        DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
     }
 }
 

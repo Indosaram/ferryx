@@ -7,6 +7,7 @@ import {
   RotateCcw,
   RotateCw,
   TerminalSquare,
+  X,
 } from "lucide-react";
 
 import {
@@ -15,6 +16,7 @@ import {
   useGeneralSettings,
 } from "../../lib/generalSettings";
 import {
+  cancelUpdateDownload,
   checkForUpdate,
   downloadAndInstallUpdate,
   getCurrentVersion,
@@ -45,8 +47,16 @@ function updateStatusMessage(status: UpdateStatus): string {
     case "checking":
       return "Checking for updates…";
     case "available":
+      if (status.lastFailure === "stalled") {
+        return `Download of version ${status.version} stalled. Nothing was installed; retry when ready.`;
+      }
+      if (status.lastFailure === "cancelled") {
+        return `Download of version ${status.version} was cancelled. Nothing was installed.`;
+      }
       return `Version ${status.version} is available.`;
     case "downloading":
+      if (status.installing) return `Installing version ${status.version}…`;
+      if (status.cancelRequested) return "Cancelling download…";
       return `Downloading version ${status.version}…`;
     case "downloaded":
       return `Version ${status.version} is ready to install.`;
@@ -113,11 +123,13 @@ export function SoftwareUpdateCard() {
   const isAvailable = status.state === "available";
   const isDownloaded = status.state === "downloaded";
   const isActionable = isAvailable || isDownloaded;
+  // Installation is not cancellable, so Cancel exists only while bytes are still downloading.
+  const isCancellable = status.state === "downloading" && !status.installing;
   const percent = Math.round((status.downloadProgress ?? 0) * 100);
 
   let statusClassName = "text-foreground";
   if (isDownloaded) statusClassName = "flex items-center gap-1.5 font-medium text-status-success";
-  if (status.state === "error") statusClassName = "text-destructive";
+  if (status.state === "error" || status.lastFailure === "stalled") statusClassName = "text-destructive";
 
   const handleInstallAndRelaunch = () => {
     if (isAvailable) {
@@ -183,8 +195,21 @@ export function SoftwareUpdateCard() {
           }`}
         >
           <RotateCcw className="size-3" />
-          Install and Relaunch
+          {isAvailable && status.lastFailure ? "Retry Install and Relaunch" : "Install and Relaunch"}
         </Button>
+        {isCancellable ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void cancelUpdateDownload()}
+            disabled={status.cancelRequested === true}
+            className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+          >
+            <X className="size-3" />
+            Cancel
+          </Button>
+        ) : null}
       </div>
     </Card>
   );

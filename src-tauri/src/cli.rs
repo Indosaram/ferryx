@@ -2906,6 +2906,11 @@ pub fn run_daemon_headless(
     // Install before anything else: a panic during startup is exactly the death that left no
     // trace on 2026-09-25, and the desktop discards this process's stderr.
     crate::daemon::logging::install_panic_recorder();
+    // Before any thread exists: keeps NOTIFY_SOCKET away from every PTY child.
+    #[cfg(unix)]
+    crate::daemon::supervisor_linux::capture_notify_socket();
+    #[cfg(target_os = "linux")]
+    let supervisor_unavailable = crate::daemon::supervisor_linux::availability().clone();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -2917,6 +2922,10 @@ pub fn run_daemon_headless(
                 None
             }
         };
+        #[cfg(target_os = "linux")]
+        if let Some(reason) = supervisor_unavailable {
+            tracing::warn!("crash-restart unavailable: {reason}");
+        }
         #[cfg(test)]
         if std::env::var("FERRYX_LOGGING_FIXTURE").as_deref() == Ok("1") {
             let hub = crate::daemon::agent_state::AgentStateHub::default();
@@ -3001,6 +3010,8 @@ pub fn run_daemon_headless(
                 if announce_readiness {
                     println!("FERRYX_DAEMON_READY");
                     let _ = std::io::stdout().flush();
+                    #[cfg(unix)]
+                    crate::daemon::supervisor_linux::notify_ready();
                 }
             }
             Err(_) => {
@@ -3028,6 +3039,11 @@ pub fn run_daemon_headless(
                             "Another daemon already serves this endpoint; exiting without taking over"
                         );
                     }
+                    // A `Type=notify` unit whose process exits before `READY=1` counts as failed
+                    // and `Restart=on-failure` would relaunch it in a loop; report ready so this
+                    // clean exit stays a clean, unrestarted stop.
+                    #[cfg(unix)]
+                    crate::daemon::supervisor_linux::notify_ready();
                     result = Ok(());
                 }
             }

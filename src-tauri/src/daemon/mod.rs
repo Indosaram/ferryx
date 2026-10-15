@@ -29,6 +29,9 @@ pub mod supervisor;
 // Windows backend of the facade: per-user scheduled task + `--daemon-supervisor` watchdog. Its pure
 // parts (task XML, watchdog decisions) build and test on every target.
 pub mod supervisor_windows;
+// systemd user unit and sd_notify for the Linux supervisor backend.
+#[cfg(unix)]
+pub mod supervisor_linux;
 pub mod workspace_service;
 
 /// Shared headless authority supplied only by the session-owning daemon.
