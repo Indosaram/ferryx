@@ -258,6 +258,47 @@ pub fn reference_file_bounds_check(
     Ok(())
 }
 
+/// Read a staged file for preview.
+///
+/// The staged path lives in the pane's own worktree, where the agent can replace it: a symlink or
+/// any other non-regular file there (a link to a secret, a device that never reaches EOF) is
+/// refused without being followed, the read is capped at [ATTACHMENT_MAX_FILE_BYTES], and bytes
+/// whose length differs from the receipt are not the file that was staged.
+pub fn read_reference_staged_file(
+    path: &Path,
+    expected_size: u64,
+) -> Result<Vec<u8>, ScopeErrorCode> {
+    use std::io::Read as _;
+
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| ScopeErrorCode::NotFound)?;
+    if !metadata.file_type().is_file() {
+        return Err(ScopeErrorCode::NotFound);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // A link swapped in between the check above and this open is refused too.
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(|_| ScopeErrorCode::NotFound)?;
+    if !file.metadata().map_err(|_| ScopeErrorCode::NotFound)?.is_file() {
+        return Err(ScopeErrorCode::NotFound);
+    }
+    let mut bytes = Vec::new();
+    file.take(ATTACHMENT_MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ScopeErrorCode::NotFound)?;
+    if bytes.len() as u64 > ATTACHMENT_MAX_FILE_BYTES {
+        return Err(ScopeErrorCode::PayloadTooLarge);
+    }
+    if bytes.len() as u64 != expected_size {
+        return Err(ScopeErrorCode::NotFound);
+    }
+    Ok(bytes)
+}
+
 /// Decode a stage payload's bytes, refusing an oversized file and a declared size that does not
 /// match the bytes actually carried.
 pub fn decode_reference_file_payload(
@@ -502,6 +543,44 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use crate::scoped_contracts::AttachmentMediaType;
     use sha2::{Digest, Sha256};
+
+    // rs-files-routes-r6-1
+    #[test]
+    fn a_staged_file_read_refuses_a_symlink_an_oversized_file_and_a_size_mismatch() {
+        let root = scratch_dir();
+        std::fs::write(root.join("shot.png"), b"png!").expect("write staged");
+        assert_eq!(
+            read_reference_staged_file(&root.join("shot.png"), 4).expect("the staged file reads"),
+            b"png!".to_vec()
+        );
+        assert_eq!(
+            read_reference_staged_file(&root.join("shot.png"), 5),
+            Err(ScopeErrorCode::NotFound),
+            "a file whose size differs from its receipt is not the staged file"
+        );
+
+        #[cfg(unix)]
+        {
+            std::fs::write(root.join("secret"), b"key").expect("write secret");
+            std::os::unix::fs::symlink(root.join("secret"), root.join("link.png"))
+                .expect("symlink");
+            assert_eq!(
+                read_reference_staged_file(&root.join("link.png"), 3),
+                Err(ScopeErrorCode::NotFound),
+                "a symlink swapped in at the staged path is never followed"
+            );
+        }
+
+        let big = vec![0u8; (ATTACHMENT_MAX_FILE_BYTES + 1) as usize];
+        std::fs::write(root.join("big.png"), &big).expect("write big");
+        assert_eq!(
+            read_reference_staged_file(&root.join("big.png"), ATTACHMENT_MAX_FILE_BYTES + 1),
+            Err(ScopeErrorCode::PayloadTooLarge),
+            "nothing past the file cap is served"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn scratch_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ferryx-ref-files-{}", uuid::Uuid::new_v4()));

@@ -6401,14 +6401,26 @@ async fn reference_chat_preview_file(
             "no staged file of that id belongs to this target",
         );
     };
+    // The staged path sits in the pane's worktree, where the agent may have swapped it for a
+    // symlink or a device: the read refuses a non-regular file, caps the bytes, and requires the
+    // receipt's size.
+    let expected_size = receipt.size_bytes;
     let bytes = crate::ipc::run_blocking(move || {
-        std::fs::read(&path)
-            .map_err(|error| crate::ipc::error::IpcError::internal(error.to_string()))
+        Ok::<_, crate::ipc::error::IpcError>(reference_files::read_reference_staged_file(
+            &path,
+            expected_size,
+        ))
     })
     .await;
     let bytes = match bytes {
-        Ok(bytes) => bytes,
-        Err(_) => {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(ScopeErrorCode::PayloadTooLarge)) => {
+            return reference_chat_error(
+                ScopeErrorCode::PayloadTooLarge,
+                "the staged file is larger than a preview may carry",
+            )
+        }
+        _ => {
             return reference_chat_error(
                 ScopeErrorCode::NotFound,
                 "the staged file is no longer readable",

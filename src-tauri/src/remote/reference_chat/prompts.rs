@@ -833,12 +833,27 @@ impl ReferencePromptAnswers {
 
         // A folded OmO widget is not answerable where it stands. Its own key opens the form, and
         // the form the screen then shows — verified to be the same asking — is what is answered.
+        // Once its open key went out the pane has changed, so no later refusal may claim that
+        // nothing was typed.
+        let mut opened = false;
         if card.is_folded_omo() {
             // Validate first: an answer the folded card already refuses must not open the form.
             if let Err(code) =
                 plan_answer_keys(&card, card.prompt(), &request.payload.answer, None)
             {
                 return refused(code, false, REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE);
+            }
+            // A revoke or a disconnect that landed while the screen was read stops here, before
+            // the open key.
+            if let Err(error) = (request.authorize)() {
+                return ReferenceInputOutcome::NotTyped { error };
+            }
+            if !(request.alive)() {
+                return refused(
+                    ScopeErrorCode::Unauthorized,
+                    false,
+                    REFERENCE_CALLER_GONE_MESSAGE,
+                );
             }
             let open_key =
                 reference_key_bytes(REFERENCE_OMO_OPEN_FORM_KEY).expect("the open key is mapped");
@@ -847,19 +862,24 @@ impl ReferencePromptAnswers {
                     "the form's open key may have reached the pane and could not be confirmed: {message}"
                 ));
             }
+            opened = true;
             match wait_for_open_form(request, screen, clock, agent).await {
                 Ok((opened, text)) => {
                     card = opened;
                     screen_text = text;
                 }
-                Err(outcome) => return outcome,
+                Err(outcome) => return typed_after_open(outcome),
             }
         }
 
         // Reauthorize before the first key: a revoke that landed while the screen was read stops
         // here, with nothing typed.
         if let Err(error) = (request.authorize)() {
-            return ReferenceInputOutcome::NotTyped { error };
+            return if opened {
+                outcome_unknown(error.message)
+            } else {
+                ReferenceInputOutcome::NotTyped { error }
+            };
         }
 
         let prompt = card.prompt().clone();
@@ -867,14 +887,18 @@ impl ReferencePromptAnswers {
         {
             Ok(steps) => steps,
             Err(code) => {
-                return refused(code, false, REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE);
+                return if opened {
+                    outcome_unknown(REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE)
+                } else {
+                    refused(code, false, REFERENCE_PROMPT_INVALID_ANSWER_MESSAGE)
+                };
             }
         };
 
         let mut wrote = false;
         for (index, step) in steps.iter().enumerate() {
             if !(request.alive)() {
-                return if wrote {
+                return if wrote || opened {
                     outcome_unknown(REFERENCE_CALLER_GONE_MESSAGE)
                 } else {
                     refused(
@@ -887,7 +911,7 @@ impl ReferencePromptAnswers {
             let bytes = match reference_key_step_bytes(step) {
                 Ok(bytes) => bytes,
                 Err(code) => {
-                    return if wrote {
+                    return if wrote || opened {
                         outcome_unknown(REFERENCE_PROMPT_UNKNOWN_KEY_MESSAGE)
                     } else {
                         refused(code, false, REFERENCE_PROMPT_UNKNOWN_KEY_MESSAGE)
@@ -908,11 +932,15 @@ impl ReferencePromptAnswers {
             }
         }
         if !wrote {
-            return refused(
-                ScopeErrorCode::InvalidRequest,
-                false,
-                REFERENCE_PROMPT_EMPTY_PLAN_MESSAGE,
-            );
+            return if opened {
+                outcome_unknown(REFERENCE_PROMPT_EMPTY_PLAN_MESSAGE)
+            } else {
+                refused(
+                    ScopeErrorCode::InvalidRequest,
+                    false,
+                    REFERENCE_PROMPT_EMPTY_PLAN_MESSAGE,
+                )
+            };
         }
 
         // Committed: this card is not answered twice. The record is taken under the pane's step,
@@ -1007,6 +1035,15 @@ fn outcome_unknown(message: impl Into<String>) -> ReferenceInputOutcome {
     ReferenceInputOutcome::OutcomeUnknown {
         code: REFERENCE_OUTCOME_UNKNOWN_CODE.to_string(),
         message: message.into(),
+    }
+}
+
+/// A refusal that came after the folded form's open key reached the pane: the pane moved, so the
+/// outcome is unknown rather than "nothing typed".
+fn typed_after_open(outcome: ReferenceInputOutcome) -> ReferenceInputOutcome {
+    match outcome {
+        ReferenceInputOutcome::NotTyped { error } => outcome_unknown(error.message),
+        other => other,
     }
 }
 
@@ -1949,7 +1986,9 @@ mod tests {
             alive: &alive(),
         };
         let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
-        assert_not_typed(&outcome, ScopeErrorCode::RequestConflict);
+        // rs-input-screen-r6-1: the open key already reached the pane, so the outcome is unknown,
+        // never "nothing typed".
+        assert!(outcome.is_outcome_unknown(), "the open key went out: {outcome:?}");
         assert_eq!(outcome.wire_message(), Some(REFERENCE_PROMPT_FOLDED_FORM_MESSAGE));
         assert_eq!(
             writer.text(),
@@ -1962,6 +2001,119 @@ mod tests {
             clock.now(),
             REFERENCE_PROMPT_SETTLE_MS,
             "the settle window is measured on the clock, and it ended it"
+        );
+    }
+
+    /// Authorize passes for the first `passes` calls, then the device is revoked.
+    fn allow_first(passes: usize) -> impl Fn() -> Result<(), ScopeError> + Send + Sync {
+        let calls = AtomicUsize::new(0);
+        move || {
+            if calls.fetch_add(1, Ordering::SeqCst) < passes {
+                Ok(())
+            } else {
+                refusal()()
+            }
+        }
+    }
+
+    /// The caller is present for the first `passes` checks, then leaves.
+    fn alive_first(passes: usize) -> impl Fn() -> bool + Send + Sync {
+        let calls = AtomicUsize::new(0);
+        move || calls.fetch_add(1, Ordering::SeqCst) < passes
+    }
+
+    #[tokio::test]
+    async fn a_folded_open_key_is_not_sent_for_a_caller_revoked_or_gone_during_the_read() {
+        // rs-prompts-r6-1: authorize and alive are checked again after the screen read and
+        // before the open key, so a revoke or disconnect during the read sends nothing.
+        let prompt =
+            detect_reference_prompt_in_session("omo", OMO_WIDGET, &session(OMO_ASKS_FOLDED))
+                .expect("the folded widget is a card");
+        let target = target("sess-1");
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let answers = ReferencePromptAnswers::new();
+        let payload = payload(&prompt.id, REVISION, option(0));
+
+        let writer = RecordingWriter::new();
+        let reader =
+            ScriptedScreen::many(vec![Ok(snapshot(OMO_WIDGET)), Ok(snapshot(OMO_FORM_OPENED))]);
+        let revoked = allow_first(1);
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-1",
+            agent: &prompt.agent,
+            payload: &payload,
+            session: session(OMO_ASKS_FOLDED),
+            authorize: &revoked,
+            alive: &alive(),
+        };
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert!(
+            writer.log().is_empty(),
+            "a caller revoked during the read gets no open key: {:?}",
+            writer.text()
+        );
+        assert_not_typed(&outcome, ScopeErrorCode::Unauthorized);
+
+        let writer = RecordingWriter::new();
+        let reader =
+            ScriptedScreen::many(vec![Ok(snapshot(OMO_WIDGET)), Ok(snapshot(OMO_FORM_OPENED))]);
+        let leaving = alive_first(1);
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-2",
+            agent: &prompt.agent,
+            payload: &payload,
+            session: session(OMO_ASKS_FOLDED),
+            authorize: &allow(),
+            alive: &leaving,
+        };
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert!(
+            writer.log().is_empty(),
+            "a caller gone during the read gets no open key: {:?}",
+            writer.text()
+        );
+        assert_not_typed(&outcome, ScopeErrorCode::Unauthorized);
+        assert_eq!(outcome.wire_message(), Some(REFERENCE_CALLER_GONE_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn a_folded_answer_refused_after_the_open_key_reports_an_unknown_outcome() {
+        // rs-input-screen-r6-1: once alt+up reached the pane, a later refusal (here a revoke
+        // after the form opened) must not claim nothing was typed.
+        let prompt =
+            detect_reference_prompt_in_session("omo", OMO_WIDGET, &session(OMO_ASKS_FOLDED))
+                .expect("the folded widget is a card");
+        let target = target("sess-1");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader =
+            ScriptedScreen::many(vec![Ok(snapshot(OMO_WIDGET)), Ok(snapshot(OMO_FORM_OPENED))]);
+        let answers = ReferencePromptAnswers::new();
+        let payload = payload(&prompt.id, REVISION, option(0));
+        // the entry check and the pre-open check pass; the revoke lands while the form opens
+        let revoked = allow_first(2);
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-1",
+            agent: &prompt.agent,
+            payload: &payload,
+            session: session(OMO_ASKS_FOLDED),
+            authorize: &revoked,
+            alive: &alive(),
+        };
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+        assert_eq!(
+            writer.text(),
+            vec!["\u{1b}\u{1b}[A".to_string()],
+            "only the open key went out"
+        );
+        assert!(
+            outcome.is_outcome_unknown(),
+            "the open key reached the pane, so nothing-typed is false: {outcome:?}"
         );
     }
 
