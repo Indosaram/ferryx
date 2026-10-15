@@ -268,7 +268,6 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
       prepended &&
       messages.length > previous.count &&
       !previous.atBottom &&
-      previous.top > 0 &&
       el.scrollHeight > previous.height
     ) {
       el.scrollTop = previous.top + (el.scrollHeight - previous.height);

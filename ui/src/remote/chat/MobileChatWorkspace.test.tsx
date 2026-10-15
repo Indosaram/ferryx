@@ -350,6 +350,34 @@ describe("MobileChatWorkspace", () => {
     expect(stream.scrollTop).toBe(2000);
   });
 
+  it("16c. keeps the reader's place when an older page loads while they sit at the very top", () => {
+    const firstPage: MobileChatMessageProps[] = Array.from({ length: 4 }, (_, idx) => ({
+      id: `new-${idx}`,
+      role: idx % 2 === 0 ? "user" : "assistant",
+      content: `Newest ${idx}`,
+      timestamp: Date.now() + idx,
+    }));
+    const { rerender } = render(<MobileChatWorkspace messages={firstPage} onSendMessage={vi.fn()} />);
+
+    const stream = screen.getByTestId("chat-message-stream");
+    Object.defineProperty(stream, "clientHeight", { value: 300, configurable: true });
+    Object.defineProperty(stream, "scrollHeight", { value: 1000, configurable: true });
+    // the Load-earlier control sits at the top, so a reader who taps it is at scrollTop 0
+    Object.defineProperty(stream, "scrollTop", { value: 0, configurable: true, writable: true });
+    fireEvent.scroll(stream);
+
+    const older: MobileChatMessageProps[] = Array.from({ length: 2 }, (_, idx) => ({
+      id: `old-${idx}`,
+      role: idx % 2 === 0 ? "user" : "assistant",
+      content: `Older ${idx}`,
+      timestamp: Date.now() - 1000 + idx,
+    }));
+    Object.defineProperty(stream, "scrollHeight", { value: 1200, configurable: true });
+    rerender(<MobileChatWorkspace messages={[...older, ...firstPage]} onSendMessage={vi.fn()} />);
+
+    expect(stream.scrollTop).toBe(200);
+  });
+
   it("17. follows the bottom when the reader was already at the bottom", () => {
     const firstPage: MobileChatMessageProps[] = [{ id: "new-0", role: "assistant", content: "First", timestamp: Date.now() }];
     const { rerender } = render(<MobileChatWorkspace messages={firstPage} onSendMessage={vi.fn()} />);

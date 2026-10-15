@@ -1152,6 +1152,9 @@ export const RemoteHostConnection: React.FC<{
   // The fence the newest read was issued under: a response for another one is dropped.
   const chatFenceRef = useRef<ReferenceHistoryFence | null>(null);
   const chatRetentionTruncatedRef = useRef(false);
+  // How many history turns already carried an echo's exact words when it was sent: only a turn
+  // beyond that count is the echo's delivery.
+  const chatEchoBaselineRef = useRef<Map<string, number>>(new Map());
 
   const [browserSessions, setBrowserSessions] = useState<Array<{ browserId: string; title?: string; url?: string }>>([]);
   const [selectedBrowserId, setSelectedBrowserId] = useState<string | null>(null);
@@ -2915,9 +2918,21 @@ export const RemoteHostConnection: React.FC<{
         const mapped = mapReferenceTurns(read.page);
         setChatMessages((prev) => {
           const pending = prev.filter((message) => message.id.startsWith("pending-"));
-          const kept = pending.filter(
-            (echo) => !mapped.some((turn) => turn.role === echo.role && turn.content === echo.content),
-          );
+          // An echo retires only against a turn that is new since it was sent: an earlier turn with
+          // the same words is not its delivery. Each new matching turn retires at most one echo.
+          const spent = new Map<string, number>();
+          const kept = pending.filter((echo) => {
+            const key = `${echo.role}\u0000${echo.content}`;
+            const seen = mapped.filter((turn) => turn.role === echo.role && turn.content === echo.content).length;
+            const baseline = chatEchoBaselineRef.current.get(echo.id) ?? 0;
+            const used = spent.get(key) ?? 0;
+            if (seen - baseline > used) {
+              spent.set(key, used + 1);
+              chatEchoBaselineRef.current.delete(echo.id);
+              return false;
+            }
+            return true;
+          });
           const { messages: capped, truncated } = capRetainedMessages([...mapped, ...kept]);
           if (truncated) chatRetentionTruncatedRef.current = true;
           return capped;
@@ -3146,7 +3161,15 @@ export const RemoteHostConnection: React.FC<{
         content: text,
         timestamp: Date.now(),
       };
-      setChatMessages((prev) => [...prev, pending]);
+      setChatMessages((prev) => {
+        chatEchoBaselineRef.current.set(
+          pending.id,
+          prev.filter(
+            (message) => !message.id.startsWith("pending-") && message.role === "user" && message.content === text,
+          ).length,
+        );
+        return [...prev, pending];
+      });
       const payload: ReferenceSubmitPayload = { text, attachmentIds: [], origin: "chat" };
       const outcome = await postChatMutation(
         chatBaseUrlRef.current,
@@ -3191,7 +3214,9 @@ export const RemoteHostConnection: React.FC<{
       if (!stillCurrent) {
         endHeldSend();
         if (heldId === undefined) {
-          if (referenceDrafts.read(target).text.length === 0) referenceDrafts.set(target, text);
+          const current = referenceDrafts.read(target).text;
+          if (current.length === 0) referenceDrafts.set(target, text);
+          else if (!current.startsWith(text)) referenceDrafts.set(target, `${text}\n${current}`);
           referenceDrafts.end(target);
         }
         return false;
@@ -3205,7 +3230,9 @@ export const RemoteHostConnection: React.FC<{
       setChatMessages((prev) => prev.filter((message) => message.id !== pending.id));
       if (heldId === undefined) {
         const current = referenceDrafts.read(target).text;
+        // the failed text comes back in front of whatever the user typed while it was in flight
         if (current.length === 0) referenceDrafts.set(target, text);
+        else if (!current.startsWith(text)) referenceDrafts.set(target, `${text}\n${current}`);
         setChatDraftText(referenceDrafts.read(target).text);
       } else {
         endHeldSend();
@@ -3502,6 +3529,17 @@ export const RemoteHostConnection: React.FC<{
           /* the card reports the refusal it was given */
         });
         return true;
+      }
+      // the checks that refuse before anything is sent answer here, so the box keeps its text
+      const trimmed = text.trim();
+      if (!trimmed) return false;
+      if (!chatTargetRef.current || !chatSessionIdRef.current || !chatTokenRef.current) {
+        setChatWarnings((prev) => withChatWarning(prev, CHAT_NO_SESSION_WARNING));
+        return false;
+      }
+      if (trimmed.length > REFERENCE_SUBMIT_MAX_CHARS) {
+        setChatWarnings((prev) => withChatWarning(prev, CHAT_SUBMIT_TOO_LONG_WARNING));
+        return false;
       }
       void sendChatMessage(text);
       return true;
