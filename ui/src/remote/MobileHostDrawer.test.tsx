@@ -206,6 +206,19 @@ describe("MobileHostDrawer", () => {
     expect(screen.getByTestId("mobile-host-option-local")).not.toHaveAttribute("aria-selected");
   });
 
+  it("ui-shell-sheets-r7-1: a double tap on Remove pairing never lands on Confirm disconnect", () => {
+    const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn() };
+    render(<MobileHostDrawer open {...props} />);
+
+    // both taps hit the same element under the finger
+    const underFinger = screen.getByTestId("mobile-host-drawer-disconnect");
+    fireEvent.click(underFinger);
+    fireEvent.click(underFinger);
+
+    expect(props.onDisconnect).not.toHaveBeenCalled();
+    expect(screen.getByTestId("mobile-host-drawer-confirm-disconnect")).toBeInTheDocument();
+  });
+
   it("disarms the disconnect confirmation when the drawer closes", () => {
     const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn() };
     const { rerender } = render(<MobileHostDrawer open {...props} />);

@@ -193,8 +193,19 @@ describe("reference target identity", () => {
     };
     for (const wrong of [otherOwner, otherEpoch, otherSession]) {
       expect(sameReferenceTarget(base, wrong)).toBe(false);
+    }
+    for (const wrong of [otherEpoch, otherSession]) {
       expect(referenceDraftKey(base)).not.toBe(referenceDraftKey(wrong));
     }
+  });
+
+  it("ui-reference-logic-r7-1: the durable draft key outlives a gateway restart that mints a new owner", () => {
+    const before = boundTarget("provider-7");
+    const afterRestart = { target: { ...target, ownerId: "owner-after-restart" }, providerSessionId: "provider-7" };
+    // the owner still fences requests ...
+    expect(referenceTargetKey(before)).not.toBe(referenceTargetKey(afterRestart));
+    // ... but the user's draft and held rows stay with the same host, incarnation and session
+    expect(referenceDraftKey(afterRestart)).toBe(referenceDraftKey(before));
   });
 });
 

@@ -40,6 +40,33 @@ function fixture() {
 }
 
 describe("reference draft target scoping", () => {
+  it("ui-reference-logic-r7-1: a draft saved under an older owner-bearing key is found after a gateway restart", () => {
+    const { data } = fixture();
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const legacyKey = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-before-restart|${base.epoch}|${base.backendSessionId}`;
+    data.set(legacyKey, "half-typed message");
+    data.set(`${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-before-restart|${base.epoch}|sess-other`, "other pane");
+    const store = new ReferenceDraftStore(() => storage);
+
+    expect(store.read(target({ ownerId: "owner-after-restart" })).text).toBe("half-typed message");
+    expect(store.storageKey(paneA).startsWith("ferryx.")).toBe(true);
+    expect(data.get(store.storageKey(paneA))).toBe("half-typed message");
+    expect(data.has(legacyKey)).toBe(false);
+    expect(store.read(paneB).text).toBe("");
+  });
+
   it("keys a draft on the frozen target key, ignoring the provider session", () => {
     const { store } = fixture();
     expect(store.storageKey(paneA)).toBe(REFERENCE_DRAFT_STORAGE_PREFIX + referenceDraftKey(paneA));
@@ -63,15 +90,15 @@ describe("reference draft target scoping", () => {
     expect(data.get(store.storageKey(otherHost))).toBe("draft on another host");
   });
 
-  it("treats another epoch or owner as a different pane with its own storage slot", () => {
+  it("treats another epoch as a different pane, while a restarted gateway's new owner keeps the draft", () => {
     const { store } = fixture();
     const otherEpoch = target({ epoch: "7" });
     const otherOwner = target({ ownerId: "owner-b" });
     store.set(paneA, "A");
     expect(store.read(otherEpoch).text).toBe("");
-    expect(store.read(otherOwner).text).toBe("");
+    expect(store.read(otherOwner).text).toBe("A");
     expect(store.storageKey(otherEpoch)).not.toBe(store.storageKey(paneA));
-    expect(store.storageKey(otherOwner)).not.toBe(store.storageKey(paneA));
+    expect(store.storageKey(otherOwner)).toBe(store.storageKey(paneA));
   });
 });
 

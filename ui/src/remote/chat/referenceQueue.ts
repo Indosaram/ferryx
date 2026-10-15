@@ -18,7 +18,7 @@
  * Pure state plus a `Storage` shim: no fetch, no timer, no DOM beyond the optional
  * `storage` listener that reconciles another tab's write before a mutation.
  */
-import { referenceDraftKey, type ReferenceTargetRef } from "./referenceTypes";
+import { legacyReferenceStorageKey, referenceDraftKey, type ReferenceTargetRef } from "./referenceTypes";
 
 /** Canonical `ferryx.*` prefix; the frozen target key is appended verbatim. */
 export const REFERENCE_QUEUE_STORAGE_PREFIX = "ferryx.referenceChat.queue:";
@@ -28,7 +28,7 @@ export interface HeldMessage {
   readonly text: string;
 }
 
-type QueueStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+type QueueStorage = Pick<Storage, "getItem" | "setItem" | "removeItem"> & Partial<Pick<Storage, "key" | "length">>;
 
 const newId = () =>
   globalThis.crypto?.randomUUID?.() ??
@@ -153,6 +153,7 @@ export class ReferenceQueueStore {
     let raw: string | null = null;
     try {
       raw = this.storage().getItem(REFERENCE_QUEUE_STORAGE_PREFIX + key);
+      if (raw === null) raw = this.migrateLegacy(key);
     } catch {
       /* private mode */
     }
@@ -184,6 +185,18 @@ export class ReferenceQueueStore {
     this.saved.set(key, raw);
     this.queues.set(key, messages);
     return messages;
+  }
+
+  /** Move held rows saved under the older owner-bearing key to the durable key, once. */
+  private migrateLegacy(key: string): string | null {
+    const storage = this.storage();
+    const legacy = legacyReferenceStorageKey(storage, REFERENCE_QUEUE_STORAGE_PREFIX, key);
+    if (legacy === null) return null;
+    const raw = storage.getItem(legacy);
+    if (raw === null) return null;
+    storage.setItem(REFERENCE_QUEUE_STORAGE_PREFIX + key, raw);
+    storage.removeItem(legacy);
+    return raw;
   }
 
   private write(key: string, messages: HeldMessage[]): void {

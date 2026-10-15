@@ -2813,6 +2813,7 @@ export const RemoteHostConnection: React.FC<{
     chatStagedFilesRef.current = [];
     clearChatTranscript();
     setChatWarnings([]);
+    setChatComposerNotice(null);
     setChatDraftText("");
     setChatStagedFiles([]);
     setChatAttaching(false);
@@ -3004,6 +3005,8 @@ export const RemoteHostConnection: React.FC<{
           // Everything else clears the lane.
           if (error.code === "TARGET_EXPIRED" || error.code === "FORBIDDEN") {
             await refreshChatIdentity();
+            // the user may have moved to another pane while the identity was being re-read
+            if (cancelled) return;
           }
           // Only what the pane's transcript said is withdrawn: the draft, held rows and staged
           // files are the user's own and stay. A changed target resets those through its key.

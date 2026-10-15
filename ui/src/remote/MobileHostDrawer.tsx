@@ -167,6 +167,7 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
           {confirmDisconnect ? (
             <>
               <button
+                key="confirm"
                 type="button"
                 data-testid="mobile-host-drawer-confirm-disconnect"
                 onClick={() => {
@@ -189,6 +190,7 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
           ) : (
             <>
               <button
+                key="arm"
                 type="button"
                 data-testid="mobile-host-drawer-disconnect"
                 onClick={() => setConfirmDisconnect(true)}

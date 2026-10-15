@@ -1713,6 +1713,57 @@ describe("reference chat lane review fixes", () => {
     expect(screen.getByTestId("chat-composer-textarea")).toHaveValue(reply);
   });
 
+  it("ui-workspace-wiring-r7-1: a send warning from the previous pane does not follow the user to the next pane", async () => {
+    installLane(({ url }) =>
+      url.includes("/submit")
+        ? jsonResponse({ ok: false, error: { code: "FORBIDDEN", message: "no", retryable: false }, requestId: "r1" })
+        : undefined,
+    );
+    render(<RemoteApp />);
+    await laneReady();
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "one" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent(/not delivered/);
+    });
+
+    await switchToSecondTab();
+
+    expect(screen.queryByTestId("chat-composer-warning")).not.toBeInTheDocument();
+  });
+
+  it("ui-workspace-wiring-r7-2: an identity refusal that resolves after a pane switch leaves the new pane alone", async () => {
+    const identity = deferred<Response>();
+    let capabilityReads = 0;
+    installLane(({ url }) => {
+      if (url.includes("/api/v1/capabilities")) {
+        capabilityReads += 1;
+        return capabilityReads === 1 ? undefined : identity.promise;
+      }
+      if (url.includes("/history") && url.includes(SESSION_ID)) {
+        return jsonResponse({ error: { code: "TARGET_EXPIRED" } }, false, 410);
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await waitFor(() => {
+      expect(capabilityReads).toBe(2);
+    });
+
+    await switchToSecondTab();
+    await act(async () => {
+      identity.resolve(
+        jsonResponse({ apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH, referenceOwnerId: REFERENCE_OWNER_ID }),
+      );
+    });
+    await drainSettledResponses();
+
+    expect(screen.getByText("B0")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-history-warning")?.textContent ?? "").not.toMatch(/not available/);
+  });
+
   it("ui-workspace-wiring-r5-1: a pane switch that releases staged files also drops their mentions from the pane's draft", async () => {
     installLane(({ url, method }) =>
       url.includes("/files") && method === "GET" ? jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" }) : undefined,
