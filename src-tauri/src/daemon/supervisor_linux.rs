@@ -70,14 +70,28 @@ pub(crate) fn daemon_executable(appimage: Option<&OsStr>, current_exe: &Path) ->
         .unwrap_or_else(|| current_exe.to_path_buf())
 }
 
+/// The `FERRYX_*` configuration the daemon reads at startup and while it runs. Anything else with
+/// that prefix stays out: a GUI launched from inside a Ferryx pane carries per-session variables
+/// (`FERRYX_SESSION_ID`, `FERRYX_PTY_INCARNATION`) and secrets (`FERRYX_AGENT_STATE_TOKEN`,
+/// `FERRYX_MACHINE_TOKEN`) that must never be written into a unit file on disk.
+const FORWARDED_FERRYX_KEYS: [&str; 6] = [
+    "FERRYX_DATA_DIR",
+    "FERRYX_RUNTIME_DIR",
+    "FERRYX_SESSION_DIR",
+    "FERRYX_HANDOVER_V5",
+    "FERRYX_MAX_MACHINE_SESSIONS",
+    "FERRYX_RELAY_URL",
+];
+
 fn forwarded_key(key: &str) -> bool {
-    let ferryx = key.starts_with("FERRYX_") && key != "FERRYX_DAEMON_SUCCESSOR";
     let locale = key == "LANG" || key == "LANGUAGE" || key.starts_with("LC_");
-    (ferryx || locale) && key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    let locale = locale && key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    locale || FORWARDED_FERRYX_KEYS.contains(&key)
 }
 
-/// Only `FERRYX_*` and locale variables reach the unit; `PATH` is rebuilt for every PTY child, and
-/// anything else would freeze one GUI session's environment into the user's login service.
+/// Only the allowlisted `FERRYX_*` and locale variables reach the unit; `PATH` is rebuilt for every
+/// PTY child, and anything else would freeze one GUI session's environment into the user's login
+/// service.
 pub(crate) fn forwarded_env(vars: &[(OsString, OsString)]) -> Vec<(String, String)> {
     let mut forwarded: Vec<(String, String)> = vars
         .iter()
@@ -91,7 +105,6 @@ pub(crate) fn forwarded_env(vars: &[(OsString, OsString)]) -> Vec<(String, Strin
         .collect();
     // Sorted, so an unchanged environment renders a byte-identical unit and is not rewritten.
     forwarded.sort();
-    forwarded.dedup_by(|a, b| a.0 == b.0);
     forwarded
 }
 
@@ -335,7 +348,7 @@ pub(crate) fn send_notify(socket: &OsStr, message: &str) -> std::io::Result<()> 
 fn notify(message: &str) {
     if let Some(socket) = notify_socket() {
         if let Err(error) = send_notify(socket, message) {
-            tracing::warn!(%error, message, "Could not notify the systemd supervisor");
+            tracing::warn!(%error, notify_state = message, "Could not notify the systemd supervisor");
         }
     }
 }
@@ -462,6 +475,34 @@ mod tests {
             unit,
             "environment order must not change the rendered unit"
         );
+    }
+
+    #[test]
+    fn unit_never_forwards_agent_state_token() {
+        let env = vars(&[
+            ("FERRYX_DATA_DIR", "/home/u/.ferryx-qa"),
+            ("FERRYX_AGENT_STATE_TOKEN", "secret-token-value"),
+            ("FERRYX_AGENT_STATE_PORT", "43210"),
+            ("FERRYX_SESSION_ID", "pty-session-1234"),
+            ("FERRYX_PTY_INCARNATION", "7"),
+            ("FERRYX_MACHINE_TOKEN", "machine-secret"),
+        ]);
+        let keys: Vec<String> = forwarded_env(&env).into_iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, ["FERRYX_DATA_DIR"]);
+        let unit = render_unit(Path::new("/opt/ferryx/ferryx"), &env).unwrap();
+        assert!(
+            unit.contains("Environment=\"FERRYX_DATA_DIR=/home/u/.ferryx-qa\"\n"),
+            "{unit}"
+        );
+        for leaked in [
+            "FERRYX_AGENT_STATE_TOKEN",
+            "secret-token-value",
+            "FERRYX_SESSION_ID",
+            "pty-session-1234",
+            "FERRYX_MACHINE_TOKEN",
+        ] {
+            assert!(!unit.contains(leaked), "{leaked} leaked into the unit: {unit}");
+        }
     }
 
     #[test]
