@@ -43,6 +43,35 @@ const texts = (queue: ReferenceQueueStore, owner: ReferenceTargetRef) =>
   queue.read(owner).map((message) => message.text);
 
 describe("reference held queue persistence", () => {
+  it("ui-reference-logic-r7-1: held rows saved under an older owner-bearing key are found after a gateway restart", () => {
+    const { data } = fixture();
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const legacyKey = `${REFERENCE_QUEUE_STORAGE_PREFIX}${base.hostId}|owner-before-restart|${base.epoch}|${base.backendSessionId}`;
+    data.set(
+      legacyKey,
+      JSON.stringify({ version: 1, messages: [{ id: "h1", text: "first" }, { id: "h2", text: "second" }] }),
+    );
+    const queue = new ReferenceQueueStore(() => storage);
+
+    expect(texts(queue, target({ ownerId: "owner-after-restart" }))).toEqual(["first", "second"]);
+    expect(queue.storageKey(paneA).startsWith("ferryx.")).toBe(true);
+    expect(data.has(queue.storageKey(paneA))).toBe(true);
+    expect(data.has(legacyKey)).toBe(false);
+    expect(texts(queue, paneB)).toEqual([]);
+  });
+
   it("keys the queue on the frozen target key under the canonical prefix", () => {
     const { queue } = fixture();
     expect(queue.storageKey(paneA)).toBe(REFERENCE_QUEUE_STORAGE_PREFIX + referenceDraftKey(paneA));

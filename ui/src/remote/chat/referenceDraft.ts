@@ -18,12 +18,12 @@
  * Pure state plus a `Storage` shim: no fetch, no DOM beyond the optional `storage`
  * listener that lets another tab's write reconcile before an acknowledgement lands.
  */
-import { referenceDraftKey, type ReferenceTargetRef } from "./referenceTypes";
+import { legacyReferenceStorageKey, referenceDraftKey, type ReferenceTargetRef } from "./referenceTypes";
 
 /** Canonical `ferryx.*` prefix; the frozen target key is appended verbatim. */
 export const REFERENCE_DRAFT_STORAGE_PREFIX = "ferryx.referenceChat.draft:";
 
-type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem"> & Partial<Pick<Storage, "key" | "length">>;
 
 /**
  * Where the sent text ends inside the draft, or null when the draft no longer extends it.
@@ -115,6 +115,7 @@ export class ReferenceDraftStore {
       let text: string | null = null;
       try {
         text = this.storage().getItem(REFERENCE_DRAFT_STORAGE_PREFIX + key);
+        if (text === null) text = this.migrateLegacy(key);
       } catch {
         /* private mode: the draft lives only in memory */
       }
@@ -123,6 +124,18 @@ export class ReferenceDraftStore {
       this.drafts.set(key, draft);
     }
     return draft;
+  }
+
+  /** Move a draft saved under the older owner-bearing key to the durable key, once. */
+  private migrateLegacy(key: string): string | null {
+    const storage = this.storage();
+    const legacy = legacyReferenceStorageKey(storage, REFERENCE_DRAFT_STORAGE_PREFIX, key);
+    if (legacy === null) return null;
+    const text = storage.getItem(legacy);
+    if (text === null) return null;
+    storage.setItem(REFERENCE_DRAFT_STORAGE_PREFIX + key, text);
+    storage.removeItem(legacy);
+    return text;
   }
 
   private refreshKey(key: string): void {
