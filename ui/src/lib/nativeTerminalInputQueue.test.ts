@@ -854,4 +854,137 @@ describe("NativeTerminalInputQueueManager", () => {
       vi.useRealTimers();
     }
   });
+
+  describe("printable text coalescing at the entry cap", () => {
+    function textSender(sent: string[], head?: Promise<void>) {
+      return async (text: string) => {
+        sent.push(text);
+        if (head && sent.length === 1) await head;
+        return text;
+      };
+    }
+    function enqueueText(
+      sessionId: string,
+      generation: number | null,
+      text: string,
+      send: (text: string, requestId: string) => Promise<unknown>,
+    ) {
+      return queue.enqueue(sessionId, generation, new TextEncoder().encode(text).length,
+        (requestId) => send(text, requestId), undefined, "input", undefined,
+        { coalesceText: { text, send } });
+    }
+
+    it("appends text to the queued tail at the cap and never exceeds the entry bound", async () => {
+      const head = createDeferred<void>();
+      const sent: string[] = [];
+      const send = textSender(sent, head.promise);
+      const burst = "abcdefghij";
+      const results = Array.from(burst, (key) => enqueueText("s", null, key, send));
+      // Cap is 4: one in flight, three queued; the queued tail absorbs keys 5..10.
+      expect(queue.getQueuedCount("s")).toBe(4);
+      expect(queue.getQueuedBytes("s")).toBe(burst.length);
+      head.resolve();
+      await Promise.all(results);
+      expect(sent).toEqual(["a", "b", "c", "defghij"]);
+      expect(sent.join("")).toBe(burst);
+      expect(queue.getQueuedCount("s")).toBe(0);
+      expect(queue.getQueuedBytes("s")).toBe(0);
+    });
+
+    it("does not merge across a non-text tail and keeps rejecting at the cap", async () => {
+      const head = createDeferred<void>();
+      const order: string[] = [];
+      const send = async (text: string) => {
+        order.push(text);
+        if (order.length === 1) await head.promise;
+        return text;
+      };
+      const items = [
+        enqueueText("s", null, "a", send),
+        enqueueText("s", null, "b", send),
+        enqueueText("s", null, "c", send),
+        queue.enqueue("s", null, 32, async () => {
+          order.push("<Enter>");
+        }),
+      ];
+      await expect(enqueueText("s", null, "d", send)).rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+      head.resolve();
+      await Promise.all(items);
+      expect(order).toEqual(["a", "b", "c", "<Enter>"]);
+    });
+
+    it("does not merge non-coalescable input into a text tail", async () => {
+      const head = createDeferred<void>();
+      const sent: string[] = [];
+      const send = textSender(sent, head.promise);
+      const items = ["a", "b", "c", "d"].map((key) => enqueueText("s", null, key, send));
+      const control = vi.fn(async () => undefined);
+      await expect(queue.enqueue("s", null, 1, control)).rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+      head.resolve();
+      await Promise.all(items);
+      expect(control).not.toHaveBeenCalled();
+      expect(sent).toEqual(["a", "b", "c", "d"]);
+    });
+
+    it("does not merge across a generation change and rejects the merged keys with the stale tail", async () => {
+      const head = createDeferred<void>();
+      const sent: string[] = [];
+      const send = textSender(sent, head.promise);
+      const items = ["a", "b", "c", "d"].map((key) => enqueueText("s", 1, key, send));
+      const mergedIntoTail = enqueueText("s", 1, "e", send);
+      // A newer generation never merges into an older-generation tail.
+      await expect(enqueueText("s", 2, "x", send)).rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+      queue.invalidateOldGenerations("s", 2);
+      await expect(items[1]).rejects.toBeInstanceOf(NativeTerminalStaleGenerationError);
+      await expect(items[2]).rejects.toBeInstanceOf(NativeTerminalStaleGenerationError);
+      await expect(items[3]).rejects.toBeInstanceOf(NativeTerminalStaleGenerationError);
+      await expect(mergedIntoTail).rejects.toBeInstanceOf(NativeTerminalStaleGenerationError);
+      head.resolve();
+      await items[0];
+      expect(sent).toEqual(["a"]);
+      expect(queue.getQueuedBytes("s")).toBe(0);
+    });
+
+    it("still overflows when the merge would exceed the byte cap", async () => {
+      const small = new NativeTerminalInputQueueManager({ maxQueueBytes: 8, maxQueueEntries: 2 });
+      const head = createDeferred<void>();
+      const sent: string[] = [];
+      const send = textSender(sent, head.promise);
+      const enqueue = (text: string) =>
+        small.enqueue("s", null, text.length, (requestId) => send(text, requestId), undefined, "input",
+          undefined, { coalesceText: { text, send } });
+      const items = [enqueue("a"), enqueue("bc"), enqueue("defg")];
+      expect(small.getQueuedBytes("s")).toBe(7);
+      await expect(enqueue("hi")).rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+      expect(small.getQueuedBytes("s")).toBe(7);
+      head.resolve();
+      await Promise.all(items);
+      expect(sent).toEqual(["a", "bcdefg"]);
+    });
+
+    it("retries a recovered coalesced item with its whole merged text before later items", async () => {
+      const head = createDeferred<void>();
+      const sent: string[] = [];
+      let failOnce = true;
+      const send = async (text: string) => {
+        if (text === "de" && failOnce) {
+          failOnce = false;
+          throw new Error("not written");
+        }
+        sent.push(text);
+        if (sent.length === 1) await head.promise;
+        return text;
+      };
+      const enqueue = (text: string) =>
+        queue.enqueue("s", null, 1, (requestId) => send(text, requestId), undefined, "input", undefined, {
+          coalesceText: { text, send },
+          recover: async () => true,
+        });
+      const items = ["a", "b", "c", "d", "e"].map(enqueue);
+      head.resolve();
+      await Promise.all(items);
+      // Cap 4: "e" merges into the queued tail "d"; the recovered retry resends "de" whole.
+      expect(sent).toEqual(["a", "b", "c", "de"]);
+    });
+  });
 });
