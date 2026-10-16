@@ -1989,6 +1989,49 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(getByRole("alert")).toHaveTextContent("Input dropped");
   });
 
+  it("delivers every key of a printable burst typed faster than the input IPC round trip", async () => {
+    // One sendInput per printable key; the queue admits at most 17 entries per session (the
+    // daemon's pending-operation bound), so a longer burst must not lose its tail while the
+    // head IPC is still pending.
+    const session = createSession("term-session-burst");
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-burst" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    await act(async () => {});
+
+    let releaseHead!: () => void;
+    const headPending = new Promise<void>((resolve) => {
+      releaseHead = resolve;
+    });
+    const sentTexts: string[] = [];
+    tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockImplementation(async (cmd, args) => {
+      if (cmd === "cmd_native_terminal_send_input") {
+        const text = (args?.input as { text?: string } | undefined)?.text;
+        if (typeof text === "string") sentTexts.push(text);
+        if (sentTexts.length === 1) await headPending;
+      }
+      return undefined;
+    });
+
+    const burst = "abcdefghijklmnopqrstuvwxyz0123";
+    expect(burst.length).toBeGreaterThan(17);
+    act(() => {
+      for (const key of burst) {
+        textarea.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      }
+    });
+    expect(sentTexts).toEqual(["a"]);
+
+    await act(async () => {
+      releaseHead();
+    });
+
+    await waitFor(() => {
+      expect(sentTexts.join("")).toBe(burst);
+    });
+    expect(getTerminalInputDropCount("overflow")).toBe(0);
+  });
+
   it("encodes and forwards non-printable control keys on keydown without duplicating printable input", async () => {
     const session = createSession("term-session-1");
     const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);

@@ -549,6 +549,15 @@ function estimateInputBytes(input: NativeTerminalInput): number {
   return 32;
 }
 
+// Text with no C0 control or DEL bytes: the backend writes text input verbatim
+// (NativeTerminalInput::Text -> text.as_bytes()), so appending it to a queued text write
+// produces exactly the bytes of two separate writes. Control text such as Ctrl+V's \u0016
+// is excluded so it keeps its own write.
+function isCoalescablePrintableText(input: NativeTerminalInput): input is { readonly text: string } {
+  return "text" in input && typeof input.text === "string" && input.text.length > 0 &&
+    !/[\u0000-\u001f\u007f]/.test(input.text);
+}
+
 export function resetNativeTerminalPaneForTest(): void {
   sessionInputRecoveries.clear();
   mountedNativeTerminalSessionCounts.clear();
@@ -1503,6 +1512,13 @@ export function NativeTerminalPane({
         // The command resolves as soon as the PTY write lands; the receipt that positions the IME
         // candidate window now arrives on `native_terminal_input_receipt`. Waiting for it here used
         // to hold this session's queue slot for the whole round trip, delaying the next keystroke.
+        const sendText = (text: string, requestId: string) =>
+          invoke<void>("cmd_native_terminal_send_input", {
+            sessionId: currentSessionId,
+            input: { text },
+            ...(generation != null ? { generation } : {}),
+            requestId,
+          });
         await terminalInputQueue.enqueue(
           currentSessionId,
           generation,
@@ -1518,7 +1534,12 @@ export function NativeTerminalPane({
           undefined,
           "input",
           undefined,
-          { recover: recoverInput },
+          {
+            recover: recoverInput,
+            ...(isCoalescablePrintableText(input)
+              ? { coalesceText: { text: input.text, send: sendText } }
+              : {}),
+          },
         );
         if (!isCurrentOwner()) return;
         if (consecutiveDropsRef.current > 0) {
