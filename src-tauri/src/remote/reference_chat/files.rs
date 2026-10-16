@@ -538,8 +538,11 @@ static REFERENCE_STAGING_LEDGER_LOCK: parking_lot::Mutex<()> = parking_lot::Mute
 
 /// Create (0700) or verify the staging base: a real directory, never a symlink, owned by this
 /// user and closed to group/other on unix. A base that fails any check is refused, never fixed
-/// up, because someone else may already control it.
+/// up, because someone else may already control it. A base this call just created skips only
+/// the mode clause: nobody else could have planted it, and filesystems without POSIX modes
+/// (exFAT/FAT/SMB, vfat/cifs) report 0777 regardless of the requested 0700.
 fn ensure_reference_staging_base(base: &Path) -> Result<(), ScopeErrorCode> {
+    let mut just_created = false;
     if std::fs::symlink_metadata(base).is_err() {
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
@@ -550,16 +553,25 @@ fn ensure_reference_staging_base(base: &Path) -> Result<(), ScopeErrorCode> {
         builder
             .create(base)
             .map_err(|_| reference_staging_failure_code())?;
+        just_created = true;
         // Keep staged uploads out of the pane's git status.
         let _ = std::fs::write(base.join(".gitignore"), b"*\n");
     }
-    verify_reference_staging_base(base)
+    let metadata = std::fs::symlink_metadata(base).map_err(|_| reference_staging_failure_code())?;
+    check_reference_staging_base_metadata(&metadata, just_created)
 }
 
 /// Verify an existing staging base: a real directory, never a symlink, owned by this user and
 /// closed to group/other on unix.
 fn verify_reference_staging_base(base: &Path) -> Result<(), ScopeErrorCode> {
     let metadata = std::fs::symlink_metadata(base).map_err(|_| reference_staging_failure_code())?;
+    check_reference_staging_base_metadata(&metadata, false)
+}
+
+fn check_reference_staging_base_metadata(
+    metadata: &std::fs::Metadata,
+    just_created: bool,
+) -> Result<(), ScopeErrorCode> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(ScopeErrorCode::Forbidden);
     }
@@ -568,10 +580,12 @@ fn verify_reference_staging_base(base: &Path) -> Result<(), ScopeErrorCode> {
         use std::os::unix::fs::MetadataExt as _;
         // SAFETY: geteuid has no arguments, pointers, or caller preconditions.
         let uid = unsafe { libc::geteuid() };
-        if metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
+        if metadata.uid() != uid || (!just_created && metadata.mode() & 0o077 != 0) {
             return Err(ScopeErrorCode::Forbidden);
         }
     }
+    #[cfg(not(unix))]
+    let _ = just_created;
     Ok(())
 }
 
@@ -1122,6 +1136,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&elsewhere);
         let _ = std::fs::remove_dir_all(&shared_root);
+    }
+
+    /// rs-files-routes-rfinal-1: a base this call just created is accepted even when the
+    /// filesystem cannot store modes and reports 0777 (exFAT/FAT/SMB, vfat/cifs).
+    #[cfg(unix)]
+    #[test]
+    fn a_just_created_staging_base_on_a_modeless_filesystem_is_accepted() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = scratch_dir();
+        let base = root.join(REFERENCE_STAGING_DIR_NAME);
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o777))
+            .expect("chmod 0777");
+        let metadata = std::fs::symlink_metadata(&base).expect("metadata");
+        assert!(
+            check_reference_staging_base_metadata(&metadata, true).is_ok(),
+            "a base this call just created must be accepted even if it reports 0777"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// rs-files-routes-rfinal-1: a base that already existed keeps the full mode check, both at
+    /// the seam and through staging, so a shared 0777 base is still refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_pre_existing_staging_base_reporting_0777_is_still_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = scratch_dir();
+        let base = root.join(REFERENCE_STAGING_DIR_NAME);
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o777))
+            .expect("chmod 0777");
+        let metadata = std::fs::symlink_metadata(&base).expect("metadata");
+        assert_eq!(
+            check_reference_staging_base_metadata(&metadata, false),
+            Err(ScopeErrorCode::Forbidden)
+        );
+        assert!(
+            stage_reference_file_in("host-test", &root, &payload("shot.png", b"x")).is_err(),
+            "a pre-existing 0777 staging base must be refused"
+        );
+        assert_eq!(
+            std::fs::read_dir(&base).expect("read base").count(),
+            0,
+            "nothing may be staged into a refused base"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
