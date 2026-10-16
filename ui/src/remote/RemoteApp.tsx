@@ -3009,17 +3009,17 @@ export const RemoteHostConnection: React.FC<{
           return capped;
         });
         setChatWarnings((prev) => {
+          // The page's own disclosure is drawn by the page banner from `chatPage`, which follows
+          // every read; repeating it here would draw it twice and outlive the page that said it.
           const cleared = prev.filter(
             (warning) =>
               warning !== CHAT_REFRESH_WARNING &&
               warning !== CHAT_UNAVAILABLE_WARNING &&
               warning !== CHAT_RETENTION_WARNING,
           );
-          const disclosed = referenceHistoryNotice(read.page);
-          const next = disclosed === null ? cleared : withChatWarning(cleared, disclosed);
           return chatRetentionTruncatedRef.current
-            ? withChatWarning(next, CHAT_RETENTION_WARNING)
-            : next;
+            ? withChatWarning(cleared, CHAT_RETENTION_WARNING)
+            : cleared;
         });
       } catch (error) {
         if (cancelled) return;
