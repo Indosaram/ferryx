@@ -68,7 +68,7 @@ export function referenceAnswerFromText(
       .split(/[\s,]+/)
       .filter(Boolean)
       .map(byNumber);
-    return indices.every((index) => index !== null)
+    return indices.length > 0 && indices.every((index) => index !== null)
       ? { optionIndices: [...new Set(indices as number[])] }
       : null;
   }

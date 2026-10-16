@@ -971,7 +971,8 @@ fn omo_question_view(lines: &[String], start: usize, end: usize, cut: bool) -> O
                 }
             }
         };
-        if let Some(number) = row {
+        // Options count from 1: a row numbered 0 is never one, even where a cut form starts.
+        if let Some(number) = row.filter(|number| *number >= 1) {
             if Some(number) == next && (selected || (indent >= 2 && indent < 5)) {
                 view.rows.push(OmoRow {
                     number,
@@ -2450,6 +2451,26 @@ mod tests {
         assert_eq!(planner(&card, &option_answer(1)), Ok(key_steps(&["down", "enter"])));
         let unusable = ReferencePromptAnswer::default();
         assert_eq!(planner(&card, &unusable), Err("invalid_answer".to_string()));
+    }
+
+    #[test]
+    fn a_cut_form_row_numbered_zero_is_not_an_option_row() {
+        let session = r#"{"type":"message","id":"m","timestamp":"2026-10-06T10:00:00.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-zero","name":"ask_user_question","arguments":{"questions":[{"header":"선택","question":"어느 쪽으로 할까요?","multiSelect":false,"options":[{"label":"Alpha","description":null}]}],"waitForAnswer":true}}]}}"#;
+        let screen = [
+            "  → 0. Alpha",
+            "  1. Alpha",
+            "  Type your own answer...",
+            "  ↑↓ move  1-9 select  space select  enter next  tab next question  c comment  esc cancel",
+            " ────────────────",
+            " ~/dev/ferryx (main)",
+            " omo 5.1.19 ·  · 12.3k tokens",
+        ]
+        .join("\n");
+        let card = card_for("omo", &screen, session).expect("the cut form's row 1 is the call's only option");
+        assert_eq!(card.prompt.options, vec![option("Alpha", None)]);
+        // Row 0 is no option, so the cursor on it is not in the list: the plan starts from the top.
+        assert_eq!(card.multi_plan.as_ref().map(|plan| plan.cursor), Some(None));
+        assert_eq!(card.option_plans[0], key_steps(&["up", "up", "enter"]));
     }
 }
 

@@ -9,12 +9,16 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { createHash } from "node:crypto";
+import { remoteHostStore } from "../state/remoteHostStore";
 import {
   RemoteApp,
   chatDaemonEpochFromRows,
   chatProviderSessionId,
   parseChatGatewayIdentity,
 } from "./RemoteApp";
+import { referenceDrafts } from "./chat/referenceDraft";
+import type { ReferenceTargetRef } from "./chat/referenceTypes";
 
 vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: ({
@@ -141,6 +145,7 @@ function installFetch(options: {
   files?: () => unknown;
   capabilities?: Record<string, unknown>;
   sessions?: () => unknown[];
+  state?: () => unknown;
 } = {}): Harness {
   const calls: HarnessCall[] = [];
   interface Waiter {
@@ -209,6 +214,10 @@ function installFetch(options: {
       return jsonResponse({ sessions: (options.sessions ?? (() => [{ sessionId: SESSION_ID, daemonEpoch: DAEMON_EPOCH, running: true }]))() });
     }
     if (url.includes("/reference-chat/") && url.includes("/history")) {
+      // The host's history route requires a registry id: an empty one is a 400 INVALID_REQUEST.
+      if (new URL(url, "http://harness.invalid").searchParams.get("registryId") === "") {
+        return jsonResponse({ error: { code: "INVALID_REQUEST" } }, false, 400);
+      }
       if (options.historyStatus !== undefined) {
         return jsonResponse({ error: { code: options.historyErrorCode ?? "FORBIDDEN" } }, false, options.historyStatus);
       }
@@ -237,7 +246,7 @@ function installFetch(options: {
         requestId: "r4",
       })))());
     }
-    if (url.includes("/api/v1/workspace/state")) return jsonResponse(remoteState);
+    if (url.includes("/api/v1/workspace/state")) return jsonResponse((options.state ?? (() => remoteState))());
     return jsonResponse({});
   });
   vi.stubGlobal("fetch", impl as unknown as typeof fetch);
@@ -345,6 +354,51 @@ describe("reference chat lane (task 12)", () => {
     expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
   });
 
+  it("ui-workspace-wiring-r20-1: a pane with no agent reads no transcript and says so instead of a refresh failure", async () => {
+    setWidth(390);
+    let agentType: string | undefined;
+    const harness = installFetch({
+      state: () => ({
+        activeContext: {
+          ...remoteState.activeContext,
+          activeTerminal: { sessionId: SESSION_ID, title: "zsh", running: true },
+          terminalTabs: [
+            { id: "tab-main", sessionId: SESSION_ID, label: "zsh", activityState: "idle", worktreeLabel: "main", ...(agentType ? { agentType } : {}) },
+          ],
+        },
+      }),
+    });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      render(<RemoteApp />);
+      expect(await screen.findByTestId("mobile-chat-workspace")).toBeInTheDocument();
+      // The notice is drawn only once the pane's target is bound, so the polls below are not vacuous.
+      await waitFor(() => {
+        expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/no transcript reader/i);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(9000);
+        await new Promise<void>((done) => setTimeout(done, 0));
+      });
+      expect(harness.calls.some((call) => call.url.includes("/history"))).toBe(false);
+      expect(screen.getByTestId("chat-history-warning")).not.toHaveTextContent(/could not refresh/i);
+      // The composer stays usable on a plain shell pane.
+      expect(screen.getByTestId("chat-composer-textarea")).not.toBeDisabled();
+
+      // The pane gains an agent: the newest page is read for it and the notice goes away.
+      agentType = "claude";
+      await act(async () => {
+        window.dispatchEvent(new Event("online"));
+      });
+      const history = await harness.whenCalled("/history");
+      expect(history.url).toContain("registryId=claude");
+      await screen.findByText("The parser now streams line by line.");
+      expect(screen.queryByTestId("chat-history-warning")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("QA-04: a send goes through /submit and fabricates no assistant turn", async () => {
     setWidth(390);
     const harness = installFetch();
@@ -393,6 +447,51 @@ describe("reference chat lane (task 12)", () => {
     const bubbles = screen.getAllByTestId("user-message-bubble");
     expect(bubbles).toHaveLength(1);
     expect(bubbles[0]).toHaveTextContent("what changed in the parser?");
+  });
+
+  it("ui-reference-logic-r17-1: a send that fails on the current pane ends its draft send", async () => {
+    setWidth(390);
+    // the spy calls through: it only records which target the composer's send began on
+    const begin = vi.spyOn(referenceDrafts, "begin");
+    const begun = (): ReferenceTargetRef[] => begin.mock.calls.map(([target]) => target);
+    let submits = 0;
+    const harness = installFetch({
+      submit: () => {
+        submits += 1;
+        return submits === 1
+          ? { ok: false, error: { code: "FORBIDDEN", message: "no", retryable: false }, requestId: "r1" }
+          : { ok: true, data: { receipt: { requestId: "r2", target: {}, stage: "accepted" } }, requestId: "r2" };
+      },
+    });
+    render(<RemoteApp />);
+    await screen.findByTestId("chat-composer-textarea");
+
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "helo" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("helo");
+    });
+    expect(begun()).toHaveLength(1);
+    // the failed send is over: the draft must not stay in flight carrying 'helo' as its pending
+    // text, or the corrected resend is treated as an overlap and never ends either
+    expect(referenceDrafts.read(begun()[0]).sending).toBe(false);
+
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "hello" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await waitFor(() => {
+      expect(harness.calls.filter((call) => call.url.includes("/submit"))).toHaveLength(2);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("");
+    });
+    await waitFor(() => {
+      expect(referenceDrafts.read(begun()[0]).sending).toBe(false);
+    });
+    begin.mockRestore();
   });
 
   it("QA-06: Stop goes through /stop with the pane's own interrupt, never Ctrl-C", async () => {
@@ -1317,6 +1416,338 @@ describe("reference chat lane review fixes", () => {
     });
   });
 
+  const MOVED_HOST_ID = `${window.location.origin}/host/mach-1`;
+
+  /** The connection is a saved machine record that does not yet name its relay origin. */
+  function seedSavedHost(): void {
+    remoteHostStore.reset();
+    remoteHostStore.upsertHost({
+      hostId: MOVED_HOST_ID,
+      name: "mach-1",
+      address: window.location.origin,
+      machineId: "mach-1",
+      deviceToken: "test-token",
+    } as unknown as Parameters<typeof remoteHostStore.upsertHost>[0]);
+    remoteHostStore.setActiveHost(MOVED_HOST_ID);
+  }
+
+  /**
+   * Moves the transport base URL WITHOUT a remount: the same host record gains its relay origin,
+   * so every route (capabilities included) is now addressed through /host/<machineId>. The
+   * gateway answer is scoped to the old base, so the chat target is null until it re-answers.
+   */
+  function moveTransportBase(): void {
+    act(() => {
+      remoteHostStore.upsertHost({
+        hostId: MOVED_HOST_ID,
+        name: "mach-1",
+        address: window.location.origin,
+        machineId: "mach-1",
+        relayOrigin: window.location.origin,
+      } as unknown as Parameters<typeof remoteHostStore.upsertHost>[0]);
+    });
+  }
+
+  it("ui-workspace-wiring-r17-1: a transport change that answers the same target keeps the staged file and its mention", async () => {
+    try {
+      seedSavedHost();
+      const calls = installLane();
+      render(<RemoteApp />);
+      await laneReady();
+      await stageNotes();
+      await screen.findByTestId("attachment-preview-att-1");
+      expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toContain("@notes.txt");
+
+      moveTransportBase();
+      // The same identity answers on the new base, and the lane reads its page there again.
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/host/mach-1/") && call.url.includes("/history"))).toBe(true);
+      });
+      await drainSettledResponses();
+
+      expect(calls.filter((call) => call.method === "DELETE" && call.url.includes("/files/"))).toEqual([]);
+      expect(screen.getByTestId("attachment-preview-att-1")).toBeInTheDocument();
+      expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toContain("@notes.txt");
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  it("ui-workspace-wiring-r17-1: a transport change that answers a different owner still releases the staged file", async () => {
+    try {
+      seedSavedHost();
+      let ownerId = REFERENCE_OWNER_ID;
+      const calls = installLane(({ url }) =>
+        url.includes("/api/v1/capabilities")
+          ? jsonResponse({ apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH, referenceOwnerId: ownerId })
+          : undefined,
+      );
+      render(<RemoteApp />);
+      await laneReady();
+      await stageNotes();
+      await screen.findByTestId("attachment-preview-att-1");
+
+      ownerId = "owner-pub-2";
+      moveTransportBase();
+
+      await waitFor(() => {
+        expect(
+          calls.some(
+            (call) =>
+              call.method === "DELETE" &&
+              call.url.includes(`/reference-chat/${SESSION_ID}/files/att-1`) &&
+              call.url.includes(`ownerId=${REFERENCE_OWNER_ID}`),
+          ),
+        ).toBe(true);
+      });
+      await waitFor(() => {
+        expect(screen.queryByTestId("attachment-preview-att-1")).toBeNull();
+      });
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  /** Holds the identity answer on the moved base, so the chat target stays null until released. */
+  function gatedMovedCapabilities(): { route: LaneRoute; release: () => void } {
+    const gate = deferred<void>();
+    return {
+      route: ({ url }) =>
+        url.includes("/host/mach-1/") && url.includes("/api/v1/capabilities")
+          ? gate.promise.then(() =>
+              jsonResponse({ apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH, referenceOwnerId: REFERENCE_OWNER_ID }),
+            )
+          : undefined,
+      release: () => gate.resolve(),
+    };
+  }
+
+  it("ui-workspace-wiring-r18-1: an upload finishing while the target is briefly null leaves the composer usable", async () => {
+    try {
+      seedSavedHost();
+      const stage = deferred<Response>();
+      const identity = gatedMovedCapabilities();
+      const calls = installLane((call) =>
+        call.url.includes("/files") && call.method === "POST" ? stage.promise : identity.route(call),
+      );
+      render(<RemoteApp />);
+      await laneReady();
+      await stageNotes();
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/files") && call.method === "POST")).toBe(true);
+      });
+      expect(screen.getByTestId("attach-file-button")).toBeDisabled();
+
+      // The transport moves while the upload is out: the target is null until the host re-answers.
+      moveTransportBase();
+      await act(async () => {
+        stage.resolve(okStage());
+      });
+      await drainSettledResponses();
+
+      // The same identity answers on the new base, so the lane is not reset.
+      await act(async () => {
+        identity.release();
+      });
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/host/mach-1/") && call.url.includes("/history"))).toBe(true);
+      });
+      await drainSettledResponses();
+
+      await act(async () => {
+        fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "hello" } });
+      });
+      expect(screen.getByTestId("attach-file-button")).toBeEnabled();
+      expect(screen.getByTestId("send-button")).toBeEnabled();
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  it("ui-workspace-wiring-r18-2: an older page finishing while the target is briefly null leaves Load earlier usable", async () => {
+    try {
+      seedSavedHost();
+      const older = deferred<Response>();
+      const identity = gatedMovedCapabilities();
+      const calls = installLane((call) => {
+        const { url } = call;
+        if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return identity.route(call);
+        return url.includes("cursor=")
+          ? older.promise
+          : jsonResponse(nativePage({ cursor: { streamId: "omo:abc", offset: 500 }, hasMore: true }));
+      });
+      render(<RemoteApp />);
+      const olderButton = await screen.findByTestId("reference-older-button");
+      await act(async () => {
+        fireEvent.click(olderButton);
+      });
+
+      moveTransportBase();
+      await act(async () => {
+        older.resolve(new Response("unavailable", { status: 503 }));
+      });
+      await drainSettledResponses();
+
+      await act(async () => {
+        identity.release();
+      });
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/host/mach-1/") && call.url.includes("/history"))).toBe(true);
+      });
+      await drainSettledResponses();
+
+      expect(screen.getByTestId("reference-older-button")).toBeEnabled();
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  /** Message rows only: the composer's own value is not a sent message. */
+  const shownMessages = (text: string): HTMLElement[] =>
+    screen.queryAllByText(text).filter((element) => element.tagName !== "TEXTAREA");
+
+  it("ui-workspace-wiring-r19-1: a send failing while the target is briefly null removes its echo and restores the draft", async () => {
+    try {
+      seedSavedHost();
+      const submit = deferred<Response>();
+      const identity = gatedMovedCapabilities();
+      const calls = installLane((call) => (call.url.includes("/submit") ? submit.promise : identity.route(call)));
+      render(<RemoteApp />);
+      await laneReady();
+      fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "refactor the parser" } });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("send-button"));
+      });
+      expect(shownMessages("refactor the parser")).toHaveLength(1);
+
+      // The direct endpoint dies: the transport moves and the send settles while the target is null.
+      moveTransportBase();
+      await act(async () => {
+        submit.resolve(
+          jsonResponse({ ok: false, error: { code: "NETWORK_ERROR", message: "down", retryable: true }, requestId: "r1" }, false, 502),
+        );
+      });
+      await drainSettledResponses();
+
+      // The same identity answers on the new base, so the lane is not reset.
+      await act(async () => {
+        identity.release();
+      });
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/host/mach-1/") && call.url.includes("/history"))).toBe(true);
+      });
+      await drainSettledResponses();
+
+      expect(shownMessages("refactor the parser")).toHaveLength(0);
+      expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toContain("refactor the parser");
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not delivered|may not have been delivered|not known/i);
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  it("ui-workspace-wiring-r19-1: a stop failing while the target is briefly null still warns", async () => {
+    try {
+      seedSavedHost();
+      const stop = deferred<Response>();
+      const identity = gatedMovedCapabilities();
+      const calls = installLane((call) => {
+        if (call.url.includes("/prompt")) return jsonResponse(promptBody("A", false));
+        if (call.url.includes("/stop")) return stop.promise;
+        return identity.route(call);
+      });
+      render(<RemoteApp />);
+      await screen.findByText("Question A");
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("stop-button"));
+      });
+
+      moveTransportBase();
+      await act(async () => {
+        stop.resolve(
+          jsonResponse({ ok: false, error: { code: "INTERNAL", message: "no", retryable: true }, requestId: "s1" }, false, 500),
+        );
+      });
+      await drainSettledResponses();
+      await act(async () => {
+        identity.release();
+      });
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/host/mach-1/") && call.url.includes("/history"))).toBe(true);
+      });
+      await drainSettledResponses();
+
+      expect(screen.getAllByText(/stop request was not delivered/).length).toBeGreaterThan(0);
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  it("ui-workspace-wiring-r19-1: an answer refused while the target is briefly null shows its error on the card", async () => {
+    try {
+      seedSavedHost();
+      const answer = deferred<Response>();
+      const identity = gatedMovedCapabilities();
+      const calls = installLane((call) => {
+        if (call.url.includes("/prompt")) return jsonResponse(promptBody("A", false));
+        if (call.url.includes("/answer")) return answer.promise;
+        return identity.route(call);
+      });
+      render(<RemoteApp />);
+      await screen.findByText("Question A");
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("reference-prompt-option-0"));
+      });
+
+      moveTransportBase();
+      await act(async () => {
+        answer.resolve(
+          jsonResponse(
+            { ok: false, error: { code: "INTERNAL", message: "answer failed in gap", retryable: true }, requestId: "a1" },
+            false,
+            500,
+          ),
+        );
+      });
+      await drainSettledResponses();
+      await act(async () => {
+        identity.release();
+      });
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/host/mach-1/") && call.url.includes("/history"))).toBe(true);
+      });
+      await drainSettledResponses();
+
+      expect(screen.getByText("answer failed in gap")).toBeInTheDocument();
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  it("ui-workspace-wiring-r19-1: a send failing after a switch to a different pane stays with its own pane", async () => {
+    const submit = deferred<Response>();
+    installLane(({ url }) => (url.includes("/submit") ? submit.promise : undefined));
+    render(<RemoteApp />);
+    await laneReady();
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "refactor the parser" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+
+    await switchToSecondTab();
+    await act(async () => {
+      submit.resolve(
+        jsonResponse({ ok: false, error: { code: "NETWORK_ERROR", message: "down", retryable: true }, requestId: "r1" }, false, 502),
+      );
+    });
+    await drainSettledResponses();
+
+    expect(screen.getByText("B0")).toBeInTheDocument();
+    expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).not.toContain("refactor the parser");
+    expect(screen.queryByTestId("chat-composer-warning")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("chat-history-warning")?.textContent ?? "").not.toMatch(/not delivered/);
+  });
+
   it("ui-workspace-wiring-2: a late older page from the previous pane is never painted", async () => {
     const older = deferred<Response>();
     installLane(({ url }) => {
@@ -1856,9 +2287,37 @@ describe("reference chat lane review fixes", () => {
   });
 
   it("ui-workspace-wiring-r5-1: a pane switch that releases staged files also drops their mentions from the pane's draft", async () => {
-    installLane(({ url, method }) =>
-      url.includes("/files") && method === "GET" ? jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" }) : undefined,
-    );
+    // The desktop follows the pick and says so, so each switch confirms on its own event instead
+    // of holding the picker until the confirmation timeout releases it.
+    let activeTabId = "tab-main";
+    installLane(({ url, method, body }) => {
+      if (url.includes("/files") && method === "GET") return jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" });
+      if (url.includes("/api/v1/workspace/select")) {
+        activeTabId = (body as { tabId: string }).tabId;
+        queueMicrotask(() => {
+          for (const socket of StubWebSocket.instances) {
+            socket.onmessage?.({
+              data: JSON.stringify({
+                event: "remote_active_selection_changed",
+                payload: { workspaceId: "ferryx", worktreeSlug: "main", tabId: activeTabId },
+              }),
+            } as MessageEvent);
+          }
+        });
+        return jsonResponse({ ok: true });
+      }
+      if (url.includes("/api/v1/workspace/state")) {
+        const tab = twoTabState.activeContext.terminalTabs.find((entry) => entry.id === activeTabId)!;
+        return jsonResponse({
+          activeContext: {
+            ...twoTabState.activeContext,
+            activeTabId,
+            activeTerminal: { sessionId: tab.sessionId, title: tab.label, running: true },
+          },
+        });
+      }
+      return undefined;
+    });
     render(<RemoteApp />);
     await laneReady();
     await stageNotes();
@@ -1883,5 +2342,175 @@ describe("reference chat lane review fixes", () => {
 
     expect(screen.queryByTestId("attachment-preview-att-1")).not.toBeInTheDocument();
     expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).not.toContain("@notes.txt");
+  });
+
+  it("ui-workspace-wiring-r13-1: a stop that fails after a pane switch does not warn in the new pane", async () => {
+    const stopA = deferred<Response>();
+    installLane(({ url }) => {
+      if (url.includes("/prompt")) return jsonResponse(promptBody(url.includes(SECOND_SESSION_ID) ? "B" : "A", false));
+      if (url.includes(`/reference-chat/${SESSION_ID}/stop`)) return stopA.promise;
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await screen.findByText("Question A");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("stop-button"));
+    });
+
+    await switchToSecondTab();
+    await screen.findByText("Question B");
+    await act(async () => {
+      stopA.resolve(
+        jsonResponse({ ok: false, error: { code: "INTERNAL", message: "no", retryable: true }, requestId: "s1" }, false, 500),
+      );
+    });
+    await drainSettledResponses();
+
+    expect(screen.queryAllByText(/stop request was not delivered/)).toHaveLength(0);
+  });
+
+  it("ui-workspace-wiring-r13-1: a stop still in flight on one pane does not swallow a stop on the next pane", async () => {
+    const stopA = deferred<Response>();
+    const calls = installLane(({ url }) => {
+      if (url.includes("/prompt")) return jsonResponse(promptBody(url.includes(SECOND_SESSION_ID) ? "B" : "A", false));
+      if (url.includes(`/reference-chat/${SESSION_ID}/stop`)) return stopA.promise;
+      if (url.includes("/stop")) {
+        return jsonResponse({ ok: true, data: { receipt: { requestId: "r2", target: {}, stage: "accepted" } }, requestId: "r2" });
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await screen.findByText("Question A");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("stop-button"));
+    });
+
+    await switchToSecondTab();
+    await screen.findByText("Question B");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("stop-button"));
+    });
+    await drainSettledResponses();
+
+    expect(
+      calls.filter((call) => call.method === "POST" && call.url.includes(`/reference-chat/${SECOND_SESSION_ID}/stop`)),
+    ).toHaveLength(1);
+    await act(async () => {
+      stopA.resolve(jsonResponse({ ok: true, data: {}, requestId: "s1" }));
+    });
+  });
+
+  it("ui-workspace-wiring-r15-1: files picked together are bounded by the bytes staged earlier in the same pick", async () => {
+    // Three 8 MiB files: each fits the 10 MiB file bound, but together they pass the 20 MiB turn bound.
+    const size = 8 * 1024 * 1024;
+    const bytes = new Uint8Array(size);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const big = (name: string) => ({
+      name,
+      type: "text/plain",
+      size,
+      arrayBuffer: async () => bytes.buffer.slice(0),
+    });
+    const calls = installLane(({ url, method, body }) => {
+      if (!url.includes("/files") || method !== "POST") return undefined;
+      const name = (body as { params: { name: string } }).params.name;
+      return jsonResponse({
+        ok: true,
+        data: {
+          receipt: { hostId: "local", attachmentId: `att-${name}`, sha256, sizeBytes: size, mediaType: "text/plain" },
+          displayName: name,
+          mentionText: `@${name} `,
+        },
+        requestId: `r-${name}`,
+      });
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("file-upload-input"), {
+        target: { files: [big("one.txt"), big("two.txt"), big("three.txt")] },
+      });
+    });
+    await screen.findByTestId("attachment-preview-att-two.txt", undefined, { timeout: 10_000 });
+    await drainSettledResponses();
+
+    expect(calls.filter((call) => call.method === "POST" && call.url.includes("/files"))).toHaveLength(2);
+    expect(screen.queryByTestId("attachment-preview-att-three.txt")).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-composer-attach-error")).toHaveTextContent(/must stay within/);
+  }, 30_000);
+
+  it("ui-workspace-wiring-r15-2: a slide past a repeated turn keeps every turn it slid past", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const cont = { role: "user", parts: [{ kind: "text", text: "continue" }], startedAt: null };
+    const a1 = { role: "assistant", parts: [{ kind: "text", text: "ANSWER-1" }], startedAt: null };
+    const a2 = { role: "assistant", parts: [{ kind: "text", text: "ANSWER-2" }], startedAt: null };
+    const n1 = { role: "user", parts: [{ kind: "text", text: "NEW-1" }], startedAt: null };
+    const n2 = { role: "assistant", parts: [{ kind: "text", text: "NEW-2" }], startedAt: null };
+    let slid = false;
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      if (url.includes("cursor=")) {
+        return jsonResponse(nativePage({
+          turns: [{ role: "user", parts: [{ kind: "text", text: "OLD-1" }], startedAt: "2026-10-05T00:00:00Z" }],
+          cursor: null,
+          hasMore: false,
+        }));
+      }
+      return slid
+        ? jsonResponse(nativePage({ turns: [cont, a2, n1, n2], cursor: { streamId: "omo:abc", offset: 600 }, hasMore: true }))
+        : jsonResponse(nativePage({ turns: [cont, a1, cont, a2], cursor: { streamId: "omo:abc", offset: 500 }, hasMore: true }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+    await screen.findByText("OLD-1");
+
+    // two turns were appended: the window now starts at the second "continue"
+    slid = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await drainSettledResponses();
+    await screen.findByText("NEW-2");
+
+    expect(screen.getByText("OLD-1")).toBeInTheDocument();
+    expect(screen.getAllByText("ANSWER-1")).toHaveLength(1);
+    expect(screen.getAllByText("continue")).toHaveLength(2);
+    expect(
+      screen.getByText("OLD-1").compareDocumentPosition(screen.getByText("ANSWER-1")) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      screen.getByText("ANSWER-1").compareDocumentPosition(screen.getByText("ANSWER-2")) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("ui-workspace-wiring-r15-2: an older page and the newest page holding the same turn text never share a key", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cont = { role: "user", parts: [{ kind: "text", text: "continue" }], startedAt: null };
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      if (url.includes("cursor=")) {
+        return jsonResponse(nativePage({ turns: [cont], cursor: null, hasMore: false }));
+      }
+      return jsonResponse(nativePage({
+        turns: [cont, { role: "assistant", parts: [{ kind: "text", text: "The parser now streams line by line." }], startedAt: null }],
+        cursor: { streamId: "omo:abc", offset: 500 },
+        hasMore: true,
+      }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+    await waitFor(() => {
+      expect(screen.getAllByText("continue")).toHaveLength(2);
+    });
+
+    const duplicateKeys = errors.mock.calls.filter((args) => args.map(String).join(" ").includes("same key"));
+    errors.mockRestore();
+    expect(duplicateKeys).toEqual([]);
   });
 });

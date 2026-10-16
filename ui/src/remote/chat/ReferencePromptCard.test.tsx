@@ -4,7 +4,7 @@
  */
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ReferencePromptCard, type ReferencePromptCardProps } from "./ReferencePromptCard";
 import type { ReferencePrompt, ReferencePromptAnswerPayload } from "./referenceTypes";
 
@@ -33,6 +33,16 @@ function accepted() {
   return vi.fn<(payload: ReferencePromptAnswerPayload) => Promise<boolean>>(
     async () => true,
   );
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (cause: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 function renderCard(overrides: Partial<ReferencePromptCardProps> = {}) {
@@ -139,6 +149,21 @@ describe("ReferencePromptCard", () => {
     expect(onAnswered).not.toHaveBeenCalled();
   });
 
+  it("lets the user answer again when a still-shown card's answer was dropped", async () => {
+    const flight = deferred<boolean>();
+    const onAnswer = vi.fn(() => flight.promise);
+    renderCard({ onAnswer });
+    fireEvent.click(screen.getByTestId("reference-prompt-option-0"), { detail: 1 });
+    expect(screen.getByTestId("reference-prompt-card")).toHaveAttribute("aria-busy", "true");
+    await act(async () => {
+      flight.resolve(false);
+      await flight.promise;
+    });
+    expect(screen.getByTestId("reference-prompt-card")).toHaveAttribute("aria-busy", "false");
+    expect(screen.getByTestId("reference-prompt-option-0")).not.toBeDisabled();
+    expect(screen.getByTestId("reference-prompt-option-1")).not.toBeDisabled();
+  });
+
   it("says the screen moved and asks for a re-read when the answer is refused as stale", async () => {
     const onPromptChanged = vi.fn();
     const onAnswered = vi.fn();
@@ -217,6 +242,39 @@ describe("ReferencePromptCard typed approval confirmation", () => {
     fireEvent.click(screen.getByTestId("reference-prompt-confirm-send"), { detail: 1 });
     await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
     expect(onTypedAnswerDone).not.toHaveBeenCalled();
+  });
+});
+
+describe("ReferencePromptCard typed confirm failure", () => {
+  beforeEach(cleanup);
+  afterEach(cleanup);
+
+  it("keeps the typed pick for a retry when Confirm fails on the transport", async () => {
+    const flight = deferred<boolean>();
+    const onAnswer = vi.fn(() => flight.promise);
+    const onTypedAnswerDone = vi.fn();
+    renderCard({ onAnswer, typedAnswer: { optionIndex: 0 }, onTypedAnswerDone });
+    fireEvent.click(screen.getByTestId("reference-prompt-confirm-send"), { detail: 1 });
+    await act(async () => {
+      flight.reject(new Error("host 503"));
+      await flight.promise.catch(() => undefined);
+    });
+    expect(screen.getByTestId("reference-prompt-error")).toHaveTextContent("host 503");
+    expect(onTypedAnswerDone).not.toHaveBeenCalled();
+    expect(screen.getByTestId("reference-prompt-confirm-send")).not.toBeDisabled();
+  });
+
+  it("still clears the typed pick when Confirm is refused as stale", async () => {
+    const flight = deferred<boolean>();
+    const onAnswer = vi.fn(() => flight.promise);
+    const onTypedAnswerDone = vi.fn();
+    renderCard({ onAnswer, typedAnswer: { optionIndex: 0 }, onTypedAnswerDone });
+    fireEvent.click(screen.getByTestId("reference-prompt-confirm-send"), { detail: 1 });
+    await act(async () => {
+      flight.reject({ code: "REQUEST_CONFLICT", message: "staleScreen", retryable: true, details: null });
+      await flight.promise.catch(() => undefined);
+    });
+    expect(onTypedAnswerDone).toHaveBeenCalledTimes(1);
   });
 });
 

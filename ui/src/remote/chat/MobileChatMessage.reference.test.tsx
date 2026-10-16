@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import {
   REFERENCE_ABANDONED_NOTE,
   ReferenceAbandonedBranchDisclosure,
@@ -446,8 +446,8 @@ describe("reference tool part", () => {
       />,
     );
 
-    // the chip is turn level: it stays visible while the work section is folded
-    expect(screen.getByTestId("worked-for-toggle")).toHaveAttribute("aria-expanded", "false");
+    // the chip is turn level; a turn with no tool or thinking parts has no work to fold (r13-2)
+    expect(screen.queryByTestId("worked-for-toggle")).not.toBeInTheDocument();
     const skills = screen.getByTestId("reference-turn-skills");
     expect(skills).toHaveTextContent("lonely");
     expect(skills).toHaveTextContent("Skill instructions loaded");
@@ -817,6 +817,72 @@ describe("native turn props as mapReferenceTurns builds them", () => {
     );
 
     expect(screen.queryByText("2026-10-06T00:00:00.000Z")).not.toBeInTheDocument();
+  });
+
+  it("ui-messages-r14-1: toggling Worked for keeps an open task result open", () => {
+    render(
+      <MobileChatMessage
+        id="msg-toggle-keeps-details"
+        role="assistant"
+        content=""
+        durationLabel="2m"
+        referenceParts={[
+          { kind: "tool", name: "read", summary: "Read src/app.ts", input: "src/app.ts", output: "body" },
+          { kind: "taskResult", tasks: [task()] },
+        ]}
+      />,
+    );
+
+    const details = screen.getByTestId("reference-task-result") as HTMLDetailsElement;
+    details.open = true;
+    fireEvent.click(screen.getByTestId("worked-for-toggle"));
+    expect(screen.getByTestId("reference-tool-part")).toBeInTheDocument();
+    expect(screen.getByTestId("reference-task-result")).toBe(details);
+    expect(details.open).toBe(true);
+    fireEvent.click(screen.getByTestId("worked-for-toggle"));
+    expect(screen.getByTestId("reference-task-result")).toBe(details);
+    expect(details.open).toBe(true);
+  });
+
+  it("ui-messages-r13-2: a rich turn with no tool or thinking parts has no Worked for toggle", () => {
+    render(
+      <MobileChatMessage
+        id="msg-no-work"
+        role="assistant"
+        content="Done."
+        durationLabel="3s"
+        referenceParts={[{ kind: "text", text: "Done." }]}
+      />,
+    );
+
+    expect(screen.queryByTestId("worked-for-toggle")).not.toBeInTheDocument();
+    expect(screen.getByTestId("assistant-reference-body")).toHaveTextContent("Done.");
+  });
+
+  it("ui-messages-r13-3: a successful copy after a failure clears the failure label", async () => {
+    vi.spyOn(clipboardModule, "copyTextToClipboard")
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    render(
+      <MobileChatMessage
+        id="msg-copy-recover"
+        role="assistant"
+        content="Hi"
+        referenceParts={[{ kind: "text", text: "Hi" }]}
+      />,
+    );
+
+    const button = screen.getByTestId("message-copy-button");
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(button).toHaveAttribute("aria-label", "Copy failed");
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    // the 2 s reset timer has not fired: only the second copy's own result decides the label
+    expect(button).toHaveAttribute("aria-label", "Copy message");
+    expect(button).toHaveAttribute("title", "Copy message");
   });
 
   it("ui-messages-5: copies only the visible prose, not thinking", () => {

@@ -509,6 +509,11 @@ export function parseChatGatewayIdentity(raw: unknown): ChatGatewayIdentity | nu
   };
 }
 
+/** The bearer and host an identity was answered for; any other pair has none until it answers. */
+function chatGatewayScope(token: string, baseUrl: string): string {
+  return `${baseUrl}\u0000${token}`;
+}
+
 /** The gateway's own identity, from the one authenticated route that publishes it. */
 export async function readChatGatewayIdentity(args: {
   baseUrl: string;
@@ -608,6 +613,8 @@ export async function fetchChatSessionRows(args: {
 
 const CHAT_REFRESH_WARNING = "Could not refresh the transcript; showing the last known state.";
 const CHAT_UNAVAILABLE_WARNING = "This session's transcript is not available to this device.";
+const CHAT_NO_READER_WARNING =
+  "This pane runs no agent, so there is no transcript reader for it. Open the terminal to see its output.";
 
 const CHAT_RETENTION_WARNING = "Older messages are hidden to keep the phone view responsive.";
 const CHAT_SEND_FAILED_WARNING = "That message was not delivered. It is back in the message box.";
@@ -660,13 +667,31 @@ function chatTurnSeed(turn: ReferenceTurn): string {
   return `${turn.role}|${turn.startedAt ?? ""}|${(first?.text ?? "").slice(0, 64)}`;
 }
 
-function chatTurnId(seed: string, occurrence: number): string {
+function chatTurnId(seed: string): string {
   let hash = 0;
   for (let index = 0; index < seed.length; index += 1) {
     hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
   }
-  const base = `turn-${hash.toString(36)}`;
-  return occurrence === 0 ? base : `${base}-${occurrence}`;
+  return `turn-${hash.toString(36)}`;
+}
+
+/**
+ * Where a slid window joins the one before it: the first index whose suffix of `previous` is a
+ * prefix of `next`, compared turn by turn. A single id is not enough when turns repeat.
+ */
+function chatSlideJoin(previous: readonly MobileChatMessageProps[], next: readonly MobileChatMessageProps[]): number {
+  for (let start = 0; start < previous.length; start += 1) {
+    const overlap = Math.min(previous.length - start, next.length);
+    let matches = true;
+    for (let index = 0; index < overlap; index += 1) {
+      if (previous[start + index].id !== next[index].id) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return start;
+  }
+  return -1;
 }
 
 /**
@@ -674,11 +699,8 @@ function chatTurnId(seed: string, occurrence: number): string {
  * abandoned disclosure left for the page to compose. No assistant turn is ever invented.
  */
 function mapReferenceTurns(page: ReferenceHistoryPage): MobileChatMessageProps[] {
-  const occurrences = new Map<string, number>();
   return page.turns.map((turn) => {
     const seed = chatTurnSeed(turn);
-    const occurrence = occurrences.get(seed) ?? 0;
-    occurrences.set(seed, occurrence + 1);
     const text = turn.parts
       .map((part) =>
         part.kind === "text" || part.kind === "thinking" || part.kind === "compact" ? part.text : null,
@@ -686,7 +708,7 @@ function mapReferenceTurns(page: ReferenceHistoryPage): MobileChatMessageProps[]
       .filter((part): part is string => part !== null)
       .join("\n\n");
     return {
-      id: chatTurnId(seed, occurrence),
+      id: chatTurnId(seed),
       role: turn.role,
       content: text,
       timestamp: turn.startedAt ?? undefined,
@@ -1148,7 +1170,7 @@ export const RemoteHostConnection: React.FC<{
   const [chatPromptError, setChatPromptError] = useState<string | null>(null);
   const [chatPromptRefresh, setChatPromptRefresh] = useState(0);
   /** The owning host's own identity, as its authenticated capabilities answer publishes it. */
-  const [chatGateway, setChatGateway] = useState<ChatGatewayIdentity | null>(null);
+  const [chatGatewayAnswer, setChatGatewayAnswer] = useState<{ scope: string; identity: ChatGatewayIdentity } | null>(null);
   /** The provider session id the host published for THIS pane; null means unknown, never guessed. */
   const [chatProviderSession, setChatProviderSession] = useState<string | null>(null);
   const [chatComposerNotice, setChatComposerNotice] = useState<string | null>(null);
@@ -1208,6 +1230,10 @@ export const RemoteHostConnection: React.FC<{
     ? `${relayUrl}/host/${encodeURIComponent(activeTunnelConnection.machine.machineId)}`
     : null;
   const transportBaseUrl = accountHostBaseUrl ?? hostTransportUrl(activeHost, transport.url);
+  const chatGateway =
+    chatGatewayAnswer !== null && token && chatGatewayAnswer.scope === chatGatewayScope(token, transportBaseUrl)
+      ? chatGatewayAnswer.identity
+      : null;
   // The transferred tunnel is owned here: close it when it is replaced or on unmount.
   // AccountConnection.close is idempotent, so explicit closes elsewhere are safe.
   useEffect(() => {
@@ -2603,10 +2629,21 @@ export const RemoteHostConnection: React.FC<{
   const chatLaneTargetRef = useRef<ReferenceTargetRef | null>(null);
   /** Aborted when the lane resets, so nothing started for one pane lands in another. */
   const chatLaneAbortRef = useRef(new AbortController());
-  /** Is this the pane the lane is speaking to right now? Asked after every await. */
+  /**
+   * Is this lane still the one `target` was started for? Asked after every await. The lane owner
+   * decides: a target that is only briefly null (a new token or transport not yet re-answered)
+   * resets nothing, so a request settling in that gap still belongs here. Only a DIFFERENT
+   * target - live already, or bound by the lane - makes it someone else's. Starting a NEW request
+   * still needs a live target, and checks `chatTargetRef` for that itself.
+   */
   const chatTargetIsCurrent = useCallback((target: ReferenceTargetRef): boolean => {
+    const owner = chatLaneTargetRef.current;
     const live = chatTargetRef.current;
-    return live !== null && sameReferenceTarget(target, live);
+    return (
+      owner !== null &&
+      sameReferenceTarget(target, owner) &&
+      (live === null || sameReferenceTarget(target, live))
+    );
   }, []);
 
 
@@ -2619,11 +2656,12 @@ export const RemoteHostConnection: React.FC<{
   const refreshChatIdentity = useCallback(async () => {
     const bearer = chatTokenRef.current;
     if (!bearer) return;
+    const baseUrl = chatBaseUrlRef.current;
     const identity = await readChatGatewayIdentity({
-      baseUrl: chatBaseUrlRef.current,
+      baseUrl,
       token: bearer,
     });
-    if (identity !== null) setChatGateway(identity);
+    if (identity !== null) setChatGatewayAnswer({ scope: chatGatewayScope(bearer, baseUrl), identity });
   }, []);
 
   const terminalCreateWebSocket = useMemo(() => {
@@ -2672,10 +2710,10 @@ export const RemoteHostConnection: React.FC<{
   }, [activeTunnelMachineId, noteSessionActivity]);
 
   useEffect(() => {
-    if (!token) {
-      setChatGateway(null);
-      return;
-    }
+    // The identity belongs to the host that answered it: a new token or transport has none yet.
+    setChatGatewayAnswer(null);
+    if (!token) return;
+    const scope = chatGatewayScope(token, transportBaseUrl);
     const controller = new AbortController();
     let retry: ReturnType<typeof setInterval> | null = null;
     let warned = false;
@@ -2685,7 +2723,7 @@ export const RemoteHostConnection: React.FC<{
       const identity = await readChatGatewayIdentity({ baseUrl: transportBaseUrl, token, signal: controller.signal });
       if (controller.signal.aborted) return;
       if (identity !== null) {
-        setChatGateway(identity);
+        setChatGatewayAnswer({ scope, identity });
         if (retry !== null) clearInterval(retry);
         retry = null;
         if (warned) setChatWarnings((prev) => prev.filter((warning) => warning !== CHAT_UNAVAILABLE_WARNING));
@@ -2826,13 +2864,15 @@ export const RemoteHostConnection: React.FC<{
   /* The draft and the held rows belong to the TARGET, not to this component instance: switching
      panes reads that target's own rows back, and never carries them across. */
   useEffect(() => {
+    // A null target is a gap, not a departure: a new token or transport has no gateway answer
+    // until the host re-answers, and the same pane usually comes right back. Leaving the lane
+    // target in place means the files staged for it stay staged and its draft keeps their
+    // mentions; only a DIFFERENT target replacing it releases them.
+    if (chatReferenceTarget === null) return;
+    const previous = chatLaneTargetRef.current;
+    if (previous !== null && sameReferenceTarget(previous, chatReferenceTarget)) return;
     resetChatLane();
     chatLaneTargetRef.current = chatReferenceTarget;
-    if (chatReferenceTarget === null) {
-      setChatDraftText("");
-      setChatHeld([]);
-      return;
-    }
     referenceDrafts.refresh(chatReferenceTarget);
     referenceQueues.refresh(chatReferenceTarget);
     setChatDraftText(referenceDrafts.read(chatReferenceTarget).text);
@@ -2885,6 +2925,18 @@ export const RemoteHostConnection: React.FC<{
     const target = chatReferenceTarget;
     const sessionId = effectiveSessionId;
     if (!target || !sessionId || !token) return;
+    // The history route requires the pane's registry id; a pane with no agent has none, so the
+    // read would only ever be refused. Say so once instead of polling into a refresh failure.
+    if (!chatAgentType) {
+      clearChatTranscript();
+      setChatWarnings((prev) =>
+        withChatWarning(
+          prev.filter((warning) => warning !== CHAT_REFRESH_WARNING && warning !== CHAT_UNAVAILABLE_WARNING),
+          CHAT_NO_READER_WARNING,
+        ),
+      );
+      return;
+    }
     const registryId = chatAgentType;
     let cancelled = false;
     let fetching = false;
@@ -2900,7 +2952,7 @@ export const RemoteHostConnection: React.FC<{
           sessionId,
           token,
           target,
-          registryId: registryId ?? "",
+          registryId,
           limit: CHAT_HISTORY_PAGE_LIMIT,
           signal: controller.signal,
           transport: activeTunnelConnection?.transport,
@@ -2929,7 +2981,7 @@ export const RemoteHostConnection: React.FC<{
           start.offset > anchor.offset &&
           mapped.length > 0
         ) {
-          const joinAt = previousTurns.findIndex((turn) => turn.id === mapped[0].id);
+          const joinAt = chatSlideJoin(previousTurns, mapped);
           if (joinAt >= 0) slidOut = previousTurns.slice(0, joinAt);
         }
         if (slidOut !== null) {
@@ -2984,17 +3036,18 @@ export const RemoteHostConnection: React.FC<{
           return capped;
         });
         setChatWarnings((prev) => {
+          // The page's own disclosure is drawn by the page banner from `chatPage`, which follows
+          // every read; repeating it here would draw it twice and outlive the page that said it.
           const cleared = prev.filter(
             (warning) =>
               warning !== CHAT_REFRESH_WARNING &&
               warning !== CHAT_UNAVAILABLE_WARNING &&
+              warning !== CHAT_NO_READER_WARNING &&
               warning !== CHAT_RETENTION_WARNING,
           );
-          const disclosed = referenceHistoryNotice(read.page);
-          const next = disclosed === null ? cleared : withChatWarning(cleared, disclosed);
           return chatRetentionTruncatedRef.current
-            ? withChatWarning(next, CHAT_RETENTION_WARNING)
-            : next;
+            ? withChatWarning(cleared, CHAT_RETENTION_WARNING)
+            : cleared;
         });
       } catch (error) {
         if (cancelled) return;
@@ -3154,7 +3207,9 @@ export const RemoteHostConnection: React.FC<{
       setChatOlderFailed(true);
       setChatWarnings((prev) => withChatWarning(prev, CHAT_OLDER_FAILED_WARNING));
     } finally {
-      if (!signal.aborted && chatTargetIsCurrent(target) && !superseded()) setChatOlderLoading(false);
+      // A target change aborts the lane and a re-anchor bumps the generation: both clear the flag
+      // themselves. A target that is only briefly null does neither, so this read clears it.
+      if (!signal.aborted && !superseded()) setChatOlderLoading(false);
     }
   }, [chatOlderCursor, chatTargetIsCurrent]);
 
@@ -3282,6 +3337,7 @@ export const RemoteHostConnection: React.FC<{
         // the failed text comes back in front of whatever the user typed while it was in flight
         if (current.length === 0) referenceDrafts.set(target, text);
         else if (!current.startsWith(text)) referenceDrafts.set(target, `${text}\n${current}`);
+        referenceDrafts.end(target, text);
         setChatDraftText(referenceDrafts.read(target).text);
       } else {
         endHeldSend();
@@ -3301,7 +3357,7 @@ export const RemoteHostConnection: React.FC<{
    * Stop the pane's own turn. `refused` is an answer, not a reason to send a killing signal: an
    * unknown capability sends nothing and says so, and the explicit terminal keeps Ctrl-C.
    */
-  const chatStopInFlightRef = useRef(false);
+  const chatStopInFlightRef = useRef(new Set<string>());
   const stopChatExecution = useCallback(async () => {
     const target = chatTargetRef.current;
     const sessionId = chatSessionIdRef.current;
@@ -3318,8 +3374,9 @@ export const RemoteHostConnection: React.FC<{
     }
     // Each request carries a fresh requestId, so the host would send a second interrupt for a
     // second tap; in Claude Code that second Escape opens the rewind picker on the idle prompt.
-    if (chatStopInFlightRef.current) return;
-    chatStopInFlightRef.current = true;
+    const stopKey = referenceTargetKey(target);
+    if (chatStopInFlightRef.current.has(stopKey)) return;
+    chatStopInFlightRef.current.add(stopKey);
     const payload: ReferenceStopPayload = { capability };
     let outcome: Awaited<ReturnType<typeof postChatMutation>>;
     try {
@@ -3331,12 +3388,12 @@ export const RemoteHostConnection: React.FC<{
         chatMutationBody(target, payload),
       );
     } finally {
-      chatStopInFlightRef.current = false;
+      chatStopInFlightRef.current.delete(stopKey);
     }
-    if (!outcome.ok) {
+    if (!outcome.ok && chatTargetIsCurrent(target)) {
       setChatWarnings((prev) => withChatWarning(prev, CHAT_STOP_FAILED_WARNING));
     }
-  }, [chatMutationBody]);
+  }, [chatMutationBody, chatTargetIsCurrent]);
 
   /**
    * Answer the prompt the user is looking at. The card owns the press/focus rules; this only
@@ -3459,7 +3516,7 @@ export const RemoteHostConnection: React.FC<{
       const signal = chatLaneAbortRef.current.signal;
       for (const file of files) {
         try {
-          const used = chatStagedFiles.reduce((sum, entry) => sum + entry.receipt.sizeBytes, 0);
+          const used = [...chatStagedFiles, ...staged].reduce((sum, entry) => sum + entry.receipt.sizeBytes, 0);
           const receipt = await stageReferenceChatFile(
             { transport: chatFileTransport },
             target,
@@ -3478,6 +3535,9 @@ export const RemoteHostConnection: React.FC<{
         // The pane changed while these uploaded: the lane they were for is gone, so nothing is
         // inserted anywhere and the host is told to let them go.
         releaseStagedChatFiles(target, staged);
+        // A target that is only briefly null resets nothing, so this upload clears its own flag;
+        // a real target change aborted the lane and already reset it.
+        if (!signal.aborted) setChatAttaching(false);
         return;
       }
       setChatAttaching(false);
@@ -3679,7 +3739,16 @@ export const RemoteHostConnection: React.FC<{
 
   /** Older pages first, then the newest page and the user's own pending echoes. */
   const chatTranscript = useMemo(
-    () => (chatOlderMessages.length === 0 ? chatMessages : [...chatOlderMessages, ...chatMessages]),
+    () => {
+      const all = chatOlderMessages.length === 0 ? chatMessages : [...chatOlderMessages, ...chatMessages];
+      // A turn id is its content, so a repeated turn repeats it: each repeat gets its own key.
+      const seen = new Map<string, number>();
+      return all.map((message) => {
+        const repeat = seen.get(message.id) ?? 0;
+        seen.set(message.id, repeat + 1);
+        return repeat === 0 ? message : { ...message, id: `${message.id}~${repeat}` };
+      });
+    },
     [chatMessages, chatOlderMessages],
   );
 

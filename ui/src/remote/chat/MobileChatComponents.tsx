@@ -1271,21 +1271,26 @@ export const ReferencePartView: React.FC<{
 /** Every part of one turn, in the order the transcript recorded them. */
 export const ReferencePartList: React.FC<{
   parts: readonly ReferencePart[];
+  /** Skip tool and thinking parts; keys keep each part's index in `parts` so the rest never remount. */
+  hideWork?: boolean;
   context?: ReferencePartRenderContext;
   timestamp?: string | number | null;
   className?: string;
-}> = ({ parts, context, timestamp, className }) => {
-  if (parts.length === 0) return null;
+}> = ({ parts, hideWork = false, context, timestamp, className }) => {
+  const shown = hideWork ? parts.filter((part) => part.kind !== "tool" && part.kind !== "thinking") : parts;
+  if (shown.length === 0) return null;
   return (
     <div data-testid="reference-parts" className={cn("w-full flex flex-col gap-1.5", className)}>
-      {parts.map((part, index) => (
-        <ReferencePartView
-          key={`${part.kind}-${index}`}
-          part={part}
-          context={context}
-          timestamp={timestamp}
-        />
-      ))}
+      {parts.map((part, index) =>
+        hideWork && (part.kind === "tool" || part.kind === "thinking") ? null : (
+          <ReferencePartView
+            key={`${part.kind}-${index}`}
+            part={part}
+            context={context}
+            timestamp={timestamp}
+          />
+        ),
+      )}
     </div>
   );
 };

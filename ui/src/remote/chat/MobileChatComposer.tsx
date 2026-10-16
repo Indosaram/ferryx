@@ -173,7 +173,8 @@ export const MobileChatComposer = React.forwardRef<
   const handleSend = useCallback(() => {
     // A running pane still takes typed text (that is how a TUI is driven), and a prompt waiting
     // on the original pane takes a typed answer: the owner decides what the text means.
-    if (disabled) return;
+    // a file still staging has no mention yet: sending now would leave it behind
+    if (disabled || attaching) return;
     const trimmed = text.trim();
     if (!trimmed) return;
     const consumed = onSend(trimmed);
@@ -184,7 +185,7 @@ export const MobileChatComposer = React.forwardRef<
     if (textareaRef.current) {
       textareaRef.current.style.height = "36px";
     }
-  }, [disabled, text, onSend, setText]);
+  }, [disabled, attaching, text, onSend, setText]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -233,7 +234,7 @@ export const MobileChatComposer = React.forwardRef<
     setEditingHeldText("");
   }, [editingHeldId, editingHeldText, onEditHeld]);
 
-  const canSubmit = text.trim().length > 0 && !disabled;
+  const canSubmit = text.trim().length > 0 && !disabled && !attaching;
   // A prompt waiting on the original pane is a question this box answers, so the box keeps Send
   // beside Stop while one is up. Without a prompt, a running pane shows Stop alone.
   const answersWaitingPrompt = promptCard !== undefined && promptCard !== null;

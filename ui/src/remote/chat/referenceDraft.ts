@@ -133,8 +133,13 @@ export class ReferenceDraftStore {
     const texts = legacy.map((candidate) => storage.getItem(candidate)).filter((text): text is string => !!text);
     if (!texts.length) return null;
     const text = texts.join("\n");
-    storage.setItem(REFERENCE_DRAFT_STORAGE_PREFIX + key, text);
-    for (const candidate of legacy) storage.removeItem(candidate);
+    try {
+      storage.setItem(REFERENCE_DRAFT_STORAGE_PREFIX + key, text);
+      for (const candidate of legacy) storage.removeItem(candidate);
+    } catch {
+      // the move could not be written: show the draft from memory and say it is unsaved
+      this.unsaved.add(key);
+    }
     return text;
   }
 

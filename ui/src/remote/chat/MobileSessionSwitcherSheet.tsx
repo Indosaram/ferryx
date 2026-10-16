@@ -87,10 +87,8 @@ export function MobileSessionSwitcherSheet({
 
         const status = touchStatusLabel((tab.activityState as any) ?? null);
         const trailing = status ? (
-          <span
-            aria-hidden="true"
-            className={cn("text-[12px] font-medium tabular-nums", status.className)}
-          >
+          // not aria-hidden: the status is how a screen-reader user finds the session needing approval
+          <span className={cn("text-[12px] font-medium tabular-nums", status.className)}>
             {status.text}
           </span>
         ) : null;

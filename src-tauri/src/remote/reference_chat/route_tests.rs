@@ -557,6 +557,37 @@ impl ReferenceRouteFixture {
         } else {
             format!("printf '{prefix}_%s\\n' '{suffix}'\n")
         };
+        self.submit_command_and_await_marker_at(marker, &command, server, path)
+            .await;
+    }
+
+    /// Print the marker and then leave the shell in a long foreground sleep, so the marker is the
+    /// last output the pane produces on its own: the shell prints no further prompt while its
+    /// foreground job runs. The terminal is back in cooked mode with echo on for that job, so a
+    /// write to the pane is still echoed and still advances its output sequence.
+    ///
+    /// The command carries no trailing newline: the submit route's own separately written Enter
+    /// is its only terminator, so no second Enter is left to be echoed after the marker.
+    async fn park_pane_after_marker(&self, marker: &str) {
+        let (prefix, suffix) = marker
+            .split_once('_')
+            .expect("the marker names a prefix and a suffix the shell joins");
+        let command = if cfg!(windows) {
+            format!("Write-Output ('{prefix}_' + '{suffix}'); Start-Sleep -Seconds 100000")
+        } else {
+            format!("printf '{prefix}_%s\\n' '{suffix}'; sleep 100000")
+        };
+        self.submit_command_and_await_marker_at(marker, &command, &self.server, &self.route("submit"))
+            .await;
+    }
+
+    async fn submit_command_and_await_marker_at(
+        &self,
+        marker: &str,
+        command: &str,
+        server: &ReferenceRouteServer,
+        path: &str,
+    ) {
         let attachment = self
             .state
             .session_backend
@@ -834,6 +865,11 @@ async fn a_target_naming_another_owner_is_refused_without_writing_or_resizing() 
             && fixture.state.reference_owner_id != ROUTE_TEST_FOREIGN_OWNER,
         "the gateway's owner identity is its own value, never the caller's"
     );
+    // The pane's own startup output (the login shell's first prompt) is asynchronous and may land
+    // at any time after the session is created; on a loaded host it lands after the baseline
+    // below. Park the pane first, so everything it will emit by itself has been emitted before
+    // the baseline is taken, and any later output can only come from a write.
+    fixture.park_pane_after_marker("REFUSAL_PARKED").await;
 
     // Valid control: this gateway's own owner is served, so the refusals below are the fence's.
     let control = fixture.read_query(
@@ -896,8 +932,9 @@ async fn a_target_naming_another_owner_is_refused_without_writing_or_resizing() 
     assert_eq!(status, 410, "a foreign owner must not reach a mutation: {body}");
     assert!(body.contains("TARGET_EXPIRED"), "typed refusal on submit: {body}");
 
-    // Zero writes and zero resizes: nothing was submitted in this test, so the idle pane emits
-    // nothing, and a refused target must leave both observables exactly as the control left them.
+    // Zero writes and zero resizes: the parked pane emits nothing by itself, and echoes anything
+    // written to it, so a refused target must leave both observables exactly as the control
+    // left them.
     assert_eq!(
         fixture.geometry().await,
         geometry_before,
@@ -1358,7 +1395,10 @@ impl crate::remote::backend::RemoteSessionBackend for ScreenStubBackend {
     ) -> futures_util::future::BoxFuture<'a, Result<crate::terminal::SessionAttachment, String>>
     {
         Box::pin(async move {
-            let (_sender, receiver) = tokio::sync::broadcast::channel(1);
+            let (sender, receiver) = tokio::sync::broadcast::channel(1);
+            // A live pane's output stream stays open while it is attached: a closed one would end
+            // a terminal socket before it reads the input it was sent.
+            std::mem::forget(sender);
             Ok(crate::terminal::SessionAttachment {
                 snapshot: crate::terminal::AttachmentSnapshot {
                     session_id: self.session_id.clone(),
@@ -1630,6 +1670,66 @@ async fn a_submit_whose_caller_leaves_after_the_paste_still_writes_its_enter() {
         Some(b"\r".as_slice()),
         "the paste was left unsent in the pane after its caller left"
     );
+}
+
+/// rs-input-screen-r15-1: raw keystrokes typed through the remote terminal socket must hold a chat
+/// paste back for the typed-settle window, or the paste lands inside the program's own redraw of
+/// those keys. The settle window is the behavior under test, so its lower bound is asserted:
+/// without the guard the submit finishes after only the paste-to-Enter gap.
+#[tokio::test]
+async fn a_chat_submit_right_behind_raw_terminal_keystrokes_waits_for_them_to_settle() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let session_id = "reference-route-typed-settle";
+    let (written_tx, mut written) = tokio::sync::mpsc::unbounded_channel();
+    let (backend, state, control) = unhubbed_pane(session_id, Some(written_tx));
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let mut request = format!("ws://{}/api/v1/terminal/{session_id}", server.addr)
+        .into_client_request()
+        .expect("terminal socket request");
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {control}").parse().expect("authorization header"),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("terminal socket upgrade");
+
+    let typed_at = std::time::Instant::now();
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Binary(b"x".to_vec().into()))
+        .await
+        .expect("keystroke sent");
+    let keystroke = tokio::time::timeout(std::time::Duration::from_secs(5), written.recv())
+        .await
+        .expect("the keystroke reached the pane")
+        .expect("the keystroke was written");
+    assert_eq!(keystroke, b"x".to_vec());
+
+    let (status, response) = server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"),
+            Some(&control),
+            Some(&unhubbed_submit(&state, session_id, "hello")),
+        )
+        .await;
+    let elapsed = typed_at.elapsed();
+
+    assert_eq!(status, 200, "{response}");
+    let writes = backend.writes.lock().expect("writes").clone();
+    assert_eq!(writes, vec![b"x".to_vec(), b"hello".to_vec(), b"\r".to_vec()]);
+    // The paste waits out the settle window measured from the keystroke, then the Enter gap.
+    let floor = std::time::Duration::from_millis(
+        super::input::REFERENCE_TYPED_SETTLE_MS + super::input::REFERENCE_SUBMIT_DELAY_MS - 20,
+    );
+    assert!(
+        elapsed >= floor,
+        "the paste did not wait for the raw keystroke to settle: {elapsed:?} < {floor:?}"
+    );
+    let _ = socket.close(None).await;
+    server.stop().await;
 }
 
 /// A backend whose one pane is served by a real output hub, so a replay gap behaves as it does on
@@ -2299,6 +2399,160 @@ async fn a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally() 
     );
     assert_eq!(status, 422, "{body}");
     assert!(body.contains("UNSUPPORTED"), "{body}");
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-r15-1: a staged file stays deletable after its session exited, so the client
+/// rs-files-routes-r14-1: a staging directory left in a directory the pane has since moved away
+/// from is swept once it outlives the TTL, even though no stage ever targets that directory again.
+#[tokio::test]
+async fn a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept() {
+    let fixture = fixture().await;
+    fixture.submit_and_await_marker("LEFTREADY_ONE").await;
+    let worktree = fixture.worktree().await;
+    let (status, body) = fixture.stage("left-behind.txt", b"left behind").await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+    let attachment_id = staged["data"]["receipt"]["attachmentId"]
+        .as_str()
+        .expect("attachmentId")
+        .to_string();
+    let left_dir = reference_files::reference_staging_base_dir(&worktree).join(&attachment_id);
+    assert!(left_dir.is_dir(), "the first stage wrote under the spawn worktree");
+    // Age the directory past the TTL, as a previous gateway process's leftovers would be.
+    let old = std::time::SystemTime::now()
+        - std::time::Duration::from_millis(reference_files::reference_unreferenced_ttl_ms() + 60_000);
+    std::fs::File::open(&left_dir)
+        .expect("open staged dir")
+        .set_modified(old)
+        .expect("age staged dir");
+
+    let nested = worktree.join("elsewhere");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+    let marker = "LEFTMOVED_TWO";
+    let command = if cfg!(windows) {
+        "Set-Location elsewhere; [Environment]::CurrentDirectory = (Get-Location).ProviderPath; Write-Output ('LEFTMOVED_' + 'TWO')\r".to_string()
+    } else {
+        "cd elsewhere && printf 'LEFTMOVED_%s\\n' 'TWO'\r".to_string()
+    };
+    let attachment = fixture
+        .state
+        .session_backend
+        .attach_with_sequence(&fixture.session_id, None)
+        .await
+        .expect("attach the pane");
+    let mut seen = attachment.snapshot.history;
+    let mut watch = attachment.receiver;
+    fixture
+        .state
+        .session_backend
+        .write_input(&fixture.session_id, command.as_bytes())
+        .await
+        .expect("type the cd");
+    let moved = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            match watch.recv().await {
+                Ok(chunk) => {
+                    seen.extend_from_slice(&chunk.bytes);
+                    if seen.windows(marker.len()).any(|window| window == marker.as_bytes()) {
+                        return true;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+            }
+        }
+    })
+    .await;
+    assert_eq!(moved.ok(), Some(true), "the pane must run the cd: {}", escaped_bytes(&seen, 4096));
+
+    let (status, body) = fixture.stage("new-cwd.txt", b"new cwd").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !left_dir.exists(),
+        "a stale staging dir under a cwd the pane left must be swept: {}",
+        left_dir.display()
+    );
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-r15-1: a staged file stays deletable after its session exited, so the client
+/// can release the bytes instead of leaving them in the working directory until a TTL sweep.
+#[tokio::test]
+async fn a_staged_file_of_an_exited_session_can_still_be_deleted() {
+    let fixture = fixture().await;
+    let (status, body) = fixture.stage("exited.txt", b"staged before exit").await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+    let attachment_id = staged["data"]["receipt"]["attachmentId"]
+        .as_str()
+        .expect("attachmentId")
+        .to_string();
+    let attachment_dir =
+        reference_files::reference_staging_base_dir(&fixture.worktree().await).join(&attachment_id);
+    assert!(attachment_dir.is_dir(), "the stage wrote its directory");
+
+    let close = serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(),
+        "daemonEpoch": fixture.daemon_epoch.as_str(),
+    })
+    .to_string();
+    let (status, body) = fixture
+        .server
+        .request(
+            "DELETE",
+            &format!("/api/v1/sessions/{}", fixture.session_id),
+            Some(&fixture.control),
+            Some(&close),
+        )
+        .await;
+    assert_eq!(status, 204, "session close: {body}");
+    assert!(
+        !fixture
+            .state
+            .session_backend
+            .list_sessions()
+            .await
+            .contains(&fixture.session_id),
+        "the closed session is no longer live"
+    );
+
+    let query = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    let own = format!("{}?{query}", fixture.route(&format!("files/{attachment_id}")));
+    let (status, body) = fixture
+        .server
+        .request("DELETE", &own, Some(&fixture.view), None)
+        .await;
+    assert_eq!(status, 403, "a view-only device still cannot delete: {body}");
+    let foreign = fixture.read_query_naming_owner(
+        &fixture.session_id,
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &uuid::Uuid::new_v4().to_string(),
+        &[],
+    );
+    let (status, body) = fixture
+        .server
+        .request(
+            "DELETE",
+            &format!("{}?{foreign}", fixture.route(&format!("files/{attachment_id}"))),
+            Some(&fixture.control),
+            None,
+        )
+        .await;
+    assert_eq!(status, 410, "a foreign owner is still fenced: {body}");
+    let (status, body) = fixture
+        .server
+        .request("DELETE", &own, Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 204, "the exited session's staged file can be released: {body}");
+    assert!(!attachment_dir.exists(), "the release removed the bytes");
     fixture.server.stop().await;
 }
 

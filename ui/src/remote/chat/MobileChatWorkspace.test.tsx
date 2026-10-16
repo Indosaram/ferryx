@@ -323,6 +323,47 @@ describe("MobileChatWorkspace", () => {
     expect(stream.scrollTop).toBe(300);
   });
 
+  it("ui-workspace-wiring-r14-1: the older-page anchor jump is instant, not smooth-scrolled", () => {
+    const firstPage: MobileChatMessageProps[] = Array.from({ length: 4 }, (_, idx) => ({
+      id: `new-${idx}`,
+      role: idx % 2 === 0 ? "user" : "assistant",
+      content: `Newest ${idx}`,
+      timestamp: 1_000 + idx,
+    }));
+    const { rerender } = render(<MobileChatWorkspace messages={firstPage} onSendMessage={vi.fn()} />);
+
+    const stream = screen.getByTestId("chat-message-stream");
+    // the stream is smooth-scrolled by class; record the inline scroll-behavior each write runs under
+    expect(stream).toHaveClass("scroll-smooth");
+    let top = 100;
+    const writes: { top: number; behavior: string }[] = [];
+    Object.defineProperty(stream, "clientHeight", { value: 300, configurable: true });
+    Object.defineProperty(stream, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(stream, "scrollTop", {
+      configurable: true,
+      get: () => top,
+      set: (value: number) => {
+        writes.push({ top: value, behavior: stream.style.scrollBehavior });
+        top = value;
+      },
+    });
+    fireEvent.scroll(stream);
+
+    const older: MobileChatMessageProps[] = Array.from({ length: 2 }, (_, idx) => ({
+      id: `old-${idx}`,
+      role: idx % 2 === 0 ? "user" : "assistant",
+      content: `Older ${idx}`,
+      timestamp: 500 + idx,
+    }));
+    Object.defineProperty(stream, "scrollHeight", { value: 1200, configurable: true });
+    rerender(<MobileChatWorkspace messages={[...older, ...firstPage]} onSendMessage={vi.fn()} />);
+
+    // the anchor write overrides the smooth class so the reader's place never animates
+    expect(writes).toEqual([{ top: 300, behavior: "auto" }]);
+    // and the container's own smooth scrolling is restored afterwards
+    expect(stream.style.scrollBehavior).toBe("");
+  });
+
   it("16b. leaves the reader's place alone when a turn is appended below them", () => {
     const firstPage: MobileChatMessageProps[] = Array.from({ length: 4 }, (_, idx) => ({
       id: `new-${idx}`,

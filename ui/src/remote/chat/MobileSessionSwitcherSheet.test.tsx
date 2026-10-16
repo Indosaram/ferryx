@@ -93,6 +93,23 @@ describe("MobileSessionSwitcherSheet", () => {
     expect(screen.queryByText("Done")).not.toBeInTheDocument();
   });
 
+  it("ui-shell-sheets-r15-1: the agent status is part of each row's accessible name", () => {
+    render(
+      <MobileSessionSwitcherSheet
+        open
+        onOpenChange={vi.fn()}
+        tabs={sampleTabs}
+        activeTabId="tab-1"
+        worktreeLabel="main"
+        onSelectTab={vi.fn()}
+        onNewTerminal={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("session-switcher-tab-tab-1")).toHaveAccessibleName(/Working/);
+    expect(screen.getByTestId("session-switcher-tab-tab-2")).toHaveAccessibleName(/Approval/);
+  });
+
   it("indicates active tab via aria-current", () => {
     render(
       <MobileSessionSwitcherSheet

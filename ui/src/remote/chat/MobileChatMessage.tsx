@@ -98,7 +98,7 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) 
     }
     const ok = await copyTextToClipboard(codeText);
     setCopied(ok);
-    if (!ok) setCopyFailed(true);
+    setCopyFailed(!ok);
     timerRef.current = setTimeout(() => {
       setCopied(false);
       setCopyFailed(false);
@@ -292,11 +292,12 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   // A user turn's bubble already holds its prose; only its other parts are drawn below it.
   const userExtraParts = visibleParts.filter((part) => part.kind !== "text");
   const isRuntime = referenceSource === "runtime";
-  // The Worked for toggle folds a native turn's work (tools, thinking) as it folds `toolCalls`.
-  const workFolded = Boolean(durationLabel) && !workExpanded;
-  const assistantParts = workFolded
-    ? visibleParts.filter((part) => part.kind !== "tool" && part.kind !== "thinking")
-    : visibleParts;
+  // The Worked for toggle folds a native turn's work (tools, thinking) as it folds `toolCalls`;
+  // a turn with no such work has nothing to fold and draws no toggle.
+  const hasWork = hasRichParts
+    ? visibleParts.some((part) => part.kind === "tool" || part.kind === "thinking")
+    : toolCalls.length > 0;
+  const workFolded = Boolean(durationLabel) && hasWork && !workExpanded;
 
   useEffect(() => {
     return () => {
@@ -312,7 +313,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
     }
     const ok = await copyTextToClipboard(copyText);
     setCopied(ok);
-    if (!ok) setCopyFailed(true);
+    setCopyFailed(!ok);
     timerRef.current = setTimeout(() => {
       setCopied(false);
       setCopyFailed(false);
@@ -411,7 +412,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
 
       {isRuntime && <span className="sr-only">Runtime message</span>}
 
-      {durationLabel && (
+      {durationLabel && hasWork && (
         <button
           type="button"
           data-testid="worked-for-toggle"
@@ -447,7 +448,8 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
       {hasRichParts ? (
         <div data-testid="assistant-reference-body" className="w-full">
           <ReferencePartList
-            parts={assistantParts}
+            parts={visibleParts}
+            hideWork={workFolded}
             context={referenceContext}
             timestamp={timestamp}
           />

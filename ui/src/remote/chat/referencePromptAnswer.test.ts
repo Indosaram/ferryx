@@ -127,6 +127,12 @@ describe("answering a prompt from the chat", () => {
     expect(referenceAnswerFromText(noCustom, "unlisted text")).toBeNull();
     expect(referenceAnswerHint(noCustom)).toBe("Type 1–2 to choose…");
   });
+
+  it("ui-reference-logic-r15-1: holds a multiple choice that names no option instead of sending an empty selection", () => {
+    const multi = prompt(["LM-O", "YCB-V", "T-LESS"], null, true);
+    expect(referenceAnswerFromText(multi, ",")).toBeNull();
+    expect(referenceAnswerFromText(multi, " , ,")).toBeNull();
+  });
 });
 
 describe("referencePressOrigin", () => {

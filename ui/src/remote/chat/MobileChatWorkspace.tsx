@@ -270,7 +270,10 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
       !previous.atBottom &&
       el.scrollHeight > previous.height
     ) {
+      // the container is scroll-smooth; an animated anchor would show the reader's place jump
+      el.style.scrollBehavior = "auto";
       el.scrollTop = previous.top + (el.scrollHeight - previous.height);
+      el.style.scrollBehavior = "";
     }
     viewportRef.current = {
       top: el.scrollTop,
