@@ -80,7 +80,9 @@ pub(crate) fn daemon_executable(appimage: Option<&OsStr>, current_exe: &Path) ->
 /// that prefix stays out: a GUI launched from inside a Ferryx pane carries per-session variables
 /// (`FERRYX_SESSION_ID`, `FERRYX_PTY_INCARNATION`) and secrets (`FERRYX_AGENT_STATE_TOKEN`,
 /// `FERRYX_MACHINE_TOKEN`) that must never be written into a unit file on disk.
-const FORWARDED_FERRYX_KEYS: [&str; 7] = [
+const FORWARDED_FERRYX_KEYS: [&str; 9] = [
+    "FERRYX_ALLOW_INSECURE_DIRECT",
+    "FERRYX_ALLOW_INSECURE_LAN",
     "FERRYX_ALLOW_INSECURE_RELAY",
     "FERRYX_DATA_DIR",
     "FERRYX_RUNTIME_DIR",
@@ -721,6 +723,33 @@ mod tests {
                 "Environment=\"FERRYX_RELAY_URL=ws://relay.test:8080\"",
             ]
         );
+    }
+
+    #[test]
+    fn allow_insecure_direct_and_lan_are_forwarded_only_when_set() {
+        let exe = Path::new("/opt/ferryx/ferryx");
+        let env = vars(&[
+            ("FERRYX_ALLOW_INSECURE_LAN", "1"),
+            ("FERRYX_ALLOW_INSECURE_DIRECT", "1"),
+        ]);
+        let keys: Vec<String> = forwarded_env(&env).into_iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, ["FERRYX_ALLOW_INSECURE_DIRECT", "FERRYX_ALLOW_INSECURE_LAN"]);
+        let unit = render_unit(exe, &env).unwrap();
+        let environment: Vec<&str> = unit
+            .lines()
+            .filter(|line| line.starts_with("Environment="))
+            .collect();
+        assert_eq!(
+            environment,
+            [
+                "Environment=\"FERRYX_ALLOW_INSECURE_DIRECT=1\"",
+                "Environment=\"FERRYX_ALLOW_INSECURE_LAN=1\"",
+            ]
+        );
+
+        let unset = render_unit(exe, &vars(&[("FERRYX_DATA_DIR", "/home/u/.ferryx")])).unwrap();
+        assert!(!unset.contains("FERRYX_ALLOW_INSECURE_DIRECT"), "{unset}");
+        assert!(!unset.contains("FERRYX_ALLOW_INSECURE_LAN"), "{unset}");
     }
 
     #[test]
