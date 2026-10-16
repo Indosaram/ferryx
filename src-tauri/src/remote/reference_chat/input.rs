@@ -509,11 +509,23 @@ pub struct ReferenceStopRequest<'a> {
 pub struct ReferenceInputQueue {
     target_locks: parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     records: parking_lot::Mutex<ReferenceInputRecords>,
+    /// When raw keystrokes last reached each pane through the remote terminal, by backend session.
+    raw_typed_at: parking_lot::Mutex<HashMap<String, u64>>,
 }
 
 impl ReferenceInputQueue {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record that raw keystrokes reached `backend_session_id` at `at_ms` (the clock's
+    /// milliseconds), so a submit right behind them waits [REFERENCE_TYPED_SETTLE_MS].
+    pub fn note_raw_input(&self, backend_session_id: &str, at_ms: u64) {
+        let mut typed = self.raw_typed_at.lock();
+        // Only a stamp inside the settle window can still delay a submit; older ones are dropped
+        // so the map stays as small as the set of panes typed into just now.
+        typed.retain(|_, last| at_ms.saturating_sub(*last) < REFERENCE_TYPED_SETTLE_MS);
+        typed.insert(backend_session_id.to_string(), at_ms);
     }
 
     /// Type one composer message into its original pane, then its Enter.
@@ -651,18 +663,21 @@ impl ReferenceInputQueue {
         let _step = self.step(request.target).await;
 
         // A paste right behind raw keystrokes waits for the pane to finish reading them, so the
-        // paste is not swallowed by the program's own redraw.
-        if let Some(last_typed_at_ms) = request.last_typed_at_ms {
+        // paste is not swallowed by the program's own redraw. Read under the step, so keys typed
+        // while this message waited behind another still count.
+        let raw_typed_at_ms = self
+            .raw_typed_at
+            .lock()
+            .get(request.target.target.backend_session_id.as_str())
+            .copied();
+        if let Some(last_typed_at_ms) = request.last_typed_at_ms.max(raw_typed_at_ms) {
             let since = clock.now_ms().saturating_sub(last_typed_at_ms);
             if since < REFERENCE_TYPED_SETTLE_MS {
                 clock.sleep_ms(REFERENCE_TYPED_SETTLE_MS - since).await;
             }
         }
 
-        // Reauthorize, then the deadline: both before a single byte is written.
-        if let Err(error) = (request.authorize)() {
-            return ReferenceInputOutcome::NotTyped { error };
-        }
+        // The deadline, before a single byte is written (reauthorization follows the probe).
         if clock.now_ms().saturating_sub(request.arrived_at_ms) > REFERENCE_SUBMIT_DEADLINE_MS {
             return ReferenceInputOutcome::not_typed(
                 ScopeErrorCode::Timeout,
@@ -711,6 +726,11 @@ impl ReferenceInputQueue {
         };
 
         let session_id = request.target.target.backend_session_id.as_str();
+        // Reauthorize right before the first byte, after the (possibly slow) prompt probe, so a
+        // revoke that lands during the probe is still a clean refusal that types nothing.
+        if let Err(error) = (request.authorize)() {
+            return ReferenceInputOutcome::NotTyped { error };
+        }
         dispatched.store(true, Ordering::SeqCst);
         if let Err(message) = writer.write(session_id, shaped.as_bytes()).await {
             return ReferenceInputOutcome::outcome_unknown(format!(
@@ -1641,6 +1661,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_keystrokes_noted_on_the_pane_hold_a_submit_for_the_typed_settle_window() {
+        let queue = ReferenceInputQueue::new();
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::at(1_000);
+        let target = target("sess-a");
+        queue.note_raw_input("sess-a", 900);
+        // Keys on another pane do not hold this one.
+        queue.note_raw_input("sess-b", 1_000);
+
+        let outcome =
+            submit_ok(&queue, writer.as_ref(), &clock, &target, "r1", &submit_payload("hello")).await;
+
+        assert!(outcome.is_typed());
+        assert_eq!(clock.sleeps(), vec![REFERENCE_TYPED_SETTLE_MS - 100, REFERENCE_SUBMIT_DELAY_MS]);
+    }
+
+    #[tokio::test]
     async fn a_revoke_after_the_paste_cannot_untype_it() {
         let queue = ReferenceInputQueue::new();
         let writer = RecordingWriter::new();
@@ -1676,6 +1713,37 @@ mod tests {
             writer.writes(),
             vec![format!("{REFERENCE_PASTE_START}hello{REFERENCE_PASTE_END}").into_bytes()]
         );
+    }
+
+    #[tokio::test]
+    async fn a_revoke_that_lands_during_the_prompt_probe_types_nothing() {
+        let queue = ReferenceInputQueue::new();
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::at(0);
+        let target = target("sess-a");
+        let payload = submit_payload("hello");
+        let revoked = AtomicBool::new(false);
+        let authorize = || if revoked.load(Ordering::SeqCst) { Err(refusal()) } else { Ok(()) };
+        // The device is revoked while the (slow, real) screen probe reads the pane.
+        let probe = || {
+            revoked.store(true, Ordering::SeqCst);
+            std::future::ready(ReferencePromptProbe::Clear)
+        };
+
+        let request = ReferenceSubmitRequest {
+            target: &target,
+            request_id: "r1",
+            payload: &payload,
+            bracketed_paste: &paste_on,
+            blocked_prompt: None,
+            arrived_at_ms: 0,
+            last_typed_at_ms: None,
+            authorize: &authorize,
+        };
+        let outcome = queue.submit_with_probe(&request, &probe, writer.as_ref(), &clock).await;
+
+        assert_eq!(outcome.wire_code().as_deref(), Some("UNAUTHORIZED"), "{outcome:?}");
+        assert!(writer.writes().is_empty(), "a revoke before the first byte must type nothing");
     }
 
     #[tokio::test]

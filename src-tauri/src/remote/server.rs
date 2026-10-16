@@ -2830,6 +2830,10 @@ async fn handle_terminal_socket(
                     });
                     if can_control && !is_outage && !is_ssh {
                         let _ = session_backend.write_input(&session_id_clone, &bytes).await;
+                        // A chat submit right behind these keys waits for the pane to read them.
+                        reference_chat_runtime()
+                            .input
+                            .note_raw_input(&session_id_clone, reference_input::SystemReferenceClock.now_ms());
                     }
                 }
                 Message::Text(text) => {
@@ -3218,6 +3222,10 @@ async fn handle_terminal_grid_socket(
                     });
                     if can_control && !is_outage && !is_ssh {
                         let _ = session_backend.write_input(&session_id_clone, &bytes).await;
+                        // A chat submit right behind these keys waits for the pane to read them.
+                        reference_chat_runtime()
+                            .input
+                            .note_raw_input(&session_id_clone, reference_input::SystemReferenceClock.now_ms());
                     }
                 }
                 Message::Text(text) => {

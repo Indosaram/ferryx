@@ -1358,7 +1358,10 @@ impl crate::remote::backend::RemoteSessionBackend for ScreenStubBackend {
     ) -> futures_util::future::BoxFuture<'a, Result<crate::terminal::SessionAttachment, String>>
     {
         Box::pin(async move {
-            let (_sender, receiver) = tokio::sync::broadcast::channel(1);
+            let (sender, receiver) = tokio::sync::broadcast::channel(1);
+            // A live pane's output stream stays open while it is attached: a closed one would end
+            // a terminal socket before it reads the input it was sent.
+            std::mem::forget(sender);
             Ok(crate::terminal::SessionAttachment {
                 snapshot: crate::terminal::AttachmentSnapshot {
                     session_id: self.session_id.clone(),
@@ -1630,6 +1633,66 @@ async fn a_submit_whose_caller_leaves_after_the_paste_still_writes_its_enter() {
         Some(b"\r".as_slice()),
         "the paste was left unsent in the pane after its caller left"
     );
+}
+
+/// rs-input-screen-r15-1: raw keystrokes typed through the remote terminal socket must hold a chat
+/// paste back for the typed-settle window, or the paste lands inside the program's own redraw of
+/// those keys. The settle window is the behavior under test, so its lower bound is asserted:
+/// without the guard the submit finishes after only the paste-to-Enter gap.
+#[tokio::test]
+async fn a_chat_submit_right_behind_raw_terminal_keystrokes_waits_for_them_to_settle() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let session_id = "reference-route-typed-settle";
+    let (written_tx, mut written) = tokio::sync::mpsc::unbounded_channel();
+    let (backend, state, control) = unhubbed_pane(session_id, Some(written_tx));
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let mut request = format!("ws://{}/api/v1/terminal/{session_id}", server.addr)
+        .into_client_request()
+        .expect("terminal socket request");
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {control}").parse().expect("authorization header"),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("terminal socket upgrade");
+
+    let typed_at = std::time::Instant::now();
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Binary(b"x".to_vec().into()))
+        .await
+        .expect("keystroke sent");
+    let keystroke = tokio::time::timeout(std::time::Duration::from_secs(5), written.recv())
+        .await
+        .expect("the keystroke reached the pane")
+        .expect("the keystroke was written");
+    assert_eq!(keystroke, b"x".to_vec());
+
+    let (status, response) = server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"),
+            Some(&control),
+            Some(&unhubbed_submit(&state, session_id, "hello")),
+        )
+        .await;
+    let elapsed = typed_at.elapsed();
+
+    assert_eq!(status, 200, "{response}");
+    let writes = backend.writes.lock().expect("writes").clone();
+    assert_eq!(writes, vec![b"x".to_vec(), b"hello".to_vec(), b"\r".to_vec()]);
+    // The paste waits out the settle window measured from the keystroke, then the Enter gap.
+    let floor = std::time::Duration::from_millis(
+        super::input::REFERENCE_TYPED_SETTLE_MS + super::input::REFERENCE_SUBMIT_DELAY_MS - 20,
+    );
+    assert!(
+        elapsed >= floor,
+        "the paste did not wait for the raw keystroke to settle: {elapsed:?} < {floor:?}"
+    );
+    let _ = socket.close(None).await;
+    server.stop().await;
 }
 
 /// A backend whose one pane is served by a real output hub, so a replay gap behaves as it does on
