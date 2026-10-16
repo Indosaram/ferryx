@@ -1458,6 +1458,100 @@ describe("reference chat lane review fixes", () => {
     }
   });
 
+  /** Holds the identity answer on the moved base, so the chat target stays null until released. */
+  function gatedMovedCapabilities(): { route: LaneRoute; release: () => void } {
+    const gate = deferred<void>();
+    return {
+      route: ({ url }) =>
+        url.includes("/host/mach-1/") && url.includes("/api/v1/capabilities")
+          ? gate.promise.then(() =>
+              jsonResponse({ apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH, referenceOwnerId: REFERENCE_OWNER_ID }),
+            )
+          : undefined,
+      release: () => gate.resolve(),
+    };
+  }
+
+  it("ui-workspace-wiring-r18-1: an upload finishing while the target is briefly null leaves the composer usable", async () => {
+    try {
+      seedSavedHost();
+      const stage = deferred<Response>();
+      const identity = gatedMovedCapabilities();
+      const calls = installLane((call) =>
+        call.url.includes("/files") && call.method === "POST" ? stage.promise : identity.route(call),
+      );
+      render(<RemoteApp />);
+      await laneReady();
+      await stageNotes();
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/files") && call.method === "POST")).toBe(true);
+      });
+      expect(screen.getByTestId("attach-file-button")).toBeDisabled();
+
+      // The transport moves while the upload is out: the target is null until the host re-answers.
+      moveTransportBase();
+      await act(async () => {
+        stage.resolve(okStage());
+      });
+      await drainSettledResponses();
+
+      // The same identity answers on the new base, so the lane is not reset.
+      await act(async () => {
+        identity.release();
+      });
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/host/mach-1/") && call.url.includes("/history"))).toBe(true);
+      });
+      await drainSettledResponses();
+
+      await act(async () => {
+        fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "hello" } });
+      });
+      expect(screen.getByTestId("attach-file-button")).toBeEnabled();
+      expect(screen.getByTestId("send-button")).toBeEnabled();
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  it("ui-workspace-wiring-r18-2: an older page finishing while the target is briefly null leaves Load earlier usable", async () => {
+    try {
+      seedSavedHost();
+      const older = deferred<Response>();
+      const identity = gatedMovedCapabilities();
+      const calls = installLane((call) => {
+        const { url } = call;
+        if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return identity.route(call);
+        return url.includes("cursor=")
+          ? older.promise
+          : jsonResponse(nativePage({ cursor: { streamId: "omo:abc", offset: 500 }, hasMore: true }));
+      });
+      render(<RemoteApp />);
+      const olderButton = await screen.findByTestId("reference-older-button");
+      await act(async () => {
+        fireEvent.click(olderButton);
+      });
+
+      moveTransportBase();
+      await act(async () => {
+        older.resolve(new Response("unavailable", { status: 503 }));
+      });
+      await drainSettledResponses();
+
+      await act(async () => {
+        identity.release();
+      });
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/host/mach-1/") && call.url.includes("/history"))).toBe(true);
+      });
+      await drainSettledResponses();
+
+      expect(screen.getByTestId("reference-older-button")).toBeEnabled();
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
   it("ui-workspace-wiring-2: a late older page from the previous pane is never painted", async () => {
     const older = deferred<Response>();
     installLane(({ url }) => {

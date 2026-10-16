@@ -3181,7 +3181,9 @@ export const RemoteHostConnection: React.FC<{
       setChatOlderFailed(true);
       setChatWarnings((prev) => withChatWarning(prev, CHAT_OLDER_FAILED_WARNING));
     } finally {
-      if (!signal.aborted && chatTargetIsCurrent(target) && !superseded()) setChatOlderLoading(false);
+      // A target change aborts the lane and a re-anchor bumps the generation: both clear the flag
+      // themselves. A target that is only briefly null does neither, so this read clears it.
+      if (!signal.aborted && !superseded()) setChatOlderLoading(false);
     }
   }, [chatOlderCursor, chatTargetIsCurrent]);
 
@@ -3507,6 +3509,9 @@ export const RemoteHostConnection: React.FC<{
         // The pane changed while these uploaded: the lane they were for is gone, so nothing is
         // inserted anywhere and the host is told to let them go.
         releaseStagedChatFiles(target, staged);
+        // A target that is only briefly null resets nothing, so this upload clears its own flag;
+        // a real target change aborted the lane and already reset it.
+        if (!signal.aborted) setChatAttaching(false);
         return;
       }
       setChatAttaching(false);
