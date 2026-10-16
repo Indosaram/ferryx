@@ -9,6 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { createHash } from "node:crypto";
 import {
   RemoteApp,
   chatDaemonEpochFromRows,
@@ -1856,9 +1857,37 @@ describe("reference chat lane review fixes", () => {
   });
 
   it("ui-workspace-wiring-r5-1: a pane switch that releases staged files also drops their mentions from the pane's draft", async () => {
-    installLane(({ url, method }) =>
-      url.includes("/files") && method === "GET" ? jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" }) : undefined,
-    );
+    // The desktop follows the pick and says so, so each switch confirms on its own event instead
+    // of holding the picker until the confirmation timeout releases it.
+    let activeTabId = "tab-main";
+    installLane(({ url, method, body }) => {
+      if (url.includes("/files") && method === "GET") return jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" });
+      if (url.includes("/api/v1/workspace/select")) {
+        activeTabId = (body as { tabId: string }).tabId;
+        queueMicrotask(() => {
+          for (const socket of StubWebSocket.instances) {
+            socket.onmessage?.({
+              data: JSON.stringify({
+                event: "remote_active_selection_changed",
+                payload: { workspaceId: "ferryx", worktreeSlug: "main", tabId: activeTabId },
+              }),
+            } as MessageEvent);
+          }
+        });
+        return jsonResponse({ ok: true });
+      }
+      if (url.includes("/api/v1/workspace/state")) {
+        const tab = twoTabState.activeContext.terminalTabs.find((entry) => entry.id === activeTabId)!;
+        return jsonResponse({
+          activeContext: {
+            ...twoTabState.activeContext,
+            activeTabId,
+            activeTerminal: { sessionId: tab.sessionId, title: tab.label, running: true },
+          },
+        });
+      }
+      return undefined;
+    });
     render(<RemoteApp />);
     await laneReady();
     await stageNotes();
@@ -1883,5 +1912,175 @@ describe("reference chat lane review fixes", () => {
 
     expect(screen.queryByTestId("attachment-preview-att-1")).not.toBeInTheDocument();
     expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).not.toContain("@notes.txt");
+  });
+
+  it("ui-workspace-wiring-r13-1: a stop that fails after a pane switch does not warn in the new pane", async () => {
+    const stopA = deferred<Response>();
+    installLane(({ url }) => {
+      if (url.includes("/prompt")) return jsonResponse(promptBody(url.includes(SECOND_SESSION_ID) ? "B" : "A", false));
+      if (url.includes(`/reference-chat/${SESSION_ID}/stop`)) return stopA.promise;
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await screen.findByText("Question A");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("stop-button"));
+    });
+
+    await switchToSecondTab();
+    await screen.findByText("Question B");
+    await act(async () => {
+      stopA.resolve(
+        jsonResponse({ ok: false, error: { code: "INTERNAL", message: "no", retryable: true }, requestId: "s1" }, false, 500),
+      );
+    });
+    await drainSettledResponses();
+
+    expect(screen.queryAllByText(/stop request was not delivered/)).toHaveLength(0);
+  });
+
+  it("ui-workspace-wiring-r13-1: a stop still in flight on one pane does not swallow a stop on the next pane", async () => {
+    const stopA = deferred<Response>();
+    const calls = installLane(({ url }) => {
+      if (url.includes("/prompt")) return jsonResponse(promptBody(url.includes(SECOND_SESSION_ID) ? "B" : "A", false));
+      if (url.includes(`/reference-chat/${SESSION_ID}/stop`)) return stopA.promise;
+      if (url.includes("/stop")) {
+        return jsonResponse({ ok: true, data: { receipt: { requestId: "r2", target: {}, stage: "accepted" } }, requestId: "r2" });
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await screen.findByText("Question A");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("stop-button"));
+    });
+
+    await switchToSecondTab();
+    await screen.findByText("Question B");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("stop-button"));
+    });
+    await drainSettledResponses();
+
+    expect(
+      calls.filter((call) => call.method === "POST" && call.url.includes(`/reference-chat/${SECOND_SESSION_ID}/stop`)),
+    ).toHaveLength(1);
+    await act(async () => {
+      stopA.resolve(jsonResponse({ ok: true, data: {}, requestId: "s1" }));
+    });
+  });
+
+  it("ui-workspace-wiring-r15-1: files picked together are bounded by the bytes staged earlier in the same pick", async () => {
+    // Three 8 MiB files: each fits the 10 MiB file bound, but together they pass the 20 MiB turn bound.
+    const size = 8 * 1024 * 1024;
+    const bytes = new Uint8Array(size);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const big = (name: string) => ({
+      name,
+      type: "text/plain",
+      size,
+      arrayBuffer: async () => bytes.buffer.slice(0),
+    });
+    const calls = installLane(({ url, method, body }) => {
+      if (!url.includes("/files") || method !== "POST") return undefined;
+      const name = (body as { params: { name: string } }).params.name;
+      return jsonResponse({
+        ok: true,
+        data: {
+          receipt: { hostId: "local", attachmentId: `att-${name}`, sha256, sizeBytes: size, mediaType: "text/plain" },
+          displayName: name,
+          mentionText: `@${name} `,
+        },
+        requestId: `r-${name}`,
+      });
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("file-upload-input"), {
+        target: { files: [big("one.txt"), big("two.txt"), big("three.txt")] },
+      });
+    });
+    await screen.findByTestId("attachment-preview-att-two.txt", undefined, { timeout: 10_000 });
+    await drainSettledResponses();
+
+    expect(calls.filter((call) => call.method === "POST" && call.url.includes("/files"))).toHaveLength(2);
+    expect(screen.queryByTestId("attachment-preview-att-three.txt")).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-composer-attach-error")).toHaveTextContent(/must stay within/);
+  }, 30_000);
+
+  it("ui-workspace-wiring-r15-2: a slide past a repeated turn keeps every turn it slid past", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const cont = { role: "user", parts: [{ kind: "text", text: "continue" }], startedAt: null };
+    const a1 = { role: "assistant", parts: [{ kind: "text", text: "ANSWER-1" }], startedAt: null };
+    const a2 = { role: "assistant", parts: [{ kind: "text", text: "ANSWER-2" }], startedAt: null };
+    const n1 = { role: "user", parts: [{ kind: "text", text: "NEW-1" }], startedAt: null };
+    const n2 = { role: "assistant", parts: [{ kind: "text", text: "NEW-2" }], startedAt: null };
+    let slid = false;
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      if (url.includes("cursor=")) {
+        return jsonResponse(nativePage({
+          turns: [{ role: "user", parts: [{ kind: "text", text: "OLD-1" }], startedAt: "2026-10-05T00:00:00Z" }],
+          cursor: null,
+          hasMore: false,
+        }));
+      }
+      return slid
+        ? jsonResponse(nativePage({ turns: [cont, a2, n1, n2], cursor: { streamId: "omo:abc", offset: 600 }, hasMore: true }))
+        : jsonResponse(nativePage({ turns: [cont, a1, cont, a2], cursor: { streamId: "omo:abc", offset: 500 }, hasMore: true }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+    await screen.findByText("OLD-1");
+
+    // two turns were appended: the window now starts at the second "continue"
+    slid = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await drainSettledResponses();
+    await screen.findByText("NEW-2");
+
+    expect(screen.getByText("OLD-1")).toBeInTheDocument();
+    expect(screen.getAllByText("ANSWER-1")).toHaveLength(1);
+    expect(screen.getAllByText("continue")).toHaveLength(2);
+    expect(
+      screen.getByText("OLD-1").compareDocumentPosition(screen.getByText("ANSWER-1")) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      screen.getByText("ANSWER-1").compareDocumentPosition(screen.getByText("ANSWER-2")) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("ui-workspace-wiring-r15-2: an older page and the newest page holding the same turn text never share a key", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cont = { role: "user", parts: [{ kind: "text", text: "continue" }], startedAt: null };
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      if (url.includes("cursor=")) {
+        return jsonResponse(nativePage({ turns: [cont], cursor: null, hasMore: false }));
+      }
+      return jsonResponse(nativePage({
+        turns: [cont, { role: "assistant", parts: [{ kind: "text", text: "The parser now streams line by line." }], startedAt: null }],
+        cursor: { streamId: "omo:abc", offset: 500 },
+        hasMore: true,
+      }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+    await waitFor(() => {
+      expect(screen.getAllByText("continue")).toHaveLength(2);
+    });
+
+    const duplicateKeys = errors.mock.calls.filter((args) => args.map(String).join(" ").includes("same key"));
+    errors.mockRestore();
+    expect(duplicateKeys).toEqual([]);
   });
 });
