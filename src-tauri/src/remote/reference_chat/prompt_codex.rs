@@ -606,6 +606,9 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
             return None;
         }
         question = Some(normalized);
+        // the line holds text once it no longer shows the empty-answer placeholder
+        typed_row_holds_text =
+            !re_type_your_answer().is_match(clean_line(&lines[answer_line]).trim());
         options = Vec::new();
         menu_row_count = 0;
         selected_index = 0;
@@ -1693,6 +1696,7 @@ pinned_regex!(re_messages_to_be_submitted, r"(?i)Messages to be submitted");
 pinned_regex!(re_to_answer, r"(?i)\bto answer$");
 pinned_regex!(re_none_of_the_above, r"(?i)^None of the above\b");
 pinned_regex!(re_other_row, r"(?i)^Other\b");
+pinned_regex!(re_type_your_answer, r"(?i)^Type your answer$");
 pinned_regex!(
     re_codex_approval_header,
     r"(?i)(?:Would you like to (?:run|make|apply|continue|grant)|Allow Codex to|Approve (?:this )?(?:app )?tool call|Do you trust the contents|Trust this folder\?|Enable full access)"
@@ -1970,6 +1974,31 @@ mod tests {
                 keys_of(&["enter"])
             ]
         );
+    }
+
+    /// A free-form answer line that already holds typed text takes no custom answer: Codex has no
+    /// clear-line key, so a typed answer would be appended to that text.
+    #[test]
+    fn a_free_form_answer_line_holding_text_takes_no_custom_answer() {
+        let screen = ASYNC_FREE_FORM.replace("  Type your answer\n", "  abc\n");
+        assert_ne!(screen, ASYNC_FREE_FORM, "the fixture holds the placeholder line");
+        let parsed = parse_reference_codex_prompt(&screen).expect("the free form parses");
+        assert_eq!(parsed.responder, ReferenceCodexResponder::AsyncQuestion);
+        assert_eq!(parsed.prompt.question, "Any notes?");
+        assert_eq!(parsed.prompt.custom_option_index, None);
+        assert_eq!(parsed.custom_menu_index, None);
+    }
+
+    /// The placeholder line, in any case and with surrounding spaces, stays answerable.
+    #[test]
+    fn a_free_form_placeholder_line_keeps_its_custom_answer() {
+        for placeholder in ["Type your answer", "type your answer  "] {
+            let screen =
+                ASYNC_FREE_FORM.replace("  Type your answer\n", &format!("  {placeholder}\n"));
+            let parsed = parse_reference_codex_prompt(&screen).expect("the free form parses");
+            assert_eq!(parsed.prompt.custom_option_index, Some(0), "{placeholder:?}");
+            assert_eq!(parsed.custom_menu_index, Some(0), "{placeholder:?}");
+        }
     }
 
     /// A last row already typed over still counts as the typed row, and its options are the ones
