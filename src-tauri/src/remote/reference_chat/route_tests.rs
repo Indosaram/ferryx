@@ -557,6 +557,37 @@ impl ReferenceRouteFixture {
         } else {
             format!("printf '{prefix}_%s\\n' '{suffix}'\n")
         };
+        self.submit_command_and_await_marker_at(marker, &command, server, path)
+            .await;
+    }
+
+    /// Print the marker and then leave the shell in a long foreground sleep, so the marker is the
+    /// last output the pane produces on its own: the shell prints no further prompt while its
+    /// foreground job runs. The terminal is back in cooked mode with echo on for that job, so a
+    /// write to the pane is still echoed and still advances its output sequence.
+    ///
+    /// The command carries no trailing newline: the submit route's own separately written Enter
+    /// is its only terminator, so no second Enter is left to be echoed after the marker.
+    async fn park_pane_after_marker(&self, marker: &str) {
+        let (prefix, suffix) = marker
+            .split_once('_')
+            .expect("the marker names a prefix and a suffix the shell joins");
+        let command = if cfg!(windows) {
+            format!("Write-Output ('{prefix}_' + '{suffix}'); Start-Sleep -Seconds 100000")
+        } else {
+            format!("printf '{prefix}_%s\\n' '{suffix}'; sleep 100000")
+        };
+        self.submit_command_and_await_marker_at(marker, &command, &self.server, &self.route("submit"))
+            .await;
+    }
+
+    async fn submit_command_and_await_marker_at(
+        &self,
+        marker: &str,
+        command: &str,
+        server: &ReferenceRouteServer,
+        path: &str,
+    ) {
         let attachment = self
             .state
             .session_backend
@@ -834,6 +865,11 @@ async fn a_target_naming_another_owner_is_refused_without_writing_or_resizing() 
             && fixture.state.reference_owner_id != ROUTE_TEST_FOREIGN_OWNER,
         "the gateway's owner identity is its own value, never the caller's"
     );
+    // The pane's own startup output (the login shell's first prompt) is asynchronous and may land
+    // at any time after the session is created; on a loaded host it lands after the baseline
+    // below. Park the pane first, so everything it will emit by itself has been emitted before
+    // the baseline is taken, and any later output can only come from a write.
+    fixture.park_pane_after_marker("REFUSAL_PARKED").await;
 
     // Valid control: this gateway's own owner is served, so the refusals below are the fence's.
     let control = fixture.read_query(
@@ -896,8 +932,9 @@ async fn a_target_naming_another_owner_is_refused_without_writing_or_resizing() 
     assert_eq!(status, 410, "a foreign owner must not reach a mutation: {body}");
     assert!(body.contains("TARGET_EXPIRED"), "typed refusal on submit: {body}");
 
-    // Zero writes and zero resizes: nothing was submitted in this test, so the idle pane emits
-    // nothing, and a refused target must leave both observables exactly as the control left them.
+    // Zero writes and zero resizes: the parked pane emits nothing by itself, and echoes anything
+    // written to it, so a refused target must leave both observables exactly as the control
+    // left them.
     assert_eq!(
         fixture.geometry().await,
         geometry_before,
