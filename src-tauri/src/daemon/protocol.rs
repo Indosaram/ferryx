@@ -13,6 +13,9 @@ use std::path::PathBuf;
 
 pub const DAEMON_PROTOCOL_VERSION: u32 = 5;
 pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
+/// Error code a daemon that knows the agent integration requests puts on every failure of them,
+/// so a client can tell such a failure from an older daemon's untyped "malformed request" reply.
+pub const AGENT_INTEGRATION_ERROR_CODE: &str = "AGENT_INTEGRATION_FAILED";
 pub const LOCAL_SPLIT_VALIDITY_MS: u64 = 600_000;
 
 pub const ATTEMPT_TOTAL_BUDGET_MS: u64 = 15_000;
@@ -587,6 +590,13 @@ pub enum DaemonRequest {
     ClearSession,
     RemoteGetStatus,
     GetCapabilities,
+    /// Reads the daemon-held agent-state integration setting.
+    GetAgentIntegration,
+    /// Turns the agent-state integration on or off; panes spawned afterwards follow it.
+    #[serde(rename_all = "camelCase")]
+    SetAgentIntegration {
+        enabled: bool,
+    },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
     PairedHostList,
@@ -863,6 +873,10 @@ pub enum DaemonResponse {
         provider_session_id: Option<String>,
     },
     ResetAgentStateOk,
+    #[serde(rename_all = "camelCase")]
+    AgentIntegrationOk {
+        enabled: bool,
+    },
     #[serde(rename_all = "camelCase")]
     AttachOk {
         epoch: u64,

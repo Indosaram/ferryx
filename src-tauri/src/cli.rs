@@ -13,6 +13,8 @@ use crate::ipc::browser_cli::{send_browser_cli_request, BrowserCliRequest, Brows
 pub enum LaunchMode {
     Gui,
     Daemon,
+    /// `--daemon-supervisor`: the Windows watchdog the per-user scheduled task runs.
+    DaemonSupervisor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2829,11 +2831,50 @@ where
     T: AsRef<str>,
 {
     for arg in args {
+        if arg.as_ref() == crate::daemon::supervisor_windows::SUPERVISOR_ARG {
+            return LaunchMode::DaemonSupervisor;
+        }
         if arg.as_ref() == "--daemon" {
             return LaunchMode::Daemon;
         }
     }
     LaunchMode::Gui
+}
+
+/// Runs the `--daemon-supervisor` watchdog and returns its exit code.
+///
+/// `args` is the full command line. The task forwards the isolation variables as `--env KEY=VALUE`
+/// because a scheduled task has no environment block; they are applied here, while the process is
+/// still single-threaded, so the watchdog and every daemon it spawns use the same runtime dir.
+pub fn run_daemon_supervisor(args: &[String]) -> i32 {
+    let forwarded = match crate::daemon::supervisor_windows::parse_supervisor_args(
+        args.get(1..).unwrap_or_default(),
+    ) {
+        Some(Ok(forwarded)) => forwarded,
+        Some(Err(error)) => {
+            eprintln!("Ferryx daemon supervisor error: {error}");
+            return 2;
+        }
+        None => {
+            eprintln!(
+                "Ferryx daemon supervisor error: {} must be the first argument",
+                crate::daemon::supervisor_windows::SUPERVISOR_ARG
+            );
+            return 2;
+        }
+    };
+    for (key, value) in forwarded {
+        std::env::set_var(key, value);
+    }
+    #[cfg(windows)]
+    {
+        crate::daemon::supervisor_windows::run_watchdog()
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!("Ferryx daemon supervisor error: the watchdog only runs on Windows");
+        2
+    }
 }
 
 /// Parses `--handover-from <path>`.
@@ -2865,6 +2906,11 @@ pub fn run_daemon_headless(
     // Install before anything else: a panic during startup is exactly the death that left no
     // trace on 2026-09-25, and the desktop discards this process's stderr.
     crate::daemon::logging::install_panic_recorder();
+    // Before any thread exists: keeps NOTIFY_SOCKET away from every PTY child.
+    #[cfg(unix)]
+    crate::daemon::supervisor_linux::capture_notify_socket();
+    #[cfg(target_os = "linux")]
+    let supervisor_unavailable = crate::daemon::supervisor_linux::availability().clone();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -2876,6 +2922,10 @@ pub fn run_daemon_headless(
                 None
             }
         };
+        #[cfg(target_os = "linux")]
+        if let Some(reason) = supervisor_unavailable {
+            tracing::warn!("crash-restart unavailable: {reason}");
+        }
         #[cfg(test)]
         if std::env::var("FERRYX_LOGGING_FIXTURE").as_deref() == Ok("1") {
             let hub = crate::daemon::agent_state::AgentStateHub::default();
@@ -2960,6 +3010,8 @@ pub fn run_daemon_headless(
                 if announce_readiness {
                     println!("FERRYX_DAEMON_READY");
                     let _ = std::io::stdout().flush();
+                    #[cfg(unix)]
+                    crate::daemon::supervisor_linux::notify_ready();
                 }
             }
             Err(_) => {
@@ -2987,6 +3039,11 @@ pub fn run_daemon_headless(
                             "Another daemon already serves this endpoint; exiting without taking over"
                         );
                     }
+                    // A `Type=notify` unit whose process exits before `READY=1` counts as failed
+                    // and `Restart=on-failure` would relaunch it in a loop; report ready so this
+                    // clean exit stays a clean, unrestarted stop.
+                    #[cfg(unix)]
+                    crate::daemon::supervisor_linux::notify_ready();
                     result = Ok(());
                 }
             }
@@ -3316,6 +3373,14 @@ mod tests {
             "--other".to_string(),
         ];
         assert_eq!(parse_launch_mode(&args), LaunchMode::Gui);
+    }
+
+    #[test]
+    fn test_parse_launch_mode_detects_daemon_supervisor_flag() {
+        let args = vec!["ferryx".to_string(), "--daemon-supervisor".to_string()];
+        assert_eq!(parse_launch_mode(&args), LaunchMode::DaemonSupervisor);
+        let malformed = vec!["ferryx".to_string(), "--daemon-supervisor".to_string(), "--bogus".to_string()];
+        assert_eq!(run_daemon_supervisor(&malformed), 2);
     }
 
     #[test]

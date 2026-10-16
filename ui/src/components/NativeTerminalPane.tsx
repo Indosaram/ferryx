@@ -23,6 +23,13 @@ import {
 } from "../lib/nativeTerminalLifecycle";
 import { switchDebug } from "../lib/switchDebug";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
+import {
+  TERMINAL_COPY_MODE_EVENT,
+  TerminalCopyModeBadge,
+  useTerminalCopyMode,
+  type CopyModeGridSize,
+  type TerminalCopyModeEventDetail,
+} from "./TerminalCopyMode";
 import { openTerminalToken, resolveTokenAtCol } from "../lib/linkRouting";
 import { loadFileLinkEditor } from "../lib/fileLinkSettings";
 import {
@@ -132,6 +139,9 @@ interface NativeTerminalReceipt {
   readonly cellWidthPx: number;
   readonly cellHeightPx: number;
   readonly effectiveScaleFactor?: number | null;
+  /** Grid size; present on bounds receipts (NativeTerminalBoundsReceipt.cols/rows). */
+  readonly cols?: number;
+  readonly rows?: number;
 }
 
 interface ImeAnchor {
@@ -635,6 +645,21 @@ export function NativeTerminalPane({
       ? (session.backendSessionId ?? null)
       : (sessionId ?? null);
   const paneIdentity = session?.id ?? sessionId;
+  const copyModeGridRef = useRef<CopyModeGridSize>({ cols: 80, rows: 24 });
+  const copyMode = useTerminalCopyMode(targetSessionId, copyModeGridRef);
+  const copyModeActiveRef = copyMode.activeRef;
+  const toggleCopyMode = copyMode.toggle;
+  const copyModeOnOutput = copyMode.onOutput;
+  const copyModeHandleKey = copyMode.handleKey;
+  useEffect(() => {
+    const onToggle = (event: Event) => {
+      const detail = (event as CustomEvent<TerminalCopyModeEventDetail>).detail;
+      if (!detail || !paneIdentity || detail.sessionId !== paneIdentity) return;
+      toggleCopyMode();
+    };
+    window.addEventListener(TERMINAL_COPY_MODE_EVENT, onToggle);
+    return () => window.removeEventListener(TERMINAL_COPY_MODE_EVENT, onToggle);
+  }, [paneIdentity, toggleCopyMode]);
   useEffect(() => {
     switchDebug("terminal.surface.input.gate.state", {
       paneIdentity,
@@ -865,6 +890,9 @@ export function NativeTerminalPane({
       width: receipt.cellWidthPx,
       height: receipt.cellHeightPx,
     };
+    if (typeof receipt.cols === "number" && typeof receipt.rows === "number" && receipt.cols > 0 && receipt.rows > 0) {
+      copyModeGridRef.current = { cols: receipt.cols, rows: receipt.rows };
+    }
     setImeAnchor({
       left: (receipt.cursorCol * receipt.cellWidthPx) / scaleFactor,
       top: (receipt.cursorRow * receipt.cellHeightPx) / scaleFactor,
@@ -1377,6 +1405,11 @@ export function NativeTerminalPane({
   }, [remoteConnectionState, remoteGeneration, session?.remoteConnectionState, session?.remoteGeneration, session?.workspaceId, targetSessionId, visible]);
 
   const sendInput = useCallback((input: NativeTerminalInput) => {
+    // Copy mode owns the keyboard: nothing (keys, IME commits, AltGr text) reaches the PTY.
+    if (copyModeActiveRef.current) {
+      switchDebug("terminal.surface.input.copyMode", { backendSessionId: targetSessionId });
+      return;
+    }
     if (!visible || !isTauri() || !targetSessionId) {
       recordTerminalInputDrop("dropped");
       switchDebug("terminal.surface.input.dropped", {
@@ -1639,7 +1672,7 @@ export function NativeTerminalPane({
 
   const sendPaste = useCallback(
     (text: string) => {
-      if (!visible || !isTauri() || !targetSessionId) {
+      if (copyModeActiveRef.current || !visible || !isTauri() || !targetSessionId) {
         return;
       }
       if (paneIdentity) {
@@ -1790,7 +1823,7 @@ export function NativeTerminalPane({
     button: "Left" | "Right" | null,
   ) => {
     const viewport = viewportRef.current;
-    if (!visible || !isTauri() || !targetSessionId || !viewport) return;
+    if (copyModeActiveRef.current || !visible || !isTauri() || !targetSessionId || !viewport) return;
     const rect = viewport.getBoundingClientRect();
     const timestampNs = Math.round(
       (typeof event.timeStamp === "number" && event.timeStamp > 0
@@ -1914,7 +1947,10 @@ export function NativeTerminalPane({
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void onNativeTerminalScrollbar((metrics) => {
-      if (metrics.sessionId === targetSessionId) updateScrollbar(metrics);
+      if (metrics.sessionId !== targetSessionId) return;
+      updateScrollbar(metrics);
+      // Output while copy mode is active: re-read pruning; the viewport stays frozen.
+      copyModeOnOutput();
     }).then((listener) => {
       if (disposed) listener();
       else unlisten = listener;
@@ -1924,7 +1960,7 @@ export function NativeTerminalPane({
       disposed = true;
       unlisten?.();
     };
-  }, [targetSessionId, updateScrollbar, visible]);
+  }, [copyModeOnOutput, targetSessionId, updateScrollbar, visible]);
 
   useEffect(() => {
     let plainDown: { clientX: number; clientY: number } | null = null;
@@ -2174,6 +2210,16 @@ export function NativeTerminalPane({
         }
         return;
       }
+      // Copy mode gate (after the IME/AltGr gate): keys become motions, never PTY input. A chord
+      // an app shortcut already claimed (the copy-mode toggle itself) is left alone, and the
+      // platform copy chord keeps its usual meaning.
+      if (copyModeActiveRef.current) {
+        if (event.defaultPrevented || !canClaimInput || isCopyShortcut(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        copyModeHandleKey(event);
+        return;
+      }
 
       if (
         targetEl !== inputRef.current &&
@@ -2325,7 +2371,7 @@ export function NativeTerminalPane({
       window.removeEventListener("blur", clearPasteSuppression);
       clearPasteSuppression();
     };
-  }, [active, copySelectionOrInterrupt, pasteClipboardImage, performNativePasteFallback, sendCtrlC, sendImagePasteShortcut, sendInput, sendPaste, session?.workspaceId, targetSessionId, visible]);
+  }, [active, copyModeActiveRef, copyModeHandleKey, copySelectionOrInterrupt, pasteClipboardImage, performNativePasteFallback, sendCtrlC, sendImagePasteShortcut, sendInput, sendPaste, session?.workspaceId, targetSessionId, visible]);
 
   useEffect(() => {
     if (!visible || !targetSessionId || !isTauri()) return;
@@ -3350,6 +3396,8 @@ export function NativeTerminalPane({
       }}
       onWheel={(event) => {
         if (!visible || event.deltaY === 0 || !Number.isFinite(event.deltaY)) return;
+        // A wheel under mouse tracking / alternate scroll writes to the PTY; copy mode forbids it.
+        if (copyModeActiveRef.current) return;
         triggerScrollbarReveal();
         if (!isTauri() || !targetSessionId) return;
         let deltaRows: number;
@@ -3493,6 +3541,17 @@ export function NativeTerminalPane({
               return;
             }
             if (isAltGraphTextInput(forwardable)) {
+              return;
+            }
+
+            if (copyModeActiveRef.current) {
+              if (isCopyShortcut(event)) {
+                event.preventDefault();
+                copySelectionOrInterrupt();
+                return;
+              }
+              event.preventDefault();
+              copyModeHandleKey(event);
               return;
             }
 
@@ -3706,6 +3765,7 @@ export function NativeTerminalPane({
           />
         ) : null}
       </div>
+      {copyMode.active ? <TerminalCopyModeBadge /> : null}
       {error ? (
         <button
           type="button"

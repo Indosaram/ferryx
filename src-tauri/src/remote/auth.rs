@@ -84,7 +84,11 @@ pub fn load_or_generate_machine_identity(base_dir: &Path) -> Result<MachineIdent
     }
 
     let key = SigningKey::generate(&mut rand::rngs::OsRng);
-    let display_name = std::process::Command::new("hostname")
+    let mut hostname = std::process::Command::new("hostname");
+    // Also compiled into the push harness, which has no `crate::util`.
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut hostname, 0x0800_0000); // CREATE_NO_WINDOW
+    let display_name = hostname
         .output()
         .ok()
         .filter(|output| output.status.success())

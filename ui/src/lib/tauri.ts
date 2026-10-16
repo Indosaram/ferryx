@@ -330,6 +330,14 @@ export async function applyTerminalOverrides(
   });
 }
 
+/** Pushes the resolved app appearance so the native terminal follows it; returns the effective preferences. */
+export async function setTerminalAppearance(
+  appearance: "light" | "dark",
+): Promise<TerminalPreferences | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<TerminalPreferences>("cmd_terminal_set_appearance", { appearance });
+}
+
 export async function listWorktrees(workspaceId: string) {
   if (!isTauri()) {
     if (getRemoteAuthToken()) {
@@ -1020,6 +1028,41 @@ export async function resetAgentState(sessionId: string): Promise<void> {
   await invokeCommand<void>("cmd_agent_state_reset", {
     sessionId,
   });
+}
+
+export interface AgentIntegrationStatus {
+  enabled: boolean;
+}
+
+export interface LocalRemovalReport {
+  removed: string[];
+  keptModified: string[];
+  failed: { path: string; error: string }[];
+}
+
+export interface DaemonSupervisorStatus {
+  supported: boolean;
+  enabled: boolean;
+}
+
+export async function getAgentIntegration(): Promise<AgentIntegrationStatus> {
+  return invokeCommand<AgentIntegrationStatus>("cmd_agent_integration_get");
+}
+
+export async function setAgentIntegration(enabled: boolean): Promise<AgentIntegrationStatus> {
+  return invokeCommand<AgentIntegrationStatus>("cmd_agent_integration_set", { enabled });
+}
+
+export async function removeLocalAgentIntegration(): Promise<LocalRemovalReport> {
+  return invokeCommand<LocalRemovalReport>("cmd_agent_integration_remove_local");
+}
+
+export async function getDaemonSupervisor(): Promise<DaemonSupervisorStatus> {
+  return invokeCommand<DaemonSupervisorStatus>("cmd_daemon_supervisor_get");
+}
+
+export async function setDaemonSupervisor(enabled: boolean): Promise<DaemonSupervisorStatus> {
+  return invokeCommand<DaemonSupervisorStatus>("cmd_daemon_supervisor_set", { enabled });
 }
 
 export type RemoteNetworkMode = "off" | "localNetwork" | "tailscale" | "relay";

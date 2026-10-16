@@ -33,6 +33,7 @@ const TERMINAL_CHORD_CASES: readonly [string, ShortcutActionId, KeyboardEventIni
   ["focus next terminal pane", "terminal.focusNext", { key: "]", metaKey: true }],
   ["focus previous terminal pane", "terminal.focusPrevious", { key: "[", metaKey: true }],
   ["find in terminal", "terminal.search", { key: "f", metaKey: true }],
+  ["toggle terminal copy mode", "terminal.copyMode", { key: "x", metaKey: true, shiftKey: true }],
   ["toggle sidebar", "sidebar.left.toggle", { key: "b", metaKey: true }],
   ["add project primary", "project.add", { key: "o", metaKey: true }],
   ["add project alias cmd-n", "project.add", { key: "n", metaKey: true }],
@@ -132,6 +133,7 @@ describe("shortcut registry", () => {
       "terminal.focusNext",
       "terminal.focusPrevious",
       "terminal.search",
+      "terminal.copyMode",
       "sidebar.left.toggle",
       "project.add",
       "commandPalette.open",
@@ -166,6 +168,8 @@ describe("shortcut registry", () => {
     expect(shortcutAliasesLabels("tab.previous", true)).toEqual(["⌃PgUp", "⌃⇧Tab"]);
     expect(shortcutLabel("terminal.search", true)).toBe("⌘F");
     expect(shortcutLabel("terminal.search", false)).toBe("Ctrl+F");
+    expect(shortcutLabel("terminal.copyMode", true)).toBe("⌘⇧X");
+    expect(shortcutLabel("terminal.copyMode", false)).toBe("Ctrl+Shift+X");
     expect(shortcutLabel("settings.toggle", true)).toBe("⌘,");
     expect(shortcutLabel("settings.toggle", false)).toBe("Ctrl+,");
     expect(shortcutLabel("workspace.select1", true)).toBe("⌘1");
@@ -322,6 +326,7 @@ describe("shortcut registry", () => {
       "terminal.focusNext": vi.fn(),
       "terminal.focusPrevious": vi.fn(),
       "terminal.search": vi.fn(),
+      "terminal.copyMode": vi.fn(),
       "sidebar.left.toggle": vi.fn(),
       "project.add": vi.fn(),
       "commandPalette.open": vi.fn(),
@@ -367,6 +372,27 @@ describe("shortcut registry", () => {
     fireEvent.keyDown(input, { key: "n", ctrlKey: true, shiftKey: true });
     expect(handlers["notifications.toggle"]).toHaveBeenCalledOnce();
     input.remove();
+  });
+
+  it("ignores chords typed into the shortcut recorder", () => {
+    const handlers = { "settings.toggle": vi.fn() };
+    renderHook(() => useShortcuts(handlers, { isMac: false }));
+    const recorder = document.createElement("div");
+    recorder.setAttribute("data-shortcut-recorder", "");
+    const recorderInput = document.createElement("input");
+    recorder.appendChild(recorderInput);
+    const plain = document.createElement("div");
+    document.body.append(recorder, plain);
+
+    const recorded = new KeyboardEvent("keydown", { key: ",", ctrlKey: true, bubbles: true, cancelable: true });
+    recorderInput.dispatchEvent(recorded);
+    expect(handlers["settings.toggle"]).not.toHaveBeenCalled();
+    expect(recorded.defaultPrevented).toBe(false);
+
+    fireEvent.keyDown(plain, { key: ",", ctrlKey: true });
+    expect(handlers["settings.toggle"]).toHaveBeenCalledOnce();
+    recorder.remove();
+    plain.remove();
   });
 });
 
@@ -511,6 +537,8 @@ describe("shortcut chord collision invariants", () => {
       "Mod+]": ["browser.forward", "terminal.focusNext"],
       "Mod+f": ["browser.find", "terminal.search"],
     });
+    // terminal.copyMode (Mod+Shift+X / Ctrl+Shift+X off macOS) shares its chord with nothing.
+    expect(Object.values(collisions).flat()).not.toContain("terminal.copyMode");
   });
 
   it("every colliding pair spans the browser/terminal surface split", () => {

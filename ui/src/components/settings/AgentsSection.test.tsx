@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { loadAgentSettings } from "../../lib/agentsSettings";
@@ -6,10 +6,16 @@ import { AgentsSection } from "./AgentsSection";
 
 const native = vi.hoisted(() => ({
   detectAgents: vi.fn(),
+  getAgentIntegration: vi.fn(),
+  setAgentIntegration: vi.fn(),
+  removeLocalAgentIntegration: vi.fn(),
 }));
 
 vi.mock("../../lib/tauri", () => ({
   detectAgents: native.detectAgents,
+  getAgentIntegration: native.getAgentIntegration,
+  setAgentIntegration: native.setAgentIntegration,
+  removeLocalAgentIntegration: native.removeLocalAgentIntegration,
 }));
 
 describe("AgentsSection", () => {
@@ -17,6 +23,13 @@ describe("AgentsSection", () => {
     vi.clearAllMocks();
     localStorage.clear();
     native.detectAgents.mockResolvedValue([]);
+    native.getAgentIntegration.mockResolvedValue({ enabled: true });
+    native.setAgentIntegration.mockResolvedValue(undefined);
+    native.removeLocalAgentIntegration.mockResolvedValue({
+      removed: [],
+      keptModified: [],
+      failed: [],
+    });
   });
 
   afterEach(() => {
@@ -208,5 +221,61 @@ describe("AgentsSection", () => {
 
     await waitFor(() => expect(loadAgentSettings().custom).toEqual([]));
     expect(screen.getByText("No custom agents registered yet.")).toBeInTheDocument();
+  });
+
+  it("toggle off persists via IPC and hides Prepare", async () => {
+    native.getAgentIntegration.mockResolvedValue({ enabled: true });
+
+    render(<AgentsSection />);
+
+    const toggle = await screen.findByRole("switch", { name: "Agent state integration" });
+    await waitFor(() => expect(toggle).toBeChecked());
+
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(native.setAgentIntegration).toHaveBeenCalledWith(false));
+    // Turning the integration off must never remove installed files.
+    expect(native.removeLocalAgentIntegration).not.toHaveBeenCalled();
+  });
+
+  it("older daemon shows takes-effect-after-restart note", async () => {
+    native.setAgentIntegration.mockRejectedValue({
+      code: "DAEMON_UPGRADE_REQUIRED",
+      message: "daemon too old",
+    });
+
+    render(<AgentsSection />);
+
+    const toggle = await screen.findByRole("switch", { name: "Agent state integration" });
+    await waitFor(() => expect(toggle).toBeChecked());
+    expect(screen.queryByText("Takes effect after Ferryx restarts")).toBeNull();
+
+    fireEvent.click(toggle);
+
+    expect(await screen.findByText("Takes effect after Ferryx restarts")).toBeInTheDocument();
+    expect(native.setAgentIntegration).toHaveBeenCalledWith(false);
+    // Turning the integration off must never remove installed files.
+    expect(native.removeLocalAgentIntegration).not.toHaveBeenCalled();
+  });
+
+  it("remove local shows removed and kept counts", async () => {
+    native.removeLocalAgentIntegration.mockResolvedValue({
+      removed: ["/home/u/.claude/settings.json", "/home/u/.codex/hooks.json"],
+      keptModified: ["/home/u/.omp/hooks.json"],
+      failed: [],
+    });
+
+    render(<AgentsSection />);
+    await waitFor(() => expect(native.getAgentIntegration).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove from this computer" }));
+    const dialog = await screen.findByRole("dialog", { name: "Remove agent integration" });
+    expect(native.removeLocalAgentIntegration).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+
+    expect(await screen.findByText("Removed 2, kept 1 modified")).toBeInTheDocument();
+    expect(native.removeLocalAgentIntegration).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog", { name: "Remove agent integration" })).toBeNull();
   });
 });

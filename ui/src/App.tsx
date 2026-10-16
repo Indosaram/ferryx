@@ -11,6 +11,7 @@ import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./comp
 import { Sidebar, type SidebarAttention } from "./components/Sidebar";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
+import { TERMINAL_COPY_MODE_EVENT, type TerminalCopyModeEventDetail } from "./components/TerminalCopyMode";
 import { RemoteHostConnection } from "./remote/RemoteApp";
 import { RemoteBrowserSharingIndicator } from "./components/RemoteBrowserSharingIndicator";
 import { remoteHostStore, selectActiveHost } from "./state/remoteHostStore";
@@ -42,7 +43,8 @@ import { notificationEntryId } from "./lib/notificationCenter/types";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
-import { isMacShortcutPlatform, SHORTCUTS, useShortcuts } from "./lib/shortcuts";
+import { isMacShortcutPlatform, resolvedShortcuts, useShortcuts } from "./lib/shortcuts";
+import { useShortcutOverrides } from "./lib/shortcutOverrides";
 import { initUpdateToasts } from "./lib/updateToast";
 // Wave 3a cross-platform onboarding, release notes, and getting started checklist
 import {
@@ -2546,6 +2548,19 @@ function WorkspaceApp({
     setSearchLeafId(leafId);
   }, []);
 
+  // Desktop only: the remote web client has no native surface to select on.
+  const handleToggleTerminalCopyMode = useCallback(() => {
+    if (activeRemoteHostRef.current) return;
+    const currentState = stateRef.current;
+    const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
+    if (!activeTab || !isTerminalTab(activeTab)) return;
+    const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
+    const leafId = activeLayout?.activeLeafId ?? (activeLayout?.root ? collectLeafIds(activeLayout.root)[0] : null);
+    const sessionId = (leafId && activeLayout?.sessionIdsByLeafId?.[leafId]) || activeTab.sessionId;
+    if (!sessionId) return;
+    window.dispatchEvent(new CustomEvent<TerminalCopyModeEventDetail>(TERMINAL_COPY_MODE_EVENT, { detail: { sessionId } }));
+  }, []);
+
   const handleSelectWorktreeByIndex = useCallback(
     (index: number) => {
       if (activeRemoteHostRef.current) return;
@@ -3385,6 +3400,7 @@ function WorkspaceApp({
         "terminal.focusNext": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(1),
         "terminal.focusPrevious": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(-1),
         "terminal.search": browserShortcutsActive ? undefined : handleOpenTerminalSearch,
+        "terminal.copyMode": browserShortcutsActive ? undefined : handleToggleTerminalCopyMode,
         "sidebar.left.toggle": toggleSidebar,
         "project.add": handleOpenAddProject,
         "commandPalette.open": handleOpenCommandPalette,
@@ -3407,6 +3423,7 @@ function WorkspaceApp({
       handleOpenAddProject,
       handleOpenCommandPalette,
       handleOpenTerminalSearch,
+      handleToggleTerminalCopyMode,
       handleSelectTerminalTabByIndex,
       handleSelectWorktreeByIndex,
       handleSplitActive,
@@ -3422,7 +3439,8 @@ function WorkspaceApp({
       toggleSidebar,
     ],
   );
-  useShortcuts(shortcutHandlers);
+  const { overrides: shortcutOverrides } = useShortcutOverrides();
+  useShortcuts(shortcutHandlers, { overrides: shortcutOverrides });
 
   const sshHostId = activeProject.target?.kind === "ssh" ? activeProject.target.hostId : null;
   const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId
@@ -3448,7 +3466,7 @@ function WorkspaceApp({
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
       <ShortcutHints
-        enabledActions={SHORTCUTS.filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
+        enabledActions={resolvedShortcuts(shortcutOverrides).filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
         getContext={() => {
           const current = stateRef.current;
           const group = current.layout.focusedGroupId ? current.layout.tabGroups?.[current.layout.focusedGroupId] : undefined;

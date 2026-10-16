@@ -4,11 +4,105 @@
 //! inference for those sessions. The file is owned by Ferryx: it is rewritten whenever the bundled
 //! version changes, and left untouched otherwise so an unchanged install costs no disk writes.
 
+use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const EXTENSION_SOURCE: &str =
     include_str!("../../resources/agent-extensions/ferryx-agent-state.ts");
 pub const EXTENSION_FILE_NAME: &str = "ferryx-agent-state.ts";
+
+/// The opt-out setting file, kept beside \`remote-config.json\` in the per-user remote data dir.
+pub const AGENT_INTEGRATION_FILE_NAME: &str = "agent-integration.json";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedAgentIntegration {
+    enabled: bool,
+}
+
+/// Whether Ferryx installs its agent-state extension and exposes the agent-state endpoint to new
+/// panes. The daemon owns one instance; every pane it spawns reads the in-memory flag, so a change
+/// applies to the next pane without a restart.
+#[derive(Debug)]
+pub struct AgentIntegration {
+    enabled: AtomicBool,
+    path: Option<PathBuf>,
+    write_lock: std::sync::Mutex<()>,
+}
+
+impl AgentIntegration {
+    /// An unpersisted setting, used where no daemon-owned setting exists.
+    pub fn in_memory(enabled: bool) -> Self {
+        Self {
+            enabled: AtomicBool::new(enabled),
+            path: None,
+            write_lock: std::sync::Mutex::new(()),
+        }
+    }
+
+    /// Loads the setting from \`path\`. An absent, unreadable or malformed file means enabled: the
+    /// integration is on by default and only an explicit, readable opt-out turns it off.
+    pub fn load(path: Option<PathBuf>) -> Self {
+        let enabled = path.as_deref().is_none_or(read_enabled);
+        Self {
+            enabled: AtomicBool::new(enabled),
+            path,
+            write_lock: std::sync::Mutex::new(()),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Persists \`enabled\` and then publishes it in memory. A failed write leaves both unchanged,
+    /// so the flag never disagrees with what the next boot will read. Blocking: performs disk I/O.
+    pub fn set(&self, enabled: bool) -> std::io::Result<()> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(path) = self.path.as_deref() {
+            crate::remote::auth::write_private_json(path, &PersistedAgentIntegration { enabled })?;
+        }
+        self.enabled.store(enabled, Ordering::Release);
+        Ok(())
+    }
+}
+
+fn read_enabled(path: &Path) -> bool {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "Unreadable agent integration setting; keeping it enabled");
+            return true;
+        }
+    };
+    match serde_json::from_slice::<PersistedAgentIntegration>(&bytes) {
+        Ok(setting) => setting.enabled,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "Malformed agent integration setting; keeping it enabled");
+            true
+        }
+    }
+}
+
+/// The setting file path for the current environment: the same \`<data>/remote\` directory that
+/// holds \`remote-config.json\`, so \`FERRYX_DATA_DIR\` relocates both together.
+pub fn agent_integration_path() -> Option<PathBuf> {
+    agent_integration_path_with_env(|key| std::env::var_os(key))
+}
+
+fn agent_integration_path_with_env(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    crate::remote::auth::resolve_canonical_remote_dir(lookup)
+        .map(|dir| dir.join(AGENT_INTEGRATION_FILE_NAME))
+}
 
 /// The agent the bundled body declares, and the identity every rewrite starts from.
 pub const BASE_AGENT_ID: &str = "omo";
@@ -93,7 +187,28 @@ fn install_into(dir: &Path, agent: &str) -> std::io::Result<bool> {
 }
 
 pub fn install_agent_state_extension() {
-    for (agent, dir) in extension_dirs() {
+    install_into_dirs(extension_dirs());
+}
+
+/// The daemon's boot install: skipped entirely while the integration is turned off.
+pub fn install_agent_state_extension_if_enabled(setting: &AgentIntegration) -> bool {
+    install_into_dirs_if_enabled(setting, extension_dirs())
+}
+
+fn install_into_dirs_if_enabled(
+    setting: &AgentIntegration,
+    dirs: Vec<(&'static str, PathBuf)>,
+) -> bool {
+    if !setting.enabled() {
+        tracing::info!("Agent state integration is turned off; skipping the extension install");
+        return false;
+    }
+    install_into_dirs(dirs);
+    true
+}
+
+fn install_into_dirs(dirs: Vec<(&'static str, PathBuf)>) {
+    for (agent, dir) in dirs {
         match install_into(&dir, agent) {
             Ok(true) => {
                 tracing::info!(agent, dir = %dir.display(), "Installed Ferryx agent state extension")
@@ -104,6 +219,73 @@ pub fn install_agent_state_extension() {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovalFailure {
+    pub path: String,
+    pub error: String,
+}
+
+/// What a local removal did to each extension file Ferryx may have installed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovalReport {
+    /// Files deleted because their bytes were exactly a Ferryx payload.
+    pub removed: Vec<String>,
+    /// Paths left in place because they are not a byte-exact Ferryx payload (user-modified, a
+    /// directory, or a symlink).
+    pub kept_modified: Vec<String>,
+    /// Paths that could not be inspected or deleted.
+    pub failed: Vec<RemovalFailure>,
+}
+
+/// Deletes the Ferryx agent-state extension from every agent extension directory, but only where
+/// the file is byte-for-byte a payload Ferryx writes. Directories are never deleted.
+pub fn remove_agent_state_extension() -> RemovalReport {
+    remove_from_dirs(extension_dirs().into_iter().map(|(_, dir)| dir))
+}
+
+fn is_ferryx_payload(bytes: &[u8]) -> bool {
+    // Any agent's payload counts, so a file written with another agent's identity is still ours.
+    EXTENSION_AGENTS
+        .iter()
+        .filter_map(|(_, agent)| extension_source_for(agent))
+        .any(|source| source.as_bytes() == bytes)
+}
+
+fn remove_from_dirs(dirs: impl IntoIterator<Item = PathBuf>) -> RemovalReport {
+    let mut report = RemovalReport::default();
+    for dir in dirs {
+        let target = dir.join(EXTENSION_FILE_NAME);
+        let display = target.to_string_lossy().into_owned();
+        let metadata = match std::fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                report.failed.push(RemovalFailure { path: display, error: error.to_string() });
+                continue;
+            }
+        };
+        if !metadata.file_type().is_file() {
+            report.kept_modified.push(display);
+            continue;
+        }
+        match std::fs::read(&target) {
+            Ok(bytes) if is_ferryx_payload(&bytes) => match std::fs::remove_file(&target) {
+                Ok(()) => report.removed.push(display),
+                Err(error) => {
+                    report.failed.push(RemovalFailure { path: display, error: error.to_string() })
+                }
+            },
+            Ok(_) => report.kept_modified.push(display),
+            Err(error) => {
+                report.failed.push(RemovalFailure { path: display, error: error.to_string() })
+            }
+        }
+    }
+    report
 }
 
 #[cfg(test)]
@@ -332,6 +514,182 @@ mod tests {
 #[cfg(test)]
 mod p09_tests {
     use super::*;
+
+    fn temp_root(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("ferryx-t8-{tag}-"))
+            .tempdir()
+            .expect("temp root")
+    }
+
+    fn agent_dirs(root: &Path) -> Vec<PathBuf> {
+        EXTENSION_AGENTS
+            .iter()
+            .map(|(dir, _)| {
+                let path = root.join(dir).join("agent").join("extensions");
+                std::fs::create_dir_all(&path).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn remove_deletes_files_matching_any_agent_payload() {
+        let root = temp_root("remove-any");
+        let dirs = agent_dirs(root.path());
+        // .omo gets its own payload, .pi gets omo's (a wrong-identity install from an older
+        // build), .omp gets pi's: all three are Ferryx bytes and must go.
+        let payloads = [
+            extension_source_for("omo").unwrap(),
+            extension_source_for("omo").unwrap(),
+            extension_source_for("pi").unwrap(),
+        ];
+        for (dir, payload) in dirs.iter().zip(payloads.iter()) {
+            std::fs::write(dir.join(EXTENSION_FILE_NAME), payload).unwrap();
+        }
+        let report = remove_from_dirs(dirs.clone());
+        assert_eq!(report.removed.len(), 3, "{report:?}");
+        assert!(report.kept_modified.is_empty() && report.failed.is_empty(), "{report:?}");
+        for dir in &dirs {
+            assert!(!dir.join(EXTENSION_FILE_NAME).exists());
+            assert!(dir.is_dir(), "the extension directory itself must stay");
+        }
+        // A second removal finds nothing and reports nothing.
+        assert_eq!(remove_from_dirs(dirs), RemovalReport::default());
+    }
+
+    #[test]
+    fn remove_keeps_user_modified_file_and_reports_path() {
+        let root = temp_root("remove-kept");
+        let dirs = agent_dirs(root.path());
+        let edited = format!("{}\n// user edit\n", extension_source_for("omo").unwrap());
+        let target = dirs[0].join(EXTENSION_FILE_NAME);
+        std::fs::write(&target, &edited).unwrap();
+        std::fs::write(dirs[1].join(EXTENSION_FILE_NAME), extension_source_for("pi").unwrap())
+            .unwrap();
+
+        let report = remove_from_dirs(dirs.clone());
+        assert_eq!(report.kept_modified, vec![target.to_string_lossy().into_owned()]);
+        assert_eq!(report.removed, vec![dirs[1].join(EXTENSION_FILE_NAME).to_string_lossy().into_owned()]);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), edited, "a user file is never touched");
+    }
+
+    #[test]
+    fn remove_never_deletes_directories() {
+        let root = temp_root("remove-dirs");
+        let dirs = agent_dirs(root.path());
+        // A directory occupying the file name is kept and reported, with its contents intact.
+        let squatter = dirs[0].join(EXTENSION_FILE_NAME);
+        std::fs::create_dir(&squatter).unwrap();
+        std::fs::write(squatter.join("inner.ts"), extension_source_for("omo").unwrap()).unwrap();
+        // A missing extension directory is a no-op, not an error and not a creation.
+        let absent = root.path().join("absent").join("extensions");
+        let report = remove_from_dirs(vec![dirs[0].clone(), dirs[1].clone(), absent.clone()]);
+        assert_eq!(report.kept_modified, vec![squatter.to_string_lossy().into_owned()]);
+        assert!(report.removed.is_empty() && report.failed.is_empty(), "{report:?}");
+        assert!(squatter.join("inner.ts").is_file());
+        assert!(dirs.iter().all(|dir| dir.is_dir()));
+        assert!(!absent.exists());
+    }
+
+    #[test]
+    fn disabled_integration_skips_boot_install() {
+        let root = temp_root("boot-install");
+        let dirs: Vec<(&'static str, PathBuf)> = EXTENSION_AGENTS
+            .iter()
+            .zip(agent_dirs(root.path()))
+            .map(|((_, agent), dir)| (*agent, dir))
+            .collect();
+        let off = AgentIntegration::in_memory(false);
+        assert!(!install_into_dirs_if_enabled(&off, dirs.clone()));
+        assert!(dirs.iter().all(|(_, dir)| !dir.join(EXTENSION_FILE_NAME).exists()));
+
+        let on = AgentIntegration::in_memory(true);
+        assert!(install_into_dirs_if_enabled(&on, dirs.clone()));
+        for (agent, dir) in &dirs {
+            assert_eq!(
+                std::fs::read_to_string(dir.join(EXTENSION_FILE_NAME)).unwrap(),
+                extension_source_for(agent).unwrap()
+            );
+        }
+    }
+
+    /// Runs \`env\` in a pane spawned by \`manager\` and returns everything it printed.
+    #[cfg(unix)]
+    pub(crate) async fn pane_env(manager: &crate::terminal::pty::PtyManager) -> String {
+        let mut cmd = portable_pty::CommandBuilder::new("/usr/bin/env");
+        // The variable must be absent because Ferryx withheld it, not because the test process
+        // happened not to have it: seed it as an inherited value first.
+        cmd.env("FERRYX_AGENT_STATE_SOCKET", "/inherited/should-not-survive.sock");
+        let (_id, mut rx) = manager.spawn(cmd, 200, 50).expect("spawn env pane");
+        let mut out = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while let Some(chunk) = rx.recv().await {
+                out.extend_from_slice(&chunk);
+            }
+        })
+        .await
+        .expect("env pane output ends when env exits");
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disabled_integration_skips_env_injection() {
+        let setting = std::sync::Arc::new(AgentIntegration::in_memory(false));
+        let manager = crate::terminal::pty::PtyManager::new()
+            .with_agent_integration(std::sync::Arc::clone(&setting));
+        let env = pane_env(&manager).await;
+        assert!(env.contains("FERRYX_SESSION_ID="), "the pane ran env: {env}");
+        assert!(!env.contains("FERRYX_AGENT_STATE_SOCKET"), "{env}");
+
+        setting.set(true).unwrap();
+        let env = pane_env(&manager).await;
+        assert!(
+            env.contains(&format!(
+                "FERRYX_AGENT_STATE_SOCKET={}",
+                crate::daemon::agent_state_socket_path()
+            )),
+            "{env}"
+        );
+    }
+
+    #[test]
+    fn setting_file_respects_ferryx_data_dir() {
+        let root = temp_root("data-dir");
+        let data = root.path().join("data");
+        let path = agent_integration_path_with_env(|key| {
+            (key == "FERRYX_DATA_DIR").then(|| data.clone().into_os_string())
+        })
+        .unwrap();
+        // Same directory remote-config.json lives in.
+        assert_eq!(path, data.join("remote").join(AGENT_INTEGRATION_FILE_NAME));
+        assert_eq!(
+            path.parent().unwrap(),
+            crate::remote::auth::resolve_canonical_remote_dir(|key| {
+                (key == "FERRYX_DATA_DIR").then(|| data.clone().into_os_string())
+            })
+            .unwrap()
+        );
+
+        let setting = AgentIntegration::load(Some(path.clone()));
+        assert!(setting.enabled(), "absent file means enabled");
+        setting.set(false).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, serde_json::json!({ "enabled": false }));
+        assert!(!AgentIntegration::load(Some(path)).enabled(), "the opt-out survives a restart");
+    }
+
+    #[test]
+    fn malformed_setting_file_defaults_to_enabled() {
+        let root = temp_root("malformed");
+        for body in ["", "{", "not json", "{\"enabled\":\"no\"}", "[]"] {
+            let path = root.path().join("agent-integration.json");
+            std::fs::write(&path, body).unwrap();
+            assert!(AgentIntegration::load(Some(path)).enabled(), "{body:?} must read as enabled");
+        }
+    }
 
     #[test]
     fn userprofile_only_installs_existing_agent_extensions() {

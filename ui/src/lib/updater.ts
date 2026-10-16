@@ -1,7 +1,16 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { check, type Update } from "@tauri-apps/plugin-updater";
+
+export type UpdateFailure = "cancelled" | "stalled";
+
+/** Offer returned by `cmd_updater_check` (`UpdaterOffer` in ipc/updater.rs). */
+type UpdateOffer = {
+  version: string;
+  currentVersion: string;
+  date?: string;
+  body?: string;
+};
 
 export type UpdateStatus = {
   state: "idle" | "checking" | "available" | "downloading" | "downloaded" | "error";
@@ -9,6 +18,12 @@ export type UpdateStatus = {
   releaseNotes?: string;
   downloadProgress?: number;
   error?: string;
+  /** Why the last download of this offer ended without installing; the offer stays retryable. */
+  lastFailure?: UpdateFailure;
+  /** A cancel was requested; the download ends when the backend acknowledges it. */
+  cancelRequested?: boolean;
+  /** The downloaded update is being installed, which cannot be cancelled. */
+  installing?: boolean;
 };
 
 type CloseGuardListener = () => Promise<void> | void;
@@ -35,7 +50,7 @@ type StatusListener = (status: UpdateStatus) => void;
 
 const statusListeners = new Set<StatusListener>();
 let status: UpdateStatus = { state: "idle" };
-let pendingUpdate: Update | null = null;
+let pendingUpdate: UpdateOffer | null = null;
 
 function setStatus(next: UpdateStatus): void {
   status = next;
@@ -44,7 +59,13 @@ function setStatus(next: UpdateStatus): void {
 
 function describe(error: unknown): string {
   if (error instanceof Error) return error.message;
-  return typeof error === "string" ? error : "Unknown updater failure";
+  if (typeof error === "string") return error;
+  // Backend IPC failures arrive as structured `{ code, message, details }` objects.
+  if (typeof error === "object" && error !== null) {
+    const { message } = error as { message?: unknown };
+    if (typeof message === "string") return message;
+  }
+  return "Unknown updater failure";
 }
 
 export function getUpdateStatus(): UpdateStatus {
@@ -98,7 +119,9 @@ export async function checkForUpdate(): Promise<void> {
 
   setStatus({ state: "checking" });
   try {
-    const update = await check();
+    // The Rust command builds the same updater as the download, so a debug endpoint override
+    // applies to the offer too.
+    const update = await invoke<UpdateOffer | null>("cmd_updater_check");
     if (!update) {
       pendingUpdate = null;
       setStatus({ state: "idle" });
@@ -116,39 +139,165 @@ export async function checkForUpdate(): Promise<void> {
   }
 }
 
+/** Progress stream of `cmd_updater_download` (`UpdaterDownloadEvent` in ipc/updater.rs). */
+type UpdaterDownloadEvent =
+  | { event: "started"; data: { contentLength: number | null } }
+  | { event: "progress"; data: { chunkLength: number } }
+  | { event: "finished" }
+  | { event: "cancelled" }
+  | { event: "stalled" }
+  | { event: "error"; data: { message: string } };
+
+type DownloadOutcome = "finished" | UpdateFailure | { error: string };
+
+/** How often a cancel the backend has not yet acted on is sent again. */
+export const CANCEL_RETRY_MS = 1000;
+
+type ActiveDownload = {
+  cancelRequested: boolean;
+  /** The backend reported a terminal event; nothing is left to cancel. */
+  settled: boolean;
+  installing: boolean;
+  cancelRetry: ReturnType<typeof setInterval> | null;
+};
+
+let activeDownload: ActiveDownload | null = null;
+
+function stopCancelRetry(download: ActiveDownload): void {
+  if (download.cancelRetry !== null) {
+    clearInterval(download.cancelRetry);
+    download.cancelRetry = null;
+  }
+}
+
+async function sendCancel(): Promise<void> {
+  try {
+    await invoke("cmd_updater_cancel");
+  } catch (error) {
+    console.error("Cancelling the update download failed:", error);
+  }
+}
+
 export async function downloadAndInstallUpdate(): Promise<void> {
   if (!isTauri()) return;
 
   const update = pendingUpdate;
-  if (!update) return;
+  if (!update || status.state !== "available" || activeDownload) return;
 
   const version = update.version;
   const releaseNotes = update.body ?? undefined;
+  const download: ActiveDownload = {
+    cancelRequested: false,
+    settled: false,
+    installing: false,
+    cancelRetry: null,
+  };
+  activeDownload = download;
   let contentLength = 0;
   let downloaded = 0;
 
-  setStatus({ state: "downloading", version, releaseNotes, downloadProgress: 0 });
-  try {
-    await update.downloadAndInstall((event) => {
-      switch (event.event) {
-        case "Started":
-          contentLength = event.data.contentLength ?? 0;
-          break;
-        case "Progress":
-          downloaded += event.data.chunkLength;
-          break;
-        case "Finished":
-          downloaded = contentLength;
-          break;
-      }
-      // Without a Content-Length the total is unknown, so the bar stays at 0 rather than
-      // reporting a fraction of an unknown whole.
-      const progress = contentLength > 0 ? Math.min(downloaded / contentLength, 1) : 0;
-      setStatus({ state: "downloading", version, releaseNotes, downloadProgress: progress });
+  let resolveOutcome: (outcome: DownloadOutcome) => void = () => {};
+  const outcome = new Promise<DownloadOutcome>((resolve) => {
+    resolveOutcome = resolve;
+  });
+  const settle = (result: DownloadOutcome): void => {
+    download.settled = true;
+    stopCancelRetry(download);
+    resolveOutcome(result);
+  };
+  const onEvent = new Channel<UpdaterDownloadEvent>((message) => {
+    switch (message.event) {
+      case "started":
+        contentLength = message.data.contentLength ?? 0;
+        break;
+      case "progress":
+        downloaded += message.data.chunkLength;
+        break;
+      case "finished":
+        settle("finished");
+        return;
+      case "cancelled":
+        settle("cancelled");
+        return;
+      case "stalled":
+        settle("stalled");
+        return;
+      case "error":
+        settle({ error: message.data.message });
+        return;
+    }
+    // Without a Content-Length the total is unknown, so the bar stays at 0 rather than
+    // reporting a fraction of an unknown whole.
+    const progress = contentLength > 0 ? Math.min(downloaded / contentLength, 1) : 0;
+    setStatus({
+      state: "downloading",
+      version,
+      releaseNotes,
+      downloadProgress: progress,
+      ...(download.cancelRequested ? { cancelRequested: true } : {}),
     });
-    setStatus({ state: "downloaded", version, releaseNotes, downloadProgress: 1 });
+  });
+
+  setStatus({ state: "downloading", version, releaseNotes, downloadProgress: 0 });
+  let result: DownloadOutcome;
+  try {
+    await invoke("cmd_updater_download", { expectedVersion: version, onEvent });
+    result = await outcome;
   } catch (error) {
+    download.settled = true;
+    stopCancelRetry(download);
+    activeDownload = null;
     setStatus({ state: "error", version, releaseNotes, error: describe(error) });
+    return;
+  }
+
+  if (result === "finished" && !download.cancelRequested) {
+    download.installing = true;
+    setStatus({ state: "downloading", version, releaseNotes, downloadProgress: 1, installing: true });
+    try {
+      await invoke("cmd_updater_install");
+    } catch (error) {
+      activeDownload = null;
+      setStatus({ state: "error", version, releaseNotes, error: describe(error) });
+      return;
+    }
+    activeDownload = null;
+    setStatus({ state: "downloaded", version, releaseNotes, downloadProgress: 1 });
+    return;
+  }
+
+  activeDownload = null;
+  if (typeof result === "object") {
+    setStatus({ state: "error", version, releaseNotes, error: result.error });
+    return;
+  }
+  // A download that completed after the user cancelled is discarded rather than installed.
+  if (result === "finished") await sendCancel();
+  // The offer stays available, and is never marked dismissed, so the user can retry it and the
+  // periodic check is not blocked.
+  setStatus({
+    state: "available",
+    version,
+    releaseNotes,
+    lastFailure: result === "stalled" && !download.cancelRequested ? "stalled" : "cancelled",
+  });
+}
+
+/**
+ * Cancels the running update download. Installation is not cancellable, so this does nothing once
+ * the downloaded update is being installed.
+ */
+export async function cancelUpdateDownload(): Promise<void> {
+  if (!isTauri()) return;
+  const download = activeDownload;
+  if (!download || download.cancelRequested || download.installing) return;
+  download.cancelRequested = true;
+  setStatus({ ...status, cancelRequested: true });
+  await sendCancel();
+  // The backend ignores a cancel that arrives while it is still checking for the update, before
+  // the download exists, so the cancel is repeated until the download reports how it ended.
+  if (!download.settled && download.cancelRetry === null) {
+    download.cancelRetry = setInterval(() => void sendCancel(), CANCEL_RETRY_MS);
   }
 }
 

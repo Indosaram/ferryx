@@ -88,6 +88,19 @@ pub trait TerminalEngine {
     /// Select the line at a visible viewport row.
     fn select_line_at(&mut self, row: u16) -> Result<(), NativeTerminalError>;
 
+    /// Select the inclusive cell range between two screen (scrollback-inclusive)
+    /// `(col, row)` cells; `rectangle` selects the column block instead of reading order.
+    fn select_range(
+        &mut self,
+        start: (u16, u32),
+        end: (u16, u32),
+        rectangle: bool,
+    ) -> Result<(), NativeTerminalError>;
+
+    /// Monotonic count of rows dropped from the top of the primary screen. Screen-row
+    /// coordinates recorded earlier shift up by the difference between two readings.
+    fn scrollback_pruned_rows(&self) -> u64;
+
     /// Copy the active selection into owned UTF-8 text.
     fn selection_text(&self) -> Result<Option<String>, NativeTerminalError>;
 

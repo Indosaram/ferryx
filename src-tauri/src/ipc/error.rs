@@ -30,6 +30,8 @@ pub enum IpcErrorCode {
     AgentResumeInvalid,
     AgentSessionConflict,
     DaemonProtocolMismatch,
+    /// The running daemon predates the request; the change takes effect after a restart.
+    DaemonUpgradeRequired,
     BrowserNotFound,
     WebviewNotFound,
     BrowserUrlInvalid,
