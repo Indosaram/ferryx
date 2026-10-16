@@ -613,6 +613,8 @@ export async function fetchChatSessionRows(args: {
 
 const CHAT_REFRESH_WARNING = "Could not refresh the transcript; showing the last known state.";
 const CHAT_UNAVAILABLE_WARNING = "This session's transcript is not available to this device.";
+const CHAT_NO_READER_WARNING =
+  "This pane runs no agent, so there is no transcript reader for it. Open the terminal to see its output.";
 
 const CHAT_RETENTION_WARNING = "Older messages are hidden to keep the phone view responsive.";
 const CHAT_SEND_FAILED_WARNING = "That message was not delivered. It is back in the message box.";
@@ -2923,6 +2925,18 @@ export const RemoteHostConnection: React.FC<{
     const target = chatReferenceTarget;
     const sessionId = effectiveSessionId;
     if (!target || !sessionId || !token) return;
+    // The history route requires the pane's registry id; a pane with no agent has none, so the
+    // read would only ever be refused. Say so once instead of polling into a refresh failure.
+    if (!chatAgentType) {
+      clearChatTranscript();
+      setChatWarnings((prev) =>
+        withChatWarning(
+          prev.filter((warning) => warning !== CHAT_REFRESH_WARNING && warning !== CHAT_UNAVAILABLE_WARNING),
+          CHAT_NO_READER_WARNING,
+        ),
+      );
+      return;
+    }
     const registryId = chatAgentType;
     let cancelled = false;
     let fetching = false;
@@ -2938,7 +2952,7 @@ export const RemoteHostConnection: React.FC<{
           sessionId,
           token,
           target,
-          registryId: registryId ?? "",
+          registryId,
           limit: CHAT_HISTORY_PAGE_LIMIT,
           signal: controller.signal,
           transport: activeTunnelConnection?.transport,
@@ -3028,6 +3042,7 @@ export const RemoteHostConnection: React.FC<{
             (warning) =>
               warning !== CHAT_REFRESH_WARNING &&
               warning !== CHAT_UNAVAILABLE_WARNING &&
+              warning !== CHAT_NO_READER_WARNING &&
               warning !== CHAT_RETENTION_WARNING,
           );
           return chatRetentionTruncatedRef.current

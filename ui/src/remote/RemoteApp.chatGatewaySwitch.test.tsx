@@ -99,6 +99,8 @@ function machineTransport(machine: MachineFixture, historyPaths: string[]): Tunn
             sessionId: machine.sessionId,
             running: true,
             title: "claude",
+            // A pane with no agent type has no transcript reader, so the chat would read nothing.
+            agentType: "claude",
           },
         ],
       });

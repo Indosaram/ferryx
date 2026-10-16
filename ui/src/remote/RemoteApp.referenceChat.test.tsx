@@ -145,6 +145,7 @@ function installFetch(options: {
   files?: () => unknown;
   capabilities?: Record<string, unknown>;
   sessions?: () => unknown[];
+  state?: () => unknown;
 } = {}): Harness {
   const calls: HarnessCall[] = [];
   interface Waiter {
@@ -213,6 +214,10 @@ function installFetch(options: {
       return jsonResponse({ sessions: (options.sessions ?? (() => [{ sessionId: SESSION_ID, daemonEpoch: DAEMON_EPOCH, running: true }]))() });
     }
     if (url.includes("/reference-chat/") && url.includes("/history")) {
+      // The host's history route requires a registry id: an empty one is a 400 INVALID_REQUEST.
+      if (new URL(url, "http://harness.invalid").searchParams.get("registryId") === "") {
+        return jsonResponse({ error: { code: "INVALID_REQUEST" } }, false, 400);
+      }
       if (options.historyStatus !== undefined) {
         return jsonResponse({ error: { code: options.historyErrorCode ?? "FORBIDDEN" } }, false, options.historyStatus);
       }
@@ -241,7 +246,7 @@ function installFetch(options: {
         requestId: "r4",
       })))());
     }
-    if (url.includes("/api/v1/workspace/state")) return jsonResponse(remoteState);
+    if (url.includes("/api/v1/workspace/state")) return jsonResponse((options.state ?? (() => remoteState))());
     return jsonResponse({});
   });
   vi.stubGlobal("fetch", impl as unknown as typeof fetch);
@@ -347,6 +352,51 @@ describe("reference chat lane (task 12)", () => {
       expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not available/i);
     });
     expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
+  });
+
+  it("ui-workspace-wiring-r20-1: a pane with no agent reads no transcript and says so instead of a refresh failure", async () => {
+    setWidth(390);
+    let agentType: string | undefined;
+    const harness = installFetch({
+      state: () => ({
+        activeContext: {
+          ...remoteState.activeContext,
+          activeTerminal: { sessionId: SESSION_ID, title: "zsh", running: true },
+          terminalTabs: [
+            { id: "tab-main", sessionId: SESSION_ID, label: "zsh", activityState: "idle", worktreeLabel: "main", ...(agentType ? { agentType } : {}) },
+          ],
+        },
+      }),
+    });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      render(<RemoteApp />);
+      expect(await screen.findByTestId("mobile-chat-workspace")).toBeInTheDocument();
+      // The notice is drawn only once the pane's target is bound, so the polls below are not vacuous.
+      await waitFor(() => {
+        expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/no transcript reader/i);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(9000);
+        await new Promise<void>((done) => setTimeout(done, 0));
+      });
+      expect(harness.calls.some((call) => call.url.includes("/history"))).toBe(false);
+      expect(screen.getByTestId("chat-history-warning")).not.toHaveTextContent(/could not refresh/i);
+      // The composer stays usable on a plain shell pane.
+      expect(screen.getByTestId("chat-composer-textarea")).not.toBeDisabled();
+
+      // The pane gains an agent: the newest page is read for it and the notice goes away.
+      agentType = "claude";
+      await act(async () => {
+        window.dispatchEvent(new Event("online"));
+      });
+      const history = await harness.whenCalled("/history");
+      expect(history.url).toContain("registryId=claude");
+      await screen.findByText("The parser now streams line by line.");
+      expect(screen.queryByTestId("chat-history-warning")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("QA-04: a send goes through /submit and fabricates no assistant turn", async () => {
