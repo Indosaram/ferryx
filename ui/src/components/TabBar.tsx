@@ -119,6 +119,7 @@ export function TabBar({
   const [hostPlatform, setHostPlatform] = useState<string | null>(null);
   const isMac = isMacShortcutPlatform();
   const { overrides: shortcutOverrides } = useShortcutOverrides();
+  const newTerminalChord = shortcutLabel("tab.newTerminal", isMac, shortcutOverrides);
   // The shell profile menu follows the HOST platform reported by the backend, never
   // the browser OS: the remote web client can drive a host of a different platform.
   const isWindows = hostPlatform === "windows";
@@ -510,6 +511,7 @@ export function TabBar({
           <div ref={addButtonRef} className="no-drag relative flex shrink-0 items-center">
             <IconButton
               label="New tab"
+              title={newTerminalChord ? `New tab (${newTerminalChord})` : "New tab"}
               data-shortcut={onAddBrowser ? "tab.newTerminal tab.newBrowser" : "tab.newTerminal"}
               size="sm"
               className="no-drag my-auto ml-1"
