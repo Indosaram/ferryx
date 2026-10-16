@@ -239,6 +239,38 @@ describe("MobileHostDrawer", () => {
     expect(props.onSignOut).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["pairing mode", { isAccountSession: false, withSignOut: false }],
+    ["account session without onSignOut", { isAccountSession: true, withSignOut: false }],
+    ["account session with Sign out", { isAccountSession: true, withSignOut: true }],
+  ])("ui-shell-sheets-r17-1: the arm button keeps the slot Cancel takes, never Confirm (%s)", (_mode, mode) => {
+    const props = {
+      onOpenChange: vi.fn(),
+      onDisconnect: vi.fn(),
+      ...(mode.withSignOut ? { onSignOut: vi.fn() } : {}),
+    };
+    render(<MobileHostDrawer open isAccountSession={mode.isAccountSession} {...props} />);
+
+    // jsdom has no geometry: the row's flex-1 slots stand in for where each button sits
+    const arm = screen.getByTestId("mobile-host-drawer-disconnect");
+    const row = arm.parentElement!;
+    const armSlots = row.children.length;
+    const armSlot = Array.from(row.children).indexOf(arm);
+
+    fireEvent.click(arm);
+
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    const confirm = screen.getByTestId("mobile-host-drawer-confirm-disconnect");
+    expect(cancel.parentElement).toBe(row);
+    expect(row.children.length).toBe(armSlots);
+    expect(Array.from(row.children).indexOf(cancel)).toBe(armSlot);
+    expect(Array.from(row.children).indexOf(confirm)).not.toBe(armSlot);
+
+    // a second tap on the arm button's slot cancels instead of disconnecting
+    fireEvent.click(row.children[armSlot]!);
+    expect(props.onDisconnect).not.toHaveBeenCalled();
+  });
+
   it("ui-shell-sheets-r13-1: keyboard focus stays inside the sheet across the disconnect arm/cancel swap", () => {
     const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn() };
     render(<MobileHostDrawer open {...props} />);

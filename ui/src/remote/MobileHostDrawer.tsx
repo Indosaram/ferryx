@@ -182,7 +182,8 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
         <div className="flex items-center gap-2">
           {confirmDisconnect ? (
             <>
-              {/* Cancel takes the slot the arm button had and Confirm the one Sign out has: a quick
+              {/* Cancel takes the slot the arm button had and Confirm the one Sign out (or its
+                  spacer) has: a quick second tap on the arm button lands on Cancel, and a quick
                   second tap on Cancel lands on the harmless arm button, never on Sign out. */}
               <button
                 ref={cancelRef}
@@ -230,7 +231,11 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
                 >
                   Sign out
                 </button>
-              ) : null}
+              ) : (
+                // Without Sign out the arm button still takes only the left half, so the Confirm
+                // button that appears in the right half after arming is never under the finger.
+                <span className="flex-1" aria-hidden="true" />
+              )}
             </>
           )}
         </div>
