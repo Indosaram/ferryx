@@ -5725,6 +5725,21 @@ async fn reference_chat_read_context(
     query: &ReferenceChatReadQuery,
     registry_required: bool,
 ) -> Result<ReferenceChatRead, Response> {
+    reference_chat_read_context_with(state, headers, session_id, query, registry_required, true)
+        .await
+}
+
+/// [reference_chat_read_context], optionally without requiring the session to still be live: a
+/// staged file of an exited session must stay releasable, and its registry key already ties it
+/// to its own target.
+async fn reference_chat_read_context_with(
+    state: &Arc<RemoteGatewayState>,
+    headers: &HeaderMap,
+    session_id: &str,
+    query: &ReferenceChatReadQuery,
+    registry_required: bool,
+    require_live: bool,
+) -> Result<ReferenceChatRead, Response> {
     let device = authenticate_machine_request(state, headers)?;
     if let Some(named) = query
         .backend_session_id
@@ -5751,9 +5766,16 @@ async fn reference_chat_read_context(
             .load(std::sync::atomic::Ordering::Acquire),
     )
     .map_err(|error| reference_chat_refusal(&error))?;
-    reference_chat_ensure_live(state, session_id)
-        .await
-        .map_err(|error| reference_chat_refusal(&error))?;
+    if require_live {
+        reference_chat_ensure_live(state, session_id)
+            .await
+            .map_err(|error| reference_chat_refusal(&error))?;
+    } else if !crate::agent_transcript::is_valid_session_id(session_id) {
+        return Err(reference_chat_error(
+            ScopeErrorCode::InvalidRequest,
+            "the session id is not a session id",
+        ));
+    }
     let registry_id = query
         .registry_id
         .as_deref()
@@ -6103,7 +6125,13 @@ fn reference_chat_staged_key(
 ///
 /// The registry is process-local, so the pane's own staging root is swept by mtime as well:
 /// directories a previous gateway process staged are removed once they outlive the TTL.
-async fn reference_chat_prune_staged(runtime: &ReferenceChatRuntime, worktree: &Path) {
+/// Every staging base recorded in the gateway's ledger is swept too, so a directory the pane has
+/// left (or that only a previous process staged into) is not kept forever.
+async fn reference_chat_prune_staged(
+    runtime: &ReferenceChatRuntime,
+    worktree: &Path,
+    ledger: Option<PathBuf>,
+) {
     let now = reference_input::SystemReferenceClock.now_ms();
     let ttl = reference_files::reference_unreferenced_ttl_ms();
     let mut expired = Vec::new();
@@ -6123,9 +6151,36 @@ async fn reference_chat_prune_staged(runtime: &ReferenceChatRuntime, worktree: &
             let _ = reference_files::reference_cancel_staged_file(&dir);
         }
         reference_files::reference_prune_staging_root(&base, ttl);
+        if let Some(ledger) = ledger {
+            reference_files::reference_prune_recorded_staging_bases(&ledger, ttl);
+        }
         Ok::<_, crate::ipc::error::IpcError>(())
     })
     .await;
+}
+
+/// The gateway's staging-base ledger, in its owner-private data directory (none when the gateway
+/// keeps no state on disk).
+fn reference_chat_staging_ledger(state: &RemoteGatewayState) -> Option<PathBuf> {
+    state
+        .identity_dir
+        .as_ref()
+        .map(|dir| dir.join(reference_files::REFERENCE_STAGING_LEDGER_NAME))
+}
+
+/// Sweep every recorded staging base once, off the async runtime: run when a gateway starts, so
+/// the leftovers of an earlier process are removed even if nothing is ever staged again.
+fn reference_chat_sweep_recorded_staging(state: &RemoteGatewayState) {
+    let Some(ledger) = reference_chat_staging_ledger(state) else {
+        return;
+    };
+    tokio::spawn(crate::ipc::run_blocking(move || {
+        reference_files::reference_prune_recorded_staging_bases(
+            &ledger,
+            reference_files::reference_unreferenced_ttl_ms(),
+        );
+        Ok::<_, crate::ipc::error::IpcError>(())
+    }));
 }
 
 /// Read one bounded mutation envelope off the wire, after authentication.
@@ -6572,7 +6627,8 @@ pub(crate) async fn reference_chat_stage_file(
             )
         }
     };
-    reference_chat_prune_staged(runtime, &worktree).await;
+    let ledger = reference_chat_staging_ledger(&state);
+    reference_chat_prune_staged(runtime, &worktree, ledger.clone()).await;
     let target_key = reference_types::reference_draft_key(&target);
     // Check and reserve under ONE lock, so concurrent stages cannot all observe a free slot.
     let reservation = format!("{target_key}\u{1f}pending-{}", uuid::Uuid::new_v4());
@@ -6622,12 +6678,16 @@ pub(crate) async fn reference_chat_stage_file(
     let transaction = tokio::spawn(async move {
         let host_id = reference_files::reference_host_id();
         let stage_root = worktree.clone();
+        let ledger_base = reference_files::reference_staging_base_dir(&worktree);
         let staged = crate::ipc::run_blocking(move || {
-            Ok::<_, crate::ipc::error::IpcError>(reference_files::stage_reference_file_in(
-                &host_id,
-                &stage_root,
-                &payload,
-            ))
+            let staged = reference_files::stage_reference_file_in(&host_id, &stage_root, &payload);
+            if let (Ok(_), Some(ledger)) = (&staged, ledger.as_deref()) {
+                if let Err(error) = reference_files::reference_record_staging_base(ledger, &ledger_base)
+                {
+                    tracing::warn!("reference chat: staging base not recorded for the sweep: {error}");
+                }
+            }
+            Ok::<_, crate::ipc::error::IpcError>(staged)
         })
         .await;
         let receipt = match staged {
@@ -6825,7 +6885,17 @@ async fn reference_chat_delete_file(
         Ok(query) => query,
         Err(response) => return response,
     };
-    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
+    // No liveness check: a staged file of an exited session must stay releasable, and the
+    // registry key below already ties the file to its own target.
+    let read = match reference_chat_read_context_with(
+        &state,
+        &headers,
+        &session_id,
+        &query,
+        false,
+        false,
+    )
+    .await
     {
         Ok(read) => read,
         Err(response) => return response,
@@ -7287,6 +7357,7 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
 
     // Baseline listener: always loopback, never the wildcard address.
     let loopback_addr: SocketAddr = (std::net::Ipv4Addr::LOCALHOST, config.port).into();
+    reference_chat_sweep_recorded_staging(&state);
     let router = create_remote_router(Arc::clone(&state));
     let (primary_local_addr, shutdown_tx) =
         bind_and_serve(loopback_addr, Arc::clone(&state), router, true).await?;

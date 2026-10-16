@@ -2302,3 +2302,157 @@ async fn a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally() 
     fixture.server.stop().await;
 }
 
+/// rs-files-routes-r15-1: a staged file stays deletable after its session exited, so the client
+/// rs-files-routes-r14-1: a staging directory left in a directory the pane has since moved away
+/// from is swept once it outlives the TTL, even though no stage ever targets that directory again.
+#[tokio::test]
+async fn a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept() {
+    let fixture = fixture().await;
+    fixture.submit_and_await_marker("LEFTREADY_ONE").await;
+    let worktree = fixture.worktree().await;
+    let (status, body) = fixture.stage("left-behind.txt", b"left behind").await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+    let attachment_id = staged["data"]["receipt"]["attachmentId"]
+        .as_str()
+        .expect("attachmentId")
+        .to_string();
+    let left_dir = reference_files::reference_staging_base_dir(&worktree).join(&attachment_id);
+    assert!(left_dir.is_dir(), "the first stage wrote under the spawn worktree");
+    // Age the directory past the TTL, as a previous gateway process's leftovers would be.
+    let old = std::time::SystemTime::now()
+        - std::time::Duration::from_millis(reference_files::reference_unreferenced_ttl_ms() + 60_000);
+    std::fs::File::open(&left_dir)
+        .expect("open staged dir")
+        .set_modified(old)
+        .expect("age staged dir");
+
+    let nested = worktree.join("elsewhere");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+    let marker = "LEFTMOVED_TWO";
+    let command = if cfg!(windows) {
+        "Set-Location elsewhere; [Environment]::CurrentDirectory = (Get-Location).ProviderPath; Write-Output ('LEFTMOVED_' + 'TWO')\r".to_string()
+    } else {
+        "cd elsewhere && printf 'LEFTMOVED_%s\\n' 'TWO'\r".to_string()
+    };
+    let attachment = fixture
+        .state
+        .session_backend
+        .attach_with_sequence(&fixture.session_id, None)
+        .await
+        .expect("attach the pane");
+    let mut seen = attachment.snapshot.history;
+    let mut watch = attachment.receiver;
+    fixture
+        .state
+        .session_backend
+        .write_input(&fixture.session_id, command.as_bytes())
+        .await
+        .expect("type the cd");
+    let moved = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            match watch.recv().await {
+                Ok(chunk) => {
+                    seen.extend_from_slice(&chunk.bytes);
+                    if seen.windows(marker.len()).any(|window| window == marker.as_bytes()) {
+                        return true;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+            }
+        }
+    })
+    .await;
+    assert_eq!(moved.ok(), Some(true), "the pane must run the cd: {}", escaped_bytes(&seen, 4096));
+
+    let (status, body) = fixture.stage("new-cwd.txt", b"new cwd").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !left_dir.exists(),
+        "a stale staging dir under a cwd the pane left must be swept: {}",
+        left_dir.display()
+    );
+    fixture.server.stop().await;
+}
+
+/// rs-files-routes-r15-1: a staged file stays deletable after its session exited, so the client
+/// can release the bytes instead of leaving them in the working directory until a TTL sweep.
+#[tokio::test]
+async fn a_staged_file_of_an_exited_session_can_still_be_deleted() {
+    let fixture = fixture().await;
+    let (status, body) = fixture.stage("exited.txt", b"staged before exit").await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+    let attachment_id = staged["data"]["receipt"]["attachmentId"]
+        .as_str()
+        .expect("attachmentId")
+        .to_string();
+    let attachment_dir =
+        reference_files::reference_staging_base_dir(&fixture.worktree().await).join(&attachment_id);
+    assert!(attachment_dir.is_dir(), "the stage wrote its directory");
+
+    let close = serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(),
+        "daemonEpoch": fixture.daemon_epoch.as_str(),
+    })
+    .to_string();
+    let (status, body) = fixture
+        .server
+        .request(
+            "DELETE",
+            &format!("/api/v1/sessions/{}", fixture.session_id),
+            Some(&fixture.control),
+            Some(&close),
+        )
+        .await;
+    assert_eq!(status, 204, "session close: {body}");
+    assert!(
+        !fixture
+            .state
+            .session_backend
+            .list_sessions()
+            .await
+            .contains(&fixture.session_id),
+        "the closed session is no longer live"
+    );
+
+    let query = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    let own = format!("{}?{query}", fixture.route(&format!("files/{attachment_id}")));
+    let (status, body) = fixture
+        .server
+        .request("DELETE", &own, Some(&fixture.view), None)
+        .await;
+    assert_eq!(status, 403, "a view-only device still cannot delete: {body}");
+    let foreign = fixture.read_query_naming_owner(
+        &fixture.session_id,
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &uuid::Uuid::new_v4().to_string(),
+        &[],
+    );
+    let (status, body) = fixture
+        .server
+        .request(
+            "DELETE",
+            &format!("{}?{foreign}", fixture.route(&format!("files/{attachment_id}"))),
+            Some(&fixture.control),
+            None,
+        )
+        .await;
+    assert_eq!(status, 410, "a foreign owner is still fenced: {body}");
+    let (status, body) = fixture
+        .server
+        .request("DELETE", &own, Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 204, "the exited session's staged file can be released: {body}");
+    assert!(!attachment_dir.exists(), "the release removed the bytes");
+    fixture.server.stop().await;
+}
+

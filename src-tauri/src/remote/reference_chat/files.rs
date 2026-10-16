@@ -69,6 +69,8 @@ use super::types::{
 
 /// Directory under the pane's working directory that holds this lane's staged files.
 pub const REFERENCE_STAGING_DIR_NAME: &str = ".ferryx-reference-chat-files";
+/// File, in the gateway's owner-private data directory, listing every staging base it used.
+pub const REFERENCE_STAGING_LEDGER_NAME: &str = "reference-chat-staging-bases.txt";
 /// Environment override for the owning host id reported on the receipt.
 pub const REFERENCE_HOST_ID_ENV: &str = "FERRYX_HOST_ID";
 /// Host id used when the host did not name itself.
@@ -470,6 +472,69 @@ pub fn reference_prune_staging_root(base: &Path, ttl_ms: u64) -> usize {
     }
     removed
 }
+
+/// Remember a staging base in the ledger, so a later sweep reaches it even when no stage ever
+/// targets that directory again and the in-memory registry has been lost to a restart.
+pub fn reference_record_staging_base(ledger: &Path, base: &Path) -> std::io::Result<()> {
+    let Some(line) = base.to_str().filter(|line| !line.contains(['\n', '\r'])) else {
+        return Ok(());
+    };
+    let _guard = REFERENCE_STAGING_LEDGER_LOCK.lock();
+    let existing = match std::fs::read_to_string(ledger) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    if existing.lines().any(|recorded| recorded == line) {
+        return Ok(());
+    }
+    if let Some(parent) = ledger.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    use std::io::Write as _;
+    writeln!(options.open(ledger)?, "{line}")
+}
+
+/// Sweep every staging base the ledger names with [reference_prune_staging_root], and forget
+/// the bases that no longer exist. Only paths whose last component is the staging directory
+/// name are ever swept, so a tampered line cannot aim the sweep at another directory.
+pub fn reference_prune_recorded_staging_bases(ledger: &Path, ttl_ms: u64) -> usize {
+    let _guard = REFERENCE_STAGING_LEDGER_LOCK.lock();
+    let Ok(text) = std::fs::read_to_string(ledger) else {
+        return 0;
+    };
+    let mut removed = 0;
+    let mut kept = Vec::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let base = Path::new(line);
+        if base.file_name().and_then(|name| name.to_str()) != Some(REFERENCE_STAGING_DIR_NAME) {
+            continue;
+        }
+        if std::fs::symlink_metadata(base).is_err() {
+            continue;
+        }
+        removed += reference_prune_staging_root(base, ttl_ms);
+        kept.push(line);
+    }
+    if kept.len() != text.lines().count() {
+        let mut body = kept.join("\n");
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        let _ = std::fs::write(ledger, body);
+    }
+    removed
+}
+
+/// Serializes this process's read-modify-write passes over the ledger.
+static REFERENCE_STAGING_LEDGER_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 /// Create (0700) or verify the staging base: a real directory, never a symlink, owned by this
 /// user and closed to group/other on unix. A base that fails any check is refused, never fixed
