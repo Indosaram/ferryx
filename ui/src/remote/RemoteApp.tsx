@@ -2627,10 +2627,21 @@ export const RemoteHostConnection: React.FC<{
   const chatLaneTargetRef = useRef<ReferenceTargetRef | null>(null);
   /** Aborted when the lane resets, so nothing started for one pane lands in another. */
   const chatLaneAbortRef = useRef(new AbortController());
-  /** Is this the pane the lane is speaking to right now? Asked after every await. */
+  /**
+   * Is this lane still the one `target` was started for? Asked after every await. The lane owner
+   * decides: a target that is only briefly null (a new token or transport not yet re-answered)
+   * resets nothing, so a request settling in that gap still belongs here. Only a DIFFERENT
+   * target - live already, or bound by the lane - makes it someone else's. Starting a NEW request
+   * still needs a live target, and checks `chatTargetRef` for that itself.
+   */
   const chatTargetIsCurrent = useCallback((target: ReferenceTargetRef): boolean => {
+    const owner = chatLaneTargetRef.current;
     const live = chatTargetRef.current;
-    return live !== null && sameReferenceTarget(target, live);
+    return (
+      owner !== null &&
+      sameReferenceTarget(target, owner) &&
+      (live === null || sameReferenceTarget(target, live))
+    );
   }, []);
 
 

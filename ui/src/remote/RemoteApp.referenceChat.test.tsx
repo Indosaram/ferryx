@@ -1552,6 +1552,152 @@ describe("reference chat lane review fixes", () => {
     }
   });
 
+  /** Message rows only: the composer's own value is not a sent message. */
+  const shownMessages = (text: string): HTMLElement[] =>
+    screen.queryAllByText(text).filter((element) => element.tagName !== "TEXTAREA");
+
+  it("ui-workspace-wiring-r19-1: a send failing while the target is briefly null removes its echo and restores the draft", async () => {
+    try {
+      seedSavedHost();
+      const submit = deferred<Response>();
+      const identity = gatedMovedCapabilities();
+      const calls = installLane((call) => (call.url.includes("/submit") ? submit.promise : identity.route(call)));
+      render(<RemoteApp />);
+      await laneReady();
+      fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "refactor the parser" } });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("send-button"));
+      });
+      expect(shownMessages("refactor the parser")).toHaveLength(1);
+
+      // The direct endpoint dies: the transport moves and the send settles while the target is null.
+      moveTransportBase();
+      await act(async () => {
+        submit.resolve(
+          jsonResponse({ ok: false, error: { code: "NETWORK_ERROR", message: "down", retryable: true }, requestId: "r1" }, false, 502),
+        );
+      });
+      await drainSettledResponses();
+
+      // The same identity answers on the new base, so the lane is not reset.
+      await act(async () => {
+        identity.release();
+      });
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/host/mach-1/") && call.url.includes("/history"))).toBe(true);
+      });
+      await drainSettledResponses();
+
+      expect(shownMessages("refactor the parser")).toHaveLength(0);
+      expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toContain("refactor the parser");
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not delivered|may not have been delivered|not known/i);
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  it("ui-workspace-wiring-r19-1: a stop failing while the target is briefly null still warns", async () => {
+    try {
+      seedSavedHost();
+      const stop = deferred<Response>();
+      const identity = gatedMovedCapabilities();
+      const calls = installLane((call) => {
+        if (call.url.includes("/prompt")) return jsonResponse(promptBody("A", false));
+        if (call.url.includes("/stop")) return stop.promise;
+        return identity.route(call);
+      });
+      render(<RemoteApp />);
+      await screen.findByText("Question A");
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("stop-button"));
+      });
+
+      moveTransportBase();
+      await act(async () => {
+        stop.resolve(
+          jsonResponse({ ok: false, error: { code: "INTERNAL", message: "no", retryable: true }, requestId: "s1" }, false, 500),
+        );
+      });
+      await drainSettledResponses();
+      await act(async () => {
+        identity.release();
+      });
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/host/mach-1/") && call.url.includes("/history"))).toBe(true);
+      });
+      await drainSettledResponses();
+
+      expect(screen.getAllByText(/stop request was not delivered/).length).toBeGreaterThan(0);
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  it("ui-workspace-wiring-r19-1: an answer refused while the target is briefly null shows its error on the card", async () => {
+    try {
+      seedSavedHost();
+      const answer = deferred<Response>();
+      const identity = gatedMovedCapabilities();
+      const calls = installLane((call) => {
+        if (call.url.includes("/prompt")) return jsonResponse(promptBody("A", false));
+        if (call.url.includes("/answer")) return answer.promise;
+        return identity.route(call);
+      });
+      render(<RemoteApp />);
+      await screen.findByText("Question A");
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("reference-prompt-option-0"));
+      });
+
+      moveTransportBase();
+      await act(async () => {
+        answer.resolve(
+          jsonResponse(
+            { ok: false, error: { code: "INTERNAL", message: "answer failed in gap", retryable: true }, requestId: "a1" },
+            false,
+            500,
+          ),
+        );
+      });
+      await drainSettledResponses();
+      await act(async () => {
+        identity.release();
+      });
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/host/mach-1/") && call.url.includes("/history"))).toBe(true);
+      });
+      await drainSettledResponses();
+
+      expect(screen.getByText("answer failed in gap")).toBeInTheDocument();
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  it("ui-workspace-wiring-r19-1: a send failing after a switch to a different pane stays with its own pane", async () => {
+    const submit = deferred<Response>();
+    installLane(({ url }) => (url.includes("/submit") ? submit.promise : undefined));
+    render(<RemoteApp />);
+    await laneReady();
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "refactor the parser" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+
+    await switchToSecondTab();
+    await act(async () => {
+      submit.resolve(
+        jsonResponse({ ok: false, error: { code: "NETWORK_ERROR", message: "down", retryable: true }, requestId: "r1" }, false, 502),
+      );
+    });
+    await drainSettledResponses();
+
+    expect(screen.getByText("B0")).toBeInTheDocument();
+    expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).not.toContain("refactor the parser");
+    expect(screen.queryByTestId("chat-composer-warning")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("chat-history-warning")?.textContent ?? "").not.toMatch(/not delivered/);
+  });
+
   it("ui-workspace-wiring-2: a late older page from the previous pane is never painted", async () => {
     const older = deferred<Response>();
     installLane(({ url }) => {
