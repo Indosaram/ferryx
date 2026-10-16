@@ -129,7 +129,12 @@ export function ReferencePromptCard({
       setLocalError(null);
       try {
         const accepted = await onAnswer({ promptId: prompt.id, screenRevision, answer: choice }, press);
-        if (!shown.current || accepted === false) return false;
+        if (!shown.current) return false;
+        if (accepted === false) {
+          // dropped, but the card is still up: it can be answered again
+          setPending(false);
+          return false;
+        }
         // and read again: the answer took a moment, and the user may have gone on to something else
         const card = cardRef.current;
         const active = document.activeElement;
@@ -150,6 +155,9 @@ export function ReferencePromptCard({
           onPromptChanged?.();
         } else {
           setLocalError(cause instanceof Error ? cause.message : String(cause));
+          // a transport failure keeps a typed pick for a retry
+          setPending(false);
+          return false;
         }
       }
       setPending(false);

@@ -135,6 +135,19 @@ describe("MobileChatComposer", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it("does not send while a file is still staging, so the file is not left behind", () => {
+    const onSend = vi.fn();
+    const { rerender } = render(<MobileChatComposer onSend={onSend} value="see this" attaching={true} />);
+    expect(screen.getByTestId("send-button")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("send-button"));
+    fireEvent.keyDown(screen.getByTestId("chat-composer-textarea"), { key: "Enter" });
+    expect(onSend).not.toHaveBeenCalled();
+
+    rerender(<MobileChatComposer onSend={onSend} value="see this @shot.png " attaching={false} />);
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(onSend).toHaveBeenCalledWith("see this @shot.png");
+  });
+
   it("keeps the draft when the owner refuses the send", () => {
     const onSend = vi.fn(() => false);
     render(<MobileChatComposer onSend={onSend} />);
