@@ -2851,13 +2851,15 @@ export const RemoteHostConnection: React.FC<{
   /* The draft and the held rows belong to the TARGET, not to this component instance: switching
      panes reads that target's own rows back, and never carries them across. */
   useEffect(() => {
+    // A null target is a gap, not a departure: a new token or transport has no gateway answer
+    // until the host re-answers, and the same pane usually comes right back. Leaving the lane
+    // target in place means the files staged for it stay staged and its draft keeps their
+    // mentions; only a DIFFERENT target replacing it releases them.
+    if (chatReferenceTarget === null) return;
+    const previous = chatLaneTargetRef.current;
+    if (previous !== null && sameReferenceTarget(previous, chatReferenceTarget)) return;
     resetChatLane();
     chatLaneTargetRef.current = chatReferenceTarget;
-    if (chatReferenceTarget === null) {
-      setChatDraftText("");
-      setChatHeld([]);
-      return;
-    }
     referenceDrafts.refresh(chatReferenceTarget);
     referenceQueues.refresh(chatReferenceTarget);
     setChatDraftText(referenceDrafts.read(chatReferenceTarget).text);

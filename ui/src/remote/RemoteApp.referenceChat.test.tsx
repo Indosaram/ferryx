@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createHash } from "node:crypto";
+import { remoteHostStore } from "../state/remoteHostStore";
 import {
   RemoteApp,
   chatDaemonEpochFromRows,
@@ -1363,6 +1364,98 @@ describe("reference chat lane review fixes", () => {
         calls.some((call) => call.method === "DELETE" && call.url.includes(`/reference-chat/${SESSION_ID}/files/att-1`)),
       ).toBe(true);
     });
+  });
+
+  const MOVED_HOST_ID = `${window.location.origin}/host/mach-1`;
+
+  /** The connection is a saved machine record that does not yet name its relay origin. */
+  function seedSavedHost(): void {
+    remoteHostStore.reset();
+    remoteHostStore.upsertHost({
+      hostId: MOVED_HOST_ID,
+      name: "mach-1",
+      address: window.location.origin,
+      machineId: "mach-1",
+      deviceToken: "test-token",
+    } as unknown as Parameters<typeof remoteHostStore.upsertHost>[0]);
+    remoteHostStore.setActiveHost(MOVED_HOST_ID);
+  }
+
+  /**
+   * Moves the transport base URL WITHOUT a remount: the same host record gains its relay origin,
+   * so every route (capabilities included) is now addressed through /host/<machineId>. The
+   * gateway answer is scoped to the old base, so the chat target is null until it re-answers.
+   */
+  function moveTransportBase(): void {
+    act(() => {
+      remoteHostStore.upsertHost({
+        hostId: MOVED_HOST_ID,
+        name: "mach-1",
+        address: window.location.origin,
+        machineId: "mach-1",
+        relayOrigin: window.location.origin,
+      } as unknown as Parameters<typeof remoteHostStore.upsertHost>[0]);
+    });
+  }
+
+  it("ui-workspace-wiring-r17-1: a transport change that answers the same target keeps the staged file and its mention", async () => {
+    try {
+      seedSavedHost();
+      const calls = installLane();
+      render(<RemoteApp />);
+      await laneReady();
+      await stageNotes();
+      await screen.findByTestId("attachment-preview-att-1");
+      expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toContain("@notes.txt");
+
+      moveTransportBase();
+      // The same identity answers on the new base, and the lane reads its page there again.
+      await waitFor(() => {
+        expect(calls.some((call) => call.url.includes("/host/mach-1/") && call.url.includes("/history"))).toBe(true);
+      });
+      await drainSettledResponses();
+
+      expect(calls.filter((call) => call.method === "DELETE" && call.url.includes("/files/"))).toEqual([]);
+      expect(screen.getByTestId("attachment-preview-att-1")).toBeInTheDocument();
+      expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toContain("@notes.txt");
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  it("ui-workspace-wiring-r17-1: a transport change that answers a different owner still releases the staged file", async () => {
+    try {
+      seedSavedHost();
+      let ownerId = REFERENCE_OWNER_ID;
+      const calls = installLane(({ url }) =>
+        url.includes("/api/v1/capabilities")
+          ? jsonResponse({ apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH, referenceOwnerId: ownerId })
+          : undefined,
+      );
+      render(<RemoteApp />);
+      await laneReady();
+      await stageNotes();
+      await screen.findByTestId("attachment-preview-att-1");
+
+      ownerId = "owner-pub-2";
+      moveTransportBase();
+
+      await waitFor(() => {
+        expect(
+          calls.some(
+            (call) =>
+              call.method === "DELETE" &&
+              call.url.includes(`/reference-chat/${SESSION_ID}/files/att-1`) &&
+              call.url.includes(`ownerId=${REFERENCE_OWNER_ID}`),
+          ),
+        ).toBe(true);
+      });
+      await waitFor(() => {
+        expect(screen.queryByTestId("attachment-preview-att-1")).toBeNull();
+      });
+    } finally {
+      remoteHostStore.reset();
+    }
   });
 
   it("ui-workspace-wiring-2: a late older page from the previous pane is never painted", async () => {
