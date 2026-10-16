@@ -299,6 +299,32 @@ describe("reference draft notification and failure", () => {
     expect(store.read(paneA).text).toBe("keep me");
     expect(store.isUnsaved(paneA)).toBe(true);
   });
+
+  it("ui-reference-logic-r15-2: a legacy draft whose migration cannot be written stays visible and unsaved", () => {
+    const data = new Map<string, string>();
+    const PREFIX = REFERENCE_DRAFT_STORAGE_PREFIX + referenceDraftKey(paneA);
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        if (key.startsWith(PREFIX)) throw new Error("QuotaExceededError");
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const legacyKey = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-before-restart|${base.epoch}|${base.backendSessionId}`;
+    data.set(legacyKey, "half-typed message");
+    const store = new ReferenceDraftStore(() => storage);
+
+    expect(store.read(paneA).text).toBe("half-typed message");
+    expect(store.isUnsaved(paneA)).toBe(true);
+    expect(data.get(legacyKey)).toBe("half-typed message");
+  });
 });
 
 describe("reference draft overlapping sends", () => {

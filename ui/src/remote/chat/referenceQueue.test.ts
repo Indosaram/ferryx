@@ -324,4 +324,49 @@ describe("reference held queue unrecognised storage", () => {
     data.set(queue.storageKey(paneA), "legacy text");
     expect(texts(queue, paneA)).toEqual(["legacy text"]);
   });
+
+  it("ui-reference-logic-r14-1: holding a message never overwrites a value another build stored", () => {
+    const { queue, data } = fixture();
+    const raw = JSON.stringify({ version: 2, messages: [{ id: "n1", text: "newer build row" }] });
+    data.set(queue.storageKey(paneA), raw);
+    expect(queue.read(paneA)).toEqual([]);
+
+    queue.add(paneA, "held here");
+    expect(data.get(queue.storageKey(paneA))).toBe(raw);
+    expect(texts(queue, paneA)).toEqual(["held here"]);
+    expect(queue.isUnsaved(paneA)).toBe(true);
+
+    queue.remove(paneA, queue.read(paneA)[0].id);
+    expect(data.get(queue.storageKey(paneA))).toBe(raw);
+  });
+
+  it("ui-reference-logic-r15-2: held rows whose legacy migration cannot be written stay visible and unsaved", () => {
+    const data = new Map<string, string>();
+    const PREFIX = queuePrefix(paneA);
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        if (key.startsWith(PREFIX)) throw new Error("QuotaExceededError");
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const legacyKey = `${REFERENCE_QUEUE_STORAGE_PREFIX}${base.hostId}|owner-before-restart|${base.epoch}|${base.backendSessionId}`;
+    data.set(legacyKey, JSON.stringify({ version: 1, messages: [{ id: "h1", text: "held before" }] }));
+    const queue = new ReferenceQueueStore(() => storage);
+
+    expect(texts(queue, paneA)).toEqual(["held before"]);
+    expect(queue.isUnsaved(paneA)).toBe(true);
+    expect(data.has(legacyKey)).toBe(true);
+  });
 });
+
+function queuePrefix(owner: ReferenceTargetRef): string {
+  return REFERENCE_QUEUE_STORAGE_PREFIX + referenceDraftKey(owner);
+}

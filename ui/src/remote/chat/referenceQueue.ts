@@ -38,6 +38,8 @@ const newId = () =>
 export class ReferenceQueueStore {
   private saved = new Map<string, string | null>();
   private unsaved = new Set<string>();
+  /** keys whose stored value is not a v1 envelope (another build's): never written over */
+  private foreign = new Set<string>();
   private queues = new Map<string, HeldMessage[]>();
   private listeners = new Set<() => void>();
   private pending = new Set<string>();
@@ -157,7 +159,10 @@ export class ReferenceQueueStore {
     } catch {
       /* private mode */
     }
-    const messages = parseHeld(raw) ?? [];
+    const parsed = parseHeld(raw);
+    if (parsed === null) this.foreign.add(key);
+    else this.foreign.delete(key);
+    const messages = parsed ?? [];
     this.saved.set(key, raw);
     this.queues.set(key, messages);
     return messages;
@@ -187,13 +192,25 @@ export class ReferenceQueueStore {
       });
       raw = JSON.stringify({ version: 1, messages });
     }
-    storage.setItem(REFERENCE_QUEUE_STORAGE_PREFIX + key, raw);
-    for (const entry of moved) storage.removeItem(entry.candidate);
+    try {
+      storage.setItem(REFERENCE_QUEUE_STORAGE_PREFIX + key, raw);
+      for (const entry of moved) storage.removeItem(entry.candidate);
+    } catch {
+      // the move could not be written: show the rows from memory and say they are unsaved
+      this.unsaved.add(key);
+    }
     return raw;
   }
 
   private write(key: string, messages: HeldMessage[]): void {
     this.queues.set(key, messages);
+    if (this.foreign.has(key)) {
+      // another build's value sits under this key: keep the rows in memory, visibly unsaved,
+      // rather than overwrite what that build holds
+      this.unsaved.add(key);
+      this.notify();
+      return;
+    }
     try {
       const storageKey = REFERENCE_QUEUE_STORAGE_PREFIX + key;
       const raw = messages.length ? JSON.stringify({ version: 1, messages }) : null;
