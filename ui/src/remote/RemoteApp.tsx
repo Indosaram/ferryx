@@ -2857,8 +2857,8 @@ export const RemoteHostConnection: React.FC<{
     setChatAttaching(false);
     setChatAttachError(null);
     setChatHeld([]);
-    chatHeldSendingRef.current = new Set();
-    setChatHeldSendingIds([]);
+    // A held row's send stays in flight across a pane switch, and its id is unique to the row: the
+    // set is kept, so returning to the pane before it settles cannot send the same row twice.
   }, [clearChatTranscript, releaseStagedChatFiles]);
 
   /* The draft and the held rows belong to the TARGET, not to this component instance: switching
@@ -3654,12 +3654,13 @@ export const RemoteHostConnection: React.FC<{
         }).catch(() => {
           // The card reports the refusal it was given; the composer cleared the box on send, so
           // the typed answer comes back in front of anything typed since.
-          if (target === null || !chatTargetIsCurrent(target)) return;
+          // The draft is the target's own: a pane left meanwhile gets it back in its store.
+          if (target === null) return;
           const current = referenceDrafts.read(target).text;
           if (current.startsWith(text)) return;
           const restored = current.length === 0 ? text : `${text}\n${current}`;
           referenceDrafts.set(target, restored);
-          setChatDraftText(restored);
+          if (chatTargetIsCurrent(target)) setChatDraftText(restored);
         });
         return true;
       }
