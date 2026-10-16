@@ -7,6 +7,8 @@ import * as attachTunnelModule from "./attachTunnel";
 import * as accountAttachModule from "./accountAttach";
 import type { FetchLikeInit, TunnelResponse, TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 import { remoteHostStore } from "../state/remoteHostStore";
+import { referenceDrafts } from "./chat/referenceDraft";
+import type { ReferenceTargetRef } from "./chat/referenceTypes";
 
 vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: () => <div data-testid="remote-terminal" />,
@@ -248,5 +250,184 @@ describe("reference chat gateway identity across a machine switch", () => {
       (path) => path.includes(`ownerId=${M1.ownerId}`) || path.includes(`epoch=${M1.epoch}`),
     );
     expect(foreign).toEqual([]);
+  });
+
+  /** SHA-256 of "abc": the staging lane refuses a receipt it cannot prove. */
+  const NOTES_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+  interface DeleteCall {
+    url: string;
+    authorization: string | null;
+  }
+
+  /**
+   * Two machines whose identities both answer, with a file staged on M1 and a worktree pick that
+   * moves the lane to M2. `deleteAnswer` is what M1 says to the release.
+   */
+  async function stageOnFirstMachineThenSwitch(deleteAnswer: () => Response): Promise<DeleteCall[]> {
+    storeAccountSessionToken("switch-account-token", window.location.origin);
+    const transports: Record<string, TunnelTransport> = {
+      [M1.machineId]: machineTransport(M1, []),
+      [M2.machineId]: machineTransport(M2, []),
+    };
+    const deletes: DeleteCall[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (url.endsWith("/api/account/v1/machines")) {
+          return new Response(
+            JSON.stringify(
+              [M1, M2].map((machine) => ({
+                machineRecordId: `rec-${machine.machineId}`,
+                machineId: machine.machineId,
+                displayName: machine.machineId,
+                publicKey: "pk",
+                attachPublicKey: "apk",
+                relayOrigin: window.location.origin,
+                platform: "linux",
+                online: true,
+                enrollmentEpoch: "1",
+                lastSeenAt: Date.now(),
+              })),
+            ),
+            { status: 200 },
+          );
+        }
+        const grant = url.match(/\/machines\/rec-([^/]+)\/grants/);
+        if (grant) {
+          return new Response(
+            JSON.stringify({
+              grantId: `grant-${grant[1]}`,
+              machineId: grant[1],
+              relayOrigin: window.location.origin,
+              pairingToken: "pairing-token",
+              machineAttachPublicKey: "machine-attach-key",
+              grantScope: "machine",
+              expiresAt: Date.now() + 600_000,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/v1/attach/session")) {
+          return new Response(JSON.stringify({ sessionId: "alloc" }), { status: 200 });
+        }
+        for (const machine of [M1, M2]) {
+          if (url.includes(`/host/${machine.machineId}/api/v1/capabilities`)) {
+            return new Response(
+              JSON.stringify({
+                apiVersion: 1,
+                machineId: machine.machineId,
+                daemonEpoch: machine.epoch,
+                referenceOwnerId: machine.ownerId,
+              }),
+              { status: 200 },
+            );
+          }
+        }
+        if (url.includes("/reference-chat/") && url.includes("/files")) {
+          if (method === "DELETE") {
+            const headers = new Headers(init?.headers);
+            deletes.push({ url, authorization: headers.get("Authorization") });
+            return deleteAnswer();
+          }
+          if (method === "POST") {
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                data: {
+                  receipt: { hostId: "local", attachmentId: "att-1", sha256: NOTES_SHA256, sizeBytes: 3, mediaType: "text/plain" },
+                  displayName: "notes.txt",
+                  mentionText: "@notes.txt ",
+                },
+                requestId: "stage",
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response(JSON.stringify({ ok: true, data: { files: [] }, requestId: "list" }), { status: 200 });
+        }
+        return new Response("Not Found", { status: 404 });
+      }),
+    );
+    vi.stubGlobal("WebSocket", IdleSocket);
+    vi.spyOn(accountAttachModule, "getOrCreateAttachKey").mockResolvedValue({
+      publicKey: "initiator-pk",
+      privateKey: "initiator-sk",
+    });
+    vi.spyOn(accountSessionModule, "openTunnel").mockImplementation(async (params) => ({
+      transport: transports[params.machineId],
+      close: () => {},
+    }));
+    vi.spyOn(attachTunnelModule, "openAccountTunnel").mockImplementation(async (opts) => ({
+      transport: transports[opts.machineId],
+      close: () => {},
+    }));
+
+    render(<RemoteApp />);
+    const pick = async (workspaceId: string) => {
+      const trigger = await screen.findByRole("button", { name: /Change workspace context/i });
+      act(() => {
+        fireEvent.click(trigger);
+      });
+      const option = await screen.findByRole("button", { name: `${workspaceId} / main` }, { timeout: 5000 });
+      act(() => {
+        fireEvent.click(option);
+      });
+    };
+
+    await pick(M1.workspaceId);
+    await screen.findByText(`hello from ${M1.machineId}`, undefined, { timeout: 5000 });
+    const file = new File(["abc"], "notes.txt", { type: "text/plain" });
+    Object.defineProperty(file, "arrayBuffer", {
+      configurable: true,
+      value: async () => new TextEncoder().encode("abc").buffer,
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("file-upload-input"), { target: { files: [file] } });
+    });
+    await screen.findByTestId("attachment-preview-att-1");
+    expect(referenceDrafts.read(firstMachineTarget).text).toContain("@notes.txt");
+
+    await pick(M2.workspaceId);
+    await screen.findByText(`hello from ${M2.machineId}`, undefined, { timeout: 5000 });
+    await waitFor(() => {
+      expect(deletes.length).toBeGreaterThan(0);
+    });
+    await act(async () => {
+      await new Promise<void>((done) => setTimeout(done, 0));
+    });
+    return deletes;
+  }
+
+  const firstMachineTarget: ReferenceTargetRef = {
+    target: { hostId: "local", ownerId: M1.ownerId, epoch: M1.epoch, backendSessionId: M1.sessionId },
+  };
+
+  it("ui-workspace-wiring-rfinal-1: a cross-machine switch releases the staged file on its own host, then drops its mention", async () => {
+    const deletes = await stageOnFirstMachineThenSwitch(
+      () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+
+    expect(deletes).toEqual([
+      {
+        url: expect.stringContaining(`/host/${M1.machineId}/api/v1/reference-chat/${M1.sessionId}/files/att-1`),
+        authorization: `Bearer ${M1.deviceToken}`,
+      },
+    ]);
+    expect(deletes[0].url).toContain(`ownerId=${M1.ownerId}`);
+    expect(referenceDrafts.read(firstMachineTarget).text).not.toContain("@notes.txt");
+  });
+
+  it("ui-workspace-wiring-rfinal-1: a refused release keeps the mention in the previous machine's draft", async () => {
+    await stageOnFirstMachineThenSwitch(
+      () =>
+        new Response(JSON.stringify({ ok: false, error: { code: "TARGET_EXPIRED", message: "expired" } }), {
+          status: 409,
+        }),
+    );
+
+    expect(referenceDrafts.read(firstMachineTarget).text).toContain("@notes.txt");
   });
 });

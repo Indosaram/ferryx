@@ -2513,4 +2513,117 @@ describe("reference chat lane review fixes", () => {
     errors.mockRestore();
     expect(duplicateKeys).toEqual([]);
   });
+
+  /** The desktop follows each pick and says so, so a pane round trip confirms on its own events. */
+  function followingDesktop(): LaneRoute {
+    let activeTabId = "tab-main";
+    return ({ url, body }) => {
+      if (url.includes("/api/v1/workspace/select")) {
+        activeTabId = (body as { tabId: string }).tabId;
+        queueMicrotask(() => {
+          for (const socket of StubWebSocket.instances) {
+            socket.onmessage?.({
+              data: JSON.stringify({
+                event: "remote_active_selection_changed",
+                payload: { workspaceId: "ferryx", worktreeSlug: "main", tabId: activeTabId },
+              }),
+            } as MessageEvent);
+          }
+        });
+        return jsonResponse({ ok: true });
+      }
+      if (url.includes("/api/v1/workspace/state")) {
+        const tab = twoTabState.activeContext.terminalTabs.find((entry) => entry.id === activeTabId)!;
+        return jsonResponse({
+          activeContext: {
+            ...twoTabState.activeContext,
+            activeTabId,
+            activeTerminal: { sessionId: tab.sessionId, title: tab.label, running: true },
+          },
+        });
+      }
+      return undefined;
+    };
+  }
+
+  async function switchBackToFirstTab(): Promise<void> {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+    });
+    const sheet = screen.getByRole("tablist", { name: /terminal tabs/i });
+    await act(async () => {
+      fireEvent.click(within(sheet).getByRole("tab", { name: /claude/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
+    });
+  }
+
+  const noPrompt = () => jsonResponse({ prompt: null, screenRevision: "rev-1", cols: 80, rows: 24 });
+
+  it("lane-sweep-1: a held row still in flight after leaving and returning to its pane cannot be sent twice", async () => {
+    const submit = deferred<Response>();
+    const desktop = followingDesktop();
+    const calls = installLane((call) => {
+      if (call.url.includes("/prompt")) return call.url.includes(SECOND_SESSION_ID) ? noPrompt() : jsonResponse(promptBody("P", false));
+      if (call.url.includes("/submit")) return submit.promise;
+      return desktop(call);
+    });
+    render(<RemoteApp />);
+    await screen.findByText("Question P");
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "note one" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    const [held] = screen.getAllByTestId(/^held-message-send-/);
+    await act(async () => {
+      fireEvent.click(held);
+    });
+    expect(calls.filter((call) => call.url.includes("/submit"))).toHaveLength(1);
+
+    await switchToSecondTab();
+    await switchBackToFirstTab();
+    await screen.findByText("Question P");
+
+    const [again] = screen.getAllByTestId(/^held-message-send-/);
+    expect(again).toBeDisabled();
+    await act(async () => {
+      fireEvent.click(again);
+    });
+    expect(calls.filter((call) => call.url.includes("/submit"))).toHaveLength(1);
+    await act(async () => {
+      submit.resolve(okSubmit());
+    });
+    await drainSettledResponses();
+  });
+
+  it("lane-sweep-2: a typed answer refused after a switch to another pane comes back in its own pane's draft", async () => {
+    const answer = deferred<Response>();
+    const desktop = followingDesktop();
+    installLane((call) => {
+      if (call.url.includes("/prompt")) return call.url.includes(SECOND_SESSION_ID) ? noPrompt() : jsonResponse(promptBody("A", false));
+      if (call.url.includes("/answer")) return answer.promise;
+      return desktop(call);
+    });
+    render(<RemoteApp />);
+    await screen.findByText("Question A");
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "2" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toBe("");
+
+    await switchToSecondTab();
+    await act(async () => {
+      answer.resolve(
+        jsonResponse({ ok: false, error: { code: "INTERNAL", message: "answer refused", retryable: true }, requestId: "a1" }, false, 500),
+      );
+    });
+    await drainSettledResponses();
+    expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).not.toContain("2");
+
+    await switchBackToFirstTab();
+    await screen.findByText("Question A");
+    expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toBe("2");
+  });
 });

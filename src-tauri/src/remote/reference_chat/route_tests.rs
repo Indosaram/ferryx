@@ -946,6 +946,19 @@ async fn a_target_naming_another_owner_is_refused_without_writing_or_resizing() 
         "a refused target wrote to the pane"
     );
 
+    // The parked job must not outlive the test. Its foreground `sleep` owns the terminal, so the
+    // EOF the session's writer sends when it is dropped reaches the sleep rather than the shell,
+    // the shell never exits, and the pane's reader stays blocked in its read: that blocking thread
+    // belongs to this test's runtime, whose drop waits for it, so the test would never return.
+    // Closing the session terminates the shell and its foreground job, reaps them, and ends the
+    // reader before the runtime is dropped.
+    let closed = fixture
+        .state
+        .terminal_service
+        .close_session(&fixture.session_id)
+        .await;
+    assert!(closed.is_ok(), "the parked pane must close: {closed:?}");
+
     fixture.server.stop().await;
 }
 

@@ -442,6 +442,12 @@ function hasMagicLinkCode(): boolean {
  */
 const REFERENCE_CHAT_DEFAULT_HOST_ID = "local";
 
+/** Where a lane's own host answers: its base URL and the bearer it accepts. */
+interface ChatLaneRoute {
+  readonly baseUrl: string;
+  readonly token: string | null;
+}
+
 /**
  * The identity the owning host publishes for itself, as `/api/v1/capabilities` answers it.
  *
@@ -2627,6 +2633,19 @@ export const RemoteHostConnection: React.FC<{
   chatStagedFilesRef.current = chatStagedFiles;
   /** The target the lane was last reset to: the owner of whatever the lane still holds. */
   const chatLaneTargetRef = useRef<ReferenceTargetRef | null>(null);
+  /**
+   * The base URL and bearer that reach the lane target's host. Refreshed only while the live
+   * target IS the lane target (a live target always pairs with the current base and token), so
+   * once another host's target replaces it, this still names the host that holds its files.
+   */
+  const chatLaneRouteRef = useRef<ChatLaneRoute>({ baseUrl: transportBaseUrl, token });
+  if (
+    chatReferenceTarget !== null &&
+    chatLaneTargetRef.current !== null &&
+    sameReferenceTarget(chatReferenceTarget, chatLaneTargetRef.current)
+  ) {
+    chatLaneRouteRef.current = { baseUrl: transportBaseUrl, token };
+  }
   /** Aborted when the lane resets, so nothing started for one pane lands in another. */
   const chatLaneAbortRef = useRef(new AbortController());
   /**
@@ -2783,26 +2802,38 @@ export const RemoteHostConnection: React.FC<{
   }, [activeTunnelConnection, effectiveSessionId, token, transportBaseUrl]);
 
   /**
-   * Release files staged for a target and never sent. Fire and forget: the route is the owning
-   * pane's own, so this never depends on which pane is current by the time it runs.
+   * Release files staged for a target and never sent, on the host `route` reaches. The route is
+   * the owning pane's own, so this never depends on which pane is current by the time it runs.
+   * Resolves to the ids the host confirmed it let go of.
    */
   const releaseStagedChatFiles = useCallback(
-    (target: ReferenceTargetRef, files: readonly ReferenceFileReceipt[]) => {
-      const bearer = chatTokenRef.current;
-      if (!bearer || files.length === 0) return;
+    async (
+      target: ReferenceTargetRef,
+      files: readonly ReferenceFileReceipt[],
+      route: ChatLaneRoute,
+    ): Promise<ReadonlySet<string>> => {
+      const bearer = route.token;
+      if (!bearer || files.length === 0) return new Set();
       const query = referenceChatReadQuery({ target: target.target }, chatAgentTypeRef.current ?? "", undefined, null);
-      for (const file of files) {
-        const id = encodeURIComponent(file.receipt.attachmentId);
-        void fetch(
-          remoteApiUrl(
-            chatBaseUrlRef.current,
-            `${referenceChatRoute(target.target.backendSessionId, `files/${id}`)}?${query}`,
-          ),
-          { method: "DELETE", headers: { Authorization: `Bearer ${bearer}` } },
-        ).catch(() => {
-          /* the host prunes what it was not told about on its own schedule */
-        });
-      }
+      const answers = await Promise.all(
+        files.map(async (file) => {
+          const id = file.receipt.attachmentId;
+          try {
+            const response = await fetch(
+              remoteApiUrl(
+                route.baseUrl,
+                `${referenceChatRoute(target.target.backendSessionId, `files/${encodeURIComponent(id)}`)}?${query}`,
+              ),
+              { method: "DELETE", headers: { Authorization: `Bearer ${bearer}` } },
+            );
+            return response.ok ? id : null;
+          } catch {
+            /* the host prunes what it was not told about on its own schedule */
+            return null;
+          }
+        }),
+      );
+      return new Set(answers.filter((id): id is string => id !== null));
     },
     [],
   );
@@ -2837,16 +2868,21 @@ export const RemoteHostConnection: React.FC<{
     const previous = chatLaneTargetRef.current;
     if (previous !== null) {
       const released = chatStagedFilesRef.current;
-      releaseStagedChatFiles(previous, released);
       // A released file no longer exists on the host: its mention leaves the pane's saved draft
       // with it, as removing the chip does, so returning to the pane never sends a dead mention.
-      const draft = referenceDrafts.read(previous).text;
-      let stripped = draft;
-      for (const file of released) {
-        const path = referenceMentionPathOf(file.mentionText);
-        if (path !== null) stripped = stripped.split(referenceMentionFor(path)).join("");
-      }
-      if (stripped !== draft) referenceDrafts.set(previous, stripped);
+      // A file the host did not confirm releasing is still staged there, and keeps its mention.
+      void releaseStagedChatFiles(previous, released, chatLaneRouteRef.current).then((confirmed) => {
+        const draft = referenceDrafts.read(previous).text;
+        let stripped = draft;
+        for (const file of released) {
+          if (!confirmed.has(file.receipt.attachmentId)) continue;
+          const path = referenceMentionPathOf(file.mentionText);
+          if (path !== null) stripped = stripped.split(referenceMentionFor(path)).join("");
+        }
+        if (stripped === draft) return;
+        referenceDrafts.set(previous, stripped);
+        if (chatTargetIsCurrent(previous)) setChatDraftText(stripped);
+      });
     }
     chatStagedFilesRef.current = [];
     clearChatTranscript();
@@ -2857,9 +2893,9 @@ export const RemoteHostConnection: React.FC<{
     setChatAttaching(false);
     setChatAttachError(null);
     setChatHeld([]);
-    chatHeldSendingRef.current = new Set();
-    setChatHeldSendingIds([]);
-  }, [clearChatTranscript, releaseStagedChatFiles]);
+    // A held row's send stays in flight across a pane switch, and its id is unique to the row: the
+    // set is kept, so returning to the pane before it settles cannot send the same row twice.
+  }, [chatTargetIsCurrent, clearChatTranscript, releaseStagedChatFiles]);
 
   /* The draft and the held rows belong to the TARGET, not to this component instance: switching
      panes reads that target's own rows back, and never carries them across. */
@@ -2873,6 +2909,7 @@ export const RemoteHostConnection: React.FC<{
     if (previous !== null && sameReferenceTarget(previous, chatReferenceTarget)) return;
     resetChatLane();
     chatLaneTargetRef.current = chatReferenceTarget;
+    chatLaneRouteRef.current = { baseUrl: chatBaseUrlRef.current, token: chatTokenRef.current };
     referenceDrafts.refresh(chatReferenceTarget);
     referenceQueues.refresh(chatReferenceTarget);
     setChatDraftText(referenceDrafts.read(chatReferenceTarget).text);
@@ -3511,6 +3548,9 @@ export const RemoteHostConnection: React.FC<{
       }
       setChatAttaching(true);
       setChatAttachError(null);
+      // The host these upload to: an abandoned upload is released there, not on whatever host
+      // the lane has moved to by then.
+      const route: ChatLaneRoute = { baseUrl: chatBaseUrlRef.current, token: chatTokenRef.current };
       const staged: ReferenceFileReceipt[] = [];
       let failure: string | null = null;
       const signal = chatLaneAbortRef.current.signal;
@@ -3534,7 +3574,7 @@ export const RemoteHostConnection: React.FC<{
       if (signal.aborted || !chatTargetIsCurrent(target)) {
         // The pane changed while these uploaded: the lane they were for is gone, so nothing is
         // inserted anywhere and the host is told to let them go.
-        releaseStagedChatFiles(target, staged);
+        void releaseStagedChatFiles(target, staged, route);
         // A target that is only briefly null resets nothing, so this upload clears its own flag;
         // a real target change aborted the lane and already reset it.
         if (!signal.aborted) setChatAttaching(false);
@@ -3654,12 +3694,13 @@ export const RemoteHostConnection: React.FC<{
         }).catch(() => {
           // The card reports the refusal it was given; the composer cleared the box on send, so
           // the typed answer comes back in front of anything typed since.
-          if (target === null || !chatTargetIsCurrent(target)) return;
+          // The draft is the target's own: a pane left meanwhile gets it back in its store.
+          if (target === null) return;
           const current = referenceDrafts.read(target).text;
           if (current.startsWith(text)) return;
           const restored = current.length === 0 ? text : `${text}\n${current}`;
           referenceDrafts.set(target, restored);
-          setChatDraftText(restored);
+          if (chatTargetIsCurrent(target)) setChatDraftText(restored);
         });
         return true;
       }
