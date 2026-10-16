@@ -3307,6 +3307,7 @@ export const RemoteHostConnection: React.FC<{
         // the failed text comes back in front of whatever the user typed while it was in flight
         if (current.length === 0) referenceDrafts.set(target, text);
         else if (!current.startsWith(text)) referenceDrafts.set(target, `${text}\n${current}`);
+        referenceDrafts.end(target, text);
         setChatDraftText(referenceDrafts.read(target).text);
       } else {
         endHeldSend();

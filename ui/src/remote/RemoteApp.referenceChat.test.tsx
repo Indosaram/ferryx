@@ -16,6 +16,8 @@ import {
   chatProviderSessionId,
   parseChatGatewayIdentity,
 } from "./RemoteApp";
+import { referenceDrafts } from "./chat/referenceDraft";
+import type { ReferenceTargetRef } from "./chat/referenceTypes";
 
 vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: ({
@@ -394,6 +396,51 @@ describe("reference chat lane (task 12)", () => {
     const bubbles = screen.getAllByTestId("user-message-bubble");
     expect(bubbles).toHaveLength(1);
     expect(bubbles[0]).toHaveTextContent("what changed in the parser?");
+  });
+
+  it("ui-reference-logic-r17-1: a send that fails on the current pane ends its draft send", async () => {
+    setWidth(390);
+    // the spy calls through: it only records which target the composer's send began on
+    const begin = vi.spyOn(referenceDrafts, "begin");
+    const begun = (): ReferenceTargetRef[] => begin.mock.calls.map(([target]) => target);
+    let submits = 0;
+    const harness = installFetch({
+      submit: () => {
+        submits += 1;
+        return submits === 1
+          ? { ok: false, error: { code: "FORBIDDEN", message: "no", retryable: false }, requestId: "r1" }
+          : { ok: true, data: { receipt: { requestId: "r2", target: {}, stage: "accepted" } }, requestId: "r2" };
+      },
+    });
+    render(<RemoteApp />);
+    await screen.findByTestId("chat-composer-textarea");
+
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "helo" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("helo");
+    });
+    expect(begun()).toHaveLength(1);
+    // the failed send is over: the draft must not stay in flight carrying 'helo' as its pending
+    // text, or the corrected resend is treated as an overlap and never ends either
+    expect(referenceDrafts.read(begun()[0]).sending).toBe(false);
+
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "hello" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await waitFor(() => {
+      expect(harness.calls.filter((call) => call.url.includes("/submit"))).toHaveLength(2);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("");
+    });
+    await waitFor(() => {
+      expect(referenceDrafts.read(begun()[0]).sending).toBe(false);
+    });
+    begin.mockRestore();
   });
 
   it("QA-06: Stop goes through /stop with the pane's own interrupt, never Ctrl-C", async () => {
