@@ -239,6 +239,21 @@ describe("MobileHostDrawer", () => {
     expect(props.onSignOut).toHaveBeenCalledTimes(1);
   });
 
+  it("ui-shell-sheets-r13-1: keyboard focus stays inside the sheet across the disconnect arm/cancel swap", () => {
+    const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn() };
+    render(<MobileHostDrawer open {...props} />);
+
+    // a keyboard user focuses the arm button and activates it
+    const arm = screen.getByTestId("mobile-host-drawer-disconnect");
+    arm.focus();
+    fireEvent.click(arm);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }));
+
+    // and Cancel hands focus back to the arm button that replaces it
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(document.activeElement).toBe(screen.getByTestId("mobile-host-drawer-disconnect"));
+  });
+
   it("disarms the disconnect confirmation when the drawer closes", () => {
     const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn() };
     const { rerender } = render(<MobileHostDrawer open {...props} />);

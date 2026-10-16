@@ -1,5 +1,5 @@
 import { Cable, Check, Laptop, Radio, Server, Wifi } from "lucide-react";
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { cn } from "../lib/cn";
 import { MobileSheet } from "./chat/MobileSheet";
@@ -146,6 +146,22 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const hosts = useMemo(() => selectHostList(state), [state]);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  // The arm/cancel swap unmounts the focused button; hand focus to its replacement so it never
+  // falls to <body>, outside the modal's Tab trap.
+  const armRef = useRef<HTMLButtonElement | null>(null);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const focusAfterSwapRef = useRef(false);
+
+  const toggleConfirmDisconnect = (next: boolean) => {
+    focusAfterSwapRef.current = true;
+    setConfirmDisconnect(next);
+  };
+
+  useEffect(() => {
+    if (!focusAfterSwapRef.current) return;
+    focusAfterSwapRef.current = false;
+    (confirmDisconnect ? cancelRef : armRef).current?.focus();
+  }, [confirmDisconnect]);
 
   // The drawer stays mounted while closed, so a dismissal by any path (backdrop, Escape, X,
   // host selection) must disarm the two-step confirm before the next open.
@@ -169,8 +185,9 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
               {/* Cancel takes the slot the arm button had and Confirm the one Sign out has: a quick
                   second tap on Cancel lands on the harmless arm button, never on Sign out. */}
               <button
+                ref={cancelRef}
                 type="button"
-                onClick={() => setConfirmDisconnect(false)}
+                onClick={() => toggleConfirmDisconnect(false)}
                 className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 Cancel
@@ -193,9 +210,10 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
             <>
               <button
                 key="arm"
+                ref={armRef}
                 type="button"
                 data-testid="mobile-host-drawer-disconnect"
-                onClick={() => setConfirmDisconnect(true)}
+                onClick={() => toggleConfirmDisconnect(true)}
                 className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 {isAccountSession ? "Disconnect machine" : "Remove pairing"}
