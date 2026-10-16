@@ -633,7 +633,9 @@ pub fn read_reference_history_window(
         return Ok(ReferenceHistoryWindow { start: 0, bytes });
     }
 
-    let start = length - cap;
+    // Read one byte before the window too, so a window that begins exactly on a record boundary
+    // keeps that record instead of discarding it as a torn head.
+    let start = length - cap - 1;
     let mut file = File::open(path).map_err(|error| {
         history_error(
             ScopeErrorCode::NotFound,
@@ -646,16 +648,17 @@ pub fn read_reference_history_window(
             format!("{}: {error}", path.display()),
         )
     })?;
-    let mut bytes: Vec<u8> = Vec::with_capacity(cap as usize);
-    file.take(cap).read_to_end(&mut bytes).map_err(|error| {
+    let mut bytes: Vec<u8> = Vec::with_capacity(cap as usize + 1);
+    file.take(cap + 1).read_to_end(&mut bytes).map_err(|error| {
         history_error(
             ScopeErrorCode::NotFound,
             format!("{}: {error}", path.display()),
         )
     })?;
 
-    // The window begins mid-record by construction; drop the torn head so the parser never sees a
-    // truncated record. A window with no line break at all holds nothing that can be read.
+    // Drop everything through the first line break: when the byte before the window is one, that
+    // is only that byte; otherwise it is the torn head of a record, which the parser must never
+    // see. A window with no line break at all holds nothing that can be read.
     match bytes.iter().position(|byte| *byte == b'\n') {
         Some(index) => Ok(ReferenceHistoryWindow {
             start: start + index as u64 + 1,
@@ -838,11 +841,13 @@ struct ReferenceTrackerInner {
 }
 
 /// Does `current` continue `previous` after its head moved forward? True when some non-empty
-/// suffix of the previous turns is exactly the start of the current ones.
+/// suffix of the previous turns is exactly the start of the current ones. The last previous turn
+/// may still be growing, so it is only required to still be there.
 fn reference_history_head_shifted(previous: &[String], current: &[String]) -> bool {
     (1..previous.len()).any(|drop| {
         let kept = &previous[drop..];
-        current.len() >= kept.len() && current[..kept.len()] == *kept
+        let closed = kept.len() - 1;
+        current.len() >= kept.len() && current[..closed] == kept[..closed]
     })
 }
 
@@ -937,9 +942,13 @@ impl ReferenceHistoryGenerationTracker {
         }
 
         let truncated = fingerprints.len() < state.fingerprints.len();
+        // The newest observed turn is still open: an agent appends records to it until it settles,
+        // so its growth is an append, not a rewrite.
+        let closed = state.fingerprints.len().saturating_sub(1);
         let rewritten = state
             .fingerprints
             .iter()
+            .take(closed)
             .zip(fingerprints.iter())
             .any(|(previous, current)| previous != current);
         let head_moved = window_start > state.window_start
@@ -994,18 +1003,16 @@ pub fn reference_history_generation(
 
 /// The generation of a stream read as a bounded window starting at `window_start`.
 ///
-/// A whole-store read is [`reference_history_generation`]. A tail window's first turn moves with
-/// every append, so a genesis digest over it would rotate on every poll; such a window is tracked
-/// by incarnation instead, which tolerates the head moving forward.
+/// Every native read is tracked by incarnation, whether or not a provider session is known and
+/// whether the store was read whole or as a tail window: a tail window's first turn moves with
+/// every append, so a genesis digest over it would rotate on every poll, and switching methods
+/// when a growing store passes the read cap would rotate the token on a plain append.
 fn reference_history_window_generation(
     stream_id: &str,
     provider_session_id: Option<&str>,
     window_start: u64,
     turns: &[ReferenceTurn],
 ) -> String {
-    if window_start == 0 {
-        return reference_history_generation(stream_id, provider_session_id, turns);
-    }
     global_reference_history_generation_tracker().observe_window(
         stream_id,
         provider_session_id,
@@ -1255,8 +1262,9 @@ pub fn reference_history_page_from_window(
             } as u64,
     });
     // A tail window's oldest page is not the conversation's beginning: the turns before the window
-    // were never read, so the page says so rather than passing its first turn off as the start.
-    let unavailable_reason = (window_start > 0 && start_index == 0).then(|| {
+    // were never read, so the page says so rather than passing its first turn off as the start. A
+    // reset inside the window is the conversation's beginning, so nothing older is missing.
+    let unavailable_reason = (window_start > 0 && start_index == 0 && reset.is_none()).then(|| {
         format!(
             "older history lies beyond the {REFERENCE_HISTORY_MAX_BYTES} byte read cap; the {window_start} \
              bytes before this window were not read"
@@ -2552,6 +2560,153 @@ mod tests {
         assert_eq!(page.turns.len(), 4, "the two kept prompts and their answers");
         assert!(!page.has_more, "nothing before the clear may be paged in");
         assert!(page.cursor.is_none());
+    }
+
+    /// The open turn of an omo store: a prompt and an answer that called a tool and has not yet
+    /// recorded its result. `grown` adds the tool result and the answer's closing text.
+    fn open_turn_lines(prompt: &str, grown: bool) -> Vec<String> {
+        let mut lines = vec![
+            omo_line("user", prompt),
+            serde_json::json!({"type": "message", "message": {"role": "assistant", "stopReason": "toolUse", "content": [{"type": "text", "text": "looking"}, {"type": "toolCall", "id": "t1", "name": "read", "arguments": {"path": "a"}}]}}).to_string(),
+        ];
+        if grown {
+            lines.push(serde_json::json!({"type": "message", "message": {"role": "toolResult", "toolName": "read", "toolCallId": "t1", "content": [{"type": "text", "text": "contents"}]}}).to_string());
+            lines.push(omo_line("assistant", "done"));
+        }
+        lines
+    }
+
+    // rs-history-r15-1
+    #[test]
+    fn the_open_tail_turn_growing_keeps_the_generation() {
+        // A whole-store read: the newest turn grows in place, no existing record is rewritten.
+        let home = TempHome::new();
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", THREE_TURNS);
+        let identity = bound_identity("omo", "sess-1", "aaa");
+        let stream = omo_stream(&home, &identity);
+        let closed = vec![omo_line("user", "U0"), omo_line("assistant", "A0")];
+        let mut open_lines = closed.clone();
+        open_lines.extend(open_turn_lines("U", false));
+        let mut grown_lines = closed.clone();
+        grown_lines.extend(open_turn_lines("U", true));
+        let open = joined(&open_lines);
+        let grown = joined(&grown_lines);
+        let before = reference_history_page_from_bytes(&stream, &identity, open.as_bytes(), 10, None)
+            .expect("the open turn is served");
+        let after = reference_history_page_from_bytes(&stream, &identity, grown.as_bytes(), 10, None)
+            .expect("the grown turn is served");
+        assert_eq!(after.turns.len(), before.turns.len(), "the fixture grows a turn, it does not add one");
+        assert_eq!(after.generation, before.generation, "growth of the open tail turn is an append");
+        let mut rewritten_lines = grown_lines.clone();
+        rewritten_lines[0] = omo_line("user", "rewritten");
+        let rewritten = joined(&rewritten_lines);
+        let rotated = reference_history_page_from_bytes(&stream, &identity, rewritten.as_bytes(), 10, None)
+            .expect("the rewritten store is served");
+        assert_ne!(rotated.generation, before.generation, "a rewritten closed turn still rotates");
+
+        // A tail window whose head moves forward while its newest turn grows.
+        let home = TempHome::new();
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", THREE_TURNS);
+        let stream = omo_stream(&home, &identity);
+        let head = vec![omo_line("user", "U0"), omo_line("assistant", "A0")];
+        let mut first_lines = head.clone();
+        first_lines.extend(open_turn_lines("U", false));
+        let mut second_lines = head[1..].to_vec();
+        second_lines.extend(open_turn_lines("U", true));
+        let first = joined(&first_lines);
+        let second = joined(&second_lines);
+        let shifted = 1000 + head[0].len() as u64 + 1;
+        let before = reference_history_page_from_window(&stream, &identity, 1000, first.as_bytes(), 10, None)
+            .expect("the first window is served")
+            .generation;
+        let after = reference_history_page_from_window(&stream, &identity, shifted, second.as_bytes(), 10, None)
+            .expect("the shifted window is served")
+            .generation;
+        assert_eq!(after, before, "a moved head with a growing tail turn is an append");
+    }
+
+    // rs-history-r14-2
+    #[test]
+    fn a_store_growing_past_the_read_cap_keeps_the_generation() {
+        let home = TempHome::new();
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", THREE_TURNS);
+        let identity = identity("omo", "aaa");
+        let stream = omo_stream(&home, &identity);
+        assert!(identity.provider_session_id().is_none(), "the stream has no provider session id");
+        let mut lines = vec![
+            omo_line("user", "U0"),
+            omo_line("assistant", "A0"),
+            omo_line("user", "U1"),
+            omo_line("assistant", "A1"),
+        ];
+        let whole = joined(&lines);
+        let before = reference_history_page_from_window(&stream, &identity, 0, whole.as_bytes(), 10, None)
+            .expect("the whole store is served")
+            .generation;
+        lines.push(omo_line("user", "U2"));
+        lines.push(omo_line("assistant", "A2"));
+        let appended = joined(&lines);
+        // The store passed the cap: the window now starts inside the first record.
+        let window_start = 5usize;
+        let after = reference_history_page_from_window(
+            &stream,
+            &identity,
+            window_start as u64,
+            &appended.as_bytes()[window_start..],
+            10,
+            None,
+        )
+        .expect("the tail window is served")
+        .generation;
+        assert_eq!(after, before, "an append that pushes the store past the read cap is not a change");
+    }
+
+    // rs-history-r15-2
+    #[test]
+    fn a_bounded_window_starting_on_a_line_boundary_keeps_its_first_record() {
+        let home = TempHome::new();
+        let cap = REFERENCE_HISTORY_MAX_BYTES;
+        let base = joined(&[omo_line("user", "boundary prompt"), omo_line("assistant", "")]).len();
+        let rest = joined(&[omo_line("user", "boundary prompt"), omo_line("assistant", &"p".repeat(cap - base))]);
+        assert_eq!(rest.len(), cap, "the fixture tail is exactly the read cap");
+        let head = format!("{}\n", "x".repeat(16));
+        let path = home.write_session("--w--", "2026-10-06_aaa.jsonl", &format!("{head}{rest}"));
+        let window = read_reference_history_window(&path, ReferenceNativeHistoryKind::Omo)
+            .expect("the bounded window is read");
+        assert_eq!(window.start, head.len() as u64, "the window starts on the record boundary");
+        assert!(window.bytes == rest.as_bytes(), "the record the window starts on is kept whole");
+
+        // A window that starts mid-record still drops the torn head.
+        let torn = format!("{head}y{rest}");
+        std::fs::write(&path, &torn).expect("the store is rewritable");
+        let window = read_reference_history_window(&path, ReferenceNativeHistoryKind::Omo)
+            .expect("the bounded window is read");
+        let first_line = rest.find('\n').expect("the tail has a line") + 1;
+        assert_eq!(window.start, (head.len() + 1 + first_line) as u64);
+        assert!(window.bytes == rest.as_bytes()[first_line..], "the torn head line is dropped");
+    }
+
+    // rs-history-r13-3
+    #[test]
+    fn a_reset_inside_a_tail_window_fences_the_unread_history_disclosure() {
+        let home = TempHome::new();
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", THREE_TURNS);
+        let identity = bound_identity("omo", "sess-1", "aaa");
+        let stream = omo_stream(&home, &identity);
+        let window = joined(&[
+            omo_line("assistant", "tail of an older turn"),
+            r#"{"type":"custom","customType":"context_clear"}"#.to_string(),
+            omo_line("user", "B"),
+            omo_line("assistant", "answer B"),
+        ]);
+        let page = reference_history_page_from_window(&stream, &identity, 1000, window.as_bytes(), 10, None)
+            .expect("the oldest page of the window is served");
+        assert_eq!(first_text(&page.turns[0]), "B");
+        assert!(!page.has_more);
+        assert_eq!(
+            page.unavailable_reason, None,
+            "nothing before the reset belongs to the conversation, so no older history is unread"
+        );
     }
 
     #[tokio::test]
