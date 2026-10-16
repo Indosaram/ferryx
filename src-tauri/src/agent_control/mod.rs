@@ -122,7 +122,10 @@ pub fn derive_status(
     use crate::agent_detect::AgentActivity;
     let native = provider.filter(|report| report.self_reported);
     if let Some(state) = native.and_then(|report| provider_state(&report.state)) {
-        let state = if pending_prompt { AgentControlState::Blocked } else { state };
+        // The provider never said it is blocked: the prompt on the screen did, so that is the source.
+        if pending_prompt {
+            return DerivedStatus { tier: AgentTier::Native, state: AgentControlState::Blocked, source: AgentStateSource::Screen };
+        }
         return DerivedStatus { tier: AgentTier::Native, state, source: AgentStateSource::Provider };
     }
     let tier = if native.is_some() { AgentTier::Native } else { AgentTier::Screen };
@@ -265,7 +268,8 @@ async fn connect_daemon() -> Result<tokio::net::TcpStream, (Value, i32)> {
         let (value, _) = failure("NOT_FOUND", "no Ferryx daemon is listening");
         (value, EXIT_NOT_FOUND)
     };
-    let port: u16 = std::fs::read_to_string(&path)
+    let port: u16 = tokio::fs::read_to_string(&path)
+        .await
         .ok()
         .and_then(|text| text.trim().parse().ok())
         .ok_or_else(not_running)?;
@@ -307,6 +311,15 @@ pub async fn request_daemon(op: AgentControlOp) -> (Value, i32) {
         Ok(other) => return failure("UNSUPPORTED", &format!("unexpected handshake response: {other:?}")),
         Err(message) => return failure("INTERNAL", &message),
     }
+    // Gate on the advertised capability: an older daemon never sees a request it cannot parse.
+    match exchange(&mut reader, &mut write_half, &DaemonRequest::GetCapabilities).await {
+        Ok(DaemonResponse::CapabilitiesOk { capabilities }) if capabilities.iter().any(|name| name == AGENT_CONTROL_CAPABILITY) => {}
+        Ok(DaemonResponse::CapabilitiesOk { .. }) => {
+            return failure("UNSUPPORTED", "this daemon does not support agent control (agentControlV1)")
+        }
+        Ok(other) => return failure("INTERNAL", &format!("unexpected capabilities response: {other:?}")),
+        Err(message) => return failure("INTERNAL", &message),
+    }
     match exchange(&mut reader, &mut write_half, &DaemonRequest::AgentControl { request: op }).await {
         Ok(DaemonResponse::AgentControlOk { result }) => {
             let mut value = serde_json::json!({ "ok": true });
@@ -317,10 +330,6 @@ pub async fn request_daemon(op: AgentControlOp) -> (Value, i32) {
         }
         Ok(DaemonResponse::Error { message, code, .. }) => {
             let code = code.unwrap_or_default();
-            // An older daemon answers an unknown request type as malformed: that is a refusal.
-            if code.is_empty() && message.starts_with("Malformed request") {
-                return failure("UNSUPPORTED", "this daemon does not support agent control (agentControlV1)");
-            }
             failure(if code.is_empty() { "INTERNAL" } else { &code }, &message)
         }
         Ok(other) => failure("INTERNAL", &format!("unexpected daemon response: {other:?}")),
@@ -433,7 +442,11 @@ mod tests {
 
     #[test]
     fn a_pending_prompt_is_always_blocked() {
-        assert_eq!(derive_status(Some(&report("working", true)), None, true).state, AgentControlState::Blocked);
+        assert_eq!(
+            derive_status(Some(&report("working", true)), None, true),
+            DerivedStatus { tier: AgentTier::Native, state: AgentControlState::Blocked, source: AgentStateSource::Screen },
+            "the block was read from the screen, not reported by the provider"
+        );
         let screen_only = derive_status(None, Some(AgentActivity::Idle), true);
         assert_eq!((screen_only.state, screen_only.source), (AgentControlState::Blocked, AgentStateSource::Screen));
     }

@@ -68,6 +68,7 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
     let agent = provider
         .as_ref()
         .and_then(|report| report.agent.clone())
+        .filter(|id| !id.trim().is_empty())
         .or_else(|| detection.as_ref().map(|found| found.manifest_id.clone()).filter(|id| !id.is_empty()));
     let readable = screen.as_ref().is_some_and(|snapshot| snapshot.is_answerable());
     let pending = match (&agent, &screen) {
@@ -277,5 +278,179 @@ pub(crate) async fn handle(state: &Arc<RemoteGatewayState>, op: AgentControlOp) 
             let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
             outcome_result(reference_chat_runtime().input.stop(&stop, &writer).await)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::backend::RemoteSessionBackend as _;
+    use crate::remote::reference_chat::types::ReferencePromptAnswer;
+
+    const CLAUDE_APPROVAL: &str = include_str!("reference_chat/fixtures/claude/prompt/approval-command.screen");
+
+    /// One pane showing a fixed screen; every write and every signal it is handed is recorded.
+    struct FixedPane {
+        session_id: String,
+        screen: Vec<u8>,
+        writes: std::sync::Mutex<Vec<Vec<u8>>>,
+        signals: std::sync::Mutex<Vec<crate::terminal::TerminalSignal>>,
+    }
+
+    impl crate::remote::backend::RemoteSessionBackend for FixedPane {
+        fn list_sessions(&self) -> futures_util::future::BoxFuture<'_, Vec<String>> {
+            Box::pin(async move { vec![self.session_id.clone()] })
+        }
+        fn describe_session<'a>(
+            &'a self,
+            session_id: &'a str,
+        ) -> futures_util::future::BoxFuture<'a, Result<RemoteSessionDetails, String>> {
+            Box::pin(async move {
+                if session_id != self.session_id {
+                    return Err("unknown session".to_string());
+                }
+                Ok(RemoteSessionDetails {
+                    session_id: self.session_id.clone(),
+                    workspace_id: None,
+                    worktree_label: None,
+                    worktree_path: None,
+                    running: true,
+                    cols: 100,
+                    rows: 30,
+                })
+            })
+        }
+        fn attach_with_sequence<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _after_sequence: Option<u64>,
+        ) -> futures_util::future::BoxFuture<'a, Result<crate::terminal::SessionAttachment, String>> {
+            Box::pin(async move {
+                let (sender, receiver) = tokio::sync::broadcast::channel(1);
+                std::mem::forget(sender);
+                Ok(crate::terminal::SessionAttachment {
+                    snapshot: crate::terminal::AttachmentSnapshot {
+                        session_id: self.session_id.clone(),
+                        history_start_sequence: Some(1),
+                        history_end_sequence: Some(1),
+                        history: self.screen.clone(),
+                        history_segments: vec![crate::terminal::HistorySegment {
+                            cols: Some(100),
+                            rows: Some(30),
+                            bytes: self.screen.clone(),
+                        }],
+                        gap: None,
+                        history_incomplete: false,
+                    },
+                    receiver,
+                })
+            })
+        }
+        fn write_input<'a>(&'a self, _session_id: &'a str, data: &'a [u8]) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+            self.writes.lock().expect("writes").push(data.to_vec());
+            Box::pin(async { Ok(()) })
+        }
+        fn resize<'a>(&'a self, _session_id: &'a str, _cols: u16, _rows: u16) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Err("this pane never resizes".to_string()) })
+        }
+        fn signal<'a>(
+            &'a self,
+            _session_id: &'a str,
+            signal: crate::terminal::TerminalSignal,
+        ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+            self.signals.lock().expect("signals").push(signal);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn pane(session_id: &str, screen: &str) -> (Arc<FixedPane>, Arc<RemoteGatewayState>) {
+        let backend = Arc::new(FixedPane {
+            session_id: session_id.to_string(),
+            screen: screen.trim_end().replace('\n', "\r\n").into_bytes(),
+            writes: std::sync::Mutex::new(Vec::new()),
+            signals: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = Arc::new(RemoteGatewayState::new_with_backend(
+            Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+            crate::worktree::registry::WorkspaceRegistry::new(),
+        ));
+        (backend, state)
+    }
+
+    /// The pending prompt a read reports, and the revision it was read from.
+    async fn pending_prompt(state: &Arc<RemoteGatewayState>, session_id: &str) -> (String, String) {
+        let read = handle(state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
+        let session = &read["session"];
+        assert_eq!(session["agent"], "claude", "{read}");
+        assert_eq!(session["state"], "blocked", "{read}");
+        assert_eq!(session["stateSource"], "screen", "{read}");
+        let prompt_id = session["pending"]["id"].as_str().expect("a pending prompt").to_string();
+        let revision = session["screenRevision"].as_str().expect("a screen revision").to_string();
+        (prompt_id, revision)
+    }
+
+    fn answer(session_id: &str, prompt_id: &str, revision: &str, request_id: Option<&str>) -> AgentControlOp {
+        AgentControlOp::Answer {
+            session_id: session_id.to_string(),
+            prompt_id: prompt_id.to_string(),
+            screen_revision: revision.to_string(),
+            answer: ReferencePromptAnswer { option_index: Some(0), ..Default::default() },
+            request_id: request_id.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_the_prompt_on_the_screen_is_typed() {
+        let session_id = "agent-control-answer-ok";
+        let (backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        let (prompt_id, revision) = pending_prompt(&state, session_id).await;
+
+        let result = handle(&state, answer(session_id, &prompt_id, &revision, None)).await.expect("the answer is accepted");
+
+        assert_eq!(result["receipt"]["stage"], "accepted", "{result}");
+        assert!(!backend.writes.lock().expect("writes").is_empty(), "an accepted answer typed its keys");
+        let replay = handle(&state, answer(session_id, &prompt_id, &revision, Some("agent-control-answer-replay")))
+            .await
+            .expect_err("a card is answered once");
+        assert_eq!(replay.code, ScopeErrorCode::RequestConflict, "{}", replay.message);
+    }
+
+    #[tokio::test]
+    async fn an_answer_for_a_screen_that_moved_on_types_nothing() {
+        let session_id = "agent-control-answer-stale";
+        let (backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        let (prompt_id, _) = pending_prompt(&state, session_id).await;
+
+        let error = handle(&state, answer(session_id, &prompt_id, "not-the-current-revision", None))
+            .await
+            .expect_err("a stale revision is refused");
+
+        assert_eq!(error.code, ScopeErrorCode::RequestConflict, "{}", error.message);
+        assert!(backend.writes.lock().expect("writes").is_empty(), "a refused answer typed nothing");
+    }
+
+    #[tokio::test]
+    async fn a_pane_no_prompt_reader_knows_cannot_be_answered() {
+        let session_id = "agent-control-answer-shell";
+        let (backend, state) = pane(session_id, "$ ");
+
+        let error = handle(&state, answer(session_id, "any", "any", None)).await.expect_err("no reader knows a shell");
+
+        assert_eq!(error.code, ScopeErrorCode::Unsupported, "{}", error.message);
+        assert!(backend.writes.lock().expect("writes").is_empty(), "nothing was typed");
+    }
+
+    #[tokio::test]
+    async fn stop_presses_the_interrupt_key_and_never_signals() {
+        let session_id = "agent-control-stop";
+        let (backend, state) = pane(session_id, CLAUDE_APPROVAL);
+
+        handle(&state, AgentControlOp::Stop { session_id: session_id.to_string(), request_id: None })
+            .await
+            .expect("stop is accepted");
+
+        assert_eq!(backend.writes.lock().expect("writes").clone(), vec![b"\x1b".to_vec()]);
+        assert!(backend.signals.lock().expect("signals").is_empty(), "stop must never signal the process");
+        assert!(backend.list_sessions().await.contains(&session_id.to_string()));
     }
 }
