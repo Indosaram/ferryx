@@ -21,6 +21,8 @@ const OTHER_MACHINE_ID = "mach-other-9";
 const EPOCH = "101";
 const SID_FIRST = "s-1a-alpha";
 const SID_SECOND = "s-1b-beta";
+/** When set, the machine advertises a desktop-local snapshot and answers the scoped query with it. */
+let desktopScopedProjects: Array<{ workspaceId: string; availability: string }> | null = null;
 
 type SessionRow = {
   workspaceId: string;
@@ -210,10 +212,18 @@ async function mountAccountHarness(initial: SessionRow[], chat?: {
       });
     }
     if (path === "/api/v1/workspace/projects") {
+      if (desktopScopedProjects) return respond({ revision: "1", completeness: "complete", desktopLocalSnapshotExists: true, projects: [], unavailableWorkspaceIds: [] });
       return respond({
         revision: "1",
         completeness: "complete",
         projects: [{ workspaceId: "ws-ferryx", repoRoot: "/srv/ferryx", availability: "ready", revision: "1" }],
+        unavailableWorkspaceIds: [],
+      });
+    }
+    if (path === "/api/v1/workspace/projects?scope=desktopLocal" && desktopScopedProjects) {
+      return respond({
+        revision: "2", completeness: "complete", desktopLocalSnapshotExists: true,
+        projects: desktopScopedProjects.map((project) => ({ ...project, repoRoot: `/srv/${project.workspaceId}`, revision: "2" })),
         unavailableWorkspaceIds: [],
       });
     }
@@ -455,6 +465,7 @@ describe("RemoteApp machine inventory selection", () => {
 
   afterEach(() => {
     cleanup();
+    desktopScopedProjects = null;
     for (const dispose of r25Cleanups) dispose();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -642,6 +653,55 @@ describe("RemoteApp machine inventory selection", () => {
       expect(alerts.length).toBeGreaterThan(0);
     });
     expect(harness.terminalPaths().some((path) => path.includes(SID_SECOND))).toBe(false);
+    expect(harness.sessionCreatePosts()).toEqual([]);
+  });
+
+  it("r28-ui keeps the attached session when its project becomes unavailable in the desktop scope", async () => {
+    desktopScopedProjects = [
+      { workspaceId: "ws-aaa", availability: "ready" },
+      { workspaceId: "ws-ferryx", availability: "ready" },
+    ];
+    const harness = await mountAccountHarness([
+      session(SID_FIRST, "alpha-shell", { workspaceId: "ws-aaa", worktree: null }),
+      session(SID_SECOND, "beta-agent"),
+    ]);
+    await waitFor(() => {
+      expect(harness.sessionsQueryCount()).toBeGreaterThan(0);
+    });
+    await openContextPicker();
+    const row = await waitFor(() => {
+      const found = sessionRow(SID_SECOND_ROW);
+      if (!found) throw new Error("second-session row not rendered");
+      return found;
+    });
+    act(() => {
+      fireEvent.click(row);
+    });
+    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+    await waitFor(() => {
+      expect(harness.terminalPaths().some((path) => path.includes(SID_SECOND))).toBe(true);
+    });
+    const attachedBefore = harness.terminalPaths().length;
+
+    // The attached session's project goes offline (for example an unmounted volume).
+    desktopScopedProjects = [
+      { workspaceId: "ws-aaa", availability: "ready" },
+      { workspaceId: "ws-ferryx", availability: "missing" },
+    ];
+    const refresh = harness.expectSessionsQuery();
+    act(() => {
+      harness.publishInventoryEvent({ completeness: "complete", sessions: payload([session(SID_FIRST, "alpha-shell", { workspaceId: "ws-aaa", worktree: null }), session(SID_SECOND, "beta-agent")]) });
+    });
+    await awaitSignal(refresh.arrived, "inventory refresh arrival");
+    refresh.answer(payload([session(SID_FIRST, "alpha-shell", { workspaceId: "ws-aaa", worktree: null }), session(SID_SECOND, "beta-agent")]));
+    await awaitSignal(refresh.completed, "inventory refresh answer completion");
+    await waitFor(() => {
+      expect(harness.timeline()).toContain("GET /api/v1/workspace/projects?scope=desktopLocal");
+    });
+    // Let any reselection the refresh triggers settle before asserting.
+    await act(async () => { await Promise.resolve(); });
+    const opened = harness.terminalPaths().slice(attachedBefore);
+    expect(opened.some((path) => path.includes(SID_FIRST))).toBe(false);
     expect(harness.sessionCreatePosts()).toEqual([]);
   });
 

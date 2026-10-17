@@ -321,25 +321,23 @@ impl DaemonWorkspaceService {
                 || project.repo_root.parent().is_none() {
                 return Err("INVALID_REQUEST".into());
             }
-            match fs::canonicalize(&project.repo_root) {
-                Ok(root) => {
-                    let manager = WorktreeManager::try_new(&root).map_err(|_| "INVALID_PATH")?;
-                    if manager.repo_root() != root { return Err("INVALID_PATH".into()); }
-                    if candidate.workspaces.get(&project.workspace_id)
-                        .is_some_and(|row| row.repo_root != root) {
-                        return Err("INVALID_PATH".into());
-                    }
-                    project.repo_root = root;
-                }
-                Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied) => {
-                    if let Some(row) = candidate.workspaces.get(&project.workspace_id) {
-                        project.repo_root = row.repo_root.clone();
-                    } else if let Some(previous) = candidate.desktop_local_projects.iter().flatten()
-                        .find(|member| member.workspace_id == project.workspace_id) {
-                        project.repo_root = previous.repo_root.clone();
-                    }
-                }
-                Err(_) => return Err("INVALID_PATH".into()),
+            // Membership is the desktop's list; validation only decides which root is
+            // recorded. A member that cannot be validated now (offline volume, a Git
+            // parent appearing above a folder, an I/O error) stays a member under its
+            // last trusted root and is reported unavailable by the inventory probe, so
+            // one bad project can never freeze the whole list.
+            let validated_root = fs::canonicalize(&project.repo_root).ok().filter(|root| {
+                WorktreeManager::try_new(root).is_ok_and(|manager| manager.repo_root() == root)
+                    && candidate.workspaces.get(&project.workspace_id)
+                        .is_none_or(|row| &row.repo_root == root)
+            });
+            if let Some(root) = validated_root {
+                project.repo_root = root;
+            } else if let Some(row) = candidate.workspaces.get(&project.workspace_id) {
+                project.repo_root = row.repo_root.clone();
+            } else if let Some(previous) = candidate.desktop_local_projects.iter().flatten()
+                .find(|member| member.workspace_id == project.workspace_id) {
+                project.repo_root = previous.repo_root.clone();
             }
             members.push(project);
         }
@@ -468,6 +466,33 @@ impl DaemonWorkspaceService {
 #[cfg(test)]
 mod catalog_tests {
     use super::*;
+    #[tokio::test]
+    async fn r28_rust_one_unvalidatable_member_does_not_freeze_desktop_membership() {
+        crate::ipc::run_blocking(|| {
+            let root = tempfile::tempdir().unwrap();
+            let home = fs::canonicalize(root.path()).unwrap();
+            let scratch = home.join("scratch");
+            let added = home.join("added");
+            fs::create_dir(&scratch).unwrap();
+            fs::create_dir(&added).unwrap();
+            let service = DaemonWorkspaceService::new(WorkspaceRegistry::new(), home.join("data/catalog"));
+            let member = |id: &str, path: &std::path::Path| workspace_catalog::DesktopLocalProject {
+                workspace_id: id.into(), repo_root: path.to_path_buf(),
+            };
+            service.sync_desktop_local_projects(vec![member("scratch", &scratch)]).unwrap();
+            // A Git repository appears above the plain folder, so it no longer validates.
+            let status = std::process::Command::new("git").arg("init").arg("-q").arg(&home).status().unwrap();
+            assert!(status.success());
+            service.sync_desktop_local_projects(vec![member("scratch", &scratch), member("added", &added)]).unwrap();
+            let members = service.catalog().unwrap().desktop_local_projects.unwrap();
+            assert_eq!(members.iter().map(|m| m.workspace_id.as_str()).collect::<Vec<_>>(), vec!["scratch", "added"]);
+            assert_eq!(members[0].repo_root, scratch);
+            drop(service);
+            root.close().unwrap();
+            Ok(())
+        }).await.unwrap();
+    }
+
     #[tokio::test]
     async fn desktop_snapshot_is_idempotent_retains_rows_and_persists_empty() {
         crate::ipc::run_blocking(|| {

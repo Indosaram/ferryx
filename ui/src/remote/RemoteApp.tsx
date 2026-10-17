@@ -1750,11 +1750,12 @@ export const RemoteHostConnection: React.FC<{
         const currentTarget = initialAccountTargetRef.current;
         const currentModel = modelRef.current;
         const requestedWs = currentTarget?.workspaceId ?? currentModel.context.workspaceId;
-        const currentWs = projsData?.desktopLocalSnapshotExists === true
-          ? projectsList.find((project: { workspaceId: string; availability: string }) =>
-              project.workspaceId === requestedWs && project.availability === "ready")?.workspaceId
-            ?? projectsList.find((project: { availability: string }) => project.availability === "ready")?.workspaceId ?? null
-          : requestedWs ?? projectsList[0]?.workspaceId ?? null;
+        // A refresh never moves an existing selection to another project: the user's
+        // terminal and input stay on the workspace they chose even when it is offline.
+        // Only the very first pick falls back to a ready desktop member.
+        const currentWs = requestedWs ?? (projsData?.desktopLocalSnapshotExists === true
+          ? projectsList.find((project: { availability: string }) => project.availability === "ready")?.workspaceId ?? null
+          : projectsList[0]?.workspaceId ?? null);
         const retainedWorkspace = currentWs === requestedWs;
         const currentSlug = retainedWorkspace ? currentTarget?.worktreeSlug ?? currentModel.context.worktreeSlug ?? null : null;
         const currentLabel = retainedWorkspace ? currentTarget?.worktreeLabel ?? currentModel.context.worktreeLabel ?? currentSlug ?? "main" : "main";
