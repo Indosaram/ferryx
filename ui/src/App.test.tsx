@@ -63,6 +63,7 @@ const native = {
   listProjectBranches: vi.fn(),
   listWorktrees: vi.fn().mockResolvedValue([]),
   registerProject: vi.fn(),
+  syncDesktopLocalProjects: vi.fn().mockResolvedValue(undefined),
   signalTerminal: vi.fn(),
   saveSession: vi.fn().mockResolvedValue(undefined),
   loadSession: vi.fn().mockResolvedValue(null),
@@ -211,6 +212,7 @@ vi.mock("./lib/tauri", () => ({
   listProjectBranches: native.listProjectBranches,
   listWorktrees: native.listWorktrees,
   registerProject: native.registerProject,
+  syncDesktopLocalProjects: native.syncDesktopLocalProjects,
   signalTerminal: native.signalTerminal,
   saveSession: native.saveSession,
   loadSession: native.loadSession,
@@ -469,7 +471,7 @@ function seedSidebarBrowserTab(workspaceId: string) {
   });
 }
 
-const { App, ensureLocalProjectsRegistered } = await import("./App");
+const { App, ensureLocalProjectsRegistered, createDesktopLocalProjectSync } = await import("./App");
 const { resetWorkspaceRestore } = await import("./state/workspaceRestore");
 
 afterEach(() => {
@@ -644,6 +646,39 @@ describe("App project workspace flow", () => {
       expect(upToBootstrap).toContain("await withTimeout(");
       expect(upToBootstrap).toContain("ensureLocalProjectsRegistered(prepared.projects)");
     }
+  });
+
+  it("serializes desktop snapshots and sends only the latest queued membership", async () => {
+    let release: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    native.syncDesktopLocalProjects.mockReset();
+    native.syncDesktopLocalProjects.mockImplementationOnce(() => blocked).mockResolvedValue(undefined);
+    const send = createDesktopLocalProjectSync();
+    const project = (id: string) => ({ workspaceId: id, repoRoot: `/repo/${id}`, gitRoot: null });
+    const first = send([project("first")]);
+    void send([project("obsolete")]);
+    const last = send([project("latest"), project("ssh:excluded"), project("default")]);
+    expect(native.syncDesktopLocalProjects).toHaveBeenCalledTimes(1);
+    release();
+    await Promise.all([first, last]);
+    expect(native.syncDesktopLocalProjects.mock.calls).toEqual([
+      [[{ workspaceId: "first", repoRoot: "/repo/first" }]],
+      [[{ workspaceId: "latest", repoRoot: "/repo/latest" }]],
+    ]);
+  });
+
+  it("resends unchanged desktop membership after reconnect and includes failed registrations", async () => {
+    native.syncDesktopLocalProjects.mockReset().mockResolvedValue(undefined);
+    native.registerProject.mockRejectedValueOnce(new Error("missing volume"));
+    const saved = [{ workspaceId: "sync-missing", repoRoot: "/offline/repo", gitRoot: null }];
+    await ensureLocalProjectsRegistered(saved);
+    const send = createDesktopLocalProjectSync();
+    await send(saved);
+    await send(saved);
+    expect(native.syncDesktopLocalProjects.mock.calls).toEqual([
+      [[{ workspaceId: "sync-missing", repoRoot: "/offline/repo" }]],
+      [[{ workspaceId: "sync-missing", repoRoot: "/offline/repo" }]],
+    ]);
   });
 
   it("dedupes repeated local registration heals and skips placeholder projects", async () => {

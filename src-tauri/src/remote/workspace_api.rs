@@ -766,7 +766,7 @@ pub(crate) async fn event_projects(
     };
     crate::ipc::run_blocking(move || {
         let (_permit, _grant) = (permit, grant);
-        Ok(project_inventory(&service, &context))
+        Ok(project_inventory(&service, &context, false))
     })
     .await
     .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE".to_owned())?
@@ -775,13 +775,43 @@ pub(crate) async fn event_projects(
 fn project_inventory(
     service: &crate::daemon::workspace_service::DaemonWorkspaceService,
     context: &RequestContext,
+    desktop_local: bool,
 ) -> Result<Projects, String> {
     let c = service.catalog()?;
     let mut projects = Vec::new();
-    let mut completeness = Completeness::Complete;
+    let mut completeness = if desktop_local && c.desktop_local_projects.is_none() {
+        Completeness::Partial
+    } else { Completeness::Complete };
     let mut failed = std::collections::BTreeSet::new();
     let mut probed = std::collections::HashMap::<std::path::PathBuf, Result<Project, String>>::new();
-    for (id, row) in &c.workspaces {
+    let scoped_rows: std::collections::BTreeMap<_, _> = c.desktop_local_projects.iter().flatten()
+        .map(|member| (member.workspace_id.clone(), super::workspace_catalog::CatalogRow {
+            repo_root: member.repo_root.clone(), mirror_exposed: true,
+            availability: Availability::Invalid,
+        })).collect();
+    let rows = if desktop_local { &scoped_rows } else { &c.workspaces };
+    // Distinct roots are probed by at most four worker threads; each probe still
+    // runs its Git commands serially under the same cancellation and deadline.
+    let mut roots: Vec<(&String, &std::path::PathBuf)> = Vec::new();
+    for (id, row) in rows {
+        if !roots.iter().any(|(_, root)| *root == &row.repo_root) {
+            roots.push((id, &row.repo_root));
+        }
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::with_capacity(roots.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..roots.len().min(4) {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some((id, root)) = roots.get(index) else { break };
+                let res = project(id, root, c.revision, context);
+                results.lock().unwrap_or_else(|e| e.into_inner()).push(((*root).clone(), res));
+            });
+        }
+    });
+    probed.extend(results.into_inner().unwrap_or_else(|e| e.into_inner()));
+    for (id, row) in rows {
         let probe = match probed.get(&row.repo_root) {
             Some(cached) => cached.clone(),
             None => {
@@ -808,7 +838,7 @@ fn project_inventory(
                     git_remote: None,
                     git_branch: None,
                     git_head: None,
-                    availability: row.availability.clone(),
+                    availability: if desktop_local { Availability::Invalid } else { row.availability.clone() },
                     revision: c.revision,
                 });
             }
@@ -830,7 +860,8 @@ fn project_inventory(
     }
     let changed: Vec<_> = projects
         .iter()
-        .filter(|p| current.workspaces[&p.workspace_id].availability != p.availability)
+        .filter(|p| current.workspaces.get(&p.workspace_id)
+            .is_some_and(|row| row.availability != p.availability))
         .cloned()
         .collect();
     if !changed.is_empty() {
@@ -873,6 +904,7 @@ fn project_inventory(
     let inventory = Projects {
         revision: current.revision,
         completeness,
+        desktop_local_snapshot_exists: current.desktop_local_projects.is_some(),
         projects,
         unavailable_workspace_ids,
     };
@@ -886,7 +918,28 @@ fn project_inventory(
     Ok(inventory)
 }
 
-pub async fn list(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap) -> Response {
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectQuery {
+    scope: Option<String>,
+}
+
+pub async fn list_scoped(
+    state: State<Arc<RemoteGatewayState>>,
+    axum::extract::Query(query): axum::extract::Query<ProjectQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if query.scope.as_deref().is_some_and(|scope| scope != "desktopLocal") {
+        return failure("INVALID_REQUEST", &uuid::Uuid::new_v4().to_string());
+    }
+    list_inventory(state, headers, query.scope.is_some()).await
+}
+
+pub async fn list(state: State<Arc<RemoteGatewayState>>, headers: HeaderMap) -> Response {
+    list_inventory(state, headers, false).await
+}
+
+async fn list_inventory(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap, desktop_local: bool) -> Response {
     let id = uuid::Uuid::new_v4().to_string();
     execute(
         state,
@@ -902,7 +955,7 @@ pub async fn list(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderM
                 authorize(&state, &headers)?;
                 #[cfg(test)]
                 probe(state, "listProbe");
-                project_inventory(&services.workspaces, context)
+                project_inventory(&services.workspaces, context, desktop_local)
             })();
             match result {
                 Ok(p) => response(200, p),
@@ -1086,8 +1139,18 @@ async fn mutate(
                             p.workspace_id = existing.clone();
                             p.repo_root = row.repo_root.to_str().ok_or("INVALID_PATH")?.into();
                             p.revision = c.revision;
+                            if c.ownership.get(&p.workspace_id).is_some_and(|owner| owner.machine) {
+                                return Ok((200, OperationOutcome::Project { project: p }));
+                            }
+                            c.ownership.entry(p.workspace_id.clone()).or_default().machine = true;
+                            if super::workspace_catalog::persist(&service.catalog_path, &c).is_err() {
+                                *service.catalog.lock() = Err("MACHINE_SERVICE_UNAVAILABLE".into());
+                                return Err("OPERATION_OUTCOME_UNKNOWN".into());
+                            }
+                            *service.catalog.lock() = Ok(c.clone());
                             return Ok((200, OperationOutcome::Project { project: p }));
-                        }
+                        } else {
+                        c.ownership.entry(resource.clone()).or_default().machine = true;
                         authorize(&state, &headers)?;
                         c.workspaces.insert(
                             resource.clone(),
@@ -1101,6 +1164,7 @@ async fn mutate(
                             c.revision.0.checked_add(1).ok_or("CAPACITY_EXCEEDED")?,
                         );
                         (201, OperationOutcome::Project { project: p })
+                        }
                     };
                     c.revision.0 = c.revision.0.checked_add(1).ok_or("CAPACITY_EXCEEDED")?;
                     c.transaction = Some(service.journal.catalog_receipt(

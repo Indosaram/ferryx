@@ -3910,6 +3910,14 @@ impl DaemonServer {
                         Err(message) => daemon_error(message),
                     }
                 }
+                Ok(DaemonRequest::SyncDesktopLocalProjects { projects }) => {
+                    let service = Arc::clone(&self.session_service.workspace_service);
+                    match crate::ipc::run_blocking(move || service.sync_desktop_local_projects(projects)
+                        .map_err(crate::ipc::IpcError::internal)).await {
+                        Ok(()) => DaemonResponse::RegisterWorkspaceOk,
+                        Err(error) => daemon_error(error.to_string()),
+                    }
+                }
                 Ok(DaemonRequest::RegisterWorkspace {
                     workspace_id,
                     repo_root,

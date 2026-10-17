@@ -7233,7 +7233,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )
         .route(
             "/api/v1/workspace/projects",
-            get(super::workspace_api::list)
+            get(super::workspace_api::list_scoped)
                 .post(register_project_boundary)
                 .layer(axum::extract::DefaultBodyLimit::max(
                     super::machine_protocol::MACHINE_JSON_MAX_BYTES,

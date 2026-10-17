@@ -286,6 +286,14 @@ pub async fn cmd_project_initial(
 }
 
 #[tauri::command]
+pub async fn cmd_sync_desktop_local_projects(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    projects: Vec<crate::remote::workspace_catalog::DesktopLocalProject>,
+) -> Result<(), IpcError> {
+    daemon_client.sync_desktop_local_projects(projects).await
+}
+
+#[tauri::command]
 pub async fn cmd_project_branches(
     registry: State<'_, WorkspaceRegistry>,
     request: ProjectBranchesRequest,

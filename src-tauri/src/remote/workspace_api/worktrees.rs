@@ -227,16 +227,26 @@ fn observed_revision(
     manager: &WorktreeManager,
     context: &RequestContext,
 ) -> Result<crate::scoped_contracts::Epoch, String> {
-    service.observe_worktrees(
-        workspace,
-        observation_digest(workspace, manager)?,
-        context.deadline,
-    )
+    Ok(observed_rows(service, workspace, manager, context)?.0)
+}
+/// Observes and returns one row snapshot so a listing never re-runs
+/// the Git worktree listing between the fenced digest and the response.
+fn observed_rows(
+    service: &crate::daemon::workspace_service::DaemonWorkspaceService,
+    workspace: &str,
+    manager: &WorktreeManager,
+    context: &RequestContext,
+) -> Result<(crate::scoped_contracts::Epoch, Vec<Worktree>), String> {
+    let rows = rows(workspace, manager)?;
+    let digest = rows_digest(&rows, manager)?;
+    Ok((service.observe_worktrees(workspace, digest, context.deadline)?, rows))
 }
 fn observation_digest(workspace: &str, manager: &WorktreeManager) -> Result<String, String> {
-    let rows = rows(workspace, manager)?;
+    rows_digest(&rows(workspace, manager)?, manager)
+}
+fn rows_digest(rows: &[Worktree], manager: &WorktreeManager) -> Result<String, String> {
     let mut observed = Vec::new();
-    for row in &rows {
+    for row in rows {
         if row.managed && row.prunable.is_none() {
             let path = std::path::Path::new(&row.path);
             if manager.canonical_allowed_path(path).ok().as_deref() == Some(path) {
@@ -288,8 +298,8 @@ pub async fn read(
             let _gate = gate.try_lock_until(context.deadline).ok_or("TIMEOUT")?;
             context.check()?;
             let manager = service.worktree_manager(&query.workspace_id, false)?;
-            let revision = observed_revision(service, &query.workspace_id, &manager, context)?;
-            if !preview { return Ok(serde_json::to_value(Worktrees { revision, worktrees: rows(&query.workspace_id, &manager)? }).expect("rows")); }
+            let (revision, listed) = observed_rows(service, &query.workspace_id, &manager, context)?;
+            if !preview { return Ok(serde_json::to_value(Worktrees { revision, worktrees: listed }).expect("rows")); }
             let identity = WorktreeIdentity { ws_id: query.ws_id.ok_or("INVALID_REQUEST")?, slug: query.slug.ok_or("INVALID_REQUEST")? };
             self::identity(&query.workspace_id, &identity)?;
             let row = rows(&query.workspace_id, &manager)?.into_iter()

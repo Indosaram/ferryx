@@ -486,6 +486,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::CreateWorktree { .. } => "createWorktree",
         DaemonRequest::DeleteWorktree { .. } => "deleteWorktree",
         DaemonRequest::RegisterWorkspace { .. } => "registerWorkspace",
+        DaemonRequest::SyncDesktopLocalProjects { .. } => "syncDesktopLocalProjects",
         DaemonRequest::UnregisterWorkspace { .. } => "unregisterWorkspace",
         DaemonRequest::Spawn { .. } => "spawn",
         DaemonRequest::SpawnOperationStatus { .. } => "spawnOperationStatus",
@@ -3064,6 +3065,17 @@ impl DaemonClient {
         };
         *conn_guard = Some(fresh_conn);
         Ok(resp)
+    }
+
+    pub async fn sync_desktop_local_projects(
+        &self,
+        projects: Vec<crate::remote::workspace_catalog::DesktopLocalProject>,
+    ) -> Result<(), IpcError> {
+        match self.send_request(DaemonRequest::SyncDesktopLocalProjects { projects }).await? {
+            DaemonResponse::RegisterWorkspaceOk => Ok(()),
+            DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
+            _ => Err(IpcError::internal("Unexpected daemon response")),
+        }
     }
 
     pub async fn register_workspace(

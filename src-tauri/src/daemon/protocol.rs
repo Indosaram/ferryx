@@ -450,6 +450,10 @@ pub enum DaemonRequest {
     },
 
     #[serde(rename_all = "camelCase")]
+    SyncDesktopLocalProjects {
+        projects: Vec<crate::remote::workspace_catalog::DesktopLocalProject>,
+    },
+    #[serde(rename_all = "camelCase")]
     RegisterWorkspace {
         workspace_id: String,
         repo_root: String,

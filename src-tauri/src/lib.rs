@@ -1161,6 +1161,7 @@ fn start_remote_event_bridge<R: tauri::Runtime>(
         loop {
             match daemon_client.subscribe_remote_events().await {
                 Ok(mut events) => {
+                    let _ = app.emit("desktop_local_projects_resync", ());
                     while let Some(event) = events.recv().await {
                         if let Err(error) = app.emit(event.event.as_str(), event.payload) {
                             tracing::debug!("Failed to relay remote event: {error}");
@@ -1614,6 +1615,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_boot_trace,
         crate::ipc::system_resources::cmd_system_resources,
         cmd_project_register,
+        cmd_sync_desktop_local_projects,
         ipc::project_remote::cmd_project_register_remote,
         ipc::project_remote::cmd_ssh_list_directories,
         cmd_project_unregister,

@@ -1698,9 +1698,16 @@ export const RemoteHostConnection: React.FC<{
           return null;
         }
 
-        const projsData = projRes.status >= 200 && projRes.status < 300
+        let projsData = projRes.status >= 200 && projRes.status < 300
           ? JSON.parse(new TextDecoder().decode(projRes.body))
           : null;
+        if (projsData?.desktopLocalSnapshotExists === true) {
+          const scoped = await activeTunnelConnection.transport.fetchLike("/api/v1/workspace/projects?scope=desktopLocal", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (scoped.status < 200 || scoped.status >= 300) return null;
+          projsData = JSON.parse(new TextDecoder().decode(scoped.body));
+        }
         const sessData = sessRes.status >= 200 && sessRes.status < 300
           ? JSON.parse(new TextDecoder().decode(sessRes.body))
           : null;
@@ -1742,10 +1749,16 @@ export const RemoteHostConnection: React.FC<{
         // If an initial account target or selected model exists, retain or focus that machine context
         const currentTarget = initialAccountTargetRef.current;
         const currentModel = modelRef.current;
-        const currentWs = currentTarget?.workspaceId ?? currentModel.context.workspaceId ?? projectsList[0]?.workspaceId ?? null;
-        const currentSlug = currentTarget?.worktreeSlug ?? currentModel.context.worktreeSlug ?? null;
-        const currentLabel = currentTarget?.worktreeLabel ?? currentModel.context.worktreeLabel ?? currentSlug ?? "main";
-        const requestedSessionId = currentModel.context.activeTerminal?.sessionId ?? null;
+        const requestedWs = currentTarget?.workspaceId ?? currentModel.context.workspaceId;
+        const currentWs = projsData?.desktopLocalSnapshotExists === true
+          ? projectsList.find((project: { workspaceId: string; availability: string }) =>
+              project.workspaceId === requestedWs && project.availability === "ready")?.workspaceId
+            ?? projectsList.find((project: { availability: string }) => project.availability === "ready")?.workspaceId ?? null
+          : requestedWs ?? projectsList[0]?.workspaceId ?? null;
+        const retainedWorkspace = currentWs === requestedWs;
+        const currentSlug = retainedWorkspace ? currentTarget?.worktreeSlug ?? currentModel.context.worktreeSlug ?? null : null;
+        const currentLabel = retainedWorkspace ? currentTarget?.worktreeLabel ?? currentModel.context.worktreeLabel ?? currentSlug ?? "main" : "main";
+        const requestedSessionId = retainedWorkspace ? currentModel.context.activeTerminal?.sessionId ?? null : null;
 
         // The pending target's exact session outranks any remembered preference: a
         // background refresh must never resolve a chosen session to the worktree's first
@@ -1753,7 +1766,7 @@ export const RemoteHostConnection: React.FC<{
         const preferredSid = currentWs
           ? getAccountPreferredSessionId(relayUrl, machineId, currentWs, currentSlug)
           : null;
-        const pendingSid = currentTarget?.sessionId ?? null;
+        const pendingSid = retainedWorkspace ? currentTarget?.sessionId ?? null : null;
         const candidateSid = pendingSid ?? preferredSid ?? requestedSessionId;
         const candidateEpoch = pendingSid
           ? currentTarget?.daemonEpoch ?? sessionEpochsRef.current.get(pendingSid) ?? null
