@@ -38,7 +38,7 @@ below is skipped without a reason.
 | `claude-question` (option preview) | `withoutPreview` `:446-471` | `question-preview.screen` | preview box cut off at its own column; `n to add notes` line dropped; no typed row |
 | `claude-question` (over the task list) | `withoutClaudeTasks` `:1575-1603` | `question-tasks.screen` | task list under the panel; `promptTailIsActive` still finds the hint at the end |
 | `claude-submit` | `parseClaudeSubmit` `:554-572` | `submit.screen` | `kind: menu`, title `Review your answers`, no typed row; tail = last row `2. Cancel` |
-| `claude-plan` | `parseClaudeApproval` plan arm `:1113-1132` | `plan.screen` | `kind: plan`, title `Ready to code?`, `custom_option_index` = `Tell Claude what to change`; typed answer ends `shift+tab` |
+| `claude-plan` | `parseClaudeApproval` plan arm `:1113-1132` | `plan.screen` | `kind: plan`, title `Ready to code?`, `custom_option_index` = `Tell Claude what to change`; typed answer ends `enter` (change feedback; `shift+tab` would approve the plan) |
 | `claude-plan` (tail) | `promptTailIsActive` `:1624` | `answered-plan.screen` | the plan's own tail is buried under later output: **no card** |
 | `claude-approval` (marker form) | `parseClaudeApproval` `:1134-1177` | `approval-command.screen` | panel opened by `This command requires approval`; title from `nearestQuestion`; options joined over wrapped lines |
 | `claude-approval` (no marker, panel rule) | `:1148-1172` | `approval-command-wrapped.screen`, `approval-edit-wrapped.screen`, `approval-under-text.screen` | panel = lines under the first rule after the tool call; a rule in Claude's own table is not the panel; `Tip:` lines dropped |
