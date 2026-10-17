@@ -1203,6 +1203,9 @@ export const RemoteHostConnection: React.FC<{
   const selectionEventReceivedRef = useRef(false);
   const confirmationInFlightRef = useRef(false);
   const confirmationRequeuedRef = useRef(false);
+  /* A timed-out account selection whose machine answer is still in flight. It may land late
+     only while no newer selection, back-out or connection change has replaced it. */
+  const lateSelectionRef = useRef<RemoteContextOption | null>(null);
   const workspaceRefreshVersionRef = useRef(0);
   const confirmationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -1263,6 +1266,7 @@ export const RemoteHostConnection: React.FC<{
     optimisticSocketSessionIdRef.current = null;
     optimisticSocketClosedRef.current = false;
     pendingSelectionRef.current = null;
+    lateSelectionRef.current = null;
     selectionRequestAcceptedRef.current = false;
     selectionEventReceivedRef.current = false;
     confirmationInFlightRef.current = false;
@@ -1924,6 +1928,7 @@ export const RemoteHostConnection: React.FC<{
     }
     creationSessionsRef.current = null;
     pendingSelectionRef.current = null;
+    lateSelectionRef.current = null;
     selectionRequestAcceptedRef.current = false;
     selectionEventReceivedRef.current = false;
     confirmationInFlightRef.current = false;
@@ -2155,6 +2160,8 @@ export const RemoteHostConnection: React.FC<{
         setCreationError("Desktop did not confirm the selected worktree. Please retry or go back.");
       }
       clearPendingSelection();
+      // The picker is released, but the attempt's own bounded request may still answer.
+      lateSelectionRef.current = option;
     }, CONFIRMATION_TIMEOUT_MS);
   }, [clearPendingSelection]);
 
@@ -2165,6 +2172,8 @@ export const RemoteHostConnection: React.FC<{
     if (!token || pendingSelectionRef.current) return false;
     // A picker can reuse an option object; each attempt needs its own identity.
     const option = { ...requestedOption };
+    lateSelectionRef.current = null;
+    const attemptIsCurrent = () => pendingSelectionRef.current === option || lateSelectionRef.current === option;
     setCreationError(null);
     creationSessionsRef.current = createTerminal ? new Set([
       ...(model.context.terminalTabs?.flatMap((tab) => tab.sessionId ? [tab.sessionId] : []) ?? []),
@@ -2200,6 +2209,7 @@ export const RemoteHostConnection: React.FC<{
         const sessListRes = await activeTunnelConnection.transport.fetchLike("/api/v1/sessions", {
           headers: { Authorization: `Bearer ${token}` },
         });
+        if (!attemptIsCurrent()) return false;
 
         if (sessListRes.status < 200 || sessListRes.status >= 300) {
           throw new Error(`Machine sessions query failed (${sessListRes.status})`);
@@ -2309,6 +2319,7 @@ export const RemoteHostConnection: React.FC<{
             },
             body: JSON.stringify(createPayload),
           });
+          if (!attemptIsCurrent()) return false;
 
           if (createRes.status >= 200 && createRes.status < 300) {
             targetSession = JSON.parse(new TextDecoder().decode(createRes.body));
@@ -2374,6 +2385,8 @@ export const RemoteHostConnection: React.FC<{
           }));
 
           setInitialAccountTarget(null);
+          // A late answer that lands supersedes its own timeout banner.
+          setCreationError(null);
           clearPendingSelection(true);
           return true;
         }
@@ -2396,7 +2409,7 @@ export const RemoteHostConnection: React.FC<{
       if (initialAccountTargetRef.current || selectionEventReceivedRef.current) void confirmSelection(option);
       return true;
     } catch (error) {
-      if (pendingSelectionRef.current !== option) return false;
+      if (!attemptIsCurrent()) return false;
       const message = error instanceof Error ? error.message : "Selection request failed";
       setCreationError(message);
       clearPendingSelection();
@@ -2500,6 +2513,8 @@ export const RemoteHostConnection: React.FC<{
           (current.worktreeSlug ?? null) === worktreeSlug &&
           current.activeTerminal?.sessionId === sessionId;
         lastFollowedRef.current = { connection, key };
+        // A newer desktop focus supersedes any timed-out attempt still waiting on its answer.
+        lateSelectionRef.current = null;
         if (alreadyShown) return;
         const applied = await selectContextRef.current({
           machineId,
@@ -3960,6 +3975,8 @@ export const RemoteHostConnection: React.FC<{
 
   const selectAccountOption = async (accountOpt: AccountWorktreeOption): Promise<boolean> => {
     if (accountAcquireInFlightRef.current || pendingSelectionRef.current) return false;
+    // A new pick supersedes a timed-out attempt before the effect issues the new selection.
+    lateSelectionRef.current = null;
     accountSelectionGenerationRef.current += 1;
     const currentSelectionGen = accountSelectionGenerationRef.current;
     const expectedToken = accountSessionToken;
