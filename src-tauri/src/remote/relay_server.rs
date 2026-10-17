@@ -2255,6 +2255,9 @@ async fn proxy_http(
                 Ok(reference_chat_outcome_unknown(&request_id))
             }
             Err(RoundTripError::Unanswered) => Err(StatusCode::BAD_GATEWAY),
+            Err(RoundTripError::Failed(_)) if mutation => {
+                Ok(reference_chat_outcome_unknown(&request_id))
+            }
             Err(RoundTripError::Failed(status)) => Err(status),
         }
     };
@@ -3786,6 +3789,68 @@ mod tests {
         assert_eq!(body["requestId"], "req-1");
         state.unregister_control_channel("submit-host", generation);
         server.abort();
+    }
+
+    async fn reference_chat_partial_response_case(method: Method, suffix: &str, partial: &[u8]) {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, mut notices, _grants) =
+            state.register_control_channel("r23-partial-host".into());
+        let path = format!("/api/v1/reference-chat/sess-1/{suffix}?hostId=h");
+        let mutation = method == Method::POST;
+        let expected_prefix = format!("{method} {path} HTTP/1.1\r\n");
+        let http = proxy_http(&state, "r23-partial-host", Some(generation), method, &path,
+            HeaderMap::new(), br#"{"requestId":"req-r23-partial","params":{}}"#.to_vec());
+        let peer = async {
+            let notice = notices.recv().await.unwrap();
+            let (mut data, _) = tokio_tungstenite::connect_async(format!(
+                "{base}/tunnel/data/{}", notice.session_id,
+            )).await.unwrap();
+            let request = data.next().await.unwrap().unwrap().into_data();
+            assert!(request.starts_with(expected_prefix.as_bytes()));
+            data.send(TMessage::Binary(partial.to_vec().into())).await.unwrap();
+            data.close(None).await.unwrap();
+        };
+        let (response, ()) = timeout(Duration::from_secs(10), async {
+            tokio::join!(http, peer)
+        }).await.unwrap();
+        if mutation {
+            let response = response.expect("a truncated mutation response is typed uncertainty");
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body: serde_json::Value = serde_json::from_slice(
+                &to_bytes(response.into_body(), 4096).await.unwrap(),
+            ).unwrap();
+            assert_eq!(body["ok"], false);
+            assert_eq!(body["error"]["code"], "OPERATION_OUTCOME_UNKNOWN");
+            assert_eq!(body["error"]["retryable"], false);
+            assert_eq!(body["requestId"], "req-r23-partial");
+        } else {
+            assert_eq!(response.err(), Some(StatusCode::BAD_GATEWAY));
+        }
+        assert!(notices.try_recv().is_err(), "a partially answered request is never replayed");
+        assert!(state.inner.pending_sessions.lock().is_empty());
+        state.unregister_control_channel("r23-partial-host", generation);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn r23_truncated_reference_chat_mutations_report_outcome_unknown() {
+        for suffix in ["submit", "stop", "answer"] {
+            for partial in [
+                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n".as_slice(),
+                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"ok\":true".as_slice(),
+            ] {
+                reference_chat_partial_response_case(Method::POST, suffix, partial).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn r23_truncated_reference_chat_read_remains_bad_gateway() {
+        reference_chat_partial_response_case(Method::GET, "screen",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"text\":",
+        ).await;
     }
 
     /// rs-files-routes-8: a staged-file preview is base64 of up to ATTACHMENT_MAX_FILE_BYTES,

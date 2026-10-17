@@ -966,6 +966,13 @@ impl ReferencePromptAnswers {
             if bytes.is_empty() {
                 continue;
             }
+            if let Err(error) = (request.authorize)() {
+                return if wrote || opened {
+                    outcome_unknown(error.message)
+                } else {
+                    ReferenceInputOutcome::NotTyped { error }
+                };
+            }
             if let Err(message) = writer.write(session_id(request), &bytes).await {
                 return outcome_unknown(format!(
                     "an answer key may have reached the pane and could not be confirmed: {message}"
@@ -1798,6 +1805,36 @@ mod tests {
             vec!["\u{1b}[B".to_string(), "\r".to_string()],
             "the plan's moves then its Enter"
         );
+    }
+
+    #[tokio::test]
+    async fn r23_revocation_after_answer_navigation_prevents_confirmation() {
+        let prompt = detect_reference_prompt("claude", CLAUDE_QUESTION).expect("a claude card");
+        let target = target("sess-r23-revoked");
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader = ScriptedScreen::one(CLAUDE_QUESTION);
+        let answers = ReferencePromptAnswers::new();
+        let payload = payload(&prompt.id, REVISION, option(1));
+        let authorize = || {
+            if writer.log().is_empty() { Ok(()) } else { refusal()() }
+        };
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id: "req-r23-revoked",
+            agent: &prompt.agent,
+            payload: &payload,
+            session: ReferencePromptSession::default(),
+            authorize: &authorize,
+            alive: &alive(),
+        };
+
+        let outcome = answer_once(&answers, &request, &step, &reader, &writer, &clock).await;
+
+        assert!(outcome.is_outcome_unknown(), "{outcome:?}");
+        assert_eq!(writer.log(), vec![b"\x1b[B".to_vec()]);
+        assert_eq!(clock.sleeps(), vec![REFERENCE_PROMPT_STEP_GAP_MS]);
     }
 
     #[tokio::test]

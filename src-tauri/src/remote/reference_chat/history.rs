@@ -566,6 +566,19 @@ fn reference_history_cwd_candidates(home: &Path, cwd: &str) -> Vec<PathBuf> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("jsonl"))
+        .filter(|path| {
+            use std::io::BufRead as _;
+
+            let Ok(file) = File::open(path) else {
+                return false;
+            };
+            // The folder slug is lossy. Only an exact cwd in the session header establishes
+            // ownership; bound the header read just like the transcript window read.
+            let mut reader = std::io::BufReader::new(file.take(REFERENCE_HISTORY_MAX_BYTES as u64));
+            let mut first_line = String::new();
+            reader.read_line(&mut first_line).is_ok()
+                && super::history_omo::omo_session_header(&first_line, cwd).is_some()
+        })
         .collect();
     candidates.sort();
     candidates
@@ -1591,7 +1604,12 @@ mod tests {
     #[test]
     fn resolve_binds_a_windows_cwd_to_the_folder_omo_names_for_it() {
         let home = TempHome::new();
-        let only = home.write_session("--C--Users-me-app--", "2026-10-06_aaa.jsonl", THREE_TURNS);
+        let transcript = THREE_TURNS.replacen(
+            r#""cwd":"/w""#,
+            r#""cwd":"C:\\Users\\me\\app""#,
+            1,
+        );
+        let only = home.write_session("--C--Users-me-app--", "2026-10-06_aaa.jsonl", &transcript);
         let identity = identity("omo", "sess-z").with_cwd(r"C:\Users\me\app");
         let stream = resolve_reference_history_stream(home.path(), &identity, &[])
             .expect("a Windows cwd resolves to OmO's own folder for it");
@@ -1682,6 +1700,54 @@ mod tests {
             .expect_err("two candidates and no identity match is an ambiguous owner");
         assert_eq!(refusal.code, ScopeErrorCode::ControlConflict);
         assert!(refusal.message.contains('2'));
+    }
+
+    #[test]
+    fn cwd_fallback_refuses_a_transcript_from_a_colliding_cwd_slug() {
+        let home = TempHome::new();
+        let cwd = "/work/a/b";
+        let other_cwd = "/work/a-b";
+        let folder = super::super::history_omo::omo_session_folder(cwd);
+        assert_eq!(folder, super::super::history_omo::omo_session_folder(other_cwd));
+        let body = serde_json::json!({"type": "session", "id": "old", "cwd": other_cwd});
+        home.write_session(&folder, "old.jsonl", &format!("{body}\n"));
+        let identity = identity("omo", "sess-live").with_cwd(cwd);
+
+        let refusal = resolve_reference_history_stream(home.path(), &identity, &[])
+            .expect_err("a colliding slug is not exact cwd ownership");
+
+        assert_eq!(refusal.code, ScopeErrorCode::NotFound);
+    }
+
+    #[test]
+    fn cwd_fallback_selects_only_the_exact_header_among_colliding_slugs() {
+        let home = TempHome::new();
+        let cwd = "/work/a/b";
+        let folder = super::super::history_omo::omo_session_folder(cwd);
+        let other = serde_json::json!({"type": "session", "id": "old", "cwd": "/work/a-b"});
+        let own = serde_json::json!({"type": "session", "id": "own", "cwd": cwd});
+        home.write_session(&folder, "old.jsonl", &format!("{other}\n"));
+        let path = home.write_session(&folder, "own.jsonl", &format!("{own}\n"));
+        let identity = identity("omo", "sess-live").with_cwd(cwd);
+
+        let stream = resolve_reference_history_stream(home.path(), &identity, &[])
+            .expect("the exact cwd header identifies the only candidate");
+
+        assert_eq!(stream.file_path(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn cwd_fallback_refuses_missing_malformed_and_non_session_headers() {
+        for body in ["", "not json\n", r#"{"type":"message","id":"old","cwd":"/w"}"#] {
+            let home = TempHome::new();
+            home.write_session("--w--", "old.jsonl", body);
+            let identity = identity("omo", "sess-live").with_cwd("/w");
+
+            let refusal = resolve_reference_history_stream(home.path(), &identity, &[])
+                .expect_err("a transcript without a valid cwd header has no proven owner");
+
+            assert_eq!(refusal.code, ScopeErrorCode::NotFound);
+        }
     }
 
     #[test]
