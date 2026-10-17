@@ -5350,10 +5350,17 @@ pub(crate) struct ReferenceChatRuntime {
     answers: reference_prompts::ReferencePromptAnswers,
     staged: parking_lot::Mutex<std::collections::HashMap<String, ReferenceStagedFile>>,
     staging_sweep: tokio::sync::RwLock<()>,
+    #[cfg(test)]
+    pub(crate) submit_staging_entered: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     preview_budget: std::sync::OnceLock<Arc<tokio::sync::Semaphore>>,
 }
 
 impl ReferenceChatRuntime {
+    #[cfg(test)]
+    pub(crate) async fn hold_staging_sweep(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        self.staging_sweep.write().await
+    }
+
     #[cfg(test)]
     pub(crate) async fn await_preview_capacity(&self) -> tokio::sync::OwnedSemaphorePermit {
         Arc::clone(self.preview_budget.get().expect("budget initialized"))
@@ -5378,7 +5385,7 @@ fn reference_chat_runtime() -> &'static ReferenceChatRuntime {
 /// The query a reference-chat read binds its target with.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ReferenceChatReadQuery {
+pub(crate) struct ReferenceChatReadQuery {
     #[serde(default)]
     host_id: Option<String>,
     #[serde(default)]
@@ -6044,10 +6051,25 @@ async fn reference_chat_prompt_session(
 }
 
 /// The tail of the original session file, when this host holds one for the target.
-async fn reference_chat_session_jsonl(
+pub(crate) async fn reference_chat_session_jsonl(
     state: &Arc<RemoteGatewayState>,
     identity: &reference_history::ReferenceHistoryIdentity,
 ) -> Option<String> {
+    reference_chat_session_jsonl_with_resolver(
+        state, identity, reference_history::resolve_reference_history_stream,
+    ).await
+}
+
+pub(crate) async fn reference_chat_session_jsonl_with_resolver<F>(
+    state: &Arc<RemoteGatewayState>,
+    identity: &reference_history::ReferenceHistoryIdentity,
+    resolver: F,
+) -> Option<String>
+where
+    F: FnOnce(&Path, &reference_history::ReferenceHistoryIdentity,
+        &[reference_history::ReferenceHistorySibling])
+        -> Result<reference_history::ReferenceHistoryStream, ScopeError> + Send + 'static,
+{
     // A remote session's store is on its own host: no local cwd or backend-id fallback may stand
     // in for it, or the prompt detectors plan from an unrelated session's records.
     if reference_chat_session_is_remote(state, &identity.target.target.backend_session_id).await {
@@ -6055,8 +6077,9 @@ async fn reference_chat_session_jsonl(
     }
     let home = reference_chat_history_home(state)?;
     let siblings = reference_chat_siblings(state, &identity.target.target.backend_session_id).await;
-    let stream =
-        reference_history::resolve_reference_history_stream(&home, identity, &siblings).ok()?;
+    let stream = reference_chat_resolve_history(
+        home, identity.clone(), siblings, resolver,
+    ).await.ok()?;
     let path = stream.file_path()?.to_path_buf();
     // Only the tail is read: the store has no size bound, and the prompt detectors need its end.
     let bounded = crate::ipc::run_blocking(move || {
@@ -6068,6 +6091,23 @@ async fn reference_chat_session_jsonl(
     // Lossy on purpose: the window may start mid-character, and the partial first record is not
     // a record the detectors may match anyway.
     Some(String::from_utf8_lossy(&bounded).into_owned())
+}
+
+pub(crate) async fn reference_chat_resolve_history<F>(
+    home: PathBuf,
+    identity: reference_history::ReferenceHistoryIdentity,
+    siblings: Vec<reference_history::ReferenceHistorySibling>,
+    resolver: F,
+) -> Result<reference_history::ReferenceHistoryStream, ScopeError>
+where
+    F: FnOnce(&Path, &reference_history::ReferenceHistoryIdentity,
+        &[reference_history::ReferenceHistorySibling])
+        -> Result<reference_history::ReferenceHistoryStream, ScopeError> + Send + 'static,
+{
+    // Keep resolver refusals as data: only a failed blocking task becomes an internal error.
+    crate::ipc::run_blocking(move || Ok(resolver(&home, &identity, &siblings)))
+        .await
+        .map_err(|error| reference_chat_scope(ScopeErrorCode::InventoryIncomplete, error.to_string()))?
 }
 
 /// What this route's own screen read says about a prompt the pane may be holding.
@@ -6277,6 +6317,23 @@ async fn reference_chat_history(
     query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
+    reference_chat_history_with_resolver(
+        state, session_id, query, headers, reference_history::resolve_reference_history_stream,
+    ).await
+}
+
+pub(crate) async fn reference_chat_history_with_resolver<F>(
+    state: Arc<RemoteGatewayState>,
+    session_id: String,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+    resolver: F,
+) -> Response
+where
+    F: FnOnce(&Path, &reference_history::ReferenceHistoryIdentity,
+        &[reference_history::ReferenceHistorySibling])
+        -> Result<reference_history::ReferenceHistoryStream, ScopeError> + Send + 'static,
+{
     let query = match reference_chat_read_query(query) {
         Ok(query) => query,
         Err(response) => return response,
@@ -6325,13 +6382,24 @@ async fn reference_chat_history(
         );
     };
     let siblings = reference_chat_siblings(&state, &session_id).await;
-    let stream = match reference_history::resolve_reference_history_stream(
-        &home,
-        &read.identity,
-        &siblings,
-    ) {
+    let stream = match reference_chat_resolve_history(
+        home,
+        read.identity.clone(),
+        siblings,
+        resolver,
+    ).await {
         Ok(stream) => stream,
-        Err(error) => return reference_chat_refusal(&error),
+        Err(error) => return (
+            reference_chat_status(error.code),
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({"error": {
+                "code": reference_chat_wire_code(error.code),
+                "message": error.message,
+                "retryable": error.retryable,
+                "details": error.details,
+                "requestId": uuid::Uuid::new_v4().to_string(),
+            }})),
+        ).into_response(),
     };
     match reference_history::read_reference_history_page(
         &stream,
@@ -6436,6 +6504,20 @@ pub(crate) async fn reference_chat_submit_with_runtime(
     request: axum::extract::Request,
     runtime: &'static ReferenceChatRuntime,
 ) -> Response {
+    reference_chat_submit_with_clock(
+        state, session_id, request, runtime, Arc::new(reference_input::SystemReferenceClock),
+    ).await
+}
+
+pub(crate) async fn reference_chat_submit_with_clock(
+    state: Arc<RemoteGatewayState>,
+    session_id: String,
+    request: axum::extract::Request,
+    runtime: &'static ReferenceChatRuntime,
+    clock: Arc<dyn reference_input::ReferenceInputClock>,
+) -> Response {
+    // Admission and staging waits spend the same arrival-relative budget as the input queue.
+    let arrived_at_ms = clock.now_ms();
     let (headers, body) = match reference_chat_mutation_body::<
         ReferenceChatMutation<reference_types::ReferenceSubmitPayload>,
     >(request, &state)
@@ -6482,6 +6564,10 @@ pub(crate) async fn reference_chat_submit_with_runtime(
     // The transaction runs on its own task: a caller that disconnects drops this handler, and
     // must not cancel the transaction between its paste and its Enter.
     let transaction = tokio::spawn(async move {
+        #[cfg(test)]
+        if let Some(entered) = &runtime.submit_staging_entered {
+            entered.send(()).expect("staging observer");
+        }
         let _staging = runtime.staging_sweep.read().await;
         let target_key = reference_types::reference_draft_key(&target);
         let reserved = {
@@ -6508,7 +6594,6 @@ pub(crate) async fn reference_chat_submit_with_runtime(
             }
             keys
         };
-        let clock = reference_input::SystemReferenceClock;
         let submit = reference_input::ReferenceSubmitRequest {
             target: &target,
             request_id: &body.request_id,
@@ -6517,7 +6602,7 @@ pub(crate) async fn reference_chat_submit_with_runtime(
             // The prompt guard reads the screen INSIDE the target's step (the probe below), so a
             // prompt that appears while this message waits behind earlier input is still seen.
             blocked_prompt: None,
-            arrived_at_ms: clock.now_ms(),
+            arrived_at_ms,
             last_typed_at_ms: None,
             authorize: &*authorize,
         };
@@ -6526,7 +6611,7 @@ pub(crate) async fn reference_chat_submit_with_runtime(
         let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
         let outcome = runtime
             .input
-            .submit_with_probe(&submit, probe, &writer, &clock)
+            .submit_with_probe(&submit, probe, &writer, clock.as_ref())
             .await;
         let mut staged = runtime.staged.lock();
         for key in reserved {

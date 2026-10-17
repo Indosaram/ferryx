@@ -2218,6 +2218,271 @@ async fn a_multi_line_submit_to_a_pane_whose_paste_mode_is_unknown_types_nothing
     server.stop().await;
 }
 
+struct R25RouteClock(std::sync::atomic::AtomicU64);
+
+fn r25_history_identity(state: &RemoteGatewayState, session: &str)
+    -> super::history::ReferenceHistoryIdentity
+{
+    let body: serde_json::Value = serde_json::from_str(&unhubbed_submit(state, session, "hello"))
+        .expect("envelope");
+    super::history::ReferenceHistoryIdentity::new(
+        super::types::ReferenceTargetRef::without_provider_session(
+            serde_json::from_value(body["target"].clone()).expect("target"),
+        ), "omo",
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn r25_history_resolver_yields_worker_and_preserves_typed_refusal() {
+    let root = tempfile::tempdir().expect("isolated root");
+    let (_, state, _) = unhubbed_pane("r25-scheduling", None);
+    let identity = r25_history_identity(&state, "r25-scheduling");
+    let (entered_tx, entered) = tokio::sync::oneshot::channel();
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let (finished_tx, finished) = std::sync::mpsc::channel();
+    let watchdog_gate = Arc::clone(&gate);
+    let watchdog = std::thread::spawn(move || {
+        let timed_out = finished.recv_timeout(std::time::Duration::from_secs(5)).is_err();
+        let (lock, ready) = &*watchdog_gate;
+        *lock.lock().expect("watchdog gate") = true;
+        ready.notify_all();
+        timed_out
+    });
+    let worker_gate = Arc::clone(&gate);
+    let controller = tokio::spawn(async move {
+        let observed = entered.await;
+        let (lock, ready) = &*gate;
+        *lock.lock().expect("controller gate") = true;
+        ready.notify_all();
+        observed
+    });
+    let refusal = crate::remote::server::reference_chat_resolve_history(
+        root.path().to_path_buf(), identity, Vec::new(), move |_, _, _| {
+            entered_tx.send(()).expect("entry subscriber");
+            let (lock, ready) = &*worker_gate;
+            let mut released = lock.lock().expect("resolver gate");
+            while !*released {
+                released = ready.wait(released).expect("resolver release");
+            }
+            Err(crate::scoped_contracts::ScopeError {
+                code: crate::scoped_contracts::ScopeErrorCode::ControlConflict,
+                message: "r25-refusal".into(), retryable: true,
+                details: serde_json::json!({"marker": 25}),
+            })
+        },
+    ).await.expect_err("typed refusal");
+    let controller_result = controller.await;
+    let signal_result = finished_tx.send(());
+    let timed_out = watchdog.join().expect("watchdog joined");
+    assert!(!timed_out, "resolver occupied the current-thread async worker");
+    controller_result.expect("controller").expect("entry");
+    signal_result.expect("watchdog completion");
+    assert_eq!(refusal.code, crate::scoped_contracts::ScopeErrorCode::ControlConflict);
+    assert_eq!(refusal.message, "r25-refusal");
+    assert!(refusal.retryable);
+    assert_eq!(refusal.details, serde_json::json!({"marker":25}));
+}
+
+#[tokio::test]
+async fn r25_history_route_refusal_and_prompt_none_keep_structured_contract() {
+    let root = tempfile::tempdir().expect("isolated history");
+    let session = "r25-refusal";
+    let (_, state, control) = unhubbed_pane(session, None);
+    *state.agent_history_home.write() = Some(root.path().to_path_buf());
+    let identity = r25_history_identity(&state, session);
+    let query = serde_json::from_value(serde_json::json!({
+        "hostId": identity.target.target.host_id,
+        "ownerId": identity.target.target.owner_id,
+        "epoch": identity.target.target.epoch.0.to_string(),
+        "backendSessionId": session, "registryId": "omo",
+    })).expect("query");
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {control}").parse().expect("bearer"));
+    let refuse = |_: &std::path::Path, _: &super::history::ReferenceHistoryIdentity,
+        _: &[super::history::ReferenceHistorySibling]| {
+        Err(crate::scoped_contracts::ScopeError {
+            code: crate::scoped_contracts::ScopeErrorCode::ControlConflict,
+            message: "r25-refusal".into(), retryable: true,
+            details: serde_json::json!({"marker":25}),
+        })
+    };
+    let response = crate::remote::server::reference_chat_history_with_resolver(
+        Arc::clone(&state), session.into(), Ok(axum::extract::Query(query)), headers, refuse,
+    ).await;
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    let bytes = axum::body::to_bytes(response.into_body(), 65_536).await.expect("body");
+    let envelope: serde_json::Value = serde_json::from_slice(&bytes).expect("refusal");
+    let body = &envelope["error"];
+    assert_eq!(body["code"], "CONTROL_CONFLICT", "{body}");
+    assert_eq!(body["message"], "r25-refusal", "{body}");
+    assert_eq!(body["retryable"], true, "{body}");
+    assert_eq!(body["details"], serde_json::json!({"marker":25}), "{body}");
+    assert!(crate::remote::server::reference_chat_session_jsonl_with_resolver(
+        &state, &identity, refuse,
+    ).await.is_none());
+}
+
+impl super::input::ReferenceInputClock for R25RouteClock {
+    fn now_ms(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn sleep_ms(&self, _ms: u64) -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(async {})
+    }
+}
+
+#[tokio::test]
+async fn r25_history_and_prompt_preserve_real_resolver_selection_matrix() {
+    for case in ["exact", "cwd", "ambiguous", "sibling", "missing", "remote"] {
+        let root = tempfile::tempdir().expect("isolated home");
+        let cwd = root.path().join("worktree");
+        let session = format!("r25-history-{case}");
+        let backend = Arc::new(ScreenStubBackend {
+            session_id: session.clone(), cols: 80, rows: 24, screen: b"ready\r\n".to_vec(),
+            writes: std::sync::Mutex::new(Vec::new()), written: None,
+            on_screen: None, on_write: None, worktree: Some(cwd.clone()),
+            screen_gate: None, screen_seen: None, fail_write: false,
+        });
+        let mut gateway = RemoteGatewayState::new_with_backend(
+            backend as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+            crate::worktree::registry::WorkspaceRegistry::new(),
+        );
+        let daemon = crate::daemon::server::DaemonServer::new_with_paths(
+            Some(root.path().join("config")), Some(root.path().join("auth")),
+        );
+        if case == "remote" {
+            let services = Arc::clone(daemon.remote_state().machine_services.as_ref().expect("services"));
+            let store = services.sessions.remote_sessions_store_path();
+            std::fs::create_dir_all(store.parent().expect("store parent")).expect("store directory");
+            std::fs::write(store, serde_json::json!({"remoteSessions":[{"descriptor":{
+                "backendSessionId":session,
+                "config":{"host":{"hostname":"test.invalid"},
+                    "environment":{"home":"/isolated", "platform":"posix"},
+                    "projectPath":"/isolated/worktree"}
+            }}]}).to_string()).expect("isolated remote store");
+            gateway.machine_services = Some(services);
+        }
+        let state = Arc::new(gateway);
+        *state.agent_history_home.write() = Some(root.path().to_path_buf());
+        let mut identity = r25_history_identity(&state, &session).with_cwd(cwd.to_string_lossy());
+        if case == "exact" {
+            identity.target.provider_session_id = Some("native-r25".into());
+        }
+        let folder = root.path().join(".omo/agent/sessions")
+            .join(super::history_omo::omo_session_folder(&cwd.to_string_lossy()));
+        std::fs::create_dir_all(&folder).expect("transcript folder");
+        let jsonl = format!("{}\n{}\n",
+            serde_json::json!({"type":"session","id":"native-r25","cwd":cwd.to_string_lossy()}),
+            serde_json::json!({"type":"message","id":"turn-r25","message":{
+                "role":"user","content":[{"type":"text","text":"hello"}]}}));
+        if case != "missing" {
+            std::fs::write(folder.join("native-r25.jsonl"), &jsonl).expect("transcript");
+        }
+        if case == "ambiguous" {
+            std::fs::write(folder.join("other.jsonl"), &jsonl).expect("ambiguous transcript");
+        }
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (control, _) = state.auth_manager.exchange_pairing_code(&pin, case).expect("token");
+        let query = serde_json::from_value(serde_json::json!({
+            "hostId":identity.target.target.host_id, "ownerId":identity.target.target.owner_id,
+            "epoch":identity.target.target.epoch.0.to_string(), "backendSessionId":session,
+            "providerSessionId":identity.target.provider_session_id, "registryId":"omo",
+        })).expect("query");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {control}").parse().expect("bearer"));
+        let resolve = move |home: &std::path::Path, identity: &super::history::ReferenceHistoryIdentity,
+            siblings: &[super::history::ReferenceHistorySibling]| {
+            assert_ne!(case, "remote", "remote session must never resolve locally");
+            let mut siblings = siblings.to_vec();
+            if case == "sibling" {
+                siblings.push(super::history::ReferenceHistorySibling::new("other-pane", identity.cwd.clone()));
+            }
+            super::history::resolve_reference_history_stream(home, identity, &siblings)
+        };
+        let response = crate::remote::server::reference_chat_history_with_resolver(
+            Arc::clone(&state), session.clone(), Ok(axum::extract::Query(query)), headers, resolve,
+        ).await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), 65_536).await.expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("page or refusal");
+        let prompt = crate::remote::server::reference_chat_session_jsonl_with_resolver(
+            &state, &identity, resolve,
+        ).await;
+        match case {
+            "exact" | "cwd" => {
+                assert_eq!(status, 200, "{case}: {body}");
+                assert_eq!(body["availability"], "native", "{body}");
+                assert_eq!(prompt.as_deref(), Some(jsonl.as_str()));
+            }
+            "ambiguous" | "sibling" => {
+                assert_eq!(status, 409, "{case}: {body}");
+                assert_eq!(body["error"]["code"], "CONTROL_CONFLICT");
+                assert!(prompt.is_none());
+            }
+            "missing" => {
+                assert_eq!(status, 404, "{body}");
+                assert_eq!(body["error"]["code"], "NOT_FOUND");
+                assert!(prompt.is_none());
+            }
+            "remote" => {
+                assert_eq!(status, 422, "{body}");
+                assert_eq!(body["error"]["code"], "UNSUPPORTED");
+                assert!(prompt.is_none());
+            }
+            _ => unreachable!("fixed matrix"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn r25_submit_http_admission_spends_arrival_budget() {
+    for elapsed in [44_999, 45_000, 45_001] {
+        let session_id = format!("r25-arrival-{elapsed}");
+        let (backend, state, control) = unhubbed_pane(&session_id, None);
+        let root = tempfile::tempdir().expect("isolated history");
+        *state.agent_history_home.write() = Some(root.path().to_path_buf());
+        let (entered_tx, mut entered) = tokio::sync::mpsc::unbounded_channel();
+        let mut isolated_runtime = crate::remote::server::ReferenceChatRuntime::default();
+        isolated_runtime.submit_staging_entered = Some(entered_tx);
+        let runtime: &'static _ = Box::leak(Box::new(isolated_runtime));
+        let staging = runtime.hold_staging_sweep().await;
+        let clock = Arc::new(R25RouteClock(std::sync::atomic::AtomicU64::new(7_000)));
+        let payload = unhubbed_submit(&state, &session_id, "hello");
+        let request = axum::http::Request::builder().method("POST")
+            .header("authorization", format!("Bearer {control}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(payload)).expect("request");
+        let request_clock = Arc::clone(&clock);
+        let mut handler = tokio::spawn(async move {
+            crate::remote::server::reference_chat_submit_with_clock(
+                state, session_id, request, runtime, request_clock,
+            ).await
+        });
+        let admission = tokio::time::timeout(std::time::Duration::from_secs(5), entered.recv()).await;
+        clock.0.store(7_000 + elapsed, std::sync::atomic::Ordering::SeqCst);
+        drop(staging);
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), &mut handler).await;
+        if completed.is_err() {
+            handler.abort();
+            assert!(handler.await.expect_err("aborted handler").is_cancelled());
+        }
+        assert!(admission.is_ok_and(|entry| entry.is_some()), "handler reached staging read");
+        let response = completed.expect("bounded handler").expect("handler");
+        let bytes = axum::body::to_bytes(response.into_body(), 65_536).await.expect("body");
+        let result: serde_json::Value = serde_json::from_slice(&bytes).expect("result");
+        let writes = backend.writes.lock().expect("writes").clone();
+        if elapsed > 45_000 {
+            assert_eq!(result["error"]["code"], "TIMEOUT", "{result}");
+            assert_eq!(result["error"]["retryable"], true, "{result}");
+            assert!(writes.is_empty(), "NotTyped: {writes:?}");
+        } else {
+            assert_eq!(result["data"]["receipt"]["stage"], "accepted", "{result}");
+            assert_eq!(writes, vec![b"hello".to_vec(), b"\r".to_vec()]);
+        }
+    }
+}
+
 /// rs-input-screen-r3-2: a caller that goes away between the paste and its Enter must not leave
 /// the paste unsent in the pane. The handler future is dropped exactly as hyper drops it on a
 /// disconnect, right after the paste is written.
