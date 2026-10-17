@@ -697,6 +697,11 @@ pub enum DaemonRequest {
         project_path: String,
     },
     Shutdown,
+    /// Agent-neutral control of one or every live session (capability `agentControlV1`).
+    #[serde(rename_all = "camelCase")]
+    AgentControl {
+        request: crate::agent_control::AgentControlOp,
+    },
 }
 
 /// Authenticated identity of a paired DAG subscription. The desktop names the host
@@ -873,6 +878,10 @@ pub enum DaemonResponse {
         provider_session_id: Option<String>,
     },
     ResetAgentStateOk,
+    #[serde(rename_all = "camelCase")]
+    AgentControlOk {
+        result: serde_json::Value,
+    },
     #[serde(rename_all = "camelCase")]
     AgentIntegrationOk {
         enabled: bool,

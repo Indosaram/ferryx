@@ -4457,6 +4457,7 @@ impl DaemonServer {
                     capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY.into());
                     #[cfg(unix)]
                     capabilities.push("sessionOwnershipTransferV1".into());
+                    capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
@@ -4899,6 +4900,12 @@ impl DaemonServer {
                     match self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
                         Ok(()) => std::process::exit(0),
                         Err(message) => daemon_error(message),
+                    }
+                }
+                Ok(DaemonRequest::AgentControl { request }) => {
+                    match crate::remote::server::agent_control_service::handle(&self.remote_state, request).await {
+                        Ok(result) => DaemonResponse::AgentControlOk { result },
+                        Err(error) => crate::remote::server::agent_control_service::error_response(error),
                     }
                 }
                 Err(e) => daemon_error(format!("Malformed request: {e}"),),

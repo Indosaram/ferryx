@@ -10,6 +10,7 @@
 #![recursion_limit = "512"]
 
 pub mod account;
+pub mod agent_control;
 pub mod agent_detect;
 pub mod agent_transcript;
 pub mod browser;
