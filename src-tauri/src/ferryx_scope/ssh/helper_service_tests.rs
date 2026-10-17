@@ -6,6 +6,188 @@ fn private_tempdir() -> tempfile::TempDir {
     dir
 }
 
+/// Bridge output the test can read after the bridge has consumed its `'static` writer.
+#[derive(Clone, Default)]
+struct SharedOutput(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedOutput {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl SharedOutput {
+    fn frames(&self) -> Vec<Value> {
+        let bytes = self.0.lock().unwrap().clone();
+        let mut cursor = std::io::Cursor::new(bytes);
+        std::iter::from_fn(|| read_frame(&mut cursor).unwrap()).collect()
+    }
+}
+
+/// Client stdin that never delivers a byte or EOF while the returned sender is alive: the
+/// state of an SSH channel whose client vanished without the server noticing.
+struct SilentInput(std::sync::mpsc::Receiver<Vec<u8>>, std::collections::VecDeque<u8>);
+
+impl Read for SilentInput {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.1.is_empty() {
+            match self.0.recv() {
+                Ok(bytes) => self.1.extend(bytes),
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = self.1.len().min(buf.len());
+        for (slot, byte) in buf.iter_mut().zip(self.1.drain(..n)) {
+            *slot = byte;
+        }
+        Ok(n)
+    }
+}
+
+fn silent_input() -> (std::sync::mpsc::Sender<Vec<u8>>, SilentInput) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    (sender, SilentInput(receiver, Default::default()))
+}
+
+/// Runs `run` on a thread and returns its result, failing the test if it never ends.
+fn finishes_within<T: Send + 'static>(
+    bound: std::time::Duration,
+    run: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (done, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(run());
+    });
+    result
+        .recv_timeout(bound)
+        .expect("bridge did not exit within the bound")
+}
+
+#[test]
+fn ssh_bridge_exits_when_daemon_connection_closes_while_client_is_silent() {
+    let dir = private_tempdir();
+    let bound = bind_runtime(dir.path(), "qa-daemon-gone".into()).unwrap();
+    let root = dir.path().to_path_buf();
+    let (_client_alive, input) = silent_input();
+    let bridge = std::thread::spawn(move || bridge(&root, input, SharedOutput::default()));
+    // The daemon accepts the bridge and then goes away, as when it is OOM-killed or replaced.
+    let (stream, _) = bound.listener.accept().unwrap();
+    drop(stream);
+    drop(bound);
+
+    let result = finishes_within(std::time::Duration::from_secs(10), move || bridge.join());
+    assert!(
+        matches!(result, Ok(Err(ref error)) if error.starts_with("REMOTE_UNAVAILABLE")),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn ssh_bridge_exits_after_idle_timeout_when_client_sends_nothing() {
+    let dir = private_tempdir();
+    let bound = bind_runtime(dir.path(), "qa-idle".into()).unwrap();
+    let runtime = bound.runtime.clone();
+    let daemon = std::thread::spawn(move || {
+        let (stream, _) = bound.listener.accept().unwrap();
+        serve(stream, bound.runtime.clone())
+    });
+    let root = dir.path().to_path_buf();
+    let (_client_alive, input) = silent_input();
+    let idle = std::time::Duration::from_millis(200);
+    let started = std::time::Instant::now();
+
+    let result = finishes_within(std::time::Duration::from_secs(10), move || {
+        bridge_with_idle_timeout(&root, input, SharedOutput::default(), idle)
+    });
+    assert!(
+        matches!(result, Err(ref error) if error.starts_with("REMOTE_IDLE_TIMEOUT")),
+        "{result:?}"
+    );
+    assert!(started.elapsed() >= idle);
+    // The bridge closed its daemon connection, and the daemon itself keeps serving.
+    assert!(daemon.join().unwrap().is_ok());
+    let auth = endpoint(dir.path()).unwrap();
+    assert!(runtime
+        .handle(Request {
+            protocol: 1,
+            token: auth.token,
+            op: "handshake".into(),
+            params: json!({})
+        })
+        .is_ok());
+}
+
+#[test]
+fn ssh_bridge_idle_timeout_waits_for_in_flight_request() {
+    let dir = private_tempdir();
+    let bound = bind_runtime(dir.path(), "qa-in-flight".into()).unwrap();
+    let (answer, answered) = std::sync::mpsc::channel::<()>();
+    // A daemon that answers only when the test says so: a long poll in progress.
+    let daemon = std::thread::spawn(move || {
+        let (mut stream, _) = bound.listener.accept().unwrap();
+        let request = read_frame(&mut stream).unwrap().unwrap();
+        answered.recv().unwrap();
+        write_frame(&mut stream, &json!({"ok":true,"data":{"op":request["op"]}})).unwrap();
+        while read_frame(&mut stream).unwrap().is_some() {}
+    });
+    let root = dir.path().to_path_buf();
+    let (client, input) = silent_input();
+    let mut frame = Vec::new();
+    write_frame(&mut frame, &json!({"protocol":1,"op":"pty.read","params":{}})).unwrap();
+    client.send(frame).unwrap();
+    let output = SharedOutput::default();
+    let idle = std::time::Duration::from_millis(100);
+    let bridge_output = output.clone();
+    let bridge = std::thread::spawn(move || {
+        bridge_with_idle_timeout(&root, input, bridge_output, idle)
+    });
+
+    std::thread::sleep(idle * 3);
+    assert!(!bridge.is_finished(), "an in-flight request must hold the bridge open");
+    answer.send(()).unwrap();
+    let result = finishes_within(std::time::Duration::from_secs(10), move || bridge.join());
+    assert!(
+        matches!(result, Ok(Err(ref error)) if error.starts_with("REMOTE_IDLE_TIMEOUT")),
+        "{result:?}"
+    );
+    assert_eq!(output.frames(), vec![json!({"ok":true,"data":{"op":"pty.read"}})]);
+    drop(client);
+    daemon.join().unwrap();
+}
+
+#[test]
+fn ssh_bridge_keeps_responses_in_request_order_around_rejected_ops() {
+    let dir = private_tempdir();
+    let bound = bind_runtime(dir.path(), "qa-order".into()).unwrap();
+    let worker = std::thread::spawn(move || {
+        let (stream, _) = bound.listener.accept().unwrap();
+        serve(stream, bound.runtime.clone()).unwrap();
+    });
+    let mut input = Vec::new();
+    for op in ["pty.describe", "shell.exec", "handshake"] {
+        write_frame(&mut input, &json!({"protocol":1,"op":op,"params":{}})).unwrap();
+    }
+    let output = SharedOutput::default();
+    bridge(dir.path(), std::io::Cursor::new(input), output.clone()).unwrap();
+    worker.join().unwrap();
+
+    let frames = output.frames();
+    assert_eq!(frames.len(), 3, "{frames:?}");
+    assert_eq!(
+        frames[0]["error"].as_str().unwrap().split(':').next(),
+        Some("INVALID_REQUEST")
+    );
+    assert_eq!(
+        frames[1]["error"],
+        json!("UNSUPPORTED: operation not allowlisted")
+    );
+    assert_eq!(frames[2]["data"]["hostId"], json!("qa-order"));
+}
+
 #[test]
 fn ssh_reconnect_safety_live_runtime_cannot_be_replaced() {
     let dir = private_tempdir();
@@ -94,11 +276,9 @@ fn ssh_process_survival_bridge_allows_describe_without_stopping_runtime() {
         &json!({"protocol":1,"op":"pty.describe","params":{}}),
     )
     .unwrap();
-    let mut output = Vec::new();
-    bridge(dir.path(), std::io::Cursor::new(input), &mut output).unwrap();
-    let response = read_frame(&mut std::io::Cursor::new(output))
-        .unwrap()
-        .unwrap();
+    let output = SharedOutput::default();
+    bridge(dir.path(), std::io::Cursor::new(input), output.clone()).unwrap();
+    let response = output.frames().remove(0);
     assert_eq!(
         response["error"].as_str().unwrap().split(':').next(),
         Some("INVALID_REQUEST")
@@ -133,8 +313,7 @@ fn ssh_process_survival_agent_state_survives_bridge_eof() {
         &json!({"protocol":1,"op":"handshake","params":{}}),
     )
     .unwrap();
-    let mut output = Vec::new();
-    bridge(dir.path(), std::io::Cursor::new(input), &mut output).unwrap();
+    bridge(dir.path(), std::io::Cursor::new(input), SharedOutput::default()).unwrap();
     worker.join().unwrap();
 
     let server_port = runtime.agent_state_server().unwrap().port();
