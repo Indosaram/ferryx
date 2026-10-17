@@ -97,6 +97,38 @@ describe("reference draft target scoping", () => {
     expect(data.get(otherPane)).toBe("other pane");
   });
 
+  it("ui-reference-logic-r22-1: a draft saved before a rolling handover is found under the successor's new epoch", () => {
+    const data = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    // the current epoch-bearing format and the older owner-bearing format, both from the predecessor
+    const epochKey = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|epoch-before-handover|${base.backendSessionId}`;
+    const ownerKey = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-old|epoch-older|${base.backendSessionId}`;
+    const otherPane = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|epoch-before-handover|sess-other`;
+    data.set(epochKey, "half-typed message");
+    data.set(otherPane, "other pane");
+    data.set(ownerKey, "older text");
+    const store = new ReferenceDraftStore(() => storage);
+    const successor = target({ epoch: "epoch-after-handover" });
+
+    expect(store.read(successor).text).toBe("half-typed message\nolder text");
+    expect(data.get(store.storageKey(successor))).toBe("half-typed message\nolder text");
+    expect(data.has(epochKey)).toBe(false);
+    expect(data.has(ownerKey)).toBe(false);
+    expect(data.get(otherPane)).toBe("other pane");
+  });
+
   it("keys a draft on the frozen target key, ignoring the provider session", () => {
     const { store } = fixture();
     expect(store.storageKey(paneA)).toBe(REFERENCE_DRAFT_STORAGE_PREFIX + referenceDraftKey(paneA));
@@ -120,14 +152,14 @@ describe("reference draft target scoping", () => {
     expect(data.get(store.storageKey(otherHost))).toBe("draft on another host");
   });
 
-  it("treats another epoch as a different pane, while a restarted gateway's new owner keeps the draft", () => {
+  it("keeps the draft across a new epoch or a restarted gateway's new owner for the same backend session", () => {
     const { store } = fixture();
     const otherEpoch = target({ epoch: "7" });
     const otherOwner = target({ ownerId: "owner-b" });
     store.set(paneA, "A");
-    expect(store.read(otherEpoch).text).toBe("");
+    expect(store.read(otherEpoch).text).toBe("A");
     expect(store.read(otherOwner).text).toBe("A");
-    expect(store.storageKey(otherEpoch)).not.toBe(store.storageKey(paneA));
+    expect(store.storageKey(otherEpoch)).toBe(store.storageKey(paneA));
     expect(store.storageKey(otherOwner)).toBe(store.storageKey(paneA));
   });
 });
