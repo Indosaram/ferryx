@@ -296,6 +296,40 @@ describe("reference chat lane (task 12)", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([
+    ["idle", false],
+    ["working", false],
+    ["idle", true],
+  ] as const)("r25-ui-m1: direct %s snapshot preserves controls with prompt=%s", async (activityState, hasPrompt) => {
+    const harness = installFetch({
+      state: () => ({ activeContext: {
+        ...remoteState.activeContext,
+        terminalTabs: remoteState.activeContext.terminalTabs.map((tab) => ({ ...tab, activityState })),
+      } }),
+      prompt: () => hasPrompt ? promptBody("r25-direct", false) : { prompt: null, screenRevision: null },
+    });
+    const promptRead = harness.whenCalled("/prompt");
+    const running = activityState === "working" || hasPrompt;
+    let dispose = () => {};
+    const ready = new Promise<void>((resolve, reject) => {
+      const matches = () => screen.queryByTestId(running ? "stop-button" : "send-button") !== null
+        && (!hasPrompt || screen.queryByTestId("reference-prompt-card") !== null);
+      const observer = new MutationObserver(() => { if (matches()) { dispose(); resolve(); } });
+      const timer = setTimeout(() => { dispose(); reject(new Error("Missing R25 direct controls")); }, 2000);
+      dispose = () => { clearTimeout(timer); observer.disconnect(); };
+      observer.observe(document.body, { subtree: true, childList: true, attributes: true });
+    });
+    try {
+      await act(async () => { render(<RemoteApp />); });
+      await Promise.all([promptRead, ready]);
+      if (hasPrompt) expect(screen.queryByTestId("send-button")).not.toBeNull();
+      else expect(screen.queryByTestId(running ? "send-button" : "stop-button")).toBeNull();
+      expect(harness.calls.filter((call) => call.url.includes("/workspace/select"))).toHaveLength(0);
+    } finally {
+      dispose();
+    }
+  });
+
   it("QA-01: chat is the first surface at 360, 390 and 1280 wide", async () => {
     for (const width of [360, 390, 1280]) {
       cleanup();
@@ -2407,6 +2441,161 @@ describe("reference chat lane review fixes", () => {
 
     expect(screen.getByText("B0")).toBeInTheDocument();
     expect(screen.queryByTestId("chat-history-warning")?.textContent ?? "").not.toMatch(/not available/);
+  });
+
+  it.each([
+    ["accepted", "different-id"],
+    ["refused", "different-id"],
+    ["accepted", "same-id-new-revision"],
+    ["refused", "same-id-new-revision"],
+    ["accepted", "same-occurrence"],
+    ["refused", "same-occurrence"],
+    ["accepted", "A-B-A"],
+    ["refused", "A-B-A"],
+    ["accepted", "A-null-A"],
+    ["refused", "A-null-A"],
+  ] as const)("r24-ui-m1: %s completion protects %s prompt ownership", async (result, replacement) => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const answer = deferred<Response>();
+    const arrived = deferred<void>();
+    const nextArrived = deferred<void>();
+    let promptRead = deferred<void>();
+    const customPrompt = (id: string, revision: string) => ({
+      ...promptBody(id, false),
+      prompt: {
+        promptId: id,
+        agent: "claude",
+        kind: "question",
+        title: `Question ${revision}`,
+        question: `Question ${revision}`,
+        options: [{ label: "alpha" }, { label: "Other" }],
+        customOptionIndex: 1,
+        multiSelect: false,
+      },
+      screenRevision: revision,
+    });
+    let current: Record<string, unknown> = customPrompt("A", "rev-A");
+    let polling = false;
+    let completed = false;
+    const calls = installLane(({ url }) => {
+      if (url.includes("/prompt")) {
+        if (polling) promptRead.resolve();
+        return jsonResponse(completed && replacement === "same-occurrence" && result === "accepted"
+          ? { prompt: null, screenRevision: null }
+          : current);
+      }
+      if (url.includes("/answer")) {
+        if (calls.filter((call) => call.url.includes("/answer")).length > 1) nextArrived.resolve();
+        arrived.resolve();
+        return answer.promise;
+      }
+      return undefined;
+    });
+    const bounded = <T,>(signal: Promise<T>): Promise<T> => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Missing R24 prompt event")), 2000);
+      signal.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error: unknown) => { clearTimeout(timer); reject(error); },
+      );
+    });
+    const whenState = (matches: () => boolean): Promise<void> => new Promise((resolve, reject) => {
+      const observer = new MutationObserver(() => {
+        if (matches()) finish();
+      });
+      const timer = setTimeout(() => {
+        observer.disconnect();
+        reject(new Error("Missing R24 prompt state transition"));
+      }, 2000);
+      const finish = () => {
+        clearTimeout(timer);
+        observer.disconnect();
+        resolve();
+      };
+      observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+      if (matches()) finish();
+    });
+    const ready = whenState(() => screen.queryByTestId("reference-prompt-option-0") !== null);
+    render(<RemoteApp />);
+    await ready;
+    const firstCard = screen.getByTestId("reference-prompt-card");
+    const dispatched = bounded(arrived.promise);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("reference-prompt-option-0"));
+      await dispatched;
+    });
+    expect(calls.find((call) => call.url.includes("/answer"))?.body).toMatchObject({
+      params: { promptId: "A", screenRevision: "rev-A" },
+    });
+
+    const changed = replacement !== "same-occurrence";
+    const recurring = replacement === "A-B-A" || replacement === "A-null-A";
+    if (changed) current = replacement === "A-null-A"
+      ? { prompt: null, screenRevision: null }
+      : customPrompt(replacement === "different-id" || replacement === "A-B-A" ? "B" : "A", "rev-B");
+    const published = whenState(() => changed
+      ? replacement === "A-null-A"
+        ? screen.queryByTestId("reference-prompt-card") === null
+        : screen.queryByTestId("reference-prompt-card") !== null && screen.queryByTestId("reference-prompt-card") !== firstCard
+      : screen.queryByTestId("reference-prompt-option-0")?.hasAttribute("disabled") === true);
+    const polled = bounded(promptRead.promise);
+    polling = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+      await polled;
+    });
+    await published;
+    if (recurring) {
+      const intermediateCard = screen.queryByTestId("reference-prompt-card");
+      current = customPrompt("A", "rev-A");
+      promptRead = deferred<void>();
+      const returnedRead = bounded(promptRead.promise);
+      const returned = whenState(() => {
+        const shown = screen.queryByTestId("reference-prompt-card");
+        return shown !== null && shown !== firstCard && shown !== intermediateCard;
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+        await returnedRead;
+      });
+      await returned;
+    }
+    const card = screen.getByTestId("reference-prompt-card");
+    const customDraft = recurring ? "A2 custom draft" : "B custom draft";
+    if (changed) {
+      fireEvent.change(screen.getByTestId("reference-prompt-custom-input"), { target: { value: customDraft } });
+    }
+    const settled = changed ? null : whenState(() => result === "accepted"
+      ? screen.queryByTestId("reference-prompt-card") === null
+      : screen.queryAllByText("R24 answer refused").length > 0);
+    completed = true;
+    await act(async () => {
+      answer.resolve(result === "accepted"
+        ? jsonResponse({ ok: true, data: {}, requestId: "r24" })
+        : jsonResponse({ ok: false, error: { code: "INTERNAL", message: "R24 answer refused", retryable: true }, requestId: "r24" }, false, 500));
+      await answer.promise;
+    });
+    if (settled) await settled;
+    if (!changed) {
+      if (result === "accepted") expect(screen.queryByTestId("reference-prompt-card")).not.toBeInTheDocument();
+      else {
+        expect(screen.getByTestId("reference-prompt-card")).toBe(card);
+        expect(screen.getByTestId("reference-prompt-option-0")).toBeEnabled();
+      }
+      return;
+    }
+    expect(screen.getByTestId("reference-prompt-card")).toBe(card);
+    expect(screen.getByTestId("reference-prompt-custom-input")).toHaveValue(customDraft);
+    expect(screen.queryAllByText("R24 answer refused")).toHaveLength(0);
+    const nextAnswer = calls.filter((call) => call.url.includes("/answer")).length;
+    const nextDispatched = bounded(nextArrived.promise);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("reference-prompt-custom-send"));
+      await nextDispatched;
+    });
+    expect(calls.filter((call) => call.url.includes("/answer"))).toHaveLength(nextAnswer + 1);
+    expect(calls.filter((call) => call.url.includes("/answer"))[nextAnswer].body).toMatchObject({
+      params: { promptId: replacement === "different-id" ? "B" : "A", screenRevision: recurring ? "rev-A" : "rev-B", answer: { customText: customDraft } },
+    });
   });
 
   it("ui-workspace-wiring-r11-1: an answer refused after a pane switch leaves the new pane's prompt card alone", async () => {

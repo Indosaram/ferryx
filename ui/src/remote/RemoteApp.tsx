@@ -1175,6 +1175,8 @@ export const RemoteHostConnection: React.FC<{
   const chatOlderGenerationRef = useRef(0);
   const [chatPrompt, setChatPrompt] = useState<ReferencePrompt | null>(null);
   const chatPromptIdRef = useRef<string | null>(null);
+  const chatPromptRevisionRef = useRef<string | null>(null);
+  const chatPromptGenerationRef = useRef(0);
   const chatComposerRef = useRef<MobileChatComposerHandle | null>(null);
   const [chatScreenRevision, setChatScreenRevision] = useState<string | null>(null);
   const [chatTypedAnswer, setChatTypedAnswer] = useState<ReferencePromptAnswer | null>(null);
@@ -2599,10 +2601,58 @@ export const RemoteHostConnection: React.FC<{
      The chat never opens a raw terminal socket: the explicit terminal mode owns that, and the
      chat would otherwise be a second writer into the same pane with no ordering between them.
      ------------------------------------------------------------------------- */
-  const chatAgentType =
-    model.context.terminalTabs?.find((tab) => tab.id === model.context.activeTabId)?.agentType ?? null;
-  const chatActivity =
-    model.context.terminalTabs?.find((tab) => tab.id === model.context.activeTabId)?.activityState ?? null;
+  /* Declared above the auth early return so the hook count is identical on the
+     login screen and after pairing; a hook below the guard changes the order. */
+  const isAccountMode = Boolean(accountSessionToken);
+  const activeMachineInventory = activeTunnelConnection
+    ? accountDiscovery.sessionInventories[activeTunnelConnection.machine.machineId] ?? null
+    : null;
+  inventoryRef.current = activeMachineInventory;
+
+  /* Pane rows render from the model's tab strip, which is a snapshot taken when the model
+     was built. Observations arrive afterwards, so the live inventory wins over the snapshot
+     for the matching epoch: a pane must not be frozen on the state it was built with.
+     An observation whose epoch contradicts the pane is never applied. */
+  const paneTabsWithObservedActivity = (tabs: RemoteTerminalTabInfo[] | undefined) => {
+    if (!tabs || tabs.length === 0) return tabs;
+    const entries = activeMachineInventory?.entries ?? [];
+    if (entries.length === 0) return tabs;
+    return tabs.map((tab) => {
+      const sessionId = tab.sessionId;
+      if (!sessionId) return tab;
+      const entry = entries.find((row) => row.sessionId === sessionId);
+      if (!entry) return tab;
+      const paneEpoch = tab.daemonEpoch === null || tab.daemonEpoch === undefined ? null : String(tab.daemonEpoch);
+      const entryEpoch = entry.daemonEpoch ?? null;
+      if (paneEpoch && entryEpoch && paneEpoch !== entryEpoch) return tab;
+      const observed = entry.activityState ?? null;
+      const snapshot = tab.activityState ?? null;
+      if (!observed && !snapshot) return tab;
+      if (!observed && snapshot) return tab;
+      if (observed === snapshot && (!entry.agentType || entry.agentType === tab.agentType)) return tab;
+      return {
+        ...tab,
+        ...(observed ? { activityState: observed } : {}),
+        ...(entry.agentType ? { agentType: entry.agentType } : {}),
+        ...(entryEpoch ? { daemonEpoch: entryEpoch } : {}),
+      };
+    });
+  };
+
+  const effectiveModel: RemoteWorkspaceModel = isAccountMode && accountDiscovery.accountOptions.length > 0
+    ? {
+        ...model,
+        options: accountDiscovery.accountOptions,
+        context: {
+          ...model.context,
+          terminalTabs: paneTabsWithObservedActivity(model.context.terminalTabs),
+        },
+      }
+    : model;
+
+  const activeObservedTab = effectiveModel.context.terminalTabs?.find((tab) => tab.id === model.context.activeTabId);
+  const chatAgentType = activeObservedTab?.agentType ?? null;
+  const chatActivity = activeObservedTab?.activityState ?? null;
   // The gateway's own capabilities answer is the exact value the route compares a target
   // against, so it wins; the session row is the fallback for a host that publishes it there.
   const chatDaemonEpoch =
@@ -2885,8 +2935,10 @@ export const RemoteHostConnection: React.FC<{
     chatNewestStartRef.current = null;
     chatNewestTurnsRef.current = [];
     chatOlderGenerationRef.current += 1;
+    chatPromptGenerationRef.current += 1;
     setChatPrompt(null);
     chatPromptIdRef.current = null;
+    chatPromptRevisionRef.current = null;
     setChatScreenRevision(null);
     setChatTypedAnswer(null);
     setChatPromptError(null);
@@ -3175,6 +3227,9 @@ export const RemoteHostConnection: React.FC<{
     const sessionId = effectiveSessionId;
     if (!target || !sessionId || !token) return;
     if (!chatAgentType || !chatAgentIsNative) {
+      chatPromptGenerationRef.current += 1;
+      chatPromptIdRef.current = null;
+      chatPromptRevisionRef.current = null;
       setChatPrompt(null);
       setChatScreenRevision(null);
       return;
@@ -3206,14 +3261,17 @@ export const RemoteHostConnection: React.FC<{
         const body: unknown = await response.json();
         const prompt = parseChatPrompt(body);
         const promptId = prompt?.id ?? null;
-        // A different prompt (or none) starts clean: a typed answer or an error was for the last one.
-        if (promptId !== chatPromptIdRef.current) {
+        const revision = prompt === null ? null : parseChatScreenRevision(body);
+        // Each occurrence owns its typed answer and error, even if the provider reuses an id.
+        if (promptId !== chatPromptIdRef.current || revision !== chatPromptRevisionRef.current) {
+          chatPromptGenerationRef.current += 1;
           setChatTypedAnswer(null);
           setChatPromptError(null);
         }
         chatPromptIdRef.current = promptId;
+        chatPromptRevisionRef.current = revision;
         setChatPrompt(prompt);
-        setChatScreenRevision(prompt === null ? null : parseChatScreenRevision(body));
+        setChatScreenRevision(revision);
         setChatWarnings((prev) => prev.filter((warning) => warning !== CHAT_HELD_WARNING));
       } catch {
         /* a transient prompt read keeps the card the user is looking at */
@@ -3527,6 +3585,7 @@ export const RemoteHostConnection: React.FC<{
       if (!target || !sessionId || !bearer) {
         throw new ReferencePromptRefused("UNAUTHORIZED", CHAT_NO_SESSION_WARNING);
       }
+      const promptGeneration = chatPromptGenerationRef.current;
       const outcome = await postChatMutation(
         chatBaseUrlRef.current,
         sessionId,
@@ -3534,9 +3593,14 @@ export const RemoteHostConnection: React.FC<{
         "answer",
         chatMutationBody(target, payload),
       );
-      // The pane may have changed while the answer was on its way: its outcome belongs to the pane
-      // it answered, never to the prompt, typed answer or error of the pane now on screen.
-      if (!chatTargetIsCurrent(target)) {
+      // A later prompt in the same pane also owns its own input and errors. Settle the old
+      // request truthfully without touching the current occurrence or interrupting its poll.
+      if (
+        !chatTargetIsCurrent(target) ||
+        chatPromptGenerationRef.current !== promptGeneration ||
+        chatPromptIdRef.current !== payload.promptId ||
+        chatPromptRevisionRef.current !== payload.screenRevision
+      ) {
         if (!outcome.ok) throw new ReferencePromptRefused(outcome.code, outcome.message);
         return true;
       }
@@ -3546,7 +3610,10 @@ export const RemoteHostConnection: React.FC<{
       }
       setChatTypedAnswer(null);
       setChatPromptError(null);
+      chatPromptGenerationRef.current += 1;
       setChatPrompt(null);
+      chatPromptIdRef.current = null;
+      chatPromptRevisionRef.current = null;
       setChatScreenRevision(null);
       setChatPromptRefresh((generation) => generation + 1);
       return true;
@@ -3846,8 +3913,8 @@ export const RemoteHostConnection: React.FC<{
     if (chatPrompt === null || chatScreenRevision === null) return null;
     return (
       <ReferencePromptCard
-        // One card per prompt: picks, text and errors never carry over to the next prompt.
-        key={chatPrompt.id}
+        // Returning to identical content after a clear or transition is still a new card.
+        key={chatPromptGenerationRef.current}
         prompt={chatPrompt}
         screenRevision={chatScreenRevision}
         typedAnswer={chatTypedAnswer}
@@ -3885,55 +3952,6 @@ export const RemoteHostConnection: React.FC<{
   /** What the message box says while a prompt waits, so the user knows what typing does. */
   const chatComposerPlaceholder =
     chatPrompt !== null ? referenceAnswerHint(chatPrompt) : undefined;
-
-  /* Declared above the auth early return so the hook count is identical on the
-     login screen and after pairing; a hook below the guard changes the order. */
-  const isAccountMode = Boolean(accountSessionToken);
-  const activeMachineInventory = activeTunnelConnection
-    ? accountDiscovery.sessionInventories[activeTunnelConnection.machine.machineId] ?? null
-    : null;
-  inventoryRef.current = activeMachineInventory;
-
-  /* Pane rows render from the model's tab strip, which is a snapshot taken when the model
-     was built. Observations arrive afterwards, so the live inventory wins over the snapshot
-     for the matching epoch: a pane must not be frozen on the state it was built with.
-     An observation whose epoch contradicts the pane is never applied. */
-  const paneTabsWithObservedActivity = (tabs: RemoteTerminalTabInfo[] | undefined) => {
-    if (!tabs || tabs.length === 0) return tabs;
-    const entries = activeMachineInventory?.entries ?? [];
-    if (entries.length === 0) return tabs;
-    return tabs.map((tab) => {
-      const sessionId = tab.sessionId;
-      if (!sessionId) return tab;
-      const entry = entries.find((row) => row.sessionId === sessionId);
-      if (!entry) return tab;
-      const paneEpoch = tab.daemonEpoch === null || tab.daemonEpoch === undefined ? null : String(tab.daemonEpoch);
-      const entryEpoch = entry.daemonEpoch ?? null;
-      if (paneEpoch && entryEpoch && paneEpoch !== entryEpoch) return tab;
-      const observed = entry.activityState ?? null;
-      const snapshot = tab.activityState ?? null;
-      if (!observed && !snapshot) return tab;
-      if (!observed && snapshot) return tab;
-      if (observed === snapshot && (!entry.agentType || entry.agentType === tab.agentType)) return tab;
-      return {
-        ...tab,
-        ...(observed ? { activityState: observed } : {}),
-        ...(entry.agentType ? { agentType: entry.agentType } : {}),
-        ...(entryEpoch ? { daemonEpoch: entryEpoch } : {}),
-      };
-    });
-  };
-
-  const effectiveModel: RemoteWorkspaceModel = isAccountMode && accountDiscovery.accountOptions.length > 0
-    ? {
-        ...model,
-        options: accountDiscovery.accountOptions,
-        context: {
-          ...model.context,
-          terminalTabs: paneTabsWithObservedActivity(model.context.terminalTabs),
-        },
-      }
-    : model;
 
   const createWorktree = useCallback(async () => {
     const workspaceId = model.context.workspaceId;
