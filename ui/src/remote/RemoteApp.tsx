@@ -846,6 +846,15 @@ function submittedFileKey(target: ReferenceTargetRef, id: string): string {
   return `${referenceTargetKey(target)}\u0000${id}`;
 }
 
+/** Validated receipts are owned by every durable held row still naming their mention. */
+function heldChatFileIsReferenced(target: ReferenceTargetRef, file: ReferenceFileReceipt): boolean {
+  referenceQueues.refresh(target);
+  const path = referenceMentionPathOf(file.mentionText);
+  return path !== null && referenceQueues.read(target).some(
+    (row) => row.text.includes(referenceMentionFor(path).trimEnd()),
+  );
+}
+
 /**
  * One mutation, as the frozen envelope carries it. The route answers the frozen ScopeResult, and
  * a refusal before the mutation answers the machine error envelope; both are read here.
@@ -2901,6 +2910,9 @@ export const RemoteHostConnection: React.FC<{
       const answers = await Promise.all(
         files.map(async (file) => {
           const id = file.receipt.attachmentId;
+          // Both departure and a late definite submit refusal reach this path. Read the owning
+          // target's live queue, not the displayed rows (which a pane switch already cleared).
+          if (heldChatFileIsReferenced(target, file)) return null;
           try {
             const response = await fetch(
               remoteApiUrl(
@@ -3759,6 +3771,10 @@ export const RemoteHostConnection: React.FC<{
       if (chatSubmittedFilesRef.current.has(submittedFileKey(target, attachmentId))) return;
       const entry = chatStagedFiles.find((file) => file.receipt.attachmentId === attachmentId);
       if (!entry) return;
+      if (heldChatFileIsReferenced(target, entry)) {
+        setChatAttachError("Edit or remove the held messages referencing this file before removing it.");
+        return;
+      }
       const cleaned = await cancelReferenceChatFile({ transport: chatFileTransport }, target, entry);
       const stillCurrent = chatTargetIsCurrent(target);
       if (!cleaned.cleaned) {

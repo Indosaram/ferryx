@@ -18,6 +18,7 @@ import {
   parseChatGatewayIdentity,
 } from "./RemoteApp";
 import { referenceDrafts } from "./chat/referenceDraft";
+import { referenceQueues } from "./chat/referenceQueue";
 import type { ReferenceTargetRef } from "./chat/referenceTypes";
 
 vi.mock("./RemoteTerminal", () => ({
@@ -2932,6 +2933,271 @@ describe("reference chat lane review fixes", () => {
   }
 
   const noPrompt = () => jsonResponse({ prompt: null, screenRevision: "rev-1", cols: 80, rows: 24 });
+
+  function r26Bounded<T>(signal: Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Missing R26 transport settlement")), 2000);
+      signal.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error: unknown) => { clearTimeout(timer); reject(error); },
+      );
+    });
+  }
+
+  function r26DomEvent(matches: () => boolean): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const finish = () => {
+        clearTimeout(timer);
+        observer.disconnect();
+        resolve();
+      };
+      const observer = new MutationObserver(() => { if (matches()) finish(); });
+      const timer = setTimeout(() => {
+        observer.disconnect();
+        reject(new Error("Missing R26 DOM state event"));
+      }, 2000);
+      observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+      if (matches()) finish();
+    });
+  }
+
+  const r26Target: ReferenceTargetRef = {
+    target: { hostId: "local", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, backendSessionId: SESSION_ID },
+  };
+
+  function r26Receipt(name: string) {
+    return {
+      receipt: { hostId: "local", attachmentId: `att-${name}`, sha256: NOTES_TXT_SHA256, sizeBytes: 3, mediaType: "text/plain" },
+      displayName: name,
+      mentionText: `@.ferryx/chat/att-${name}/${name} `,
+    };
+  }
+
+  function r26Registry() {
+    const desktop = followingDesktop();
+    const files = new Map<string, Map<string, ReturnType<typeof r26Receipt>>>();
+    const writes: string[] = [];
+    let prompt = true;
+    let deleteFails = false;
+    let submitGate: ReturnType<typeof deferred<Response>> | null = null;
+    const dispatched = deferred<void>();
+    const key = (session: string) => `local\u0000${session}`;
+    const bucket = (session: string) => {
+      const targetKey = key(session);
+      let entries = files.get(targetKey);
+      if (!entries) { entries = new Map(); files.set(targetKey, entries); }
+      return entries;
+    };
+    const calls = installLane((call) => {
+      const url = new URL(call.url, "http://harness.invalid");
+      const session = url.pathname.match(/\/reference-chat\/([^/]+)\//)?.[1];
+      if (!session) return desktop(call);
+      if (url.pathname.endsWith("/prompt")) {
+        return session === SESSION_ID && prompt ? jsonResponse(promptBody("R26", false)) : noPrompt();
+      }
+      const entries = bucket(session);
+      if (url.pathname.includes("/files")) {
+        if (call.method === "GET") return jsonResponse({ files: [...entries.values()] });
+        if (call.method === "DELETE") {
+          if (deleteFails) return jsonResponse({ ok: false }, false, 500);
+          entries.delete(decodeURIComponent(url.pathname.split("/").pop() ?? ""));
+          return jsonResponse({ ok: true });
+        }
+        const body = call.body as { target: { hostId: string; backendSessionId: string }; params: { name: string } };
+        expect(body.target).toMatchObject({ hostId: "local", backendSessionId: session });
+        const file = r26Receipt(body.params.name);
+        entries.set(file.receipt.attachmentId, file);
+        return jsonResponse({ ok: true, data: file, requestId: "r26-stage" });
+      }
+      if (url.pathname.endsWith("/submit")) {
+        const body = call.body as { target: { hostId: string; backendSessionId: string }; params: { text: string } };
+        expect(body.target).toMatchObject({ hostId: "local", backendSessionId: session });
+        const mentions = body.params.text.match(/@\.ferryx\/chat\/[^\s]+/g) ?? [];
+        const missing = mentions.some((mention) => ![...entries.values()].some((file) => file.mentionText.trimEnd() === mention));
+        dispatched.resolve();
+        if (missing) return jsonResponse({ ok: false, error: { code: "NOT_FOUND", message: "nothing was typed", retryable: false } }, false, 404);
+        if (submitGate) return submitGate.promise;
+        writes.push(body.params.text);
+        return okSubmit();
+      }
+      return desktop(call);
+    });
+    return {
+      calls, writes, bucket, dispatched,
+      clearPrompt: () => { prompt = false; },
+      failDelete: () => { deleteFails = true; },
+      deferSubmit: () => { const gate = deferred<Response>(); submitGate = gate; return gate; },
+    };
+  }
+
+  async function r26Open(): Promise<void> {
+    const ready = r26DomEvent(() => screen.queryByText("Question R26") !== null);
+    await act(async () => { render(<RemoteApp />); });
+    await ready;
+  }
+
+  async function r26Stage(name: string): Promise<void> {
+    const staged = r26DomEvent(() => screen.queryByTestId(`attachment-preview-att-${name}`) !== null);
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("file-upload-input"), {
+        target: { files: [readableFile("abc", name, "text/plain")] },
+      });
+    });
+    await staged;
+  }
+
+  async function r26Hold(text: string): Promise<void> {
+    const count = referenceQueues.read(r26Target).length;
+    const held = r26DomEvent(() => screen.queryAllByTestId(/^held-message-send-/).length === count + 1);
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: text } });
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await held;
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "" } });
+    });
+  }
+
+  it("r26-ui: held upload survives departure, GET rehydration and explicit send while unheld upload is deleted", async () => {
+    const registry = r26Registry();
+    await r26Open();
+    await r26Stage("held.txt");
+    const text = `review ${r26Receipt("held.txt").mentionText}`.trimEnd();
+    await r26Hold(text);
+    await r26Stage("unheld.txt");
+    await switchToSecondTab();
+    expect(registry.bucket(SESSION_ID).has("att-held.txt")).toBe(true);
+    expect(registry.bucket(SESSION_ID).has("att-unheld.txt")).toBe(false);
+    expect(registry.calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
+    expect(referenceDrafts.read(r26Target).text).not.toContain("att-unheld.txt");
+    registry.clearPrompt();
+    const rehydrated = r26DomEvent(() => screen.queryByTestId("attachment-preview-att-held.txt") !== null);
+    await switchBackToFirstTab();
+    await rehydrated;
+    expect(screen.queryByTestId("attachment-preview-att-unheld.txt")).toBeNull();
+    const acknowledged = r26DomEvent(() => screen.queryAllByTestId(/^held-message-send-/).length === 0);
+    await act(async () => { fireEvent.click(screen.getAllByTestId(/^held-message-send-/)[0]); });
+    await acknowledged;
+    expect(registry.writes).toEqual([text]);
+    expect(referenceQueues.read(r26Target)).toEqual([]);
+    expect(registry.bucket(SESSION_ID).has("att-held.txt")).toBe(true);
+  });
+
+  it("r26-ui: late definite refusal after departure preserves the held row and its bytes", async () => {
+    const registry = r26Registry();
+    const response = registry.deferSubmit();
+    await r26Open();
+    await r26Stage("held.txt");
+    await r26Hold(`later ${r26Receipt("held.txt").mentionText}`);
+    const dispatched = r26Bounded(registry.dispatched.promise);
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId(/^held-message-send-/)[0]);
+      await dispatched;
+    });
+    await switchToSecondTab();
+    const ended = deferred<void>();
+    const unsubscribe = referenceDrafts.subscribe(() => ended.resolve());
+    const settled = r26Bounded(ended.promise);
+    try {
+      await act(async () => {
+        response.resolve(jsonResponse({ ok: false, error: { code: "NOT_FOUND", message: "nothing was typed", retryable: false } }, false, 404));
+        await settled;
+      });
+    } finally {
+      unsubscribe();
+    }
+    expect(registry.calls.filter((call) => call.method === "DELETE")).toHaveLength(0);
+    expect(registry.bucket(SESSION_ID).has("att-held.txt")).toBe(true);
+    expect(referenceQueues.read(r26Target)).toHaveLength(1);
+    expect(screen.getByText("B0")).toBeInTheDocument();
+    const returned = r26DomEvent(() => screen.queryByTestId("attachment-preview-att-held.txt") !== null);
+    await switchBackToFirstTab();
+    await returned;
+    expect(screen.getAllByTestId(/^held-message-send-/)[0]).toBeEnabled();
+    expect(registry.writes).toEqual([]);
+  });
+
+  it("r26-ui: chip removal is visibly refused until every held reference is explicitly edited or removed", async () => {
+    const registry = r26Registry();
+    await r26Open();
+    await r26Stage("held.txt");
+    await r26Hold(`one ${r26Receipt("held.txt").mentionText}`);
+    await r26Hold(`two ${r26Receipt("held.txt").mentionText}`);
+    const notice = r26DomEvent(() => screen.queryByTestId("chat-composer-attach-error") !== null);
+    await act(async () => { fireEvent.click(screen.getByTestId("remove-attachment-att-held.txt")); });
+    await notice;
+    expect(screen.getByTestId("chat-composer-attach-error").textContent?.length).toBeGreaterThan(0);
+    expect(registry.calls.filter((call) => call.method === "DELETE")).toHaveLength(0);
+    const [first, second] = referenceQueues.read(r26Target);
+    await act(async () => { fireEvent.click(screen.getByTestId(`held-message-edit-${first.id}`)); });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId(`held-message-input-${first.id}`), { target: { value: "no attachment" } });
+      fireEvent.keyDown(screen.getByTestId(`held-message-input-${first.id}`), { key: "Enter" });
+    });
+    await act(async () => { fireEvent.click(screen.getByTestId("remove-attachment-att-held.txt")); });
+    expect(registry.bucket(SESSION_ID).has("att-held.txt")).toBe(true);
+    expect(referenceQueues.read(r26Target).find((row) => row.id === second.id)?.text).toContain("att-held.txt");
+    await act(async () => { fireEvent.click(screen.getByTestId(`held-message-remove-${second.id}`)); });
+    const removed = r26DomEvent(() => screen.queryByTestId("attachment-preview-att-held.txt") === null);
+    await act(async () => { fireEvent.click(screen.getByTestId("remove-attachment-att-held.txt")); });
+    await removed;
+    expect(registry.bucket(SESSION_ID).has("att-held.txt")).toBe(false);
+    expect(referenceQueues.read(r26Target)).toEqual([{ id: first.id, text: "no attachment" }]);
+  });
+
+  it("r26-ui: cold GET rehydration protects held ownership through another departure without a draft", async () => {
+    const registry = r26Registry();
+    registry.bucket(SESSION_ID).set("att-held.txt", r26Receipt("held.txt"));
+    localStorage.setItem(referenceQueues.storageKey(r26Target), JSON.stringify({ version: 1, messages: [
+      { id: "r26-cold", text: r26Receipt("held.txt").mentionText },
+    ] }));
+    const ready = r26DomEvent(() => screen.queryByTestId("attachment-preview-att-held.txt") !== null);
+    await act(async () => { render(<RemoteApp />); });
+    await ready;
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("");
+    await switchToSecondTab();
+    const returned = r26DomEvent(() => screen.queryByTestId("attachment-preview-att-held.txt") !== null);
+    await switchBackToFirstTab();
+    await returned;
+    await switchToSecondTab();
+    expect(registry.calls.filter((call) => call.method === "DELETE")).toHaveLength(0);
+    expect(registry.bucket(SESSION_ID).has("att-held.txt")).toBe(true);
+  });
+
+  it.each([false, true])("r26-ui: unheld departure honors DELETE confirmation with failure=%s", async (fails) => {
+    const registry = r26Registry();
+    if (fails) registry.failDelete();
+    await r26Open();
+    await r26Stage("unheld.txt");
+    await switchToSecondTab();
+    expect(registry.calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
+    expect(registry.bucket(SESSION_ID).has("att-unheld.txt")).toBe(fails);
+    expect(referenceDrafts.read(r26Target).text.includes("att-unheld.txt")).toBe(fails);
+  });
+
+  it("r26-ui: a missing generated mention refuses before writing and keeps the held row", async () => {
+    const registry = r26Registry();
+    await r26Open();
+    await r26Stage("held.txt");
+    await r26Hold(r26Receipt("held.txt").mentionText);
+    registry.bucket(SESSION_ID).clear();
+    const previousNotice = screen.getByTestId("chat-composer-warning").textContent;
+    const refused = r26DomEvent(() => {
+      const notice = screen.queryByTestId("chat-composer-warning");
+      return notice !== null && notice.textContent !== previousNotice
+        && !screen.getAllByTestId(/^held-message-send-/)[0].hasAttribute("disabled");
+    });
+    const dispatched = r26Bounded(registry.dispatched.promise);
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId(/^held-message-send-/)[0]);
+      await dispatched;
+    });
+    await refused;
+    expect(registry.writes).toEqual([]);
+    expect(referenceQueues.read(r26Target)).toHaveLength(1);
+    expect(registry.calls.filter((call) => call.url.includes("/submit"))).toHaveLength(1);
+  });
 
   it("lane-sweep-1: a held row still in flight after leaving and returning to its pane cannot be sent twice", async () => {
     const submit = deferred<Response>();
