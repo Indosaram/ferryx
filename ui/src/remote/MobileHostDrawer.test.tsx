@@ -286,7 +286,7 @@ describe("MobileHostDrawer", () => {
     expect(document.activeElement).toBe(screen.getByTestId("mobile-host-drawer-disconnect"));
   });
 
-  it("disarms the disconnect confirmation when the drawer closes", () => {
+  it("ui-shell-sheets-1: disarms the disconnect confirmation when the drawer closes", () => {
     const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn() };
     const { rerender } = render(<MobileHostDrawer open {...props} />);
 

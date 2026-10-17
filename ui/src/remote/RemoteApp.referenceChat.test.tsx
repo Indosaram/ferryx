@@ -1333,6 +1333,93 @@ describe("reference chat lane review fixes", () => {
     expect(calls.filter((call) => call.url.includes("/submit"))).toHaveLength(2);
   });
 
+  it("ui-reference-logic-1: a typed answer waiting for Confirm is dropped when the prompt changes", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const menu = (id: string) => {
+      const body = promptBody(id, false);
+      return { ...body, prompt: { ...(body.prompt as Record<string, unknown>), kind: "menu" } };
+    };
+    let current = menu("P1");
+    const calls = installLane(({ url }) => (url.includes("/prompt") ? jsonResponse(current) : undefined));
+    render(<RemoteApp />);
+    await screen.findByText("Question P1", undefined, { timeout: 15000 });
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "1" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    expect(screen.getByTestId("reference-prompt-confirm-send")).toBeInTheDocument();
+
+    current = menu("P2");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await screen.findByText("Question P2");
+
+    // the "1" was typed for P1: P2's card offers no Confirm that would answer it with that pick
+    expect(screen.queryByTestId("reference-prompt-confirm-send")).toBeNull();
+    expect(calls.some((call) => call.url.includes("/answer"))).toBe(false);
+  });
+
+  it("ui-reference-logic-5: tapping a held row again while its send is in flight, after another row was sent, sends it once", async () => {
+    const submits: Array<(response: Response) => void> = [];
+    const calls = installLane(({ url }) => {
+      if (url.includes("/prompt")) return jsonResponse(promptBody("P", false));
+      if (url.includes("/submit")) return new Promise<Response>((done) => submits.push(done));
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await screen.findByText("Question P", undefined, { timeout: 15000 });
+    const textarea = screen.getByTestId("chat-composer-textarea");
+    for (const text of ["held A", "held B"]) {
+      fireEvent.change(textarea, { target: { value: text } });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("send-button"));
+      });
+    }
+    const [sendA, sendB] = screen.getAllByTestId(/^held-message-send-/);
+    await act(async () => {
+      fireEvent.click(sendA);
+    });
+    await act(async () => {
+      fireEvent.click(sendB);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId(/^held-message-send-/)[0]);
+    });
+
+    const submitsOf = (text: string) =>
+      calls.filter(
+        (call) => call.url.includes("/submit") && (call.body as { params?: { text?: string } }).params?.text === text,
+      );
+    expect(submitsOf("held B")).toHaveLength(1);
+    expect(submitsOf("held A")).toHaveLength(1);
+    await act(async () => {
+      for (const done of submits) done(okSubmit());
+    });
+    await drainSettledResponses();
+  });
+
+  it("ui-workspace-wiring-1: picks ticked on one multi-select prompt are not carried to the next prompt", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let current = promptBody("M1", true);
+    installLane(({ url }) => (url.includes("/prompt") ? jsonResponse(current) : undefined));
+    render(<RemoteApp />);
+    await screen.findByText("Question M1", undefined, { timeout: 15000 });
+    fireEvent.click(within(screen.getByTestId("reference-prompt-multi-0")).getByRole("checkbox"));
+    fireEvent.click(within(screen.getByTestId("reference-prompt-multi-2")).getByRole("checkbox"));
+    expect(screen.getByTestId("reference-prompt-submit")).toBeEnabled();
+
+    current = promptBody("M2", true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await screen.findByText("Question M2");
+
+    expect(within(screen.getByTestId("reference-prompt-multi-0")).getByRole("checkbox")).not.toBeChecked();
+    expect(within(screen.getByTestId("reference-prompt-multi-2")).getByRole("checkbox")).not.toBeChecked();
+    expect(screen.getByTestId("reference-prompt-submit")).toBeDisabled();
+  });
+
   it("ui-composer-prompt-3: a keyboard answer hands the focus on to the message box", async () => {
     let answered = false;
     installLane(({ url }) => {
@@ -2625,5 +2712,135 @@ describe("reference chat lane review fixes", () => {
     await switchBackToFirstTab();
     await screen.findByText("Question A");
     expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toBe("2");
+  });
+
+  it("ui-reference-logic-3: files delivered with a send stop counting against the next turn's file bound", async () => {
+    const calls = installLane(({ url, method, body }) => {
+      if (url.includes("/files") && method === "GET") return jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" });
+      if (!url.includes("/files") || method !== "POST") return undefined;
+      const name = (body as { params: { name: string } }).params.name;
+      return jsonResponse({
+        ok: true,
+        data: {
+          receipt: { hostId: "local", attachmentId: `att-${name}`, sha256: NOTES_TXT_SHA256, sizeBytes: 3, mediaType: "text/plain" },
+          displayName: name,
+          mentionText: `@${name} `,
+        },
+        requestId: `r-${name}`,
+      });
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("file-upload-input"), {
+        target: { files: ["a.txt", "b.txt", "c.txt", "d.txt"].map((name) => readableFile("abc", name, "text/plain")) },
+      });
+    });
+    await screen.findByTestId("attachment-preview-att-d.txt");
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await waitFor(() => {
+      expect(calls.some((call) => call.url.includes("/submit"))).toBe(true);
+    });
+    await drainSettledResponses();
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("file-upload-input"), {
+        target: { files: [readableFile("abc", "e.txt", "text/plain")] },
+      });
+    });
+    await drainSettledResponses();
+
+    expect(screen.queryByTestId("chat-composer-attach-error")).not.toBeInTheDocument();
+    expect(calls.filter((call) => call.method === "POST" && call.url.includes("/files"))).toHaveLength(5);
+    await screen.findByTestId("attachment-preview-att-e.txt");
+  });
+
+  it("ui-workspace-wiring-4: an older page whose cursor names the newest page's stream keeps Load earlier reachable", async () => {
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      return url.includes("cursor=")
+        ? jsonResponse(nativePage({
+            turns: [{ role: "user", parts: [{ kind: "text", text: "OLDER-PAGE-1" }], startedAt: "2026-10-05T00:00:00Z" }],
+            cursor: { streamId: "claude:abc", offset: 2048 },
+            hasMore: true,
+          }))
+        : jsonResponse(nativePage({ cursor: { streamId: "claude:abc", offset: 4096 }, hasMore: true }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+    await screen.findByText("OLDER-PAGE-1");
+    await drainSettledResponses();
+
+    expect(screen.queryByTestId("reference-older-endcap")).not.toBeInTheDocument();
+    expect(screen.getByTestId("reference-older-button")).toBeInTheDocument();
+  });
+
+  it("ui-workspace-wiring-r16-1: a newest-page disclosure is drawn once and does not outlive the page that said it", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const notStarted = "This session has not written a turn yet.";
+    let reads = 0;
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      reads += 1;
+      return jsonResponse(
+        reads === 1
+          ? nativePage({ source: "omo-transcript", availability: "notStarted", turns: [], unavailableReason: "session_not_written" })
+          : nativePage(),
+      );
+    });
+    render(<RemoteApp />);
+    await waitFor(() => {
+      expect(screen.getByTestId("reference-disclosure")).toHaveTextContent(notStarted);
+    });
+    await drainSettledResponses();
+    expect(document.body.textContent?.split(notStarted).length).toBe(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await laneReady();
+    await drainSettledResponses();
+
+    expect(reads).toBe(2);
+    expect(document.body.textContent).not.toContain(notStarted);
+  });
+
+  it("ui-workspace-wiring-r5-1: a released staged file's mention leaves the previous pane's saved draft", async () => {
+    const desktop = followingDesktop();
+    const calls = installLane((call) => {
+      if (call.url.includes("/files") && call.method === "GET") return jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" });
+      return desktop(call);
+    });
+    const savedDrafts = (): string[] => {
+      const values: string[] = [];
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (key?.startsWith("ferryx.referenceChat.draft:")) values.push(localStorage.getItem(key) ?? "");
+      }
+      return values;
+    };
+    render(<RemoteApp />);
+    await laneReady();
+    await stageNotes();
+    await screen.findByTestId("attachment-preview-att-1");
+    await waitFor(() => {
+      expect(savedDrafts().some((text) => text.includes("@notes.txt"))).toBe(true);
+    });
+
+    await switchToSecondTab();
+    await waitFor(() => {
+      expect(
+        calls.some((call) => call.method === "DELETE" && call.url.includes(`/reference-chat/${SESSION_ID}/files/att-1`)),
+      ).toBe(true);
+    });
+    await drainSettledResponses();
+
+    expect(savedDrafts().some((text) => text.includes("@notes.txt"))).toBe(false);
   });
 });

@@ -370,4 +370,16 @@ describe("reference draft overlapping sends", () => {
     store.settle(paneA, "yes");
     expect(store.read(paneA).text).toBe("yes");
   });
+
+  it("ui-reference-logic-4: an overlapped send's acknowledgement never strips its prefix from text typed afterwards", () => {
+    const { store } = fixture();
+    expect(store.begin(paneA, "A")).toBe(true);
+    expect(store.begin(paneA, "fix")).toBe(false);
+    store.set(paneA, "");
+    store.settle(paneA, "A");
+    store.end(paneA);
+    store.set(paneA, "fix the test");
+    expect(store.settle(paneA, "fix")).toEqual({ text: "fix the test", edited: true });
+    expect(store.read(paneA).text).toBe("fix the test");
+  });
 });
