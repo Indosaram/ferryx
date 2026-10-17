@@ -1811,6 +1811,102 @@ describe("reference chat lane review fixes", () => {
     }
   });
 
+  it("ui-composer-prompt-r22-1: a typed reply sent while the target is briefly null stays in the message box", async () => {
+    try {
+      seedSavedHost();
+      const freeForm = {
+        prompt: {
+          promptId: "Q",
+          agent: "codex",
+          kind: "question",
+          title: "Question Q",
+          question: "Question Q",
+          options: [],
+          customOptionIndex: 0,
+          multiSelect: false,
+        },
+        screenRevision: "rev-Q",
+        cols: 80,
+        rows: 24,
+      };
+      const identity = gatedMovedCapabilities();
+      const calls = installLane((call) => (call.url.includes("/prompt") ? jsonResponse(freeForm) : identity.route(call)));
+      render(<RemoteApp />);
+      // The lane is bound and its card is up before the transport moves.
+      await laneReady();
+      await screen.findByText("Question Q");
+      await drainSettledResponses();
+
+      // The transport moves: the target is null until the host re-answers, and the card stays.
+      moveTransportBase();
+      await drainSettledResponses();
+      expect(screen.getByText("Question Q")).toBeInTheDocument();
+
+      const reply = "please keep the parser streaming";
+      fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: reply } });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("send-button"));
+      });
+      await drainSettledResponses();
+
+      expect(calls.some((call) => call.url.includes("/answer"))).toBe(false);
+      expect(screen.getByTestId("chat-composer-textarea")).toHaveValue(reply);
+      expect(screen.getAllByText(/not attached yet, so nothing was sent/).length).toBeGreaterThan(0);
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  it("rs-history-r22-1: a provider session that rotated under the pane is re-read from the host's session rows", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let provider = "prov-A";
+    let sessionReads = 0;
+    const calls = installLane(({ url }) => {
+      if (url.includes("/api/v1/sessions")) {
+        sessionReads += 1;
+        return jsonResponse({
+          sessions: [
+            { sessionId: SESSION_ID, daemonEpoch: DAEMON_EPOCH, running: true, providerSession: { key: "claude", id: provider } },
+            { sessionId: SECOND_SESSION_ID, daemonEpoch: DAEMON_EPOCH, running: true },
+          ],
+        });
+      }
+      if (url.includes("/history") && url.includes(SESSION_ID)) {
+        if (url.includes("providerSessionId=prov-B")) {
+          return jsonResponse(
+            nativePage({ turns: [{ role: "assistant", parts: [{ kind: "text", text: "fresh conversation B" }], startedAt: "2026-10-06T00:00:02Z" }] }),
+          );
+        }
+        // the daemon now publishes prov-B for this pane, so a read naming prov-A is refused
+        if (provider !== "prov-A") return jsonResponse({ error: { code: "TARGET_EXPIRED" } }, false, 410);
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    expect(calls.some((call) => call.url.includes("/history") && call.url.includes("providerSessionId=prov-A"))).toBe(true);
+    await drainSettledResponses();
+    const readsBefore = sessionReads;
+
+    // /new on the desktop: the pane's provider session rotates
+    provider = "prov-B";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await drainSettledResponses();
+    await drainSettledResponses();
+
+    // the refusal re-read the pane's session rows ...
+    expect(sessionReads).toBeGreaterThan(readsBefore);
+    // ... and the next read speaks to the new conversation
+    await waitFor(() => {
+      expect(calls.some((call) => call.url.includes("/history") && call.url.includes("providerSessionId=prov-B"))).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.getByText("fresh conversation B")).toBeInTheDocument();
+    });
+  });
+
   it("ui-workspace-wiring-r19-1: a send failing after a switch to a different pane stays with its own pane", async () => {
     const submit = deferred<Response>();
     installLane(({ url }) => (url.includes("/submit") ? submit.promise : undefined));

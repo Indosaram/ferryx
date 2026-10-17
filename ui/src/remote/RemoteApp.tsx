@@ -1179,6 +1179,8 @@ export const RemoteHostConnection: React.FC<{
   const [chatGatewayAnswer, setChatGatewayAnswer] = useState<{ scope: string; identity: ChatGatewayIdentity } | null>(null);
   /** The provider session id the host published for THIS pane; null means unknown, never guessed. */
   const [chatProviderSession, setChatProviderSession] = useState<string | null>(null);
+  /** Bumped when a history read is refused TARGET_EXPIRED, so the pane's session rows are re-read. */
+  const [chatSessionRowsTick, setChatSessionRowsTick] = useState(0);
   const [chatComposerNotice, setChatComposerNotice] = useState<string | null>(null);
   // The fence the newest read was issued under: a response for another one is dropped.
   const chatFenceRef = useRef<ReferenceHistoryFence | null>(null);
@@ -1559,7 +1561,8 @@ export const RemoteHostConnection: React.FC<{
           ...modelRef.current,
           context: {
             ...modelRef.current.context,
-            activeTabId: state.context.activeTabId ?? modelRef.current.context.activeTabId,
+            // The tab strip is keyed by session id, not by the desktop's own pane id.
+            activeTabId: activeSessionId,
             activeTerminal: active,
             daemonEpoch: state.context.daemonEpoch ?? modelRef.current.context.daemonEpoch,
           },
@@ -1569,13 +1572,13 @@ export const RemoteHostConnection: React.FC<{
           if (prev.context.worktreeSlug !== chosenWorktree) return prev;
           if (
             prev.context.activeTerminal?.sessionId === activeSessionId &&
-            prev.context.activeTabId === state.context.activeTabId
+            prev.context.activeTabId === activeSessionId
           ) return prev;
           return {
             ...prev,
             context: {
               ...prev.context,
-              activeTabId: state.context.activeTabId ?? prev.context.activeTabId,
+              activeTabId: activeSessionId,
               activeTerminal: active,
               daemonEpoch: state.context.daemonEpoch ?? prev.context.daemonEpoch,
             },
@@ -2783,11 +2786,14 @@ export const RemoteHostConnection: React.FC<{
   // session the host published for it. Absence is unknown; a disagreement between rows is
   // ambiguous, and both stay unknown rather than being guessed.
   useEffect(() => {
+    setChatProviderSession(null);
+  }, [activeTunnelConnection, effectiveSessionId, token, transportBaseUrl]);
+  // A refresh tick re-reads the same pane's rows without first forgetting its provider session, so
+  // a rotated session (e.g. after /new) replaces the old one in place.
+  useEffect(() => {
     if (!effectiveSessionId || !token) {
-      setChatProviderSession(null);
       return;
     }
-    setChatProviderSession(null);
     let cancelled = false;
     const controller = new AbortController();
     void fetchChatSessionRows({
@@ -2814,7 +2820,7 @@ export const RemoteHostConnection: React.FC<{
       cancelled = true;
       controller.abort();
     };
-  }, [activeTunnelConnection, effectiveSessionId, token, transportBaseUrl]);
+  }, [activeTunnelConnection, chatSessionRowsTick, effectiveSessionId, token, transportBaseUrl]);
 
   /**
    * Release files staged for a target and never sent, on the host `route` reaches. The route is
@@ -3112,6 +3118,9 @@ export const RemoteHostConnection: React.FC<{
             await refreshChatIdentity();
             // the user may have moved to another pane while the identity was being re-read
             if (cancelled) return;
+            // The pane's provider session may have rotated (e.g. /new): re-read its session rows
+            // once per refusal; the poll cadence bounds how often that can happen.
+            if (error.code === "TARGET_EXPIRED") setChatSessionRowsTick((tick) => tick + 1);
           }
           // Only what the pane's transcript said is withdrawn: the draft, held rows and staged
           // files are the user's own and stay. A changed target resets those through its key.
@@ -3684,6 +3693,11 @@ export const RemoteHostConnection: React.FC<{
           // into a key press, and never silently dropped. `false` keeps it in the message box.
           holdChatMessage(text);
           setChatWarnings((prev) => withChatWarning(prev, CHAT_HELD_WARNING));
+          return false;
+        }
+        // An answer with no live session would be refused before it is sent: keep the text.
+        if (!chatTargetRef.current || !chatSessionIdRef.current || !chatTokenRef.current) {
+          setChatWarnings((prev) => withChatWarning(prev, CHAT_NO_SESSION_WARNING));
           return false;
         }
         if (referencePromptNeedsConfirmation(chatPrompt, typed)) {
