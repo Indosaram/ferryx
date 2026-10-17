@@ -1214,6 +1214,44 @@ async fn reference_chat_reads_serve_the_pane_screen_and_an_honest_history_page()
     fixture.server.stop().await;
 }
 
+// rs-history-r22-1
+#[tokio::test]
+async fn a_history_read_naming_a_rotated_provider_session_is_refused_target_expired() {
+    let fixture = fixture().await;
+    let services = fixture.state.machine_services.as_ref().expect("machine services");
+    // The pane's agent started a new conversation: the daemon now publishes the rotated id.
+    services.sessions.publish_agent_state_for_test(crate::daemon::agent_state::AgentState {
+        session_id: fixture.session_id.clone(),
+        state: "working".into(),
+        agent: Some("omo".into()),
+        provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+            key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+            id: "provider-rotated".into(),
+            transcript_path: None,
+        }),
+        detail: None,
+        origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+    });
+    let stale = fixture.read_query(
+        "omo",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[("providerSessionId", "provider-before".to_string())],
+    );
+    let (status, body) = fixture
+        .server
+        .request(
+            "GET",
+            &format!("{}?{stale}", fixture.route("history")),
+            Some(&fixture.control),
+            None,
+        )
+        .await;
+    assert_eq!(status, 410, "a stale provider session is never served: {body}");
+    assert!(body.contains("TARGET_EXPIRED"), "{body}");
+    fixture.server.stop().await;
+}
+
 /// The file lane stages on the owning host, previews what it staged, and deletes only explicitly.
 #[tokio::test]
 async fn staged_reference_files_round_trip_on_the_owning_host() {
@@ -1309,6 +1347,36 @@ async fn staged_reference_files_round_trip_on_the_owning_host() {
         .await;
     assert_eq!(status, 404, "the deleted file is gone: {body}");
 
+    fixture.server.stop().await;
+}
+
+// rs-files-routes-r22-1
+#[tokio::test]
+async fn deleting_a_staged_file_this_target_no_longer_holds_succeeds_and_touches_nothing_else() {
+    let fixture = fixture().await;
+    let (status, body) = fixture.stage("kept.txt", b"kept").await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+    let kept_id = staged["data"]["receipt"]["attachmentId"]
+        .as_str()
+        .expect("attachmentId")
+        .to_string();
+    let kept_dir =
+        reference_files::reference_staging_base_dir(&fixture.worktree().await).join(&kept_id);
+    let query = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    // An id this target does not hold, as after the TTL prune dropped it: already gone.
+    let gone = fixture.route(&format!("files/{}", uuid::Uuid::new_v4()));
+    let (status, body) = fixture
+        .server
+        .request("DELETE", &format!("{gone}?{query}"), Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 204, "a file the host no longer holds is already removed: {body}");
+    assert!(kept_dir.is_dir(), "the delete touched no other staged file");
     fixture.server.stop().await;
 }
 

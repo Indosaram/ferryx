@@ -6236,6 +6236,19 @@ async fn reference_chat_history(
         Ok(read) => read,
         Err(response) => return response,
     };
+    // The pane's agent rotated its conversation (e.g. /new) since the caller read its session
+    // rows: the caller's provider session is stale, never served in place of the current one.
+    if let (Some(named), Some(current)) = (
+        read.identity.provider_session_id(),
+        read.identity.agent_session_id.as_deref(),
+    ) {
+        if named != current {
+            return reference_chat_error(
+                ScopeErrorCode::TargetExpired,
+                "the pane's provider session changed; re-read its session rows",
+            );
+        }
+    }
     let limit = match reference_history::normalize_reference_history_limit(
         query
             .limit
@@ -6920,14 +6933,24 @@ async fn reference_chat_delete_file(
         let mut staged = runtime.staged.lock();
         match staged.get(&key) {
             Some(entry) if !entry.pending => staged.remove(&key),
-            _ => None,
+            Some(_) => {
+                return reference_chat_error(
+                    ScopeErrorCode::NotFound,
+                    "that staged file of this target is still being written",
+                );
+            }
+            None => None,
         }
     };
+    // The key is scoped to this target, so an id it does not hold (already deleted, or dropped by
+    // the TTL prune) is already gone from this target: the delete succeeds without touching any
+    // other target's file.
     let Some(entry) = entry else {
-        return reference_chat_error(
-            ScopeErrorCode::NotFound,
-            "no staged file of that id belongs to this target",
-        );
+        return (
+            StatusCode::NO_CONTENT,
+            [(header::CACHE_CONTROL, "no-store")],
+        )
+            .into_response();
     };
     let dir = entry.dir.clone();
     let removed = crate::ipc::run_blocking(move || {
