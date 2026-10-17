@@ -1603,6 +1603,188 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     expect(callsAfter).toBe(callsBefore);
   });
 
+  it("reacquires a tunnel instead of reusing one the relay already closed when a same-machine worktree is selected", async () => {
+    const MACHINE = "2773ab38-d556-4a81-ae49-18a3b0fb83af";
+    const WS = "project-2a54aface19a497491abc9ed791fd65d";
+    const makeTransport = (label: string) => {
+      const t = {
+        label,
+        isClosed: false,
+        fetchLike: vi.fn().mockImplementation((path: string) => {
+          if (t.isClosed) return Promise.reject(new Error("STREAM_CLOSED: cannot write to closed stream"));
+          if (path === "/api/v1/pair/exchange") {
+            return Promise.resolve({ status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify({ token: "device-token-123", displayName: "omarchy" })) });
+          }
+          if (path === "/api/v1/workspace/projects") {
+            return Promise.resolve({ status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify({ revision: 2, completeness: "complete", projects: [{ workspaceId: WS, repoRoot: "/srv/repos/EclipticRD-Rewrite", availability: "ready", revision: 1 }], unavailableWorkspaceIds: [] })) });
+          }
+          if (path.startsWith("/api/v1/workspace/worktrees?workspaceId=")) {
+            return Promise.resolve({ status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify({ revision: 1, worktrees: [{ workspaceId: WS, identity: null, path: "/srv/repos/EclipticRD-Rewrite", head: "abc1234", branch: "refs/heads/main", bare: false, detached: false, locked: null, prunable: null, managed: false }] })) });
+          }
+          if (path === "/api/v1/sessions") {
+            return Promise.resolve({ status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify({ revision: "1", completeness: "complete", sessions: [{ workspaceId: WS, worktree: null, target: { machineId: MACHINE, sessionId: "machine-sess-1", daemonEpoch: "1790742255752" }, running: true, title: "main" }] })) });
+          }
+          return Promise.resolve({ status: 404, headers: {}, body: new Uint8Array(0) });
+        }),
+        openWebSocket: vi.fn().mockImplementation((path: string) => {
+          if (t.isClosed) return Promise.reject(new Error("STREAM_CLOSED: transport has been closed"));
+          return Promise.resolve(new MockTestWebSocket(path));
+        }),
+        close: vi.fn(() => { t.isClosed = true; }),
+      };
+      return t;
+    };
+    const transports: ReturnType<typeof makeTransport>[] = [];
+
+    storeAccountSessionToken("test-account-session-token-xyz", window.location.origin);
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/api/account/v1/machines")) {
+        return Promise.resolve(new Response(JSON.stringify([{ machineId: MACHINE, machineRecordId: "rec-1", publicKey: "pub-1", attachPublicKey: "attach-pub", relayOrigin: "https://relay.example.com", displayName: "omarchy", platform: "linux", online: true, enrollmentEpoch: "1", lastSeenAt: Date.now() }]), { status: 200 }));
+      }
+      if (url.includes("/grants")) {
+        return Promise.resolve(new Response(JSON.stringify({ grantId: "grant-1", pairingToken: "grant-pairing-token", relayOrigin: "https://relay.example.com", machineAttachPublicKey: "attach-pub" }), { status: 200 }));
+      }
+      if (url.endsWith("/api/v1/attach/session")) {
+        return Promise.resolve(new Response(JSON.stringify({ sessionId: `sess-alloc-${transports.length}` }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("Not Found", { status: 404 }));
+    });
+    vi.spyOn(attachTunnelModule, "openAccountTunnel").mockImplementation(async () => {
+      const t = makeTransport(`tunnel-${transports.length + 1}`);
+      transports.push(t);
+      return { transport: t as any, close: t.close };
+    });
+    vi.spyOn(accountAttachModule, "getOrCreateAttachKey").mockResolvedValue({
+      publicKey: "phone-initiator-pub-key-base64",
+      privateKey: "phone-initiator-priv-key-base64",
+    });
+
+    render(<RemoteApp />);
+
+    const pickWorktree = async () => {
+      const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
+      act(() => { fireEvent.click(trigger); });
+      const option = await waitFor(() => {
+        const dialog = screen.getByRole("dialog", { name: "Workspace context" });
+        return within(dialog).getByRole("button", {
+          name: (content, element) =>
+            element?.getAttribute("aria-label") === `${WS} / main` || content.trim() === `${WS} / main`,
+        });
+      });
+      await act(async () => { fireEvent.click(option); });
+    };
+
+    // Given a selected worktree on a live tunnel
+    await pickWorktree();
+    await waitFor(() => expect(screen.getByTestId("remote-view-mode-terminal")).toBeInTheDocument());
+    const activeBefore = transports.filter((t) => !t.isClosed);
+    expect(activeBefore.length).toBeGreaterThan(0);
+
+    // When the relay drops every idle tunnel and the user picks a worktree on the same machine
+    for (const t of transports) t.isClosed = true;
+    const openedBefore = transports.length;
+    await pickWorktree();
+
+    // Then the selection opens a fresh tunnel instead of writing to the closed one
+    await waitFor(() => expect(transports.length).toBeGreaterThan(openedBefore));
+    await waitFor(() => {
+      const fresh = transports.slice(openedBefore);
+      expect(fresh.some((t) => t.fetchLike.mock.calls.some((c: any[]) => c[0] === "/api/v1/sessions"))).toBe(true);
+    });
+    expect(screen.queryByText(/STREAM_CLOSED/)).toBeNull();
+  });
+
+  it("opens a fresh tunnel when the discovery tunnel was closed by the relay before the first selection", async () => {
+    const MACHINE = "2773ab38-d556-4a81-ae49-18a3b0fb83af";
+    const WS = "project-2a54aface19a497491abc9ed791fd65d";
+    const makeTransport = (label: string) => {
+      const t = {
+        label,
+        isClosed: false,
+        fetchLike: vi.fn().mockImplementation((path: string) => {
+          if (t.isClosed) return Promise.reject(new Error("STREAM_CLOSED: cannot write to closed stream"));
+          if (path === "/api/v1/pair/exchange") {
+            return Promise.resolve({ status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify({ token: "device-token-123", displayName: "omarchy" })) });
+          }
+          if (path === "/api/v1/workspace/projects") {
+            return Promise.resolve({ status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify({ revision: 2, completeness: "complete", projects: [{ workspaceId: WS, repoRoot: "/srv/repos/EclipticRD-Rewrite", availability: "ready", revision: 1 }], unavailableWorkspaceIds: [] })) });
+          }
+          if (path.startsWith("/api/v1/workspace/worktrees?workspaceId=")) {
+            return Promise.resolve({ status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify({ revision: 1, worktrees: [{ workspaceId: WS, identity: null, path: "/srv/repos/EclipticRD-Rewrite", head: "abc1234", branch: "refs/heads/main", bare: false, detached: false, locked: null, prunable: null, managed: false }] })) });
+          }
+          if (path === "/api/v1/sessions") {
+            return Promise.resolve({ status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify({ revision: "1", completeness: "complete", sessions: [{ workspaceId: WS, worktree: null, target: { machineId: MACHINE, sessionId: "machine-sess-1", daemonEpoch: "1790742255752" }, running: true, title: "main" }] })) });
+          }
+          return Promise.resolve({ status: 404, headers: {}, body: new Uint8Array(0) });
+        }),
+        openWebSocket: vi.fn().mockImplementation((path: string) => {
+          if (t.isClosed) return Promise.reject(new Error("STREAM_CLOSED: transport has been closed"));
+          return Promise.resolve(new MockTestWebSocket(path));
+        }),
+        close: vi.fn(() => { t.isClosed = true; }),
+      };
+      return t;
+    };
+    const transports: ReturnType<typeof makeTransport>[] = [];
+
+    storeAccountSessionToken("test-account-session-token-xyz", window.location.origin);
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/api/account/v1/machines")) {
+        return Promise.resolve(new Response(JSON.stringify([{ machineId: MACHINE, machineRecordId: "rec-1", publicKey: "pub-1", attachPublicKey: "attach-pub", relayOrigin: "https://relay.example.com", displayName: "omarchy", platform: "linux", online: true, enrollmentEpoch: "1", lastSeenAt: Date.now() }]), { status: 200 }));
+      }
+      if (url.includes("/grants")) {
+        return Promise.resolve(new Response(JSON.stringify({ grantId: "grant-1", pairingToken: "grant-pairing-token", relayOrigin: "https://relay.example.com", machineAttachPublicKey: "attach-pub" }), { status: 200 }));
+      }
+      if (url.endsWith("/api/v1/attach/session")) {
+        return Promise.resolve(new Response(JSON.stringify({ sessionId: `sess-alloc-${transports.length}` }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("Not Found", { status: 404 }));
+    });
+    vi.spyOn(attachTunnelModule, "openAccountTunnel").mockImplementation(async () => {
+      const t = makeTransport(`tunnel-${transports.length + 1}`);
+      transports.push(t);
+      return { transport: t as any, close: t.close };
+    });
+    vi.spyOn(accountAttachModule, "getOrCreateAttachKey").mockResolvedValue({
+      publicKey: "phone-initiator-pub-key-base64",
+      privateKey: "phone-initiator-priv-key-base64",
+    });
+
+    render(<RemoteApp />);
+
+    const pickWorktree = async () => {
+      const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
+      act(() => { fireEvent.click(trigger); });
+      const option = await waitFor(() => {
+        const dialog = screen.getByRole("dialog", { name: "Workspace context" });
+        return within(dialog).getByRole("button", {
+          name: (content, element) =>
+            element?.getAttribute("aria-label") === `${WS} / main` || content.trim() === `${WS} / main`,
+        });
+      });
+      await act(async () => { fireEvent.click(option); });
+    };
+
+    // Given discovery finished and left its probe tunnel open for the machine
+    await waitFor(() => expect(transports.length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Change workspace context/i })).toBeInTheDocument());
+
+    // When the relay drops the idle probe tunnel before the user picks the first worktree
+    for (const t of transports) t.isClosed = true;
+    const openedBefore = transports.length;
+    await pickWorktree();
+
+    // Then the selection opens a fresh tunnel instead of writing to the closed one
+    await waitFor(() => expect(transports.length).toBeGreaterThan(openedBefore));
+    await waitFor(() => {
+      const fresh = transports.slice(openedBefore);
+      expect(fresh.some((t) => t.fetchLike.mock.calls.some((c: any[]) => c[0] === "/api/v1/sessions"))).toBe(true);
+    });
+    expect(screen.queryByText(/STREAM_CLOSED/)).toBeNull();
+  });
+
   it("does not create a session when GET /api/v1/sessions returns non-2xx status or 404", async () => {
     let postAttempted = false;
     const selectFailedDeferred = deferred<void>();

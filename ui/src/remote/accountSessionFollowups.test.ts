@@ -11,6 +11,7 @@ import {
   getAccountLastSelectedTarget,
   setAccountLastSelectedTarget,
   clearAccountLastSelectedTarget,
+  createAccountConnection,
   type AccountMachineView,
 } from "./accountSession";
 
@@ -309,5 +310,53 @@ describe("Account Follow-ups: Sign-out, Auth Classification, and Last Target Per
       expect(getStoredAccountSessionToken(relayUrl)).toBeNull();
       expect(getAccountLastSelectedTarget(relayUrl)).toBeNull();
     });
+  });
+});
+
+describe("AccountConnection closed state", () => {
+  const machine = {
+    machineRecordId: "rec-1",
+    machineId: "mach-1",
+    displayName: "Mac",
+    publicKey: "pk",
+    attachPublicKey: "apk",
+    relayOrigin: "https://relay.ferryx.dev",
+    platform: "macos",
+    online: true,
+    enrollmentEpoch: "1",
+    lastSeenAt: 0,
+  } as unknown as AccountMachineView;
+
+  it("reports closed when its tunnel transport was dropped by the relay", () => {
+    const transport = { fetchLike: vi.fn(), openWebSocket: vi.fn(), close: vi.fn(), isClosed: false };
+    const conn = createAccountConnection({
+      relayUrl: "https://relay.ferryx.dev",
+      accountSessionToken: "acct",
+      machine,
+      deviceToken: "dev",
+      httpTransport: transport,
+      httpClose: vi.fn(),
+    });
+    expect(conn.isClosed).toBe(false);
+
+    // When the relay closes the idle tunnel underneath the connection
+    transport.isClosed = true;
+
+    // Then the connection reports closed so selection reacquires instead of reusing it
+    expect(conn.isClosed).toBe(true);
+  });
+
+  it("reports closed after its own close()", () => {
+    const transport = { fetchLike: vi.fn(), openWebSocket: vi.fn(), close: vi.fn() };
+    const conn = createAccountConnection({
+      relayUrl: "https://relay.ferryx.dev",
+      accountSessionToken: "acct",
+      machine,
+      deviceToken: "dev",
+      httpTransport: transport,
+      httpClose: vi.fn(),
+    });
+    conn.close();
+    expect(conn.isClosed).toBe(true);
   });
 });

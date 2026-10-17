@@ -591,12 +591,19 @@ export function useAccountWorktrees(
       const existing = tunnelsRef.current.get(machineId);
       if (existing) {
         tunnelsRef.current.delete(machineId);
-        return {
-          transport: existing.transport,
-          close: existing.close,
-          machine: existing.machine,
-          deviceToken: existing.deviceToken,
-        };
+        // The relay drops an idle tunnel; a discovery tunnel it already closed is discarded,
+        // not handed out, so the caller gets a fresh one below.
+        if (existing.transport.isClosed !== true) {
+          return {
+            transport: existing.transport,
+            close: existing.close,
+            machine: existing.machine,
+            deviceToken: existing.deviceToken,
+          };
+        }
+        try {
+          existing.close();
+        } catch {}
       }
 
       const machine = machinesRef.current.find((m) => m.machineId === machineId);

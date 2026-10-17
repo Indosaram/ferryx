@@ -3985,7 +3985,9 @@ export const RemoteHostConnection: React.FC<{
     };
     setCreationError(null);
 
-    if (activeTunnelConnection && token && activeMachineId === accountOpt.machineId) {
+    // A relay drops an idle tunnel (about 2 minutes without traffic); a closed connection must be
+    // reacquired, never reused, or every request on it fails with STREAM_CLOSED.
+    if (activeTunnelConnection && !activeTunnelConnection.isClosed && token && activeMachineId === accountOpt.machineId) {
       // Same machine: keep the connection, gate the body until the exact target confirms.
       initialAccountSelectionAttemptedRef.current = false;
       setInitialAccountTarget(selectionTarget);

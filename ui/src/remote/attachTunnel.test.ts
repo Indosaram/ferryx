@@ -1109,3 +1109,29 @@ describe("attachTunnel encrypted stream terminal path and ordering", () => {
     }
   });
 });
+
+describe("attachTunnel closed-state reporting", () => {
+  it("reports the transport closed once the relay closes the encrypted socket", async () => {
+    try {
+      const { tunnel, socket } = await openScriptedTunnel();
+      expect(tunnel.transport.isClosed).toBe(false);
+
+      // When the relay drops an idle tunnel
+      socket.onclose?.({ code: 1006, reason: "", wasClean: false });
+
+      // Then the transport reports itself closed so a caller can reacquire instead of writing
+      await expect.poll(() => tunnel.transport.isClosed).toBe(true);
+      await expect(tunnel.transport.fetchLike("/api/v1/sessions")).rejects.toThrow(/STREAM_CLOSED/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reports the transport closed after an explicit close", () => {
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    expect(transport.isClosed).toBe(false);
+    transport.close();
+    expect(transport.isClosed).toBe(true);
+  });
+});
