@@ -2907,6 +2907,82 @@ describe("reference chat lane review fixes", () => {
     expect(document.body.textContent).not.toContain(notStarted);
   });
 
+  it.each(["accepted", "refused", "fetch-lost", "body-truncated", "invalid-envelope"] as const)(
+    "r23-ui: protects dispatched mentions across a switch until %s settles",
+    async (result) => {
+      const response = deferred<Response>();
+      const arrived = deferred<void>();
+      const desktop = followingDesktop();
+      const calls = installLane((call) => {
+        if (call.url.includes("/files") && call.method === "GET") {
+          return jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" });
+        }
+        if (call.url.includes("/submit")) {
+          arrived.resolve();
+          return response.promise.then((answer) => {
+            if (result === "fetch-lost") throw new TypeError("Connection closed after dispatch");
+            return answer;
+          });
+        }
+        return desktop(call);
+      });
+      const bounded = <T,>(signal: Promise<T>): Promise<T> => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Missing submit state event")), 2000);
+        signal.then(
+          (value) => { clearTimeout(timer); resolve(value); },
+          (error: unknown) => { clearTimeout(timer); reject(error); },
+        );
+      });
+      render(<RemoteApp />);
+      await laneReady();
+      await stageNotes();
+      await screen.findByTestId("attachment-preview-att-1");
+      const target: ReferenceTargetRef = {
+        target: { hostId: "local", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, backendSessionId: SESSION_ID },
+      };
+      const ended = deferred<void>();
+      let sending = false;
+      const unsubscribe = referenceDrafts.subscribe(() => {
+        const draft = referenceDrafts.read(target);
+        if (draft.sending) sending = true;
+        else if (sending) ended.resolve();
+      });
+      try {
+        const dispatched = bounded(arrived.promise);
+        await act(async () => {
+          fireEvent.click(screen.getByTestId("send-button"));
+          await dispatched;
+        });
+        await act(async () => {
+          fireEvent.click(screen.getByTestId("remove-attachment-att-1"));
+        });
+        expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(0);
+        await switchToSecondTab();
+        const deletes = () => calls.filter((call) => call.method === "DELETE" && call.url.includes("/files/att-1"));
+        expect(deletes()).toHaveLength(0);
+
+        const settled = bounded(ended.promise);
+        await act(async () => {
+          response.resolve(
+            result === "refused"
+              ? jsonResponse({ ok: false, error: { code: "FORBIDDEN", message: "no", retryable: false } }, false, 403)
+              : result === "body-truncated"
+                ? new Response('{"ok":true,', { status: 200 })
+                : result === "invalid-envelope"
+                  ? jsonResponse({})
+                  : okSubmit(),
+          );
+          await settled;
+        });
+        expect(deletes()).toHaveLength(result === "refused" ? 1 : 0);
+        if (result === "refused") expect(deletes()[0].url).toContain(`/reference-chat/${SESSION_ID}/files/att-1`);
+        expect(screen.getByText("B0")).toBeInTheDocument();
+      } finally {
+        unsubscribe();
+      }
+    },
+  );
+
   it("ui-workspace-wiring-r5-1: a released staged file's mention leaves the previous pane's saved draft", async () => {
     const desktop = followingDesktop();
     const calls = installLane((call) => {

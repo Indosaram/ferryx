@@ -61,6 +61,7 @@ import {
   REFERENCE_PROMPT_STALE_MESSAGE,
 } from "./chat/referencePromptAnswer";
 import {
+  REFERENCE_OUTCOME_UNKNOWN_CODE,
   REFERENCE_SUBMIT_MAX_CHARS,
   referenceAnswerIsSingleChoice,
   referenceChatRoute,
@@ -841,6 +842,10 @@ type ChatMutationOutcome =
   | { readonly ok: true; readonly data: Record<string, unknown> }
   | { readonly ok: false; readonly code: string; readonly message: string; readonly retryable: boolean };
 
+function submittedFileKey(target: ReferenceTargetRef, id: string): string {
+  return `${referenceTargetKey(target)}\u0000${id}`;
+}
+
 /**
  * One mutation, as the frozen envelope carries it. The route answers the frozen ScopeResult, and
  * a refusal before the mutation answers the machine error envelope; both are read here.
@@ -864,9 +869,9 @@ async function postChatMutation(
   } catch (error) {
     return {
       ok: false,
-      code: "NETWORK_ERROR",
+      code: REFERENCE_OUTCOME_UNKNOWN_CODE,
       message: error instanceof Error ? error.message : String(error),
-      retryable: true,
+      retryable: false,
     };
   }
   let parsed: unknown = null;
@@ -886,7 +891,7 @@ async function postChatMutation(
   }
   return {
     ok: false,
-    code: chatStatusErrorCode(response.status),
+    code: REFERENCE_OUTCOME_UNKNOWN_CODE,
     message: `The reference-chat request failed with status ${response.status}.`,
     retryable: false,
   };
@@ -2649,6 +2654,13 @@ export const RemoteHostConnection: React.FC<{
   chatAgentTypeRef.current = chatAgentType;
   const chatStagedFilesRef = useRef<readonly ReferenceFileReceipt[]>([]);
   chatStagedFilesRef.current = chatStagedFiles;
+  // A dispatched mention may already be in the PTY before its HTTP acknowledgement arrives.
+  // Keep its bytes out of every cleanup path until all sends definitely refused it.
+  const chatSubmittedFilesRef = useRef(new Map<string, {
+    file: ReferenceFileReceipt;
+    pending: number;
+    retained: boolean;
+  }>());
   /** The target the lane was last reset to: the owner of whatever the lane still holds. */
   const chatLaneTargetRef = useRef<ReferenceTargetRef | null>(null);
   /**
@@ -2888,7 +2900,9 @@ export const RemoteHostConnection: React.FC<{
     chatLaneAbortRef.current = new AbortController();
     const previous = chatLaneTargetRef.current;
     if (previous !== null) {
-      const released = chatStagedFilesRef.current;
+      const released = chatStagedFilesRef.current.filter(
+        (file) => !chatSubmittedFilesRef.current.has(submittedFileKey(previous, file.receipt.attachmentId)),
+      );
       // A released file no longer exists on the host: its mention leaves the pane's saved draft
       // with it, as removing the chip does, so returning to the pane never sends a dead mention.
       // A file the host did not confirm releasing is still staged there, and keeps its mention.
@@ -2961,7 +2975,10 @@ export const RemoteHostConnection: React.FC<{
         const listed = parseReferenceStagedFileList(raw, rehydrateTarget);
         if (listed.length === 0) return;
         const known = new Set(chatStagedFilesRef.current.map((file) => file.receipt.attachmentId));
-        const fresh = listed.filter((file) => !known.has(file.receipt.attachmentId));
+        const fresh = listed.filter((file) =>
+          !known.has(file.receipt.attachmentId) &&
+          !chatSubmittedFilesRef.current.has(submittedFileKey(rehydrateTarget, file.receipt.attachmentId)),
+        );
         if (fresh.length === 0) return;
         chatStagedFilesRef.current = [...chatStagedFilesRef.current, ...fresh];
         setChatStagedFiles((prev) => [
@@ -3336,25 +3353,67 @@ export const RemoteHostConnection: React.FC<{
         return [...prev, pending];
       });
       const payload: ReferenceSubmitPayload = { text, attachmentIds: [], origin: "chat" };
+      const route: ChatLaneRoute = { baseUrl: chatBaseUrlRef.current, token: bearer };
+      const mentioned = (entry: ReferenceFileReceipt): boolean => {
+        const path = referenceMentionPathOf(entry.mentionText);
+        return path !== null && text.includes(referenceMentionFor(path).trimEnd());
+      };
+      const submitted = new Map<string, ReferenceFileReceipt>();
+      for (const file of chatStagedFilesRef.current) {
+        if (mentioned(file)) submitted.set(submittedFileKey(target, file.receipt.attachmentId), file);
+      }
+      for (const [key, entry] of chatSubmittedFilesRef.current) {
+        if (key === submittedFileKey(target, entry.file.receipt.attachmentId) && mentioned(entry.file)) {
+          submitted.set(key, entry.file);
+        }
+      }
+      for (const [key, file] of submitted) {
+        const entry = chatSubmittedFilesRef.current.get(key) ?? { file, pending: 0, retained: false };
+        entry.pending += 1;
+        chatSubmittedFilesRef.current.set(key, entry);
+      }
       const outcome = await postChatMutation(
-        chatBaseUrlRef.current,
+        route.baseUrl,
         sessionId,
         bearer,
         "submit",
         chatMutationBody(target, payload),
       );
       const stillCurrent = chatTargetIsCurrent(target);
+      const unsent: ReferenceFileReceipt[] = [];
+      for (const [key] of submitted) {
+        const entry = chatSubmittedFilesRef.current.get(key);
+        if (!entry) continue;
+        entry.pending -= 1;
+        entry.retained ||= outcome.ok || referenceIsOutcomeUnknown(outcome.code);
+        if (entry.pending === 0 && !entry.retained) {
+          chatSubmittedFilesRef.current.delete(key);
+          unsent.push(entry.file);
+        }
+      }
+      if (!stillCurrent) void releaseStagedChatFiles(target, unsent, route).then((confirmed) => {
+        let draft = referenceDrafts.read(target).text;
+        for (const file of unsent) {
+          if (!confirmed.has(file.receipt.attachmentId)) continue;
+          const path = referenceMentionPathOf(file.mentionText);
+          if (path !== null) draft = draft.split(referenceMentionFor(path)).join("");
+        }
+        referenceDrafts.set(target, draft);
+        if (chatTargetIsCurrent(target)) setChatDraftText(draft);
+      });
+      else if (unsent.length > 0) {
+        const known = new Set(chatStagedFilesRef.current.map((file) => file.receipt.attachmentId));
+        const restored = unsent.filter((file) => !known.has(file.receipt.attachmentId));
+        chatStagedFilesRef.current = [...chatStagedFilesRef.current, ...restored];
+        setChatStagedFiles((prev) => [...prev, ...restored]);
+      }
       if (outcome.ok) {
         if (stillCurrent) {
           // The mentions this text carried were delivered: those files are the agent's now, not
           // staged ones the user may still remove or that count against the next turn.
-          const delivered = (entry: ReferenceFileReceipt): boolean => {
-            const path = referenceMentionPathOf(entry.mentionText);
-            return path !== null && text.includes(referenceMentionFor(path).trimEnd());
-          };
-          const remaining = chatStagedFilesRef.current.filter((entry) => !delivered(entry));
+          const remaining = chatStagedFilesRef.current.filter((entry) => !mentioned(entry));
           chatStagedFilesRef.current = remaining;
-          setChatStagedFiles((prev) => prev.filter((entry) => !delivered(entry)));
+          setChatStagedFiles((prev) => prev.filter((entry) => !mentioned(entry)));
           setChatWarnings((prev) =>
             prev.filter(
               (warning) => warning !== CHAT_SEND_FAILED_WARNING && warning !== CHAT_OUTCOME_UNKNOWN_WARNING,
@@ -3386,7 +3445,7 @@ export const RemoteHostConnection: React.FC<{
         }
         return false;
       }
-      // Nothing was written: the echo stops claiming it was sent, and the text comes back.
+      // A refusal or an uncertain outcome removes the unconfirmed echo and restores the draft.
       setChatComposerNotice(
         referenceIsOutcomeUnknown(outcome.code)
           ? CHAT_OUTCOME_UNKNOWN_WARNING
@@ -3411,7 +3470,7 @@ export const RemoteHostConnection: React.FC<{
       );
       return false;
     },
-    [chatMutationBody, chatTargetIsCurrent],
+    [chatMutationBody, chatTargetIsCurrent, releaseStagedChatFiles],
   );
 
   /**
@@ -3630,6 +3689,7 @@ export const RemoteHostConnection: React.FC<{
     async (attachmentId: string) => {
       const target = chatTargetRef.current;
       if (!target) return;
+      if (chatSubmittedFilesRef.current.has(submittedFileKey(target, attachmentId))) return;
       const entry = chatStagedFiles.find((file) => file.receipt.attachmentId === attachmentId);
       if (!entry) return;
       const cleaned = await cancelReferenceChatFile({ transport: chatFileTransport }, target, entry);
