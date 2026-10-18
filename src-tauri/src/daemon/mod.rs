@@ -14,6 +14,7 @@ pub mod handover_wire;
 pub mod launchd;
 pub(crate) mod logging;
 pub mod manifest;
+pub(crate) mod owner_admission;
 pub mod protocol;
 pub mod proxy;
 // Pane-liveness QA barrier producers (handover transfer/rollback, held remote RPC).

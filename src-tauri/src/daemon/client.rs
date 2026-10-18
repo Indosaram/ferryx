@@ -158,7 +158,7 @@ pub struct DaemonSpawnResult {
 // few seconds on a cold cache. A daemon that genuinely fails to start closes stdout and is
 // reported immediately by wait_for_daemon_ready, so this budget only bounds a live but slow
 // start; it never delays a real failure.
-const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 // How long a freshly loaded launchd job is given to bind its socket before the client assumes the
 // job is loaded-but-dead and reloads it. `RunAtLoad` fires the daemon immediately, so a healthy
