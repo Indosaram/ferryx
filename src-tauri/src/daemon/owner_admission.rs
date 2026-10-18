@@ -49,6 +49,25 @@ pub(crate) struct OwnerRecord {
     pub start_time: u64,
     pub generation_key: String,
     pub epoch: u64,
+    /// The Windows watchdog that spawned this daemon (FERRYX_SUPERVISOR_PID / _START), if any.
+    /// Absent in records written by older daemons and by daemons with no watchdog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_start_time: Option<u64>,
+}
+
+/// The watchdog passes its own pid to the daemon it spawns through this variable.
+pub(crate) const SUPERVISOR_PID_ENV: &str = "FERRYX_SUPERVISOR_PID";
+/// The watchdog passes its own process start time to the daemon it spawns through this variable.
+pub(crate) const SUPERVISOR_START_ENV: &str = "FERRYX_SUPERVISOR_START";
+
+/// The spawning watchdog's identity from the daemon's environment. Both values must parse;
+/// a half-set pair is ignored rather than recorded as a partial identity.
+pub(crate) fn supervisor_identity_from(env: &dyn Fn(&str) -> Option<String>) -> Option<(u32, u64)> {
+    let pid = env(SUPERVISOR_PID_ENV)?.trim().parse().ok()?;
+    let start_time = env(SUPERVISOR_START_ENV)?.trim().parse().ok()?;
+    Some((pid, start_time))
 }
 
 /// <runtime_dir>/starting.json, written by a launcher before it issues a start.
@@ -92,8 +111,15 @@ fn record_owner_alive(probe: &dyn OwnerProbe, record: &OwnerRecord) -> bool {
 /// 4. Free + endpoint Answers or Silent -> Unknown
 /// 5. Free + Missing + record pid alive with equal start time -> Unknown
 /// 5b. Free + Missing + starting.json younger than 2 x DAEMON_READY_TIMEOUT -> Unknown
+/// 5c. (Windows only) Free + Missing + the record's watchdog alive with equal start time ->
+///     Unknown: that watchdog may still respawn its daemon, so starting another would race it.
 /// 6. Free + Missing otherwise (no record, dead pid, different start time) -> Absent
 pub(crate) fn classify_owner(probe: &dyn OwnerProbe) -> OwnerState {
+    classify_owner_with(probe, cfg!(windows))
+}
+
+/// [classify_owner] with row 5c switched explicitly, so every target can test both forms.
+pub(crate) fn classify_owner_with(probe: &dyn OwnerProbe, watchdog_row: bool) -> OwnerState {
     // Row 1.
     let lock = probe.lock_state();
     if lock == LockState::Error {
@@ -170,6 +196,19 @@ pub(crate) fn classify_owner(probe: &dyn OwnerProbe) -> OwnerState {
                     "a start by launcher pid {} is pending ({age_ms} ms old)",
                     starting.launcher_pid
                 ),
+            };
+        }
+    }
+    // Row 5c.
+    if watchdog_row {
+        let watchdog = record.as_ref().and_then(|record| {
+            let pid = record.supervisor_pid?;
+            let start_time = record.supervisor_start_time?;
+            (probe.process_start_time(pid) == Some(start_time)).then_some(pid)
+        });
+        if let Some(pid) = watchdog {
+            return OwnerState::Unknown {
+                reason: format!("the daemon's watchdog pid {pid} is alive and may respawn it"),
             };
         }
     }
@@ -300,6 +339,7 @@ pub(crate) fn publish_owner(paths: &AdmissionPaths, generation_key: &str, epoch:
     let pid = std::process::id();
     let start_time = process_start_time(pid)
         .ok_or_else(|| format!("Cannot read the start time of daemon pid {pid}"))?;
+    let supervisor = supervisor_identity_from(&|key| std::env::var(key).ok());
     write_record_atomic(
         &paths.owner,
         &OwnerRecord {
@@ -307,6 +347,8 @@ pub(crate) fn publish_owner(paths: &AdmissionPaths, generation_key: &str, epoch:
             start_time,
             generation_key: generation_key.to_string(),
             epoch,
+            supervisor_pid: supervisor.map(|(pid, _)| pid),
+            supervisor_start_time: supervisor.map(|(_, start_time)| start_time),
         },
     )?;
     withdraw_pending_start(paths)
@@ -746,7 +788,17 @@ mod tests {
                 start_time,
                 generation_key: "gen-a".to_string(),
                 epoch: 1,
+                supervisor_pid: None,
+                supervisor_start_time: None,
             }));
+            self
+        }
+
+        fn with_watchdog(mut self, pid: u32, start_time: u64) -> Self {
+            if let Ok(Some(record)) = &mut self.record {
+                record.supervisor_pid = Some(pid);
+                record.supervisor_start_time = Some(start_time);
+            }
             self
         }
 
@@ -910,6 +962,74 @@ mod tests {
             .with_process(10, 555);
         assert_eq!(classify_owner(&probe), OwnerState::Absent);
     }
+
+    #[test]
+    fn row5c_alive_watchdog_of_a_dead_daemon_is_unknown() {
+        let probe = FakeProbe::new(LockState::Free, Endpoint::Missing)
+            .with_record(10, 100)
+            .with_watchdog(20, 200)
+            .with_process(20, 200);
+        assert!(is_unknown(&classify_owner_with(&probe, true)));
+    }
+
+    #[test]
+    fn row5c_applies_only_where_a_watchdog_exists() {
+        let probe = FakeProbe::new(LockState::Free, Endpoint::Missing)
+            .with_record(10, 100)
+            .with_watchdog(20, 200)
+            .with_process(20, 200);
+        assert_eq!(classify_owner_with(&probe, false), OwnerState::Absent);
+    }
+
+    #[test]
+    fn row5c_dead_or_reused_watchdog_pid_is_absent() {
+        let dead = FakeProbe::new(LockState::Free, Endpoint::Missing)
+            .with_record(10, 100)
+            .with_watchdog(20, 200);
+        assert_eq!(classify_owner_with(&dead, true), OwnerState::Absent);
+        let reused = FakeProbe::new(LockState::Free, Endpoint::Missing)
+            .with_record(10, 100)
+            .with_watchdog(20, 200)
+            .with_process(20, 999);
+        assert_eq!(classify_owner_with(&reused, true), OwnerState::Absent);
+    }
+
+    #[test]
+    fn row5c_never_overrides_an_alive_owner() {
+        let probe = FakeProbe::new(LockState::Held, Endpoint::Answers)
+            .with_record(10, 100)
+            .with_process(10, 100)
+            .with_watchdog(20, 200)
+            .with_process(20, 200);
+        assert_eq!(
+            classify_owner_with(&probe, true),
+            OwnerState::Alive { pid: 10, start_time: 100 }
+        );
+    }
+
+    #[test]
+    fn supervisor_identity_needs_both_values() {
+        let both = |key: &str| match key {
+            SUPERVISOR_PID_ENV => Some("42".to_string()),
+            SUPERVISOR_START_ENV => Some("133700".to_string()),
+            _ => None,
+        };
+        assert_eq!(supervisor_identity_from(&both), Some((42, 133700)));
+        let pid_only = |key: &str| (key == SUPERVISOR_PID_ENV).then(|| "42".to_string());
+        assert_eq!(supervisor_identity_from(&pid_only), None);
+        let garbage = |_: &str| Some("x".to_string());
+        assert_eq!(supervisor_identity_from(&garbage), None);
+    }
+
+    #[test]
+    fn owner_record_without_watchdog_fields_still_parses() {
+        let record: OwnerRecord =
+            serde_json::from_str(r#"{"pid":1,"startTime":2,"generationKey":"g","epoch":3}"#).unwrap();
+        assert_eq!(record.supervisor_pid, None);
+        assert_eq!(record.supervisor_start_time, None);
+        let written = serde_json::to_string(&record).unwrap();
+        assert!(!written.contains("supervisor"), "{written}");
+    }
     // ---- runtime helpers, admission lock, admit_and_start ----
 
     use std::cell::Cell;
@@ -946,6 +1066,8 @@ mod tests {
             start_time: 2,
             generation_key: "gen".to_string(),
             epoch: 3,
+            supervisor_pid: Some(4),
+            supervisor_start_time: Some(5),
         };
         write_record_atomic(&path, &record).unwrap();
         assert_eq!(read_record::<OwnerRecord>(&path).unwrap(), Some(record));

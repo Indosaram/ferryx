@@ -446,9 +446,10 @@ mod backend {
         task::ensure(env, executable)
     }
 
-    /// Re-imports the task definition for this executable without `/Run`.
+    /// Registers this build's generation task for logon and demotes older generations, without
+    /// `/Run`, `/End` or `/Delete`.
     pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
-        task::retarget(env, executable)
+        task::register_for_login(env, executable)
     }
 
     pub fn reload(env: Env<'_>) -> Result<()> {
@@ -471,7 +472,7 @@ mod backend {
     }
 
     pub fn installed(env: Env<'_>) -> bool {
-        schtasks(&["/Query", "/TN", &task::task_name(env)]).unwrap_or(false)
+        task::installed(env)
     }
 
     /// Deletes the task definition only (no `/End`), so the running watchdog and daemon stay up.

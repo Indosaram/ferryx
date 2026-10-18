@@ -70,6 +70,12 @@ pub fn windows_detach_flags() -> u32 {
     detach_flags_for(true, limits)
 }
 
+/// Whether a child spawned with `flags` would stay in the launcher's job object, and so die when
+/// that job closes (a GUI quit inside a job that forbids breakaway).
+pub const fn detach_keeps_child_in_job(flags: u32) -> bool {
+    flags & CREATE_BREAKAWAY_FROM_JOB == 0
+}
+
 #[inline]
 pub fn configure_no_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
     #[cfg(windows)]
@@ -187,6 +193,10 @@ mod tests {
         assert_eq!(detach_flags_for(true, Some(0x2000)), DETACHED_PROCESS, "KILL_ON_JOB_CLOSE only");
         assert_eq!(detach_flags_for(true, None), DETACHED_PROCESS, "unreadable limits");
         assert_eq!(detach_flags_for(false, None) & CREATE_NO_WINDOW, 0);
+        assert!(!detach_keeps_child_in_job(detach_flags_for(false, None)));
+        assert!(!detach_keeps_child_in_job(detach_flags_for(true, Some(0x0800))));
+        assert!(detach_keeps_child_in_job(detach_flags_for(true, Some(0x2000))));
+        assert!(detach_keeps_child_in_job(detach_flags_for(true, None)));
     }
 
     /// The daemon must not be a member of the launcher's session or process group: that membership
