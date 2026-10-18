@@ -1687,7 +1687,7 @@ mod tests {
     #[test]
     #[ignore = "drives the real Task Scheduler; run on maho-win with --ignored"]
     fn real_task_instance_survives_logon_trigger_removal() {
-        use platform::SystemScheduler;
+        use super::platform::SystemScheduler;
 
         struct QaTask(String);
         impl Drop for QaTask {
@@ -1708,15 +1708,18 @@ mod tests {
             (SUPERVISOR_NAME_ENV, qa.as_str()),
         ]);
         let name = generation_task_name(&env, "qa-old");
-        let pid_file = dir.path().join("instance.pid");
+        // The instance reports its pid over loopback: the test waits on that signal, never polls.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
         let script = format!(
-            "$PID | Out-File -Encoding ascii '{}'; Start-Sleep -Seconds 300",
-            pid_file.display()
+            "$c = New-Object System.Net.Sockets.TcpClient('127.0.0.1', {port}); \
+             $b = [Text.Encoding]::ASCII.GetBytes([string]$PID); \
+             $c.GetStream().Write($b, 0, $b.Length); $c.Close(); Start-Sleep -Seconds 300"
         );
         let xml = render_task_xml(
             &task_user(&env).unwrap(),
             "powershell.exe",
-            &format!("-NoProfile -WindowStyle Hidden -Command "{script}""),
+            &format!("-NoProfile -WindowStyle Hidden -Command \"{script}\""),
         );
         let mut scheduler = SystemScheduler;
         import_definition(&mut scheduler, &name, &task_xml_path(&env, &name).unwrap(), &xml)
@@ -1724,17 +1727,19 @@ mod tests {
         let _task = QaTask(name.clone());
         assert_eq!(scheduler.run(&["/Run", "/TN", &name]), Ok(true));
 
-        let until = Instant::now() + Duration::from_secs(30);
-        let pid: u32 = loop {
-            if let Some(pid) = std::fs::read_to_string(&pid_file)
-                .ok()
-                .and_then(|text| text.trim().parse().ok())
-            {
-                break pid;
-            }
-            assert!(Instant::now() < until, "the QA task never wrote its pid");
-            std::thread::sleep(Duration::from_millis(50));
-        };
+        let (sender, accepted) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(listener.accept().map(|(stream, _)| stream));
+        });
+        let mut stream = accepted
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the QA task never connected")
+            .expect("accepting the QA task's connection failed");
+        stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut stream, &mut text)
+            .expect("the QA task never sent its pid");
+        let pid: u32 = text.trim().parse().expect("the QA task sent a pid");
         let started = crate::daemon::owner_admission::process_start_time(pid)
             .expect("the task instance is running");
 
