@@ -639,7 +639,7 @@ pub fn perform_daemon_exec() -> Result<(), std::io::Error> {
     perform_daemon_exec_with_path(&exe)
 }
 
-fn get_persistent_lock_path() -> Option<PathBuf> {
+pub(crate) fn get_persistent_lock_path() -> Option<PathBuf> {
     std::env::var_os("FERRYX_DATA_DIR")
         .map(PathBuf::from)
         .or_else(|| {
@@ -904,7 +904,7 @@ fn ensure_runtime_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn open_secure_lock_file(path: &Path) -> Result<File, String> {
+pub(crate) fn open_secure_lock_file(path: &Path) -> Result<File, String> {
     match fs::symlink_metadata(path) {
         Ok(_) => validate_safe_ownership_and_type(path, RuntimeNodeKind::RegularFile)?,
         Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -3533,6 +3533,17 @@ impl DaemonServer {
 
         let lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
         self.handover_manager.set_lock_files(lock_files);
+        // Publish who owns the locks so launchers can tell this daemon from a reused pid, and
+        // clear the launcher's pending-start marker. A failure only weakens admission to
+        // Unknown (never a second start), so it is logged rather than fatal.
+        let admission_paths = crate::daemon::owner_admission::AdmissionPaths::for_runtime();
+        if let Err(error) = crate::daemon::owner_admission::publish_owner(
+            &admission_paths,
+            &crate::daemon::owner_admission::current_generation_key(),
+            self.epoch,
+        ) {
+            tracing::warn!(%error, "Could not publish the daemon owner record");
+        }
 
         // Clean up stale socket only after lock acquisition and safe ownership check.
         remove_stale_socket_after_lock(&socket_path)?;

@@ -32,6 +32,9 @@ pub enum IpcErrorCode {
     DaemonProtocolMismatch,
     /// The running daemon predates the request; the change takes effect after a restart.
     DaemonUpgradeRequired,
+    /// A daemon owner is alive or cannot be identified, and it did not answer in time. Nothing
+    /// was started or replaced.
+    DaemonBusy,
     BrowserNotFound,
     WebviewNotFound,
     BrowserUrlInvalid,
