@@ -45,8 +45,8 @@ enum AfterFlush {
     Nothing,
     /// Re-check the retirement predicate (RetireWhenIdle).
     CheckRetirement,
-    /// Shutdown accepted: marker, graceful shutdown, exit 0.
-    Exit,
+    /// Shutdown accepted: hand the exit to the single retirement task.
+    Shutdown,
 }
 
 impl DaemonServer {
@@ -61,7 +61,7 @@ impl DaemonServer {
             return Ok(());
         }
         daemon_start_time_ms();
-        self.spawn_control_retirement_task();
+        self.spawn_control_retirement_task_in(get_runtime_dir());
 
         #[cfg(unix)]
         {
@@ -140,20 +140,27 @@ impl DaemonServer {
         Ok(())
     }
 
-    /// One task per daemon: waits until a Retiring daemon is empty (nothing live, spawning or in
-    /// flight; every response already flushed), then writes the marker, shuts down gracefully and
-    /// exits 0.
-    fn spawn_control_retirement_task(self: &Arc<Self>) {
+    /// One task per daemon and the only retirement path for both RetireWhenIdle and Shutdown:
+    /// waits until a Retiring daemon is empty (nothing spawning or in flight, every response
+    /// already flushed, and nothing live unless a Shutdown confirmed those sessions), then writes
+    /// the marker into runtime_dir, shuts down gracefully and exits 0. The retiring_signalled
+    /// swap in handover.rs makes the signal one-shot, so this runs at most once.
+    pub(crate) fn spawn_control_retirement_task_in(self: &Arc<Self>, runtime_dir: PathBuf) {
         let server = Arc::clone(self);
         let ready = self.handover_manager.retiring_ready();
         tokio::spawn(async move {
             ready.notified().await;
-            server.finish_control_retirement("control-v1 RetireWhenIdle").await;
+            let reason = if server.handover_manager.control_shutdown_requested() {
+                "control-v1 Shutdown"
+            } else {
+                "control-v1 RetireWhenIdle"
+            };
+            server.finish_control_retirement(&runtime_dir, reason).await;
         });
     }
 
-    async fn finish_control_retirement(&self, reason: &str) {
-        let marker = get_runtime_dir().join(format!(
+    async fn finish_control_retirement(&self, runtime_dir: &Path, reason: &str) {
+        let marker = runtime_dir.join(format!(
             "retired-{}.json",
             generation_key().unwrap_or_else(|| std::process::id().to_string())
         ));
@@ -220,9 +227,11 @@ impl DaemonServer {
                     self.handover_manager
                         .check_retirement_if_empty(&self.terminal_service);
                 }
-                AfterFlush::Exit => {
+                // The response is flushed; mark the Shutdown before this guard drops so the guard
+                // drop (or the last other in-flight request) signals the retirement task.
+                AfterFlush::Shutdown => {
+                    self.handover_manager.mark_control_shutdown();
                     drop(guard);
-                    self.finish_control_retirement("control-v1 Shutdown").await;
                     return;
                 }
             }
@@ -289,7 +298,7 @@ impl DaemonServer {
                     AfterFlush::Nothing,
                 ),
                 ShutdownDecision::Proceed { live } => {
-                    (ControlReply::Live { live }, AfterFlush::Exit)
+                    (ControlReply::Live { live }, AfterFlush::Shutdown)
                 }
             },
             ControlRequest::Unsupported { .. } => (

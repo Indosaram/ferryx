@@ -782,6 +782,9 @@ pub struct HandoverManager {
     /// Raised once a Retiring daemon is empty; the control retirement task waits on it.
     retiring_ready: Arc<tokio::sync::Notify>,
     retiring_signalled: AtomicBool,
+    /// Set once a control-v1 Shutdown was accepted: the retirement predicate then ignores the
+    /// live sessions the caller confirmed and waits only for in-flight responses.
+    shutdown_requested: AtomicBool,
     client_abort_tx: broadcast::Sender<()>,
     commit_notify_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     commit_callbacks: Arc<Mutex<Vec<Box<dyn FnOnce() + Send + 'static>>>>,
@@ -882,6 +885,7 @@ impl HandoverManager {
             retiring_terminals: Mutex::new(None),
             retiring_ready: Arc::new(tokio::sync::Notify::new()),
             retiring_signalled: AtomicBool::new(false),
+            shutdown_requested: AtomicBool::new(false),
             client_abort_tx,
             commit_notify_tx: Arc::new(Mutex::new(None)),
             commit_callbacks: Arc::new(Mutex::new(Vec::new())),
@@ -970,6 +974,17 @@ impl HandoverManager {
 
     pub(crate) fn retiring_signalled(&self) -> bool {
         self.retiring_signalled.load(Ordering::SeqCst)
+    }
+
+    /// Records an accepted control-v1 Shutdown. Call it after the Shutdown response is flushed
+    /// and before that handler's RetirementGuard drops: the guard drop (or the last other
+    /// in-flight request) then signals the single retirement task, which exits exactly once.
+    pub(crate) fn mark_control_shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn control_shutdown_requested(&self) -> bool {
+        self.shutdown_requested.load(Ordering::SeqCst)
     }
 
     /// Runs the installed retirement action (process exit 0 outside fixtures).
@@ -1209,9 +1224,16 @@ impl HandoverManager {
         {
             let status = self.status.write();
             if *status == HandoverStatus::Retiring {
+                // After an accepted Shutdown the confirmed sessions end with the process, so only
+                // spawns and in-flight responses keep it alive.
+                let live = if self.shutdown_requested.load(Ordering::SeqCst) {
+                    0
+                } else {
+                    live_session_count(terminal_service) as usize
+                };
                 if crate::daemon::control::retirement_ready(
                     status.owner_status(),
-                    live_session_count(terminal_service) as usize,
+                    live,
                     self.spawn_owners.load(Ordering::Relaxed),
                     0,
                 ) && !self.retiring_signalled.swap(true, Ordering::SeqCst)
