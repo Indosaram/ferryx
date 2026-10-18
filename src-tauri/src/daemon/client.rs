@@ -454,6 +454,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::Suspend { .. }
             | DaemonRequest::Resume { .. }
             | DaemonRequest::ListSessions
+            | DaemonRequest::DescribeLiveSessions
             | DaemonRequest::SpawnOperationStatus { .. }
             | DaemonRequest::ResourceUsage
             | DaemonRequest::DescribeSession { .. }
@@ -498,6 +499,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::Suspend { .. } => "suspend",
         DaemonRequest::Resume { .. } => "resume",
         DaemonRequest::ListSessions => "listSessions",
+        DaemonRequest::DescribeLiveSessions => "describeLiveSessions",
         DaemonRequest::DescribeSession { .. } => "describeSession",
         DaemonRequest::DiscoverAgentSession { .. } => "discoverAgentSession",
         DaemonRequest::ResetAgentState { .. } => "resetAgentState",
@@ -4196,6 +4198,22 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::ResumeOk => Ok(()),
+            DaemonResponse::Error { message, .. } => {
+                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response",
+            )),
+        }
+    }
+
+    /// Live identity of every session (read-only; never collapses an error to an empty list).
+    pub async fn describe_live_sessions(
+        &self,
+    ) -> Result<Vec<crate::daemon::protocol::LiveSessionInfo>, IpcError> {
+        match self.send_request(DaemonRequest::DescribeLiveSessions).await? {
+            DaemonResponse::DescribeLiveSessionsOk { sessions, .. } => Ok(sessions),
             DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
