@@ -582,7 +582,11 @@ pub(crate) fn admit_and_start(
 
     let until = Instant::now() + ready_timeout;
     loop {
-        if matches!(classify_owner(probe), OwnerState::Alive { .. }) {
+        // Probing a free daemon lock briefly takes it, which could make the starting daemon's
+        // fail-fast lock attempt lose. The daemon publishes owner.json only after it holds its
+        // locks, so the full classification runs only once that record names a live process.
+        if owner_record_is_live(probe) && matches!(classify_owner(probe), OwnerState::Alive { .. })
+        {
             return Ok(Admission::Started { ready: true });
         }
         if Instant::now() >= until {
@@ -591,6 +595,10 @@ pub(crate) fn admit_and_start(
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn owner_record_is_live(probe: &dyn OwnerProbe) -> bool {
+    matches!(probe.read_record(), Ok(Some(record)) if record_owner_alive(probe, &record))
 }
 
 #[cfg(test)]
@@ -794,6 +802,7 @@ mod tests {
     // ---- runtime helpers, admission lock, admit_and_start ----
 
     use std::cell::Cell;
+    use std::io::Write as _;
 
     fn paths_in(dir: &Path) -> AdmissionPaths {
         AdmissionPaths {
