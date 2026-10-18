@@ -2734,7 +2734,7 @@ mod quit_path_tests {
             .build()
             .expect("main window");
 
-        handle_window_destroyed(main.as_ref().window());
+        handle_window_destroyed(&main.as_ref().window());
         handle_run_event(app.handle(), &tauri::RunEvent::Exit);
 
         let (connections, requests) = fake.snapshot();
