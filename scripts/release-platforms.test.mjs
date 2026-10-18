@@ -1060,6 +1060,93 @@ test("finalizeMacosBundle: orders DMG creation after app staple and before DMG n
   }
 });
 
+test("finalizeMacosBundle: signs the nested daemon helper bundle before the outer app, both with the recorded entitlements", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-nested-helper-order-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    const helperApp = join(fixture.appPath, "Contents", "Helpers", "Ferryx Daemon.app");
+    mkdirSync(join(helperApp, "Contents", "MacOS"), { recursive: true });
+    writeFileSync(join(helperApp, "Contents", "MacOS", "ferryx"), "macho:main");
+    const recorded = "<plist><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>";
+    const entitlements = join(fixture.workspaceDir, "outer-entitlements.plist");
+    writeFileSync(entitlements, `${recorded}\n`);
+    // codesign -d --entitlements reports what the outer app was signed with.
+    const exec = (command, args, opts) => {
+      if (command === "codesign" && args[0] === "-d" && args.includes("--entitlements")) {
+        fixture.calls.push([command, ...args].join(" "));
+        return { status: 0, stdout: recorded, stderr: "" };
+      }
+      return fixture.exec(command, args, opts);
+    };
+
+    finalizeMacosBundle({
+      appPath: fixture.appPath,
+      dmgPath: fixture.dmgPath,
+      workspaceDir: fixture.workspaceDir,
+      signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      notaryProfile: "FerryxNotary",
+      approveNotarization: true,
+      entitlements,
+      exec,
+    });
+
+    const calls = fixture.calls;
+    const signs = calls.filter((c) => c.startsWith("codesign --force"));
+    const looseHelperExe = signs.findIndex((c) => c.endsWith("Ferryx Daemon.app/Contents/MacOS/ferryx"));
+    const nestedBundle = signs.findIndex((c) => c.endsWith("Contents/Helpers/Ferryx Daemon.app"));
+    const outerApp = signs.findIndex((c) => c.endsWith(fixture.appPath));
+    assert.notEqual(looseHelperExe, -1, "the helper's Mach-O is signed as a loose file first");
+    assert.notEqual(nestedBundle, -1, "the nested helper bundle is signed as a bundle");
+    assert.notEqual(outerApp, -1, "the outer app is signed");
+    assert.ok(looseHelperExe < nestedBundle, "loose Mach-O files precede the nested bundle");
+    assert.ok(nestedBundle < outerApp, "the nested bundle signature precedes the outer app signature");
++    for (const idx of [nestedBundle, outerApp]) {
+      assert.ok(signs[idx].includes(`--entitlements ${entitlements}`), `bundle signature carries the recorded entitlements: ${signs[idx]}`);
+      assert.ok(signs[idx].includes("--timestamp"), "Developer ID signatures keep a secure timestamp");
+      assert.ok(!signs[idx].includes("--deep"), "bundles are signed without --deep");
+    }
+    assert.ok(!signs[looseHelperExe].includes("--entitlements"), "loose Mach-O files carry no entitlements");
+
+    const entitlementCheck = calls.findIndex((c) => c.startsWith("codesign -d --entitlements"));
+    const verify = calls.findIndex((c) => c.startsWith("codesign --verify --deep --strict"));
+    assert.ok(calls.indexOf(signs[outerApp]) < entitlementCheck, "entitlements are compared after the outer signature");
+    assert.ok(entitlementCheck < verify, "entitlements are compared before the deep verify");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("finalizeMacosBundle: fails when signing changed the outer app's recorded entitlements", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-entitlement-drift-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    const entitlements = join(fixture.workspaceDir, "outer-entitlements.plist");
+    writeFileSync(entitlements, "<plist><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>\n");
+    // The fixture's codesign -d prints no entitlements: the recorded one was lost.
+    assert.throws(
+      () =>
+        finalizeMacosBundle({
+          appPath: fixture.appPath,
+          dmgPath: null,
+          workspaceDir: fixture.workspaceDir,
+          signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+          notaryProfile: "FerryxNotary",
+          approveNotarization: true,
+          entitlements,
+          exec: fixture.exec,
+        }),
+      /Outer app entitlements changed/,
+    );
+    assert.equal(
+      fixture.calls.some((c) => c.startsWith("xcrun notarytool submit")),
+      false,
+      "nothing is submitted for notarization after an entitlement drift",
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("submitForNotarization: fails closed on an Invalid submission instead of proceeding to staple", () => {
   const tmp = mkdtempSync(join(tmpdir(), "ferryx-notary-invalid-"));
   try {

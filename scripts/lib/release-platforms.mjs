@@ -7,6 +7,12 @@ import { tmpdir } from "node:os";
 import { runHostScript, runProcess, quoteSh, quotePowerShell } from "./release-hosts.mjs";
 import { verifyMinisign } from "./minisign-verify.mjs";
 import {
+  assembleDaemonHelper,
+  codesignArgs,
+  readEntitlementsXml,
+  sameEntitlements,
+} from "../macos-daemon-helper.mjs";
+import {
   parseReceipt,
   parsePlan,
   validateToolchains,
@@ -829,6 +835,13 @@ export function recreateDmgFromApp({ appPath, dmgPath, stagingDir, exec = macExe
  * Re-signs, notarizes, and staples the macOS app bundle, then rebuilds and
  * notarizes the DMG from that final app so the image never ships the bundler's
  * pre-signing copy of the embedded helpers.
+ *
+ * Signing is inside-out: loose Mach-O files, then every nested bundle under
+ * Contents/Helpers/*.app (signed as a bundle), then the outer app. No --deep.
+ * `entitlements` is the outer-entitlements file recorded by
+ * assembleDaemonHelper (scripts/macos-daemon-helper.mjs): when it is non-empty
+ * both bundle signatures carry it, and after signing the outer app's
+ * entitlements must equal it exactly. An empty file means the app has none.
  */
 export function finalizeMacosBundle({
   appPath,
@@ -837,27 +850,45 @@ export function finalizeMacosBundle({
   signingIdentity = null,
   notaryProfile = null,
   approveNotarization = false,
+  entitlements = null,
   exec = macExec,
 }) {
+  const recordedEntitlements = entitlements === null ? null : readFileSync(entitlements, "utf8");
+  const bundleEntitlements = recordedEntitlements && recordedEntitlements.trim() !== "" ? entitlements : null;
+
   // Re-sign every Mach-O binary (including embedded helpers) with hardened
-  // runtime and a secure timestamp, then seal the bundle.
+  // runtime and a secure timestamp, then the nested bundles, then seal the app.
   if (signingIdentity) {
     const findOut = exec("find", [appPath, "-type", "f"]).stdout;
     for (const itemPath of findOut.trim().split("\n")) {
       if (!itemPath) continue;
       const fileType = exec("file", ["-b", itemPath]).stdout;
       if (fileType.includes("Mach-O")) {
-        exec("codesign", ["--force", "--options", "runtime", "--timestamp", "--sign", signingIdentity, itemPath]);
+        exec("codesign", [...codesignArgs(signingIdentity), itemPath]);
       }
     }
-    exec("codesign", ["--force", "--options", "runtime", "--timestamp", "--sign", signingIdentity, appPath]);
+    for (const bundlePath of nestedHelperBundles(appPath)) {
+      exec("codesign", [...codesignArgs(signingIdentity, bundleEntitlements), bundlePath]);
+    }
+    exec("codesign", [...codesignArgs(signingIdentity, bundleEntitlements), appPath]);
+  }
+
+  if (recordedEntitlements !== null) {
+    const after = readEntitlementsXml(appPath, exec);
+    if (!sameEntitlements(after, recordedEntitlements)) {
+      throw new Error(
+        `Outer app entitlements changed while signing ${appPath}: recorded ${JSON.stringify(recordedEntitlements.trim())}, now ${JSON.stringify(after)}`,
+      );
+    }
   }
 
   exec("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath]);
   if (signingIdentity) {
     const signInfo = exec("codesign", ["-dv", "--verbose=4", appPath], { allowFailure: true });
     const combined = `${signInfo.stdout}\n${signInfo.stderr}`;
-    if (!combined.includes(signingIdentity)) {
+    const signedAsExpected =
+      signingIdentity === "-" ? /(^|\n)Signature=adhoc\s*(\n|$)/.test(combined) : combined.includes(signingIdentity);
+    if (!signedAsExpected) {
       throw new Error(`App bundle is not signed with expected identity '${signingIdentity}'`);
     }
   }
@@ -908,6 +939,16 @@ export function finalizeMacosBundle({
   }
 
   return { appPath, dmgPath, notarizations };
+}
+
+/** Nested bundles under Contents/Helpers, in a stable order. */
+function nestedHelperBundles(appPath) {
+  const helpersDir = join(appPath, "Contents", "Helpers");
+  if (!existsSync(helpersDir)) return [];
+  return readdirSync(helpersDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.endsWith(".app"))
+    .map((entry) => join(helpersDir, entry.name))
+    .sort();
 }
 
 /**
@@ -1183,6 +1224,11 @@ export async function buildHost({
 
       // 3-4. Re-sign all Mach-O binaries, notarize/staple the app, then rebuild
       // and notarize the DMG from that final signed + stapled app.
+      // The daemon helper bundle is assembled first so it is signed inside-out
+      // and shipped inside the notarized app and the updater archive.
+      const macSigningIdentity = hostConfig.signingIdentity ?? "-";
+      const outerEntitlements = join(workspaceDir, "outer-entitlements.plist");
+      assembleDaemonHelper({ appPath, identity: macSigningIdentity, entitlements: outerEntitlements });
       const dmgDir = join(bundleDir, "dmg");
       let dmgPath = null;
       if (existsSync(dmgDir)) {
@@ -1198,9 +1244,10 @@ export async function buildHost({
         appPath,
         dmgPath,
         workspaceDir,
-        signingIdentity: hostConfig.signingIdentity ?? null,
+        signingIdentity: macSigningIdentity,
         notaryProfile: hostConfig.notaryProfile ?? null,
         approveNotarization,
+        entitlements: outerEntitlements,
       });
 
       // 5. Create updater tar from verified (and stapled) .app, excluding AppleDouble

@@ -272,9 +272,114 @@ Install safety rules enforced by the script:
 
 For a fully signed, notarized, stapled local build without a release run, use
 `node scripts/build-notarized-local.mjs <detached-worktree>` (builds from the
-worktree at merged main HEAD with `APPLE_SIGNING_IDENTITY`, re-signs every
-Mach-O, submits to notarytool, staples, and refuses to finish without
-`spctl` reporting `Notarized Developer ID`).
+worktree at merged main HEAD with `APPLE_SIGNING_IDENTITY`, assembles the daemon
+helper bundle, re-signs inside-out, submits to notarytool, staples, and refuses
+to finish without `spctl` reporting `Notarized Developer ID`).
+
+## Daemon runtime layout (independent daemon lifetime)
+
+The terminal daemon does not run from the GUI executable inside the installed app.
+Each platform runs it from an immutable, generation-keyed copy outside the app install,
+under its own OS job, so replacing, moving or updating the app never changes or stops a
+running daemon.
+
+### macOS daemon helper bundle
+
+Every macOS release ships a complete, signed helper bundle inside the app:
+
+```text
+Ferryx.app/Contents/Helpers/Ferryx Daemon.app/
+  Contents/MacOS/ferryx      copy of Ferryx.app/Contents/MacOS/ferryx
+  Contents/Info.plist        CFBundleIdentifier com.ferryx.app.daemon, CFBundleExecutable ferryx,
+                             CFBundlePackageType APPL, LSUIElement true,
+                             CFBundleShortVersionString = the app version
+```
+
+It is built at packaging time by `assembleDaemonHelper` in `scripts/macos-daemon-helper.mjs`,
+called by both `release-local.mjs build --host macbook` and `build-notarized-local.mjs` after
+the Tauri bundle exists and before `finalizeMacosBundle`, so the helper is inside the notarized,
+stapled app, the DMG and the updater archive. It first records the outer app's entitlements
+(`codesign -d --entitlements :-`) into `outer-entitlements.plist` in the run directory (an
+empty file means none; today the app has none), then signs the helper as a bundle.
+`finalizeMacosBundle` signs inside-out: loose Mach-O files, then each bundle under
+`Contents/Helpers/*.app`, then the outer app, passing the recorded entitlements to both bundle
+signatures when present, never `--deep`. It fails if the outer app's entitlements afterwards
+differ from the recorded ones, and runs `codesign --verify --deep --strict` on the app. QA debug
+bundles use the same function with the ad-hoc identity `-` (no secure timestamp).
+
+At runtime nothing builds or edits a bundle: the daemon runtime stager copies
+`Ferryx Daemon.app` byte-for-byte (`ditto`) into the generation directory and verifies it
+with `codesign --verify --strict`. A build without the helper is refused (`HelperMissing`);
+a staged copy that fails verification is refused (`SignatureInvalid`); there is no fallback
+to the GUI executable.
+
+### Generation keys and per-generation OS jobs
+
+A generation key is `<version>-<first 8 hex of the SHA-256 of the staged executable>`, so two
+builds with the same version still get different keys. A generation directory is written once
+(temp dir, fsync, hash check, atomic rename) and never overwritten while anything runs from it.
+
+| Platform | Runtime root | Staged executable | OS job per generation |
+| --- | --- | --- | --- |
+| macOS | `~/Library/Application Support/Ferryx/daemon-runtime` | `<key>/Ferryx Daemon.app` | launchd `com.ferryx.daemon.<key>` (`~/Library/LaunchAgents/<label>.plist`) |
+| Linux | `$XDG_DATA_HOME/ferryx/daemon-runtime` (`~/.local/share`) | `<key>/ferryx` | systemd --user `ferryx-daemon-<key>.service` |
+| Windows | `%LOCALAPPDATA%\Ferryx\daemon-runtime` | `<key>\ferryx.exe` | scheduled task `Ferryx\Daemon-<key>` |
+
+With `FERRYX_DATA_DIR` set (isolated QA) the root is `$FERRYX_DATA_DIR/daemon-runtime`. Only the
+newest generation autostarts at login; older jobs lose their login trigger without being
+stopped. Old generation directories are removed only when no process runs from them and no
+registered job references them; the newest two are always kept.
+
+### Legacy single-job migration
+
+Installs before this change used one job: `com.ferryx.daemon` (macOS), `ferryx-daemon.service`
+(Linux), `Ferryx\Daemon` (Windows). The new app never stops a live legacy daemon. If it is
+running, or its state cannot be verified, its job stays loaded and running and only loses its
+login autostart; the newest generation is registered for the next login. A live legacy daemon
+keeps serving until it ends on its own (logout or reboot) or the user explicitly restarts
+terminals; the newest generation takes over at that point. A legacy job with no daemon is
+removed. Expect the old daemon to stay in Activity Monitor / `ps` after the first update; that
+is by design.
+
+### Control channel freeze rule
+
+Besides the data protocol (`DAEMON_PROTOCOL_VERSION`), the daemon serves a version-stable
+control channel, `control.sock` in the runtime dir on Unix and `control.port` + `control.token`
+on Windows. Its schema `control-v1` (ops `Hello`, `Inventory`, `RequestUpgrade`,
+`RetireWhenIdle`, `Shutdown`) is frozen and additive-only forever: new optional fields and new
+ops are allowed; no removal, rename or type change. The handover wire (`handover-v1`) is frozen
+the same way. Any later `DAEMON_PROTOCOL_VERSION` bump must keep control v1 working, because it
+is the only way a newer app can inspect, upgrade, retire or stop an older daemon. The fixtures
+`src-tauri/tests/fixtures/control-v1.json` and `handover-v1.json` fail the suite on a breaking
+change; never edit them to make a change pass.
+
+### Windows pending rule
+
+Windows cannot move terminals between daemon processes. When an update changes the daemon
+protocol, the app never shuts down, terminates or replaces the running daemon. It shows
+"Update installed; N terminals still running on the previous version" and asks the old daemon
+to retire once idle; the old generation exits by itself when its last terminal closes, and the
+newest generation starts then. The only destructive path is the user pressing "Restart
+terminals now" and confirming the exact terminal count; if the count changed, nothing stops and
+the count is re-read. When the old daemon cannot report its count, the button stays disabled.
+
+### Post-build release check (macOS)
+
+Before installing or publishing a macOS release artifact, run on the final `Ferryx.app` (and on
+the copy inside the DMG when checking the DMG):
+
+```bash
+APP="<path/to>/Ferryx.app"
+HELPER="$APP/Contents/Helpers/Ferryx Daemon.app"
+codesign --verify --deep --strict --verbose=2 "$APP"
+codesign --verify --deep --strict --verbose=2 "$HELPER"
+spctl --assess --type execute -vv "$APP"
+spctl --assess --type execute -vv "$HELPER"
+```
+
+All four must exit 0, and both `spctl` results must report `source=Notarized Developer ID`. A
+missing helper bundle, a helper that fails verification, or a helper Gatekeeper rejects blocks
+the release: the app could not stage a daemon runtime on users' machines.
 
 ## Checks, cleanup, and recovery
 
@@ -285,6 +390,7 @@ Mach-O, submits to notarytool, staples, and refuses to finish without
 - [ ] Plan tag, app version, MSIX version, source SHA, Ghostty pin, channels, and updater key are reviewed.
 - [ ] All three receipts match the plan and list only the expected artifacts.
 - [ ] Developer ID signing, notarization/stapling, updater signatures, package metadata, and hashes pass.
+- [ ] The macOS post-build release check passes on `Ferryx.app` and `Contents/Helpers/Ferryx Daemon.app`.
 - [ ] `assemble` and `verify` pass against the production updater public key.
 - [ ] Draft bytes and inventory are reviewed before the separate publication approval.
 - [ ] `verify-remote` passes after publication.
