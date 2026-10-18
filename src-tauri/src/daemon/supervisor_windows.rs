@@ -1752,11 +1752,19 @@ mod tests {
             Some(started),
             "the running instance must survive the re-import"
         );
-        let status = crate::util::no_window_command("schtasks")
-            .args(["/Query", "/TN", &name, "/FO", "CSV", "/NH"])
+        // schtasks' Status column is localized; the MSFT_ScheduledTask State enum prints the
+        // invariant name on every display language.
+        let (folder, leaf) = name.rsplit_once('\\').expect("the task name has a folder");
+        let state = crate::util::no_window_command("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!("(Get-ScheduledTask -TaskPath '\\{folder}\\' -TaskName '{leaf}').State"),
+            ])
             .output()
             .unwrap();
-        let status = String::from_utf8_lossy(&status.stdout);
-        assert!(status.contains("Running"), "{status}");
+        assert!(state.status.success(), "{state:?}");
+        let state = String::from_utf8_lossy(&state.stdout);
+        assert_eq!(state.trim(), "Running", "{state}");
     }
 }
