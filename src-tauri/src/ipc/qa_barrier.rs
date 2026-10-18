@@ -1726,6 +1726,7 @@ async fn create_plain_fixture_session(
             FIXTURE_ROWS,
             None,
             None,
+            None,
         ),
     )
     .await
