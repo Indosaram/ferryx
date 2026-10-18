@@ -6,7 +6,10 @@
  *   1. bun install for the UI workspace
  *   2. cargo tauri build --bundles app with APPLE_SIGNING_IDENTITY + updater key
  *      and an isolated CARGO_TARGET_DIR
- *   3. finalizeMacosBundle: re-sign every Mach-O (runtime + timestamp), seal,
+ *   3. assembleDaemonHelper: add the signed Contents/Helpers/Ferryx Daemon.app
+ *      and record the outer app's entitlements
+ *   4. finalizeMacosBundle: re-sign inside-out (loose Mach-O, nested helper
+ *      bundles, outer app; runtime + timestamp, recorded entitlements), seal,
  *      notarytool submit (profile FerryxNotary), assert Accepted, staple,
  *      validate, and require spctl "Notarized Developer ID"
  *
@@ -77,13 +80,27 @@ if (build.exit !== 0) {
   process.exit(1);
 }
 
-// 3. Finalize: re-sign, seal, notarize, staple, validate via the release pipeline.
+// 3. Daemon helper bundle, before finalize so it is inside the notarized, stapled app.
 const appPath = path.join(targetDir, "release/bundle/macos/Ferryx.app");
 if (!existsSync(appPath)) {
   console.error(`bundle not found at ${appPath}`);
   process.exit(1);
 }
 mkdirWorkdir(runDir);
+const { assembleDaemonHelper } = await import(path.join(mainRepo, "scripts/macos-daemon-helper.mjs"));
+let helper;
+try {
+  helper = assembleDaemonHelper({
+    appPath,
+    identity: signingIdentity,
+    entitlements: path.join(runDir, "outer-entitlements.plist"),
+  });
+} catch (error) {
+  console.error(`assembleDaemonHelper failed: ${error.message}`);
+  process.exit(1);
+}
+
+// 4. Finalize: re-sign, seal, notarize, staple, validate via the release pipeline.
 const { finalizeMacosBundle } = await import(path.join(mainRepo, "scripts/lib/release-platforms.mjs"));
 let outcome;
 try {
@@ -94,13 +111,18 @@ try {
   signingIdentity,
   notaryProfile,
   approveNotarization: true,
+  entitlements: path.join(runDir, "outer-entitlements.plist"),
   exec: (cmd, args, opts = {}) => {
     const result = spawnSync(cmd, args, { encoding: "utf8" });
-    return {
+    const outcome = {
       status: result.status === null ? -1 : result.status,
       stdout: result.stdout ?? "",
       stderr: result.stderr ?? "",
     };
+    if (outcome.status !== 0 && !opts.allowFailure) {
+      throw new Error(`${cmd} ${args.join(" ")} exited ${outcome.status}: ${(outcome.stderr || outcome.stdout).trim()}`);
+    }
+    return outcome;
   },
   });
 } catch (error) {
@@ -116,6 +138,7 @@ if (spctl.status !== 0 || !combined.includes("Notarized Developer ID")) {
 }
 
 console.log(`NOTARIZED_BUNDLE:${appPath}`);
+console.log(`DAEMON_HELPER:${helper.helperPath}`);
 console.log(`notary submissions: ${JSON.stringify(outcome.notarizations)}`);
 
 function mkdirWorkdir(dir) {
