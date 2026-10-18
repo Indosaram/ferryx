@@ -1100,7 +1100,7 @@ test("finalizeMacosBundle: signs the nested daemon helper bundle before the oute
     assert.notEqual(outerApp, -1, "the outer app is signed");
     assert.ok(looseHelperExe < nestedBundle, "loose Mach-O files precede the nested bundle");
     assert.ok(nestedBundle < outerApp, "the nested bundle signature precedes the outer app signature");
-+    for (const idx of [nestedBundle, outerApp]) {
+    for (const idx of [nestedBundle, outerApp]) {
       assert.ok(signs[idx].includes(`--entitlements ${entitlements}`), `bundle signature carries the recorded entitlements: ${signs[idx]}`);
       assert.ok(signs[idx].includes("--timestamp"), "Developer ID signatures keep a secure timestamp");
       assert.ok(!signs[idx].includes("--deep"), "bundles are signed without --deep");
