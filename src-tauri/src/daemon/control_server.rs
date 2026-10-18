@@ -245,10 +245,17 @@ impl DaemonServer {
     fn dispatch_control(&self, request: ControlRequest) -> (ControlReply, AfterFlush) {
         match request {
             ControlRequest::Hello => {
-                let ops: Vec<String> =
+                let mut ops: Vec<String> =
                     control::FROZEN_OPS.iter().map(|op| op.to_string()).collect();
-                // TODO(todo 8): push control::HANDOVER_V1_OP once the handover-v1 wire freeze and
-                // its fixture land.
+                // The handover wire is frozen as handover-v1 (tests/fixtures/handover-v1.json);
+                // only unix daemons hand over.
+                // TODO(todo 8): the candidate sends Hello over control first and refuses with
+                // CODE_HANDOVER_WIRE_UNSUPPORTED unless these ops list handover-v1; todo 8 owns
+                // that path: "sends the upgrade through the control channel (todo 15) as
+                // RequestUpgrade { staged_executable, generation_key }".
+                if cfg!(unix) {
+                    ops.push(control::HANDOVER_V1_OP.to_string());
+                }
                 (
                     ControlReply::Hello(HelloReply {
                         daemon_version: env!("CARGO_PKG_VERSION").to_string(),

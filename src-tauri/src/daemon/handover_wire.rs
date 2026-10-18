@@ -617,6 +617,98 @@ mod tests {
         assert!(matches!(error, HandoverWireError::Closed));
     }
 
+    const HANDOVER_V1_FIXTURE: &str = include_str!("../../tests/fixtures/handover-v1.json");
+
+    fn handover_v1_fixture() -> Value {
+        serde_json::from_str(HANDOVER_V1_FIXTURE).expect("handover-v1 fixture is valid JSON")
+    }
+
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex digit pair"))
+            .collect()
+    }
+
+    /// handover-v1 freeze: every frame kind and the base authority fd order encode to exactly the
+    /// pinned header bytes and payload length, and decode back to the same values.
+    #[test]
+    fn handover_v1_fixture_round_trips_value_for_value() {
+        use crate::daemon::handover_socket::{
+            AuthorityMetadata, SessionTransferMetadata, KIND_AUTHORITY, KIND_AUTHORITY_ACK,
+            KIND_SESSION, KIND_SESSION_ACK, KIND_TRANSFER_DONE,
+        };
+        let fixture = handover_v1_fixture();
+        assert_eq!(fixture["framing_version"], HANDOVER_FRAMING_VERSION);
+        assert_eq!(fixture["header_bytes"], HANDOVER_HEADER_BYTES);
+        let transfer_id = fixture["transfer_id"].as_str().expect("transfer id");
+        let mut kinds = Vec::new();
+        for frame in fixture["frames"].as_array().expect("frames") {
+            let kind = frame["kind"].as_u64().expect("kind") as u16;
+            let sequence = frame["frame_sequence"].as_u64().expect("sequence");
+            let fd_count = frame["fd_roles"].as_array().expect("fd roles").len() as u16;
+            let payload = serde_json::to_vec(&frame["payload"]).expect("payload");
+            assert_eq!(payload.len() as u64, frame["payload_len"].as_u64().unwrap(), "{frame}");
+            let header =
+                encode_header(kind, transfer_id, sequence, fd_count, 0, payload.len() as u32)
+                    .expect("encode header");
+            let pinned = hex_bytes(frame["header_hex"].as_str().expect("header hex"));
+            assert_eq!(header.as_slice(), pinned.as_slice(), "header of {}", frame["name"]);
+            assert_eq!(
+                decode_header(&header).expect("decode header"),
+                (kind, transfer_id.to_string(), sequence, fd_count, 0, payload.len() as u32)
+            );
+            match kind {
+                KIND_SESSION => {
+                    let meta: SessionTransferMetadata =
+                        serde_json::from_value(frame["payload"].clone()).expect("session payload");
+                    assert_eq!(serde_json::to_value(&meta).unwrap(), frame["payload"]);
+                }
+                KIND_AUTHORITY => {
+                    let meta: AuthorityMetadata =
+                        serde_json::from_value(frame["payload"].clone()).expect("authority payload");
+                    assert_eq!(serde_json::to_value(&meta).unwrap(), frame["payload"]);
+                    // Base fd order; todo 8 may only append roles after these.
+                    assert_eq!(meta.fd_roles, ["canonical_listener", "legacy_lock", "persistent_lock"]);
+                    assert_eq!(meta.fd_roles, frame["fd_roles"].as_array().unwrap().iter()
+                        .map(|role| role.as_str().unwrap().to_string()).collect::<Vec<_>>());
+                }
+                KIND_SESSION_ACK | KIND_TRANSFER_DONE | KIND_AUTHORITY_ACK => {
+                    assert_eq!(frame["payload"], Value::Null);
+                }
+                other => panic!("fixture frame kind {other:#x} is not a handover-v1 kind"),
+            }
+            kinds.push(kind);
+        }
+        for kind in [KIND_SESSION, KIND_SESSION_ACK, KIND_TRANSFER_DONE, KIND_AUTHORITY, KIND_AUTHORITY_ACK] {
+            assert!(kinds.contains(&kind), "fixture covers kind {kind:#x}");
+        }
+    }
+
+    /// A pinned copy of every handover-v1 frame (header bytes from the fixture, not from the
+    /// current encoder) is accepted by the current decoder with its descriptors.
+    #[test]
+    fn handover_v1_pinned_frames_decode_with_current_decoder() {
+        let fixture = handover_v1_fixture();
+        for frame in fixture["frames"].as_array().expect("frames") {
+            let (sender, receiver) = socketpair();
+            let header: [u8; HANDOVER_HEADER_BYTES] = hex_bytes(frame["header_hex"].as_str().unwrap())
+                .try_into()
+                .expect("60-byte pinned header");
+            let payload = serde_json::to_vec(&frame["payload"]).expect("payload");
+            let fd_count = frame["fd_roles"].as_array().unwrap().len();
+            let fds = dev_null_fds(fd_count);
+            let raw: Vec<RawFd> = fds.iter().map(AsRawFd::as_raw_fd).collect();
+            unsafe { send_raw_with_fds(sender.as_raw_fd(), &header, &payload, &raw) }.expect("send pinned");
+            let got = recv_frame(receiver.as_raw_fd()).expect("current decoder accepts pinned frame");
+            assert_eq!(u64::from(got.kind), frame["kind"].as_u64().unwrap());
+            assert_eq!(got.transfer_id, fixture["transfer_id"].as_str().unwrap());
+            assert_eq!(got.frame_sequence, frame["frame_sequence"].as_u64().unwrap());
+            assert_eq!(got.payload, frame["payload"]);
+            assert_eq!(got.fds.len(), fd_count);
+        }
+    }
+
     #[test]
     fn peer_credentials_match_self() {
         let (sender, receiver) = socketpair();
