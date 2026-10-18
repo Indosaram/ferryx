@@ -725,6 +725,19 @@ fn dirs_next() -> Option<PathBuf> {
     }
 }
 
+/// Root of the immutable generation-keyed daemon runtime copies (`daemon::runtime_stage`).
+/// `FERRYX_DATA_DIR` isolates QA. Windows uses `%LOCALAPPDATA%` like `get_runtime_dir`, not
+/// `dirs_next` (APPDATA there), because roaming profiles must not carry executables.
+pub fn daemon_runtime_root() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let platform_base = std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("Ferryx"));
+    #[cfg(target_os = "macos")]
+    let platform_base = dirs_next().map(|dir| dir.join("Ferryx"));
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let platform_base = dirs_next().map(|dir| dir.join("ferryx"));
+    super::runtime_stage::runtime_root_from(std::env::var_os("FERRYX_DATA_DIR").as_deref(), platform_base)
+}
+
 fn dirs_fallback() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".rorca"))
 }
