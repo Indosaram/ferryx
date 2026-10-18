@@ -23,8 +23,9 @@
 //! inside the app bundle. Only the newest generation has `RunAtLoad` true. The [`generation`]
 //! module holds the job-state rules: a running or unverifiable job is never touched, an Absent
 //! owner is started only by `bootstrap` (job not registered) or a plain `kickstart` (registered and
-//! idle; never `-k`), and older generations only lose `RunAtLoad` by a plist rewrite. Nothing here
-//! unloads or boots out a job; only the explicit user uninstall in
+//! idle; never `-k`), and older generations only lose their load-time launch by a plist rewrite
+//! (`RunAtLoad` false and `KeepAlive` false, since `KeepAlive { SuccessfulExit }` implies
+//! `RunAtLoad`). Nothing here unloads or boots out a job; only the explicit user uninstall in
 //! [`uninstall_launchd_agent_from_path`] does.
 //!
 //! Other targets plug their own backend into `daemon::supervisor`; where none is supported the
@@ -190,8 +191,9 @@ pub fn write_launchd_plist(
 /// (`daemon::owner_admission`): only an Absent owner may start a job, and then only through
 /// `bootstrap` (job not registered) or a plain `kickstart` (registered and idle). A running or
 /// unverifiable job is never touched, and nothing here unloads, boots out or `kickstart -k`s a
-/// job. Older generations only lose `RunAtLoad` by a plist rewrite, which launchd reads at the
-/// next login; their running process keeps going. `launchctl` is injected through [`Launchctl`],
+/// job. Older generations only lose their load-time launch (`RunAtLoad` and `KeepAlive`) by a
+/// plist rewrite, which launchd reads at the next login; their running process keeps going.
+/// `launchctl` is injected through [`Launchctl`],
 /// so these rules are testable on every target without the real launchd.
 pub(crate) mod generation {
     #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -205,6 +207,10 @@ pub(crate) mod generation {
 
     const RUN_AT_LOAD_TRUE: &str = "<key>RunAtLoad</key>\n    <true/>";
     const RUN_AT_LOAD_FALSE: &str = "<key>RunAtLoad</key>\n    <false/>";
+    /// The `KeepAlive` dict [`generate_launchd_plist`] renders. launchd.plist(5): `SuccessfulExit`
+    /// implies `RunAtLoad`, so a plist keeping it is still launched when launchd loads it at login.
+    const KEEP_ALIVE_ABNORMAL_EXIT: &str = "<key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>\n    </dict>";
+    const KEEP_ALIVE_FALSE: &str = "<key>KeepAlive</key>\n    <false/>";
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) struct LaunchctlOutput {
@@ -445,19 +451,23 @@ pub(crate) mod generation {
         Ok(plists)
     }
 
-    /// Sets `RunAtLoad` false by rewriting the plist file only; launchd reads it at the next login
-    /// and a running job keeps its current definition. A missing or already-disabled plist is left
-    /// unchanged. Returns whether the file changed.
+    /// Removes every load-time launch condition by rewriting the plist file only: `RunAtLoad` false
+    /// and `KeepAlive` false (`KeepAlive { SuccessfulExit }` implies `RunAtLoad`). launchd reads
+    /// the file at the next login and a running job keeps its current definition. A missing or
+    /// already-disabled plist is left unchanged. Returns whether the file changed.
     pub(crate) fn disable_login_autostart(plist_path: &Path) -> Result<bool, String> {
         let content = match fs::read_to_string(plist_path) {
             Ok(content) => content,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(format!("Failed to read {}: {e}", plist_path.display())),
         };
-        if !content.contains(RUN_AT_LOAD_TRUE) {
+        let disabled = content
+            .replacen(RUN_AT_LOAD_TRUE, RUN_AT_LOAD_FALSE, 1)
+            .replacen(KEEP_ALIVE_ABNORMAL_EXIT, KEEP_ALIVE_FALSE, 1);
+        if disabled == content {
             return Ok(false);
         }
-        fs::write(plist_path, content.replacen(RUN_AT_LOAD_TRUE, RUN_AT_LOAD_FALSE, 1))
+        fs::write(plist_path, disabled)
             .map_err(|e| format!("Failed to rewrite {}: {e}", plist_path.display()))?;
         Ok(true)
     }
@@ -835,13 +845,43 @@ mod tests {
             assert_never_stops(&launchctl.calls());
             let running_plist = fs::read_to_string(dir.path().join(format!("{old_running}.plist"))).unwrap();
             assert!(running_plist.contains("<key>RunAtLoad</key>\n    <false/>"), "a running older job loses login autostart only");
-            assert!(fs::read_to_string(dir.path().join(format!("{old_unverifiable}.plist"))).unwrap().contains("<key>RunAtLoad</key>\n    <false/>"));
+            assert!(!running_plist.contains("SuccessfulExit"), "KeepAlive SuccessfulExit implies RunAtLoad: {running_plist}");
+            assert!(running_plist.contains("<key>KeepAlive</key>\n    <false/>"));
+            let unverifiable_plist = fs::read_to_string(dir.path().join(format!("{old_unverifiable}.plist"))).unwrap();
+            assert!(unverifiable_plist.contains("<key>RunAtLoad</key>\n    <false/>"));
+            assert!(!unverifiable_plist.contains("SuccessfulExit"), "{unverifiable_plist}");
             assert!(!dir.path().join(format!("{old_idle}.plist")).exists(), "an idle older job's plist is deleted");
-            assert!(fs::read_to_string(&newest.plist_path).unwrap().contains("<key>RunAtLoad</key>\n    <true/>"));
+            assert_eq!(fs::read_to_string(&newest.plist_path).unwrap(), newest.render(true), "the newest generation keeps RunAtLoad and KeepAlive");
             assert_eq!(fs::read_to_string(&legacy).unwrap(), "legacy");
 
             // A second run changes nothing.
             assert!(!retire_older_generations(&launchctl, UID, dir.path(), BASE, &newest.label).unwrap());
+            assert_eq!(fs::read_to_string(dir.path().join(format!("{old_running}.plist"))).unwrap(), running_plist);
+        }
+
+        /// Backs `supervisor`'s macOS `remove_autostart` (opt-out) as well as retirement: a disabled
+        /// plist has no load-time launch condition left, whatever `RunAtLoad` it was rendered with.
+        #[test]
+        fn disabled_plist_has_no_load_time_launch_condition_and_rewrite_is_idempotent() {
+            let dir = tempfile::tempdir().unwrap();
+            let job = job(dir.path());
+            for run_at_load in [true, false] {
+                fs::write(&job.plist_path, job.render(run_at_load)).unwrap();
+                assert!(disable_login_autostart(&job.plist_path).unwrap());
+                let disabled = fs::read_to_string(&job.plist_path).unwrap();
+                assert!(!disabled.contains("SuccessfulExit"), "{disabled}");
+                assert!(!disabled.contains("<true/>\n    <key>KeepAlive</key>"), "{disabled}");
+                assert!(disabled.contains("<key>RunAtLoad</key>\n    <false/>"), "{disabled}");
+                assert!(disabled.contains("<key>KeepAlive</key>\n    <false/>"), "{disabled}");
+                assert_eq!(plist_program(&disabled), Some(job.executable.to_str().unwrap()));
+                assert!(disabled.contains("<key>AbandonProcessGroup</key>\n    <true/>"));
+
+                assert!(!disable_login_autostart(&job.plist_path).unwrap());
+                assert_eq!(fs::read_to_string(&job.plist_path).unwrap(), disabled, "a second rewrite keeps the same bytes");
+            }
+            let missing = dir.path().join("missing.plist");
+            assert!(!disable_login_autostart(&missing).unwrap());
+            assert!(!missing.exists());
         }
 
         #[test]
