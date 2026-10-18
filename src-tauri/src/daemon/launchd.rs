@@ -17,6 +17,16 @@
 //! duplicate-endpoint startup - and an unconditional `KeepAlive` would fight all three by
 //! relaunching instantly into the instance lock.
 //!
+//! Each daemon runtime generation (`daemon::runtime_stage`) gets its own job, labelled
+//! `com.ferryx.daemon.<generation key>` (QA: `<FERRYX_DAEMON_SUPERVISOR_NAME>.<key>`), whose
+//! `ProgramArguments` name the immutable staged copy of that generation, never the GUI's executable
+//! inside the app bundle. Only the newest generation has `RunAtLoad` true. The [`generation`]
+//! module holds the job-state rules: a running or unverifiable job is never touched, an Absent
+//! owner is started only by `bootstrap` (job not registered) or a plain `kickstart` (registered and
+//! idle; never `-k`), and older generations only lose `RunAtLoad` by a plist rewrite. Nothing here
+//! unloads or boots out a job; only the explicit user uninstall in
+//! [`uninstall_launchd_agent_from_path`] does.
+//!
 //! Other targets plug their own backend into `daemon::supervisor`; where none is supported the
 //! client keeps the detached-spawn path in `daemon::client`, which already survives a GUI exit.
 //!
@@ -98,36 +108,49 @@ pub fn agent_management_supported_for(dev_runtime: bool, isolated_runtime: bool)
     !dev_runtime && !isolated_runtime
 }
 
-/// Renders the LaunchAgent that owns the daemon's lifetime.
+/// Renders the LaunchAgent that owns one daemon generation's lifetime.
 ///
-/// `RunAtLoad` starts it at login; `KeepAlive { SuccessfulExit = false }` restarts only abnormal
-/// deaths, leaving the daemon's deliberate `exit(0)` paths (handover commit, idle binary swap,
-/// duplicate endpoint) alone. The soft descriptor limit is raised well above the 256 that launchd
+/// `RunAtLoad` (true only for the newest generation) starts it at login;
+/// `KeepAlive { SuccessfulExit = false }` restarts only abnormal deaths, leaving the daemon's
+/// deliberate `exit(0)` paths (handover commit, idle binary swap, duplicate endpoint) alone.
+/// `AbandonProcessGroup` keeps launchd from killing the daemon's PTY children when the job's main
+/// process exits, and `ProcessType Interactive` keeps a terminal host from being throttled like a
+/// background job. The soft descriptor limit is raised well above the 256 that launchd
 /// hands out by default, because a terminal daemon spends roughly three descriptors per session and
 /// a daemon that runs out mid-write dies with every session it owns; the daemon raises the soft
 /// limit again at startup, which is what lifts it to the hard ceiling.
-pub fn generate_launchd_plist(executable_path: &str, log_dir: &Path) -> String {
+pub fn generate_launchd_plist(
+    label: &str,
+    executable_path: &str,
+    log_dir: &Path,
+    run_at_load: bool,
+) -> String {
     let stdout_path = log_dir.join("daemon.stdout.log");
     let stderr_path = log_dir.join("daemon.stderr.log");
+    let run_at_load = if run_at_load { "<true/>" } else { "<false/>" };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{PLIST_LABEL}</string>
+    <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{executable_path}</string>
         <string>--daemon</string>
     </array>
     <key>RunAtLoad</key>
-    <true/>
+    {run_at_load}
     <key>KeepAlive</key>
     <dict>
         <key>SuccessfulExit</key>
         <false/>
     </dict>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
     <key>SoftResourceLimits</key>
     <dict>
         <key>NumberOfFiles</key>
@@ -145,145 +168,358 @@ pub fn generate_launchd_plist(executable_path: &str, log_dir: &Path) -> String {
     )
 }
 
-/// Writes the plist only when its content differs, and reports whether it was rewritten.
-///
-/// The GUI calls this on every start, and rewriting an unchanged file would bump its mtime for no
-/// reason. A caller that gets `true` must reload the agent so launchd re-reads it. The log directory
-/// is created here because launchd does not create a missing `StandardOutPath` parent, and a job
-/// whose output cannot be opened is a job that does not run.
+/// Writes the legacy single-job plist only when its content differs, and reports whether it was
+/// rewritten. Nothing loads it: launchd reads it at the next login.
 pub fn write_launchd_plist(
     executable_path: &Path,
     log_dir: &Path,
     plist_path: &Path,
 ) -> Result<bool, String> {
-    let content = generate_launchd_plist(&executable_path.to_string_lossy(), log_dir);
-    if fs::read_to_string(plist_path).is_ok_and(|existing| existing == content) {
-        return Ok(false);
-    }
-    if let Some(parent) = plist_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create launch agent directory: {e}"))?;
-    }
-    fs::create_dir_all(log_dir).map_err(|e| format!("Failed to create agent log directory: {e}"))?;
-    fs::write(plist_path, content).map_err(|e| format!("Failed to write plist: {e}"))?;
-    Ok(true)
+    let content = generate_launchd_plist(
+        PLIST_LABEL,
+        &executable_path.to_string_lossy(),
+        log_dir,
+        true,
+    );
+    generation::write_plist_if_changed(&content, log_dir, plist_path)
 }
 
-/// `launchctl` reports the job in this process's GUI domain, or exits non-zero when it is absent.
+/// Per-generation launchd jobs, one per staged daemon runtime generation.
 ///
-/// The domain comes from the calling uid, not `$HOME`, so an overridden `HOME` cannot read the
-/// wrong domain.
-#[cfg(target_os = "macos")]
-fn launchd_job_is_loaded() -> bool {
-    // SAFETY: `libc::getuid` takes no arguments, dereferences no pointers, and has no side effects.
-    let uid = unsafe { libc::getuid() };
-    Command::new("launchctl")
-        .args(["print", &format!("gui/{uid}/{PLIST_LABEL}")])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
+/// Every start decision here is made for a caller that holds owner admission
+/// (`daemon::owner_admission`): only an Absent owner may start a job, and then only through
+/// `bootstrap` (job not registered) or a plain `kickstart` (registered and idle). A running or
+/// unverifiable job is never touched, and nothing here unloads, boots out or `kickstart -k`s a
+/// job. Older generations only lose `RunAtLoad` by a plist rewrite, which launchd reads at the
+/// next login; their running process keeps going. `launchctl` is injected through [`Launchctl`],
+/// so these rules are testable on every target without the real launchd.
+pub(crate) mod generation {
+    #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
-/// Loads (or reloads) the agent so launchd reads the plist at `plist_path`.
-///
-/// `unload` runs first and its failure is ignored: a rewrite only takes effect after the old job is
-/// dropped, because `load -w` on a loaded job keeps the previous definition.
-#[cfg(target_os = "macos")]
-pub fn load_launchd_agent(plist_path: &Path) -> Result<(), String> {
-    let path = plist_path.to_string_lossy().to_string();
-    let _ = Command::new("launchctl")
-        .args(["unload", "-w", &path])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    use super::generate_launchd_plist;
+    use crate::daemon::owner_admission::OwnerState;
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::io;
+    use std::path::{Path, PathBuf};
 
-    let output = Command::new("launchctl")
-        .args(["load", "-w", &path])
-        .output()
-        .map_err(|e| format!("Failed to execute launchctl load: {e}"))?;
+    const RUN_AT_LOAD_TRUE: &str = "<key>RunAtLoad</key>\n    <true/>";
+    const RUN_AT_LOAD_FALSE: &str = "<key>RunAtLoad</key>\n    <false/>";
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let has_error = !output.status.success()
-        || stderr.contains("failed")
-        || stderr.contains("Failed")
-        || stderr.contains("error")
-        || stderr.contains("Error");
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct LaunchctlOutput {
+        pub success: bool,
+        pub stdout: String,
+        pub stderr: String,
+    }
 
-    if has_error {
-        let msg = if !stderr.trim().is_empty() {
-            stderr.trim()
-        } else if !stdout.trim().is_empty() {
-            stdout.trim()
-        } else {
-            "launchctl load failed with unknown error"
+    /// Runs `launchctl <args>`.
+    pub(crate) trait Launchctl {
+        fn run(&self, args: &[&str]) -> io::Result<LaunchctlOutput>;
+    }
+
+    /// The real `launchctl` binary.
+    #[cfg(target_os = "macos")]
+    pub(crate) struct SystemLaunchctl;
+
+    #[cfg(target_os = "macos")]
+    impl Launchctl for SystemLaunchctl {
+        fn run(&self, args: &[&str]) -> io::Result<LaunchctlOutput> {
+            let output = std::process::Command::new("launchctl")
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .output()?;
+            Ok(LaunchctlOutput {
+                success: output.status.success(),
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            })
+        }
+    }
+
+    /// What `launchctl print gui/<uid>/<label>` says about a job.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum JobState {
+        /// Exit non-zero with "Could not find service".
+        NotRegistered,
+        /// Registered with a `pid = N` line.
+        Running { pid: u32 },
+        /// Registered, no pid line.
+        RegisteredIdle,
+        /// Anything else, including a non-zero exit with other text.
+        Unverifiable { detail: String },
+    }
+
+    pub(crate) fn job_state_from_print(result: io::Result<LaunchctlOutput>) -> JobState {
+        let output = match result {
+            Ok(output) => output,
+            Err(error) => {
+                return JobState::Unverifiable {
+                    detail: format!("launchctl print could not run: {error}"),
+                }
+            }
         };
-        return Err(format!("launchctl load failed: {msg}"));
+        if !output.success {
+            if output.stderr.contains("Could not find service")
+                || output.stdout.contains("Could not find service")
+            {
+                return JobState::NotRegistered;
+            }
+            return JobState::Unverifiable {
+                detail: format!("launchctl print failed: {}", output.stderr.trim()),
+            };
+        }
+        let pid_line = output
+            .stdout
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("pid = "));
+        match pid_line {
+            None => JobState::RegisteredIdle,
+            Some(pid) => match pid.trim().parse() {
+                Ok(pid) => JobState::Running { pid },
+                Err(_) => JobState::Unverifiable {
+                    detail: format!("launchctl print reported an unreadable pid: {pid}"),
+                },
+            },
+        }
     }
 
-    Ok(())
-}
-
-/// Non-macOS stub: the caller falls back to the detached spawn in `daemon::client`.
-#[cfg(not(target_os = "macos"))]
-pub fn load_launchd_agent(_plist_path: &Path) -> Result<(), String> {
-    Err("LaunchAgent is macOS-only".to_string())
-}
-
-/// Makes the daemon's lifetime launchd's responsibility instead of the GUI's: writes the plist when
-/// it changed, loads it when it is new or unloaded, and returns its path.
-#[cfg(target_os = "macos")]
-pub fn ensure_launchd_agent(executable_path: &Path) -> Result<PathBuf, String> {
-    let plist_path = get_launchd_plist_path().ok_or("Cannot determine LaunchAgent path")?;
-    let log_dir = launchd_log_dir_for(std::env::var_os("HOME").as_deref())
-        .ok_or("Cannot determine the agent log directory")?;
-    let rewritten = write_launchd_plist(executable_path, &log_dir, &plist_path)?;
-    if rewritten || !launchd_job_is_loaded() {
-        load_launchd_agent(&plist_path)?;
+    /// Read-only; the domain comes from the calling uid, not `$HOME`.
+    pub(crate) fn print_job(launchctl: &dyn Launchctl, uid: u32, label: &str) -> JobState {
+        let target = format!("gui/{uid}/{label}");
+        job_state_from_print(launchctl.run(&["print", target.as_str()]))
     }
-    Ok(plist_path)
+
+    /// `<base>.<generation key>`, e.g. `com.ferryx.daemon.2026.1013.2-0a1b2c3d`.
+    pub(crate) fn generation_label(base: &str, key: &str) -> String {
+        format!("{base}.{key}")
+    }
+
+    /// Directory of the generation plists: `~/Library/LaunchAgents`, or for QA the directory named
+    /// by `FERRYX_DAEMON_PLIST_PATH` (a directory, or the directory of a `.plist` path). An empty
+    /// override resolves to nothing, like [`super::launchd_plist_path_for`].
+    pub(crate) fn launch_agents_dir(
+        override_path: Option<&OsStr>,
+        home: Option<&OsStr>,
+    ) -> Option<PathBuf> {
+        if let Some(override_path) = override_path {
+            if override_path.is_empty() {
+                return None;
+            }
+            let path = PathBuf::from(override_path);
+            if path.extension().is_some_and(|extension| extension == "plist") {
+                return path.parent().map(Path::to_path_buf);
+            }
+            return Some(path);
+        }
+        home.map(|home| PathBuf::from(home).join("Library/LaunchAgents"))
+    }
+
+    /// One generation's job: its label, its staged executable and where its plist lives.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct GenerationJob {
+        pub label: String,
+        pub executable: PathBuf,
+        pub plist_path: PathBuf,
+        pub log_dir: PathBuf,
+    }
+
+    impl GenerationJob {
+        pub(crate) fn render(&self, run_at_load: bool) -> String {
+            generate_launchd_plist(
+                &self.label,
+                &self.executable.to_string_lossy(),
+                &self.log_dir,
+                run_at_load,
+            )
+        }
+    }
+
+    /// Writes `content` only when it differs and reports whether it did. Creates the log dir,
+    /// because launchd does not create a missing `StandardOutPath` parent and a job whose output
+    /// cannot be opened does not run.
+    pub(crate) fn write_plist_if_changed(
+        content: &str,
+        log_dir: &Path,
+        plist_path: &Path,
+    ) -> Result<bool, String> {
+        if fs::read_to_string(plist_path).is_ok_and(|existing| existing == content) {
+            return Ok(false);
+        }
+        if let Some(parent) = plist_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create launch agent directory: {e}"))?;
+        }
+        fs::create_dir_all(log_dir)
+            .map_err(|e| format!("Failed to create agent log directory: {e}"))?;
+        fs::write(plist_path, content).map_err(|e| format!("Failed to write plist: {e}"))?;
+        Ok(true)
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum EnsureOutcome {
+        /// The job was not registered: its plist was written and bootstrapped.
+        Bootstrapped,
+        /// The job was registered and idle: one plain kickstart.
+        Kickstarted,
+        /// An owner exists; launchd was not asked anything.
+        OwnerPresent,
+        /// The job is running or its state is unverifiable; it was left alone.
+        Untouched(JobState),
+    }
+
+    /// The job-state switch for the current generation, evaluated under owner admission.
+    ///
+    /// Owner Absent + NotRegistered -> write plist, `launchctl bootstrap gui/<uid> <plist>`;
+    /// owner Absent + RegisteredIdle -> `launchctl kickstart gui/<uid>/<label>` (never `-k`, no
+    /// plist rewrite); owner Alive or Unknown, or job Running or Unverifiable -> zero mutations.
+    pub(crate) fn ensure_generation_job(
+        launchctl: &dyn Launchctl,
+        uid: u32,
+        job: &GenerationJob,
+        owner: &OwnerState,
+    ) -> Result<EnsureOutcome, String> {
+        if *owner != OwnerState::Absent {
+            return Ok(EnsureOutcome::OwnerPresent);
+        }
+        match print_job(launchctl, uid, &job.label) {
+            JobState::NotRegistered => {
+                write_plist_if_changed(&job.render(true), &job.log_dir, &job.plist_path)?;
+                let domain = format!("gui/{uid}");
+                let plist = job.plist_path.to_string_lossy().into_owned();
+                mutate(launchctl, &["bootstrap", domain.as_str(), plist.as_str()])?;
+                Ok(EnsureOutcome::Bootstrapped)
+            }
+            JobState::RegisteredIdle => {
+                let target = format!("gui/{uid}/{}", job.label);
+                mutate(launchctl, &["kickstart", target.as_str()])?;
+                Ok(EnsureOutcome::Kickstarted)
+            }
+            state => Ok(EnsureOutcome::Untouched(state)),
+        }
+    }
+
+    fn mutate(launchctl: &dyn Launchctl, args: &[&str]) -> Result<(), String> {
+        let output = launchctl
+            .run(args)
+            .map_err(|e| format!("Failed to run launchctl {}: {e}", args[0]))?;
+        if output.success {
+            return Ok(());
+        }
+        let detail = if output.stderr.trim().is_empty() {
+            output.stdout.trim()
+        } else {
+            output.stderr.trim()
+        };
+        Err(format!("launchctl {} failed: {detail}", args[0]))
+    }
+
+    /// Registers the newest generation for the next login: writes its plist with `RunAtLoad` true
+    /// and calls no `launchctl` at all, so launchd loads it only at the next login.
+    pub(crate) fn register_newest_for_login(job: &GenerationJob) -> Result<bool, String> {
+        write_plist_if_changed(&job.render(true), &job.log_dir, &job.plist_path)
+    }
+
+    /// Generation plists `<base>.<key>.plist` in `dir`, sorted by label. The legacy single-job
+    /// `<base>.plist` is not a generation.
+    pub(crate) fn generation_plists(dir: &Path, base: &str) -> Result<Vec<(String, PathBuf)>, String> {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(format!("Failed to read {}: {e}", dir.display())),
+        };
+        let prefix = format!("{base}.");
+        let mut plists = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("Failed to read {}: {e}", dir.display()))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(label) = name.strip_suffix(".plist") else {
+                continue;
+            };
+            if label.len() > prefix.len() && label.starts_with(&prefix) {
+                plists.push((label.to_string(), entry.path()));
+            }
+        }
+        plists.sort();
+        Ok(plists)
+    }
+
+    /// Sets `RunAtLoad` false by rewriting the plist file only; launchd reads it at the next login
+    /// and a running job keeps its current definition. A missing or already-disabled plist is left
+    /// unchanged. Returns whether the file changed.
+    pub(crate) fn disable_login_autostart(plist_path: &Path) -> Result<bool, String> {
+        let content = match fs::read_to_string(plist_path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(format!("Failed to read {}: {e}", plist_path.display())),
+        };
+        if !content.contains(RUN_AT_LOAD_TRUE) {
+            return Ok(false);
+        }
+        fs::write(plist_path, content.replacen(RUN_AT_LOAD_TRUE, RUN_AT_LOAD_FALSE, 1))
+            .map_err(|e| format!("Failed to rewrite {}: {e}", plist_path.display()))?;
+        Ok(true)
+    }
+
+    /// Every generation except `newest_label` loses login autostart by plist rewrite; its plist is
+    /// deleted only when launchd reports no process for it (not registered, or registered and
+    /// idle). Only `launchctl print` runs: an older generation is never booted out, unloaded or
+    /// kickstarted. Returns whether any file changed.
+    pub(crate) fn retire_older_generations(
+        launchctl: &dyn Launchctl,
+        uid: u32,
+        dir: &Path,
+        base: &str,
+        newest_label: &str,
+    ) -> Result<bool, String> {
+        let mut changed = false;
+        for (label, path) in generation_plists(dir, base)? {
+            if label == newest_label {
+                continue;
+            }
+            changed |= disable_login_autostart(&path)?;
+            match print_job(launchctl, uid, &label) {
+                JobState::NotRegistered | JobState::RegisteredIdle => match fs::remove_file(&path) {
+                    Ok(()) => changed = true,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(format!("Failed to remove {}: {e}", path.display())),
+                },
+                JobState::Running { .. } | JobState::Unverifiable { .. } => {}
+            }
+        }
+        Ok(changed)
+    }
+
+    /// First `ProgramArguments` entry of a plist: the executable launchd runs.
+    pub(crate) fn plist_program(content: &str) -> Option<&str> {
+        let after_key = &content[content.find("<key>ProgramArguments</key>")?..];
+        let start = after_key.find("<string>")? + "<string>".len();
+        let end = after_key[start..].find("</string>")?;
+        Some(&after_key[start..start + end])
+    }
+
+    /// Executables referenced by the generation plists in `dir`, for the runtime garbage collector
+    /// (`runtime_stage::RuntimeUsage::registered_job_executables`). An unreadable plist is an
+    /// error, so the collector never removes a runtime a job may still reference.
+    pub(crate) fn job_executables(dir: &Path, base: &str) -> Result<Vec<PathBuf>, String> {
+        let mut executables = Vec::new();
+        for (_, path) in generation_plists(dir, base)? {
+            let content = match fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("Failed to read {}: {e}", path.display())),
+            };
+            let program = plist_program(&content)
+                .ok_or_else(|| format!("{} names no program", path.display()))?;
+            executables.push(PathBuf::from(program));
+        }
+        Ok(executables)
+    }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn ensure_launchd_agent(_executable_path: &Path) -> Result<PathBuf, String> {
-    Err("LaunchAgent is macOS-only".to_string())
-}
-
-/// Writes the plist and loads it with `launchctl load -w`; macOS-only.
-#[cfg(target_os = "macos")]
-pub fn install_launchd_agent_for_path(
-    executable_path: &Path,
-    plist_path: &Path,
-) -> Result<(), String> {
-    let log_dir = launchd_log_dir_for(std::env::var_os("HOME").as_deref())
-        .ok_or("Cannot determine the agent log directory")?;
-    write_launchd_plist(executable_path, &log_dir, plist_path)?;
-    load_launchd_agent(plist_path)
-}
-
-/// Non-macOS stub: no LaunchAgent exists, and the only caller already failed on the missing plist
-/// path, so this cannot report a false success.
-#[cfg(not(target_os = "macos"))]
-pub fn install_launchd_agent_for_path(
-    _executable_path: &Path,
-    _plist_path: &Path,
-) -> Result<(), String> {
-    Ok(())
-}
-
-pub fn install_launchd_agent() -> Result<PathBuf, String> {
-    let plist_path = get_launchd_plist_path().ok_or("Cannot determine HOME directory")?;
-    let current_exe =
-        std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
-
-    install_launchd_agent_for_path(&current_exe, &plist_path)?;
-    Ok(plist_path)
-}
-
-/// Unloads the LaunchAgent with `launchctl unload -w` and removes the plist; macOS-only.
+/// Unloads the LaunchAgent with `launchctl unload -w` and removes the plist; macOS-only. Reachable
+/// only from an explicit user uninstall.
 #[cfg(target_os = "macos")]
 pub fn uninstall_launchd_agent_from_path(plist_path: &Path) -> Result<(), String> {
     if plist_path.exists() {
@@ -335,7 +571,7 @@ mod tests {
     #[test]
     fn test_generate_plist_contains_required_fields() {
         let log_dir = Path::new("/Users/someone/Library/Logs/Ferryx");
-        let plist = generate_launchd_plist("/opt/ferryx/bin/ferryx", log_dir);
+        let plist = generate_launchd_plist(PLIST_LABEL, "/opt/ferryx/bin/ferryx", log_dir, true);
         assert!(plist.contains(&format!("<string>{PLIST_LABEL}</string>")));
         assert!(plist.contains("<string>/opt/ferryx/bin/ferryx</string>"));
         assert!(plist.contains("<string>--daemon</string>"));
@@ -348,7 +584,7 @@ mod tests {
     #[test]
     fn plist_never_writes_agent_output_to_a_shared_directory() {
         let log_dir = Path::new("/Users/someone/Library/Logs/Ferryx");
-        let plist = generate_launchd_plist("/opt/ferryx/bin/ferryx", log_dir);
+        let plist = generate_launchd_plist(PLIST_LABEL, "/opt/ferryx/bin/ferryx", log_dir, true);
         let stdout_path = log_dir.join("daemon.stdout.log");
         let stderr_path = log_dir.join("daemon.stderr.log");
         assert!(plist.contains(&format!(
@@ -365,7 +601,7 @@ mod tests {
     #[test]
     fn keep_alive_restarts_only_abnormal_deaths() {
         let log_dir = Path::new("/Users/someone/Library/Logs/Ferryx");
-        let plist = generate_launchd_plist("/opt/ferryx/bin/ferryx", log_dir);
+        let plist = generate_launchd_plist(PLIST_LABEL, "/opt/ferryx/bin/ferryx", log_dir, true);
         assert!(
             plist.contains("<key>RunAtLoad</key>"),
             "the agent must start the daemon at login: {plist}"
@@ -384,11 +620,258 @@ mod tests {
     #[test]
     fn plist_raises_the_descriptor_limit_above_the_launchd_default() {
         let log_dir = Path::new("/Users/someone/Library/Logs/Ferryx");
-        let plist = generate_launchd_plist("/opt/ferryx/bin/ferryx", log_dir);
+        let plist = generate_launchd_plist(PLIST_LABEL, "/opt/ferryx/bin/ferryx", log_dir, true);
         assert!(
             plist.contains("<key>NumberOfFiles</key>\n        <integer>4096</integer>"),
             "the agent must raise the soft descriptor limit: {plist}"
         );
+    }
+
+    mod generation_jobs {
+        use super::super::generation::*;
+        use crate::daemon::owner_admission::OwnerState;
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        use std::fs;
+        use std::io;
+        use std::path::{Path, PathBuf};
+
+        const UID: u32 = 501;
+        const BASE: &str = "com.ferryx.daemon";
+        const KEY: &str = "2026.1013.2-0a1b2c3d";
+
+        /// Fake launchctl: answers `print` from a per-label script and records every call.
+        #[derive(Default)]
+        struct FakeLaunchctl {
+            prints: HashMap<String, LaunchctlOutput>,
+            calls: RefCell<Vec<Vec<String>>>,
+        }
+
+        impl FakeLaunchctl {
+            fn with_print(mut self, label: &str, success: bool, stdout: &str, stderr: &str) -> Self {
+                self.prints.insert(
+                    format!("gui/{UID}/{label}"),
+                    LaunchctlOutput {
+                        success,
+                        stdout: stdout.to_string(),
+                        stderr: stderr.to_string(),
+                    },
+                );
+                self
+            }
+            fn not_registered(self, label: &str) -> Self {
+                self.with_print(label, false, "", "Bad request.\nCould not find service \"x\" in domain for user gui: 501\n")
+            }
+            fn running(self, label: &str, pid: u32) -> Self {
+                self.with_print(label, true, &format!("{label} = {{\n\tstate = running\n\tpid = {pid}\n}}\n"), "")
+            }
+            fn idle(self, label: &str) -> Self {
+                self.with_print(label, true, &format!("{label} = {{\n\tstate = not running\n\tlast exit code = 0\n}}\n"), "")
+            }
+            fn calls(&self) -> Vec<Vec<String>> {
+                self.calls.borrow().clone()
+            }
+            /// Every call that is not a read-only `print`.
+            fn mutations(&self) -> Vec<Vec<String>> {
+                self.calls().into_iter().filter(|call| call[0] != "print").collect()
+            }
+        }
+
+        impl Launchctl for FakeLaunchctl {
+            fn run(&self, args: &[&str]) -> io::Result<LaunchctlOutput> {
+                self.calls.borrow_mut().push(args.iter().map(|arg| arg.to_string()).collect());
+                if args[0] == "print" {
+                    return self.prints.get(args[1]).cloned().ok_or_else(|| io::Error::other("unscripted print"));
+                }
+                Ok(LaunchctlOutput { success: true, stdout: String::new(), stderr: String::new() })
+            }
+        }
+
+        fn job(dir: &Path) -> GenerationJob {
+            let label = generation_label(BASE, KEY);
+            GenerationJob {
+                plist_path: dir.join(format!("{label}.plist")),
+                label,
+                executable: dir.join(format!("daemon-runtime/{KEY}/Ferryx Daemon.app/Contents/MacOS/ferryx")),
+                log_dir: dir.join("logs"),
+            }
+        }
+
+        /// Only `print`, `bootstrap` and a plain `kickstart` are ever allowed; anything else
+        /// (bootout, unload, stop, remove, kickstart -k, ...) could end a live daemon.
+        fn assert_never_stops(calls: &[Vec<String>]) {
+            for call in calls {
+                assert!(
+                    matches!(call[0].as_str(), "print" | "bootstrap" | "kickstart"),
+                    "forbidden launchctl call {call:?}"
+                );
+                assert!(!call.iter().any(|arg| arg == "-k"), "kickstart -k kills the running job: {call:?}");
+            }
+        }
+
+        #[test]
+        fn generation_plist_names_staged_runtime_label_and_abandons_process_group() {
+            let dir = tempfile::tempdir().unwrap();
+            let job = job(dir.path());
+            let plist = job.render(true);
+            assert!(plist.contains(&format!("<string>{BASE}.{KEY}</string>")));
+            assert!(plist.contains(&format!("<string>{}</string>", job.executable.display())));
+            assert_eq!(plist_program(&plist), Some(job.executable.to_str().unwrap()));
+            assert!(plist.contains("<key>AbandonProcessGroup</key>\n    <true/>"));
+            assert!(plist.contains("<key>ProcessType</key>\n    <string>Interactive</string>"));
+            assert!(plist.contains("<key>SuccessfulExit</key>\n        <false/>"));
+            assert!(plist.contains("<key>RunAtLoad</key>\n    <true/>"));
+            assert!(job.render(false).contains("<key>RunAtLoad</key>\n    <false/>"));
+        }
+
+        #[test]
+        fn launchctl_print_maps_to_job_states() {
+            let ok = |stdout: &str| Ok(LaunchctlOutput { success: true, stdout: stdout.into(), stderr: String::new() });
+            let failed = |stderr: &str| Ok(LaunchctlOutput { success: false, stdout: String::new(), stderr: stderr.into() });
+            assert_eq!(job_state_from_print(failed("Could not find service \"x\" in domain")), JobState::NotRegistered);
+            assert_eq!(job_state_from_print(ok("x = {\n\tpid = 4242\n}")), JobState::Running { pid: 4242 });
+            assert_eq!(job_state_from_print(ok("x = {\n\tstate = not running\n}")), JobState::RegisteredIdle);
+            assert!(matches!(job_state_from_print(failed("Operation not permitted")), JobState::Unverifiable { .. }));
+            assert!(matches!(job_state_from_print(ok("\tpid = nope")), JobState::Unverifiable { .. }));
+            assert!(matches!(job_state_from_print(Err(io::Error::other("spawn failed"))), JobState::Unverifiable { .. }));
+        }
+
+        #[test]
+        fn absent_owner_and_unregistered_job_writes_plist_and_bootstraps_once() {
+            let dir = tempfile::tempdir().unwrap();
+            let job = job(dir.path());
+            let launchctl = FakeLaunchctl::default().not_registered(&job.label);
+            let outcome = ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent).unwrap();
+            assert_eq!(outcome, EnsureOutcome::Bootstrapped);
+            assert_eq!(
+                launchctl.mutations(),
+                vec![vec!["bootstrap".to_string(), format!("gui/{UID}"), job.plist_path.to_string_lossy().into_owned()]]
+            );
+            assert_eq!(fs::read_to_string(&job.plist_path).unwrap(), job.render(true));
+        }
+
+        #[test]
+        fn registered_idle_job_with_absent_owner_gets_exactly_one_kickstart_without_k() {
+            let dir = tempfile::tempdir().unwrap();
+            let job = job(dir.path());
+            let launchctl = FakeLaunchctl::default().idle(&job.label);
+            let outcome = ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent).unwrap();
+            assert_eq!(outcome, EnsureOutcome::Kickstarted);
+            assert_eq!(launchctl.mutations(), vec![vec!["kickstart".to_string(), format!("gui/{UID}/{}", job.label)]]);
+            assert!(!job.plist_path.exists(), "a kickstart must not rewrite the plist");
+            assert_never_stops(&launchctl.calls());
+        }
+
+        #[test]
+        fn running_job_gets_zero_launchctl_mutations() {
+            let dir = tempfile::tempdir().unwrap();
+            let job = job(dir.path());
+            let launchctl = FakeLaunchctl::default().running(&job.label, 4242);
+            let outcome = ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent).unwrap();
+            assert_eq!(outcome, EnsureOutcome::Untouched(JobState::Running { pid: 4242 }));
+            assert!(launchctl.mutations().is_empty());
+            assert!(!job.plist_path.exists());
+        }
+
+        #[test]
+        fn unverifiable_job_gets_zero_launchctl_mutations() {
+            let dir = tempfile::tempdir().unwrap();
+            let job = job(dir.path());
+            let launchctl = FakeLaunchctl::default().with_print(&job.label, false, "", "Operation not permitted");
+            let outcome = ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent).unwrap();
+            assert!(matches!(outcome, EnsureOutcome::Untouched(JobState::Unverifiable { .. })));
+            assert!(launchctl.mutations().is_empty());
+            // A print that cannot even run is unverifiable too.
+            let silent = FakeLaunchctl::default();
+            let outcome = ensure_generation_job(&silent, UID, &job, &OwnerState::Absent).unwrap();
+            assert!(matches!(outcome, EnsureOutcome::Untouched(JobState::Unverifiable { .. })));
+            assert!(silent.mutations().is_empty());
+        }
+
+        #[test]
+        fn alive_or_unknown_owner_gets_zero_launchctl_calls() {
+            let dir = tempfile::tempdir().unwrap();
+            let job = job(dir.path());
+            for owner in [
+                OwnerState::Alive { pid: 7, start_time: 9 },
+                OwnerState::Unknown { reason: "lock held, holder unreadable".into() },
+            ] {
+                let launchctl = FakeLaunchctl::default().idle(&job.label);
+                let outcome = ensure_generation_job(&launchctl, UID, &job, &owner).unwrap();
+                assert_eq!(outcome, EnsureOutcome::OwnerPresent);
+                assert!(launchctl.calls().is_empty(), "{owner:?} must not reach launchctl");
+                assert!(!job.plist_path.exists());
+            }
+        }
+
+        #[test]
+        fn older_generation_is_never_booted_out_or_unloaded() {
+            let dir = tempfile::tempdir().unwrap();
+            let newest = job(dir.path());
+            let old_running = generation_label(BASE, "2026.1001.1-11111111");
+            let old_idle = generation_label(BASE, "2026.1005.1-22222222");
+            let old_unverifiable = generation_label(BASE, "2026.1007.1-33333333");
+            for label in [&old_running, &old_idle, &old_unverifiable] {
+                let older = GenerationJob {
+                    label: label.clone(),
+                    executable: dir.path().join(format!("daemon-runtime/{label}/ferryx")),
+                    plist_path: dir.path().join(format!("{label}.plist")),
+                    log_dir: newest.log_dir.clone(),
+                };
+                fs::write(&older.plist_path, older.render(true)).unwrap();
+            }
+            // The legacy single job is not a generation and is left alone here.
+            let legacy = dir.path().join(format!("{BASE}.plist"));
+            fs::write(&legacy, "legacy").unwrap();
+            register_newest_for_login(&newest).unwrap();
+
+            let launchctl = FakeLaunchctl::default()
+                .running(&old_running, 100)
+                .idle(&old_idle)
+                .with_print(&old_unverifiable, false, "", "Operation not permitted");
+            assert!(retire_older_generations(&launchctl, UID, dir.path(), BASE, &newest.label).unwrap());
+
+            assert!(launchctl.mutations().is_empty(), "only launchctl print may run: {:?}", launchctl.calls());
+            assert_never_stops(&launchctl.calls());
+            let running_plist = fs::read_to_string(dir.path().join(format!("{old_running}.plist"))).unwrap();
+            assert!(running_plist.contains("<key>RunAtLoad</key>\n    <false/>"), "a running older job loses login autostart only");
+            assert!(fs::read_to_string(dir.path().join(format!("{old_unverifiable}.plist"))).unwrap().contains("<key>RunAtLoad</key>\n    <false/>"));
+            assert!(!dir.path().join(format!("{old_idle}.plist")).exists(), "an idle older job's plist is deleted");
+            assert!(fs::read_to_string(&newest.plist_path).unwrap().contains("<key>RunAtLoad</key>\n    <true/>"));
+            assert_eq!(fs::read_to_string(&legacy).unwrap(), "legacy");
+
+            // A second run changes nothing.
+            assert!(!retire_older_generations(&launchctl, UID, dir.path(), BASE, &newest.label).unwrap());
+        }
+
+        #[test]
+        fn newest_generation_login_registration_calls_no_launchctl_and_is_idempotent() {
+            let dir = tempfile::tempdir().unwrap();
+            let job = job(dir.path());
+            assert!(register_newest_for_login(&job).unwrap());
+            assert!(!register_newest_for_login(&job).unwrap());
+            assert!(job.log_dir.is_dir());
+        }
+
+        #[test]
+        fn job_executables_report_every_generation_program_for_runtime_gc() {
+            let dir = tempfile::tempdir().unwrap();
+            let job = job(dir.path());
+            register_newest_for_login(&job).unwrap();
+            fs::write(dir.path().join("unrelated.plist"), "x").unwrap();
+            assert_eq!(job_executables(dir.path(), BASE).unwrap(), vec![job.executable.clone()]);
+            fs::write(dir.path().join(format!("{BASE}.broken.plist")), "no program").unwrap();
+            assert!(job_executables(dir.path(), BASE).is_err(), "an unreadable job must block garbage collection");
+        }
+
+        #[test]
+        fn launch_agents_dir_honors_the_qa_override() {
+            let home = std::ffi::OsStr::new("/Users/someone");
+            assert_eq!(launch_agents_dir(None, Some(home)), Some(PathBuf::from("/Users/someone/Library/LaunchAgents")));
+            assert_eq!(launch_agents_dir(Some("/qa/agents".as_ref()), Some(home)), Some(PathBuf::from("/qa/agents")));
+            assert_eq!(launch_agents_dir(Some("/qa/agents/x.plist".as_ref()), Some(home)), Some(PathBuf::from("/qa/agents")));
+            assert_eq!(launch_agents_dir(Some("".as_ref()), Some(home)), None);
+        }
     }
 
     #[test]

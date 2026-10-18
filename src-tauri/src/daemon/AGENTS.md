@@ -11,13 +11,21 @@ Standalone background daemon managing persistent terminal PTY processes, session
 | UDS client & reconnect logic | `client.rs` | Connection retry classification, streaming channels, request proxy |
 | UDS server & concurrency | `server.rs` | Socket listener, `flock` lockfile, UID validation, session registry |
 | Wire protocol serialization | `protocol.rs` | Wire schemas v5 (`DaemonRequest`/`Response`), Base64 stream encoding |
-| macOS launchd ownership | `launchd.rs` | `com.ferryx.daemon` agent: `RunAtLoad` + conditional `KeepAlive`; the daemon outlives the GUI |
+| macOS launchd ownership | `launchd.rs` | One job per runtime generation, `com.ferryx.daemon.<generation key>`, running the staged runtime; `RunAtLoad` only for the newest |
 | Module entry & exports | `mod.rs` | Public re-exports of client, server, protocol, and launchd |
 
 ## CONVENTIONS
 - **Daemon Lifetime**: The daemon owns every PTY, so it must outlive the GUI. On macOS a launchd
   agent (`launchd.rs`) owns it and restarts abnormal deaths; everywhere else the daemon is spawned
   detached (`util::detach_launched_child`). Never re-parent it back under the GUI process group.
+- **macOS per-generation jobs**: each staged runtime generation (`runtime_stage.rs`) gets its own
+  label `com.ferryx.daemon.<key>` (QA: `<FERRYX_DAEMON_SUPERVISOR_NAME>.<key>`) whose
+  `ProgramArguments` name the staged copy, never the app bundle. Under owner admission, an Absent
+  owner starts the job only by `launchctl bootstrap` (not registered) or plain `kickstart`
+  (registered, idle; never `-k`); a Running or Unverifiable job, or an Alive/Unknown owner, gets
+  zero launchctl mutations. Older generations lose `RunAtLoad` by plist rewrite only and their plist
+  is deleted only when `launchctl print` shows no pid. `unload` exists only in the explicit user
+  uninstall.
 - **Socket Security & Isolation**: Sockets reside in `/tmp/rorca-{uid}/daemon.sock` (mode 0700); verifies UID ownership, strictly forbids symlinks, and locks `daemon.lock` via `flock`.
 - **Protocol Versioning**: Current protocol is `DAEMON_PROTOCOL_VERSION = 5`. Raw byte payloads are Base64 framed.
 - **Retry-Safety Classification**: Idempotent reads/spawns/handshakes are retry-safe; mutating commands (`write`, `resize`, `signal`, `close`, `saveSession`) are NEVER retried if the connection drops post-send.

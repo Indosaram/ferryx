@@ -93,9 +93,10 @@ pub async fn cmd_daemon_supervisor_set(enabled: bool) -> Result<DaemonSupervisor
     super::run_blocking(move || {
         // The opt-out is recorded first so every later ensure() (app startup, daemon client)
         // honors it; disabling removes autostart only and never stops the running daemon.
+        // Enabling goes through owner admission: a live daemon is never started over or replaced.
         if enabled {
             crate::daemon::supervisor::set_user_opt_out(false)
-                .and_then(|()| crate::daemon::supervisor::ensure().map(|_| ()))
+                .and_then(|()| crate::daemon::supervisor::ensure_if_absent().map(|_| ()))
         } else {
             crate::daemon::supervisor::set_user_opt_out(true)
                 .and_then(|()| crate::daemon::supervisor::remove_autostart())

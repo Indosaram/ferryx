@@ -1218,8 +1218,10 @@ async fn test_daemon_gui_process_non_ownership_and_process_tree() {
 #[test]
 fn test_launchd_plist_generation_and_identity_contract() {
     let plist = generate_launchd_plist(
+        "com.ferryx.daemon",
         "/Applications/Ferryx.app/Contents/MacOS/ferryx",
         std::path::Path::new("/tmp/ferryx-test-logs"),
+        true,
     );
     assert!(
         plist.contains("<string>com.ferryx.daemon</string>"),
