@@ -533,6 +533,19 @@ pub fn get_socket_path() -> PathBuf {
     get_runtime_dir().join("daemon.port")
 }
 
+/// Uncertain-write fixture (QA builds only): after a remote write reached the remote PTY,
+/// park before WriteOk while QaWriteAckHold is armed for the session. If the client
+/// disconnected meanwhile, the response written after release is dropped.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+async fn qa_hold_write_ack(session_id: &str) {
+    if let Some(release) = crate::ipc::qa_barrier::write_ack_hold().applied(session_id) {
+        release.notified().await;
+    }
+}
+
+#[cfg(not(all(feature = "local-split-qa", feature = "native-terminal")))]
+async fn qa_hold_write_ack(_session_id: &str) {}
+
 pub fn get_lock_path() -> PathBuf {
     get_runtime_dir().join("daemon.lock")
 }
@@ -3842,7 +3855,7 @@ impl DaemonServer {
                 },
                 Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
                     match self.terminal_service.write_input_operation(&session_id, generation, data) {
-                        Ok(op) => match op.await { Ok(()) => DaemonResponse::WriteOk, Err(e) => daemon_error(e.to_string()) },
+                        Ok(op) => match op.await { Ok(()) => { qa_hold_write_ack(&session_id).await; DaemonResponse::WriteOk }, Err(e) => daemon_error(e.to_string()) },
                         Err(e) => daemon_error(e.to_string()),
                     }
                 }
@@ -3869,7 +3882,7 @@ impl DaemonServer {
                                 details: e.details,
                             },
                             Ok(()) => match self.terminal_service.remote().write(&session_id, generation, data) {
-                                Ok(op) => match op.await { Ok(()) => DaemonResponse::WriteOk, Err(failure) => DaemonResponse::RemoteSessionError { failure } },
+                                Ok(op) => match op.await { Ok(()) => { qa_hold_write_ack(&session_id).await; DaemonResponse::WriteOk }, Err(failure) => DaemonResponse::RemoteSessionError { failure } },
                                 Err(failure) => DaemonResponse::RemoteSessionError { failure },
                             }
                         }
