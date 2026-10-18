@@ -4249,6 +4249,17 @@ impl DaemonServer {
                         sessions,
                     }
                 }
+                Ok(DaemonRequest::DescribeLiveSessions) => {
+                    let service = Arc::clone(&self.terminal_service);
+                    match crate::ipc::run_blocking(move || {
+                        Ok::<_, crate::ipc::IpcError>(service.describe_live_sessions())
+                    })
+                    .await
+                    {
+                        Ok(sessions) => DaemonResponse::DescribeLiveSessionsOk { epoch: self.epoch, sessions },
+                        Err(e) => daemon_error(e.to_string()),
+                    }
+                }
                 Ok(DaemonRequest::Attach {
                     session_id,
                     after_sequence,
