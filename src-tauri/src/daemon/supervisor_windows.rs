@@ -1,25 +1,42 @@
-//! Windows backend of [`crate::daemon::supervisor`]: a per-user scheduled task that runs a watchdog.
+//! Windows backend of [`crate::daemon::supervisor`]: one per-user scheduled task per daemon runtime
+//! generation, each running that generation's watchdog.
+//!
+//! Every generation is a staged, immutable copy of the daemon runtime
+//! ([`crate::daemon::runtime_stage`]) under `%LOCALAPPDATA%\Ferryx\daemon-runtime\<key>`, and gets
+//! its own task `Ferryx\<name>-<key>` that runs `<staged ferryx.exe> --daemon-supervisor`. A task
+//! never points at the GUI's executable, so replacing or removing the app leaves every running
+//! daemon's binary untouched.
 //!
 //! Task Scheduler cannot restart the daemon by itself. Todo 21 measured that `RestartOnFailure`
 //! relaunches neither after a non-zero exit nor after `taskkill /F`: it only covers a task that
-//! fails to *start*. So the task `Ferryx\<name>` runs `<exe> --daemon-supervisor`. That watchdog
-//! spawns `<exe> --daemon` outside the task's job, waits on the process handle, and:
+//! fails to *start*. So the watchdog spawns `<its own staged exe> --daemon` outside the task's job,
+//! waits on the process handle, and:
 //!
 //! * respawns after a non-zero exit (1 s backoff, at most [`MAX_CRASHES_PER_WINDOW`] per minute);
-//! * after exit 0, looks for the handover/upgrade successor through the runtime dir's `daemon.port`
-//!   and the owner pid its handshake reports, and waits on that process instead;
+//! * after exit 0, stops at once when the daemon left a retirement marker; otherwise looks for a
+//!   successor through the runtime dir's `daemon.port` and waits on that process instead;
+//! * stops without spawning whenever a daemon of another protocol version serves the endpoint: that
+//!   daemon belongs to another generation, which has its own task;
 //! * exits once a daemon left with exit 0 and no successor took over.
+//!
+//! Registration never touches a running instance: an existing task is never recreated, deleted or
+//! ended, and it is `/Run` only when no daemon owner exists. Only the newest generation keeps the
+//! logon trigger; older tasks lose it through a definition re-import (`/Query /XML`, then
+//! `/Create /XML /F`), which Task Scheduler applies to future runs only.
 //!
 //! The task is per user (`InteractiveToken`, `LeastPrivilege`), never a service and never elevated.
 //! Store (MSIX) installs are unsupported: the Store owns their lifecycle.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+use super::owner_admission::{Endpoint, LockState, OwnerProbe, OwnerRecord, StartingRecord};
+use super::runtime_stage::StagedRuntime;
 use super::supervisor::{non_empty, Env, Result, SUPERVISOR_NAME_ENV};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Task name under the `Ferryx` task folder when no QA override is set.
+/// Base task name under the `Ferryx` task folder when no QA override is set. Generation tasks append
+/// `-<generation key>`; the bare name is the legacy single task (todo 14 migrates it).
 pub const DEFAULT_TASK_NAME: &str = "Daemon";
 /// The argument that runs the watchdog instead of the GUI or the daemon.
 pub const SUPERVISOR_ARG: &str = "--daemon-supervisor";
@@ -42,11 +59,15 @@ pub const MAX_CRASHES_PER_WINDOW: usize = 5;
 /// for the predecessor's instance lock (`handover::successor_lock_wait`) before it binds.
 pub const SUCCESSOR_WAIT: Duration = Duration::from_secs(20);
 
+const LOGON_TRIGGER_OPEN: &str = "<LogonTrigger";
+const LOGON_TRIGGER_CLOSE: &str = "</LogonTrigger>";
+
 /// Store/MSIX installs never get a task: the Store owns their install and update lifecycle.
 pub fn supported_for_install(managed_externally: bool) -> bool {
     !managed_externally
 }
 
+/// The base task name (`Ferryx\Daemon`, or the QA override). On its own it names the legacy task.
 pub fn task_name(env: Env<'_>) -> String {
     let name = non_empty(env, SUPERVISOR_NAME_ENV)
         .map(|name| name.to_string_lossy().into_owned())
@@ -54,15 +75,20 @@ pub fn task_name(env: Env<'_>) -> String {
     format!("Ferryx\\{name}")
 }
 
-/// Where the rendered task XML is kept; comparing against it is what makes the write change-only.
-/// One file per task name, under the user's own local app data.
-fn task_xml_path(env: Env<'_>) -> Result<PathBuf> {
+/// The task of one runtime generation: `<task_name>-<generation key>`.
+pub fn generation_task_name(env: Env<'_>, key: &str) -> String {
+    format!("{}-{key}", task_name(env))
+}
+
+/// Where this user's task definitions are kept, under the user's own local app data.
+fn supervisor_dir(env: Env<'_>) -> Result<PathBuf> {
     let base = non_empty(env, "LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
-    let name = task_name(env).replace('\\', "-");
-    Ok(PathBuf::from(base)
-        .join("Ferryx")
-        .join("supervisor")
-        .join(format!("{name}.xml")))
+    Ok(PathBuf::from(base).join("Ferryx").join("supervisor"))
+}
+
+/// The definition file of one task: what `/Create /XML` imported, one file per task name.
+fn task_xml_path(env: Env<'_>, name: &str) -> Result<PathBuf> {
+    Ok(supervisor_dir(env)?.join(format!("{}.xml", name.replace('\\', "-"))))
 }
 
 fn task_user(env: Env<'_>) -> Result<String> {
@@ -73,7 +99,6 @@ fn task_user(env: Env<'_>) -> Result<String> {
         None => user.into_owned(),
     })
 }
-
 fn forwarded_env(env: Env<'_>) -> Vec<(String, String)> {
     FORWARDED_ENV
         .iter()
@@ -222,77 +247,288 @@ fn read_task_xml(path: &Path) -> Option<String> {
     decode_utf16_with_bom(&std::fs::read(path).ok()?)
 }
 
-/// One `schtasks` invocation: `Ok(true)` when it exited 0, `Ok(false)` when it ran and failed.
-pub type Schtasks<'a> = &'a mut dyn FnMut(&[&str]) -> Result<bool>;
-
-/// What [`ensure_with`] does once the definition is registered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AfterRegister {
-    /// `/Run` the task when no daemon answers (startup and on-demand connect).
-    RunWhenIdle,
-    /// Only rewrite the definition (protocol-mismatch replacement, where the old daemon still runs).
-    RegisterOnly,
+/// The task definition without its `<LogonTrigger>` element (and the whitespace that led into it),
+/// everything else byte-identical. Used to demote an older generation: a definition change applies
+/// to future runs and never stops a running instance.
+pub fn strip_logon_trigger(xml: &str) -> String {
+    let mut stripped = xml.to_string();
+    while let Some(start) = stripped.find(LOGON_TRIGGER_OPEN) {
+        let Some(close) = stripped[start..].find(LOGON_TRIGGER_CLOSE) else {
+            break;
+        };
+        let end = start + close + LOGON_TRIGGER_CLOSE.len();
+        let line_start = stripped[..start].trim_end_matches([' ', '\t']).len();
+        let line_start = stripped[..line_start]
+            .strip_suffix("\r\n")
+            .or_else(|| stripped[..line_start].strip_suffix('\n'))
+            .map_or(line_start, str::len);
+        stripped.replace_range(line_start..end, "");
+    }
+    stripped
 }
 
-/// Registers `Ferryx\<name>` for `executable`.
+pub fn has_logon_trigger(xml: &str) -> bool {
+    xml.contains(LOGON_TRIGGER_OPEN)
+}
+
+/// `schtasks /Query /XML` prints UTF-16 or the console code page depending on how it is piped.
+fn decode_task_xml(bytes: &[u8]) -> String {
+    if let Some(text) = decode_utf16_with_bom(bytes) {
+        return text;
+    }
+    let looks_utf16 = bytes.len() >= 2 && bytes.len() % 2 == 0 && bytes[1] == 0;
+    if looks_utf16 {
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        if let Ok(text) = String::from_utf16(&units) {
+            return text;
+        }
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn write_task_xml(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create the supervisor task directory: {e}"))?;
+    }
+    std::fs::write(path, encode_utf16_with_bom(content))
+        .map_err(|e| format!("Failed to write the supervisor task XML: {e}"))
+}
+
+/// The Task Scheduler operations registration may issue, injected so tests need no real schtasks.
+pub trait TaskScheduler {
+    /// One `schtasks` invocation: `Ok(true)` when it exited 0, `Ok(false)` when it ran and failed.
+    fn run(&mut self, args: &[&str]) -> Result<bool>;
+    /// `schtasks /Query /TN <name> /XML`: the registered definition, `Ok(None)` when no such task.
+    fn query_xml(&mut self, name: &str) -> Result<Option<String>>;
+}
+
+/// Registers one task definition from `content` (`/Create /XML /F`), never `/Run`.
+fn import_definition(
+    scheduler: &mut dyn TaskScheduler,
+    name: &str,
+    xml_path: &Path,
+    content: &str,
+) -> Result<()> {
+    write_task_xml(xml_path, content)?;
+    let xml_arg = xml_path.to_string_lossy();
+    if !scheduler.run(&["/Create", "/TN", name, "/XML", &xml_arg, "/F"])? {
+        // Leave no definition behind that claims to be registered.
+        let _ = std::fs::remove_file(xml_path);
+        return Err(format!("schtasks /Create failed for task {name}"));
+    }
+    Ok(())
+}
+
+/// The definition of `staged`'s generation task: its own staged executable, never the GUI's.
+fn generation_definition(env: Env<'_>, staged: &StagedRuntime) -> Result<String> {
+    Ok(render_task_xml(
+        &task_user(env)?,
+        &staged.executable.to_string_lossy(),
+        &task_arguments(&forwarded_env(env)),
+    ))
+}
+
+/// Ensures the task of `staged`'s generation and starts it only for an Absent owner.
 ///
-/// A definition whose executable no longer exists is deleted first. The XML is written only when it
-/// changed, and `/Create` runs only when it changed or the task is missing. Returns `true` when the
-/// task was (re)created or started.
+/// `/Create` runs only when the task is missing. An existing task is never recreated, deleted or
+/// ended, whatever executable or definition it has: the instance it runs may own every terminal.
+/// `/Run` is issued only when `owner_absent` (admission's classify_owner said Absent); an
+/// Alive or Unknown owner gets zero mutations of any running job. Returns whether a start
+/// (`/Run`) was issued.
 pub fn ensure_with(
     env: Env<'_>,
-    executable: &Path,
-    schtasks: Schtasks<'_>,
-    daemon_is_live: &dyn Fn() -> bool,
-    after: AfterRegister,
+    staged: &StagedRuntime,
+    scheduler: &mut dyn TaskScheduler,
+    owner_absent: bool,
 ) -> Result<bool> {
-    let name = task_name(env);
-    let xml_path = task_xml_path(env)?;
-    let stale = read_task_xml(&xml_path)
-        .as_deref()
-        .and_then(task_command)
-        .filter(|command| !Path::new(command).exists());
-    if let Some(command) = stale {
-        tracing::warn!(%command, task = %name, "Removing a daemon supervisor task whose executable is gone");
-        if !schtasks(&["/Delete", "/TN", &name, "/F"])? {
-            tracing::warn!(task = %name, "schtasks /Delete of the stale task failed; /Create /F replaces it");
-        }
-        let _ = std::fs::remove_file(&xml_path);
+    let name = generation_task_name(env, &staged.key);
+    if !scheduler.run(&["/Query", "/TN", &name])? {
+        let xml_path = task_xml_path(env, &name)?;
+        import_definition(scheduler, &name, &xml_path, &generation_definition(env, staged)?)?;
     }
-
-    let content = render_task_xml(
-        &task_user(env)?,
-        &executable.to_string_lossy(),
-        &task_arguments(&forwarded_env(env)),
-    );
-    let rewritten = read_task_xml(&xml_path).as_deref() != Some(content.as_str());
-    if rewritten {
-        if let Some(parent) = xml_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create the supervisor task directory: {e}"))?;
-        }
-        std::fs::write(&xml_path, encode_utf16_with_bom(&content))
-            .map_err(|e| format!("Failed to write the supervisor task XML: {e}"))?;
+    if !owner_absent {
+        return Ok(false);
     }
-    let created = rewritten || !schtasks(&["/Query", "/TN", &name])?;
-    if created {
-        let xml_arg = xml_path.to_string_lossy();
-        if !schtasks(&["/Create", "/TN", &name, "/XML", &xml_arg, "/F"])? {
-            // Leave no definition behind that claims to be registered.
-            let _ = std::fs::remove_file(&xml_path);
-            return Err(format!("schtasks /Create failed for task {name}"));
-        }
+    if !scheduler.run(&["/Run", "/TN", &name])? {
+        return Err(format!("schtasks /Run failed for task {name}"));
     }
-    let mut started = false;
-    if after == AfterRegister::RunWhenIdle && !daemon_is_live() {
-        if !schtasks(&["/Run", "/TN", &name])? {
-            return Err(format!("schtasks /Run failed for task {name}"));
-        }
-        started = true;
-    }
-    Ok(created || started)
+    Ok(true)
 }
 
+/// Registers `staged` as the newest generation for the next logon without starting anything, and
+/// removes the logon trigger from every older generation task. Never `/Run`, `/End` or `/Delete`:
+/// both changes are definition re-imports that apply to future runs only. Returns whether any
+/// definition changed.
+pub fn register_for_login_with(
+    env: Env<'_>,
+    staged: &StagedRuntime,
+    scheduler: &mut dyn TaskScheduler,
+) -> Result<bool> {
+    let newest = generation_task_name(env, &staged.key);
+    let newest_path = task_xml_path(env, &newest)?;
+    let content = generation_definition(env, staged)?;
+    let mut changed = false;
+    let unchanged = read_task_xml(&newest_path).as_deref() == Some(content.as_str());
+    if !unchanged || !scheduler.run(&["/Query", "/TN", &newest])? {
+        import_definition(scheduler, &newest, &newest_path, &content)?;
+        changed = true;
+    }
+    for key in recorded_generation_keys(env)? {
+        if key == staged.key {
+            continue;
+        }
+        changed |= remove_logon_trigger(env, scheduler, &generation_task_name(env, &key))?;
+    }
+    Ok(changed)
+}
+
+/// Re-imports `name` without its logon trigger. The registered definition (`/Query /XML`) is
+/// the source, so nothing else about the task changes. A task that is gone only loses its stale
+/// definition file; a task already without the trigger is left alone.
+fn remove_logon_trigger(
+    env: Env<'_>,
+    scheduler: &mut dyn TaskScheduler,
+    name: &str,
+) -> Result<bool> {
+    let xml_path = task_xml_path(env, name)?;
+    if read_task_xml(&xml_path).is_some_and(|recorded| !has_logon_trigger(&recorded)) {
+        return Ok(false);
+    }
+    let Some(registered) = scheduler.query_xml(name)? else {
+        let _ = std::fs::remove_file(&xml_path);
+        return Ok(false);
+    };
+    if !has_logon_trigger(&registered) {
+        write_task_xml(&xml_path, &registered)?;
+        return Ok(false);
+    }
+    import_definition(scheduler, name, &xml_path, &strip_logon_trigger(&registered))?;
+    Ok(true)
+}
+
+/// Generation keys of every task definition this user recorded (`<task name>-<key>.xml`). The
+/// legacy single task (`<task name>.xml`) is not a generation and is left to the migration.
+fn recorded_generation_keys(env: Env<'_>) -> Result<Vec<String>> {
+    let dir = supervisor_dir(env)?;
+    let prefix = format!("{}-", task_name(env).replace('\\', "-"));
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("Failed to read {}: {error}", dir.display())),
+    };
+    let mut keys: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let key = file_name.strip_prefix(&prefix)?.strip_suffix(".xml")?;
+            (!key.is_empty()).then(|| key.to_string())
+        })
+        .collect();
+    keys.sort();
+    Ok(keys)
+}
+
+/// Executables named by every recorded task definition (generations and the legacy task), so
+/// runtime garbage collection never removes a runtime a registered task still launches.
+pub fn registered_executables(env: Env<'_>) -> Vec<PathBuf> {
+    let Ok(dir) = supervisor_dir(env) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "xml"))
+        .filter_map(|entry| read_task_xml(&entry.path()))
+        .filter_map(|xml| task_command(&xml))
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// The daemon executable a watchdog spawns: its own staged runtime (`<root>/<key>/ferryx.exe`),
+/// never the GUI's executable. `current_exe` and `runtime_root` are already resolved.
+pub fn staged_daemon_executable(current_exe: &Path, runtime_root: &Path) -> Result<PathBuf> {
+    let inside = current_exe.strip_prefix(runtime_root).map_err(|_| {
+        format!(
+            "the watchdog runs from {}, outside the staged daemon runtime {}",
+            current_exe.display(),
+            runtime_root.display()
+        )
+    })?;
+    if inside.components().count() != 2 {
+        return Err(format!(
+            "{} is not a generation executable under {}",
+            current_exe.display(),
+            runtime_root.display()
+        ));
+    }
+    Ok(current_exe.to_path_buf())
+}
+
+/// The generation key of a staged executable: the name of its generation directory.
+pub fn generation_key_of(staged_executable: &Path) -> Option<String> {
+    Some(
+        staged_executable
+            .parent()?
+            .file_name()?
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// File names a retiring daemon may use for its marker (`control_server::finish_control_retirement`
+/// names it by generation key, or by pid while the daemon does not know its key).
+pub fn retirement_marker_names(generation_key: Option<&str>, exited_pid: u32) -> Vec<String> {
+    let mut names: Vec<String> = generation_key
+        .map(|key| format!("retired-{key}.json"))
+        .into_iter()
+        .collect();
+    names.push(format!("retired-{exited_pid}.json"));
+    names
+}
+
+/// Whether a retirement marker was written by the daemon that just exited. A marker left by an
+/// earlier daemon of the same generation names another pid and is ignored.
+pub fn marker_names_pid(body: &str, exited_pid: u32) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("pid")?.as_u64())
+        == Some(u64::from(exited_pid))
+}
+
+/// Delegates to an owner probe but drops a pending-start record this very process wrote: admission
+/// records its own start before it asks the backend to issue it, and that record must not make the
+/// same start look pending (row 5b) to itself.
+pub(crate) struct IgnoreOwnPendingStart<'a>(pub &'a dyn OwnerProbe);
+
+impl OwnerProbe for IgnoreOwnPendingStart<'_> {
+    fn lock_state(&self) -> LockState {
+        self.0.lock_state()
+    }
+    fn read_record(&self) -> std::result::Result<Option<OwnerRecord>, String> {
+        self.0.read_record()
+    }
+    fn process_start_time(&self, pid: u32) -> Option<u64> {
+        self.0.process_start_time(pid)
+    }
+    fn endpoint(&self) -> std::result::Result<Endpoint, String> {
+        self.0.endpoint()
+    }
+    fn read_starting(&self) -> std::result::Result<Option<StartingRecord>, String> {
+        Ok(self
+            .0
+            .read_starting()?
+            .filter(|starting| starting.launcher_pid != std::process::id()))
+    }
+    fn now_unix_ms(&self) -> u64 {
+        self.0.now_unix_ms()
+    }
+}
 /// What the watchdog does after the process it waits on exits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WatchdogAction {
@@ -383,13 +619,125 @@ pub fn parse_supervisor_args<S: AsRef<str>>(args: &[S]) -> Option<Result<Vec<(St
     Some(Ok(forwarded))
 }
 
+/// What the endpoint showed the watchdog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seen {
+    /// A daemon of this protocol version, with the pid its handshake reported.
+    Owner(u32),
+    /// A daemon of another protocol version: it belongs to another generation, whose own task
+    /// supervises it.
+    OtherVersion,
+    /// Nothing answered.
+    Nothing,
+}
+
+/// The side effects of the watchdog loop, injected so the loop's decisions are testable anywhere.
+pub trait WatchdogHost {
+    fn probe(&mut self) -> Seen;
+    /// After an exit 0: probe until a successor other than `exited_pid` answers, another protocol
+    /// version answers, or [`SUCCESSOR_WAIT`] passes (`Seen::Nothing`).
+    fn wait_for_successor(&mut self, exited_pid: u32) -> Seen;
+    /// Spawns this generation's daemon and returns its pid.
+    fn spawn(&mut self) -> Result<u32>;
+    /// Waits for `pid` to exit; `Ok(None)` when its exit code cannot be read.
+    fn wait(&mut self, pid: u32) -> Result<Option<u32>>;
+    /// Whether `exited_pid` left a retirement marker before its deliberate exit.
+    fn retired(&mut self, exited_pid: u32) -> bool;
+    fn sleep(&mut self, duration: Duration);
+    fn log(&mut self, message: &str);
+}
+
+/// The first process to wait on: a live daemon of this protocol version is followed, nothing
+/// answering spawns one, and a daemon of another version means stop (`None`) without spawning.
+fn begin(host: &mut dyn WatchdogHost) -> Option<Result<u32>> {
+    match host.probe() {
+        Seen::Owner(owner) => {
+            host.log(&format!("following live daemon {owner}"));
+            Some(Ok(owner))
+        }
+        Seen::OtherVersion => {
+            host.log("a daemon of another protocol version serves the endpoint; stopping");
+            None
+        }
+        Seen::Nothing => Some(host.spawn()),
+    }
+}
+
+/// The `--daemon-supervisor` main loop over `host`. Returns the process exit code.
+pub fn run_watchdog_with(host: &mut dyn WatchdogHost) -> i32 {
+    let mut watchdog = Watchdog::new();
+    let mut pid = match begin(host) {
+        Some(Ok(pid)) => pid,
+        Some(Err(error)) => {
+            host.log(&format!("cannot start: {error}"));
+            return 1;
+        }
+        None => return 0,
+    };
+    loop {
+        let code = match host.wait(pid) {
+            Ok(code) => code,
+            Err(error) => {
+                host.log(&format!("cannot supervise: {error}"));
+                return 1;
+            }
+        };
+        let seen = if code == Some(0) {
+            if host.retired(pid) {
+                host.log(&format!("daemon {pid} retired deliberately; stopping"));
+                return 0;
+            }
+            host.wait_for_successor(pid)
+        } else {
+            host.probe()
+        };
+        let owner = match seen {
+            Seen::Owner(owner) => Some(owner),
+            Seen::Nothing => None,
+            Seen::OtherVersion => {
+                host.log(&format!(
+                    "daemon {pid} exited code={code:?}; another protocol version serves the endpoint; stopping"
+                ));
+                return 0;
+            }
+        };
+        let action = watchdog.on_exit(pid, code, owner, Instant::now());
+        host.log(&format!(
+            "daemon {pid} exited code={code:?} owner={owner:?} -> {action:?}"
+        ));
+        pid = match action {
+            WatchdogAction::Stop => return 0,
+            WatchdogAction::Follow(owner) => owner,
+            WatchdogAction::Respawn { after } => {
+                host.sleep(after);
+                match begin(host) {
+                    Some(Ok(pid)) => pid,
+                    Some(Err(error)) => {
+                        host.log(&format!("respawn failed: {error}"));
+                        return 1;
+                    }
+                    None => return 0,
+                }
+            }
+        };
+    }
+}
+
 #[cfg(windows)]
-pub use platform::{ensure, reload, retarget, run_watchdog, uninstall};
+pub use platform::{
+    ensure, installed, register_for_login, reload, retarget, run_watchdog, uninstall,
+};
 
 #[cfg(windows)]
 mod platform {
     use super::*;
+    use crate::daemon::owner_admission::{
+        classify_owner, AdmissionPaths, OwnerState, RuntimeProbe, SUPERVISOR_PID_ENV,
+        SUPERVISOR_START_ENV,
+    };
     use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
+    use crate::daemon::runtime_stage::{self, SystemRuntimeUsage};
+    use std::collections::HashMap;
     use std::ffi::c_void;
     use std::io::{BufRead as _, BufReader, Write as _};
 
@@ -408,81 +756,130 @@ mod platform {
         fn CloseHandle(handle: Handle) -> i32;
     }
 
-    fn process_env(key: &str) -> Option<std::ffi::OsString> {
-        std::env::var_os(key)
+    /// The real Task Scheduler.
+    pub(crate) struct SystemScheduler;
+
+    impl TaskScheduler for SystemScheduler {
+        fn run(&mut self, args: &[&str]) -> Result<bool> {
+            crate::util::no_window_command("schtasks")
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .map_err(|e| format!("Failed to run schtasks: {e}"))
+        }
+
+        fn query_xml(&mut self, name: &str) -> Result<Option<String>> {
+            let output = crate::util::no_window_command("schtasks")
+                .args(["/Query", "/TN", name, "/XML"])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .map_err(|e| format!("Failed to run schtasks: {e}"))?;
+            if !output.status.success() {
+                return Ok(None);
+            }
+            Ok(Some(decode_task_xml(&output.stdout)))
+        }
     }
 
-    fn run_schtasks(args: &[&str]) -> Result<bool> {
-        crate::util::no_window_command("schtasks")
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .map_err(|e| format!("Failed to run schtasks: {e}"))
+    /// Stages this executable as an immutable runtime generation; tasks only ever run that copy.
+    fn stage(executable: &Path) -> Result<StagedRuntime> {
+        let root = crate::daemon::server::daemon_runtime_root()
+            .ok_or("Cannot determine the daemon runtime directory")?;
+        runtime_stage::stage_runtime(&root, executable).map_err(|e| e.to_string())
+    }
+
+    /// Owner admission's verdict right before a `/Run`. Callers reach this only through admission
+    /// (which already wrote this process's starting.json), so that record is not a pending start.
+    fn owner_absent() -> bool {
+        let paths = AdmissionPaths::for_runtime();
+        let probe = RuntimeProbe { paths: &paths };
+        let state = classify_owner(&IgnoreOwnPendingStart(&probe));
+        if state != OwnerState::Absent {
+            tracing::info!(?state, "A daemon owner exists; the generation task is not run");
+        }
+        state == OwnerState::Absent
     }
 
     pub fn ensure(env: Env<'_>, executable: &Path) -> Result<bool> {
-        ensure_with(
-            env,
-            executable,
-            &mut run_schtasks,
-            &|| live_owner_pid().is_some(),
-            AfterRegister::RunWhenIdle,
-        )
+        let staged = stage(executable)?;
+        ensure_with(env, &staged, &mut SystemScheduler, owner_absent())
     }
 
-    /// Points the task at `executable` without starting it, so the watchdog's next respawn
-    /// launches the new build.
+    /// Registers this build's generation for the next logon and demotes older generations, then
+    /// collects runtime generations that neither a process nor a recorded task uses.
+    pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
+        let staged = stage(executable)?;
+        let changed = register_for_login_with(env, &staged, &mut SystemScheduler)?;
+        if let Some(root) = crate::daemon::server::daemon_runtime_root() {
+            let usage = SystemRuntimeUsage {
+                registered_job_executables: registered_executables(env),
+            };
+            match runtime_stage::collect_garbage(&root, &usage) {
+                Ok(removed) if !removed.is_empty() => {
+                    tracing::info!(?removed, "Removed unused daemon runtime generations")
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "Daemon runtime garbage collection failed"),
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Registration only, for the protocol-mismatch path: never `/Run`, never replaces a task.
     pub fn retarget(env: Env<'_>, executable: &Path) -> Result<bool> {
-        ensure_with(
-            env,
-            executable,
-            &mut run_schtasks,
-            &|| true,
-            AfterRegister::RegisterOnly,
-        )
+        register_for_login(env, executable)
     }
 
+    /// Starts this build's generation only when no owner exists; never restarts a running one.
     pub fn reload(env: Env<'_>) -> Result<()> {
-        let name = task_name(env);
-        if run_schtasks(&["/Run", "/TN", &name])? {
-            Ok(())
-        } else {
-            Err(format!("schtasks /Run failed for task {name}"))
-        }
+        let executable =
+            std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
+        ensure(env, &executable).map(|_| ())
     }
 
+    pub fn installed(env: Env<'_>) -> bool {
+        let Ok(keys) = recorded_generation_keys(env) else {
+            return false;
+        };
+        keys.iter().any(|key| {
+            SystemScheduler
+                .run(&["/Query", "/TN", &generation_task_name(env, key)])
+                .unwrap_or(false)
+        })
+    }
+
+    /// Deletes every recorded generation task, only while no daemon owner exists: a task whose
+    /// owner is Alive or Unknown is never deleted.
     pub fn uninstall(env: Env<'_>) -> Result<()> {
-        let name = task_name(env);
-        if run_schtasks(&["/Query", "/TN", &name])?
-            && !run_schtasks(&["/Delete", "/TN", &name, "/F"])?
-        {
-            return Err(format!("schtasks /Delete failed for task {name}"));
+        if !owner_absent() {
+            return Err(
+                "A daemon is running or cannot be identified; its tasks are left in place"
+                    .to_string(),
+            );
         }
-        if let Ok(path) = task_xml_path(env) {
-            let _ = std::fs::remove_file(path);
+        for key in recorded_generation_keys(env)? {
+            let name = generation_task_name(env, &key);
+            if SystemScheduler.run(&["/Query", "/TN", &name])?
+                && !SystemScheduler.run(&["/Delete", "/TN", &name, "/F"])?
+            {
+                return Err(format!("schtasks /Delete failed for task {name}"));
+            }
+            if let Ok(path) = task_xml_path(env, &name) {
+                let _ = std::fs::remove_file(path);
+            }
         }
         Ok(())
     }
 
-    /// Who serves the runtime dir's `daemon.port` now.
-    enum Endpoint {
-        /// A daemon of this protocol version, with the pid its handshake reported.
-        Owner(u32),
-        /// A daemon of another protocol version: the build was replaced under this watchdog.
-        OtherVersion,
+    fn probe_endpoint() -> Seen {
+        probe_endpoint_once().unwrap_or(Seen::Nothing)
     }
 
-    fn live_owner_pid() -> Option<u32> {
-        match probe_endpoint()? {
-            Endpoint::Owner(pid) => Some(pid),
-            Endpoint::OtherVersion => None,
-        }
-    }
-
-    fn probe_endpoint() -> Option<Endpoint> {
+    fn probe_endpoint_once() -> Option<Seen> {
         let port: u16 = std::fs::read_to_string(crate::daemon::server::get_socket_path())
             .ok()?
             .trim()
@@ -505,60 +902,9 @@ mod platform {
         let mut reply = String::new();
         BufReader::new(&stream).read_line(&mut reply).ok()?;
         match serde_json::from_str::<DaemonResponse>(&reply) {
-            Ok(DaemonResponse::HandshakeOk { pid, .. }) => Some(Endpoint::Owner(pid)),
-            Ok(DaemonResponse::ProtocolMismatch { .. }) => Some(Endpoint::OtherVersion),
+            Ok(DaemonResponse::HandshakeOk { pid, .. }) => Some(Seen::Owner(pid)),
+            Ok(DaemonResponse::ProtocolMismatch { .. }) => Some(Seen::OtherVersion),
             _ => None,
-        }
-    }
-
-    /// After exit 0: the successor's pid, or `Err(())` when the successor speaks another protocol
-    /// version (this watchdog's build was replaced and must hand over to the new one).
-    fn wait_for_successor(exited_pid: u32) -> std::result::Result<Option<u32>, ()> {
-        let deadline = Instant::now() + SUCCESSOR_WAIT;
-        loop {
-            match probe_endpoint() {
-                Some(Endpoint::Owner(owner)) if owner != exited_pid => return Ok(Some(owner)),
-                Some(Endpoint::OtherVersion) => return Err(()),
-                _ => {}
-            }
-            if Instant::now() >= deadline {
-                return Ok(None);
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-    }
-
-    /// Starts the watchdog of the build the task now names and exits this one, so a successor of
-    /// another protocol version (the protocol-mismatch replacement) stays supervised. The forwarded
-    /// isolation variables are already in this process's environment and are inherited.
-    fn hand_over_to_new_build() -> i32 {
-        let exe = match daemon_executable() {
-            Ok(exe) => exe,
-            Err(error) => {
-                log(&format!("cannot hand over to the new build: {error}"));
-                return 1;
-            }
-        };
-        let mut command = std::process::Command::new(&exe);
-        command
-            .arg(SUPERVISOR_ARG)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        crate::util::detach_launched_child(&mut command);
-        match command.spawn() {
-            Ok(child) => {
-                log(&format!(
-                    "handed over to the watchdog of {} (pid {})",
-                    exe.display(),
-                    child.id()
-                ));
-                0
-            }
-            Err(error) => {
-                log(&format!("cannot hand over to {}: {error}", exe.display()));
-                1
-            }
         }
     }
 
@@ -587,36 +933,15 @@ mod platform {
         Ok(exit)
     }
 
-    /// The daemon executable: the one the task currently names (so a retargeted task respawns the
-    /// new build), else this executable.
+    /// This watchdog's own staged executable, which is also the daemon it spawns. Never the GUI's
+    /// executable: a watchdog that does not run from the staged runtime refuses to spawn.
     fn daemon_executable() -> Result<PathBuf> {
-        let registered = task_xml_path(&process_env)
-            .ok()
-            .and_then(|path| read_task_xml(&path))
-            .as_deref()
-            .and_then(task_command)
-            .map(PathBuf::from)
-            .filter(|path| path.exists());
-        match registered {
-            Some(path) => Ok(path),
-            None => {
-                std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))
-            }
-        }
-    }
-
-    fn spawn_daemon() -> Result<std::process::Child> {
-        let exe = daemon_executable()?;
-        let mut command = std::process::Command::new(&exe);
-        command
-            .arg("--daemon")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        crate::util::detach_launched_child(&mut command);
-        command
-            .spawn()
-            .map_err(|e| format!("Failed to spawn {} --daemon: {e}", exe.display()))
+        let current =
+            std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
+        let root = crate::daemon::server::daemon_runtime_root()
+            .ok_or("Cannot determine the daemon runtime directory")?;
+        let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        staged_daemon_executable(&canonical(&current), &canonical(&root))
     }
 
     fn log(message: &str) {
@@ -641,97 +966,99 @@ mod platform {
         }
     }
 
-    enum Tracked {
-        Child(std::process::Child),
-        Pid(u32),
+    /// The real watchdog side effects. Spawned children are waited on through their own handle.
+    struct SystemHost {
+        children: HashMap<u32, std::process::Child>,
     }
 
-    /// The process to wait on next. `Ok(None)` when a daemon of another protocol version serves the
-    /// endpoint: this build was replaced, so spawning one of its own daemons would only race the new
-    /// build for the instance lock; the caller hands over to the new build's watchdog instead.
-    fn start() -> Result<Option<Tracked>> {
-        match probe_endpoint() {
-            Some(Endpoint::Owner(owner)) => {
-                log(&format!("following live daemon {owner}"));
-                return Ok(Some(Tracked::Pid(owner)));
-            }
-            Some(Endpoint::OtherVersion) => return Ok(None),
-            None => {}
+    impl WatchdogHost for SystemHost {
+        fn probe(&mut self) -> Seen {
+            probe_endpoint()
         }
-        let child = spawn_daemon()?;
-        log(&format!(
-            "spawned daemon {} (creation flags {:#x})",
-            child.id(),
-            crate::util::windows_detach_flags()
-        ));
-        Ok(Some(Tracked::Child(child)))
+
+        fn wait_for_successor(&mut self, exited_pid: u32) -> Seen {
+            let deadline = Instant::now() + SUCCESSOR_WAIT;
+            loop {
+                match probe_endpoint() {
+                    Seen::Owner(owner) if owner != exited_pid => return Seen::Owner(owner),
+                    Seen::OtherVersion => return Seen::OtherVersion,
+                    _ => {}
+                }
+                if Instant::now() >= deadline {
+                    return Seen::Nothing;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+
+        fn spawn(&mut self) -> Result<u32> {
+            let exe = daemon_executable()?;
+            let mut command = std::process::Command::new(&exe);
+            command
+                .arg("--daemon")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            // The daemon records its watchdog in owner.json (admission row 5c).
+            let own_pid = std::process::id();
+            if let Some(start) = crate::daemon::owner_admission::process_start_time(own_pid) {
+                command
+                    .env(SUPERVISOR_PID_ENV, own_pid.to_string())
+                    .env(SUPERVISOR_START_ENV, start.to_string());
+            }
+            crate::util::detach_launched_child(&mut command);
+            let child = command
+                .spawn()
+                .map_err(|e| format!("Failed to spawn {} --daemon: {e}", exe.display()))?;
+            let pid = child.id();
+            log(&format!(
+                "spawned daemon {pid} from {} (creation flags {:#x})",
+                exe.display(),
+                crate::util::windows_detach_flags()
+            ));
+            self.children.insert(pid, child);
+            Ok(pid)
+        }
+
+        fn wait(&mut self, pid: u32) -> Result<Option<u32>> {
+            match self.children.remove(&pid) {
+                Some(mut child) => Ok(child
+                    .wait()
+                    .ok()
+                    .and_then(|status| status.code())
+                    .map(|code| code as u32)),
+                None => wait_for_pid(pid),
+            }
+        }
+
+        fn retired(&mut self, exited_pid: u32) -> bool {
+            let key = daemon_executable()
+                .ok()
+                .and_then(|exe| generation_key_of(&exe));
+            let runtime_dir = crate::daemon::server::get_runtime_dir();
+            retirement_marker_names(key.as_deref(), exited_pid)
+                .iter()
+                .filter_map(|name| std::fs::read_to_string(runtime_dir.join(name)).ok())
+                .any(|body| marker_names_pid(&body, exited_pid))
+        }
+
+        fn sleep(&mut self, duration: Duration) {
+            std::thread::sleep(duration);
+        }
+
+        fn log(&mut self, message: &str) {
+            log(message);
+        }
     }
 
     /// The `--daemon-supervisor` main loop. Returns the process exit code.
     pub fn run_watchdog() -> i32 {
         log("watchdog started");
-        let mut watchdog = Watchdog::new();
-        let mut tracked = match start() {
-            Ok(Some(tracked)) => tracked,
-            Ok(None) => return hand_over_to_new_build(),
-            Err(error) => {
-                log(&format!("cannot start: {error}"));
-                return 1;
-            }
-        };
-        loop {
-            let (pid, code) = match &mut tracked {
-                Tracked::Child(child) => (
-                    child.id(),
-                    child
-                        .wait()
-                        .ok()
-                        .and_then(|status| status.code())
-                        .map(|code| code as u32),
-                ),
-                Tracked::Pid(pid) => match wait_for_pid(*pid) {
-                    Ok(code) => (*pid, code),
-                    Err(error) => {
-                        log(&format!("cannot supervise: {error}"));
-                        return 1;
-                    }
-                },
-            };
-            let owner = if code == Some(0) {
-                match wait_for_successor(pid) {
-                    Ok(owner) => owner,
-                    Err(()) => return hand_over_to_new_build(),
-                }
-            } else {
-                match probe_endpoint() {
-                    Some(Endpoint::Owner(owner)) => Some(owner),
-                    Some(Endpoint::OtherVersion) => return hand_over_to_new_build(),
-                    None => None,
-                }
-            };
-            let action = watchdog.on_exit(pid, code, owner, Instant::now());
-            log(&format!(
-                "daemon {pid} exited code={code:?} owner={owner:?} -> {action:?}"
-            ));
-            tracked = match action {
-                WatchdogAction::Stop => return 0,
-                WatchdogAction::Follow(owner) => Tracked::Pid(owner),
-                WatchdogAction::Respawn { after } => {
-                    std::thread::sleep(after);
-                    match start() {
-                        Ok(Some(tracked)) => tracked,
-                        Ok(None) => return hand_over_to_new_build(),
-                        Err(error) => {
-                            log(&format!("respawn failed: {error}"));
-                            return 1;
-                        }
-                    }
-                }
-            };
-        }
+        run_watchdog_with(&mut SystemHost {
+            children: HashMap::new(),
+        })
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -902,108 +1229,534 @@ mod tests {
         assert!(supported_for_install(false));
     }
 
-    struct Fixture {
-        _dir: tempfile::TempDir,
-        local: PathBuf,
-        exe: PathBuf,
+    #[test]
+    fn task_name_is_per_generation() {
+        assert_eq!(
+            generation_task_name(&env_of(&[]), "2026.1018.1-ab12cd34"),
+            "Ferryx\\Daemon-2026.1018.1-ab12cd34"
+        );
+        assert_eq!(
+            generation_task_name(&env_of(&[(SUPERVISOR_NAME_ENV, "DaemonQa")]), "k"),
+            "Ferryx\\DaemonQa-k"
+        );
     }
 
-    fn fixture() -> Fixture {
-        let dir = tempfile::tempdir().unwrap();
-        let local = dir.path().join("LocalAppData");
-        let exe = dir.path().join("ferryx.exe");
-        std::fs::write(&exe, b"").unwrap();
-        Fixture {
-            local,
-            exe,
-            _dir: dir,
+    /// A fake Task Scheduler: records every call and answers `/Query` from a set of registered
+    /// task names with the definitions it was given.
+    #[derive(Default)]
+    struct FakeScheduler {
+        calls: Vec<String>,
+        registered: HashMap<String, String>,
+    }
+
+    impl FakeScheduler {
+        fn with_task(mut self, name: &str, xml: &str) -> Self {
+            self.registered.insert(name.to_string(), xml.to_string());
+            self
+        }
+
+        fn mutations(&self) -> Vec<&String> {
+            self.calls
+                .iter()
+                .filter(|call| !call.starts_with("/Query"))
+                .collect()
         }
     }
 
-    fn run_ensure(
-        f: &Fixture,
-        present: bool,
-        live: bool,
-        after: AfterRegister,
-    ) -> (Result<bool>, Vec<String>) {
-        let env = env_of(&[
-            ("LOCALAPPDATA", f.local.to_str().unwrap()),
-            ("USERNAME", "sook"),
-            ("USERDOMAIN", "DESKTOP-1"),
-        ]);
-        let mut calls = Vec::new();
-        let mut schtasks = |args: &[&str]| {
-            calls.push(args.join(" "));
-            Ok(args[0] != "/Query" || present)
-        };
-        let result = ensure_with(&env, &f.exe, &mut schtasks, &|| live, after);
-        (result, calls)
+    impl TaskScheduler for FakeScheduler {
+        fn run(&mut self, args: &[&str]) -> Result<bool> {
+            self.calls.push(args.join(" "));
+            Ok(match args[0] {
+                "/Query" => self.registered.contains_key(args[2]),
+                "/Create" => {
+                    let xml = read_task_xml(Path::new(args[4])).expect("utf-16 task xml");
+                    self.registered.insert(args[2].to_string(), xml);
+                    true
+                }
+                _ => true,
+            })
+        }
+
+        fn query_xml(&mut self, name: &str) -> Result<Option<String>> {
+            self.calls.push(format!("/Query /TN {name} /XML"));
+            Ok(self.registered.get(name).cloned())
+        }
+    }
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        local: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let local = dir.path().join("LocalAppData");
+            Self { dir, local }
+        }
+
+        fn env(&self) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+            env_of(&[
+                ("LOCALAPPDATA", self.local.to_str().unwrap()),
+                ("USERNAME", "sook"),
+                ("USERDOMAIN", "DESKTOP-1"),
+            ])
+        }
+
+        /// A staged generation under the runtime root; the GUI executable lives elsewhere.
+        fn staged(&self, key: &str) -> StagedRuntime {
+            let executable = self
+                .local
+                .join("Ferryx")
+                .join("daemon-runtime")
+                .join(key)
+                .join("ferryx.exe");
+            std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            std::fs::write(&executable, key.as_bytes()).unwrap();
+            StagedRuntime {
+                key: key.to_string(),
+                executable,
+            }
+        }
+
+        fn gui_exe(&self) -> PathBuf {
+            self.dir.path().join("Program Files").join("Ferryx").join("ferryx.exe")
+        }
+
+        fn xml_path(&self, name: &str) -> PathBuf {
+            self.local
+                .join("Ferryx")
+                .join("supervisor")
+                .join(format!("{}.xml", name.replace('\\', "-")))
+        }
+
+        fn definition(&self, staged: &StagedRuntime) -> String {
+            generation_definition(&self.env(), staged).unwrap()
+        }
     }
 
     #[test]
-    fn task_xml_is_written_and_created_only_when_changed() {
-        let f = fixture();
-        let (result, calls) = run_ensure(&f, false, false, AfterRegister::RunWhenIdle);
-        assert_eq!(result, Ok(true));
-        // A new definition is created with /F straight away; querying first would add nothing.
+    fn missing_task_is_created_from_the_staged_runtime_and_run_when_absent() {
+        let f = Fixture::new();
+        let staged = f.staged("v2-00000002");
+        let mut scheduler = FakeScheduler::default();
+        assert_eq!(ensure_with(&f.env(), &staged, &mut scheduler, true), Ok(true));
+        let name = "Ferryx\\Daemon-v2-00000002";
+        assert_eq!(scheduler.calls[0], format!("/Query /TN {name}"));
         assert!(
-            calls[0].starts_with("/Create /TN Ferryx\\Daemon /XML "),
-            "{calls:?}"
+            scheduler.calls[1].starts_with(&format!("/Create /TN {name} /XML ")),
+            "{:?}",
+            scheduler.calls
         );
-        assert_eq!(calls[1], "/Run /TN Ferryx\\Daemon");
-        assert_eq!(calls.len(), 2, "{calls:?}");
-        let xml_path = f
-            .local
-            .join("Ferryx")
-            .join("supervisor")
-            .join("Ferryx-Daemon.xml");
-        let written = read_task_xml(&xml_path).expect("utf-16 task xml");
-        assert_eq!(task_command(&written).as_deref(), f.exe.to_str());
+        assert!(scheduler.calls[1].ends_with(" /F"));
+        assert_eq!(scheduler.calls[2], format!("/Run /TN {name}"));
+        assert_eq!(scheduler.calls.len(), 3);
+        let registered = &scheduler.registered[name];
+        assert_eq!(task_command(registered).as_deref(), staged.executable.to_str());
+        assert_ne!(task_command(registered), f.gui_exe().to_str().map(str::to_owned));
+        assert!(registered.contains("<Arguments>--daemon-supervisor"));
+        assert!(has_logon_trigger(registered));
+    }
 
-        let (result, calls) = run_ensure(&f, true, true, AfterRegister::RunWhenIdle);
+    #[test]
+    fn existing_task_with_absent_owner_is_only_run() {
+        let f = Fixture::new();
+        let staged = f.staged("v2-00000002");
+        let name = "Ferryx\\Daemon-v2-00000002";
+        let mut scheduler = FakeScheduler::default().with_task(name, "<Task/>");
+        assert_eq!(ensure_with(&f.env(), &staged, &mut scheduler, true), Ok(true));
         assert_eq!(
-            result,
-            Ok(false),
-            "an unchanged, registered task with a live daemon is left alone"
-        );
-        assert_eq!(calls, vec!["/Query /TN Ferryx\\Daemon".to_string()]);
-
-        let (_, calls) = run_ensure(&f, true, false, AfterRegister::RegisterOnly);
-        assert!(
-            !calls.iter().any(|call| call.starts_with("/Run")),
-            "{calls:?}"
+            scheduler.calls,
+            vec![format!("/Query /TN {name}"), format!("/Run /TN {name}")]
         );
     }
 
     #[test]
-    fn stale_task_with_missing_exe_is_removed() {
-        let f = fixture();
-        let xml_path = f
-            .local
-            .join("Ferryx")
-            .join("supervisor")
-            .join("Ferryx-Daemon.xml");
-        std::fs::create_dir_all(xml_path.parent().unwrap()).unwrap();
-        let gone = f.local.join("uninstalled").join("ferryx.exe");
-        std::fs::write(
-            &xml_path,
-            encode_utf16_with_bom(&render_task_xml(
-                "u",
-                gone.to_str().unwrap(),
-                SUPERVISOR_ARG,
-            )),
-        )
-        .unwrap();
-        let (result, calls) = run_ensure(&f, true, true, AfterRegister::RunWhenIdle);
-        assert_eq!(result, Ok(true));
-        assert_eq!(calls[0], "/Delete /TN Ferryx\\Daemon /F");
+    fn existing_task_with_alive_or_unknown_owner_gets_zero_mutations() {
+        let f = Fixture::new();
+        let staged = f.staged("v2-00000002");
+        let name = "Ferryx\\Daemon-v2-00000002";
+        // The registered definition names an executable that no longer exists: HEAD deleted and
+        // recreated such a task. Now it is left alone, because its instance may own every terminal.
+        let stale = render_task_xml("u", r"C:\gone\ferryx.exe", SUPERVISOR_ARG);
+        let mut scheduler = FakeScheduler::default().with_task(name, &stale);
+        assert_eq!(ensure_with(&f.env(), &staged, &mut scheduler, false), Ok(false));
+        assert_eq!(scheduler.calls, vec![format!("/Query /TN {name}")]);
+        assert!(scheduler.mutations().is_empty(), "{:?}", scheduler.calls);
+        assert_eq!(scheduler.registered[name], stale, "the definition is untouched");
+    }
+
+    #[test]
+    fn missing_task_with_alive_owner_is_created_but_never_run() {
+        let f = Fixture::new();
+        let staged = f.staged("v2-00000002");
+        let mut scheduler = FakeScheduler::default();
+        assert_eq!(ensure_with(&f.env(), &staged, &mut scheduler, false), Ok(false));
+        assert!(scheduler.calls.iter().any(|call| call.starts_with("/Create")));
         assert!(
-            calls
-                .iter()
-                .any(|call| call.starts_with("/Create /TN Ferryx\\Daemon")),
-            "{calls:?}"
+            !scheduler.calls.iter().any(|call| {
+                call.starts_with("/Run") || call.starts_with("/End") || call.starts_with("/Delete")
+            }),
+            "{:?}",
+            scheduler.calls
         );
-        let written = read_task_xml(&xml_path).unwrap();
-        assert_eq!(task_command(&written).as_deref(), f.exe.to_str());
+    }
+
+    #[test]
+    fn strip_logon_trigger_removes_only_the_trigger() {
+        let xml = render_task_xml("DESKTOP-1\\sook", r"C:\rt\k\ferryx.exe", SUPERVISOR_ARG);
+        let stripped = strip_logon_trigger(&xml);
+        assert!(!has_logon_trigger(&stripped), "{stripped}");
+        assert!(stripped.contains("<Triggers>\n  </Triggers>"), "{stripped}");
+        assert_eq!(task_command(&stripped), task_command(&xml));
+        for kept in [
+            "<LogonType>InteractiveToken</LogonType>",
+            "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+            "<Arguments>--daemon-supervisor</Arguments>",
+        ] {
+            assert!(stripped.contains(kept), "lost {kept}");
+        }
+        assert_eq!(strip_logon_trigger(&stripped), stripped, "idempotent");
+        let crlf = xml.replace('\n', "\r\n");
+        assert!(!has_logon_trigger(&strip_logon_trigger(&crlf)));
+        assert_eq!(
+            strip_logon_trigger("<a><LogonTrigger>unterminated"),
+            "<a><LogonTrigger>unterminated",
+            "a malformed definition is never truncated"
+        );
+    }
+
+    #[test]
+    fn older_generation_with_alive_owner_loses_only_its_logon_trigger() {
+        let f = Fixture::new();
+        let old = f.staged("v1-00000001");
+        let new = f.staged("v2-00000002");
+        let old_name = "Ferryx\\Daemon-v1-00000001";
+        let new_name = "Ferryx\\Daemon-v2-00000002";
+        // The old generation was registered (and recorded) earlier and its instance is running.
+        let old_definition = f.definition(&old);
+        write_task_xml(&f.xml_path(old_name), &old_definition).unwrap();
+        let mut scheduler = FakeScheduler::default().with_task(old_name, &old_definition);
+
+        assert_eq!(register_for_login_with(&f.env(), &new, &mut scheduler), Ok(true));
+
+        let old_calls: Vec<&String> = scheduler
+            .calls
+            .iter()
+            .filter(|call| call.contains(old_name))
+            .collect();
+        assert_eq!(old_calls.len(), 2, "{:?}", scheduler.calls);
+        assert_eq!(*old_calls[0], format!("/Query /TN {old_name} /XML"));
+        assert!(old_calls[1].starts_with(&format!("/Create /TN {old_name} /XML ")));
+        assert!(old_calls[1].ends_with(" /F"));
+        let demoted = &scheduler.registered[old_name];
+        assert!(!has_logon_trigger(demoted), "{demoted}");
+        assert_eq!(task_command(demoted).as_deref(), old.executable.to_str());
+        assert!(has_logon_trigger(&scheduler.registered[new_name]), "the newest keeps it");
+        assert!(
+            !scheduler.calls.iter().any(|call| {
+                call.starts_with("/Run") || call.starts_with("/End") || call.starts_with("/Delete")
+            }),
+            "registration never runs, ends or deletes a task: {:?}",
+            scheduler.calls
+        );
+
+        // A second reconcile changes nothing and re-imports nothing.
+        scheduler.calls.clear();
+        assert_eq!(register_for_login_with(&f.env(), &new, &mut scheduler), Ok(false));
+        assert!(scheduler.mutations().is_empty(), "{:?}", scheduler.calls);
+    }
+
+    #[test]
+    fn a_vanished_older_task_only_loses_its_record() {
+        let f = Fixture::new();
+        let old = f.staged("v1-00000001");
+        let new = f.staged("v2-00000002");
+        let old_name = "Ferryx\\Daemon-v1-00000001";
+        write_task_xml(&f.xml_path(old_name), &f.definition(&old)).unwrap();
+        let mut scheduler = FakeScheduler::default();
+        register_for_login_with(&f.env(), &new, &mut scheduler).unwrap();
+        assert!(!f.xml_path(old_name).exists());
+        assert!(!scheduler.calls.iter().any(|call| call.contains(old_name) && !call.starts_with("/Query")));
+    }
+
+    #[test]
+    fn the_legacy_task_is_not_a_generation() {
+        let f = Fixture::new();
+        let new = f.staged("v2-00000002");
+        write_task_xml(&f.xml_path("Ferryx\\Daemon"), "<Task><LogonTrigger/></Task>").unwrap();
+        let mut scheduler = FakeScheduler::default().with_task("Ferryx\\Daemon", "x");
+        register_for_login_with(&f.env(), &new, &mut scheduler).unwrap();
+        assert!(
+            !scheduler.calls.iter().any(|call| call.contains("Ferryx\\Daemon ")
+                || call.ends_with("Ferryx\\Daemon")),
+            "the legacy task is the migration's (todo 14): {:?}",
+            scheduler.calls
+        );
+    }
+
+    #[test]
+    fn registered_executables_cover_every_recorded_task() {
+        let f = Fixture::new();
+        let old = f.staged("v1-00000001");
+        let new = f.staged("v2-00000002");
+        write_task_xml(&f.xml_path("Ferryx\\Daemon-v1-00000001"), &f.definition(&old)).unwrap();
+        write_task_xml(&f.xml_path("Ferryx\\Daemon-v2-00000002"), &f.definition(&new)).unwrap();
+        let mut found = registered_executables(&f.env());
+        found.sort();
+        assert_eq!(found, vec![old.executable.clone(), new.executable.clone()]);
+    }
+
+    #[test]
+    fn watchdog_spawns_only_its_own_staged_runtime() {
+        let root = Path::new(r"C:\Users\u\AppData\Local\Ferryx\daemon-runtime");
+        let staged = root.join("v1-00000001").join("ferryx.exe");
+        assert_eq!(staged_daemon_executable(&staged, root), Ok(staged.clone()));
+        assert_eq!(generation_key_of(&staged).as_deref(), Some("v1-00000001"));
+        assert!(staged_daemon_executable(
+            Path::new(r"C:\Program Files\Ferryx\ferryx.exe"),
+            root
+        )
+        .is_err());
+        assert!(staged_daemon_executable(&root.join("ferryx.exe"), root).is_err());
+    }
+
+    #[test]
+    fn retirement_marker_must_name_the_exited_pid() {
+        assert_eq!(
+            retirement_marker_names(Some("v1-00000001"), 7),
+            vec!["retired-v1-00000001.json".to_string(), "retired-7.json".to_string()]
+        );
+        assert_eq!(retirement_marker_names(None, 7), vec!["retired-7.json".to_string()]);
+        assert!(marker_names_pid(r#"{"pid":7,"reason":"control-v1 Shutdown"}"#, 7));
+        assert!(!marker_names_pid(r#"{"pid":8}"#, 7), "an earlier daemon's marker");
+        assert!(!marker_names_pid("not json", 7));
+    }
+
+    #[test]
+    fn utf16_task_query_output_decodes() {
+        let xml = "<Task><LogonTrigger/></Task>";
+        assert_eq!(decode_task_xml(&encode_utf16_with_bom(xml)), xml);
+        assert_eq!(decode_task_xml(&encode_utf16_with_bom(xml)[2..]), xml);
+        assert_eq!(decode_task_xml(xml.as_bytes()), xml);
+    }
+
+    /// A scripted watchdog host: probes, successor waits and exit codes come from queues; every
+    /// spawn and retirement check is counted.
+    #[derive(Default)]
+    struct FakeHost {
+        probes: VecDeque<Seen>,
+        successors: VecDeque<Seen>,
+        exits: VecDeque<Option<u32>>,
+        retired_pids: Vec<u32>,
+        next_pid: u32,
+        spawns: u32,
+        log: Vec<String>,
+    }
+
+    impl WatchdogHost for FakeHost {
+        fn probe(&mut self) -> Seen {
+            self.probes.pop_front().unwrap_or(Seen::Nothing)
+        }
+        fn wait_for_successor(&mut self, _exited_pid: u32) -> Seen {
+            self.successors.pop_front().unwrap_or(Seen::Nothing)
+        }
+        fn spawn(&mut self) -> Result<u32> {
+            self.spawns += 1;
+            self.next_pid += 1;
+            Ok(100 + self.next_pid)
+        }
+        fn wait(&mut self, _pid: u32) -> Result<Option<u32>> {
+            Ok(self.exits.pop_front().expect("the script ran out of exits"))
+        }
+        fn retired(&mut self, exited_pid: u32) -> bool {
+            self.retired_pids.contains(&exited_pid)
+        }
+        fn sleep(&mut self, _duration: Duration) {}
+        fn log(&mut self, message: &str) {
+            self.log.push(message.to_string());
+        }
+    }
+
+    #[test]
+    fn other_version_at_start_stops_with_zero_spawns() {
+        let mut host = FakeHost {
+            probes: VecDeque::from([Seen::OtherVersion]),
+            ..FakeHost::default()
+        };
+        assert_eq!(run_watchdog_with(&mut host), 0);
+        assert_eq!(host.spawns, 0);
+    }
+
+    #[test]
+    fn other_version_after_a_crash_stops_with_zero_respawns() {
+        let mut host = FakeHost {
+            probes: VecDeque::from([Seen::Nothing, Seen::OtherVersion]),
+            exits: VecDeque::from([Some(1)]),
+            ..FakeHost::default()
+        };
+        assert_eq!(run_watchdog_with(&mut host), 0);
+        assert_eq!(host.spawns, 1, "only the first spawn");
+    }
+
+    #[test]
+    fn other_version_after_exit_zero_stops_with_zero_spawns() {
+        let mut host = FakeHost {
+            successors: VecDeque::from([Seen::OtherVersion]),
+            exits: VecDeque::from([Some(0)]),
+            ..FakeHost::default()
+        };
+        assert_eq!(run_watchdog_with(&mut host), 0);
+        assert_eq!(host.spawns, 1);
+    }
+
+    #[test]
+    fn exit_zero_with_retirement_marker_stops_without_waiting() {
+        let mut host = FakeHost {
+            exits: VecDeque::from([Some(0)]),
+            retired_pids: vec![101],
+            // A successor would be followed; the marker must win before any successor wait.
+            successors: VecDeque::from([Seen::Owner(555)]),
+            ..FakeHost::default()
+        };
+        assert_eq!(run_watchdog_with(&mut host), 0);
+        assert_eq!(host.spawns, 1);
+        assert_eq!(host.successors.len(), 1, "no successor wait after a retirement");
+    }
+
+    #[test]
+    fn exit_zero_without_marker_keeps_following_a_successor() {
+        let mut host = FakeHost {
+            exits: VecDeque::from([Some(0), Some(0)]),
+            successors: VecDeque::from([Seen::Owner(555), Seen::Nothing]),
+            ..FakeHost::default()
+        };
+        assert_eq!(run_watchdog_with(&mut host), 0);
+        assert_eq!(host.spawns, 1, "the successor is followed, not respawned");
+        assert!(host.log.iter().any(|line| line.contains("Follow(555)")), "{:?}", host.log);
+    }
+
+    #[test]
+    fn nonzero_exit_respawns_this_generation() {
+        let mut host = FakeHost {
+            exits: VecDeque::from([Some(3), Some(0)]),
+            ..FakeHost::default()
+        };
+        assert_eq!(run_watchdog_with(&mut host), 0);
+        assert_eq!(host.spawns, 2);
+    }
+
+    #[test]
+    fn ignore_own_pending_start_hides_only_this_process() {
+        struct Probe(u32);
+        impl OwnerProbe for Probe {
+            fn lock_state(&self) -> LockState {
+                LockState::Free
+            }
+            fn read_record(&self) -> std::result::Result<Option<OwnerRecord>, String> {
+                Ok(None)
+            }
+            fn process_start_time(&self, _pid: u32) -> Option<u64> {
+                None
+            }
+            fn endpoint(&self) -> std::result::Result<Endpoint, String> {
+                Ok(Endpoint::Missing)
+            }
+            fn read_starting(&self) -> std::result::Result<Option<StartingRecord>, String> {
+                Ok(Some(StartingRecord {
+                    launcher_pid: self.0,
+                    launcher_start_time: 1,
+                    generation_key: "g".to_string(),
+                    started_at_unix_ms: 0,
+                }))
+            }
+            fn now_unix_ms(&self) -> u64 {
+                0
+            }
+        }
+        let own = Probe(std::process::id());
+        assert_eq!(IgnoreOwnPendingStart(&own).read_starting(), Ok(None));
+        let other = Probe(std::process::id().wrapping_add(1));
+        assert!(IgnoreOwnPendingStart(&other).read_starting().unwrap().is_some());
+    }
+
+    /// maho-win only (run with --ignored): the running instance of an older generation's task
+    /// survives the logon-trigger re-import, and the task still shows Running. The test creates,
+    /// runs, ends and deletes only its own QA-named task.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "drives the real Task Scheduler; run on maho-win with --ignored"]
+    fn real_task_instance_survives_logon_trigger_removal() {
+        use super::platform::SystemScheduler;
+
+        struct QaTask(String);
+        impl Drop for QaTask {
+            fn drop(&mut self) {
+                let _ = SystemScheduler.run(&["/End", "/TN", &self.0]);
+                let _ = SystemScheduler.run(&["/Delete", "/TN", &self.0, "/F"]);
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let qa = format!("FerryxQaT6-{}", std::process::id());
+        let user = std::env::var("USERNAME").unwrap();
+        let domain = std::env::var("USERDOMAIN").unwrap_or_default();
+        let env = env_of(&[
+            ("LOCALAPPDATA", dir.path().to_str().unwrap()),
+            ("USERNAME", user.as_str()),
+            ("USERDOMAIN", domain.as_str()),
+            (SUPERVISOR_NAME_ENV, qa.as_str()),
+        ]);
+        let name = generation_task_name(&env, "qa-old");
+        // The instance reports its pid over loopback: the test waits on that signal, never polls.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let script = format!(
+            "$c = New-Object System.Net.Sockets.TcpClient('127.0.0.1', {port}); \
+             $b = [Text.Encoding]::ASCII.GetBytes([string]$PID); \
+             $c.GetStream().Write($b, 0, $b.Length); $c.Close(); Start-Sleep -Seconds 300"
+        );
+        let xml = render_task_xml(
+            &task_user(&env).unwrap(),
+            "powershell.exe",
+            &format!("-NoProfile -WindowStyle Hidden -Command \"{script}\""),
+        );
+        let mut scheduler = SystemScheduler;
+        import_definition(&mut scheduler, &name, &task_xml_path(&env, &name).unwrap(), &xml)
+            .unwrap();
+        let _task = QaTask(name.clone());
+        assert_eq!(scheduler.run(&["/Run", "/TN", &name]), Ok(true));
+
+        let (sender, accepted) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(listener.accept().map(|(stream, _)| stream));
+        });
+        let mut stream = accepted
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the QA task never connected")
+            .expect("accepting the QA task's connection failed");
+        stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut stream, &mut text)
+            .expect("the QA task never sent its pid");
+        let pid: u32 = text.trim().parse().expect("the QA task sent a pid");
+        let started = crate::daemon::owner_admission::process_start_time(pid)
+            .expect("the task instance is running");
+
+        assert_eq!(remove_logon_trigger(&env, &mut scheduler, &name), Ok(true));
+
+        let registered = scheduler.query_xml(&name).unwrap().expect("task still registered");
+        assert!(!has_logon_trigger(&registered), "{registered}");
+        assert_eq!(
+            crate::daemon::owner_admission::process_start_time(pid),
+            Some(started),
+            "the running instance must survive the re-import"
+        );
+        let status = crate::util::no_window_command("schtasks")
+            .args(["/Query", "/TN", &name, "/FO", "CSV", "/NH"])
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&status.stdout);
+        assert!(status.contains("Running"), "{status}");
     }
 }

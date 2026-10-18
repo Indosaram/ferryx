@@ -2357,6 +2357,23 @@ impl DaemonClient {
             }
         }
 
+        // A detached daemon must outlive the GUI. Inside a job that forbids breakaway it would
+        // stay in the GUI's job and die with it, so refuse instead of spawning it.
+        #[cfg(windows)]
+        if crate::util::detach_keeps_child_in_job(crate::util::windows_detach_flags()) {
+            let paths = paths.clone();
+            crate::ipc::run_blocking(move || {
+                owner_admission::withdraw_pending_start(&paths)
+                    .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
+            })
+            .await?;
+            return Err(IpcError::new(
+                IpcErrorCode::DaemonDetachUnavailable,
+                "Ferryx runs inside a job object that forbids breakaway; a daemon started from \
+                 here would end with the app, so none was started",
+            ));
+        }
+
         let mut command = tokio::process::Command::new(&binary_path);
         command
             .arg("--daemon")

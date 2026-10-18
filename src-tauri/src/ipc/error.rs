@@ -37,6 +37,9 @@ pub enum IpcErrorCode {
     /// A daemon owner is alive or cannot be identified, and it did not answer in time. Nothing
     /// was started or replaced.
     DaemonBusy,
+    /// Windows: the GUI runs in a job object that forbids breakaway, so a detached daemon would die
+    /// with the GUI. Nothing was spawned.
+    DaemonDetachUnavailable,
     BrowserNotFound,
     WebviewNotFound,
     BrowserUrlInvalid,
