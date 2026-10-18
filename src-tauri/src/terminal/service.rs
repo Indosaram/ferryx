@@ -655,11 +655,14 @@ impl TerminalService {
             out.push(remote_live_info(id, details.state, details.pid));
         }
         for id in self.paired.list() {
-            // paired.list() yields only ids whose proxy actor is still running.
-            // TODO(todo 11 follow-up): surface the paired host's remotePid once the paired
-            // runtime records it; until then remote_pid is None, never a local pid.
+            // The host-reported pid and the actor's transport/exit state; never a local pid.
+            let Some(live) = self.paired.live_state(&id) else { continue };
             out.push(crate::daemon::protocol::LiveSessionInfo::remote(
-                crate::daemon::protocol::LiveSessionKind::Paired, id, None, true, true,
+                crate::daemon::protocol::LiveSessionKind::Paired,
+                id,
+                live.remote_pid,
+                live.reader_open,
+                live.connected,
             ));
         }
         out

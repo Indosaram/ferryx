@@ -36,6 +36,17 @@ pub struct Transport {
     pub(crate) lease: CredentialLease,
     /// Direct-route epoch this socket actually rides; `None` on the relay.
     pub(crate) direct_epoch: Option<u64>,
+    /// Host-scoped pid the host reported for the attached session.
+    pub(crate) remote_pid: Option<crate::ssh::bridge::RemotePid>,
+}
+/// Live identity of a paired proxy as its owner actor last observed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PairedLive {
+    pub remote_pid: Option<crate::ssh::bridge::RemotePid>,
+    /// False once the host reported the remote process exited.
+    pub reader_open: bool,
+    /// True while a transport and controller generation are held.
+    pub connected: bool,
 }
 impl std::fmt::Debug for Transport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -75,6 +86,7 @@ pub struct Proxy {
     /// recover from a lost direct route, never to create a session.
     recovery: Option<PairedHostService>,
     agent_sink: Option<Arc<dyn crate::terminal::remote::AgentStateSink>>,
+    remote_pid: Option<crate::ssh::bridge::RemotePid>,
 }
 impl Proxy {
     pub fn new(descriptor: Descriptor, hub: Arc<TerminalOutputHub>) -> Result<Self> {
@@ -102,6 +114,7 @@ impl Proxy {
             exited: false,
             recovery: None,
             agent_sink: None,
+            remote_pid: None,
         })
     }
     pub fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
@@ -115,6 +128,13 @@ impl Proxy {
     }
     pub fn controller(&self) -> Option<Epoch> {
         self.controller
+    }
+    pub fn live_state(&self) -> PairedLive {
+        PairedLive {
+            remote_pid: self.remote_pid,
+            reader_open: !self.exited,
+            connected: self.transport.is_some() && self.controller.is_some(),
+        }
     }
 
     /// Explicit reattach only. A failed connection never submits CreateSession.
@@ -142,6 +162,9 @@ impl Proxy {
         self.hub.record_initial_size(&self.id, cols, rows);
         self.controller = Some(generation);
         self.replay_pending = true;
+        if transport.remote_pid.is_some() {
+            self.remote_pid = transport.remote_pid;
+        }
         self.transport = Some(transport);
         Ok(())
     }

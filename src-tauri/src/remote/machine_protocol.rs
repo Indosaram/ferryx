@@ -297,6 +297,10 @@ pub struct Session {
     pub provider_session: Option<crate::daemon::protocol::AgentProviderSession>,
     pub start_sequence: Epoch,
     pub end_sequence: Epoch,
+    /// Host-scoped pid of the session's process on the serving machine (absent from older
+    /// hosts). A remote pid: it never names a process on the reading machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<crate::ssh::bridge::RemotePid>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
