@@ -416,6 +416,104 @@ pub fn first_frame_token_matches(frame: &Map<String, Value>, expected: &str) -> 
         None => false,
     }
 }
++/// Client side. control::connect never falls back to the data protocol: no endpoint means a
+/// pre-plan daemon (Missing).
+pub enum ControlConnection {
+    /// No control endpoint published: a daemon that predates control-v1, or none at all.
+    Missing,
+    Connected(ControlClient),
+}
+
+pub struct ControlClient {
+    reader: tokio::io::BufReader<Box<dyn tokio::io::AsyncRead + Send + Unpin>>,
+    writer: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+    /// Windows: this boot's control token, sent on the first frame only.
+    token: Option<String>,
+}
+
+impl std::fmt::Debug for ControlClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlClient").finish_non_exhaustive()
+    }
+}
+
+/// Connects to the control endpoint inside runtime_dir.
+pub async fn connect(runtime_dir: &std::path::Path) -> std::io::Result<ControlConnection> {
+    #[cfg(unix)]
+    {
+        let path = runtime_dir.join(CONTROL_SOCKET_FILE);
+        match tokio::net::UnixStream::connect(&path).await {
+            Ok(stream) => {
+                let (read_half, write_half) = stream.into_split();
+                Ok(ControlConnection::Connected(ControlClient {
+                    reader: tokio::io::BufReader::new(Box::new(read_half)),
+                    writer: Box::new(write_half),
+                    token: None,
+                }))
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                Ok(ControlConnection::Missing)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let port_path = runtime_dir.join(CONTROL_PORT_FILE);
+        let token_path = runtime_dir.join(CONTROL_TOKEN_FILE);
+        let (port, token) = match (
+            tokio::fs::read_to_string(&port_path).await,
+            tokio::fs::read_to_string(&token_path).await,
+        ) {
+            (Ok(port), Ok(token)) => (port, token),
+            _ => return Ok(ControlConnection::Missing),
+        };
+        let Ok(port) = port.trim().parse::<u16>() else {
+            return Ok(ControlConnection::Missing);
+        };
+        match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+            Ok(stream) => {
+                let (read_half, write_half) = stream.into_split();
+                Ok(ControlConnection::Connected(ControlClient {
+                    reader: tokio::io::BufReader::new(Box::new(read_half)),
+                    writer: Box::new(write_half),
+                    token: Some(token.trim().to_string()),
+                }))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                Ok(ControlConnection::Missing)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl ControlClient {
+    /// Sends one request and reads its one-line reply.
+    pub async fn call(&mut self, request: &ControlRequest) -> std::io::Result<ControlReply> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let mut frame = encode_request(request);
+        if let (Some(token), Value::Object(map)) = (self.token.take(), &mut frame) {
+            map.insert(CONTROL_TOKEN_FIELD.into(), Value::from(token));
+        }
+        self.writer.write_all(to_line(&frame).as_bytes()).await?;
+        self.writer.flush().await?;
+        let mut line = String::new();
+        if self.reader.read_line(&mut line).await? == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "control connection closed before a reply",
+            ));
+        }
+        decode_reply(request.op(), &line)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+}
 
 #[cfg(test)]
 mod tests {

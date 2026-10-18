@@ -1,6 +1,9 @@
 // allow: SIZE_OK — daemon IPC server implementation with routing, session persistence offloading, remote control, and streaming
 #[path = "machine_gateway.rs"]
 mod machine_gateway;
+// Server side of the frozen control-v1 channel (todo 15).
+#[path = "control_server.rs"]
+mod control_server;
 use super::handover::HandoverManager;
 use super::session_service::*;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
@@ -3576,6 +3579,12 @@ impl DaemonServer {
 
         tracing::info!("rorca daemon listening on {}", socket_path.display());
 
+        // control-v1: bound right after the data listener, only while this process holds the
+        // daemon locks. A HandoverCandidate never binds it (it inherits the fd, todo 8).
+        if handover_from.is_none() {
+            self.bind_control_endpoint().await?;
+        }
+
         #[cfg(unix)]
         if !crate::daemon::handover::is_v5_ownership_transfer_enabled() {
             self.session_router.adopt_routes_from_manifest().await?;
@@ -3725,7 +3734,10 @@ impl DaemonServer {
                             binary_path: self.binary_path.clone(),
                             binary_mtime_ms: self.binary_mtime_ms,
                             daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.to_string()],
+                            capabilities: vec![
+                                crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.to_string(),
+                                crate::daemon::control::CONTROL_CAPABILITY.to_string(),
+                            ],
                             admission_time_unix_ms: Some(
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)

@@ -1126,7 +1126,8 @@ impl DaemonSessionService {
                 | "MACHINE_SERVICE_UNAVAILABLE"
                 | "OPERATION_OUTCOME_UNKNOWN"
                 | "REQUEST_CONFLICT"
-                | "AGENT_RESUME_UNSUPPORTED" => code,
+                | "AGENT_RESUME_UNSUPPORTED"
+                | "DAEMON_RETIRING" => code,
                 _ => "INVALID_PATH".into(),
             },
         })
@@ -2176,10 +2177,16 @@ impl DaemonSessionService {
             .upgrade()
             .map(|manager| manager.retain_spawn_owner())
             .transpose()
-            .map_err(|_| {
-                SpawnError::Other(
-                    "Daemon handover is in progress and does not accept new sessions".into(),
-                )
+            .map_err(|message| {
+                // A retiring daemon (control-v1 RetireWhenIdle / Shutdown) refuses with the typed
+                // DAEMON_RETIRING code instead of the generic handover message.
+                if message.starts_with(crate::daemon::control::CODE_DAEMON_RETIRING) {
+                    SpawnError::Other(crate::daemon::control::CODE_DAEMON_RETIRING.into())
+                } else {
+                    SpawnError::Other(
+                        "Daemon handover is in progress and does not accept new sessions".into(),
+                    )
+                }
             })?;
 
         if let Some((project, host)) = remote {

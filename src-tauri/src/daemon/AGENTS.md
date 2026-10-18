@@ -28,6 +28,10 @@ Standalone background daemon managing persistent terminal PTY processes, session
 - **NEVER Skip Socket Path & UID Validation**: Socket operations must reject paths outside `/tmp/rorca-{uid}/` or owned by different UIDs.
 - **NEVER Forcibly Kill or Restart Daemon on App Replacement**: When deploying release bundles, replacing `/Applications/Ferryx.app`, or relaunching the GUI, never terminate `ferryx --daemon` unless strictly required (e.g. breaking daemon protocol mismatch). Daemon death drops PTY master file descriptors in the kernel and immediately terminates all running terminal processes and agent tasks.
 
+## CONTROL CHANNEL (control-v1)
+- `daemon/control.rs` is FROZEN: schema v1 is additive-only forever (new optional fields and new ops only; never remove, rename or retype). `src-tauri/tests/fixtures/control-v1.json` pins it.
+- Every DAEMON_PROTOCOL_VERSION bump must keep control v1 working; the control channel is how a client of another revision talks to this daemon.
+
 ## COMMANDS
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml daemon::
