@@ -142,23 +142,37 @@ fn assert_daemon_retiring(response: DaemonResponse) {
     }
 }
 
-/// A Close whose handler is still parked (its RetirementGuard not yet dropped) after the
-/// session is gone: no exit while parked; the client has its CloseOk before the daemon exits.
+/// A Close whose own handler is parked after its response flush, i.e. after the session is gone
+/// but before its RetirementGuard drops: no exit while parked, the client already has CloseOk,
+/// and the daemon exits only after the handler is released.
 #[cfg(unix)]
 #[tokio::test]
 async fn control_close_parked_after_session_removal_defers_exit_until_its_guard_drops() {
     let mut fixture = ControlFixture::new();
+    let park = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+    fixture.server.set_close_park_for_test(Arc::clone(&park));
     let (session_id, _output) = spawn_cat(&fixture.server);
     assert_eq!(
         fixture.control(ControlRequest::RetireWhenIdle, None).await,
         ControlReply::Live { live: 1 }
     );
-    let parked = fixture
-        .server
-        .handover_manager
-        .retain_request(Arc::clone(&fixture.server.terminal_service))
-        .expect("parked handler guard");
-    let response = data_exchange(&fixture.server, DaemonRequest::Close { session_id }).await;
+
+    // Keep the handler task alive while it is parked (data_exchange would abort it).
+    let (client, server_side) = tokio::io::duplex(64 * 1024);
+    let handler = Arc::clone(&fixture.server);
+    let serving = tokio::spawn(async move { handler.handle_client(server_side).await });
+    let (read_half, mut write_half) = tokio::io::split(client);
+    let mut reader = BufReader::new(read_half);
+    let mut json = serde_json::to_string(&DaemonRequest::Close { session_id }).unwrap();
+    json.push('\n');
+    write_half.write_all(json.as_bytes()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), park.0.notified())
+        .await
+        .expect("the Close handler parked after its flush");
+
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let response: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
     assert!(matches!(response, DaemonResponse::CloseOk), "{response:?}");
     assert_eq!(crate::daemon::handover::live_session_count(&fixture.server.terminal_service), 0);
     assert!(
@@ -166,9 +180,12 @@ async fn control_close_parked_after_session_removal_defers_exit_until_its_guard_
         "no exit while a handler is parked"
     );
     assert!(fixture.exited.try_recv().is_err(), "no exit while a handler is parked");
-    drop(parked);
+
+    park.1.notify_one();
     assert_eq!(fixture.await_exit().await, 0);
     assert!(fixture.marker().exists());
+    drop(write_half);
+    serving.abort();
 }
 
 /// RetireWhenIdle on an idle daemon: the client receives { ok: true } and only then the daemon
@@ -194,6 +211,10 @@ async fn control_retire_when_idle_with_live_session_exits_after_it_closes() {
         ControlReply::Live { live: 1 }
     );
     assert_daemon_retiring(data_exchange(&fixture.server, spawn_request("while-retiring")).await);
+    assert!(
+        !fixture.server.handover_manager.retiring_signalled(),
+        "no exit signal while a session is live"
+    );
     assert!(fixture.exited.try_recv().is_err(), "no exit while a session is live");
     assert!(!fixture.marker().exists());
     let response = data_exchange(&fixture.server, DaemonRequest::Close { session_id }).await;

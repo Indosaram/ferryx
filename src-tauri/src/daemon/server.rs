@@ -1518,6 +1518,10 @@ pub struct DaemonServer {
     remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
     #[cfg(test)]
     _catalog_fixture: Option<tempfile::TempDir>,
+    /// Test-only park point for a Close handler: after its response is flushed and before its
+    /// RetirementGuard drops, the handler notifies .0 ("parked") and waits on .1 ("release").
+    #[cfg(test)]
+    close_park: std::sync::OnceLock<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
 }
 
 #[cfg(test)]
@@ -2515,7 +2519,18 @@ impl DaemonServer {
                 .map(|p| p.to_string_lossy().into_owned()),
             #[cfg(test)]
             _catalog_fixture: catalog_fixture,
+            #[cfg(test)]
+            close_park: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Parks every later Close handler after its response flush (see close_park).
+    #[cfg(test)]
+    pub(crate) fn set_close_park_for_test(
+        &self,
+        park: Arc<(tokio::sync::Notify, tokio::sync::Notify)>,
+    ) {
+        assert!(self.close_park.set(park).is_ok(), "close park installed once");
     }
 
     /// Installs a loopback-permitting paired inventory for isolated fixtures.
@@ -3712,6 +3727,8 @@ impl DaemonServer {
                         req.as_ref(),
                         Ok(DaemonRequest::Close { .. }) | Ok(DaemonRequest::Hibernate { .. }) | Ok(DaemonRequest::CommitHandover { .. })
                     );
+                    #[cfg(test)]
+                    let is_close = matches!(req.as_ref(), Ok(DaemonRequest::Close { .. }));
                     // Every one-shot request holds a RetirementGuard until its response is written,
                     // flushed and the retirement check below has run, so a retiring daemon never
                     // exits with this response unwritten (control-v1, todo 15). Long-lived streams
@@ -4956,6 +4973,13 @@ impl DaemonServer {
             if should_check_retirement {
                 self.handover_manager
                     .check_retirement_if_empty(&self.terminal_service);
+            }
+            #[cfg(test)]
+            if is_close {
+                if let Some(park) = self.close_park.get() {
+                    park.0.notify_one();
+                    park.1.notified().await;
+                }
             }
             // Dropping the last guard re-checks the retirement predicate (handover.rs).
             drop(retirement_guard);
