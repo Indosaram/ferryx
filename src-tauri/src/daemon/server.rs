@@ -3712,6 +3712,27 @@ impl DaemonServer {
                         req.as_ref(),
                         Ok(DaemonRequest::Close { .. }) | Ok(DaemonRequest::Hibernate { .. }) | Ok(DaemonRequest::CommitHandover { .. })
                     );
+                    // Every one-shot request holds a RetirementGuard until its response is written,
+                    // flushed and the retirement check below has run, so a retiring daemon never
+                    // exits with this response unwritten (control-v1, todo 15). Long-lived streams
+                    // are excluded: they would keep a retiring daemon alive for as long as a
+                    // subscriber stays connected. A Retired daemon refuses the guard; the request
+                    // is still answered as before.
+                    let holds_retirement_guard = !matches!(
+                        req.as_ref(),
+                        Ok(DaemonRequest::Attach { .. })
+                            | Ok(DaemonRequest::MachineGateway)
+                            | Ok(DaemonRequest::MachineMetadataSubscribe { .. })
+                            | Ok(DaemonRequest::SubscribeRemoteEvents)
+                            | Ok(DaemonRequest::SubscribeDag { .. })
+                    );
+                    let retirement_guard = holds_retirement_guard
+                        .then(|| {
+                            self.handover_manager
+                                .retain_request(Arc::clone(&self.terminal_service))
+                                .ok()
+                        })
+                        .flatten();
 
                     let resp = match req {
                 Ok(DaemonRequest::Handshake { version, .. }) => {
@@ -4936,6 +4957,8 @@ impl DaemonServer {
                 self.handover_manager
                     .check_retirement_if_empty(&self.terminal_service);
             }
+            // Dropping the last guard re-checks the retirement predicate (handover.rs).
+            drop(retirement_guard);
                 }
             }
         }
