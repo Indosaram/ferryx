@@ -29,6 +29,10 @@ use crate::remote::account_protocol::{
 
 pub const GRANT_TTL: Duration = Duration::from_secs(600);
 
+/// Status for every grant delivery failure. Not 502: Cloudflare replaces a 502 body from the
+/// origin with its own page, which strips the typed code and message the client shows.
+const GRANT_DELIVERY_FAILURE_STATUS: StatusCode = StatusCode::SERVICE_UNAVAILABLE;
+
 /// Freshness window for determining machine online status from `last_seen_at`.
 ///
 /// In Ferryx, daemons establish active presence through control channels and periodic
@@ -1224,7 +1228,7 @@ pub async fn issue_grant(
                 Ok(())
             });
             ApiError::new(
-                StatusCode::BAD_GATEWAY,
+                GRANT_DELIVERY_FAILURE_STATUS,
                 "GRANT_DELIVERY_FAILED",
                 format!("failed to deliver grant to relay at {relay_url}: {error}"),
             )
@@ -1240,8 +1244,16 @@ pub async fn issue_grant(
             store.grants.remove(&grant.grant_id);
             Ok(())
         });
+        // The relay answers 404 when no control channel holds the machine.
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(ApiError::new(
+                GRANT_DELIVERY_FAILURE_STATUS,
+                "MACHINE_OFFLINE",
+                "machine is offline: its daemon is not connected to the relay",
+            ));
+        }
         return Err(ApiError::new(
-            StatusCode::BAD_GATEWAY,
+            GRANT_DELIVERY_FAILURE_STATUS,
             "GRANT_DELIVERY_FAILED",
             format!("relay refused grant delivery with status {status}: {body}"),
         ));
@@ -1256,7 +1268,7 @@ pub async fn issue_grant(
                 Ok(())
             });
             return Err(ApiError::new(
-                StatusCode::BAD_GATEWAY,
+                GRANT_DELIVERY_FAILURE_STATUS,
                 "GRANT_DELIVERY_FAILED",
                 "relay returned invalid grant delivery response",
             ));
@@ -1269,7 +1281,7 @@ pub async fn issue_grant(
             Ok(())
         });
         return Err(ApiError::new(
-            StatusCode::BAD_GATEWAY,
+            GRANT_DELIVERY_FAILURE_STATUS,
             "GRANT_DELIVERY_FAILED",
             "relay refused grant delivery",
         ));
@@ -1288,7 +1300,7 @@ pub async fn issue_grant(
                 Ok(())
             });
             return Err(ApiError::new(
-                StatusCode::BAD_GATEWAY,
+                GRANT_DELIVERY_FAILURE_STATUS,
                 "GRANT_DELIVERY_FAILED",
                 format!("machine refused grant delivery: {other}"),
             ));
@@ -1299,7 +1311,7 @@ pub async fn issue_grant(
                 Ok(())
             });
             return Err(ApiError::new(
-                StatusCode::BAD_GATEWAY,
+                GRANT_DELIVERY_FAILURE_STATUS,
                 "GRANT_DELIVERY_FAILED",
                 "relay grant delivery response missing delivered status",
             ));
@@ -1819,7 +1831,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delivery_failure_relay_refuses_or_unreachable_yields_502() {
+    async fn delivery_failure_relay_refuses_or_unreachable_yields_503() {
         // Case A: Relay returns 403 Forbidden
         let stub_relay_403 = Router::new().route(
             "/api/v1/attach/grant",
@@ -1862,7 +1874,7 @@ mod tests {
         .await
         .expect_err("relay 403 must fail grant issuance");
 
-        assert_eq!(err_403.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err_403.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err_403.code, "GRANT_DELIVERY_FAILED");
         assert!(err_403.message.contains("403"));
 
@@ -1899,7 +1911,7 @@ mod tests {
         .await
         .expect_err("unreachable relay must fail grant issuance");
 
-        assert_eq!(err_unreachable.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err_unreachable.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err_unreachable.code, "GRANT_DELIVERY_FAILED");
 
         let grants_after_unreachable = state.read(|s| Ok(s.grants.len())).unwrap();
@@ -1956,7 +1968,7 @@ mod tests {
         .await
         .expect_err("machine refusal status must fail grant issuance");
 
-        assert_eq!(err_refusal.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err_refusal.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err_refusal.code, "GRANT_DELIVERY_FAILED");
         assert!(
             err_refusal.message.contains("ACCOUNT_OFFER_UNSEAL_FAILED"),
@@ -2007,7 +2019,7 @@ mod tests {
         .await
         .expect_err("non-JSON 200 body must fail grant issuance");
 
-        assert_eq!(err_html.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err_html.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err_html.code, "GRANT_DELIVERY_FAILED");
 
         let grants_after_html = state.read(|s| Ok(s.grants.len())).unwrap();
@@ -2060,7 +2072,7 @@ mod tests {
         .await
         .expect_err("absent delivered field must fail grant issuance");
 
-        assert_eq!(err_no_delivered.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err_no_delivered.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err_no_delivered.code, "GRANT_DELIVERY_FAILED");
 
         let grants_after_no_delivered = state.read(|s| Ok(s.grants.len())).unwrap();
@@ -2068,6 +2080,53 @@ mod tests {
             grants_after_no_delivered, 0,
             "absent delivered response must not leave orphan grant in store"
         );
+    }
+
+    #[tokio::test]
+    async fn delivery_to_offline_machine_yields_503_machine_offline() {
+        // The relay answers 404 when no control channel holds the machine: it is offline.
+        let stub_relay_offline = Router::new().route(
+            "/api/v1/attach/grant",
+            post(|| async { StatusCode::NOT_FOUND }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_origin = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, stub_relay_offline).await;
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
+        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+        let (session_token, machine) = setup_test_user_and_machine(&state, &relay_origin);
+        let req_body = serde_json::to_vec(&AccountGrantRequest {
+            machine_record_id: machine.machine_record_id.clone(),
+            enrollment_epoch: "1".into(),
+            device_label: "iPhone".into(),
+            installation_id: "inst-offline".into(),
+            grant_scope: AccountGrantScope::Machine,
+            attach_public_key: STANDARD.encode([3u8; 32]),
+        })
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {session_token}").parse().unwrap(),
+        );
+
+        let err = issue_grant(
+            State(state.clone()),
+            axum::extract::Path(machine.machine_record_id.clone()),
+            headers,
+            Bytes::from(req_body),
+        )
+        .await
+        .expect_err("an offline machine must fail grant issuance");
+
+        // 503, not 502: Cloudflare replaces a 502 body, which hides the reason from the client.
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.code, "MACHINE_OFFLINE");
+        assert_eq!(state.read(|s| Ok(s.grants.len())).unwrap(), 0);
     }
 
     #[tokio::test]
