@@ -4203,6 +4203,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         // before reaching it, so the split's query was discarded and the shell froze with no prompt
         // and therefore no output at all. Measured: the split session's only published chunk was
         // the 4-byte `ESC[6n`, while the pane session published its banner and prompt.
+        #[cfg(feature = "native-terminal")]
         if let Some(host) =
             app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>()
         {
@@ -4911,6 +4912,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     };
 
     let session_id = spawn_result.session_id.clone();
+    #[cfg(feature = "native-terminal")]
     if let Some(host) =
         app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>()
     {
@@ -4919,6 +4921,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     let attachment = match daemon_client.attach(&session_id, None).await {
         Ok(attachment) => attachment,
         Err(err) => {
+            #[cfg(feature = "native-terminal")]
             if let Some(host) = app
                 .try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>(
             ) {
@@ -4940,6 +4943,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         reason: None,
     };
     if let Err(error) = app.emit(TERMINAL_LIFECYCLE_EVENT, started) {
+        #[cfg(feature = "native-terminal")]
         if let Some(host) =
             app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>()
         {
