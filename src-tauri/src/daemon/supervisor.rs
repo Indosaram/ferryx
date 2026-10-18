@@ -4,8 +4,9 @@
 //! dies abnormally. Callers (the GUI at startup and the daemon client on demand) only talk to this
 //! module; each target plugs in its own backend:
 //!
-//! * macOS - the `launchd` LaunchAgent in [`crate::daemon::launchd`] (same plist, same
-//!   `KeepAlive { SuccessfulExit = false }`).
+//! * macOS - one `launchd` LaunchAgent per daemon runtime generation
+//!   ([`crate::daemon::launchd::generation`]), labelled `com.ferryx.daemon.<generation key>` and
+//!   running the immutable staged runtime (`daemon::runtime_stage`), never the app bundle.
 //! * Windows - a per-user scheduled task that runs the `--daemon-supervisor` watchdog
 //!   ([`crate::daemon::supervisor_windows`]); Store (MSIX) installs are unsupported.
 //! * Linux - the systemd user unit in [`crate::daemon::supervisor_linux`] (`Restart=on-failure`,
@@ -169,9 +170,10 @@ fn ensure_in(env: Env<'_>, dev_runtime: bool, executable: &Path) -> Result<bool>
     backend::ensure(env, executable)
 }
 
-/// Makes the supervisor own the daemon: removes a stale unit whose executable no longer exists,
-/// writes the unit when it changed, and (re)loads it when needed. Returns `true` when it
-/// (re)installed or reloaded the unit, `false` when nothing changed or the runtime is unsupported.
+/// Starts the supervised daemon for an Absent owner. Callers MUST hold owner admission
+/// (`owner_admission::admit` returned Start): on macOS this stages the runtime and bootstraps or
+/// kickstarts this generation's job, and never touches a running or unverifiable job. Returns
+/// `true` when a start was issued, `false` when nothing was started or the runtime is unsupported.
 /// A user who turned autostart off ([`user_opted_out`]) is a no-op that returns `false`.
 pub fn ensure() -> Result<bool> {
     let opted_out = user_opted_out();
@@ -280,10 +282,10 @@ fn retarget_unless_opted_out(
 #[cfg(target_os = "macos")]
 mod backend {
     use super::{non_empty, Env, Result, SUPERVISOR_NAME_ENV};
-    use crate::daemon::launchd;
-    use std::fs;
+    use crate::daemon::launchd::{self, generation};
+    use crate::daemon::owner_admission::OwnerState;
+    use crate::daemon::runtime_stage;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
 
     pub const TARGET_HAS_BACKEND: bool = true;
 
@@ -295,132 +297,166 @@ mod backend {
         true
     }
 
-    fn label(env: Env<'_>) -> String {
+    /// Label base: `com.ferryx.daemon`, or the QA override. Each generation's label is
+    /// `<base>.<generation key>`.
+    fn label_base(env: Env<'_>) -> String {
         non_empty(env, SUPERVISOR_NAME_ENV)
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| launchd::PLIST_LABEL.to_string())
     }
 
-    /// `launchd::get_launchd_plist_path` rules, except that a QA label gets its own file.
-    fn plist_path(env: Env<'_>, label: &str) -> Result<PathBuf> {
-        let override_path = env(launchd::PLIST_PATH_ENV);
-        let home = env("HOME");
-        let path = if label == launchd::PLIST_LABEL || override_path.is_some() {
-            launchd::launchd_plist_path_for(override_path.as_deref(), home.as_deref())
-        } else {
-            home.map(|home| {
-                PathBuf::from(home)
-                    .join("Library/LaunchAgents")
-                    .join(format!("{label}.plist"))
-            })
-        };
-        path.ok_or_else(|| "Cannot determine LaunchAgent path".to_string())
+    fn agents_dir(env: Env<'_>) -> Result<PathBuf> {
+        generation::launch_agents_dir(env(launchd::PLIST_PATH_ENV).as_deref(), env("HOME").as_deref())
+            .ok_or_else(|| "Cannot determine the LaunchAgents directory".to_string())
     }
 
-    /// The plist `launchd::generate_launchd_plist` renders; byte-identical for the real label.
-    pub(super) fn render_plist(label: &str, executable: &Path, log_dir: &Path) -> String {
-        let plist = launchd::generate_launchd_plist(&executable.to_string_lossy(), log_dir);
-        if label == launchd::PLIST_LABEL {
-            return plist;
-        }
-        plist.replacen(
-            &format!("<string>{}</string>", launchd::PLIST_LABEL),
-            &format!("<string>{label}</string>"),
-            1,
-        )
-    }
-
-    /// First `ProgramArguments` entry of an existing plist: the executable launchd would run.
-    pub(super) fn plist_program(content: &str) -> Option<&str> {
-        let after_key = &content[content.find("<key>ProgramArguments</key>")?..];
-        let start = after_key.find("<string>")? + "<string>".len();
-        let end = after_key[start..].find("</string>")?;
-        Some(&after_key[start..start + end])
-    }
-
-    /// Mirrors `launchd::write_launchd_plist`: write only on change, create the log directory.
-    fn write_plist(content: &str, log_dir: &Path, plist_path: &Path) -> Result<bool> {
-        if fs::read_to_string(plist_path).is_ok_and(|existing| existing == content) {
-            return Ok(false);
-        }
-        if let Some(parent) = plist_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create launch agent directory: {e}"))?;
-        }
-        fs::create_dir_all(log_dir)
-            .map_err(|e| format!("Failed to create agent log directory: {e}"))?;
-        fs::write(plist_path, content).map_err(|e| format!("Failed to write plist: {e}"))?;
-        Ok(true)
-    }
-
-    /// The domain comes from the calling uid, not `$HOME`, like `launchd`'s own loaded check.
-    fn job_is_loaded(label: &str) -> bool {
+    fn uid() -> u32 {
         // SAFETY: `libc::getuid` takes no arguments, dereferences no pointers, and has no side effects.
-        let uid = unsafe { libc::getuid() };
-        Command::new("launchctl")
-            .args(["print", &format!("gui/{uid}/{label}")])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
+        unsafe { libc::getuid() }
     }
 
+    /// Stages this build's signed helper bundle as an immutable runtime generation and describes
+    /// its job. The job always runs the staged copy, never the GUI executable in the app bundle.
+    fn current_job(env: Env<'_>, gui_executable: &Path) -> Result<generation::GenerationJob> {
+        let root = crate::daemon::server::daemon_runtime_root()
+            .ok_or("Cannot determine the daemon runtime directory")?;
+        let staged = runtime_stage::stage_runtime(&root, gui_executable).map_err(|e| e.to_string())?;
+        job_for(env, &staged)
+    }
+
+    pub(super) fn job_for(
+        env: Env<'_>,
+        staged: &runtime_stage::StagedRuntime,
+    ) -> Result<generation::GenerationJob> {
+        let label = generation::generation_label(&label_base(env), &staged.key);
+        let plist_path = agents_dir(env)?.join(format!("{label}.plist"));
+        let log_dir = launchd::launchd_log_dir_for(env("HOME").as_deref())
+            .ok_or("Cannot determine the agent log directory")?;
+        Ok(generation::GenerationJob {
+            label,
+            executable: staged.executable.clone(),
+            plist_path,
+            log_dir,
+        })
+    }
+
+    /// Starts this build's generation job. Callers hold owner admission and saw an Absent owner
+    /// (`owner_admission::admit` returned Start), so the owner passed to the job-state switch is
+    /// Absent; a Running or Unverifiable job is still left alone. Returns whether a start was issued.
     pub fn ensure(env: Env<'_>, executable: &Path) -> Result<bool> {
-        let label = label(env);
-        let plist_path = plist_path(env, &label)?;
-        let stale_program = fs::read_to_string(&plist_path)
-            .ok()
-            .and_then(|content| plist_program(&content).map(str::to_owned))
-            .filter(|program| !Path::new(program).exists());
-        if let Some(program) = stale_program {
-            // The app this job points at was removed. Drop the job; the write below installs it for
-            // the current executable. A failed unload is not fatal: the load unloads again first.
-            if let Err(error) = launchd::uninstall_launchd_agent_from_path(&plist_path) {
-                tracing::warn!(%error, %program, "Could not remove the stale launchd agent");
+        let job = current_job(env, executable)?;
+        let outcome = generation::ensure_generation_job(
+            &generation::SystemLaunchctl,
+            uid(),
+            &job,
+            &OwnerState::Absent,
+        )?;
+        tracing::info!(label = %job.label, ?outcome, "Daemon generation job ensured");
+        Ok(matches!(
+            outcome,
+            generation::EnsureOutcome::Bootstrapped | generation::EnsureOutcome::Kickstarted
+        ))
+    }
+
+    /// Registers this build's generation for the next login (plist with `RunAtLoad` true, no
+    /// launchctl), removes login autostart from older generations by plist rewrite, then lets the
+    /// runtime garbage collector drop generations no process runs and no job references. The
+    /// legacy `com.ferryx.daemon` job is left as it is (its migration is separate).
+    pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
+        let job = current_job(env, executable)?;
+        let dir = agents_dir(env)?;
+        let base = label_base(env);
+        let mut changed = generation::register_newest_for_login(&job)?;
+        changed |= generation::retire_older_generations(
+            &generation::SystemLaunchctl,
+            uid(),
+            &dir,
+            &base,
+            &job.label,
+        )?;
+        collect_unused_runtimes(env, &dir, &base);
+        Ok(changed)
+    }
+
+    /// Every executable a registered job references is kept, including the legacy job's. When any
+    /// plist cannot be read nothing is collected: a runtime that may be referenced stays.
+    fn collect_unused_runtimes(env: Env<'_>, dir: &Path, base: &str) {
+        let Some(root) = crate::daemon::server::daemon_runtime_root() else {
+            return;
+        };
+        let mut registered = match generation::job_executables(dir, base) {
+            Ok(executables) => executables,
+            Err(error) => {
+                tracing::warn!(%error, "Cannot read the daemon job plists; keeping every runtime generation");
+                return;
+            }
+        };
+        if let Some(legacy) = legacy_plist_path(env) {
+            match std::fs::read_to_string(&legacy) {
+                Ok(content) => registered.extend(generation::plist_program(&content).map(PathBuf::from)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(%error, "Cannot read the legacy daemon plist; keeping every runtime generation");
+                    return;
+                }
             }
         }
-        let log_dir = launchd::launchd_log_dir_for(env("HOME").as_deref())
-            .ok_or("Cannot determine the agent log directory")?;
-        let content = render_plist(&label, executable, &log_dir);
-        let rewritten = write_plist(&content, &log_dir, &plist_path)?;
-        if rewritten || !job_is_loaded(&label) {
-            launchd::load_launchd_agent(&plist_path)?;
-            return Ok(true);
+        let usage = runtime_stage::SystemRuntimeUsage {
+            registered_job_executables: registered,
+        };
+        match runtime_stage::collect_garbage(&root, &usage) {
+            Ok(removed) if !removed.is_empty() => {
+                tracing::info!(?removed, "Removed unused daemon runtime generations")
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "Daemon runtime garbage collection failed"),
         }
-        Ok(false)
     }
 
-    /// Writes the plist (RunAtLoad) only; launchd loads it at the next login. No launchctl call,
-    /// so a running job keeps its current definition and process.
-    pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
-        let label = label(env);
-        let plist_path = plist_path(env, &label)?;
-        let log_dir = launchd::launchd_log_dir_for(env("HOME").as_deref())
-            .ok_or("Cannot determine the agent log directory")?;
-        write_plist(&render_plist(&label, executable, &log_dir), &log_dir, &plist_path)
+    /// The legacy single-job plist (`com.ferryx.daemon.plist`, or the QA `<base>.plist`).
+    fn legacy_plist_path(env: Env<'_>) -> Option<PathBuf> {
+        agents_dir(env)
+            .ok()
+            .map(|dir| dir.join(format!("{}.plist", label_base(env))))
     }
 
-    pub fn reload(env: Env<'_>) -> Result<()> {
-        launchd::load_launchd_agent(&plist_path(env, &label(env))?)
+    /// Reloading would unload the job that holds the live daemon; per-generation jobs are only ever
+    /// bootstrapped or kickstarted for an Absent owner (`ensure`).
+    pub fn reload(_env: Env<'_>) -> Result<()> {
+        Err("Reloading a launchd daemon job is not supported; it would stop the live daemon".to_string())
     }
 
+    /// Explicit user uninstall: unloads and removes every generation job and the legacy job.
     pub fn uninstall(env: Env<'_>) -> Result<()> {
-        launchd::uninstall_launchd_agent_from_path(&plist_path(env, &label(env))?)
+        let dir = agents_dir(env)?;
+        for (_, path) in generation::generation_plists(&dir, &label_base(env))? {
+            launchd::uninstall_launchd_agent_from_path(&path)?;
+        }
+        match legacy_plist_path(env) {
+            Some(legacy) => launchd::uninstall_launchd_agent_from_path(&legacy),
+            None => Ok(()),
+        }
     }
 
     pub fn installed(env: Env<'_>) -> bool {
-        plist_path(env, &label(env)).is_ok_and(|path| path.exists())
+        let Ok(dir) = agents_dir(env) else {
+            return false;
+        };
+        generation::generation_plists(&dir, &label_base(env)).is_ok_and(|plists| !plists.is_empty())
+            || legacy_plist_path(env).is_some_and(|path| path.exists())
     }
 
-    /// Deletes the plist only. No `launchctl unload`/`bootout`: that would stop the running daemon.
+    /// Sets `RunAtLoad` false on every generation plist and the legacy plist by file rewrite only.
+    /// No `launchctl` call: that could stop the running daemon.
     pub fn remove_autostart(env: Env<'_>) -> Result<()> {
-        let path = plist_path(env, &label(env))?;
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("Failed to remove the LaunchAgent plist: {e}")),
+        let dir = agents_dir(env)?;
+        for (_, path) in generation::generation_plists(&dir, &label_base(env))? {
+            generation::disable_login_autostart(&path)?;
         }
+        if let Some(legacy) = legacy_plist_path(env) {
+            generation::disable_login_autostart(&legacy)?;
+        }
+        Ok(())
     }
 }
 
@@ -781,20 +817,40 @@ mod tests {
         assert_eq!(args.last(), Some(&"ferryx-daemon.service"));
     }
 
-    /// The facade must hand launchd exactly the plist the launchd module renders, and point the
-    /// stale-unit check at its program.
+    /// The macOS job of a generation runs the staged runtime copy, never the GUI's executable in
+    /// the app bundle, under the per-generation label (QA override included).
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_backend_renders_the_unchanged_launchd_plist() {
-        let exe = Path::new("/opt/ferryx/bin/ferryx");
-        let log_dir = Path::new("/Users/someone/Library/Logs/Ferryx");
-        let expected = crate::daemon::launchd::generate_launchd_plist("/opt/ferryx/bin/ferryx", log_dir);
-        let rendered =
-            backend::render_plist(crate::daemon::launchd::PLIST_LABEL, exe, log_dir);
-        assert_eq!(rendered, expected);
-        assert_eq!(backend::plist_program(&rendered), Some("/opt/ferryx/bin/ferryx"));
-        let qa = backend::render_plist("com.ferryx.qa", exe, log_dir);
-        assert!(qa.contains("<string>com.ferryx.qa</string>"));
-        assert!(!qa.contains("<string>com.ferryx.daemon</string>"));
+    fn macos_generation_job_runs_the_staged_runtime() {
+        let home = tempfile::tempdir().unwrap();
+        let staged = crate::daemon::runtime_stage::StagedRuntime {
+            key: "2026.1013.2-0a1b2c3d".to_string(),
+            executable: home
+                .path()
+                .join("daemon-runtime/2026.1013.2-0a1b2c3d/Ferryx Daemon.app/Contents/MacOS/ferryx"),
+        };
+        let env = env_of(&[("HOME", home.path().to_str().unwrap())]);
+        let job = backend::job_for(&env, &staged).unwrap();
+        assert_eq!(job.label, "com.ferryx.daemon.2026.1013.2-0a1b2c3d");
+        assert_eq!(
+            job.plist_path,
+            home.path().join("Library/LaunchAgents/com.ferryx.daemon.2026.1013.2-0a1b2c3d.plist")
+        );
+        let rendered = job.render(true);
+        assert_eq!(
+            crate::daemon::launchd::generation::plist_program(&rendered),
+            Some(staged.executable.to_str().unwrap())
+        );
+        assert!(!rendered.contains("/Applications/"), "the job must not run the app bundle");
+
+        let agents = home.path().join("qa-agents");
+        let qa = env_of(&[
+            ("HOME", home.path().to_str().unwrap()),
+            (SUPERVISOR_NAME_ENV, "ferryx-qa-1"),
+            (crate::daemon::launchd::PLIST_PATH_ENV, agents.to_str().unwrap()),
+        ]);
+        let job = backend::job_for(&qa, &staged).unwrap();
+        assert_eq!(job.label, "ferryx-qa-1.2026.1013.2-0a1b2c3d");
+        assert_eq!(job.plist_path, agents.join("ferryx-qa-1.2026.1013.2-0a1b2c3d.plist"));
     }
 }
