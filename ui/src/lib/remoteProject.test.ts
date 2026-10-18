@@ -163,6 +163,15 @@ describe("remoteProject adapter", () => {
     await expect(pasteClipboardImageLocally("daemon-backend-1")).rejects.toEqual(ipcError);
   });
 
+  it("asks the backend to defer to a local agent's own clipboard read only when requested", async () => {
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(pasteClipboardImageLocally("daemon-backend-1", true)).resolves.toBeNull();
+    expect(invokeMock).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", {
+      sessionId: "daemon-backend-1",
+      agentPaste: true,
+    });
+  });
+
   it("keeps registered ssh:/daemon: clipboard routing keyed by workspace only", async () => {
     invokeMock.mockResolvedValue({ remotePath: "/tmp/x.png", byteLength: 1 });
 

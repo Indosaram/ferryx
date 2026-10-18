@@ -62,16 +62,19 @@ export function resolvePairedStartup(workspaceId: string): SpawnTerminalRequest[
  * Saves the clipboard image for the pane's terminal and resolves to the path its foreground
  * process can open. `sessionId` is the daemon backend session ID; the backend uses it to detect a
  * manually typed SSH session and upload there, so `localPath` may be a path on that remote host.
- * `null` means the clipboard held no image.
+ * `null` means the clipboard held no image, or — with `agentPaste` — that the pane's agent reads
+ * this machine's clipboard itself and should get the paste chord instead of a path.
  */
 export async function pasteClipboardImageLocally(
   sessionId: string | null,
+  agentPaste = false,
 ): Promise<LocalClipboardImagePaste | null> {
   if (!isTauri()) {
     return null;
   }
   const result = await invoke<LocalClipboardImagePaste | null>("cmd_local_paste_clipboard_image", {
     sessionId,
+    ...(agentPaste ? { agentPaste } : {}),
   });
   return result ?? null;
 }

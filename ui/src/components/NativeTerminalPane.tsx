@@ -23,6 +23,7 @@ import {
 } from "../lib/nativeTerminalLifecycle";
 import { switchDebug } from "../lib/switchDebug";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
+import { isWindowsHost } from "../lib/platform";
 import {
   TERMINAL_COPY_MODE_EVENT,
   TerminalCopyModeBadge,
@@ -572,6 +573,7 @@ export function NativeTerminalPane({
   splitAttempt,
   className,
   style,
+  activity,
   needsAttention = false,
   active,
   onRefreshSessionIdentity,
@@ -1753,6 +1755,10 @@ export function NativeTerminalPane({
     isRemoteWorkspaceId(session?.workspaceId) || isPairedWorkspaceId(session?.workspaceId)
       ? (session?.workspaceId ?? null)
       : null;
+  // Local agents (omo, Claude Code, Codex) attach an image only when they read the clipboard on
+  // their own paste chord; a pasted temp-file path reaches them as plain text. Windows agents
+  // bind image paste to a different chord than 0x16, so they keep the path.
+  const agentReadsLocalClipboard = activity?.isAgent === true && !isWindowsHost();
 
   const pasteClipboardImage = useCallback(() => {
     if (remoteWorkspaceId) {
@@ -1781,13 +1787,14 @@ export function NativeTerminalPane({
       // to rebind or unmount. The owner token is replaced on every rebind/visibility commit, so a
       // stale result never pastes a path that only the previous destination can read.
       const requestOwner = surfaceOwnerRef.current;
-      void pasteClipboardImageLocally(targetSessionId)
+      void pasteClipboardImageLocally(targetSessionId, agentReadsLocalClipboard)
         .then((result) => {
           if (requestOwner === null || surfaceOwnerRef.current !== requestOwner) {
             return;
           }
           if (!result) {
-            // Same degrade as the remote branch: null means no readable image on the clipboard.
+            // Null means no readable image, or a local agent that reads the clipboard itself:
+            // either way the paste chord is what the foreground process needs.
             sendImagePasteShortcut();
             return;
           }
@@ -1802,7 +1809,7 @@ export function NativeTerminalPane({
           );
         });
     }
-  }, [remoteWorkspaceId, sendImagePasteShortcut, sendPaste, targetSessionId]);
+  }, [agentReadsLocalClipboard, remoteWorkspaceId, sendImagePasteShortcut, sendPaste, targetSessionId]);
 
   const suppressNextPasteRef = useRef(false);
 

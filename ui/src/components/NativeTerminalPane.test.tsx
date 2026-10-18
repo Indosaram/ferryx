@@ -3517,6 +3517,38 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(sendInputCalls).toHaveLength(0);
   });
 
+  it("hands a local agent pane's image paste to the agent's own paste chord instead of a temp-file path", async () => {
+    const sessionId = "term-session-local-agent-image-paste";
+    const session = createSession(sessionId);
+    const activity: TerminalActivity = { isAgent: true, state: "waiting", title: "OmO" };
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_local_paste_clipboard_image") return null;
+      return undefined;
+    });
+
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} activity={activity} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => "" },
+    });
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId, agentPaste: true });
+      const chordCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd, args]) => cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
+      );
+      expect(chordCalls).toHaveLength(1);
+    });
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_paste", expect.anything());
+  });
+
   it("degrades to the agent's paste chord with no error toast when the remote host cannot read a clipboard image", async () => {
     const workspaceId = `ssh:${"c".repeat(64)}`;
     const sessionId = "term-session-ssh-dom-paste-null";

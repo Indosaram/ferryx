@@ -895,14 +895,12 @@ pub struct LocalClipboardImagePaste {
 pub async fn cmd_local_paste_clipboard_image<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     session_id: Option<String>,
+    agent_paste: Option<bool>,
 ) -> Result<Option<LocalClipboardImagePaste>, IpcError> {
     use tauri::Manager;
     let daemon = session_id
         .as_ref()
         .map(|_| app.state::<std::sync::Arc<crate::daemon::client::DaemonClient>>().inner().clone());
-    let Some(image) = read_clipboard_image_for_app(&app).await? else {
-        return Ok(None);
-    };
     let detect = |id: String| {
         let daemon = daemon.clone();
         async move {
@@ -912,12 +910,34 @@ pub async fn cmd_local_paste_clipboard_image<R: tauri::Runtime>(
             }
         }
     };
+    if agent_paste == Some(true) && agent_reads_clipboard_itself(session_id.clone(), &detect).await? {
+        // None makes the pane forward the paste chord, so the agent attaches the image itself.
+        return Ok(None);
+    }
+    let Some(image) = read_clipboard_image_for_app(&app).await? else {
+        return Ok(None);
+    };
     paste_image_for_session(image, session_id, detect, |ssh, name, bytes| async move {
         let target = crate::ssh::manual::target_for(&ssh)?;
         crate::ssh::manual::upload(&target, &name, bytes).await
     })
     .await
     .map(Some)
+}
+
+/// An agent running in a local terminal reads this machine's clipboard itself when it gets its
+/// paste chord, and only then turns the image into an attachment; a pasted file path stays plain
+/// text to it. A manually typed SSH session still needs the upload, because the agent behind it
+/// can only read the remote host's clipboard.
+async fn agent_reads_clipboard_itself<D, DF>(session_id: Option<String>, detect: &D) -> Result<bool, IpcError>
+where
+    D: Fn(String) -> DF,
+    DF: std::future::Future<Output = Result<Option<crate::terminal::manual_ssh::ManualSshProcess>, IpcError>>,
+{
+    match session_id {
+        Some(id) => Ok(detect(id).await?.is_none()),
+        None => Ok(true),
+    }
 }
 
 /// Routes a paste to the destination that can read it. A detected manual SSH must be the same
@@ -1016,6 +1036,17 @@ mod tests {
         let paste = route(vec![Ok(Some(ssh(7))), Ok(Some(ssh(7)))]).await.unwrap();
         assert!(paste.local_path.starts_with("/tmp/ferryx-paste/"));
         assert_eq!(paste.byte_length, 3);
+    }
+
+    #[tokio::test]
+    async fn local_agent_reads_clipboard_unless_a_manual_ssh_owns_the_terminal() {
+        let local = |_: String| async { Ok(None) };
+        let remote = |_: String| async { Ok(Some(ssh(7))) };
+        assert!(agent_reads_clipboard_itself(Some("s1".into()), &local).await.unwrap());
+        assert!(agent_reads_clipboard_itself(None, &remote).await.unwrap());
+        assert!(!agent_reads_clipboard_itself(Some("s1".into()), &remote).await.unwrap());
+        let failing = |_: String| async { Err(changed_during_paste()) };
+        assert!(agent_reads_clipboard_itself(Some("s1".into()), &failing).await.is_err());
     }
 
     #[tokio::test]
