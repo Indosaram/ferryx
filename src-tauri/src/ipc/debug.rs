@@ -591,6 +591,7 @@ pub fn classify_pane_liveness(snapshot: &PaneLivenessSnapshot) -> PaneLivenessVe
     }
 }
 
+#[cfg(feature = "native-terminal")]
 pub fn collect_pane_liveness(
     session_id: &str,
     state: &crate::native_terminal::surface_host::NativeTerminalSurfaceHostState,

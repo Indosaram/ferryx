@@ -244,6 +244,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             // Mirrors the daemon's GetCapabilities surface: handover advertises ownership transfer.
             #[cfg(unix)]
             capabilities.push("sessionOwnershipTransferV1");
+            capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities
         };
         handshake(&socket, &local_capabilities).await?;

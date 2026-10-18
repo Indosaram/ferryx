@@ -42,11 +42,14 @@ pub async fn cmd_agent_state_reset<R: tauri::Runtime>(
     session_id: String,
 ) -> Result<(), super::IpcError> {
     daemon_client.reset_agent_state(&session_id).await?;
+    #[cfg(feature = "native-terminal")]
     if let Some(host) =
         app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>()
     {
         host.reset_agent_state::<R>(&session_id, Some(&app));
     }
+    #[cfg(not(feature = "native-terminal"))]
+    let _ = app;
     Ok(())
 }
 
