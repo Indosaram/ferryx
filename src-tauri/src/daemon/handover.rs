@@ -86,6 +86,23 @@ pub enum HandoverStatus {
     Prepared,
     Draining,
     Retired,
+    /// Entered through the control channel (RetireWhenIdle / Shutdown): no new spawn is accepted
+    /// (refused with DAEMON_RETIRING) and the daemon exits once nothing is live, spawning or in
+    /// flight. Left only by exit, or by Shutdown's COUNT_CHANGED restoring the prior status.
+    Retiring,
+}
+
+impl HandoverStatus {
+    pub(crate) fn owner_status(self) -> crate::daemon::control::OwnerStatus {
+        use crate::daemon::control::OwnerStatus;
+        match self {
+            HandoverStatus::Active => OwnerStatus::Active,
+            HandoverStatus::Prepared => OwnerStatus::Prepared,
+            HandoverStatus::Draining => OwnerStatus::Draining,
+            HandoverStatus::Retired => OwnerStatus::Retired,
+            HandoverStatus::Retiring => OwnerStatus::Retiring,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -450,6 +467,24 @@ mod tests {
     }
 }
 
+/// Live sessions counted by the control channel, split by kind: local PTYs, ssh (remote)
+/// sessions and paired sessions.
+// TODO(todo-11-merge): apply todo 11's live filter (reader_open for local, connected for
+// ssh/paired) to each count once T11's fields exist on this branch.
+pub(crate) fn live_session_counts(terminals: &Arc<TerminalService>) -> (u32, u32, u32) {
+    (
+        terminals.pty_manager().list_sessions().len() as u32,
+        terminals.remote().list().len() as u32,
+        terminals.paired().list().len() as u32,
+    )
+}
+
+/// Total live sessions of every kind; Shutdown's confirmation and the retirement predicate use it.
+pub(crate) fn live_session_count(terminals: &Arc<TerminalService>) -> u32 {
+    let (local, remote, paired) = live_session_counts(terminals);
+    local + remote + paired
+}
+
 pub(crate) struct RetirementGuard {
     manager: Arc<HandoverManager>,
     terminals: Arc<TerminalService>,
@@ -471,14 +506,142 @@ pub(crate) struct SpawnOwnerGuard {
 
 impl Drop for SpawnOwnerGuard {
     fn drop(&mut self) {
-        let _status = self.manager.status.write();
-        self.manager.spawn_owners.fetch_sub(1, Ordering::Relaxed);
+        let retiring_and_last = {
+            let status = self.manager.status.write();
+            let remaining = self.manager.spawn_owners.fetch_sub(1, Ordering::Relaxed) - 1;
+            *status == HandoverStatus::Retiring && remaining == 0
+        };
+        // A Retiring daemon re-evaluates its exit predicate whenever a counter can reach zero.
+        if retiring_and_last {
+            let terminals = self.manager.retiring_terminals.lock().clone();
+            if let Some(terminals) = terminals {
+                self.manager.check_retirement_if_empty(&terminals);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod spawn_owner_tests {
     use super::*;
+
+    fn control_fixture() -> (Arc<HandoverManager>, Arc<TerminalService>) {
+        let root = tempfile::tempdir().unwrap();
+        let manager = Arc::new(HandoverManager::new(root.path().join("control.sock")));
+        (manager, Arc::new(TerminalService::default()))
+    }
+
+    #[test]
+    fn control_shutdown_with_wrong_count_restores_active() {
+        use crate::daemon::control::ShutdownDecision;
+        let (manager, terminals) = control_fixture();
+        let decision = manager.control_shutdown(&terminals, 1);
+        assert_eq!(decision, ShutdownDecision::CountChanged { restore: crate::daemon::control::OwnerStatus::Active, live: 0 });
+        assert_eq!(manager.status(), HandoverStatus::Active);
+        assert!(!manager.retiring_signalled());
+        assert!(manager.retain_spawn_owner().is_ok());
+    }
+
+    #[test]
+    fn control_shutdown_while_a_spawn_is_parked_answers_spawn_in_flight() {
+        use crate::daemon::control::{ShutdownDecision, CODE_SPAWN_IN_FLIGHT};
+        let (manager, terminals) = control_fixture();
+        let parked = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let spawn = {
+            let manager = manager.clone();
+            let parked = parked.clone();
+            std::thread::spawn(move || {
+                let guard = manager.retain_spawn_owner().unwrap();
+                parked.wait();
+                parked.wait();
+                drop(guard);
+            })
+        };
+        parked.wait();
+        assert_eq!(
+            manager.control_shutdown(&terminals, 0),
+            ShutdownDecision::Refuse(CODE_SPAWN_IN_FLIGHT)
+        );
+        assert_eq!(manager.status(), HandoverStatus::Active);
+        parked.wait();
+        spawn.join().unwrap();
+    }
+
+    #[test]
+    fn control_shutdown_first_makes_the_next_spawn_daemon_retiring() {
+        use crate::daemon::control::{ShutdownDecision, CODE_DAEMON_RETIRING};
+        let (manager, terminals) = control_fixture();
+        assert_eq!(manager.control_shutdown(&terminals, 0), ShutdownDecision::Proceed { live: 0 });
+        assert_eq!(manager.status(), HandoverStatus::Retiring);
+        let refusal = manager.retain_spawn_owner().err().expect("spawn refused");
+        assert!(refusal.starts_with(CODE_DAEMON_RETIRING), "{refusal}");
+    }
+
+    #[test]
+    fn control_shutdown_stale_count_on_retiring_daemon_stays_retiring() {
+        use crate::daemon::control::ShutdownDecision;
+        let (manager, terminals) = control_fixture();
+        manager.control_retire_when_idle(&terminals);
+        assert!(matches!(manager.control_shutdown(&terminals, 5), ShutdownDecision::CountChanged { .. }));
+        assert_eq!(manager.status(), HandoverStatus::Retiring);
+    }
+
+    #[test]
+    fn control_retire_and_shutdown_on_draining_daemon_change_nothing() {
+        use crate::daemon::control::{ShutdownDecision, CODE_NOT_ACTIVE_OWNER};
+        let (manager, terminals) = control_fixture();
+        *manager.status.write() = HandoverStatus::Draining;
+        assert_eq!(manager.control_retire_when_idle(&terminals), 0);
+        assert_eq!(manager.status(), HandoverStatus::Draining);
+        assert_eq!(
+            manager.control_shutdown(&terminals, 0),
+            ShutdownDecision::Refuse(CODE_NOT_ACTIVE_OWNER)
+        );
+        assert_eq!(manager.status(), HandoverStatus::Draining);
+    }
+
+    #[tokio::test]
+    async fn control_retire_when_idle_waits_for_a_parked_spawn() {
+        use crate::daemon::control::CODE_DAEMON_RETIRING;
+        let (manager, terminals) = control_fixture();
+        let parked = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let spawn = {
+            let manager = manager.clone();
+            let parked = parked.clone();
+            std::thread::spawn(move || {
+                let guard = manager.retain_spawn_owner().unwrap();
+                parked.wait();
+                parked.wait();
+                drop(guard);
+            })
+        };
+        parked.wait();
+        assert_eq!(manager.control_retire_when_idle(&terminals), 0);
+        assert_eq!(manager.status(), HandoverStatus::Retiring);
+        manager.check_retirement_if_empty(&terminals);
+        assert!(!manager.retiring_signalled(), "no exit while a spawn is parked");
+        let refusal = manager.retain_spawn_owner().err().expect("second spawn refused");
+        assert!(refusal.starts_with(CODE_DAEMON_RETIRING), "{refusal}");
+        let ready = manager.retiring_ready();
+        parked.wait();
+        spawn.join().unwrap();
+        // The dropped SpawnOwnerGuard re-checked the predicate; notify_one left a permit.
+        tokio::time::timeout(std::time::Duration::from_secs(5), ready.notified())
+            .await
+            .expect("retirement signalled after the parked spawn finished");
+        assert!(manager.retiring_signalled());
+    }
+
+    #[test]
+    fn control_retirement_waits_for_in_flight_request() {
+        let (manager, terminals) = control_fixture();
+        let request = manager.retain_request(terminals.clone()).unwrap();
+        manager.control_retire_when_idle(&terminals);
+        manager.check_retirement_if_empty(&terminals);
+        assert!(!manager.retiring_signalled(), "no exit while a response is unflushed");
+        drop(request);
+        assert!(manager.retiring_signalled());
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -624,6 +787,15 @@ pub struct HandoverManager {
     is_draining: Arc<AtomicBool>,
     in_flight: Mutex<usize>,
     retirement_action: RwLock<Arc<dyn Fn() + Send + Sync>>,
+    /// Terminal service recorded when the control channel entered Retiring, so a dropping
+    /// SpawnOwnerGuard can re-check the exit predicate.
+    retiring_terminals: Mutex<Option<Arc<TerminalService>>>,
+    /// Raised once a Retiring daemon is empty; the control retirement task waits on it.
+    retiring_ready: Arc<tokio::sync::Notify>,
+    retiring_signalled: AtomicBool,
+    /// Set once a control-v1 Shutdown was accepted: the retirement predicate then ignores the
+    /// live sessions the caller confirmed and waits only for in-flight responses.
+    shutdown_requested: AtomicBool,
     client_abort_tx: broadcast::Sender<()>,
     commit_notify_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     commit_callbacks: Arc<Mutex<Vec<Box<dyn FnOnce() + Send + 'static>>>>,
@@ -694,6 +866,12 @@ impl HandoverManager {
 
     pub(crate) fn retain_spawn_owner(self: &Arc<Self>) -> Result<SpawnOwnerGuard, String> {
         let status = self.status.write();
+        if *status == HandoverStatus::Retiring {
+            return Err(format!(
+                "{}: daemon is retiring and does not accept new sessions",
+                crate::daemon::control::CODE_DAEMON_RETIRING
+            ));
+        }
         if *status != HandoverStatus::Active {
             return Err(format!(
                 "{HANDOVER_BUSY}: handover is {:?} and does not accept new spawns",
@@ -715,6 +893,10 @@ impl HandoverManager {
             is_draining: Arc::new(AtomicBool::new(false)),
             in_flight: Mutex::new(0),
             retirement_action: RwLock::new(Arc::new(|| std::process::exit(0))),
+            retiring_terminals: Mutex::new(None),
+            retiring_ready: Arc::new(tokio::sync::Notify::new()),
+            retiring_signalled: AtomicBool::new(false),
+            shutdown_requested: AtomicBool::new(false),
             client_abort_tx,
             commit_notify_tx: Arc::new(Mutex::new(None)),
             commit_callbacks: Arc::new(Mutex::new(Vec::new())),
@@ -752,6 +934,74 @@ impl HandoverManager {
 
     pub fn status(&self) -> HandoverStatus {
         *self.status.read()
+    }
+
+    /// Control-v1 RetireWhenIdle, decided under the status write lock. Returns the live count.
+    /// Active (with or without spawns in flight) becomes Retiring; every other status is left
+    /// unchanged. The caller re-checks the exit predicate after its response is flushed.
+    pub(crate) fn control_retire_when_idle(&self, terminals: &Arc<TerminalService>) -> u32 {
+        use crate::daemon::control::{decide_retire_when_idle, RetireDecision};
+        let mut status = self.status.write();
+        if decide_retire_when_idle(status.owner_status()) == RetireDecision::EnterRetiring {
+            *self.retiring_terminals.lock() = Some(terminals.clone());
+            *status = HandoverStatus::Retiring;
+        }
+        live_session_count(terminals)
+    }
+
+    /// Control-v1 Shutdown, decided atomically under the status write lock that every session
+    /// creation passes through (retain_spawn_owner). On Proceed the status stays Retiring and the
+    /// caller writes the marker, shuts down gracefully and exits 0.
+    pub(crate) fn control_shutdown(
+        &self,
+        terminals: &Arc<TerminalService>,
+        confirm_live_sessions: u32,
+    ) -> crate::daemon::control::ShutdownDecision {
+        use crate::daemon::control::{decide_shutdown, OwnerStatus, ShutdownDecision};
+        let mut status = self.status.write();
+        let prior = *status;
+        if matches!(prior.owner_status(), OwnerStatus::Active | OwnerStatus::Retiring)
+            && self.spawn_owners.load(Ordering::Relaxed) == 0
+        {
+            // Close the spawn gate before counting so no session can appear after the count.
+            *status = HandoverStatus::Retiring;
+        }
+        let decision = decide_shutdown(
+            prior.owner_status(),
+            self.spawn_owners.load(Ordering::Relaxed),
+            live_session_count(terminals),
+            confirm_live_sessions,
+        );
+        if let ShutdownDecision::CountChanged { .. } = decision {
+            *status = prior;
+        }
+        decision
+    }
+
+    /// Wakes the control retirement task once a Retiring daemon is empty.
+    pub(crate) fn retiring_ready(&self) -> Arc<tokio::sync::Notify> {
+        self.retiring_ready.clone()
+    }
+
+    pub(crate) fn retiring_signalled(&self) -> bool {
+        self.retiring_signalled.load(Ordering::SeqCst)
+    }
+
+    /// Records an accepted control-v1 Shutdown. Call it after the Shutdown response is flushed
+    /// and before that handler's RetirementGuard drops: the guard drop (or the last other
+    /// in-flight request) then signals the single retirement task, which exits exactly once.
+    pub(crate) fn mark_control_shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn control_shutdown_requested(&self) -> bool {
+        self.shutdown_requested.load(Ordering::SeqCst)
+    }
+
+    /// Runs the installed retirement action (process exit 0 outside fixtures).
+    pub(crate) fn run_retirement_action(&self) {
+        let action = self.retirement_action.read().clone();
+        action();
     }
 
     pub fn generate_legacy_socket_path() -> PathBuf {
@@ -982,6 +1232,29 @@ impl HandoverManager {
     }
 
     fn check_retirement_locked(&self, terminal_service: &Arc<TerminalService>) {
+        {
+            let status = self.status.write();
+            if *status == HandoverStatus::Retiring {
+                // After an accepted Shutdown the confirmed sessions end with the process, so only
+                // spawns and in-flight responses keep it alive.
+                let live = if self.shutdown_requested.load(Ordering::SeqCst) {
+                    0
+                } else {
+                    live_session_count(terminal_service) as usize
+                };
+                if crate::daemon::control::retirement_ready(
+                    status.owner_status(),
+                    live,
+                    self.spawn_owners.load(Ordering::Relaxed),
+                    0,
+                ) && !self.retiring_signalled.swap(true, Ordering::SeqCst)
+                {
+                    // notify_one stores a permit, so a task that starts waiting later still wakes.
+                    self.retiring_ready.notify_one();
+                }
+                return;
+            }
+        }
         if self.is_draining() && terminal_service.list_sessions().is_empty() {
             self.retire();
         }

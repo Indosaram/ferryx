@@ -1,0 +1,74 @@
+{
+  "schema": "control-v1",
+  "cases": [
+    {
+      "op": "Hello",
+      "request": { "control": 1, "op": "Hello" },
+      "responses": [
+        {
+          "ok": true,
+          "daemon_version": "2026.1013.2",
+          "protocol_version": 5,
+          "pid": 4242,
+          "start_time": 1760000000000,
+          "generation_key": "gen-abc",
+          "epoch": 7,
+          "ops": ["Hello", "Inventory", "RequestUpgrade", "RetireWhenIdle", "Shutdown", "handover-v1"]
+        },
+        {
+          "ok": true,
+          "daemon_version": "2026.1013.2",
+          "protocol_version": 5,
+          "pid": 4242,
+          "start_time": 1760000000000,
+          "generation_key": null,
+          "epoch": 0,
+          "ops": ["Hello", "Inventory", "RequestUpgrade", "RetireWhenIdle", "Shutdown"]
+        }
+      ]
+    },
+    {
+      "op": "Inventory",
+      "request": { "control": 1, "op": "Inventory" },
+      "responses": [
+        { "ok": true, "live_local": 3, "live_remote": 1, "live_paired": 2 }
+      ]
+    },
+    {
+      "op": "RequestUpgrade",
+      "request": {
+        "control": 1,
+        "op": "RequestUpgrade",
+        "staged_executable": "/Applications/Ferryx.app/Contents/MacOS/ferryx",
+        "generation_key": "gen-def"
+      },
+      "responses": [
+        { "ok": true, "accepted": true },
+        { "ok": false, "code": "UPGRADE_UNSUPPORTED" },
+        { "ok": false, "code": "HANDOVER_WIRE_UNSUPPORTED" }
+      ]
+    },
+    {
+      "op": "RetireWhenIdle",
+      "request": { "control": 1, "op": "RetireWhenIdle" },
+      "responses": [
+        { "ok": true, "live": 0 },
+        { "ok": true, "live": 2 }
+      ]
+    },
+    {
+      "op": "Shutdown",
+      "request": { "control": 1, "op": "Shutdown", "confirm_live_sessions": 2 },
+      "responses": [
+        { "ok": true, "live": 2 },
+        { "ok": false, "code": "SPAWN_IN_FLIGHT" },
+        { "ok": false, "code": "NOT_ACTIVE_OWNER" },
+        { "ok": false, "code": "COUNT_CHANGED", "live": 3 }
+      ]
+    }
+  ],
+  "unknown_op": {
+    "request": { "control": 1, "op": "FutureOp", "anything": [1, 2] },
+    "response": { "ok": false, "code": "UNSUPPORTED_OP" }
+  }
+}

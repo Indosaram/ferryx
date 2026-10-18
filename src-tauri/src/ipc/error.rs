@@ -32,6 +32,8 @@ pub enum IpcErrorCode {
     DaemonProtocolMismatch,
     /// The running daemon predates the request; the change takes effect after a restart.
     DaemonUpgradeRequired,
+    /// The daemon is retiring (control-v1 RetireWhenIdle / Shutdown) and accepts no new session.
+    DaemonRetiring,
     BrowserNotFound,
     WebviewNotFound,
     BrowserUrlInvalid,
@@ -231,6 +233,7 @@ impl IpcErrorCode {
             "SPAWN_EPOCH_CHANGED" => Self::SpawnEpochChanged,
             "SPAWN_ATTEMPT_TIMEOUT" => Self::SpawnAttemptTimeout,
             "SPAWN_CANCELLED" => Self::SpawnCancelled,
+            "DAEMON_RETIRING" => Self::DaemonRetiring,
             other => Self::Custom(other.to_string()),
         }
     }

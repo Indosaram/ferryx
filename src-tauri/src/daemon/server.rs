@@ -1,6 +1,9 @@
 // allow: SIZE_OK — daemon IPC server implementation with routing, session persistence offloading, remote control, and streaming
 #[path = "machine_gateway.rs"]
 mod machine_gateway;
+// Server side of the frozen control-v1 channel (todo 15).
+#[path = "control_server.rs"]
+mod control_server;
 use super::handover::HandoverManager;
 use super::session_service::*;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
@@ -1610,6 +1613,10 @@ pub struct DaemonServer {
     remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
     #[cfg(test)]
     _catalog_fixture: Option<tempfile::TempDir>,
+    /// Test-only park point for a Close handler: after its response is flushed and before its
+    /// RetirementGuard drops, the handler notifies .0 ("parked") and waits on .1 ("release").
+    #[cfg(test)]
+    close_park: std::sync::OnceLock<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
 }
 
 #[cfg(test)]
@@ -2844,7 +2851,18 @@ impl DaemonServer {
                 .map(|p| p.to_string_lossy().into_owned()),
             #[cfg(test)]
             _catalog_fixture: catalog_fixture,
+            #[cfg(test)]
+            close_park: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Parks every later Close handler after its response flush (see close_park).
+    #[cfg(test)]
+    pub(crate) fn set_close_park_for_test(
+        &self,
+        park: Arc<(tokio::sync::Notify, tokio::sync::Notify)>,
+    ) {
+        assert!(self.close_park.set(park).is_ok(), "close park installed once");
     }
 
     /// Installs a loopback-permitting paired inventory for isolated fixtures.
@@ -3908,6 +3926,12 @@ impl DaemonServer {
 
         tracing::info!("rorca daemon listening on {}", socket_path.display());
 
+        // control-v1: bound right after the data listener, only while this process holds the
+        // daemon locks. A HandoverCandidate never binds it (it inherits the fd, todo 8).
+        if handover_from.is_none() {
+            self.bind_control_endpoint().await?;
+        }
+
         #[cfg(unix)]
         if !crate::daemon::handover::is_v5_ownership_transfer_enabled() {
             self.session_router.adopt_routes_from_manifest().await?;
@@ -4035,6 +4059,29 @@ impl DaemonServer {
                         req.as_ref(),
                         Ok(DaemonRequest::Close { .. }) | Ok(DaemonRequest::Hibernate { .. }) | Ok(DaemonRequest::CommitHandover { .. })
                     );
+                    #[cfg(test)]
+                    let is_close = matches!(req.as_ref(), Ok(DaemonRequest::Close { .. }));
+                    // Every one-shot request holds a RetirementGuard until its response is written,
+                    // flushed and the retirement check below has run, so a retiring daemon never
+                    // exits with this response unwritten (control-v1, todo 15). Long-lived streams
+                    // are excluded: they would keep a retiring daemon alive for as long as a
+                    // subscriber stays connected. A Retired daemon refuses the guard; the request
+                    // is still answered as before.
+                    let holds_retirement_guard = !matches!(
+                        req.as_ref(),
+                        Ok(DaemonRequest::Attach { .. })
+                            | Ok(DaemonRequest::MachineGateway)
+                            | Ok(DaemonRequest::MachineMetadataSubscribe { .. })
+                            | Ok(DaemonRequest::SubscribeRemoteEvents)
+                            | Ok(DaemonRequest::SubscribeDag { .. })
+                    );
+                    let retirement_guard = holds_retirement_guard
+                        .then(|| {
+                            self.handover_manager
+                                .retain_request(Arc::clone(&self.terminal_service))
+                                .ok()
+                        })
+                        .flatten();
 
                     let resp = match req {
                 Ok(DaemonRequest::Handshake { version, .. }) => {
@@ -4057,7 +4104,10 @@ impl DaemonServer {
                             binary_path: self.binary_path.clone(),
                             binary_mtime_ms: self.binary_mtime_ms,
                             daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.to_string()],
+                            capabilities: vec![
+                                crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.to_string(),
+                                crate::daemon::control::CONTROL_CAPABILITY.to_string(),
+                            ],
                             admission_time_unix_ms: Some(
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -5273,6 +5323,15 @@ impl DaemonServer {
                 self.handover_manager
                     .check_retirement_if_empty(&self.terminal_service);
             }
+            #[cfg(test)]
+            if is_close {
+                if let Some(park) = self.close_park.get() {
+                    park.0.notify_one();
+                    park.1.notified().await;
+                }
+            }
+            // Dropping the last guard re-checks the retirement predicate (handover.rs).
+            drop(retirement_guard);
                 }
             }
         }

@@ -1,0 +1,89 @@
+{
+  "schema": "handover-v1",
+  "framing_version": 1,
+  "header_bytes": 60,
+  "transfer_id": "3f2b8c1e-0d4a-4b6e-9a51-7c2d8e9f0a1b",
+  "note": "Frozen handover-v1 wire. Header: magic FXHO, u16 framing version, u16 kind, u32 payload length, 36-byte transfer id, u64 frame sequence, u16 fd count, u16 flags (all big-endian), then the compact JSON payload; descriptors travel as SCM_RIGHTS in fd_roles order. Additive-only: new kinds and new optional payload fields may be added; nothing here may change.",
+  "frames": [
+    {
+      "name": "session",
+      "kind": 1,
+      "frame_sequence": 1,
+      "flags": 0,
+      "fd_roles": [
+        "pty_master"
+      ],
+      "payload": {
+        "session_id": "s-1",
+        "session_snapshot": {
+          "session_id": "s-1",
+          "incarnation": "inc-1",
+          "pid": 4242,
+          "pgid": 4242,
+          "cols": 80,
+          "rows": 24,
+          "worktree_path": null,
+          "state": "running",
+          "hub_snapshot": null
+        },
+        "owner": {
+          "workspace_id": "ws-1"
+        }
+      },
+      "payload_len": 216,
+      "header_hex": "4658484f00010001000000d833663262386331652d306434612d346236652d396135312d376332643865396630613162000000000000000100010000"
+    },
+    {
+      "name": "session_ack",
+      "kind": 2,
+      "frame_sequence": 2,
+      "flags": 0,
+      "fd_roles": [],
+      "payload": null,
+      "payload_len": 4,
+      "header_hex": "4658484f000100020000000433663262386331652d306434612d346236652d396135312d376332643865396630613162000000000000000200000000"
+    },
+    {
+      "name": "transfer_done",
+      "kind": 3,
+      "frame_sequence": 3,
+      "flags": 0,
+      "fd_roles": [],
+      "payload": null,
+      "payload_len": 4,
+      "header_hex": "4658484f000100030000000433663262386331652d306434612d346236652d396135312d376332643865396630613162000000000000000300000000"
+    },
+    {
+      "name": "authority",
+      "kind": 16,
+      "frame_sequence": 0,
+      "flags": 0,
+      "fd_roles": [
+        "canonical_listener",
+        "legacy_lock",
+        "persistent_lock"
+      ],
+      "payload": {
+        "has_canonical_listener": true,
+        "has_persistent_lock": true,
+        "fd_roles": [
+          "canonical_listener",
+          "legacy_lock",
+          "persistent_lock"
+        ]
+      },
+      "payload_len": 124,
+      "header_hex": "4658484f000100100000007c33663262386331652d306434612d346236652d396135312d376332643865396630613162000000000000000000030000"
+    },
+    {
+      "name": "authority_ack",
+      "kind": 17,
+      "frame_sequence": 0,
+      "flags": 0,
+      "fd_roles": [],
+      "payload": null,
+      "payload_len": 4,
+      "header_hex": "4658484f000100110000000433663262386331652d306434612d346236652d396135312d376332643865396630613162000000000000000000000000"
+    }
+  ]
+}

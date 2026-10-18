@@ -1,6 +1,8 @@
 pub mod agent_extension;
 pub(crate) mod agent_state;
 pub mod client;
+// Frozen, version-stable control channel ("control-v1"), separate from the data protocol.
+pub mod control;
 pub mod dag_service;
 pub mod handover;
 #[cfg(unix)]
