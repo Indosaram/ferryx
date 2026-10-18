@@ -467,11 +467,22 @@ mod tests {
     }
 }
 
-/// Live sessions counted by the control channel.
-// TODO(todo 11): replace with todo 11's live definition (reader_open for local, connected for
-// ssh/paired).
+/// Live sessions counted by the control channel, split by kind: local PTYs, ssh (remote)
+/// sessions and paired sessions.
+// TODO(todo-11-merge): apply todo 11's live filter (reader_open for local, connected for
+// ssh/paired) to each count once T11's fields exist on this branch.
+pub(crate) fn live_session_counts(terminals: &Arc<TerminalService>) -> (u32, u32, u32) {
+    (
+        terminals.pty_manager().list_sessions().len() as u32,
+        terminals.remote().list().len() as u32,
+        terminals.paired().list().len() as u32,
+    )
+}
+
+/// Total live sessions of every kind; Shutdown's confirmation and the retirement predicate use it.
 pub(crate) fn live_session_count(terminals: &Arc<TerminalService>) -> u32 {
-    terminals.list_sessions().len() as u32
+    let (local, remote, paired) = live_session_counts(terminals);
+    local + remote + paired
 }
 
 pub(crate) struct RetirementGuard {

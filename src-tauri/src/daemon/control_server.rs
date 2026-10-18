@@ -262,16 +262,18 @@ impl DaemonServer {
                     AfterFlush::Nothing,
                 )
             }
-            ControlRequest::Inventory => (
-                ControlReply::Inventory(InventoryReply {
-                    live_local: crate::daemon::handover::live_session_count(&self.terminal_service),
-                    // TODO(todo 11): count connected ssh / paired sessions with todo 11's live
-                    // definition.
-                    live_remote: 0,
-                    live_paired: 0,
-                }),
-                AfterFlush::Nothing,
-            ),
+            ControlRequest::Inventory => {
+                let (live_local, live_remote, live_paired) =
+                    crate::daemon::handover::live_session_counts(&self.terminal_service);
+                (
+                    ControlReply::Inventory(InventoryReply {
+                        live_local,
+                        live_remote,
+                        live_paired,
+                    }),
+                    AfterFlush::Nothing,
+                )
+            }
             // TODO(todo 8): unix routes to the RequestUpgrade handover path; Windows stays
             // UPGRADE_UNSUPPORTED permanently.
             ControlRequest::RequestUpgrade { .. } => (
