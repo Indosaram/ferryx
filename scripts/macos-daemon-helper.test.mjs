@@ -116,7 +116,17 @@ test("assembleDaemonHelper + finalizeMacosBundle: signed helper inside a signed 
 
     const runDir = join(tmp, "run");
     const entitlements = join(runDir, "outer-entitlements.plist");
-    const helper = assembleDaemonHelper({ appPath, identity: "-", entitlements });
+    // codesign embeds a signature into the helper executable, so the copy is
+    // compared with the app executable at the moment the helper is signed.
+    const appExecutableBytes = readFileSync(join(appPath, "Contents", "MacOS", "ferryx"));
+    let helperBytesBeforeSigning = null;
+    const captureExec = (command, args, opts) => {
+      if (command === "codesign" && args[0] === "--force" && args[args.length - 1].endsWith("Ferryx Daemon.app")) {
+        helperBytesBeforeSigning = readFileSync(join(args[args.length - 1], "Contents", "MacOS", "ferryx"));
+      }
+      return helperExec(command, args, opts);
+    };
+    const helper = assembleDaemonHelper({ appPath, identity: "-", entitlements, exec: captureExec });
     assert.equal(helper.helperPath, helperBundlePath(appPath));
     assert.equal(helper.helperPath, join(appPath, "Contents", "Helpers", "Ferryx Daemon.app"));
     assert.equal(helper.entitlementsPath, entitlements);
@@ -130,10 +140,10 @@ test("assembleDaemonHelper + finalizeMacosBundle: signed helper inside a signed 
     assert.equal(plistValue("CFBundlePackageType"), "APPL");
     assert.equal(plistValue("LSUIElement"), "true");
     assert.equal(plistValue("CFBundleShortVersionString"), version);
-    assert.deepEqual(
-      readFileSync(join(helper.helperPath, "Contents", "MacOS", "ferryx")),
-      readFileSync(join(appPath, "Contents", "MacOS", "ferryx")),
-      "helper executable is a copy of the app executable",
+    assert.ok(helperBytesBeforeSigning, "the helper bundle was signed");
+    assert.ok(
+      helperBytesBeforeSigning.equals(appExecutableBytes),
+      "before signing, the helper executable is a byte copy of the app executable",
     );
 
     const workspaceDir = join(tmp, "workspace");
