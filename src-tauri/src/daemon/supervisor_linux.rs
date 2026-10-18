@@ -447,6 +447,20 @@ pub(crate) fn start(name: &str) -> Result<(), String> {
     systemctl(&["start", "--no-block", &unit]).map(|_| ())
 }
 
+/// Writes the unit and enables it for the next login. Never `--now`, `start`, or `restart`:
+/// a running daemon keeps its process and PTYs.
+#[cfg(target_os = "linux")]
+pub(crate) fn register_for_login(name: &str, path: &Path, executable: &Path) -> Result<bool, String> {
+    let vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let content = render_unit(executable, &vars)?;
+    let rewritten = write_unit(&content, path)?;
+    if rewritten {
+        systemctl(&["daemon-reload"])?;
+    }
+    systemctl(&["enable", &format!("{name}.service")])?;
+    Ok(rewritten)
+}
+
 /// `disable --now` and delete the unit file; a missing unit is success.
 #[cfg(target_os = "linux")]
 pub(crate) fn uninstall(name: &str, path: &Path) -> Result<(), String> {

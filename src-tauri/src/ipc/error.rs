@@ -34,6 +34,9 @@ pub enum IpcErrorCode {
     DaemonUpgradeRequired,
     /// The daemon is retiring (control-v1 RetireWhenIdle / Shutdown) and accepts no new session.
     DaemonRetiring,
+    /// A daemon owner is alive or cannot be identified, and it did not answer in time. Nothing
+    /// was started or replaced.
+    DaemonBusy,
     BrowserNotFound,
     WebviewNotFound,
     BrowserUrlInvalid,
