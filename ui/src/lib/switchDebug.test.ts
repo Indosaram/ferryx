@@ -55,6 +55,9 @@ describe("switchDebug", () => {
     expect(isReleasePersistedInputEvent("terminal.render.vt_consumed")).toBe(true);
     expect(isReleasePersistedInputEvent("terminal.surface.presentation.receipt")).toBe(true);
     expect(isReleasePersistedInputEvent("project.select")).toBe(false);
+    expect(isReleasePersistedInputEvent("worktree.select.requested")).toBe(true);
+    expect(isReleasePersistedInputEvent("workspace.store.swap")).toBe(true);
+    expect(isReleasePersistedInputEvent("workspace.render")).toBe(false);
 
     const entry = log("terminal.surface.input.accepted", {
       operationId: "req-1",
