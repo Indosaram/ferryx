@@ -196,6 +196,51 @@ pub fn reload() -> Result<()> {
     backend::reload(&process_env)
 }
 
+/// GUI setup entry: registers this build for the next login, and ensures/starts the supervised
+/// daemon only when no daemon owner exists (owner admission says Absent). An alive or
+/// unidentifiable owner is never reloaded, restarted, or stopped. Returns whether a start was
+/// issued.
+pub fn ensure_if_absent() -> Result<bool> {
+    use crate::daemon::owner_admission as admission;
+
+    let paths = admission::AdmissionPaths::for_runtime();
+    admission::ensure_if_absent_with(
+        &paths,
+        &admission::RuntimeProbe { paths: &paths },
+        &ProcessSupervisorOps,
+        admission::ADMISSION_LOCK_DEADLINE,
+        crate::daemon::client::DAEMON_READY_TIMEOUT,
+    )
+}
+
+/// The real supervisor operations behind [`ensure_if_absent`].
+pub(crate) struct ProcessSupervisorOps;
+
+impl crate::daemon::owner_admission::SupervisorOps for ProcessSupervisorOps {
+    fn start_absent_owner(&self) -> Result<bool> {
+        ensure()
+    }
+
+    fn reconcile_login_registration(&self) -> Result<()> {
+        reconcile_login_registration().map(|_| ())
+    }
+}
+
+/// Registers this build for the next login without starting it or touching any running job
+/// (no bootstrap/load, no `--now`, no `/Run`). Returns whether a definition changed. A user who
+/// turned autostart off, or an unsupported runtime, is a no-op.
+///
+/// Removing login autostart from older generations and the legacy job needs the per-generation
+/// identity of the later todos; until then the single unit name is rewritten in place.
+pub fn reconcile_login_registration() -> Result<bool> {
+    if user_opted_out() || !supported() {
+        return Ok(false);
+    }
+    let executable =
+        std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
+    backend::register_for_login(&process_env, &executable)
+}
+
 /// Stops and removes the unit; a missing unit is success.
 pub fn uninstall() -> Result<()> {
     if !supported() {
@@ -346,6 +391,16 @@ mod backend {
         Ok(false)
     }
 
+    /// Writes the plist (RunAtLoad) only; launchd loads it at the next login. No launchctl call,
+    /// so a running job keeps its current definition and process.
+    pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
+        let label = label(env);
+        let plist_path = plist_path(env, &label)?;
+        let log_dir = launchd::launchd_log_dir_for(env("HOME").as_deref())
+            .ok_or("Cannot determine the agent log directory")?;
+        write_plist(&render_plist(&label, executable, &log_dir), &log_dir, &plist_path)
+    }
+
     pub fn reload(env: Env<'_>) -> Result<()> {
         launchd::load_launchd_agent(&plist_path(env, &label(env))?)
     }
@@ -389,6 +444,11 @@ mod backend {
 
     pub fn ensure(env: Env<'_>, executable: &Path) -> Result<bool> {
         task::ensure(env, executable)
+    }
+
+    /// Re-imports the task definition for this executable without `/Run`.
+    pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
+        task::retarget(env, executable)
     }
 
     pub fn reload(env: Env<'_>) -> Result<()> {
@@ -460,6 +520,14 @@ mod backend {
         supervisor_linux::ensure(&name, &path, &executable)
     }
 
+    /// Writes the unit and enables it for login without `--now`; a running unit is untouched.
+    pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
+        let (name, path) = unit(env)?;
+        let executable =
+            supervisor_linux::daemon_executable(env("APPIMAGE").as_deref(), executable);
+        supervisor_linux::register_for_login(&name, &path, &executable)
+    }
+
     pub fn reload(env: Env<'_>) -> Result<()> {
         supervisor_linux::start(&unit(env)?.0)
     }
@@ -522,6 +590,10 @@ mod backend {
     }
 
     pub fn ensure(_env: Env<'_>, _executable: &Path) -> Result<bool> {
+        Ok(false)
+    }
+
+    pub fn register_for_login(_env: Env<'_>, _executable: &Path) -> Result<bool> {
         Ok(false)
     }
 

@@ -8,6 +8,7 @@ use crate::daemon::protocol::{
     LOCAL_SPLIT_LIFECYCLE_CAPABILITY, LOCAL_SPLIT_VALIDITY_MS,
 };
 use crate::daemon::server::{get_socket_path, validate_runtime_socket_path};
+use crate::daemon::owner_admission;
 use crate::ipc::{IpcError, IpcErrorCode};
 use crate::remote::auth::{DeviceInfo, DevicePermission};
 use crate::remote::protocol::RemoteActiveDesktopSelection;
@@ -160,11 +161,16 @@ pub struct DaemonSpawnResult {
 // start; it never delays a real failure.
 pub(crate) const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
-// How long a freshly loaded launchd job is given to bind its socket before the client assumes the
-// job is loaded-but-dead and reloads it. `RunAtLoad` fires the daemon immediately, so a healthy
-// agent answers in well under this; keeping it short is what stops a stale job from costing the
-// full readiness budget on every GUI start.
-const SUPERVISED_START_WAIT: Duration = Duration::from_secs(5);
+fn admission_error(error: owner_admission::AdmissionError) -> IpcError {
+    match error {
+        owner_admission::AdmissionError::Busy(message) => {
+            IpcError::new(IpcErrorCode::DaemonBusy, message)
+        }
+        owner_admission::AdmissionError::Io(message) => {
+            IpcError::new(IpcErrorCode::InternalError, message)
+        }
+    }
+}
 
 async fn wait_for_daemon_ready<R>(reader: R, timeout: Duration) -> Result<(), IpcError>
 where
@@ -2255,6 +2261,31 @@ impl DaemonClient {
             return Ok(stream);
         }
 
+        // Owner admission (cross-process): classify the owner under admission.lock and start only
+        // when it is Absent. An alive or unidentifiable owner is never reloaded or replaced; the
+        // caller waits for its endpoint and otherwise reports DAEMON_BUSY.
+        let paths = owner_admission::AdmissionPaths::for_endpoint(&self.socket_path);
+        let admitted = {
+            let paths = paths.clone();
+            crate::ipc::run_blocking(move || {
+                owner_admission::admit(
+                    &paths,
+                    &owner_admission::RuntimeProbe { paths: &paths },
+                    &owner_admission::current_generation_key(),
+                    owner_admission::ADMISSION_LOCK_DEADLINE,
+                )
+                .map_err(admission_error)
+            })
+            .await?
+        };
+        let _admission_guard = match admitted {
+            owner_admission::Admit::Start(guard) => guard,
+            owner_admission::Admit::Refuse(state) => {
+                tracing::info!(?state, "A daemon owner exists; waiting for its endpoint instead of starting one");
+                return self.wait_for_owner_endpoint(&state).await;
+            }
+        };
+
         // Launch external ferryx --daemon binary with exact bounded readiness event
         let binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ferryx"));
 
@@ -2263,8 +2294,8 @@ impl DaemonClient {
         // of the app and died with it leaving no record. The detached spawn below stays as the
         // fallback for platforms with no agent and for isolated runtimes, where installing one would
         // point the user's login autostart at a test build.
-        // A user who turned autostart off gets the detached spawn directly: no agent install, no
-        // supervised wait and no reload.
+        // A user who turned autostart off gets the detached spawn directly: no agent install and no
+        // supervised wait. Nothing here ever reloads a job: the owner was Absent under admission.
         if crate::daemon::supervisor::supported() && !crate::daemon::supervisor::user_opted_out() {
             let agent = crate::ipc::run_blocking(|| {
                 crate::daemon::supervisor::ensure()
@@ -2272,42 +2303,55 @@ impl DaemonClient {
             })
             .await;
             match agent {
-                Ok(reinstalled) => {
+                Ok(true) => {
                     tracing::info!(
-                        reinstalled,
                         "Daemon lifetime handed to the supervisor"
                     );
-                    if let Ok(stream) = self.wait_for_supervised_daemon(SUPERVISED_START_WAIT).await
-                    {
-                        return Ok(stream);
-                    }
-                    // The job is loaded but no daemon is serving: launchd already ran it once and
-                    // the process is gone (a committed handover, a duplicate-endpoint exit, or a
-                    // crash it is not configured to relaunch). Reloading re-runs `RunAtLoad`, which
-                    // is what starts it again without waiting out the long readiness budget.
-                    let reload = crate::ipc::run_blocking(|| {
-                        crate::daemon::supervisor::reload()
-                            .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
-                    })
-                    .await;
-                    match reload {
-                        Ok(()) => match self.wait_for_supervised_daemon(DAEMON_READY_TIMEOUT).await {
-                            Ok(stream) => return Ok(stream),
-                            Err(error) => tracing::warn!(
-                                %error,
-                                "The supervisor still published no daemon endpoint; spawning a detached daemon instead"
-                            ),
-                        },
-                        Err(error) => tracing::warn!(
-                            %error,
-                            "Could not reload the supervisor; spawning a detached daemon instead"
-                        ),
-                    }
+                    // A start was issued: wait for it, and never start a second daemon on top of
+                    // a slow one. starting.json stays so other launchers see the pending start.
+                    return self
+                        .wait_for_supervised_daemon(DAEMON_READY_TIMEOUT)
+                        .await
+                        .map_err(|error| {
+                            IpcError::new(
+                                IpcErrorCode::DaemonBusy,
+                                format!("The supervised daemon did not publish its endpoint: {}", error.message),
+                            )
+                        });
                 }
+                // The job was already loaded and unchanged, so nothing was started (launchd ran it
+                // once and the process is gone). Fall through to the detached spawn below instead
+                // of reloading the job.
+                Ok(false) => tracing::warn!(
+                    "The supervisor started nothing; spawning a detached daemon instead"
+                ),
                 Err(error) => tracing::warn!(
                     %error,
                     "Could not hand the daemon lifetime to the supervisor; spawning a detached daemon instead"
                 ),
+            }
+            // No start was issued, so this caller's pending-start marker is withdrawn and the
+            // owner is classified again, immediately before the fallback spawn.
+            let paths = paths.clone();
+            let state = crate::ipc::run_blocking(move || {
+                owner_admission::withdraw_pending_start(&paths)
+                    .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))?;
+                let state = owner_admission::classify_owner(&owner_admission::RuntimeProbe {
+                    paths: &paths,
+                });
+                if state == owner_admission::OwnerState::Absent {
+                    owner_admission::record_pending_start(
+                        &paths,
+                        &owner_admission::current_generation_key(),
+                        owner_admission::unix_now_ms(),
+                    )
+                    .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))?;
+                }
+                Ok(state)
+            })
+            .await?;
+            if state != owner_admission::OwnerState::Absent {
+                return self.wait_for_owner_endpoint(&state).await;
             }
         }
 
@@ -2328,6 +2372,8 @@ impl DaemonClient {
                 ),
             )
         })?;
+        // The readiness-timeout kills below may only ever target this just-spawned child.
+        let spawned_pid = child.id();
 
         let stdout = child.stdout.take().ok_or_else(|| {
             IpcError::new(
@@ -2338,11 +2384,13 @@ impl DaemonClient {
 
         if let Err(error) = wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
         {
+            debug_assert_eq!(child.id(), spawned_pid, "kill must target the spawned child");
             let _ = child.kill().await;
             return Err(error);
         }
 
         if let Err(error) = Self::validate_existing_socket_path(&self.socket_path) {
+            debug_assert_eq!(child.id(), spawned_pid, "kill must target the spawned child");
             let _ = child.kill().await;
             return Err(error);
         }
@@ -2379,6 +2427,22 @@ impl DaemonClient {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// An Alive or Unknown owner is never replaced: wait for its endpoint up to the readiness
+    /// budget, then report DAEMON_BUSY. Nothing is started, reloaded, or killed.
+    async fn wait_for_owner_endpoint(
+        &self,
+        state: &owner_admission::OwnerState,
+    ) -> Result<DaemonStream, IpcError> {
+        self.wait_for_supervised_daemon(DAEMON_READY_TIMEOUT)
+            .await
+            .map_err(|_| {
+                IpcError::new(
+                    IpcErrorCode::DaemonBusy,
+                    format!("A daemon owner exists but did not answer in time ({state:?})"),
+                )
+            })
     }
 
     /// Connects and handshakes, re-reading the published pair once when the attempt that failed

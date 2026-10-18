@@ -1372,14 +1372,13 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 app.handle(),
                 app.state::<Arc<browser::BrowserManager>>().inner(),
             );
-            // Hand the daemon's lifetime to the supervisor before a terminal can ask for one, so
-            // quitting, crashing, or replacing this app can no longer take the PTYs with it. The
-            // daemon client repeats this on demand, which is what makes the race harmless; this
-            // call exists so the agent is armed even when no terminal is ever opened. A failure is
-            // not fatal: the client falls back to spawning a detached daemon.
-            tauri::async_runtime::spawn_blocking(|| match crate::daemon::supervisor::ensure() {
-                Ok(reinstalled) => tracing::info!(
-                    reinstalled,
+            // Register this build for the next login and, only when no daemon owner exists, hand
+            // the daemon's lifetime to the supervisor before a terminal can ask for one. An alive
+            // or unidentifiable owner is never reloaded or replaced (owner admission). A failure
+            // is not fatal: the client falls back to spawning a detached daemon.
+            tauri::async_runtime::spawn_blocking(|| match crate::daemon::supervisor::ensure_if_absent() {
+                Ok(started) => tracing::info!(
+                    started,
                     supported = crate::daemon::supervisor::supported(),
                     "Daemon supervisor armed"
                 ),

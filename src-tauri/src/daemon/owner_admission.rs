@@ -201,6 +201,23 @@ impl AdmissionPaths {
             admission_lock: runtime_dir.join(ADMISSION_LOCK_FILE),
         }
     }
+
+    /// Paths for a client bound to `endpoint`. The canonical endpoint uses the runtime paths;
+    /// any other endpoint (a test fixture) keeps every file beside it and has no persistent lock.
+    pub(crate) fn for_endpoint(endpoint: &Path) -> Self {
+        if endpoint == crate::daemon::server::get_socket_path() {
+            return Self::for_runtime();
+        }
+        let dir = endpoint.parent().unwrap_or_else(|| Path::new("."));
+        Self {
+            persistent_lock: None,
+            legacy_lock: dir.join("daemon.lock"),
+            endpoint: endpoint.to_path_buf(),
+            owner: dir.join(OWNER_FILE),
+            starting: dir.join(STARTING_FILE),
+            admission_lock: dir.join(ADMISSION_LOCK_FILE),
+        }
+    }
 }
 
 pub(crate) const OWNER_FILE: &str = "owner.json";
@@ -292,11 +309,7 @@ pub(crate) fn publish_owner(paths: &AdmissionPaths, generation_key: &str, epoch:
             epoch,
         },
     )?;
-    match fs::remove_file(&paths.starting) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Failed to remove {}: {error}", paths.starting.display())),
-    }
+    withdraw_pending_start(paths)
 }
 
 /// Start time of a live process in a platform-specific monotonic unit, or None when the
@@ -506,6 +519,9 @@ pub(crate) struct AdmissionGuard {
 /// Takes admission.lock, retrying until `deadline` passes. Every call opens its own handle, so
 /// threads of one process contend exactly like separate processes.
 pub(crate) fn acquire_admission_lock(path: &Path, deadline: Duration) -> Result<AdmissionGuard, AdmissionError> {
+    if let Some(parent) = path.parent() {
+        crate::daemon::server::ensure_runtime_directory(parent).map_err(AdmissionError::Io)?;
+    }
     let until = Instant::now() + deadline;
     loop {
         let file = crate::daemon::server::open_secure_lock_file(path).map_err(AdmissionError::Io)?;
@@ -542,6 +558,50 @@ pub(crate) trait StartRunner {
     fn start(&self) -> Result<(), String>;
 }
 
+/// Result of taking admission for one start.
+pub(crate) enum Admit {
+    /// The owner was Absent: starting.json is written and the caller may issue exactly one
+    /// start while it keeps the guard, until the new daemon is Alive or the ready timeout passes.
+    Start(AdmissionGuard),
+    /// The owner was Alive or Unknown; the caller must not start, reload, or replace anything.
+    Refuse(OwnerState),
+}
+
+/// Takes admission.lock and classifies the owner under it. For an Absent owner it also records
+/// the pending start in starting.json before returning, so the caller only has to start.
+pub(crate) fn admit(
+    paths: &AdmissionPaths,
+    probe: &dyn OwnerProbe,
+    generation_key: &str,
+    lock_deadline: Duration,
+) -> Result<Admit, AdmissionError> {
+    let guard = acquire_admission_lock(&paths.admission_lock, lock_deadline)?;
+    let state = classify_owner(probe);
+    if state != OwnerState::Absent {
+        return Ok(Admit::Refuse(state));
+    }
+    record_pending_start(paths, generation_key, probe.now_unix_ms()).map_err(AdmissionError::Io)?;
+    Ok(Admit::Start(guard))
+}
+
+/// Writes starting.json for a start this process is about to issue.
+pub(crate) fn record_pending_start(
+    paths: &AdmissionPaths,
+    generation_key: &str,
+    now_unix_ms: u64,
+) -> Result<(), String> {
+    let launcher_pid = std::process::id();
+    write_record_atomic(
+        &paths.starting,
+        &StartingRecord {
+            launcher_pid,
+            launcher_start_time: process_start_time(launcher_pid).unwrap_or(0),
+            generation_key: generation_key.to_string(),
+            started_at_unix_ms: now_unix_ms,
+        },
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Admission {
     /// The owner was Absent and exactly one start was issued. `ready` is true when the new
@@ -561,25 +621,19 @@ pub(crate) fn admit_and_start(
     lock_deadline: Duration,
     ready_timeout: Duration,
 ) -> Result<Admission, AdmissionError> {
-    let _guard = acquire_admission_lock(&paths.admission_lock, lock_deadline)?;
-    let state = classify_owner(probe);
-    if state != OwnerState::Absent {
-        return Ok(Admission::NotStarted(state));
-    }
-
-    let launcher_pid = std::process::id();
-    write_record_atomic(
-        &paths.starting,
-        &StartingRecord {
-            launcher_pid,
-            launcher_start_time: process_start_time(launcher_pid).unwrap_or(0),
-            generation_key: generation_key.to_string(),
-            started_at_unix_ms: probe.now_unix_ms(),
-        },
-    )
-    .map_err(AdmissionError::Io)?;
+    let _guard = match admit(paths, probe, generation_key, lock_deadline)? {
+        Admit::Start(guard) => guard,
+        Admit::Refuse(state) => return Ok(Admission::NotStarted(state)),
+    };
     runner.start().map_err(AdmissionError::Io)?;
+    Ok(Admission::Started {
+        ready: wait_until_alive(probe, ready_timeout),
+    })
+}
 
+/// Waits for the started daemon to become Alive (truth-table row 2). A timeout leaves
+/// starting.json in place so later callers see a pending start (row 5b).
+pub(crate) fn wait_until_alive(probe: &dyn OwnerProbe, ready_timeout: Duration) -> bool {
     let until = Instant::now() + ready_timeout;
     loop {
         // Probing a free daemon lock briefly takes it, which could make the starting daemon's
@@ -587,13 +641,70 @@ pub(crate) fn admit_and_start(
         // locks, so the full classification runs only once that record names a live process.
         if owner_record_is_live(probe) && matches!(classify_owner(probe), OwnerState::Alive { .. })
         {
-            return Ok(Admission::Started { ready: true });
+            return true;
         }
         if Instant::now() >= until {
-            // starting.json stays in place so later callers see a pending start (row 5b).
-            return Ok(Admission::Started { ready: false });
+            return false;
         }
         std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// The supervisor operations GUI setup may issue, injected so tests need no real
+/// launchctl/systemctl/schtasks.
+pub(crate) trait SupervisorOps {
+    /// Ensures and starts the supervised job. Only called for an Absent owner under admission.
+    /// Returns whether a start was actually issued.
+    fn start_absent_owner(&self) -> Result<bool, String>;
+    /// Registers this build for the next login without touching any running job.
+    fn reconcile_login_registration(&self) -> Result<(), String>;
+}
+
+/// GUI setup: always reconciles login registration, and starts the supervised daemon only when
+/// the owner is Absent. Returns whether a start was issued. An Alive or Unknown owner is never
+/// reloaded, restarted, or stopped.
+pub(crate) fn ensure_if_absent_with(
+    paths: &AdmissionPaths,
+    probe: &dyn OwnerProbe,
+    ops: &dyn SupervisorOps,
+    lock_deadline: Duration,
+    ready_timeout: Duration,
+) -> Result<bool, String> {
+    let started = match admit(paths, probe, &current_generation_key(), lock_deadline) {
+        Ok(Admit::Start(_guard)) => match ops.start_absent_owner() {
+            Ok(true) => {
+                if !wait_until_alive(probe, ready_timeout) {
+                    tracing::warn!("The supervised daemon did not become ready in time");
+                }
+                true
+            }
+            Ok(false) => {
+                withdraw_pending_start(paths)?;
+                false
+            }
+            Err(error) => {
+                withdraw_pending_start(paths)?;
+                return Err(error);
+            }
+        },
+        Ok(Admit::Refuse(state)) => {
+            tracing::info!(?state, "A daemon owner exists; GUI setup starts nothing");
+            false
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    // Registration runs after any start so it cannot make the start look like a no-op change.
+    ops.reconcile_login_registration()?;
+    Ok(started)
+}
+
+/// Removes this caller's starting.json after it issued no start, so its own marker never makes
+/// the next classification report a pending start (row 5b).
+pub(crate) fn withdraw_pending_start(paths: &AdmissionPaths) -> Result<(), String> {
+    match fs::remove_file(&paths.starting) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Failed to remove {}: {error}", paths.starting.display())),
     }
 }
 
@@ -1104,5 +1215,96 @@ mod tests {
             other == "not-started alive" || other.contains("is pending"),
             "the second caller must classify via row 2 or row 5b: {other}"
         );
+    }
+
+    #[test]
+    fn f_fallback_spawn_is_refused_for_alive_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let probe = FakeProbe::new(LockState::Held, Endpoint::Answers)
+            .with_record(10, 100)
+            .with_process(10, 100);
+        let admitted = admit(&paths, &probe, "gen", Duration::ZERO).unwrap();
+        assert!(matches!(admitted, Admit::Refuse(OwnerState::Alive { pid: 10, .. })));
+        assert!(!paths.starting.exists(), "a refused admission records no pending start");
+    }
+
+    #[test]
+    fn admit_records_pending_start_only_for_absent_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let probe = FakeProbe::new(LockState::Free, Endpoint::Missing);
+        let admitted = admit(&paths, &probe, "gen", Duration::ZERO).unwrap();
+        assert!(matches!(admitted, Admit::Start(_)));
+        let starting: StartingRecord = read_record(&paths.starting).unwrap().unwrap();
+        assert_eq!(starting.launcher_pid, std::process::id());
+        assert_eq!(starting.started_at_unix_ms, NOW_MS);
+    }
+
+    #[derive(Default)]
+    struct RecordingOps {
+        starts: Cell<u32>,
+        registrations: Cell<u32>,
+    }
+
+    impl SupervisorOps for RecordingOps {
+        fn start_absent_owner(&self) -> Result<bool, String> {
+            self.starts.set(self.starts.get() + 1);
+            Ok(true)
+        }
+        fn reconcile_login_registration(&self) -> Result<(), String> {
+            self.registrations.set(self.registrations.get() + 1);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn e_gui_setup_with_alive_owner_only_reconciles_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let ops = RecordingOps::default();
+        let probe = FakeProbe::new(LockState::Held, Endpoint::Answers)
+            .with_record(10, 100)
+            .with_process(10, 100);
+        let started =
+            ensure_if_absent_with(&paths, &probe, &ops, Duration::ZERO, Duration::ZERO).unwrap();
+        assert!(!started);
+        assert_eq!(ops.starts.get(), 0, "an alive owner's job is never started or reloaded");
+        assert_eq!(ops.registrations.get(), 1);
+        assert!(!paths.starting.exists());
+    }
+
+    #[test]
+    fn e_gui_setup_with_unknown_owner_starts_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let ops = RecordingOps::default();
+        let probe = FakeProbe::new(LockState::Free, Endpoint::Silent);
+        assert!(!ensure_if_absent_with(&paths, &probe, &ops, Duration::ZERO, Duration::ZERO).unwrap());
+        assert_eq!(ops.starts.get(), 0);
+        assert_eq!(ops.registrations.get(), 1);
+    }
+
+    #[test]
+    fn gui_setup_with_absent_owner_starts_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let ops = RecordingOps::default();
+        let probe = FakeProbe::new(LockState::Free, Endpoint::Missing);
+        assert!(ensure_if_absent_with(&paths, &probe, &ops, Duration::ZERO, Duration::ZERO).unwrap());
+        assert_eq!(ops.starts.get(), 1);
+        assert_eq!(ops.registrations.get(), 1);
+    }
+
+    #[test]
+    fn a_silent_endpoint_with_held_lock_issues_no_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let runner = CountingRunner { starts: Cell::new(0) };
+        let probe = FakeProbe::new(LockState::Held, Endpoint::Silent);
+        let result =
+            admit_and_start(&paths, &probe, &runner, "gen", Duration::ZERO, Duration::ZERO).unwrap();
+        assert!(matches!(result, Admission::NotStarted(OwnerState::Unknown { .. })));
+        assert_eq!(runner.starts.get(), 0);
     }
 }

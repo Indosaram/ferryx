@@ -869,7 +869,7 @@ pub(crate) fn validate_runtime_socket_path_for_uid(
     Ok(())
 }
 
-fn ensure_runtime_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn ensure_runtime_directory(path: &Path) -> Result<(), String> {
     match fs::create_dir_all(path) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
