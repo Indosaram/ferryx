@@ -18,12 +18,23 @@
  * Pure state plus a `Storage` shim: no fetch, no DOM beyond the optional `storage`
  * listener that lets another tab's write reconcile before an acknowledgement lands.
  */
-import { referenceDraftKey, type ReferenceTargetRef } from "./referenceTypes";
+import { legacyReferenceStorageKeys, referenceDraftKey, type ReferenceTargetRef } from "./referenceTypes";
 
 /** Canonical `ferryx.*` prefix; the frozen target key is appended verbatim. */
 export const REFERENCE_DRAFT_STORAGE_PREFIX = "ferryx.referenceChat.draft:";
 
-type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem"> & Partial<Pick<Storage, "key" | "length">>;
+
+/**
+ * Where the sent text ends inside the draft, or null when the draft no longer extends it.
+ * The composer sends the trimmed draft, so leading whitespace before the sent text is
+ * part of what was sent and is cleared with it.
+ */
+function sentPrefixEnd(draft: string, sent: string): number | null {
+  if (draft.startsWith(sent)) return sent.length;
+  const lead = draft.length - draft.trimStart().length;
+  return draft.startsWith(sent, lead) ? lead + sent.length : null;
+}
 
 /** The draft for one pane, plus whether a send is currently in flight for it. */
 export interface ReferenceDraft {
@@ -37,6 +48,8 @@ export class ReferenceDraftStore {
   private unsaved = new Set<string>();
   /** the text each pending send carries, and whether the draft stopped extending it meanwhile */
   private pending = new Map<string, { sent: string; edited: boolean }>();
+  /** sends whose `begin` was refused because another send was in flight: no pending record */
+  private overlapped = new Map<string, string[]>();
   private listeners = new Set<() => void>();
 
   constructor(private storage: () => DraftStorage = () => window.localStorage) {}
@@ -82,8 +95,8 @@ export class ReferenceDraftStore {
     return this.beginKey(referenceDraftKey(target), sent);
   }
 
-  end(target: ReferenceTargetRef): void {
-    this.endKey(referenceDraftKey(target));
+  end(target: ReferenceTargetRef, sent?: string): void {
+    this.endKey(referenceDraftKey(target), sent);
   }
 
   /** Remove only the acknowledged prefix; edits within the sent text stay unsent. */
@@ -102,6 +115,7 @@ export class ReferenceDraftStore {
       let text: string | null = null;
       try {
         text = this.storage().getItem(REFERENCE_DRAFT_STORAGE_PREFIX + key);
+        if (text === null) text = this.migrateLegacy(key);
       } catch {
         /* private mode: the draft lives only in memory */
       }
@@ -112,6 +126,23 @@ export class ReferenceDraftStore {
     return draft;
   }
 
+  /** Move drafts saved under every older owner-bearing key to the durable key, once. */
+  private migrateLegacy(key: string): string | null {
+    const storage = this.storage();
+    const legacy = legacyReferenceStorageKeys(storage, REFERENCE_DRAFT_STORAGE_PREFIX, key);
+    const texts = legacy.map((candidate) => storage.getItem(candidate)).filter((text): text is string => !!text);
+    if (!texts.length) return null;
+    const text = texts.join("\n");
+    try {
+      storage.setItem(REFERENCE_DRAFT_STORAGE_PREFIX + key, text);
+      for (const candidate of legacy) storage.removeItem(candidate);
+    } catch {
+      // the move could not be written: show the draft from memory and say it is unsaved
+      this.unsaved.add(key);
+    }
+    return text;
+  }
+
   private refreshKey(key: string): void {
     if (this.unsaved.has(key)) return;
     const draft = this.readKey(key);
@@ -120,7 +151,7 @@ export class ReferenceDraftStore {
       if (text === this.saved.get(key)) return;
       // another tab changed it while a send was on its way: the same rule as a local edit
       const pending = this.pending.get(key);
-      if (pending && !(text ?? "").startsWith(pending.sent)) pending.edited = true;
+      if (pending && sentPrefixEnd(text ?? "", pending.sent) === null) pending.edited = true;
       this.saved.set(key, text);
       this.drafts.set(key, { ...draft, text: text ?? "" });
       this.notify();
@@ -135,7 +166,7 @@ export class ReferenceDraftStore {
     // cleared and retyped while on its way, a draft can end up starting with the sent text
     // again: once it stopped extending it, the whole of it is the user's own
     const pending = this.pending.get(key);
-    if (pending && !text.startsWith(pending.sent)) pending.edited = true;
+    if (pending && sentPrefixEnd(text, pending.sent) === null) pending.edited = true;
     this.drafts.set(key, { ...draft, text });
     try {
       if (text) this.storage().setItem(REFERENCE_DRAFT_STORAGE_PREFIX + key, text);
@@ -152,14 +183,21 @@ export class ReferenceDraftStore {
 
   private beginKey(key: string, sent?: string): boolean {
     const draft = this.readKey(key);
-    if (draft.sending) return false;
+    if (draft.sending) {
+      if (sent !== undefined) this.overlapped.set(key, [...(this.overlapped.get(key) ?? []), sent]);
+      return false;
+    }
     if (sent !== undefined) this.pending.set(key, { sent, edited: false });
     this.drafts.set(key, { ...draft, sending: true });
     this.notify();
     return true;
   }
 
-  private endKey(key: string): void {
+  private endKey(key: string, sent?: string): void {
+    // the pending record of a newer send in flight is not this send's to end: its
+    // acknowledgement still needs it, and the box stays sending until it lands
+    const pending = this.pending.get(key);
+    if (sent !== undefined && pending !== undefined && pending.sent !== sent) return;
     this.pending.delete(key);
     this.drafts.set(key, { ...this.readKey(key), sending: false });
     this.notify();
@@ -168,10 +206,23 @@ export class ReferenceDraftStore {
   private settleKey(key: string, sent: string): { text: string; edited: boolean } {
     this.refreshKey(key);
     const current = this.readKey(key).text;
-    const editedMeanwhile = this.pending.get(key)?.edited === true;
-    this.pending.delete(key);
-    const edited = editedMeanwhile || (current !== sent && !current.startsWith(sent));
-    const text = edited ? current : current.slice(sent.length);
+    const pending = this.pending.get(key);
+    const own = pending?.sent === sent;
+    // a send that began while another was in flight never had a pending record, so nothing
+    // tracked whether the draft still extends it: keep the draft rather than strip a prefix
+    const queued = own ? [] : (this.overlapped.get(key) ?? []);
+    const overlapIndex = queued.indexOf(sent);
+    if (overlapIndex >= 0) {
+      const rest = queued.filter((_, index) => index !== overlapIndex);
+      if (rest.length) this.overlapped.set(key, rest);
+      else this.overlapped.delete(key);
+    }
+    const editedMeanwhile = (own && pending.edited) || overlapIndex >= 0;
+    // the record of a later send in flight stays: its acknowledgement still needs it
+    if (own) this.pending.delete(key);
+    const prefixEnd = sentPrefixEnd(current, sent);
+    const edited = editedMeanwhile || prefixEnd === null;
+    const text = prefixEnd === null || edited ? current : current.slice(prefixEnd);
     this.setKey(key, text);
     return { text, edited };
   }

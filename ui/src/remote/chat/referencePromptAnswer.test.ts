@@ -54,6 +54,12 @@ describe("answering a prompt from the chat", () => {
     expect(referenceAnswerHint(question)).toBe("Type 1–2 or your own reply…");
   });
 
+  it("holds a typed reply with a control character instead of sending what the backend refuses", () => {
+    const question = prompt(["LM-O (Recommended)", "YCB-V"], 2);
+    expect(referenceAnswerFromText(question, "use A\nand B")).toBeNull();
+    expect(referenceAnswerFromText(prompt([], 0), "tab\there")).toBeNull();
+  });
+
   it("answers a free-form question (Codex's queue) with the text itself, numbers included", () => {
     const freeForm = prompt([], 0);
     expect(referenceAnswerFromText(freeForm, "1")).toEqual({ customText: "1" });
@@ -120,6 +126,12 @@ describe("answering a prompt from the chat", () => {
     const noCustom: ReferencePrompt = { ...prompt(["A", "B"], null), customOptionIndex: undefined };
     expect(referenceAnswerFromText(noCustom, "unlisted text")).toBeNull();
     expect(referenceAnswerHint(noCustom)).toBe("Type 1–2 to choose…");
+  });
+
+  it("ui-reference-logic-r15-1: holds a multiple choice that names no option instead of sending an empty selection", () => {
+    const multi = prompt(["LM-O", "YCB-V", "T-LESS"], null, true);
+    expect(referenceAnswerFromText(multi, ",")).toBeNull();
+    expect(referenceAnswerFromText(multi, " , ,")).toBeNull();
   });
 });
 

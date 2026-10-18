@@ -169,7 +169,7 @@ describe("MobileHostDrawer", () => {
       const key = remoteHostKey(relayOrigin, machineId);
       fireEvent.click(screen.getByTestId(`mobile-host-option-${key}`));
       expect(remoteHostStore.getState().activeHostId).toBe(key);
-      expect(screen.getByTestId(`mobile-host-option-${key}`)).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByTestId(`mobile-host-option-${key}`)).toHaveAttribute("aria-current", "true");
     }
     for (const machineId of ["a", "b"]) {
       expect(remoteHostStore.getState().hosts[remoteHostKey(relayOrigin, machineId)].deviceToken).toBe(`token-${machineId}`);
@@ -187,6 +187,118 @@ describe("MobileHostDrawer", () => {
 
     expect(remoteHostStore.getState().activeHostId).toBeNull();
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("exposes the active host with aria-current instead of aria-selected", () => {
+    remoteHostStore.setHosts([
+      makeHost({ hostId: "host-1", name: "Studio Mac" }),
+      makeHost({ hostId: "host-2", name: "Laptop" }),
+    ]);
+    remoteHostStore.setActiveHost("host-2");
+
+    render(<MobileHostDrawer open onOpenChange={vi.fn()} />);
+
+    const active = screen.getByTestId("mobile-host-option-host-2");
+    expect(active).toHaveAttribute("aria-current", "true");
+    expect(active).not.toHaveAttribute("aria-selected");
+    expect(screen.getByTestId("mobile-host-option-host-1")).not.toHaveAttribute("aria-current");
+    expect(screen.getByTestId("mobile-host-option-local")).not.toHaveAttribute("aria-current");
+    expect(screen.getByTestId("mobile-host-option-local")).not.toHaveAttribute("aria-selected");
+  });
+
+  it("ui-shell-sheets-r7-1: a double tap on Remove pairing never lands on Confirm disconnect", () => {
+    const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn() };
+    render(<MobileHostDrawer open {...props} />);
+
+    // both taps hit the same element under the finger
+    const underFinger = screen.getByTestId("mobile-host-drawer-disconnect");
+    fireEvent.click(underFinger);
+    fireEvent.click(underFinger);
+
+    expect(props.onDisconnect).not.toHaveBeenCalled();
+    expect(screen.getByTestId("mobile-host-drawer-confirm-disconnect")).toBeInTheDocument();
+  });
+
+  it("ui-shell-sheets-r11-1: a double tap on Cancel never lands on Sign out", () => {
+    const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn(), onSignOut: vi.fn() };
+    render(<MobileHostDrawer open isAccountSession {...props} />);
+
+    fireEvent.click(screen.getByTestId("mobile-host-drawer-disconnect"));
+    // both taps land on the same slot of the row, whatever button occupies it by then
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    const row = cancel.parentElement!;
+    const slot = Array.from(row.children).indexOf(cancel);
+    fireEvent.click(cancel);
+    fireEvent.click(row.children[slot]!);
+
+    expect(props.onSignOut).not.toHaveBeenCalled();
+    expect(props.onDisconnect).not.toHaveBeenCalled();
+
+    if (screen.queryByRole("button", { name: "Cancel" })) fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByTestId("mobile-host-drawer-signout"));
+    expect(props.onSignOut).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["pairing mode", { isAccountSession: false, withSignOut: false }],
+    ["account session without onSignOut", { isAccountSession: true, withSignOut: false }],
+    ["account session with Sign out", { isAccountSession: true, withSignOut: true }],
+  ])("ui-shell-sheets-r17-1: the arm button keeps the slot Cancel takes, never Confirm (%s)", (_mode, mode) => {
+    const props = {
+      onOpenChange: vi.fn(),
+      onDisconnect: vi.fn(),
+      ...(mode.withSignOut ? { onSignOut: vi.fn() } : {}),
+    };
+    render(<MobileHostDrawer open isAccountSession={mode.isAccountSession} {...props} />);
+
+    // jsdom has no geometry: the row's flex-1 slots stand in for where each button sits
+    const arm = screen.getByTestId("mobile-host-drawer-disconnect");
+    const row = arm.parentElement!;
+    const armSlots = row.children.length;
+    const armSlot = Array.from(row.children).indexOf(arm);
+
+    fireEvent.click(arm);
+
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    const confirm = screen.getByTestId("mobile-host-drawer-confirm-disconnect");
+    expect(cancel.parentElement).toBe(row);
+    expect(row.children.length).toBe(armSlots);
+    expect(Array.from(row.children).indexOf(cancel)).toBe(armSlot);
+    expect(Array.from(row.children).indexOf(confirm)).not.toBe(armSlot);
+
+    // a second tap on the arm button's slot cancels instead of disconnecting
+    fireEvent.click(row.children[armSlot]!);
+    expect(props.onDisconnect).not.toHaveBeenCalled();
+  });
+
+  it("ui-shell-sheets-r13-1: keyboard focus stays inside the sheet across the disconnect arm/cancel swap", () => {
+    const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn() };
+    render(<MobileHostDrawer open {...props} />);
+
+    // a keyboard user focuses the arm button and activates it
+    const arm = screen.getByTestId("mobile-host-drawer-disconnect");
+    arm.focus();
+    fireEvent.click(arm);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }));
+
+    // and Cancel hands focus back to the arm button that replaces it
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(document.activeElement).toBe(screen.getByTestId("mobile-host-drawer-disconnect"));
+  });
+
+  it("disarms the disconnect confirmation when the drawer closes", () => {
+    const props = { onOpenChange: vi.fn(), onDisconnect: vi.fn() };
+    const { rerender } = render(<MobileHostDrawer open {...props} />);
+
+    fireEvent.click(screen.getByTestId("mobile-host-drawer-disconnect"));
+    expect(screen.getByTestId("mobile-host-drawer-confirm-disconnect")).toBeInTheDocument();
+
+    rerender(<MobileHostDrawer open={false} {...props} />);
+    rerender(<MobileHostDrawer open {...props} />);
+
+    expect(screen.getByTestId("mobile-host-drawer-disconnect")).toBeInTheDocument();
+    expect(screen.queryByTestId("mobile-host-drawer-confirm-disconnect")).not.toBeInTheDocument();
+    expect(props.onDisconnect).not.toHaveBeenCalled();
   });
 
   it("closes when the backdrop is tapped", () => {

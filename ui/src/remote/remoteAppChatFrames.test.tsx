@@ -250,9 +250,50 @@ describe("remoteAppChatFrames", () => {
     render(<RemoteApp />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/terminal output/i);
+      expect(screen.getByTestId("reference-disclosure")).toHaveTextContent(/terminal output/i);
     });
+    expect(screen.queryByTestId("chat-history-warning")).not.toBeInTheDocument();
     expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
+  });
+
+  it("a newest-page disclosure is drawn once and leaves when a later page has none", async () => {
+    setWidth(390);
+    let reads = 0;
+    installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(sessionState("sess-main"));
+      if (url.includes("/reference-chat/") && url.includes("/history")) {
+        reads += 1;
+        return jsonResponse(
+          reads === 1
+            ? page([], { availability: "notStarted" })
+            : page([turn("user", "real user turn"), turn("assistant", "real assistant turn")]),
+        );
+      }
+      return undefined;
+    });
+    const notStarted = "This session has not written a turn yet.";
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        render(<RemoteApp />);
+      });
+      await act(async () => {});
+      expect(reads).toBe(1);
+      expect(screen.getByTestId("reference-disclosure")).toHaveTextContent(notStarted);
+      expect(document.body.textContent?.split(notStarted).length).toBe(2);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+
+      expect(reads).toBe(2);
+      expect(screen.getByText("real assistant turn")).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain(notStarted);
+      expect(screen.queryByTestId("reference-disclosure")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("an identity refusal clears the transcript and never browses another one", async () => {

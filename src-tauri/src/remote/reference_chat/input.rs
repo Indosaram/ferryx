@@ -68,6 +68,7 @@
 //! carries a real, frozen [ScopeErrorCode] today.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -172,6 +173,27 @@ pub const REFERENCE_REQUEST_IN_FLIGHT_MESSAGE: &str =
 pub const REFERENCE_CALLER_GONE_MESSAGE: &str =
     "the caller that asked for this is no longer connected; nothing was typed";
 
+/// Why a chat message was refused when the pane's screen could not be read well enough to rule
+/// out a prompt (a replay gap, a truncated screen, or a failed read).
+pub const REFERENCE_SCREEN_UNKNOWN_MESSAGE: &str =
+    "the pane's screen could not be read to rule out a waiting prompt; nothing was typed";
+
+/// The outcome a transaction is settled with when its caller dropped it after a write went out.
+const REFERENCE_DROPPED_AFTER_WRITE_MESSAGE: &str =
+    "the request was abandoned after its input may have reached the pane; its outcome is unknown";
+
+/// What the per-target blocked-prompt probe saw on the pane's screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReferencePromptProbe {
+    /// The pane is holding this prompt (its id); a chat message must not be typed into it.
+    Blocked(String),
+    /// The screen was read and holds no prompt.
+    Clear,
+    /// The screen could not be read well enough to tell (gap, truncation, empty screen, a failed
+    /// read, or no registry id to detect with). Carries why.
+    Unknown(String),
+}
+
 /// Shape one composer message into the bytes a pane's own program expects.
 ///
 /// Normative from the pinned compose.ts:
@@ -193,6 +215,9 @@ pub fn shape_reference_submit(text: &str, bracketed_paste: bool) -> Result<Strin
         return Err(ScopeErrorCode::PayloadTooLarge);
     }
     let body = reference_composer_body(text);
+    // Chat text is typed, never pressed: a control byte in it (ESC, Ctrl-C, ...) would act as a key
+    // whether or not the pane is in bracketed-paste mode, so both branches carry the safe body.
+    let body = reference_paste_safe_body(&body);
     let shaped = if bracketed_paste {
         format!("{REFERENCE_PASTE_START}{body}{REFERENCE_PASTE_END}")
     } else {
@@ -215,6 +240,18 @@ pub fn reference_composer_body(text: &str) -> String {
     let trimmed = text.trim_end_matches(|ch| ch == '\r' || ch == '\n');
     let normalized = trimmed.replace("\r\n", "\n").replace('\r', "\n");
     normalized.replace('\n', "\r")
+}
+
+/// A body that cannot leave the paste it is wrapped in.
+///
+/// Every paste terminator is removed, then every C0 control except CR, LF and TAB (ESC included),
+/// so the text can neither end the paste early nor press a control key inside it - the reason
+/// xterm-style terminals strip the terminator from paste data.
+fn reference_paste_safe_body(body: &str) -> String {
+    body.replace(REFERENCE_PASTE_END, "")
+        .chars()
+        .filter(|ch| !ch.is_ascii_control() || matches!(ch, '\r' | '\n' | '\t'))
+        .collect()
 }
 
 /// The keys that stop the pane's current turn for an observed capability.
@@ -271,7 +308,7 @@ pub fn reference_stop_fingerprint(payload: &ReferenceStopPayload) -> String {
     reference_fingerprint(&[b"ferryx.reference-chat.stop.v1", capability.as_bytes()])
 }
 
-fn reference_fingerprint(parts: &[&[u8]]) -> String {
+pub(super) fn reference_fingerprint(parts: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     // Every part is length-prefixed, so "ab" and "a"+"b" cannot collide.
     for part in parts {
@@ -424,6 +461,9 @@ impl ReferenceInputClock for SystemReferenceClock {
     }
 }
 
+const REFERENCE_SUBMIT_TOO_LARGE_MESSAGE: &str =
+    "the message is larger than one submit may carry; nothing was typed";
+
 /// One submit the route layer has authorized and wants typed.
 pub struct ReferenceSubmitRequest<'a> {
     /// The owning target: host + owner + daemon incarnation + backend session.
@@ -433,8 +473,10 @@ pub struct ReferenceSubmitRequest<'a> {
     /// The submit payload. The text is what gets shaped; attachment ids reach the agent as @path
     /// mentions inside it, never as a managed-turn attachment.
     pub payload: &'a ReferenceSubmitPayload,
-    /// The pane's OWN bracketed-paste mode, as the caller read it from the pane.
-    pub bracketed_paste: bool,
+    /// Reads the pane's OWN bracketed-paste mode. It is asked inside the target's step, right
+    /// before the first byte, so a message that waited behind another is shaped for the mode the
+    /// pane is in when it is typed, not the one it was in when the request arrived.
+    pub bracketed_paste: &'a (dyn Fn() -> bool + Send + Sync),
     /// The prompt the pane is holding, when the caller's screen read saw one. A chat message is
     /// not typed into it; the explicit terminal is how the user answers.
     pub blocked_prompt: Option<&'a str>,
@@ -467,11 +509,23 @@ pub struct ReferenceStopRequest<'a> {
 pub struct ReferenceInputQueue {
     target_locks: parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     records: parking_lot::Mutex<ReferenceInputRecords>,
+    /// When raw keystrokes last reached each pane through the remote terminal, by backend session.
+    raw_typed_at: parking_lot::Mutex<HashMap<String, u64>>,
 }
 
 impl ReferenceInputQueue {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record that raw keystrokes reached `backend_session_id` at `at_ms` (the clock's
+    /// milliseconds), so a submit right behind them waits [REFERENCE_TYPED_SETTLE_MS].
+    pub fn note_raw_input(&self, backend_session_id: &str, at_ms: u64) {
+        let mut typed = self.raw_typed_at.lock();
+        // Only a stamp inside the settle window can still delay a submit; older ones are dropped
+        // so the map stays as small as the set of panes typed into just now.
+        typed.retain(|_, last| at_ms.saturating_sub(*last) < REFERENCE_TYPED_SETTLE_MS);
+        typed.insert(backend_session_id.to_string(), at_ms);
     }
 
     /// Type one composer message into its original pane, then its Enter.
@@ -485,18 +539,39 @@ impl ReferenceInputQueue {
         writer: &dyn ReferenceInputWriter,
         clock: &dyn ReferenceInputClock,
     ) -> ReferenceInputOutcome {
+        self.submit_with_probe(request, || std::future::ready(ReferencePromptProbe::Clear), writer, clock)
+            .await
+    }
+
+    /// [Self::submit], with the pane's blocked-prompt state read by `probe`.
+    ///
+    /// The probe runs INSIDE this target's step, after any wait behind earlier input and right
+    /// before the first byte, so a prompt that appeared while the message was queued is seen. A
+    /// chat message is refused on [ReferencePromptProbe::Blocked] and on
+    /// [ReferencePromptProbe::Unknown]: a screen that cannot be read is not a screen without a
+    /// prompt. The explicit terminal's own input is never probed.
+    pub async fn submit_with_probe<P, F>(
+        &self,
+        request: &ReferenceSubmitRequest<'_>,
+        probe: P,
+        writer: &dyn ReferenceInputWriter,
+        clock: &dyn ReferenceInputClock,
+    ) -> ReferenceInputOutcome
+    where
+        P: Fn() -> F,
+        F: std::future::Future<Output = ReferencePromptProbe>,
+    {
         // Validation is pure and comes first: a malformed request is malformed whatever its id, and
         // it must never be recorded as if something had been attempted.
-        let shaped = match shape_reference_submit(&request.payload.text, request.bracketed_paste) {
-            Ok(shaped) => shaped,
-            Err(code) => {
-                return ReferenceInputOutcome::not_typed(
-                    code,
-                    false,
-                    "the message is larger than one submit may carry; nothing was typed",
-                );
-            }
-        };
+        // The paste mode is read under the step (see run_submit), so only the character cap, which
+        // does not depend on it, is checked here.
+        if request.payload.text.chars().count() > REFERENCE_SUBMIT_MAX_CHARS {
+            return ReferenceInputOutcome::not_typed(
+                ScopeErrorCode::PayloadTooLarge,
+                false,
+                REFERENCE_SUBMIT_TOO_LARGE_MESSAGE,
+            );
+        }
 
         let key = submit_record_key(request.target, request.request_id);
         let fingerprint = reference_submit_fingerprint(request.payload);
@@ -519,8 +594,13 @@ impl ReferenceInputQueue {
             }
         }
 
-        let outcome = self.run_submit(request, &shaped, writer, clock).await;
-        self.settle(&key, &outcome);
+        // Dropping this future (a caller that went away) must not leave the record in flight
+        // forever: the guard settles it as unknown once a write went out, or frees the id when
+        // nothing did.
+        let dispatched = AtomicBool::new(false);
+        let guard = SettleOnDrop::new(&self.records, &key, &dispatched);
+        let outcome = self.run_submit(request, &probe, writer, clock, &dispatched).await;
+        guard.settle(&outcome);
         outcome
     }
 
@@ -561,33 +641,43 @@ impl ReferenceInputQueue {
             }
         }
 
-        let outcome = self.run_stop(request, keys, writer).await;
-        self.settle(&key, &outcome);
+        let dispatched = AtomicBool::new(false);
+        let guard = SettleOnDrop::new(&self.records, &key, &dispatched);
+        let outcome = self.run_stop(request, keys, writer, &dispatched).await;
+        guard.settle(&outcome);
         outcome
     }
 
-    async fn run_submit(
+    async fn run_submit<P, F>(
         &self,
         request: &ReferenceSubmitRequest<'_>,
-        shaped: &str,
+        probe: &P,
         writer: &dyn ReferenceInputWriter,
         clock: &dyn ReferenceInputClock,
-    ) -> ReferenceInputOutcome {
+        dispatched: &AtomicBool,
+    ) -> ReferenceInputOutcome
+    where
+        P: Fn() -> F,
+        F: std::future::Future<Output = ReferencePromptProbe>,
+    {
         let _step = self.step(request.target).await;
 
         // A paste right behind raw keystrokes waits for the pane to finish reading them, so the
-        // paste is not swallowed by the program's own redraw.
-        if let Some(last_typed_at_ms) = request.last_typed_at_ms {
+        // paste is not swallowed by the program's own redraw. Read under the step, so keys typed
+        // while this message waited behind another still count.
+        let raw_typed_at_ms = self
+            .raw_typed_at
+            .lock()
+            .get(request.target.target.backend_session_id.as_str())
+            .copied();
+        if let Some(last_typed_at_ms) = request.last_typed_at_ms.max(raw_typed_at_ms) {
             let since = clock.now_ms().saturating_sub(last_typed_at_ms);
             if since < REFERENCE_TYPED_SETTLE_MS {
                 clock.sleep_ms(REFERENCE_TYPED_SETTLE_MS - since).await;
             }
         }
 
-        // Reauthorize, then the deadline: both before a single byte is written.
-        if let Err(error) = (request.authorize)() {
-            return ReferenceInputOutcome::NotTyped { error };
-        }
+        // The deadline, before a single byte is written (reauthorization follows the probe).
         if clock.now_ms().saturating_sub(request.arrived_at_ms) > REFERENCE_SUBMIT_DEADLINE_MS {
             return ReferenceInputOutcome::not_typed(
                 ScopeErrorCode::Timeout,
@@ -597,7 +687,8 @@ impl ReferenceInputQueue {
         }
 
         // A message the chat types into a pane whose program is holding a menu is refused; the
-        // explicit terminal is how the user answers it.
+        // explicit terminal is how the user answers it. The screen is read here, under the step,
+        // so what is checked is the pane as it is now, not as it was when the request arrived.
         if request.payload.origin == ReferenceSubmitOrigin::Chat {
             if let Some(prompt) = request.blocked_prompt {
                 return ReferenceInputOutcome::not_typed(
@@ -606,9 +697,41 @@ impl ReferenceInputQueue {
                     format!("{REFERENCE_BLOCKED_PROMPT_MESSAGE} ({prompt})"),
                 );
             }
+            match probe().await {
+                ReferencePromptProbe::Clear => {}
+                ReferencePromptProbe::Blocked(prompt) => {
+                    return ReferenceInputOutcome::not_typed(
+                        ScopeErrorCode::ControlConflict,
+                        false,
+                        format!("{REFERENCE_BLOCKED_PROMPT_MESSAGE} ({prompt})"),
+                    );
+                }
+                ReferencePromptProbe::Unknown(why) => {
+                    return ReferenceInputOutcome::not_typed(
+                        ScopeErrorCode::ControlConflict,
+                        true,
+                        format!("{REFERENCE_SCREEN_UNKNOWN_MESSAGE} ({why})"),
+                    );
+                }
+            }
         }
 
+        // Shaped here, under the step and right before the first byte: an earlier message's Enter
+        // may have moved the pane in or out of bracketed paste while this one waited.
+        let shaped = match shape_reference_submit(&request.payload.text, (request.bracketed_paste)()) {
+            Ok(shaped) => shaped,
+            Err(code) => {
+                return ReferenceInputOutcome::not_typed(code, false, REFERENCE_SUBMIT_TOO_LARGE_MESSAGE);
+            }
+        };
+
         let session_id = request.target.target.backend_session_id.as_str();
+        // Reauthorize right before the first byte, after the (possibly slow) prompt probe, so a
+        // revoke that lands during the probe is still a clean refusal that types nothing.
+        if let Err(error) = (request.authorize)() {
+            return ReferenceInputOutcome::NotTyped { error };
+        }
+        dispatched.store(true, Ordering::SeqCst);
         if let Err(message) = writer.write(session_id, shaped.as_bytes()).await {
             return ReferenceInputOutcome::outcome_unknown(format!(
                 "the message may have reached the pane and could not be confirmed: {message}"
@@ -641,6 +764,7 @@ impl ReferenceInputQueue {
         request: &ReferenceStopRequest<'_>,
         keys: &'static [u8],
         writer: &dyn ReferenceInputWriter,
+        dispatched: &AtomicBool,
     ) -> ReferenceInputOutcome {
         let _step = self.step(request.target).await;
 
@@ -659,6 +783,7 @@ impl ReferenceInputQueue {
         }
 
         let session_id = request.target.target.backend_session_id.as_str();
+        dispatched.store(true, Ordering::SeqCst);
         match writer.write(session_id, keys).await {
             Ok(()) => ReferenceInputOutcome::accepted(request.request_id, request.target),
             Err(message) => ReferenceInputOutcome::outcome_unknown(format!(
@@ -704,20 +829,58 @@ impl ReferenceInputQueue {
     fn claim(&self, key: &str, fingerprint: &str) -> Claim {
         self.records.lock().claim(key, fingerprint)
     }
+}
 
-    fn settle(&self, key: &str, outcome: &ReferenceInputOutcome) {
-        self.records.lock().settle(key, outcome);
+/// Settles one claimed request record even when its transaction future is dropped.
+pub(super) struct SettleOnDrop<'a> {
+    records: &'a parking_lot::Mutex<ReferenceInputRecords>,
+    key: &'a str,
+    dispatched: &'a AtomicBool,
+    armed: bool,
+}
+
+impl<'a> SettleOnDrop<'a> {
+    pub(super) fn new(
+        records: &'a parking_lot::Mutex<ReferenceInputRecords>,
+        key: &'a str,
+        dispatched: &'a AtomicBool,
+    ) -> Self {
+        Self { records, key, dispatched, armed: true }
+    }
+
+    pub(super) fn settle(mut self, outcome: &ReferenceInputOutcome) {
+        self.armed = false;
+        self.records.lock().settle(self.key, outcome);
     }
 }
 
+impl Drop for SettleOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let outcome = if self.dispatched.load(Ordering::SeqCst) {
+            ReferenceInputOutcome::outcome_unknown(REFERENCE_DROPPED_AFTER_WRITE_MESSAGE)
+        } else {
+            ReferenceInputOutcome::not_typed(
+                ScopeErrorCode::Timeout,
+                true,
+                "the request was abandoned before anything was typed",
+            )
+        };
+        self.records.lock().settle(self.key, &outcome);
+    }
+}
+
+/// The bounded per-request records submit, Stop and prompt answers dedupe their request ids by.
 #[derive(Debug, Default)]
-struct ReferenceInputRecords {
+pub(super) struct ReferenceInputRecords {
     entries: HashMap<String, ReferenceInputRecord>,
     order: VecDeque<String>,
 }
 
 impl ReferenceInputRecords {
-    fn claim(&mut self, key: &str, fingerprint: &str) -> Claim {
+    pub(super) fn claim(&mut self, key: &str, fingerprint: &str) -> Claim {
         match self.entries.get(key) {
             Some(record) if record.fingerprint != fingerprint => Claim::Conflict,
             Some(record) => match &record.settled {
@@ -782,13 +945,13 @@ struct ReferenceInputRecord {
 }
 
 #[derive(Debug, Clone)]
-enum ReferenceInputRecordState {
+pub(super) enum ReferenceInputRecordState {
     Accepted(DeliveryReceipt),
     Unknown(String),
 }
 
 impl ReferenceInputRecordState {
-    fn into_outcome(self) -> ReferenceInputOutcome {
+    pub(super) fn into_outcome(self) -> ReferenceInputOutcome {
         match self {
             Self::Accepted(receipt) => ReferenceInputOutcome::Accepted { receipt },
             Self::Unknown(message) => ReferenceInputOutcome::outcome_unknown(message),
@@ -796,7 +959,7 @@ impl ReferenceInputRecordState {
     }
 }
 
-enum Claim {
+pub(super) enum Claim {
     Fresh,
     Duplicate(ReferenceInputRecordState),
     InFlight,
@@ -823,16 +986,236 @@ fn stop_record_key(target: &ReferenceTargetRef, request_id: &str) -> String {
     format!("stop\u{1f}{}", record_key(target, request_id))
 }
 
+/// The record key for a prompt ANSWER's dedupe/conflict rule.
+pub(super) fn answer_record_key(target: &ReferenceTargetRef, request_id: &str) -> String {
+    format!("answer\u{1f}{}", record_key(target, request_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::AtomicU64;
     use std::sync::Mutex;
 
     use tokio::sync::oneshot;
 
     use super::super::types::{reference_is_outcome_unknown, reference_stage_at_least};
     use crate::scoped_contracts::{Epoch, TargetRef};
+
+    // ---- review regressions: stale prompt guard, paste escape, cancellation -------------------
+
+    // rs-input-screen-r7-1
+    #[test]
+    fn a_plain_submit_body_cannot_press_a_control_key() {
+        for text in ["see log \u{1b}[31mERR", "stop\u{3}here", "a\u{4}b\u{1a}c"] {
+            let shaped = shape_reference_submit(text, false).expect("a short message is shaped");
+            assert!(
+                !shaped.chars().any(|ch| ch.is_ascii_control() && !matches!(ch, '\r' | '\t')),
+                "a plain submit must not write a control key from chat text: {shaped:?}"
+            );
+        }
+        assert_eq!(shape_reference_submit("one\ttwo\nthree", false).unwrap(), "one\ttwo\rthree");
+    }
+
+    #[test]
+    fn a_bracketed_paste_body_cannot_end_the_paste_or_carry_control_keys() {
+        let shaped = shape_reference_submit("a\u{1b}[201~b\u{3}c\td", true).unwrap();
+        assert_eq!(
+            shaped.matches(REFERENCE_PASTE_END).count(),
+            1,
+            "the body ended the paste early: {shaped:?}"
+        );
+        assert!(shaped.ends_with(REFERENCE_PASTE_END), "{shaped:?}");
+        let body = &shaped[REFERENCE_PASTE_START.len()..shaped.len() - REFERENCE_PASTE_END.len()];
+        assert!(!body.contains('\u{1b}') && !body.contains('\u{3}'), "{body:?}");
+        assert!(body.contains('\t'), "a tab is text, not a control key: {body:?}");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_that_appears_while_a_submit_waits_in_the_queue_refuses_it() {
+        let queue = ReferenceInputQueue::new();
+        let (writer, started, release) = RecordingWriter::gated();
+        let clock = ManualClock::at(0);
+        let target = target("sess-a");
+        let authorize = allow();
+        let first_payload = submit_payload("one");
+        let second_payload = submit_payload("2");
+        let shown: Mutex<Option<String>> = Mutex::new(None);
+        let probe = || {
+            let seen = match shown.lock().expect("probe state").clone() {
+                Some(id) => ReferencePromptProbe::Blocked(id),
+                None => ReferencePromptProbe::Clear,
+            };
+            std::future::ready(seen)
+        };
+        let request = |request_id, payload| ReferenceSubmitRequest {
+            target: &target,
+            request_id,
+            payload,
+            bracketed_paste: &paste_on,
+            blocked_prompt: None,
+            arrived_at_ms: 0,
+            last_typed_at_ms: None,
+            authorize: &authorize,
+        };
+        let first_request = request("r1", &first_payload);
+        let second_request = request("r2", &second_payload);
+
+        let first = queue.submit_with_probe(&first_request, &probe, writer.as_ref(), &clock);
+        let second = async {
+            started.await.expect("the first paste write started");
+            let second = queue.submit_with_probe(&second_request, &probe, writer.as_ref(), &clock);
+            tokio::pin!(second);
+            // The second submit is queued behind the first while the pane shows no prompt.
+            tokio::select! {
+                biased;
+                outcome = &mut second => panic!("the second submit ran while the first held the step: {outcome:?}"),
+                _ = tokio::task::yield_now() => {}
+            }
+            // The first message's Enter makes the agent open a menu.
+            *shown.lock().expect("probe state") = Some("claude-approval".to_string());
+            release.send(()).expect("the first paste is released");
+            second.await
+        };
+        let (first, second) = tokio::join!(first, second);
+
+        assert!(first.is_typed(), "{first:?}");
+        assert_eq!(second.wire_code().as_deref(), Some("CONTROL_CONFLICT"), "{second:?}");
+        assert_eq!(
+            writer.writes(),
+            vec![
+                format!("{REFERENCE_PASTE_START}one{REFERENCE_PASTE_END}").into_bytes(),
+                REFERENCE_SUBMIT_ENTER.to_vec(),
+            ],
+            "the queued message was typed into the menu"
+        );
+    }
+
+    // rs-input-screen-r11-1
+    #[tokio::test]
+    async fn a_queued_submit_is_shaped_for_the_paste_mode_the_pane_is_in_when_it_is_typed() {
+        let queue = ReferenceInputQueue::new();
+        let (writer, started, release) = RecordingWriter::gated();
+        let clock = ManualClock::at(0);
+        let target = target("sess-a");
+        let authorize = allow();
+        let first_payload = submit_payload("make test");
+        let second_payload = submit_payload("y\nn");
+        let bracketed = AtomicBool::new(true);
+        let mode = || bracketed.load(Ordering::SeqCst);
+        let request = |request_id, payload| ReferenceSubmitRequest {
+            target: &target,
+            request_id,
+            payload,
+            bracketed_paste: &mode,
+            blocked_prompt: None,
+            arrived_at_ms: 0,
+            last_typed_at_ms: None,
+            authorize: &authorize,
+        };
+        let first_request = request("r1", &first_payload);
+        let second_request = request("r2", &second_payload);
+
+        let first = queue.submit(&first_request, writer.as_ref(), &clock);
+        let second = async {
+            started.await.expect("the first paste write started");
+            // The second message arrives while the pane still has bracketed paste on.
+            let second = queue.submit(&second_request, writer.as_ref(), &clock);
+            tokio::pin!(second);
+            tokio::select! {
+                biased;
+                outcome = &mut second => panic!("the second submit ran while the first held the step: {outcome:?}"),
+                _ = tokio::task::yield_now() => {}
+            }
+            // The first message's Enter makes zle leave bracketed paste (ESC[?2004l) and run it.
+            bracketed.store(false, Ordering::SeqCst);
+            release.send(()).expect("the first paste is released");
+            second.await
+        };
+        let (first, second) = tokio::join!(first, second);
+
+        assert!(first.is_typed(), "{first:?}");
+        assert!(second.is_typed(), "{second:?}");
+        assert_eq!(
+            writer.writes(),
+            vec![
+                format!("{REFERENCE_PASTE_START}make test{REFERENCE_PASTE_END}").into_bytes(),
+                REFERENCE_SUBMIT_ENTER.to_vec(),
+                b"y\rn".to_vec(),
+                REFERENCE_SUBMIT_ENTER.to_vec(),
+            ],
+            "the queued message was shaped for a paste mode the pane had already left"
+        );
+    }
+
+    /// Takes the paste, then never confirms the Enter: the caller is gone before it lands.
+    struct EnterHoldingWriter {
+        writes: Mutex<Vec<Vec<u8>>>,
+        pasted: Mutex<Option<oneshot::Sender<()>>>,
+    }
+
+    impl ReferenceInputWriter for EnterHoldingWriter {
+        fn write<'a>(
+            &'a self,
+            _session_id: &'a str,
+            data: &'a [u8],
+        ) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                let first = {
+                    let mut writes = self.writes.lock().expect("writes");
+                    writes.push(data.to_vec());
+                    writes.len() == 1
+                };
+                if !first {
+                    return std::future::pending().await;
+                }
+                if let Some(pasted) = self.pasted.lock().expect("pasted").take() {
+                    let _ = pasted.send(());
+                }
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_submit_dropped_between_its_paste_and_its_enter_settles_as_outcome_unknown() {
+        let queue = ReferenceInputQueue::new();
+        let (pasted_tx, pasted) = oneshot::channel();
+        let writer = EnterHoldingWriter {
+            writes: Mutex::new(Vec::new()),
+            pasted: Mutex::new(Some(pasted_tx)),
+        };
+        let clock = ManualClock::at(0);
+        let target = target("sess-a");
+        let payload = submit_payload("hello");
+        let authorize = allow();
+        let request = ReferenceSubmitRequest {
+            target: &target,
+            request_id: "r1",
+            payload: &payload,
+            bracketed_paste: &paste_on,
+            blocked_prompt: None,
+            arrived_at_ms: 0,
+            last_typed_at_ms: None,
+            authorize: &authorize,
+        };
+
+        let mut submit = Box::pin(queue.submit(&request, &writer, &clock));
+        tokio::select! {
+            biased;
+            outcome = submit.as_mut() => panic!("the Enter was never confirmed: {outcome:?}"),
+            _ = pasted => {}
+        }
+        // The caller disconnects: the handler future is dropped after the paste.
+        drop(submit);
+
+        let again = queue.submit(&request, RecordingWriter::new().as_ref(), &clock).await;
+        assert_eq!(again.wire_code().as_deref(), Some(REFERENCE_OUTCOME_UNKNOWN_CODE), "{again:?}");
+        assert!(
+            queue.records.lock().entries.values().all(|record| record.settled.is_some()),
+            "a dropped submit left an unsettled record behind"
+        );
+    }
 
     fn target(backend: &str) -> ReferenceTargetRef {
         ReferenceTargetRef::without_provider_session(TargetRef {
@@ -853,6 +1236,10 @@ mod tests {
 
     fn stop_payload(capability: ReferenceStopCapability) -> ReferenceStopPayload {
         ReferenceStopPayload { capability }
+    }
+
+    fn paste_on() -> bool {
+        true
     }
 
     fn allow() -> impl Fn() -> Result<(), ScopeError> + Send + Sync {
@@ -990,7 +1377,7 @@ mod tests {
             target,
             request_id,
             payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1195,7 +1582,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: Some("Would you like to run the following command?"),
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1212,7 +1599,7 @@ mod tests {
             target: &target,
             request_id: "r2",
             payload: &terminal_payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: Some("Would you like to run the following command?"),
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1236,7 +1623,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1262,7 +1649,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 1_000,
             last_typed_at_ms: Some(900),
@@ -1270,6 +1657,23 @@ mod tests {
         };
         assert!(queue.submit(&request, writer.as_ref(), &clock).await.is_typed());
 
+        assert_eq!(clock.sleeps(), vec![REFERENCE_TYPED_SETTLE_MS - 100, REFERENCE_SUBMIT_DELAY_MS]);
+    }
+
+    #[tokio::test]
+    async fn raw_keystrokes_noted_on_the_pane_hold_a_submit_for_the_typed_settle_window() {
+        let queue = ReferenceInputQueue::new();
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::at(1_000);
+        let target = target("sess-a");
+        queue.note_raw_input("sess-a", 900);
+        // Keys on another pane do not hold this one.
+        queue.note_raw_input("sess-b", 1_000);
+
+        let outcome =
+            submit_ok(&queue, writer.as_ref(), &clock, &target, "r1", &submit_payload("hello")).await;
+
+        assert!(outcome.is_typed());
         assert_eq!(clock.sleeps(), vec![REFERENCE_TYPED_SETTLE_MS - 100, REFERENCE_SUBMIT_DELAY_MS]);
     }
 
@@ -1293,7 +1697,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1309,6 +1713,37 @@ mod tests {
             writer.writes(),
             vec![format!("{REFERENCE_PASTE_START}hello{REFERENCE_PASTE_END}").into_bytes()]
         );
+    }
+
+    #[tokio::test]
+    async fn a_revoke_that_lands_during_the_prompt_probe_types_nothing() {
+        let queue = ReferenceInputQueue::new();
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::at(0);
+        let target = target("sess-a");
+        let payload = submit_payload("hello");
+        let revoked = AtomicBool::new(false);
+        let authorize = || if revoked.load(Ordering::SeqCst) { Err(refusal()) } else { Ok(()) };
+        // The device is revoked while the (slow, real) screen probe reads the pane.
+        let probe = || {
+            revoked.store(true, Ordering::SeqCst);
+            std::future::ready(ReferencePromptProbe::Clear)
+        };
+
+        let request = ReferenceSubmitRequest {
+            target: &target,
+            request_id: "r1",
+            payload: &payload,
+            bracketed_paste: &paste_on,
+            blocked_prompt: None,
+            arrived_at_ms: 0,
+            last_typed_at_ms: None,
+            authorize: &authorize,
+        };
+        let outcome = queue.submit_with_probe(&request, &probe, writer.as_ref(), &clock).await;
+
+        assert_eq!(outcome.wire_code().as_deref(), Some("UNAUTHORIZED"), "{outcome:?}");
+        assert!(writer.writes().is_empty(), "a revoke before the first byte must type nothing");
     }
 
     #[tokio::test]
@@ -1436,7 +1871,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1500,7 +1935,7 @@ mod tests {
             target: &held,
             request_id: "r1",
             payload: &held_payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: None,
             arrived_at_ms: 0,
             last_typed_at_ms: None,
@@ -1593,7 +2028,7 @@ mod tests {
             target: &target,
             request_id: "r1",
             payload: &payload,
-            bracketed_paste: true,
+            bracketed_paste: &paste_on,
             blocked_prompt: Some("Approve?"),
             arrived_at_ms: 0,
             last_typed_at_ms: None,

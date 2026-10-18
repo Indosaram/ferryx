@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActivitySummary } from "../lib/activity";
 import { saveBrowserSettings } from "../lib/browserSettings";
 import { clearSleepingSessions } from "../lib/sessionLifecycle";
+import { saveShortcutOverrides } from "../lib/shortcutOverrides";
+import { formatBindingLabel, isMacShortcutPlatform } from "../lib/shortcuts";
 import type { SystemPermissionsStatus, WorkspaceTab } from "../lib/types";
 import { TabBar } from "./TabBar";
 import { SortableTab } from "./tab-dnd/SortableTab";
@@ -509,6 +511,43 @@ describe("TabBar", () => {
     fireEvent.click(newTabButton);
     expect(nativeMenu.lastCall?.command).toBe("cmd_native_new_tab_menu");
     expect(screen.queryByRole("dialog", { name: "New tab menu" })).not.toBeInTheDocument();
+  });
+
+  describe("new tab button tooltip", () => {
+    function renderTabBar() {
+      render(
+        <TabBar
+          tabs={[terminalTab("tab-a", "main")]}
+          activeTabId="tab-a"
+          onActivate={vi.fn()}
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+        />,
+      );
+      return screen.getByRole("button", { name: "New tab" });
+    }
+
+    it("shows the default new terminal tab chord", () => {
+      const chord = formatBindingLabel({ key: "t", mod: true }, isMacShortcutPlatform());
+      expect(renderTabBar()).toHaveAttribute("title", `New tab (${chord})`);
+    });
+
+    it("shows a rebound chord and follows later rebinds", () => {
+      const isMac = isMacShortcutPlatform();
+      saveShortcutOverrides({ "tab.newTerminal": { key: "n", mod: true, alt: true } });
+      const button = renderTabBar();
+      expect(button).toHaveAttribute("title", `New tab (${formatBindingLabel({ key: "n", mod: true, alt: true }, isMac)})`);
+
+      act(() => {
+        saveShortcutOverrides({ "tab.newTerminal": { key: "y", mod: true, shift: true } });
+      });
+      expect(button).toHaveAttribute("title", `New tab (${formatBindingLabel({ key: "y", mod: true, shift: true }, isMac)})`);
+    });
+
+    it("shows only New tab when the command is unbound", () => {
+      saveShortcutOverrides({ "tab.newTerminal": null });
+      expect(renderTabBar()).toHaveAttribute("title", "New tab");
+    });
   });
 
   it("forwards launchable agents with brand icons and triggers onLaunchAgent from the new tab menu", () => {

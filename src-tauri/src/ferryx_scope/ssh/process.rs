@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-pub const HELPER_VERSION: &str = "2026.1009.1";
+pub const HELPER_VERSION: &str = "2026.1016.1";
 
 /// Capability tokens this helper can advertise, in handshake order. The last one
 /// is bound at runtime, so the handshake omits it when the listener is unavailable.
@@ -117,6 +117,7 @@ fn validate_private(path: &Path) -> Result<std::fs::Metadata, String> {
 #[cfg(windows)]
 fn validate_windows_acl(path: &Path) -> Result<(), String> {
     use base64::Engine as _;
+    use std::os::windows::process::CommandExt as _;
     let path_str = path
         .to_str()
         .ok_or_else(|| "FORBIDDEN: helper IPC path is invalid UTF-8".to_string())?;
@@ -125,6 +126,7 @@ fn validate_windows_acl(path: &Path) -> Result<(), String> {
         r#"$ProgressPreference='SilentlyContinue';$ErrorActionPreference='Stop';$raw=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'));if($raw.StartsWith('\\?\UNC\')){{$raw='\\'+$raw.Substring(8)}}elseif($raw.StartsWith('\\?\')){{$raw=$raw.Substring(4)}};$p=[System.IO.Path]::GetFullPath($raw);$item=Get-Item -LiteralPath $p -Force;$acl=$item.GetAccessControl();$u=[System.Security.Principal.WindowsIdentity]::GetCurrent();$allowed=@($u.User.Value,'S-1-5-18','S-1-5-32-544');$owner=try{{$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value}}catch{{$null}};if(-not $owner){{try{{$owner=(New-Object System.Security.Principal.NTAccount($acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value}}catch{{$owner=$acl.Owner}}}};if($allowed -notcontains $owner){{exit 1}};$rules=$acl.Access;if($null -eq $rules -or $rules.Count -eq 0){{exit 2}};$hasAllowed=$false;foreach($r in $rules){{if($r.AccessControlType.ToString() -eq 'Allow'){{$sid=try{{$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}}catch{{$r.IdentityReference.Value}};if($allowed -notcontains $sid){{exit 3}};$hasAllowed=$true}}}};if(-not $hasAllowed){{exit 4}};exit 0;"#
     );
     let output = std::process::Command::new("powershell.exe")
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .args([
             "-NoProfile",
             "-NonInteractive",

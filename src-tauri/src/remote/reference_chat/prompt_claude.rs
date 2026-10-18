@@ -934,7 +934,7 @@ fn parse_claude_confirm(screen: &str) -> Option<ClaudePrompt> {
         .iter()
         .enumerate()
         .filter(|(index, _)| *index < start as usize || *index > end as usize)
-        .map(|(_, line)| line.trim_end().chars().count())
+        .map(|(_, line)| display_width(line.trim_end()))
         .max()
         .unwrap_or(0);
     let mut unsure = false;
@@ -945,9 +945,9 @@ fn parse_claude_confirm(screen: &str) -> Option<ClaudePrompt> {
         if let Some(previous) = rows.last_mut() {
             if !selected {
                 let above = &lines[index - 1];
-                let above_len = above.trim_end().chars().count();
+                let above_len = display_width(above.trim_end());
                 let first_word = &line[..line.find(char::is_whitespace).unwrap_or(line.len())];
-                if above_len + 1 + first_word.chars().count() > width {
+                if above_len + 1 + display_width(first_word) > width {
                     if above_len > width {
                         unsure = true;
                     }
@@ -1000,7 +1000,8 @@ fn parse_claude_confirm(screen: &str) -> Option<ClaudePrompt> {
         .first()
         .cloned()
         .unwrap_or_else(|| "Choose an option".to_string());
-    let prose = normalize_text(&panel[1..].join(" "));
+    // the panel is empty when the rows start the screen or sit right under a rule
+    let prose = normalize_text(&panel.get(1..).unwrap_or_default().join(" "));
     let asked = asked_question()
         .captures(&prose)
         .and_then(|captures| captures.get(1))
@@ -2049,6 +2050,18 @@ claude_pattern!(claude_tip, r#"^Try ""#);
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_confirm_with_no_panel_above_its_rows_reads_without_panicking() {
+        for screen in [
+            "❯ Yes\n  No\n\nEnter to confirm · Esc to cancel",
+            "────────\n❯ Yes\n  No\n\nEnter to confirm · Esc to cancel",
+        ] {
+            let parsed = parse_claude_prompt(screen).expect("the confirm is a card");
+            assert_eq!(parsed.prompt.kind, ReferencePromptKind::Menu);
+            assert_eq!(parsed.prompt.title, "Choose an option");
+        }
+    }
+
     const QUESTION: &str = include_str!("fixtures/claude/prompt/question.screen");
     const QUESTION_TABS: &str = include_str!("fixtures/claude/prompt/question-tabs.screen");
     const QUESTION_TABS_MULTI: &str =
@@ -2073,6 +2086,7 @@ mod tests {
     const TRUST_MENU: &str = include_str!("fixtures/claude/prompt/trust-menu.screen");
     const CONFIRM_NARROW: &str = include_str!("fixtures/claude/prompt/confirm-narrow.screen");
     const CONFIRM_AMBIGUOUS: &str = include_str!("fixtures/claude/prompt/confirm-ambiguous.screen");
+    const CONFIRM_WIDE_WRAP: &str = include_str!("fixtures/claude/prompt/confirm-wide-wrap.screen");
     const ANSWERED: &str = include_str!("fixtures/claude/prompt/answered.screen");
     const MODEL: &str = include_str!("fixtures/claude/prompt/model.screen");
     const MODEL_FAMILIES: &str = include_str!("fixtures/claude/prompt/model-families.screen");
@@ -2405,6 +2419,24 @@ mod tests {
     fn confirm_menu_keeps_a_label_a_narrow_pane_wrapped_as_one_row() {
         let parsed = read(CONFIRM_NARROW);
         assert_eq!(labels(&parsed.prompt), vec!["No, exit", "Yes, I trust this folder"]);
+    }
+
+    #[test]
+    fn confirm_menu_measures_a_wrapped_wide_label_in_columns() {
+        // the Korean label fills 65 of the pane's 78 columns in 37 characters: its tail did not
+        // fit after it, so it is the same row, and "No, exit" is the second row, not the third
+        let parsed = read(CONFIRM_WIDE_WRAP);
+        assert_eq!(
+            labels(&parsed.prompt),
+            vec![
+                "이폴더를 신뢰하고 작업공간 파일들을 읽고쓰고 실행하는 것에대해 계속진행합니다",
+                "No, exit"
+            ]
+        );
+        assert_eq!(
+            plan_claude_answer(&parsed, &option(1)).expect("a row is an answer"),
+            vec![ReferenceKeyStep::keys([KEY_DOWN]), enter()]
+        );
     }
 
     #[test]

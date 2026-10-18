@@ -2151,6 +2151,7 @@ impl RemoteSessionBackend for GapChunkTestBackend {
                 history_end_sequence: Some(self.snapshot_sequence),
                 history: self.snapshot_history.clone(),
                 history_segments: Vec::new(),
+                history_incomplete: false,
                 gap: Some(crate::terminal::output_hub::ReplayGap {
                     requested_after_sequence: 1,
                     available_from_sequence: self.snapshot_sequence + 1,

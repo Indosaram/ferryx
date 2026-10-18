@@ -84,7 +84,7 @@ try {{
             ),
             false,
         )?;
-        let mut child = tokio::process::Command::new(&plan.program)
+        let mut child = crate::util::no_window_tokio_command(&plan.program)
             .args(&plan.args)
             .envs(super::password::environment(&plan.args)?)
             .stdin(Stdio::piped())

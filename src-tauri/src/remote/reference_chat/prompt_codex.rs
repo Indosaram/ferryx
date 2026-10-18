@@ -583,6 +583,9 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
     let menu_row_count: usize;
     let selected_index: usize;
     let mut position: Option<(String, String)> = None;
+    // The last row already holds typed text: Codex has no clear-line key for it, so a custom
+    // answer typed there would be appended to that text. Such a row takes no custom answer.
+    let mut typed_row_holds_text = false;
 
     if rows.is_empty() {
         // free form: the answer line sits right above the hint
@@ -603,6 +606,9 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
             return None;
         }
         question = Some(normalized);
+        // the line holds text once it no longer shows the empty-answer placeholder
+        typed_row_holds_text =
+            !re_type_your_answer().is_match(clean_line(&lines[answer_line]).trim());
         options = Vec::new();
         menu_row_count = 0;
         selected_index = 0;
@@ -642,6 +648,10 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
                 Some(normalized)
             };
         }
+        if header.is_some() {
+            let last = labels.last().map(|label| label.trim()).unwrap_or("");
+            typed_row_holds_text = !last.is_empty() && !re_other_row().is_match(last);
+        }
         options = labels[..labels.len() - 1]
             .iter()
             .map(|label| ReferencePromptOption {
@@ -658,8 +668,8 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
         Some((asked, total)) => format!("Question {asked} of {total}"),
         None => "Question".to_string(),
     };
-    let custom_menu_index = menu_row_count.saturating_sub(1);
-    let custom_option_index = Some(options.len() as u32);
+    let custom_menu_index = (!typed_row_holds_text).then(|| menu_row_count.saturating_sub(1));
+    let custom_option_index = (!typed_row_holds_text).then(|| options.len() as u32);
     let parsed = finish_codex_prompt(FinishCodexPrompt {
         kind: ReferencePromptKind::Question,
         title,
@@ -671,7 +681,7 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
         queued: Some(ReferencePromptQueueState::Open),
         responder: ReferenceCodexResponder::AsyncQuestion,
         selected_index,
-        custom_menu_index: Some(custom_menu_index),
+        custom_menu_index,
         reject_with_escape_index: None,
         option_steps: None,
         row_key: None,
@@ -1686,6 +1696,7 @@ pinned_regex!(re_messages_to_be_submitted, r"(?i)Messages to be submitted");
 pinned_regex!(re_to_answer, r"(?i)\bto answer$");
 pinned_regex!(re_none_of_the_above, r"(?i)^None of the above\b");
 pinned_regex!(re_other_row, r"(?i)^Other\b");
+pinned_regex!(re_type_your_answer, r"(?i)^Type your answer$");
 pinned_regex!(
     re_codex_approval_header,
     r"(?i)(?:Would you like to (?:run|make|apply|continue|grant)|Allow Codex to|Approve (?:this )?(?:app )?tool call|Do you trust the contents|Trust this folder\?|Enable full access)"
@@ -1965,18 +1976,55 @@ mod tests {
         );
     }
 
+    /// A free-form answer line that already holds typed text takes no custom answer: Codex has no
+    /// clear-line key, so a typed answer would be appended to that text.
+    #[test]
+    fn a_free_form_answer_line_holding_text_takes_no_custom_answer() {
+        let screen = ASYNC_FREE_FORM.replace("  Type your answer\n", "  abc\n");
+        assert_ne!(screen, ASYNC_FREE_FORM, "the fixture holds the placeholder line");
+        let parsed = parse_reference_codex_prompt(&screen).expect("the free form parses");
+        assert_eq!(parsed.responder, ReferenceCodexResponder::AsyncQuestion);
+        assert_eq!(parsed.prompt.question, "Any notes?");
+        assert_eq!(parsed.prompt.custom_option_index, None);
+        assert_eq!(parsed.custom_menu_index, None);
+    }
+
+    /// The placeholder line, in any case and with surrounding spaces, stays answerable.
+    #[test]
+    fn a_free_form_placeholder_line_keeps_its_custom_answer() {
+        for placeholder in ["Type your answer", "type your answer  "] {
+            let screen =
+                ASYNC_FREE_FORM.replace("  Type your answer\n", &format!("  {placeholder}\n"));
+            let parsed = parse_reference_codex_prompt(&screen).expect("the free form parses");
+            assert_eq!(parsed.prompt.custom_option_index, Some(0), "{placeholder:?}");
+            assert_eq!(parsed.custom_menu_index, Some(0), "{placeholder:?}");
+        }
+    }
+
     /// A last row already typed over still counts as the typed row, and its options are the ones
     /// above it.
     #[test]
     fn the_open_queue_question_reads_a_row_already_typed_over() {
         let parsed = parse_reference_codex_prompt(ASYNC_TYPED_ROW).expect("the typed row parses");
         assert_eq!(labels(&parsed), vec!["train", "test"]);
-        assert_eq!(parsed.prompt.custom_option_index, Some(2));
         assert_eq!(parsed.selected_index, 2);
         assert_eq!(
             texts(&plan_reference_codex_answer(&parsed, &answer(Some(0), None, None)).unwrap()),
             vec![keys_of(&["up"]), keys_of(&["up"]), keys_of(&["enter"])]
         );
+    }
+
+    /// A typed row that already holds text cannot take a custom answer: Codex has no clear-line
+    /// key here, so the answer would be appended to what is already typed.
+    #[test]
+    fn a_custom_answer_is_refused_on_a_row_already_typed_over() {
+        let parsed = parse_reference_codex_prompt(ASYNC_TYPED_ROW).expect("the typed row parses");
+        assert_eq!(parsed.prompt.custom_option_index, None);
+        assert_eq!(parsed.custom_menu_index, None);
+        assert!(
+            plan_reference_codex_answer(&parsed, &answer(None, None, Some("validation"))).is_err()
+        );
+        assert!(plan_reference_codex_answer(&parsed, &answer(Some(2), None, None)).is_err());
     }
 
     /// The collapsed queue is not a screen card at all: only the rollout-backed card answers it.

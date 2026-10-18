@@ -122,6 +122,15 @@ pub fn parse_omp_transcript_limited(
     Ok(parse_records(text, max_turns))
 }
 
+/// As [`parse_omp_transcript`], starting from task titles an earlier page recorded, so a task
+/// whose call sits on an older page is still named by it.
+pub fn parse_omp_transcript_with_titles(
+    text: &str,
+    task_titles: HashMap<String, String>,
+) -> Vec<ReferenceTurn> {
+    parse_records_from(text, None, task_titles)
+}
+
 /// The skills a user prompt's instruction envelope named, and the request under it.
 ///
 /// Mirrors `skillInvocationPrompt` (`skill-activity.ts:41-63`): chained
@@ -205,7 +214,15 @@ struct OmpState {
 }
 
 fn parse_records(text: &str, max_turns: Option<usize>) -> Vec<ReferenceTurn> {
-    let mut state = OmpState::default();
+    parse_records_from(text, max_turns, HashMap::new())
+}
+
+fn parse_records_from(
+    text: &str,
+    max_turns: Option<usize>,
+    task_titles: HashMap<String, String>,
+) -> Vec<ReferenceTurn> {
+    let mut state = OmpState { task_titles, ..OmpState::default() };
 
     for line in text.split('\n') {
         if line.trim().is_empty() {

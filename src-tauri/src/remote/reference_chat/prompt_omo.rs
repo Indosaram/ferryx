@@ -155,6 +155,8 @@ pub struct OmoMultiPlan {
     pub cursor: Option<usize>,
     /// The rows the walk counts to the end from, when the cursor was out of view.
     pub rows: usize,
+    /// The options shown checked, or `None` when not every option row was in view.
+    pub checked: Option<Vec<usize>>,
 }
 
 /// A parsed OmO card: the public prompt plus the plan its answer needs.
@@ -969,7 +971,8 @@ fn omo_question_view(lines: &[String], start: usize, end: usize, cut: bool) -> O
                 }
             }
         };
-        if let Some(number) = row {
+        // Options count from 1: a row numbered 0 is never one, even where a cut form starts.
+        if let Some(number) = row.filter(|number| *number >= 1) {
             if Some(number) == next && (selected || (indent >= 2 && indent < 5)) {
                 view.rows.push(OmoRow {
                     number,
@@ -1156,6 +1159,17 @@ fn parse_omo_question(lines: &[String], ask: Option<&OmoAsk>, trusted: bool) -> 
     let selected_index = if own_selected { Some(options.len()) } else { highlighted.map(|row| row.number - 1) };
     let option_count = options.len();
     let rows = option_count + 1;
+    // A row's checked state is known only when every option row is in view.
+    let checked = (view.rows.len() == option_count
+        && view.rows.iter().enumerate().all(|(at, row)| row.number == at + 1))
+    .then(|| {
+        view.rows
+            .iter()
+            .zip(&shown_labels)
+            .filter(|(_, label)| ends_with_answered(label))
+            .map(|(row, _)| row.number - 1)
+            .collect::<Vec<usize>>()
+    });
     let option_plans: Vec<Vec<ReferenceKeyStep>> = (0..option_count)
         .map(|option| {
             let mut keys = omo_walk(option, selected_index, rows);
@@ -1183,7 +1197,7 @@ fn parse_omo_question(lines: &[String], ask: Option<&OmoAsk>, trusted: bool) -> 
         call: known.map(|ask| ask.id.as_str()),
         option_plans,
         custom_plan: Some(OmoCustomPlan { lead: custom_lead, tail: key_steps(&["enter"]) }),
-        multi_plan: Some(OmoMultiPlan { cursor: selected_index, rows }),
+        multi_plan: Some(OmoMultiPlan { cursor: selected_index, rows, checked }),
         reject_with_escape_index: None,
     }))
 }
@@ -1528,7 +1542,7 @@ fn parse_omo_pending(lines: &[String], pending: &[OmoAsk]) -> Option<OmoCard> {
         // Validation only: execution requires the opened form and its freshly read cursor.
         option_plans: vec![Vec::new(); option_count],
         custom_plan: Some(OmoCustomPlan { lead: Vec::new(), tail: Vec::new() }),
-        multi_plan: Some(OmoMultiPlan { cursor: None, rows: option_count }),
+        multi_plan: Some(OmoMultiPlan { cursor: None, rows: option_count, checked: None }),
         reject_with_escape_index: None,
     }))
 }
@@ -1760,10 +1774,14 @@ fn prompt_tail_is_active(responder: OmoResponder, screen: &str) -> bool {
             return false;
         };
         let mut end = at;
-        while end < at + OMO_HINT_LINES && !hint_end_re().is_match(clean_lines[at..=end].join(" ").trim()) {
+        while end < at + OMO_HINT_LINES
+            && end < clean_lines.len()
+            && !hint_end_re().is_match(clean_lines[at..=end].join(" ").trim())
+        {
             end += 1;
         }
-        if end >= at + OMO_HINT_LINES {
+        // A hint that never ends in its esc phrase, before the screen itself ends, is not OmO's.
+        if end >= at + OMO_HINT_LINES || end >= clean_lines.len() {
             return false;
         }
         return footer_is_omo(&clean_lines[end + 1..]);
@@ -1874,14 +1892,18 @@ pub fn omo_answer_plan(card: &OmoCard, answer: &ReferencePromptAnswer) -> Result
         if card.responder == OmoResponder::Pending {
             return Ok(Vec::new());
         }
+        // Toggle only the rows whose shown state differs from the answer; a row out of view has
+        // an unknown state, so the answer is refused rather than guessed.
+        let checked = multi.checked.as_ref().ok_or(ScopeErrorCode::InvalidRequest)?;
         let mut keys: Vec<&'static str> = vec!["backspace"];
         let mut at = multi.cursor;
-        let mut sorted = choices.clone();
-        sorted.sort_unstable();
-        for option in sorted {
-            keys.extend(omo_walk(option as usize, at, multi.rows));
+        for option in 0..prompt.options.len() {
+            if choices.contains(&(option as u32)) == checked.contains(&option) {
+                continue;
+            }
+            keys.extend(omo_walk(option, at, multi.rows));
             keys.push("space");
-            at = Some(option as usize);
+            at = Some(option);
         }
         keys.push("tab");
         return Ok(key_steps(&keys));
@@ -1946,6 +1968,16 @@ mod tests {
 
     fn option_answer(index: u32) -> ReferencePromptAnswer {
         ReferencePromptAnswer { option_index: Some(index), ..Default::default() }
+    }
+
+    #[test]
+    fn a_hint_that_does_not_end_in_an_esc_phrase_at_the_screens_end_is_no_card() {
+        let lines: Vec<&str> = FORM_TABBED.lines().collect();
+        let hint = lines.iter().position(|line| line.contains("esc cancel")).expect("the form has a hint");
+        let mut cut: Vec<String> = lines[..hint].iter().map(|line| line.to_string()).collect();
+        cut.push(format!("{}  x", lines[hint]));
+        let screen = cut.join("\n");
+        assert!(omo_card_for_screen("omo", &screen, None, true, &[]).is_none());
     }
 
     #[test]
@@ -2070,11 +2102,48 @@ mod tests {
         assert!(prompt.steps.is_empty(), "one question: the card shows no steps");
         assert_eq!(card.option_plans[0], key_steps(&["enter"]));
         assert_eq!(card.option_plans[1], key_steps(&["down", "enter"]));
-        assert_eq!(card.multi_plan, Some(OmoMultiPlan { cursor: Some(0), rows: 3 }));
+        assert_eq!(card.multi_plan, Some(OmoMultiPlan { cursor: Some(0), rows: 3, checked: Some(vec![1]) }));
         assert_eq!(
             omo_answer_plan(&card, &ReferencePromptAnswer { option_indices: Some(vec![0, 1]), ..Default::default() }),
+            Ok(key_steps(&["backspace", "space", "tab"])),
+            "the unchecked row is toggled on, the checked one kept, then the form moves on"
+        );
+    }
+
+    #[test]
+    fn a_multi_select_answer_leaves_already_checked_rows_ticked() {
+        let card = card_for("omo", FORM_MULTI, ASKS_MULTI).expect("the multiple choice is a card");
+        let both = ReferencePromptAnswer { option_indices: Some(vec![0, 1]), ..Default::default() };
+        assert_eq!(
+            omo_answer_plan(&card, &both),
+            Ok(key_steps(&["backspace", "space", "tab"])),
+            "row 2 is already checked: only row 1 is toggled on"
+        );
+        let first_only = ReferencePromptAnswer { option_indices: Some(vec![0]), ..Default::default() };
+        assert_eq!(
+            omo_answer_plan(&card, &first_only),
             Ok(key_steps(&["backspace", "space", "down", "space", "tab"])),
-            "the chosen row is toggled off, the other on, then the form moves on"
+            "row 1 is toggled on and the checked row 2 toggled off"
+        );
+        let second_only = ReferencePromptAnswer { option_indices: Some(vec![1]), ..Default::default() };
+        assert_eq!(
+            omo_answer_plan(&card, &second_only),
+            Ok(key_steps(&["backspace", "tab"])),
+            "the screen already shows the answer: nothing is toggled"
+        );
+    }
+
+    #[test]
+    fn a_multi_select_answer_is_refused_when_an_option_row_is_out_of_view() {
+        let mut card = card_for("omo", FORM_MULTI, ASKS_MULTI).expect("the multiple choice is a card");
+        let multi = card.multi_plan.as_mut().expect("a multiple choice has a plan");
+        assert_eq!(multi.checked, Some(vec![1]), "every row is in view: row 2 reads as checked");
+        multi.checked = None;
+        let both = ReferencePromptAnswer { option_indices: Some(vec![0, 1]), ..Default::default() };
+        assert_eq!(
+            omo_answer_plan(&card, &both),
+            Err(ScopeErrorCode::InvalidRequest),
+            "a row out of view has an unknown checked state"
         );
     }
 
@@ -2382,6 +2451,26 @@ mod tests {
         assert_eq!(planner(&card, &option_answer(1)), Ok(key_steps(&["down", "enter"])));
         let unusable = ReferencePromptAnswer::default();
         assert_eq!(planner(&card, &unusable), Err("invalid_answer".to_string()));
+    }
+
+    #[test]
+    fn a_cut_form_row_numbered_zero_is_not_an_option_row() {
+        let session = r#"{"type":"message","id":"m","timestamp":"2026-10-06T10:00:00.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-zero","name":"ask_user_question","arguments":{"questions":[{"header":"선택","question":"어느 쪽으로 할까요?","multiSelect":false,"options":[{"label":"Alpha","description":null}]}],"waitForAnswer":true}}]}}"#;
+        let screen = [
+            "  → 0. Alpha",
+            "  1. Alpha",
+            "  Type your own answer...",
+            "  ↑↓ move  1-9 select  space select  enter next  tab next question  c comment  esc cancel",
+            " ────────────────",
+            " ~/dev/ferryx (main)",
+            " omo 5.1.19 ·  · 12.3k tokens",
+        ]
+        .join("\n");
+        let card = card_for("omo", &screen, session).expect("the cut form's row 1 is the call's only option");
+        assert_eq!(card.prompt.options, vec![option("Alpha", None)]);
+        // Row 0 is no option, so the cursor on it is not in the list: the plan starts from the top.
+        assert_eq!(card.multi_plan.as_ref().map(|plan| plan.cursor), Some(None));
+        assert_eq!(card.option_plans[0], key_steps(&["up", "up", "enter"]));
     }
 }
 

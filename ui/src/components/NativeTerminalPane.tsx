@@ -28,6 +28,14 @@ import {
 } from "../lib/nativeTerminalLifecycle";
 import { switchDebug } from "../lib/switchDebug";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
+import { isWindowsHost } from "../lib/platform";
+import {
+  TERMINAL_COPY_MODE_EVENT,
+  TerminalCopyModeBadge,
+  useTerminalCopyMode,
+  type CopyModeGridSize,
+  type TerminalCopyModeEventDetail,
+} from "./TerminalCopyMode";
 import { openTerminalToken, resolveTokenAtCol } from "../lib/linkRouting";
 import { loadFileLinkEditor } from "../lib/fileLinkSettings";
 import {
@@ -139,6 +147,9 @@ interface NativeTerminalReceipt {
   readonly cellWidthPx: number;
   readonly cellHeightPx: number;
   readonly effectiveScaleFactor?: number | null;
+  /** Grid size; present on bounds receipts (NativeTerminalBoundsReceipt.cols/rows). */
+  readonly cols?: number;
+  readonly rows?: number;
 }
 
 interface ImeAnchor {
@@ -561,6 +572,15 @@ function estimateInputBytes(input: NativeTerminalInput): number {
   return 32;
 }
 
+// Text with no C0 control or DEL bytes: the backend writes text input verbatim
+// (NativeTerminalInput::Text -> text.as_bytes()), so appending it to a queued text write
+// produces exactly the bytes of two separate writes. Control text such as Ctrl+V's \u0016
+// is excluded so it keeps its own write.
+function isCoalescablePrintableText(input: NativeTerminalInput): input is { readonly text: string } {
+  return "text" in input && typeof input.text === "string" && input.text.length > 0 &&
+    !/[\u0000-\u001f\u007f]/.test(input.text);
+}
+
 export function resetNativeTerminalPaneForTest(): void {
   sessionInputRecoveries.clear();
   mountedNativeTerminalSessionCounts.clear();
@@ -577,6 +597,7 @@ export function NativeTerminalPane({
   splitAttempt,
   className,
   style,
+  activity,
   needsAttention = false,
   active,
   onRefreshSessionIdentity,
@@ -660,6 +681,21 @@ export function NativeTerminalPane({
       ? (session.backendSessionId ?? null)
       : (sessionId ?? null);
   const paneIdentity = session?.id ?? sessionId;
+  const copyModeGridRef = useRef<CopyModeGridSize>({ cols: 80, rows: 24 });
+  const copyMode = useTerminalCopyMode(targetSessionId, copyModeGridRef);
+  const copyModeActiveRef = copyMode.activeRef;
+  const toggleCopyMode = copyMode.toggle;
+  const copyModeOnOutput = copyMode.onOutput;
+  const copyModeHandleKey = copyMode.handleKey;
+  useEffect(() => {
+    const onToggle = (event: Event) => {
+      const detail = (event as CustomEvent<TerminalCopyModeEventDetail>).detail;
+      if (!detail || !paneIdentity || detail.sessionId !== paneIdentity) return;
+      toggleCopyMode();
+    };
+    window.addEventListener(TERMINAL_COPY_MODE_EVENT, onToggle);
+    return () => window.removeEventListener(TERMINAL_COPY_MODE_EVENT, onToggle);
+  }, [paneIdentity, toggleCopyMode]);
   useEffect(() => {
     switchDebug("terminal.surface.input.gate.state", {
       paneIdentity,
@@ -891,6 +927,9 @@ export function NativeTerminalPane({
       width: receipt.cellWidthPx,
       height: receipt.cellHeightPx,
     };
+    if (typeof receipt.cols === "number" && typeof receipt.rows === "number" && receipt.cols > 0 && receipt.rows > 0) {
+      copyModeGridRef.current = { cols: receipt.cols, rows: receipt.rows };
+    }
     setImeAnchor({
       left: (receipt.cursorCol * receipt.cellWidthPx) / scaleFactor,
       top: (receipt.cursorRow * receipt.cellHeightPx) / scaleFactor,
@@ -1513,6 +1552,11 @@ export function NativeTerminalPane({
   }, [remoteConnectionState, remoteGeneration, session?.remoteConnectionState, session?.remoteGeneration, session?.workspaceId, targetSessionId, visible]);
 
   const sendInput = useCallback((input: NativeTerminalInput) => {
+    // Copy mode owns the keyboard: nothing (keys, IME commits, AltGr text) reaches the PTY.
+    if (copyModeActiveRef.current) {
+      switchDebug("terminal.surface.input.copyMode", { backendSessionId: targetSessionId });
+      return;
+    }
     if (!visible || !isTauri() || !targetSessionId) {
       recordTerminalInputDrop("dropped");
       switchDebug("terminal.surface.input.dropped", {
@@ -1609,6 +1653,13 @@ export function NativeTerminalPane({
         // The command resolves as soon as the PTY write lands; the receipt that positions the IME
         // candidate window now arrives on `native_terminal_input_receipt`. Waiting for it here used
         // to hold this session's queue slot for the whole round trip, delaying the next keystroke.
+        const sendText = (text: string, requestId: string) =>
+          invoke<void>("cmd_native_terminal_send_input", {
+            sessionId: currentSessionId,
+            input: { text },
+            ...(generation != null ? { generation } : {}),
+            requestId,
+          });
         await terminalInputQueue.enqueue(
           currentSessionId,
           generation,
@@ -1624,7 +1675,12 @@ export function NativeTerminalPane({
           undefined,
           "input",
           undefined,
-          { recover: recoverInput },
+          {
+            recover: recoverInput,
+            ...(isCoalescablePrintableText(input)
+              ? { coalesceText: { text: input.text, send: sendText } }
+              : {}),
+          },
         );
         if (!isCurrentOwner()) return;
         emitNativeObservationRef.current("input-delivered", {
@@ -1795,7 +1851,7 @@ export function NativeTerminalPane({
 
   const sendPaste = useCallback(
     (text: string) => {
-      if (!visible || !isTauri() || !targetSessionId) {
+      if (copyModeActiveRef.current || !visible || !isTauri() || !targetSessionId) {
         return;
       }
       if (paneIdentity) {
@@ -1855,6 +1911,10 @@ export function NativeTerminalPane({
     isRemoteWorkspaceId(session?.workspaceId) || isPairedWorkspaceId(session?.workspaceId)
       ? (session?.workspaceId ?? null)
       : null;
+  // Local agents (omo, Claude Code, Codex) attach an image only when they read the clipboard on
+  // their own paste chord; a pasted temp-file path reaches them as plain text. Windows agents
+  // bind image paste to a different chord than 0x16, so they keep the path.
+  const agentReadsLocalClipboard = activity?.isAgent === true && !isWindowsHost();
 
   const pasteClipboardImage = useCallback(() => {
     if (remoteWorkspaceId) {
@@ -1883,13 +1943,14 @@ export function NativeTerminalPane({
       // to rebind or unmount. The owner token is replaced on every rebind/visibility commit, so a
       // stale result never pastes a path that only the previous destination can read.
       const requestOwner = surfaceOwnerRef.current;
-      void pasteClipboardImageLocally(targetSessionId)
+      void pasteClipboardImageLocally(targetSessionId, agentReadsLocalClipboard)
         .then((result) => {
           if (requestOwner === null || surfaceOwnerRef.current !== requestOwner) {
             return;
           }
           if (!result) {
-            // Same degrade as the remote branch: null means no readable image on the clipboard.
+            // Null means no readable image, or a local agent that reads the clipboard itself:
+            // either way the paste chord is what the foreground process needs.
             sendImagePasteShortcut();
             return;
           }
@@ -1904,7 +1965,7 @@ export function NativeTerminalPane({
           );
         });
     }
-  }, [remoteWorkspaceId, sendImagePasteShortcut, sendPaste, targetSessionId]);
+  }, [agentReadsLocalClipboard, remoteWorkspaceId, sendImagePasteShortcut, sendPaste, targetSessionId]);
 
   const suppressNextPasteRef = useRef(false);
 
@@ -1946,7 +2007,7 @@ export function NativeTerminalPane({
     button: "Left" | "Right" | null,
   ) => {
     const viewport = viewportRef.current;
-    if (!visible || !isTauri() || !targetSessionId || !viewport) return;
+    if (copyModeActiveRef.current || !visible || !isTauri() || !targetSessionId || !viewport) return;
     const rect = viewport.getBoundingClientRect();
     const timestampNs = Math.round(
       (typeof event.timeStamp === "number" && event.timeStamp > 0
@@ -2070,7 +2131,10 @@ export function NativeTerminalPane({
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void onNativeTerminalScrollbar((metrics) => {
-      if (metrics.sessionId === targetSessionId) updateScrollbar(metrics);
+      if (metrics.sessionId !== targetSessionId) return;
+      updateScrollbar(metrics);
+      // Output while copy mode is active: re-read pruning; the viewport stays frozen.
+      copyModeOnOutput();
     }).then((listener) => {
       if (disposed) listener();
       else unlisten = listener;
@@ -2080,7 +2144,7 @@ export function NativeTerminalPane({
       disposed = true;
       unlisten?.();
     };
-  }, [targetSessionId, updateScrollbar, visible]);
+  }, [copyModeOnOutput, targetSessionId, updateScrollbar, visible]);
 
   useEffect(() => {
     let plainDown: { clientX: number; clientY: number } | null = null;
@@ -2330,6 +2394,16 @@ export function NativeTerminalPane({
         }
         return;
       }
+      // Copy mode gate (after the IME/AltGr gate): keys become motions, never PTY input. A chord
+      // an app shortcut already claimed (the copy-mode toggle itself) is left alone, and the
+      // platform copy chord keeps its usual meaning.
+      if (copyModeActiveRef.current) {
+        if (event.defaultPrevented || !canClaimInput || isCopyShortcut(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        copyModeHandleKey(event);
+        return;
+      }
 
       if (
         targetEl !== inputRef.current &&
@@ -2481,7 +2555,7 @@ export function NativeTerminalPane({
       window.removeEventListener("blur", clearPasteSuppression);
       clearPasteSuppression();
     };
-  }, [active, copySelectionOrInterrupt, pasteClipboardImage, performNativePasteFallback, sendCtrlC, sendImagePasteShortcut, sendInput, sendPaste, session?.workspaceId, targetSessionId, visible]);
+  }, [active, copyModeActiveRef, copyModeHandleKey, copySelectionOrInterrupt, pasteClipboardImage, performNativePasteFallback, sendCtrlC, sendImagePasteShortcut, sendInput, sendPaste, session?.workspaceId, targetSessionId, visible]);
 
   useEffect(() => {
     if (!visible || !targetSessionId || !isTauri()) return;
@@ -3608,6 +3682,8 @@ export function NativeTerminalPane({
       }}
       onWheel={(event) => {
         if (!visible || event.deltaY === 0 || !Number.isFinite(event.deltaY)) return;
+        // A wheel under mouse tracking / alternate scroll writes to the PTY; copy mode forbids it.
+        if (copyModeActiveRef.current) return;
         triggerScrollbarReveal();
         if (!isTauri() || !targetSessionId) return;
         let deltaRows: number;
@@ -3768,6 +3844,17 @@ export function NativeTerminalPane({
               return;
             }
             if (isAltGraphTextInput(forwardable)) {
+              return;
+            }
+
+            if (copyModeActiveRef.current) {
+              if (isCopyShortcut(event)) {
+                event.preventDefault();
+                copySelectionOrInterrupt();
+                return;
+              }
+              event.preventDefault();
+              copyModeHandleKey(event);
               return;
             }
 
@@ -3981,6 +4068,7 @@ export function NativeTerminalPane({
           />
         ) : null}
       </div>
+      {copyMode.active ? <TerminalCopyModeBadge /> : null}
       {error ? (
         <button
           type="button"

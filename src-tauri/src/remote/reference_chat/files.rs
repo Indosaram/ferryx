@@ -20,8 +20,9 @@
 //!
 //! * Staging happens on the OWNING host. The receipt is the existing owner-private
 //!   'AttachmentReceipt' (host, opaque id, sha256, size, media type) and carries NO filesystem
-//!   path; the path the agent receives is the editable '@name ' mention built from the staged
-//!   file's own name, resolved against the pane's own working directory.
+//!   path; the path the agent receives is the editable '@<dir>/<id>/<name> ' mention. The bytes
+//!   are staged INSIDE the pane's own working directory (under 'REFERENCE_STAGING_DIR_NAME'),
+//!   so that relative mention resolves, from the pane's cwd, to exactly the uploaded bytes.
 //! * The bytes never travel through a managed turn and no child process is launched anywhere in
 //!   this file. 'reference_file_send_plan' returns an ordinary 'ReferenceSubmitPayload' whose
 //!   'attachment_ids' is EMPTY: the mention is text the user can still edit, and it reaches the
@@ -66,10 +67,10 @@ use super::types::{
     ReferenceSubmitPayload,
 };
 
-/// Directory under the host temp root that holds this lane's staged files.
-pub const REFERENCE_STAGING_DIR_NAME: &str = "ferryx-reference-chat-files";
-/// Environment override for the staging root (a host with its own layout, and tests).
-pub const REFERENCE_STAGING_DIR_ENV: &str = "FERRYX_REFERENCE_FILES_DIR";
+/// Directory under the pane's working directory that holds this lane's staged files.
+pub const REFERENCE_STAGING_DIR_NAME: &str = ".ferryx-reference-chat-files";
+/// File, in the gateway's owner-private data directory, listing every staging base it used.
+pub const REFERENCE_STAGING_LEDGER_NAME: &str = "reference-chat-staging-bases.txt";
 /// Environment override for the owning host id reported on the receipt.
 pub const REFERENCE_HOST_ID_ENV: &str = "FERRYX_HOST_ID";
 /// Host id used when the host did not name itself.
@@ -79,15 +80,9 @@ pub const REFERENCE_FILE_MAX_NAME_BYTES: usize = 255;
 /// Route suffix for the file routes, under the frozen reference-chat prefix.
 pub const REFERENCE_FILE_ROUTE_SUFFIX: &str = "files";
 
-/// The owning host's staging root: the environment override, else the host temp root.
-pub fn reference_staging_base_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os(REFERENCE_STAGING_DIR_ENV) {
-        return PathBuf::from(dir);
-    }
-    let tmp = std::env::var_os("TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    tmp.join(REFERENCE_STAGING_DIR_NAME)
+/// The staging base inside one pane's working directory.
+pub fn reference_staging_base_dir(worktree: &Path) -> PathBuf {
+    worktree.join(REFERENCE_STAGING_DIR_NAME)
 }
 
 /// The owning host's id, as the receipt reports it.
@@ -118,19 +113,25 @@ pub fn reference_file_route(session_id: &str, attachment_id: &str) -> String {
 
 /// A staged file's name, or the refusal that keeps it out of the staging root.
 ///
-/// A name is a NAME: no directory component, no parent, no control byte, bounded length.
+/// A name is a NAME: no directory component, no parent, no control byte, no whitespace (an
+/// '@path ' mention cannot carry it; the TS twin refuses it too), bounded length.
 pub fn validate_reference_file_name(raw: &str) -> Result<String, ScopeErrorCode> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.len() > REFERENCE_FILE_MAX_NAME_BYTES {
         return Err(ScopeErrorCode::InvalidRequest);
     }
-    if trimmed.contains('/') || trimmed.contains(char::from(92)) {
+    // ':' is refused too: on Windows 'a:x.png' is a drive-relative path, and joining it replaces
+    // the staging root instead of naming a file inside it.
+    if trimmed.contains('/') || trimmed.contains(char::from(92)) || trimmed.contains(':') {
         return Err(ScopeErrorCode::InvalidRequest);
     }
     if trimmed == "." || trimmed == ".." {
         return Err(ScopeErrorCode::InvalidRequest);
     }
     if trimmed.chars().any(char::is_control) {
+        return Err(ScopeErrorCode::InvalidRequest);
+    }
+    if trimmed.chars().any(char::is_whitespace) {
         return Err(ScopeErrorCode::InvalidRequest);
     }
     Ok(trimmed.to_string())
@@ -259,6 +260,47 @@ pub fn reference_file_bounds_check(
     Ok(())
 }
 
+/// Read a staged file for preview.
+///
+/// The staged path lives in the pane's own worktree, where the agent can replace it: a symlink or
+/// any other non-regular file there (a link to a secret, a device that never reaches EOF) is
+/// refused without being followed, the read is capped at [ATTACHMENT_MAX_FILE_BYTES], and bytes
+/// whose length differs from the receipt are not the file that was staged.
+pub fn read_reference_staged_file(
+    path: &Path,
+    expected_size: u64,
+) -> Result<Vec<u8>, ScopeErrorCode> {
+    use std::io::Read as _;
+
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| ScopeErrorCode::NotFound)?;
+    if !metadata.file_type().is_file() {
+        return Err(ScopeErrorCode::NotFound);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // A link swapped in between the check above and this open is refused too.
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(|_| ScopeErrorCode::NotFound)?;
+    if !file.metadata().map_err(|_| ScopeErrorCode::NotFound)?.is_file() {
+        return Err(ScopeErrorCode::NotFound);
+    }
+    let mut bytes = Vec::new();
+    file.take(ATTACHMENT_MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ScopeErrorCode::NotFound)?;
+    if bytes.len() as u64 > ATTACHMENT_MAX_FILE_BYTES {
+        return Err(ScopeErrorCode::PayloadTooLarge);
+    }
+    if bytes.len() as u64 != expected_size {
+        return Err(ScopeErrorCode::NotFound);
+    }
+    Ok(bytes)
+}
+
 /// Decode a stage payload's bytes, refusing an oversized file and a declared size that does not
 /// match the bytes actually carried.
 pub fn decode_reference_file_payload(
@@ -305,7 +347,12 @@ pub fn reference_file_send_plan(
 ) -> ReferenceSubmitPayload {
     let mut text = draft_text.to_string();
     for receipt in receipts {
-        text = reference_append_mention(&text, &receipt.display_name);
+        let path = receipt
+            .mention_text
+            .strip_prefix('@')
+            .unwrap_or(&receipt.mention_text)
+            .trim_end();
+        text = reference_append_mention(&text, path);
     }
     ReferenceSubmitPayload {
         text,
@@ -314,31 +361,27 @@ pub fn reference_file_send_plan(
     }
 }
 
-/// Stage a payload on this host, using the host's own staging root and host id.
-pub fn stage_reference_file(
-    payload: &ReferenceFileStagePayload,
-) -> Result<ReferenceFileReceipt, ScopeErrorCode> {
-    stage_reference_file_in(
-        &reference_host_id(),
-        &reference_staging_base_dir(),
-        payload,
-    )
-}
-
-/// Stage a payload under an explicit host id and staging root.
+/// Stage a payload under an explicit host id, inside the pane working directory 'worktree'.
 ///
-/// The bytes are written once, into a per-attachment directory created 0700, as a file created
-/// 0600 on unix. The receipt is opaque: it names the host, an id, the digest, the size and the
-/// media type, and no path. A refused payload leaves the staging root untouched, and a write
-/// that fails removes the directory it created rather than leaving a partial file behind.
+/// The bytes are written once, into '<worktree>/REFERENCE_STAGING_DIR_NAME/<id>/<name>': the
+/// base is verified to be a real directory this user owns with no group/other access (never a
+/// symlink), the per-attachment directory is created 0700 and the file 0600 on unix. The
+/// receipt names no absolute path; its mention is the path RELATIVE to the worktree. A refused
+/// payload leaves the worktree untouched, and a write that fails removes the directory it
+/// created rather than leaving a partial file behind.
 pub fn stage_reference_file_in(
     host_id: &str,
-    base_dir: &Path,
+    worktree: &Path,
     payload: &ReferenceFileStagePayload,
 ) -> Result<ReferenceFileReceipt, ScopeErrorCode> {
     let name = validate_reference_file_name(&payload.name)?;
     let bytes = decode_reference_file_payload(payload)?;
 
+    if !worktree.is_dir() {
+        return Err(ScopeErrorCode::NotFound);
+    }
+    let base_dir = reference_staging_base_dir(worktree);
+    ensure_reference_staging_base(&base_dir)?;
     let attachment_id = uuid::Uuid::new_v4().to_string();
     let staging_dir = base_dir.join(&attachment_id);
     create_reference_staging_dir(&staging_dir)?;
@@ -353,6 +396,7 @@ pub fn stage_reference_file_in(
     hasher.update(&bytes);
     let sha256 = format!("{:x}", hasher.finalize());
 
+    let mention_path = format!("{REFERENCE_STAGING_DIR_NAME}/{attachment_id}/{name}");
     Ok(ReferenceFileReceipt {
         receipt: AttachmentReceipt {
             host_id: host_id.to_string(),
@@ -362,7 +406,7 @@ pub fn stage_reference_file_in(
             media_type: payload.media_type,
         },
         display_name: name.clone(),
-        mention_text: ReferenceFileReceipt::mention_for(&name),
+        mention_text: ReferenceFileReceipt::mention_for(&mention_path),
     })
 }
 
@@ -390,14 +434,209 @@ pub fn reference_staging_failure_code() -> ScopeErrorCode {
     ScopeErrorCode::Unsupported
 }
 
-fn create_reference_staging_dir(dir: &Path) -> Result<(), ScopeErrorCode> {
-    std::fs::create_dir_all(dir).map_err(|_| reference_staging_failure_code())?;
+/// Remove staging directories older than the TTL, whether or not this process registered them.
+///
+/// The in-memory registry is process-local, so after a restart only the directory mtime says
+/// how old a staged file is. Only '<uuid>' directories are considered; anything else is kept.
+pub fn reference_prune_staging_root(base: &Path, ttl_ms: u64) -> usize {
+    reference_prune_staging_root_with(base, ttl_ms, verify_reference_staging_base)
+}
+
+fn reference_prune_staging_root_with(
+    base: &Path,
+    ttl_ms: u64,
+    verify: impl FnOnce(&Path) -> Result<(), ScopeErrorCode>,
+) -> usize {
+    // Never follow a planted symlink or sweep a base someone else controls: the same checks a
+    // stage applies, without creating anything.
+    if verify(base).is_err() {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return 0;
+    };
+    let ttl = std::time::Duration::from_millis(ttl_ms);
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let is_attachment = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| uuid::Uuid::parse_str(name).is_ok());
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !is_attachment || !metadata.is_dir() {
+            continue;
+        }
+        let stale = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > ttl);
+        if stale && std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Remember a staging base in the ledger, so a later sweep reaches it even when no stage ever
+/// targets that directory again and the in-memory registry has been lost to a restart.
+pub fn reference_record_staging_base(ledger: &Path, base: &Path) -> std::io::Result<()> {
+    let Some(line) = base.to_str().filter(|line| !line.contains(['\n', '\r'])) else {
+        return Ok(());
+    };
+    let _guard = REFERENCE_STAGING_LEDGER_LOCK.lock();
+    let existing = match std::fs::read_to_string(ledger) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    if existing.lines().any(|recorded| recorded == line) {
+        return Ok(());
+    }
+    if let Some(parent) = ledger.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
     }
-    Ok(())
+    use std::io::Write as _;
+    writeln!(options.open(ledger)?, "{line}")
+}
+
+/// Sweep every staging base the ledger names with [reference_prune_staging_root], and forget
+/// the bases that no longer exist. Only paths whose last component is the staging directory
+/// name are ever swept, so a tampered line cannot aim the sweep at another directory.
+pub fn reference_prune_recorded_staging_bases(ledger: &Path, ttl_ms: u64) -> usize {
+    let _guard = REFERENCE_STAGING_LEDGER_LOCK.lock();
+    let Ok(text) = std::fs::read_to_string(ledger) else {
+        return 0;
+    };
+    let mut removed = 0;
+    let mut kept = Vec::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let base = Path::new(line);
+        if base.file_name().and_then(|name| name.to_str()) != Some(REFERENCE_STAGING_DIR_NAME) {
+            continue;
+        }
+        if std::fs::symlink_metadata(base).is_err() {
+            continue;
+        }
+        removed += reference_prune_staging_root(base, ttl_ms);
+        kept.push(line);
+    }
+    if kept.len() != text.lines().count() {
+        let mut body = kept.join("\n");
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        let _ = std::fs::write(ledger, body);
+    }
+    removed
+}
+
+/// Serializes this process's read-modify-write passes over the ledger.
+static REFERENCE_STAGING_LEDGER_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Create (0700) or verify the staging base: a real directory, never a symlink, owned by this
+/// user and closed to group/other on unix. A symlink, a non-directory, or a base another user
+/// owns is refused outright. A base this user owns that reports group/other bits is tightened
+/// to 0700; it is accepted when the re-stat shows a private mode, or when chmod succeeded yet
+/// the mode did not change (exFAT/FAT/SMB, vfat/cifs cannot store modes and report 0777), and
+/// refused when chmod fails. A base this call just created skips the mode clause entirely.
+fn ensure_reference_staging_base(base: &Path) -> Result<(), ScopeErrorCode> {
+    let mut just_created = false;
+    if std::fs::symlink_metadata(base).is_err() {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder
+            .create(base)
+            .map_err(|_| reference_staging_failure_code())?;
+        just_created = true;
+        // Keep staged uploads out of the pane's git status.
+        let _ = std::fs::write(base.join(".gitignore"), b"*\n");
+    }
+    check_reference_staging_base(base, just_created)
+}
+
+/// Verify an existing staging base: a real directory, never a symlink, owned by this user and
+/// closed to group/other on unix.
+fn verify_reference_staging_base(base: &Path) -> Result<(), ScopeErrorCode> {
+    check_reference_staging_base(base, false)
+}
+
+fn check_reference_staging_base(base: &Path, just_created: bool) -> Result<(), ScopeErrorCode> {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid has no arguments, pointers, or caller preconditions.
+        let uid = unsafe { libc::geteuid() };
+        check_reference_staging_base_with(base, just_created, uid, |path| {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = just_created;
+        let metadata =
+            std::fs::symlink_metadata(base).map_err(|_| reference_staging_failure_code())?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ScopeErrorCode::Forbidden);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn check_reference_staging_base_with(
+    base: &Path,
+    just_created: bool,
+    owner_uid: u32,
+    chmod: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), ScopeErrorCode> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = std::fs::symlink_metadata(base).map_err(|_| reference_staging_failure_code())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ScopeErrorCode::Forbidden);
+    }
+    if metadata.uid() != owner_uid {
+        return Err(ScopeErrorCode::Forbidden);
+    }
+    if just_created || metadata.mode() & 0o077 == 0 {
+        return Ok(());
+    }
+    chmod(base).map_err(|_| ScopeErrorCode::Forbidden)?;
+    let after = std::fs::symlink_metadata(base).map_err(|_| reference_staging_failure_code())?;
+    if after.file_type().is_symlink() || !after.is_dir() || after.uid() != owner_uid {
+        return Err(ScopeErrorCode::Forbidden);
+    }
+    // Private now, or unchanged after a successful chmod: the filesystem ignores modes.
+    if after.mode() & 0o077 == 0 || after.mode() & 0o777 == metadata.mode() & 0o777 {
+        return Ok(());
+    }
+    Err(ScopeErrorCode::Forbidden)
+}
+
+fn create_reference_staging_dir(dir: &Path) -> Result<(), ScopeErrorCode> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .map_err(|_| reference_staging_failure_code())
 }
 
 fn write_reference_staged_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -422,8 +661,52 @@ mod tests {
     use crate::scoped_contracts::AttachmentMediaType;
     use sha2::{Digest, Sha256};
 
+    // rs-files-routes-r6-1
+    #[test]
+    fn a_staged_file_read_refuses_a_symlink_an_oversized_file_and_a_size_mismatch() {
+        let root = scratch_dir();
+        std::fs::write(root.join("shot.png"), b"png!").expect("write staged");
+        assert_eq!(
+            read_reference_staged_file(&root.join("shot.png"), 4).expect("the staged file reads"),
+            b"png!".to_vec()
+        );
+        assert_eq!(
+            read_reference_staged_file(&root.join("shot.png"), 5),
+            Err(ScopeErrorCode::NotFound),
+            "a file whose size differs from its receipt is not the staged file"
+        );
+
+        #[cfg(unix)]
+        {
+            std::fs::write(root.join("secret"), b"key").expect("write secret");
+            std::os::unix::fs::symlink(root.join("secret"), root.join("link.png"))
+                .expect("symlink");
+            assert_eq!(
+                read_reference_staged_file(&root.join("link.png"), 3),
+                Err(ScopeErrorCode::NotFound),
+                "a symlink swapped in at the staged path is never followed"
+            );
+        }
+
+        let big = vec![0u8; (ATTACHMENT_MAX_FILE_BYTES + 1) as usize];
+        std::fs::write(root.join("big.png"), &big).expect("write big");
+        assert_eq!(
+            read_reference_staged_file(&root.join("big.png"), ATTACHMENT_MAX_FILE_BYTES + 1),
+            Err(ScopeErrorCode::PayloadTooLarge),
+            "nothing past the file cap is served"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn scratch_dir() -> PathBuf {
-        std::env::temp_dir().join(format!("ferryx-ref-files-{}", uuid::Uuid::new_v4()))
+        let dir = std::env::temp_dir().join(format!("ferryx-ref-files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn staged_dir(root: &Path, attachment_id: &str) -> PathBuf {
+        root.join(REFERENCE_STAGING_DIR_NAME).join(attachment_id)
     }
 
     fn payload(name: &str, bytes: &[u8]) -> ReferenceFileStagePayload {
@@ -453,13 +736,19 @@ mod tests {
             .expect("staged");
 
         assert_eq!(receipt.display_name, "shot.png");
-        assert_eq!(receipt.mention_text, "@shot.png ");
+        assert_eq!(
+            receipt.mention_text,
+            format!(
+                "@{REFERENCE_STAGING_DIR_NAME}/{}/shot.png ",
+                receipt.receipt.attachment_id
+            )
+        );
         assert_eq!(receipt.receipt.host_id, "host-test");
         assert_eq!(receipt.receipt.size_bytes, bytes.len() as u64);
         assert_eq!(receipt.receipt.sha256, sha256_hex(bytes));
         assert!(!receipt.receipt.attachment_id.is_empty());
 
-        let staged = dir.join(&receipt.receipt.attachment_id).join("shot.png");
+        let staged = staged_dir(&dir, &receipt.receipt.attachment_id).join("shot.png");
         assert!(staged.is_file());
         assert_eq!(std::fs::read(&staged).expect("read back"), bytes);
 
@@ -664,7 +953,10 @@ mod tests {
         refused.name = "../escape.png".to_string();
 
         assert!(stage_reference_file_in("host-test", &dir, &refused).is_err());
-        assert!(!dir.exists(), "a refused payload must not create the staging root");
+        assert!(
+            !dir.join(REFERENCE_STAGING_DIR_NAME).exists(),
+            "a refused payload must not create the staging root"
+        );
     }
 
     #[test]
@@ -672,7 +964,7 @@ mod tests {
         let dir = scratch_dir();
         let receipt = stage_reference_file_in("host-test", &dir, &payload("shot.png", b"body"))
             .expect("staged");
-        let attachment_dir = dir.join(&receipt.receipt.attachment_id);
+        let attachment_dir = staged_dir(&dir, &receipt.receipt.attachment_id);
         let staged = attachment_dir.join("shot.png");
         assert!(staged.is_file());
 
@@ -697,19 +989,20 @@ mod tests {
 
         let plan = reference_file_send_plan("look at this", &[first.clone(), second.clone()]);
 
-        assert_eq!(plan.text, "look at this @one.png @two.txt ");
+        assert_eq!(
+            plan.text,
+            format!("look at this {}{}", first.mention_text, second.mention_text)
+        );
         assert!(
             plan.attachment_ids.is_empty(),
             "no managed-turn attachment id may be set"
         );
         assert_eq!(plan.origin, ReferenceSubmitOrigin::Chat);
 
-        assert!(dir
-            .join(&first.receipt.attachment_id)
+        assert!(staged_dir(&dir, &first.receipt.attachment_id)
             .join("one.png")
             .is_file());
-        assert!(dir
-            .join(&second.receipt.attachment_id)
+        assert!(staged_dir(&dir, &second.receipt.attachment_id)
             .join("two.txt")
             .is_file());
 
@@ -738,9 +1031,8 @@ mod tests {
         let dir = scratch_dir();
         let receipt = stage_reference_file_in("host-test", &dir, &payload("shot.png", b"body"))
             .expect("staged");
-        let staged = dir.join(&receipt.receipt.attachment_id).join("shot.png");
-
         let draft = "still typing";
+        let staged = staged_dir(&dir, &receipt.receipt.attachment_id).join("shot.png");
         let plan = reference_file_send_plan(draft, std::slice::from_ref(&receipt));
         assert!(plan.text.starts_with(draft));
         assert!(plan.attachment_ids.is_empty());
@@ -750,6 +1042,272 @@ mod tests {
         assert!(!staged.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// rs-files-routes-r5-1: a drive-prefixed name ('a:x.png') would replace the staging root on
+    /// Windows when joined, so ':' is refused like a separator.
+    #[test]
+    fn file_names_with_a_drive_prefix_are_refused() {
+        for bad in ["a:x.png", "C:shot.png", "note:stream"] {
+            assert_eq!(
+                validate_reference_file_name(bad),
+                Err(ScopeErrorCode::InvalidRequest),
+                "name {bad:?} must be refused: joining it can leave the staging root"
+            );
+        }
+    }
+
+    /// ui-reference-logic-2: the Rust validator refuses whitespace exactly as the TS twin does,
+    /// because a mention cannot carry it.
+    #[test]
+    fn file_names_with_whitespace_are_refused_like_the_ts_twin() {
+        for bad in ["two words.png", "Screenshot 2026-10-13 at 10.00.00.png"] {
+            assert_eq!(
+                validate_reference_file_name(bad),
+                Err(ScopeErrorCode::InvalidRequest),
+                "name {bad:?} must be refused: its mention could not carry it"
+            );
+        }
+        assert_eq!(
+            validate_reference_file_name("~notes.txt"),
+            Ok("~notes.txt".to_string())
+        );
+    }
+
+    /// rs-files-routes-7: a staging directory older than the TTL is removed by a fresh prune
+    /// pass, even though no in-memory registry of this process ever knew it.
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_staging_directory_is_pruned_without_the_registry() {
+        let base = scratch_dir();
+        let stale = base.join(uuid::Uuid::new_v4().to_string());
+        let fresh = base.join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&stale).expect("stale dir");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
+                .expect("owner-private base");
+        }
+        std::fs::write(stale.join("old.png"), b"old").expect("stale file");
+        std::fs::create_dir_all(&fresh).expect("fresh dir");
+        let old = std::time::SystemTime::now()
+            - std::time::Duration::from_millis(ATTACHMENT_UNREFERENCED_TTL_MS + 60_000);
+        std::fs::File::open(&stale)
+            .expect("open stale dir")
+            .set_modified(old)
+            .expect("age stale dir");
+
+        let removed = reference_prune_staging_root(&base, ATTACHMENT_UNREFERENCED_TTL_MS);
+
+        assert!(
+            !stale.exists(),
+            "a staging directory older than the TTL must be removed after a restart"
+        );
+        assert!(fresh.exists(), "a fresh staging directory must be kept");
+        assert_eq!(removed, 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// rs-files-routes-r3-1: a staging base that is a symlink is never followed by the TTL
+    /// prune, so stale UUID-named directories outside the worktree survive.
+    #[cfg(unix)]
+    #[test]
+    fn the_ttl_prune_never_follows_a_symlinked_staging_base() {
+        let outside = scratch_dir();
+        let victim = outside.join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&victim).expect("outside dir");
+        std::fs::write(victim.join("keep.txt"), b"not ours").expect("outside file");
+        let old = std::time::SystemTime::now()
+            - std::time::Duration::from_millis(ATTACHMENT_UNREFERENCED_TTL_MS + 60_000);
+        std::fs::File::open(&victim)
+            .expect("open outside dir")
+            .set_modified(old)
+            .expect("age outside dir");
+        let worktree = scratch_dir();
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let base = reference_staging_base_dir(&worktree);
+        std::os::unix::fs::symlink(&outside, &base).expect("plant symlink base");
+
+        let removed = reference_prune_staging_root(&base, ATTACHMENT_UNREFERENCED_TTL_MS);
+
+        let survived = victim.exists();
+        let _ = std::fs::remove_dir_all(&worktree);
+        let _ = std::fs::remove_dir_all(&outside);
+        assert!(survived, "a prune must not delete through a symlinked staging base");
+        assert_eq!(removed, 0);
+    }
+
+    /// rs-files-routes-9: a staging base that is a symlink planted by someone else is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_staging_base_that_is_a_symlink_is_refused() {
+        let root = scratch_dir();
+        let elsewhere = scratch_dir();
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, root.join(REFERENCE_STAGING_DIR_NAME))
+            .expect("plant symlink");
+        assert!(
+            stage_reference_file_in("host-test", &root, &payload("shot.png", b"x")).is_err(),
+            "a staging base that is a symlink must be refused"
+        );
+        assert_eq!(
+            std::fs::read_dir(&elsewhere).expect("read elsewhere").count(),
+            0,
+            "nothing may be written through a planted symlink"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    /// rs-files-routes-rfinal-1: a base this call just created is accepted even when the
+    /// filesystem cannot store modes and reports 0777 (exFAT/FAT/SMB, vfat/cifs).
+    #[cfg(unix)]
+    #[test]
+    fn a_just_created_staging_base_on_a_modeless_filesystem_is_accepted() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = scratch_dir();
+        let base = root.join(REFERENCE_STAGING_DIR_NAME);
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o777))
+            .expect("chmod 0777");
+        assert!(
+            check_reference_staging_base_with(&base, true, current_euid(), |_| Ok(())).is_ok(),
+            "a base this call just created must be accepted even if it reports 0777"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    fn current_euid() -> u32 {
+        // SAFETY: geteuid has no arguments, pointers, or caller preconditions.
+        unsafe { libc::geteuid() }
+    }
+
+    #[cfg(unix)]
+    fn shared_staging_base() -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = scratch_dir();
+        let base = root.join(REFERENCE_STAGING_DIR_NAME);
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o777))
+            .expect("chmod 0777");
+        (root, base)
+    }
+
+    #[cfg(unix)]
+    fn base_mode(base: &Path) -> u32 {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::symlink_metadata(base).expect("metadata").mode() & 0o777
+    }
+
+    /// rs-files-routes-rfinal2-1: a later stage into an existing base on a filesystem that
+    /// cannot store modes (chmod succeeds but the base still reports 0777) is accepted.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_stage_into_an_existing_0777_base_on_a_modeless_filesystem_is_accepted() {
+        let (root, base) = shared_staging_base();
+        let mut chmod_calls = 0;
+        let result = check_reference_staging_base_with(&base, false, current_euid(), |_| {
+            chmod_calls += 1;
+            Ok(())
+        });
+        let mode = base_mode(&base);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(result, Ok(()), "an existing base on a modeless filesystem must be accepted");
+        assert_eq!(chmod_calls, 1, "the base is tightened before it is judged");
+        assert_eq!(mode, 0o777, "the simulated modeless filesystem kept reporting 0777");
+    }
+
+    /// rs-files-routes-rfinal2-1: the TTL sweep still reaches a staging base on a filesystem
+    /// that cannot store modes, so a stale staged file is removed.
+    #[cfg(unix)]
+    #[test]
+    fn the_ttl_prune_sweeps_an_existing_0777_base_on_a_modeless_filesystem() {
+        let (root, base) = shared_staging_base();
+        let stale = base.join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&stale).expect("stale dir");
+        std::fs::write(stale.join("shot1.png"), b"png!").expect("stale file");
+        let old = std::time::SystemTime::now()
+            - std::time::Duration::from_millis(ATTACHMENT_UNREFERENCED_TTL_MS + 60_000);
+        std::fs::File::open(&stale)
+            .expect("open stale dir")
+            .set_modified(old)
+            .expect("age stale dir");
+
+        let removed =
+            reference_prune_staging_root_with(&base, ATTACHMENT_UNREFERENCED_TTL_MS, |base| {
+                check_reference_staging_base_with(base, false, current_euid(), |_| Ok(()))
+            });
+
+        let survived = stale.exists();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(removed, 1, "the stale staged directory must be swept");
+        assert!(!survived);
+    }
+
+    /// rs-files-routes-rfinal2-1: on a filesystem that honours modes, an existing 0777 base this
+    /// user owns is tightened to 0700 and accepted by both staging and the TTL sweep.
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_0777_base_on_a_normal_filesystem_is_tightened_and_accepted() {
+        let (root, base) = shared_staging_base();
+        let staged = stage_reference_file_in("host-test", &root, &payload("shot2.png", b"x"));
+        let staged_mode = base_mode(&base);
+
+        let (prune_root, prune_base) = shared_staging_base();
+        let stale = prune_base.join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&stale).expect("stale dir");
+        let old = std::time::SystemTime::now()
+            - std::time::Duration::from_millis(ATTACHMENT_UNREFERENCED_TTL_MS + 60_000);
+        std::fs::File::open(&stale)
+            .expect("open stale dir")
+            .set_modified(old)
+            .expect("age stale dir");
+        let removed = reference_prune_staging_root(&prune_base, ATTACHMENT_UNREFERENCED_TTL_MS);
+        let pruned_mode = base_mode(&prune_base);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&prune_root);
+        assert!(staged.is_ok(), "a later stage into an existing base must succeed: {staged:?}");
+        assert_eq!(staged_mode, 0o700, "the staging base is tightened to 0700");
+        assert_eq!(removed, 1, "the sweep reaches a tightened base");
+        assert_eq!(pruned_mode, 0o700);
+    }
+
+    /// rs-files-routes-rfinal2-1: a shared base that cannot be tightened is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_shared_staging_base_whose_chmod_fails_is_refused() {
+        let (root, base) = shared_staging_base();
+        let result = check_reference_staging_base_with(&base, false, current_euid(), |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        });
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(result, Err(ScopeErrorCode::Forbidden));
+    }
+
+    /// rs-files-routes-rfinal2-1: a base owned by another user is refused before any chmod.
+    #[cfg(unix)]
+    #[test]
+    fn a_staging_base_owned_by_another_uid_is_refused_before_any_chmod() {
+        let (root, base) = shared_staging_base();
+        let other_uid = current_euid().wrapping_add(1);
+        let mut chmod_calls = 0;
+        let existing = check_reference_staging_base_with(&base, false, other_uid, |_| {
+            chmod_calls += 1;
+            Ok(())
+        });
+        let just_created = check_reference_staging_base_with(&base, true, other_uid, |_| {
+            chmod_calls += 1;
+            Ok(())
+        });
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(existing, Err(ScopeErrorCode::Forbidden));
+        assert_eq!(just_created, Err(ScopeErrorCode::Forbidden));
+        assert_eq!(chmod_calls, 0, "a base someone else owns is never chmodded");
     }
 
     #[test]

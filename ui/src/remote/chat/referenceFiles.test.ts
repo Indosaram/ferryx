@@ -28,6 +28,9 @@ import {
   referenceMentionPathIsSafe,
   referenceMentionPathOf,
   referenceMentionPathWithinRoot,
+  parseReferenceStagedFileList,
+  referenceSha256Hex,
+  referenceStagedFileName,
   stageReferenceChatFile,
   validateReferenceFileName,
   validateReferenceFileSize,
@@ -40,6 +43,26 @@ import {
 
 const FIXED_SHA = "a".repeat(64);
 const BACKSLASH = String.fromCharCode(92);
+
+describe("reference file digest outside a secure context (ui-reference-logic-r4-1)", () => {
+  it("hashes without WebCrypto, as a plain-HTTP remote origin has none", async () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    const long = new Uint8Array(1000).map((_, index) => index & 0xff);
+    const expectedLong = await referenceSha256Hex(long);
+    Object.defineProperty(globalThis, "crypto", { value: {}, configurable: true });
+    try {
+      await expect(referenceSha256Hex(new TextEncoder().encode("abc"))).resolves.toBe(
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      );
+      await expect(referenceSha256Hex(new Uint8Array(0))).resolves.toBe(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      );
+      await expect(referenceSha256Hex(long)).resolves.toBe(expectedLong);
+    } finally {
+      if (original) Object.defineProperty(globalThis, "crypto", original);
+    }
+  });
+});
 
 const base: TargetRef = {
   hostId: "host-a",
@@ -516,5 +539,159 @@ describe("reference file routes", () => {
       target: base,
       params: { attachmentId: "att-9" },
     });
+  });
+});
+
+describe("reference file names carry whitespace-free mentions (ui-reference-logic-2, r2-1)", () => {
+  // The Rust host stages into the pane's worktree and mints this mention shape.
+  function rustShapedTransport() {
+    return fakeTransport({
+      stage: async (_target, payload) => ({
+        receipt: {
+          hostId: "host-a",
+          attachmentId: "att-ws",
+          sha256: FIXED_SHA,
+          sizeBytes: payload.sizeBytes,
+          mediaType: payload.mediaType,
+        },
+        displayName: payload.name,
+        mentionText: "@.ferryx-reference-chat-files/att-ws/" + payload.name + " ",
+      }),
+    });
+  }
+
+  it("a name with whitespace is never staged under a name its mention cannot carry", async () => {
+    const fake = rustShapedTransport();
+    const sent: string[] = [];
+    const stage = fake.transport.stage;
+    const transport: ReferenceFileStagingTransport = {
+      ...fake.transport,
+      stage: async (t, payload, s) => {
+        sent.push(payload.name);
+        return stage(t, payload, s);
+      },
+    };
+    let receipt: Awaited<ReturnType<typeof stageReferenceChatFile>> | null = null;
+    let refused: unknown = null;
+    try {
+      receipt = await stageReferenceChatFile(
+        { transport, digest: async () => FIXED_SHA },
+        target(),
+        source("Screenshot 2026-10-13 at 10.00.00.png", "image/png", [1, 2, 3]),
+        signal,
+      );
+    } catch (error) {
+      refused = error;
+    }
+    // Either refused before stage, or staged under a name whose mention parses; never orphaned.
+    if (refused !== null) {
+      expect(sent.length === 0 || fake.cancelled.includes("att-ws")).toBe(true);
+    }
+    expect(refused).toBeNull();
+    expect(sent).toEqual(["Screenshot_2026-10-13_at_10.00.00.png"]);
+    expect(referenceMentionPathOf(receipt!.mentionText)).toBe(
+      ".ferryx-reference-chat-files/att-ws/Screenshot_2026-10-13_at_10.00.00.png",
+    );
+    expect(fake.cancelled).toEqual([]);
+  });
+
+  it("the TS validator refuses whitespace exactly as the Rust validator does", () => {
+    expectCode(() => validateReferenceFileName("two words.png"), "INVALID_REQUEST");
+    expectCode(() => validateReferenceFileName("tab" + String.fromCharCode(9) + "x.png"), "INVALID_REQUEST");
+    expect(validateReferenceFileName("~notes.txt")).toBe("~notes.txt");
+  });
+
+  it("the TS validator refuses a drive-prefixed name like the Rust validator does", () => {
+    for (const bad of ["a:x.png", "C:shot.png", "note:stream"]) {
+      expectCode(() => validateReferenceFileName(bad), "INVALID_REQUEST");
+    }
+    expect(referenceStagedFileName("a:x.png")).toBe("a_x.png");
+  });
+
+  it("a leading tilde stages and its prefixed mention parses", async () => {
+    const fake = rustShapedTransport();
+    const receipt = await stageReferenceChatFile(
+      deps(fake.transport),
+      target(),
+      source("~notes.txt", "text/plain", [1]),
+      signal,
+    );
+    expect(referenceMentionPathOf(receipt.mentionText)).toBe(
+      ".ferryx-reference-chat-files/att-ws/~notes.txt",
+    );
+  });
+
+  it("cancels the staged id when the receipt fails validation after stage succeeded", async () => {
+    const fake = fakeTransport({
+      stage: async (_target, payload) => ({
+        receipt: {
+          hostId: "host-a",
+          attachmentId: "att-bad",
+          sha256: FIXED_SHA,
+          sizeBytes: payload.sizeBytes,
+          mediaType: payload.mediaType,
+        },
+        displayName: payload.name,
+        // An older host that still mints a bare, space-carrying mention.
+        mentionText: "@my " + payload.name + " ",
+      }),
+    });
+    await expectCodeAsync(
+      () => stageReferenceChatFile(deps(fake.transport), target(), source("shot.png", "image/png", [1]), signal),
+      "INVALID_REQUEST",
+    );
+    expect(fake.cancelled).toEqual(["att-bad"]);
+  });
+});
+
+describe("reference staged file list (rs-files-routes-r3-2)", () => {
+  const listed = (overrides: Record<string, unknown> = {}) => ({
+    receipt: {
+      hostId: "host-a",
+      attachmentId: "att-orphan",
+      sha256: FIXED_SHA,
+      sizeBytes: 3,
+      mediaType: "text/plain",
+    },
+    displayName: "orphan.txt",
+    mentionText: "@.ferryx-reference-chat-files/att-orphan/orphan.txt ",
+    ...overrides,
+  });
+
+  it("rehydrates the files the owning host still holds staged for this target", () => {
+    const files = parseReferenceStagedFileList({ files: [listed()] }, target());
+    expect(files).toEqual([
+      {
+        receipt: {
+          hostId: "host-a",
+          attachmentId: "att-orphan",
+          sha256: FIXED_SHA,
+          sizeBytes: 3,
+          mediaType: "text/plain",
+        },
+        displayName: "orphan.txt",
+        mentionText: "@.ferryx-reference-chat-files/att-orphan/orphan.txt ",
+      },
+    ]);
+  });
+
+  it("drops an entry from a foreign host, with an unsafe mention, or carrying a host path", () => {
+    const files = parseReferenceStagedFileList(
+      {
+        files: [
+          listed({ receipt: { ...listed().receipt, hostId: "host-b" } }),
+          listed({ mentionText: "@/etc/passwd " }),
+          listed({ path: "/Users/someone/secret" }),
+          "not an entry",
+        ],
+      },
+      target(),
+    );
+    expect(files).toEqual([]);
+  });
+
+  it("reads an unreadable list as empty", () => {
+    expect(parseReferenceStagedFileList(null, target())).toEqual([]);
+    expect(parseReferenceStagedFileList({ files: "nope" }, target())).toEqual([]);
   });
 });

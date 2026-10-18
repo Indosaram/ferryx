@@ -126,13 +126,29 @@ describe("MobileTopBar", () => {
     expect(context.parentElement).toHaveClass("text-[13px]", "text-chat-foreground-secondary");
   });
 
+  it("names the context and connection through sr-only text, not aria-label on generic spans", () => {
+    renderTopBar({
+      contextLabel: "ferryx-ui / feat-x",
+      hostBadge: { label: "maho-win", transport: "relay", ariaLabel: "Connection: Relay" },
+    });
+    const badge = screen.getByTestId("remote-connection-badge");
+    expect(badge).not.toHaveAttribute("aria-label");
+    expect(badge).toHaveTextContent("Connection: Relay");
+    expect(screen.getByText("Connection: Relay")).toHaveClass("sr-only");
+
+    expect(screen.getByRole("group", { name: "Current desktop context" })).toBe(
+      screen.getByTestId("remote-context-label"),
+    );
+    expect(screen.getByTestId("mobile-top-bar").querySelector("span[aria-label]:not([role])")).toBeNull();
+  });
+
   it("holds the connection badge with its transport, glyph and yielding label", () => {
     renderTopBar({
       hostBadge: { label: "maho-win", transport: "relay", ariaLabel: "Connection: Relay" },
     });
     const badge = screen.getByTestId("remote-connection-badge");
     expect(badge).toHaveAttribute("data-connection", "relay");
-    expect(badge).toHaveAttribute("aria-label", "Connection: Relay");
+    expect(badge).toHaveTextContent("Connection: Relay");
     expect(badge).toHaveTextContent("maho-win");
     expect(badge.querySelector("svg")).toBeInTheDocument();
     expect(badge).toHaveClass("max-w-[50%]", "shrink-0");

@@ -260,9 +260,6 @@ vi.mock("./lib/tauri", () => ({
   isStructuredIpcError: (_error: unknown) => false,
 }));
 
-vi.mock("@tauri-apps/plugin-updater", () => ({
-  check: (...args: unknown[]) => updater.check(...args),
-}));
 vi.mock("./lib/updater", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./lib/updater")>();
   return {
@@ -1267,6 +1264,11 @@ describe("App project workspace flow", () => {
     native.isTauriRuntime.mockReturnValue(true);
     const runtimeDescriptor = Object.getOwnPropertyDescriptor(globalThis, "isTauri");
     Object.defineProperty(globalThis, "isTauri", { configurable: true, value: true });
+    // The availability check is the Rust `cmd_updater_check` command.
+    const internals = (window as any).__TAURI_INTERNALS__;
+    const originalInvoke = internals.invoke;
+    internals.invoke = (cmd: string, ...rest: unknown[]) =>
+      cmd === "cmd_updater_check" ? updater.check() : originalInvoke(cmd, ...rest);
     let checked!: () => void;
     const request = new Promise<void>((resolve) => { checked = resolve; });
     updater.check.mockImplementation(async () => {
@@ -1275,7 +1277,7 @@ describe("App project workspace flow", () => {
     });
     let deadline: ReturnType<typeof setTimeout> | undefined;
     const failure = new Promise<never>((_, reject) => {
-      deadline = setTimeout(() => reject(new Error("Startup plugin check not received")), 1000);
+      deadline = setTimeout(() => reject(new Error("Startup update check not received")), 1000);
     });
     try {
       render(<App />);
@@ -1286,6 +1288,7 @@ describe("App project workspace flow", () => {
     } finally {
       clearTimeout(deadline);
       cleanup();
+      internals.invoke = originalInvoke;
       if (runtimeDescriptor) Object.defineProperty(globalThis, "isTauri", runtimeDescriptor);
       else Reflect.deleteProperty(globalThis, "isTauri");
     }

@@ -6,6 +6,11 @@ use std::process::Command;
 pub const EXPECTED_GHOSTTY_SHA: &str = "6a508fd5e34c7e222c052a6d00bb3891ff3feace";
 pub const REQUIRED_ZIG_VERSION: &str = "0.16.0";
 
+/// Version of the shared libghostty-vt artifact cache layout and of the `zig build`
+/// arguments below. Bump it whenever either changes so stale artifacts are never reused.
+const ARTIFACT_CACHE_SCHEMA: &str = "v1";
+const ARTIFACT_CACHE_COMPLETE_MARKER: &str = ".complete";
+
 /// Result of build environment verification and libghostty-vt compilation.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +216,37 @@ pub fn build_ghostty_vt_with_target_and_env(
     let zig_target = cargo_target_to_zig_target(cargo_target)?;
 
     let ghostty_prefix = out_dir.join("ghostty_vt");
+
+    // Every worktree and every CARGO_TARGET_DIR gets a fresh OUT_DIR, so without a shared
+    // cache each one recompiles libghostty-vt from scratch. The pinned SHA, Zig version and
+    // target fully determine the artifact, so it is built once per host and reused. The
+    // exclusive lock makes concurrent builds wait for the first one instead of duplicating it.
+    let cache_entry = artifact_cache_entry(&submodule_dir, &resolved_sha, &zig_version, zig_target);
+    let _cache_lock = cache_entry.as_ref().and_then(|entry| lock_cache_entry(entry));
+    let cache_entry = cache_entry.filter(|_| _cache_lock.is_some());
+    if let Some(entry) = &cache_entry {
+        if entry.join(ARTIFACT_CACHE_COMPLETE_MARKER).is_file() {
+            match restore_cached_artifact(entry, &ghostty_prefix) {
+                Ok(()) => {
+                    return finish_build_config(
+                        zig_binary,
+                        zig_version,
+                        submodule_dir,
+                        resolved_sha,
+                        out_dir,
+                        &ghostty_prefix,
+                        cargo_target,
+                        zig_target,
+                    );
+                }
+                Err(e) => println!(
+                    "cargo:warning=Ignoring unusable libghostty-vt cache entry '{}': {e}",
+                    entry.display()
+                ),
+            }
+        }
+    }
+
     let zig_cache_dir = out_dir.join("ghostty_zig_cache");
     let zig_global_cache_dir = out_dir.join("ghostty_zig_global_cache");
 
@@ -286,6 +322,38 @@ pub fn build_ghostty_vt_with_target_and_env(
         ));
     }
 
+    if let Some(entry) = &cache_entry {
+        if let Err(e) = publish_cached_artifact(&ghostty_prefix, entry) {
+            println!(
+                "cargo:warning=Failed to publish libghostty-vt to shared cache '{}': {e}",
+                entry.display()
+            );
+        }
+    }
+
+    finish_build_config(
+        zig_binary,
+        zig_version,
+        submodule_dir,
+        resolved_sha,
+        out_dir,
+        &ghostty_prefix,
+        cargo_target,
+        zig_target,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_build_config(
+    zig_binary: String,
+    zig_version: String,
+    submodule_dir: PathBuf,
+    resolved_sha: String,
+    out_dir: &Path,
+    ghostty_prefix: &Path,
+    cargo_target: &str,
+    zig_target: &str,
+) -> Result<GhosttyBuildConfig, String> {
     let lib_dir = ghostty_prefix.join("lib");
     let include_dir = ghostty_prefix.join("include");
     let (static_lib_path, link_lib_stem) = resolve_static_lib(&lib_dir, cargo_target)?;
@@ -303,6 +371,123 @@ pub fn build_ghostty_vt_with_target_and_env(
         target: cargo_target.to_string(),
         zig_target: zig_target.to_string(),
     })
+}
+
+/// Host-wide cache root for prebuilt libghostty-vt artifacts. `FERRYX_GHOSTTY_CACHE_DIR`
+/// overrides it; setting that variable to an empty string disables the cache.
+fn artifact_cache_root() -> Option<PathBuf> {
+    if let Some(dir) = env::var_os("FERRYX_GHOSTTY_CACHE_DIR") {
+        return (!dir.is_empty()).then(|| PathBuf::from(dir));
+    }
+    let base = if cfg!(target_os = "windows") {
+        env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        env::var_os("HOME").map(|home| PathBuf::from(home).join("Library").join("Caches"))
+    } else {
+        env::var_os("XDG_CACHE_HOME")
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+    };
+    base.map(|base| base.join("ferryx").join("ghostty-vt"))
+}
+
+/// Returns the cache entry for this exact build, or `None` when the cache is disabled or
+/// the vendored source has local modifications (a dirty tree must never hit or seed it).
+fn artifact_cache_entry(
+    submodule_dir: &Path,
+    resolved_sha: &str,
+    zig_version: &str,
+    zig_target: &str,
+) -> Option<PathBuf> {
+    let root = artifact_cache_root()?;
+    let pristine = Command::new("git")
+        .arg("-C")
+        .arg(submodule_dir)
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output()
+        .map(|output| output.status.success() && output.stdout.is_empty())
+        .unwrap_or(false);
+    if !pristine {
+        println!(
+            "cargo:warning=Ghostty source at '{}' has local changes; building libghostty-vt without the shared cache",
+            submodule_dir.display()
+        );
+        return None;
+    }
+    Some(root.join(format!(
+        "{resolved_sha}-zig{zig_version}-{zig_target}-ReleaseFast-{ARTIFACT_CACHE_SCHEMA}"
+    )))
+}
+
+fn lock_cache_entry(entry: &Path) -> Option<fs::File> {
+    let result = (|| -> std::io::Result<fs::File> {
+        let parent = entry.parent().unwrap_or(entry);
+        fs::create_dir_all(parent)?;
+        let mut lock_path = entry.as_os_str().to_owned();
+        lock_path.push(".lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(PathBuf::from(lock_path))?;
+        file.lock()?;
+        Ok(file)
+    })();
+    match result {
+        Ok(file) => Some(file),
+        Err(e) => {
+            println!(
+                "cargo:warning=Cannot lock libghostty-vt cache entry '{}' ({e}); building without the shared cache",
+                entry.display()
+            );
+            None
+        }
+    }
+}
+
+fn restore_cached_artifact(entry: &Path, ghostty_prefix: &Path) -> std::io::Result<()> {
+    if ghostty_prefix.exists() {
+        fs::remove_dir_all(ghostty_prefix)?;
+    }
+    fs::create_dir_all(ghostty_prefix)?;
+    for sub in ["lib", "include"] {
+        copy_dir_recursive(&entry.join(sub), &ghostty_prefix.join(sub))?;
+    }
+    Ok(())
+}
+
+/// Copies the installed prefix into a temporary sibling and renames it into place, so a
+/// reader never observes a half-written entry. Called with the entry lock held.
+fn publish_cached_artifact(ghostty_prefix: &Path, entry: &Path) -> std::io::Result<()> {
+    let mut staging = entry.as_os_str().to_owned();
+    staging.push(format!(".tmp-{}", std::process::id()));
+    let staging = PathBuf::from(staging);
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    for sub in ["lib", "include"] {
+        copy_dir_recursive(&ghostty_prefix.join(sub), &staging.join(sub))?;
+    }
+    fs::write(staging.join(ARTIFACT_CACHE_COMPLETE_MARKER), b"")?;
+    if entry.exists() {
+        fs::remove_dir_all(entry)?;
+    }
+    fs::rename(&staging, entry)
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for item in fs::read_dir(from)? {
+        let item = item?;
+        let target = to.join(item.file_name());
+        if item.file_type()?.is_dir() {
+            copy_dir_recursive(&item.path(), &target)?;
+        } else {
+            fs::copy(item.path(), &target)?;
+        }
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -388,6 +573,7 @@ pub fn build_ghostty_vt() -> Result<GhosttyBuildConfig, String> {
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=ZIG");
+    println!("cargo:rerun-if-env-changed=FERRYX_GHOSTTY_CACHE_DIR");
 
     Ok(config)
 }

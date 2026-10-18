@@ -18,7 +18,7 @@
  * Pure state plus a `Storage` shim: no fetch, no timer, no DOM beyond the optional
  * `storage` listener that reconciles another tab's write before a mutation.
  */
-import { referenceDraftKey, type ReferenceTargetRef } from "./referenceTypes";
+import { legacyReferenceStorageKeys, referenceDraftKey, type ReferenceTargetRef } from "./referenceTypes";
 
 /** Canonical `ferryx.*` prefix; the frozen target key is appended verbatim. */
 export const REFERENCE_QUEUE_STORAGE_PREFIX = "ferryx.referenceChat.queue:";
@@ -28,7 +28,7 @@ export interface HeldMessage {
   readonly text: string;
 }
 
-type QueueStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+type QueueStorage = Pick<Storage, "getItem" | "setItem" | "removeItem"> & Partial<Pick<Storage, "key" | "length">>;
 
 const newId = () =>
   globalThis.crypto?.randomUUID?.() ??
@@ -38,6 +38,8 @@ const newId = () =>
 export class ReferenceQueueStore {
   private saved = new Map<string, string | null>();
   private unsaved = new Set<string>();
+  /** keys whose stored value is not a v1 envelope (another build's): never written over */
+  private foreign = new Set<string>();
   private queues = new Map<string, HeldMessage[]>();
   private listeners = new Set<() => void>();
   private pending = new Set<string>();
@@ -153,34 +155,62 @@ export class ReferenceQueueStore {
     let raw: string | null = null;
     try {
       raw = this.storage().getItem(REFERENCE_QUEUE_STORAGE_PREFIX + key);
+      if (raw === null) raw = this.migrateLegacy(key);
     } catch {
       /* private mode */
     }
-    let messages: HeldMessage[] = raw ? [{ id: newId(), text: raw }] : [];
-    try {
-      const data = JSON.parse(raw ?? "null");
-      if (data?.version === 1 && Array.isArray(data.messages)) {
-        const ids = new Set<string>();
-        messages = data.messages.filter((item: unknown): item is HeldMessage => {
-          if (!item || typeof item !== "object") return false;
-          const value = item as HeldMessage;
-          if (typeof value.id !== "string" || typeof value.text !== "string" || ids.has(value.id)) {
-            return false;
-          }
-          ids.add(value.id);
-          return true;
-        });
-      }
-    } catch {
-      /* previous versions stored a single plain-text message */
-    }
+    const parsed = parseHeld(raw);
+    if (parsed === null) this.foreign.add(key);
+    else this.foreign.delete(key);
+    const messages = parsed ?? [];
     this.saved.set(key, raw);
     this.queues.set(key, messages);
     return messages;
   }
 
+  /** Move held rows saved under every older owner-bearing key to the durable key, once. */
+  private migrateLegacy(key: string): string | null {
+    const storage = this.storage();
+    const legacy = legacyReferenceStorageKeys(storage, REFERENCE_QUEUE_STORAGE_PREFIX, key);
+    const found = legacy.flatMap((candidate) => {
+      const raw = storage.getItem(candidate);
+      return raw === null ? [] : [{ candidate, raw }];
+    });
+    if (!found.length) return null;
+    let raw = found[0].raw;
+    let moved = found;
+    if (found.length > 1) {
+      // several owners held rows for this session: keep all of them, in storage order, once each.
+      // A value that is not a v1 envelope (another build) is left where it is, untouched.
+      moved = found.filter((entry) => parseHeld(entry.raw) !== null);
+      if (!moved.length) return null;
+      const ids = new Set<string>();
+      const messages = moved.flatMap((entry) => parseHeld(entry.raw) ?? []).filter((message) => {
+        if (ids.has(message.id)) return false;
+        ids.add(message.id);
+        return true;
+      });
+      raw = JSON.stringify({ version: 1, messages });
+    }
+    try {
+      storage.setItem(REFERENCE_QUEUE_STORAGE_PREFIX + key, raw);
+      for (const entry of moved) storage.removeItem(entry.candidate);
+    } catch {
+      // the move could not be written: show the rows from memory and say they are unsaved
+      this.unsaved.add(key);
+    }
+    return raw;
+  }
+
   private write(key: string, messages: HeldMessage[]): void {
     this.queues.set(key, messages);
+    if (this.foreign.has(key)) {
+      // another build's value sits under this key: keep the rows in memory, visibly unsaved,
+      // rather than overwrite what that build holds
+      this.unsaved.add(key);
+      this.notify();
+      return;
+    }
     try {
       const storageKey = REFERENCE_QUEUE_STORAGE_PREFIX + key;
       const raw = messages.length ? JSON.stringify({ version: 1, messages }) : null;
@@ -195,6 +225,39 @@ export class ReferenceQueueStore {
     }
     this.notify();
   }
+}
+
+/** Held rows in a stored value, or null for an object that is not a v1 envelope. */
+function parseHeld(raw: string | null): HeldMessage[] | null {
+  let messages: HeldMessage[] = [];
+  try {
+    const data = JSON.parse(raw ?? "null");
+    // a parsed primitive is a legacy plain-text message that happens to be valid JSON ("42")
+    if (raw && (data === null || typeof data !== "object")) {
+      messages = [{ id: newId(), text: raw }];
+    }
+    // an object or array that is not a v1 envelope (a future version, another build):
+    // never surface the raw JSON as a sendable message, and leave the stored value alone
+    if (data !== null && typeof data === "object" && !(data.version === 1 && Array.isArray(data.messages))) {
+      return null;
+    }
+    if (data?.version === 1 && Array.isArray(data.messages)) {
+      const ids = new Set<string>();
+      messages = data.messages.filter((item: unknown): item is HeldMessage => {
+        if (!item || typeof item !== "object") return false;
+        const value = item as HeldMessage;
+        if (typeof value.id !== "string" || typeof value.text !== "string" || ids.has(value.id)) {
+          return false;
+        }
+        ids.add(value.id);
+        return true;
+      });
+    }
+  } catch {
+    // previous versions stored a single plain-text message
+    if (raw) messages = [{ id: newId(), text: raw }];
+  }
+  return messages;
 }
 
 // Machine switches remount the terminal; outstanding sends must share the same owner cache.

@@ -33,6 +33,7 @@ vi.mock("../lib/tauri", () => ({
   disableRemoteGateway: vi.fn(),
   enableRemoteGateway: vi.fn(),
   getCliLauncherStatus,
+  getDaemonSupervisor: vi.fn(async () => ({ supported: false, enabled: false })),
   getNotificationPermissionStatus: vi.fn(),
   getRemoteStatus: vi.fn(),
   installCliLauncher,
@@ -43,6 +44,7 @@ vi.mock("../lib/tauri", () => ({
   probeNotificationDelivery: vi.fn(),
   requestNotificationPermission: vi.fn(),
   revokeRemoteDevice: vi.fn(),
+  setDaemonSupervisor: vi.fn(async () => ({ supported: false, enabled: false })),
 }));
 
 vi.mock("../lib/browserTauri", () => ({

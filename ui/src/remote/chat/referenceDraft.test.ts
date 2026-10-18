@@ -40,6 +40,63 @@ function fixture() {
 }
 
 describe("reference draft target scoping", () => {
+  it("ui-reference-logic-r7-1: a draft saved under an older owner-bearing key is found after a gateway restart", () => {
+    const { data } = fixture();
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const legacyKey = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-before-restart|${base.epoch}|${base.backendSessionId}`;
+    data.set(legacyKey, "half-typed message");
+    data.set(`${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-before-restart|${base.epoch}|sess-other`, "other pane");
+    const store = new ReferenceDraftStore(() => storage);
+
+    expect(store.read(target({ ownerId: "owner-after-restart" })).text).toBe("half-typed message");
+    expect(store.storageKey(paneA).startsWith("ferryx.")).toBe(true);
+    expect(data.get(store.storageKey(paneA))).toBe("half-typed message");
+    expect(data.has(legacyKey)).toBe(false);
+    expect(store.read(paneB).text).toBe("");
+  });
+
+  it("ui-reference-logic-r9-1: drafts under every older owner-bearing key are kept, and every legacy key is removed", () => {
+    const data = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const legacyA = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-a-old|${base.epoch}|${base.backendSessionId}`;
+    const legacyB = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-b-old|${base.epoch}|${base.backendSessionId}`;
+    const otherPane = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-b-old|${base.epoch}|sess-other`;
+    data.set(legacyA, "deploy later");
+    data.set(otherPane, "other pane");
+    data.set(legacyB, "run tests");
+    const store = new ReferenceDraftStore(() => storage);
+
+    expect(store.read(target({ ownerId: "owner-c" })).text).toBe("deploy later\nrun tests");
+    expect(data.get(store.storageKey(paneA))).toBe("deploy later\nrun tests");
+    expect(data.has(legacyA)).toBe(false);
+    expect(data.has(legacyB)).toBe(false);
+    expect(data.get(otherPane)).toBe("other pane");
+  });
+
   it("keys a draft on the frozen target key, ignoring the provider session", () => {
     const { store } = fixture();
     expect(store.storageKey(paneA)).toBe(REFERENCE_DRAFT_STORAGE_PREFIX + referenceDraftKey(paneA));
@@ -63,15 +120,15 @@ describe("reference draft target scoping", () => {
     expect(data.get(store.storageKey(otherHost))).toBe("draft on another host");
   });
 
-  it("treats another epoch or owner as a different pane with its own storage slot", () => {
+  it("treats another epoch as a different pane, while a restarted gateway's new owner keeps the draft", () => {
     const { store } = fixture();
     const otherEpoch = target({ epoch: "7" });
     const otherOwner = target({ ownerId: "owner-b" });
     store.set(paneA, "A");
     expect(store.read(otherEpoch).text).toBe("");
-    expect(store.read(otherOwner).text).toBe("");
+    expect(store.read(otherOwner).text).toBe("A");
     expect(store.storageKey(otherEpoch)).not.toBe(store.storageKey(paneA));
-    expect(store.storageKey(otherOwner)).not.toBe(store.storageKey(paneA));
+    expect(store.storageKey(otherOwner)).toBe(store.storageKey(paneA));
   });
 });
 
@@ -114,6 +171,21 @@ describe("reference draft acknowledgement", () => {
 
     data.set(store.storageKey(paneA), "another tab's draft");
     expect(store.settle(paneA, "sent").text).toBe("another tab's draft");
+  });
+
+  it("clears a trimmed send from a draft that had leading whitespace", () => {
+    const { store, data } = fixture();
+    store.set(paneA, "\nfix the build");
+    store.begin(paneA, "fix the build");
+    expect(store.settle(paneA, "fix the build")).toEqual({ text: "", edited: false });
+    store.end(paneA);
+    expect(data.has(store.storageKey(paneA))).toBe(false);
+
+    store.set(paneA, "  \nnext step");
+    store.begin(paneA, "next step");
+    store.set(paneA, "  \nnext step and more");
+    expect(store.settle(paneA, "next step")).toEqual({ text: " and more", edited: false });
+    store.end(paneA);
   });
 
   it("keeps a draft cleared and retyped while its send was on its way", () => {
@@ -226,5 +298,76 @@ describe("reference draft notification and failure", () => {
     store.refresh(paneA);
     expect(store.read(paneA).text).toBe("keep me");
     expect(store.isUnsaved(paneA)).toBe(true);
+  });
+
+  it("ui-reference-logic-r15-2: a legacy draft whose migration cannot be written stays visible and unsaved", () => {
+    const data = new Map<string, string>();
+    const PREFIX = REFERENCE_DRAFT_STORAGE_PREFIX + referenceDraftKey(paneA);
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        if (key.startsWith(PREFIX)) throw new Error("QuotaExceededError");
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const legacyKey = `${REFERENCE_DRAFT_STORAGE_PREFIX}${base.hostId}|owner-before-restart|${base.epoch}|${base.backendSessionId}`;
+    data.set(legacyKey, "half-typed message");
+    const store = new ReferenceDraftStore(() => storage);
+
+    expect(store.read(paneA).text).toBe("half-typed message");
+    expect(store.isUnsaved(paneA)).toBe(true);
+    expect(data.get(legacyKey)).toBe("half-typed message");
+  });
+});
+
+describe("reference draft overlapping sends", () => {
+  it("keeps text typed after a send that began while another was in flight", () => {
+    const { store } = fixture();
+    expect(store.begin(paneA, "A")).toBe(true);
+    expect(store.begin(paneA, "fix")).toBe(false);
+    store.set(paneA, "");
+    store.settle(paneA, "A");
+    store.end(paneA);
+    store.set(paneA, "fix the test");
+    store.settle(paneA, "fix");
+    expect(store.read(paneA).text).toBe("fix the test");
+  });
+
+  it("keeps the pending record of a later send when an overlapped send is acknowledged", () => {
+    const { store } = fixture();
+    expect(store.begin(paneA, "a")).toBe(true);
+    expect(store.begin(paneA, "b")).toBe(false);
+    store.settle(paneA, "a");
+    store.end(paneA);
+    expect(store.begin(paneA, "continue")).toBe(true);
+    store.set(paneA, "");
+    store.set(paneA, "continue with tests");
+    store.settle(paneA, "b");
+    expect(store.read(paneA).text).toBe("continue with tests");
+    store.settle(paneA, "continue");
+    expect(store.read(paneA).text).toBe("continue with tests");
+  });
+
+  it("ui-reference-logic-r6-1: ending an overlapped send keeps the pending record of a newer send", () => {
+    const { store } = fixture();
+    expect(store.begin(paneA, "a")).toBe(true);
+    expect(store.begin(paneA, "b")).toBe(false);
+    store.settle(paneA, "a");
+    store.end(paneA, "a");
+    expect(store.begin(paneA, "yes")).toBe(true);
+    store.set(paneA, "");
+    store.settle(paneA, "b");
+    store.end(paneA, "b");
+    // the user types the same words again while the newer send is still on its way
+    store.set(paneA, "yes");
+    store.settle(paneA, "yes");
+    expect(store.read(paneA).text).toBe("yes");
   });
 });

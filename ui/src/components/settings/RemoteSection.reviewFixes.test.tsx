@@ -89,7 +89,11 @@ describe("RemoteSection review fixes", () => {
     resetTailscaleDiscoveryForTests();
     localStorage.clear();
     isTauriMock.mockReturnValue(true);
-    invokeMock.mockImplementation(async (command: string) => (command === "cmd_ssh_list_hosts" ? [] : undefined));
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_list_hosts") return [];
+      if (command === "cmd_agent_integration_get") return { enabled: true };
+      return undefined;
+    });
   });
 
   afterEach(() => {

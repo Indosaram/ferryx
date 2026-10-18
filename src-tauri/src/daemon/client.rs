@@ -575,6 +575,9 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SubscribeDag { .. } => "subscribeDag",
         DaemonRequest::UnsubscribeDag { .. } => "unsubscribeDag",
         DaemonRequest::Shutdown => "shutdown",
+        DaemonRequest::AgentControl { .. } => "agentControl",
+        DaemonRequest::GetAgentIntegration => "getAgentIntegration",
+        DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
     }
 }
 
@@ -2403,18 +2406,19 @@ impl DaemonClient {
         // of the app and died with it leaving no record. The detached spawn below stays as the
         // fallback for platforms with no agent and for isolated runtimes, where installing one would
         // point the user's login autostart at a test build.
-        if crate::daemon::launchd::agent_management_supported() {
-            let agent_binary = binary_path.clone();
-            let agent = crate::ipc::run_blocking(move || {
-                crate::daemon::launchd::ensure_launchd_agent(&agent_binary)
+        // A user who turned autostart off gets the detached spawn directly: no agent install, no
+        // supervised wait and no reload.
+        if crate::daemon::supervisor::supported() && !crate::daemon::supervisor::user_opted_out() {
+            let agent = crate::ipc::run_blocking(|| {
+                crate::daemon::supervisor::ensure()
                     .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
             })
             .await;
             match agent {
-                Ok(plist_path) => {
+                Ok(reinstalled) => {
                     tracing::info!(
-                        plist = %plist_path.display(),
-                        "Daemon lifetime handed to the launchd agent"
+                        reinstalled,
+                        "Daemon lifetime handed to the supervisor"
                     );
                     if let Ok(stream) = self.wait_for_supervised_daemon(SUPERVISED_START_WAIT).await
                     {
@@ -2424,12 +2428,9 @@ impl DaemonClient {
                     // the process is gone (a committed handover, a duplicate-endpoint exit, or a
                     // crash it is not configured to relaunch). Reloading re-runs `RunAtLoad`, which
                     // is what starts it again without waiting out the long readiness budget.
-                    let reload = crate::ipc::run_blocking({
-                        let plist_path = plist_path.clone();
-                        move || {
-                            crate::daemon::launchd::load_launchd_agent(&plist_path)
-                                .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
-                        }
+                    let reload = crate::ipc::run_blocking(|| {
+                        crate::daemon::supervisor::reload()
+                            .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
                     })
                     .await;
                     match reload {
@@ -2437,18 +2438,18 @@ impl DaemonClient {
                             Ok(stream) => return Ok(stream),
                             Err(error) => tracing::warn!(
                                 %error,
-                                "The launchd agent still published no daemon endpoint; spawning a detached daemon instead"
+                                "The supervisor still published no daemon endpoint; spawning a detached daemon instead"
                             ),
                         },
                         Err(error) => tracing::warn!(
                             %error,
-                            "Could not reload the launchd agent; spawning a detached daemon instead"
+                            "Could not reload the supervisor; spawning a detached daemon instead"
                         ),
                     }
                 }
                 Err(error) => tracing::warn!(
                     %error,
-                    "Could not hand the daemon lifetime to launchd; spawning a detached daemon instead"
+                    "Could not hand the daemon lifetime to the supervisor; spawning a detached daemon instead"
                 ),
             }
         }
@@ -2695,6 +2696,7 @@ impl DaemonClient {
                         drop(reader);
                         drop(write_half);
 
+                        Self::retarget_supervisor_before_replacing_daemon().await;
                         let termination =
                             Self::terminate_stale_daemon_process_windows(pid).await;
                         if !stale_daemon_endpoint_files_removable(termination) {
@@ -2759,6 +2761,7 @@ impl DaemonClient {
                     drop(reader);
                     drop(write_half);
 
+                    Self::retarget_supervisor_before_replacing_daemon().await;
                     if let Err(error) = self.spawn_successor_daemon().await {
                         tracing::warn!(
                             %error,
@@ -2786,6 +2789,28 @@ impl DaemonClient {
                 IpcErrorCode::InternalError,
                 "Unexpected handshake response from daemon",
             )),
+        }
+    }
+
+    /// Points the Windows supervisor task at this build before an incompatible daemon is replaced.
+    ///
+    /// The watchdog respawns whatever executable the task names. Retargeting first means a crash of
+    /// the replacement, or of the old daemon while it is being replaced, is restarted with the new
+    /// build instead of the incompatible one. A failure is logged and does not block the
+    /// replacement: the task keeps its previous definition and the GUI retargets it on next start.
+    #[cfg(not(unix))]
+    async fn retarget_supervisor_before_replacing_daemon() {
+        let retarget = crate::ipc::run_blocking(|| {
+            crate::daemon::supervisor::retarget()
+                .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
+        })
+        .await;
+        match retarget {
+            Ok(changed) => tracing::info!(changed, "Supervisor task points at this build"),
+            Err(error) => tracing::warn!(
+                %error,
+                "Could not retarget the supervisor task before replacing the incompatible daemon"
+            ),
         }
     }
 

@@ -10,6 +10,7 @@
 #![recursion_limit = "512"]
 
 pub mod account;
+pub mod agent_control;
 pub mod agent_detect;
 pub mod agent_transcript;
 pub mod browser;
@@ -177,11 +178,17 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
         .build()?;
 
     let new_terminal = MenuItemBuilder::with_id("tab.newTerminal", "New Terminal Tab")
-        .accelerator("CmdOrCtrl+T")
         .build(app)?;
+    new_terminal.set_accelerator(browser::bridge::keys::menu_accelerator(
+        "tab.newTerminal",
+        "CmdOrCtrl+T",
+    ))?;
     let close_tab = MenuItemBuilder::with_id("tab.close", "Close Tab")
-        .accelerator("CmdOrCtrl+W")
         .build(app)?;
+    close_tab.set_accelerator(browser::bridge::keys::menu_accelerator(
+        "tab.close",
+        "CmdOrCtrl+W",
+    ))?;
 
     let file_menu = SubmenuBuilder::new(app, "File")
         .item(&new_terminal)
@@ -219,6 +226,10 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
     menu.append(&view_menu)?;
     menu.append(&window_menu)?;
     app.set_menu(menu)?;
+    app.manage(NativeMenuItems {
+        new_terminal: new_terminal.clone(),
+        close_tab: close_tab.clone(),
+    });
 
     // TEMPORARY-DIAGNOSTIC: same opt-in as switchDebug's native sink.
     let shortcut_debug = crate::ipc::debug::switch_debug_sink_enabled(
@@ -256,6 +267,83 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
         }
     });
     Ok(())
+}
+
+/// Menu items whose accelerators follow the user's bindings (todo 18). "Close Window" has no
+/// TS shortcut action, so it keeps its fixed accelerator.
+#[cfg(target_os = "macos")]
+struct NativeMenuItems<R: tauri::Runtime> {
+    new_terminal: tauri::menu::MenuItem<R>,
+    close_tab: tauri::menu::MenuItem<R>,
+}
+
+#[cfg(target_os = "macos")]
+fn rebind_menu_accelerators<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use browser::bridge::keys::menu_accelerator;
+    let Some(items) = app.try_state::<NativeMenuItems<R>>() else {
+        return;
+    };
+    for (item, ts_id, default) in [
+        (&items.new_terminal, "tab.newTerminal", "CmdOrCtrl+T"),
+        (&items.close_tab, "tab.close", "CmdOrCtrl+W"),
+    ] {
+        if let Err(error) = item.set_accelerator(menu_accelerator(ts_id, default)) {
+            tracing::warn!(ts_id, ?error, "Failed to rebind menu accelerator");
+        }
+    }
+}
+
+/// Pushes the user's shortcut overrides (sparse, keyed by TS action id; `null` unbinds) to
+/// every native key source: the macOS key monitor and menu, and the guest browser key
+/// sources on all platforms. An empty table restores the built-in defaults.
+#[tauri::command]
+fn cmd_shortcuts_set_native_table<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    table: Option<browser::bridge::keys::NativeOverrides>,
+) {
+    browser::bridge::keys::set_native_overrides(table);
+    #[cfg(target_os = "macos")]
+    rebind_menu_accelerators(&app);
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
+/// The chords one AppKit key event can stand for, in the legacy predicates' terms: the
+/// physical key (keyCode), plus the typed character for Cmd+W and the 1..9 digits, which the
+/// legacy predicates also matched by character. A typed digit wins over the keyCode digit.
+#[cfg(target_os = "macos")]
+fn macos_monitor_chords(
+    flags: objc2_app_kit::NSEventModifierFlags,
+    characters: Option<&str>,
+    key_code: u16,
+) -> Vec<browser::bridge::keys::Chord> {
+    use browser::bridge::keys::{mac_key_id, Chord, KeyId};
+    use objc2_app_kit::NSEventModifierFlags as Flags;
+    let chord = |key| Chord {
+        key,
+        ctrl: flags.contains(Flags::Control),
+        meta: flags.contains(Flags::Command),
+        alt: flags.contains(Flags::Option),
+        shift: flags.contains(Flags::Shift),
+    };
+    let typed = if is_unshifted_cmd_w_characters(characters) {
+        Some(KeyId::Letter('w'))
+    } else {
+        characters
+            .and_then(|chars| chars.chars().next())
+            .and_then(|char| char.to_digit(10))
+            .filter(|digit| (1..=9).contains(digit))
+            .map(|digit| KeyId::Digit(digit as u8))
+    };
+    let physical = mac_key_id(key_code);
+    let mut chords = Vec::with_capacity(2);
+    if let Some(key) = typed {
+        chords.push(chord(key));
+    }
+    if !(matches!(typed, Some(KeyId::Digit(_))) && matches!(physical, KeyId::Digit(_))) {
+        chords.push(chord(physical));
+    }
+    chords
 }
 
 #[cfg(target_os = "macos")]
@@ -697,159 +785,30 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
                 }
             }
         }
-        let worktree_digit = if event_type == NSEventType::KeyDown {
-            unshifted_cmd_digit(flags, chars_str.as_deref(), key_code)
+        let monitor_hit = if event_type == NSEventType::KeyDown {
+            browser::bridge::keys::monitor_action(&macos_monitor_chords(
+                flags,
+                chars_str.as_deref(),
+                key_code,
+            ))
         } else {
             None
         };
 
-        if event_type == NSEventType::KeyDown
-            && is_unshifted_cmd_w(flags, chars_str.as_deref(), key_code)
-        {
-            if trace_chord {
-                tracing::info!(
-                    event = "shortcut.native.forward",
-                    action = "menu_close_tab",
-                    "TEMPORARY-DIAGNOSTIC"
-                );
-            }
-            if shortcut_dispatch::dispatch(&app_handle, "menu_close_tab", ()) {
-                ptr::null_mut()
-            } else {
-                event_ptr.as_ptr()
-            }
-        } else if let Some(digit) = worktree_digit {
-            if trace_chord {
-                tracing::info!(
-                    event = "shortcut.native.forward",
-                    action = "menu_select_worktree",
-                    digit,
-                    "TEMPORARY-DIAGNOSTIC"
-                );
-            }
-            if shortcut_dispatch::dispatch(&app_handle, "menu_select_worktree", digit) {
-                ptr::null_mut()
-            } else {
-                event_ptr.as_ptr()
-            }
-        } else if let Some(digit) = if event_type == NSEventType::KeyDown {
-            ctrl_digit(flags, chars_str.as_deref(), key_code)
-        } else {
-            None
-        } {
-            if trace_chord {
-                tracing::info!(
-                    event = "shortcut.native.forward",
-                    action = "menu_select_tab",
-                    digit,
-                    "TEMPORARY-DIAGNOSTIC"
-                );
-            }
-            if shortcut_dispatch::dispatch(&app_handle, "menu_select_tab", digit) {
-                ptr::null_mut()
-            } else {
-                event_ptr.as_ptr()
-            }
-        } else if let Some(is_next) = if event_type == NSEventType::KeyDown {
-            is_ctrl_tab(flags, key_code).or_else(|| is_cmd_shift_bracket(flags, key_code))
-        } else {
-            None
-        } {
-            let action = if is_next {
-                "menu_next_tab"
-            } else {
-                "menu_prev_tab"
-            };
+        if let Some((action, digit)) = monitor_hit {
             if trace_chord {
                 tracing::info!(
                     event = "shortcut.native.forward",
                     action,
+                    digit = ?digit,
                     "TEMPORARY-DIAGNOSTIC"
                 );
             }
-            if shortcut_dispatch::dispatch(&app_handle, action, ()) {
-                ptr::null_mut()
-            } else {
-                event_ptr.as_ptr()
-            }
-        } else if event_type == NSEventType::KeyDown
-            && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_T)
-        {
-            if trace_chord {
-                tracing::info!(
-                    event = "shortcut.native.forward",
-                    action = "menu_new_terminal_tab",
-                    "TEMPORARY-DIAGNOSTIC"
-                );
-            }
-            if shortcut_dispatch::dispatch(&app_handle, "menu_new_terminal_tab", ()) {
-                ptr::null_mut()
-            } else {
-                event_ptr.as_ptr()
-            }
-        } else if let Some(is_down) = if event_type == NSEventType::KeyDown {
-            is_cmd_d_split(flags, key_code)
-        } else {
-            None
-        } {
-            let action = if is_down {
-                "menu_split_down"
-            } else {
-                "menu_split_right"
+            let delivered = match digit {
+                Some(digit) => shortcut_dispatch::dispatch(&app_handle, action, digit),
+                None => shortcut_dispatch::dispatch(&app_handle, action, ()),
             };
-            if trace_chord {
-                tracing::info!(
-                    event = "shortcut.native.forward",
-                    action,
-                    "TEMPORARY-DIAGNOSTIC"
-                );
-            }
-            if shortcut_dispatch::dispatch(&app_handle, action, ()) {
-                ptr::null_mut()
-            } else {
-                event_ptr.as_ptr()
-            }
-        } else if event_type == NSEventType::KeyDown
-            && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_K)
-        {
-            if trace_chord {
-                tracing::info!(
-                    event = "shortcut.native.forward",
-                    action = "menu_command_palette",
-                    "TEMPORARY-DIAGNOSTIC"
-                );
-            }
-            if shortcut_dispatch::dispatch(&app_handle, "menu_command_palette", ()) {
-                ptr::null_mut()
-            } else {
-                event_ptr.as_ptr()
-            }
-        } else if event_type == NSEventType::KeyDown
-            && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_B)
-        {
-            if trace_chord {
-                tracing::info!(
-                    event = "shortcut.native.forward",
-                    action = "menu_toggle_sidebar",
-                    "TEMPORARY-DIAGNOSTIC"
-                );
-            }
-            if shortcut_dispatch::dispatch(&app_handle, "menu_toggle_sidebar", ()) {
-                ptr::null_mut()
-            } else {
-                event_ptr.as_ptr()
-            }
-        } else if event_type == NSEventType::KeyDown
-            && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_COMMA)
-        {
-            if trace_chord {
-                tracing::info!(
-                    event = "shortcut.native.forward",
-                    action = "menu_open_settings",
-                    "TEMPORARY-DIAGNOSTIC"
-                );
-            }
-            if shortcut_dispatch::dispatch(&app_handle, "menu_open_settings", ()) {
+            if delivered {
                 ptr::null_mut()
             } else {
                 event_ptr.as_ptr()
@@ -1467,27 +1426,17 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             // daemon client repeats this on demand, which is what makes the race harmless; this
             // call exists so the agent is armed even when no terminal is ever opened. A failure is
             // not fatal: the client falls back to spawning a detached daemon.
-            #[cfg(target_os = "macos")]
-            {
-                if crate::daemon::launchd::agent_management_supported() {
-                    tauri::async_runtime::spawn_blocking(|| {
-                        let binary = std::env::current_exe().map_err(|error| error.to_string());
-                        match binary.and_then(|binary| {
-                            crate::daemon::launchd::ensure_launchd_agent(&binary)
-                                .map_err(|error| error.to_string())
-                        }) {
-                            Ok(plist) => tracing::info!(
-                                plist = %plist.display(),
-                                "Launchd agent owns the daemon lifetime"
-                            ),
-                            Err(error) => tracing::warn!(
-                                %error,
-                                "Could not arm the launchd agent; the daemon will be spawned detached"
-                            ),
-                        }
-                    });
-                }
-            }
+            tauri::async_runtime::spawn_blocking(|| match crate::daemon::supervisor::ensure() {
+                Ok(reinstalled) => tracing::info!(
+                    reinstalled,
+                    supported = crate::daemon::supervisor::supported(),
+                    "Daemon supervisor armed"
+                ),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Could not arm the daemon supervisor; the daemon will be spawned detached"
+                ),
+            });
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(raw_window) = window.ns_window() {
@@ -1614,7 +1563,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(Arc::clone(&in_process_backend)
             as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>)
         .manage(in_process_backend)
-        .manage(file_preview_service);
+        .manage(file_preview_service)
+        .manage(crate::ipc::updater::UpdaterDownloadState::default());
 
     #[cfg(desktop)]
     let builder = if crate::ipc::updater::updater_managed_externally() {
@@ -1635,6 +1585,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     }
     let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
         cmd_native_qa_enabled,
+        cmd_shortcuts_set_native_table,
         crate::ipc::account::cmd_account_enrollment_status,
         crate::ipc::account::cmd_account_enroll_this_machine,
         crate::ipc::paired_host::paired_host_list,
@@ -1658,6 +1609,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::file_open_with::cmd_webview_print,
         crate::ipc::updater::cmd_updater_managed_externally,
         crate::ipc::updater::cmd_distribution_channel,
+        crate::ipc::updater::cmd_updater_check,
+        crate::ipc::updater::cmd_updater_download,
+        crate::ipc::updater::cmd_updater_cancel,
+        crate::ipc::updater::cmd_updater_install,
         cmd_switch_debug_log,
         cmd_terminal_output_channel,
         cmd_terminal_spawn,
@@ -1682,6 +1637,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_terminal_list,
         cmd_terminal_preferences,
         cmd_terminal_apply_overrides,
+        cmd_terminal_set_appearance,
         cmd_native_terminal_attach,
         cmd_native_terminal_detach,
         cmd_native_terminal_close,
@@ -1695,6 +1651,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_native_terminal_set_dom_overlay_input,
         cmd_native_terminal_set_attention_frame,
         cmd_native_terminal_select,
+        cmd_native_terminal_cursor,
         cmd_native_terminal_copy_selection,
         cmd_clipboard_write_text,
         cmd_native_terminal_paste,
@@ -1729,6 +1686,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::ssh::cmd_ssh_set_password,
         ipc::ssh::cmd_ssh_clear_password,
         ipc::ssh::cmd_ssh_prepare_integration,
+        ipc::ssh::cmd_ssh_remove_integration,
         ipc::ssh::cmd_ssh_install_project_helper,
         ipc::ssh::cmd_ssh_provision_helper,
         ipc::ssh::cmd_ssh_helper_update_state,
@@ -1776,6 +1734,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_agents_detect,
         cmd_agent_session_discover,
         cmd_agent_state_reset,
+        ipc::agent_integration::cmd_agent_integration_get,
+        ipc::agent_integration::cmd_daemon_supervisor_get,
+        ipc::agent_integration::cmd_daemon_supervisor_set,
+        ipc::agent_integration::cmd_agent_integration_set,
+        ipc::agent_integration::cmd_agent_integration_remove_local,
         cmd_browser_create,
         cmd_browser_open_devtools,
         cmd_browser_inject_element_picker,
@@ -1861,6 +1824,129 @@ mod tests {
     use std::sync::Mutex;
 
     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+    /// The predicate chain the macOS key monitor ran before todo 18, in its original order.
+    #[cfg(target_os = "macos")]
+    fn legacy_monitor_action(
+        flags: objc2_app_kit::NSEventModifierFlags,
+        chars: Option<&str>,
+        key_code: u16,
+    ) -> Option<(&'static str, Option<u8>)> {
+        if is_unshifted_cmd_w(flags, chars, key_code) {
+            return Some(("menu_close_tab", None));
+        }
+        if let Some(digit) = unshifted_cmd_digit(flags, chars, key_code) {
+            return Some(("menu_select_worktree", Some(digit)));
+        }
+        if let Some(digit) = ctrl_digit(flags, chars, key_code) {
+            return Some(("menu_select_tab", Some(digit)));
+        }
+        if let Some(next) =
+            is_ctrl_tab(flags, key_code).or_else(|| is_cmd_shift_bracket(flags, key_code))
+        {
+            return Some((if next { "menu_next_tab" } else { "menu_prev_tab" }, None));
+        }
+        if is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_T) {
+            return Some(("menu_new_terminal_tab", None));
+        }
+        if let Some(down) = is_cmd_d_split(flags, key_code) {
+            return Some((if down { "menu_split_down" } else { "menu_split_right" }, None));
+        }
+        for (code, event) in [
+            (ANSI_KEY_CODE_K, "menu_command_palette"),
+            (ANSI_KEY_CODE_B, "menu_toggle_sidebar"),
+            (ANSI_KEY_CODE_COMMA, "menu_open_settings"),
+        ] {
+            if is_unshifted_cmd_key(flags, key_code, code) {
+                return Some((event, None));
+            }
+        }
+        None
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn default_table_matches_legacy_predicates() {
+        use objc2_app_kit::NSEventModifierFlags as Flags;
+        let modifiers = [Flags::Command, Flags::Control, Flags::Option, Flags::Shift, Flags::CapsLock];
+        let characters: [Option<&str>; 8] =
+            [None, Some("w"), Some("W"), Some("1"), Some("5"), Some("9"), Some("0"), Some("t")];
+        for bits in 0u32..(1 << modifiers.len()) {
+            let flags = modifiers
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| bits & (1 << index) != 0)
+                .fold(Flags::empty(), |acc, (_, flag)| acc | *flag);
+            for key_code in 0u16..128 {
+                for chars in characters {
+                    assert_eq!(
+                        browser::bridge::keys::monitor_action_in(
+                            None,
+                            &macos_monitor_chords(flags, chars, key_code),
+                        ),
+                        legacy_monitor_action(flags, chars, key_code),
+                        "flags={:#x} key_code={key_code} chars={chars:?}",
+                        flags.bits()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn rebound_close_tab_is_intercepted_on_new_chord_only() {
+        use browser::bridge::keys::{monitor_action_in, NativeBinding, NativeOverrides};
+        use objc2_app_kit::NSEventModifierFlags as Flags;
+        let table: NativeOverrides = [(
+            "tab.close".to_string(),
+            Some(NativeBinding {
+                key: "q".to_string(),
+                primary: true,
+                control: false,
+                alt: false,
+                shift: true,
+            }),
+        )]
+        .into_iter()
+        .collect();
+        let q = 12;
+        // Cmd+W now reaches the webview/PTY; Cmd+Shift+Q closes the tab.
+        assert_eq!(
+            monitor_action_in(Some(&table), &macos_monitor_chords(Flags::Command, Some("w"), ANSI_KEY_CODE_W)),
+            None
+        );
+        assert_eq!(
+            monitor_action_in(
+                Some(&table),
+                &macos_monitor_chords(Flags::Command | Flags::Shift, Some("q"), q)
+            ),
+            Some(("menu_close_tab", None))
+        );
+        assert_eq!(
+            monitor_action_in(Some(&table), &macos_monitor_chords(Flags::Command, Some("q"), q)),
+            None
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn unbound_action_is_not_intercepted() {
+        use browser::bridge::keys::{monitor_action_in, NativeOverrides};
+        use objc2_app_kit::NSEventModifierFlags as Flags;
+        let table: NativeOverrides = [("terminal.splitRight".to_string(), None)].into_iter().collect();
+        assert_eq!(
+            monitor_action_in(Some(&table), &macos_monitor_chords(Flags::Command, Some("d"), ANSI_KEY_CODE_D)),
+            None
+        );
+        assert_eq!(
+            monitor_action_in(
+                Some(&table),
+                &macos_monitor_chords(Flags::Command | Flags::Shift, Some("d"), ANSI_KEY_CODE_D)
+            ),
+            Some(("menu_split_down", None))
+        );
+    }
 
     struct RestoreFerryxDataDir(Option<OsString>);
 

@@ -87,15 +87,17 @@ interface QueuedItem<T = unknown> {
   readonly operationName: string;
   readonly queuedAt: number;
   readonly generation: number | null;
-  readonly bytes: number;
+  bytes: number;
   readonly execute: (requestId: string) => Promise<T>;
-  readonly resolve: (value: T) => void;
-  readonly reject: (error: unknown) => void;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
   /** "pointer" items (wheel/mouse) are bounded separately so momentum scrolling cannot evict keystrokes. */
   readonly kind?: "input" | "preedit" | "pointer";
   readonly supersededResolvers?: Array<(value: T) => void>;
   readonly identityMeta?: InputIdentityMeta;
   readonly recover?: (error: unknown) => Promise<boolean>;
+  /** Present only for plain printable text; later text may be appended while the item is queued. */
+  coalesce?: { text: string; readonly send: (text: string, requestId: string) => Promise<T> };
   dispatchedAt?: number | null;
 }
 
@@ -133,6 +135,15 @@ export interface NativeTerminalEnqueueOptions {
    * still holds the session lane, so later items cannot overtake it.
    */
   readonly recover?: (error: unknown) => Promise<boolean>;
+  /**
+   * Plain printable text whose bytes are identical whether written alone or appended to the
+   * previous text write. When the entry cap is reached, it is appended to the queued tail item
+   * (same session and generation, also carrying coalesceText) instead of being rejected.
+   */
+  readonly coalesceText?: {
+    readonly text: string;
+    readonly send: (text: string, requestId: string) => Promise<unknown>;
+  };
 }
 
 export const SLOW_INPUT_THRESHOLD_MS = 250;
@@ -142,6 +153,9 @@ const DEFAULT_MAX_QUEUE_BYTES = 256 * 1024;
 // which counts in-flight and queued ops together). Buffering far more entries
 // locally would only turn entries 18+ into explicit Busy rejections downstream.
 const DEFAULT_MAX_QUEUE_ENTRIES = 17;
+// One coalesced text write never exceeds the backend's per-input text limit
+// (MAX_NATIVE_INPUT_BYTES in src-tauri/src/native_terminal/input.rs).
+const MAX_COALESCED_TEXT_BYTES = 8192;
 
 function notifySuperseded<T>(
   resolvers: Array<(value: T) => void> | undefined,
@@ -361,6 +375,47 @@ export class NativeTerminalInputQueueManager {
 
     const boundedBytes = Math.max(1, payloadBytes);
     const pointer = options?.pointer === true;
+    const coalesceText = pointer ? undefined : options?.coalesceText;
+    if (
+      coalesceText &&
+      state.allocatedEntries >= this.maxQueueEntries &&
+      state.allocatedBytes + boundedBytes <= this.maxQueueBytes
+    ) {
+      // Only the queued tail is a merge target, so a merge never reorders input. Items in
+      // state.items are never running (pump shifts the head out before dispatch).
+      const tail = state.items[state.items.length - 1];
+      if (
+        tail &&
+        tail.kind === "input" &&
+        tail.coalesce &&
+        tail.generation === generation &&
+        tail.bytes + boundedBytes <= MAX_COALESCED_TEXT_BYTES
+      ) {
+        const target = tail as QueuedItem<T>;
+        target.coalesce!.text += coalesceText.text;
+        target.bytes += boundedBytes;
+        state.allocatedBytes += boundedBytes;
+        switchDebug("terminal.surface.input.coalesced", {
+          backendSessionId: sessionId,
+          operationId: target.requestId,
+          payloadBytes: boundedBytes,
+          coalescedBytes: target.bytes,
+          queuedEntries: state.allocatedEntries,
+        });
+        return new Promise<T>((resolve, reject) => {
+          const previousResolve = target.resolve;
+          const previousReject = target.reject;
+          target.resolve = (value) => {
+            previousResolve(value);
+            resolve(value);
+          };
+          target.reject = (error) => {
+            previousReject(error);
+            reject(error);
+          };
+        });
+      }
+    }
     if (
       pointer
         ? state.pointerEntries >= this.maxQueueEntries
@@ -395,6 +450,12 @@ export class NativeTerminalInputQueueManager {
         kind: pointer ? "pointer" : "input",
         identityMeta,
         recover: options?.recover,
+        coalesce: coalesceText
+          ? {
+              text: coalesceText.text,
+              send: coalesceText.send as (text: string, requestId: string) => Promise<T>,
+            }
+          : undefined,
       };
 
       state.items.push(item as QueuedItem);
@@ -616,8 +677,10 @@ export class NativeTerminalInputQueueManager {
   }
 
   private async executeWithRecovery(item: QueuedItem, state: SessionQueueState): Promise<unknown> {
+    const run = () =>
+      item.coalesce ? item.coalesce.send(item.coalesce.text, item.requestId) : item.execute(item.requestId);
     try {
-      return await item.execute(item.requestId);
+      return await run();
     } catch (error: unknown) {
       if (!item.recover || !(await item.recover(error))) throw error;
       if (
@@ -627,7 +690,7 @@ export class NativeTerminalInputQueueManager {
       ) {
         throw new NativeTerminalStaleGenerationError();
       }
-      return item.execute(item.requestId);
+      return run();
     }
   }
 }

@@ -45,7 +45,11 @@ export function isReleasePersistedInputEvent(event: string): boolean {
     || event.startsWith("terminal.open.")
     || event.startsWith("project.register.")
     || event.startsWith("terminal.surface.attach.")
-    || event === "terminal.surface.bounds.error";
+    || event === "terminal.surface.bounds.error"
+    // Worktree selection and workspace swaps/restores: rare, user-driven, and the only record of
+    // which project's state a sidebar row or "New Terminal" acted on. Renders stay debug-only.
+    || event.startsWith("worktree.")
+    || (event.startsWith("workspace.") && event !== "workspace.render");
 }
 
 type SwitchDebugLoggerOptions = {
