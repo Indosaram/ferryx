@@ -534,17 +534,86 @@ pub fn get_socket_path() -> PathBuf {
 }
 
 /// Uncertain-write fixture (QA builds only): after a remote write reached the remote PTY,
-/// park before WriteOk while QaWriteAckHold is armed for the session. If the client
-/// disconnected meanwhile, the response written after release is dropped.
+/// park before WriteOk while QaWriteAckHold is armed for the session. The park ends on
+/// release (returns true: send WriteOk) or when the connection's reader reaches EOF/error
+/// (returns false: the client is gone and the WriteOk is dropped), so a disconnected client
+/// never leaves the connection task parked. The EOF probe only fills the buffer and never
+/// consumes bytes; a pipelined request keeps the park waiting on release alone.
 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-async fn qa_hold_write_ack(session_id: &str) {
-    if let Some(release) = crate::ipc::qa_barrier::write_ack_hold().applied(session_id) {
-        release.notified().await;
+async fn qa_hold_write_ack<R: tokio::io::AsyncBufRead + Unpin>(session_id: &str, reader: &mut R) -> bool {
+    let Some(release) = crate::ipc::qa_barrier::write_ack_hold().applied(session_id) else {
+        return true;
+    };
+    let closed = async {
+        let eof = std::future::poll_fn(|cx| {
+            std::pin::Pin::new(&mut *reader)
+                .poll_fill_buf(cx)
+                .map(|filled| filled.map_or(true, |buf| buf.is_empty()))
+        })
+        .await;
+        if !eof {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        _ = release.notified() => true,
+        _ = closed => false,
     }
 }
 
 #[cfg(not(all(feature = "local-split-qa", feature = "native-terminal")))]
-async fn qa_hold_write_ack(_session_id: &str) {}
+async fn qa_hold_write_ack<R>(_session_id: &str, _reader: &mut R) -> bool {
+    true
+}
+
+#[cfg(all(test, feature = "local-split-qa", feature = "native-terminal"))]
+mod qa_write_ack_hold_close_tests {
+    use std::time::Duration;
+
+    fn connection() -> (tokio::io::DuplexStream, tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>, tokio::io::WriteHalf<tokio::io::DuplexStream>) {
+        let (client, server) = tokio::io::duplex(64);
+        let (read_half, write_half) = tokio::io::split(server);
+        (client, tokio::io::BufReader::new(read_half), write_half)
+    }
+
+    #[tokio::test]
+    async fn held_ack_is_dropped_when_connection_closes() {
+        let session = "qa-hold-close-on-disconnect";
+        let hold = crate::ipc::qa_barrier::write_ack_hold();
+        hold.arm(session);
+        let mut applied = hold.subscribe_applied();
+        let (client, mut reader, _write_half) = connection();
+        let parked = tokio::spawn(async move { super::qa_hold_write_ack(session, &mut reader).await });
+        // The write-applied event proves the task reached the park.
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), applied.recv()).await.unwrap().unwrap();
+            if event.session_id == session { break; }
+        }
+        assert!(!parked.is_finished(), "nothing released the hold and the client is still connected");
+        drop(client);
+        let deliver = tokio::time::timeout(Duration::from_secs(5), parked).await
+            .expect("connection close must end the park").unwrap();
+        assert!(!deliver, "WriteOk must be dropped for a closed connection");
+        assert!(hold.release(session), "close does not disarm; explicit release still does");
+    }
+
+    #[tokio::test]
+    async fn held_ack_is_delivered_on_release_while_connected() {
+        let session = "qa-hold-release-connected";
+        let hold = crate::ipc::qa_barrier::write_ack_hold();
+        hold.arm(session);
+        let mut applied = hold.subscribe_applied();
+        let (_client, mut reader, _write_half) = connection();
+        let parked = tokio::spawn(async move { super::qa_hold_write_ack(session, &mut reader).await });
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), applied.recv()).await.unwrap().unwrap();
+            if event.session_id == session { break; }
+        }
+        assert!(hold.release(session));
+        let deliver = tokio::time::timeout(Duration::from_secs(5), parked).await.unwrap().unwrap();
+        assert!(deliver);
+    }
+}
 
 pub fn get_lock_path() -> PathBuf {
     get_runtime_dir().join("daemon.lock")
@@ -3855,7 +3924,10 @@ impl DaemonServer {
                 },
                 Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
                     match self.terminal_service.write_input_operation(&session_id, generation, data) {
-                        Ok(op) => match op.await { Ok(()) => { qa_hold_write_ack(&session_id).await; DaemonResponse::WriteOk }, Err(e) => daemon_error(e.to_string()) },
+                        Ok(op) => match op.await {
+                            Ok(()) => if qa_hold_write_ack(&session_id, &mut reader).await { DaemonResponse::WriteOk } else { break },
+                            Err(e) => daemon_error(e.to_string()),
+                        },
                         Err(e) => daemon_error(e.to_string()),
                     }
                 }
@@ -3882,7 +3954,10 @@ impl DaemonServer {
                                 details: e.details,
                             },
                             Ok(()) => match self.terminal_service.remote().write(&session_id, generation, data) {
-                                Ok(op) => match op.await { Ok(()) => { qa_hold_write_ack(&session_id).await; DaemonResponse::WriteOk }, Err(failure) => DaemonResponse::RemoteSessionError { failure } },
+                                Ok(op) => match op.await {
+                                    Ok(()) => if qa_hold_write_ack(&session_id, &mut reader).await { DaemonResponse::WriteOk } else { break },
+                                    Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                                },
                                 Err(failure) => DaemonResponse::RemoteSessionError { failure },
                             }
                         }
