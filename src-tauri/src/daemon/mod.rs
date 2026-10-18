@@ -20,6 +20,9 @@ pub mod proxy;
 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
 pub mod qa_producers;
 pub mod resource_usage;
+// Immutable generation-keyed copies of the daemon runtime outside the GUI install; the OS job of
+// each generation runs its own copy, so replacing or moving the app never changes a live daemon.
+pub mod runtime_stage;
 pub mod server;
 pub mod session_lifecycle;
 pub mod session_service;
