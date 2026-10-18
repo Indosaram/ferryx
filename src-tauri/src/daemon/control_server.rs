@@ -7,6 +7,10 @@ use crate::daemon::control::{
     ShutdownDecision, CODE_UPGRADE_UNSUPPORTED,
 };
 
+#[cfg(test)]
+#[path = "control_wire_tests.rs"]
+mod control_wire_tests;
+
 /// Under local-split-qa only: skip binding the control endpoint (todo 12, Q09).
 #[cfg(feature = "local-split-qa")]
 fn control_disabled_for_qa() -> bool {

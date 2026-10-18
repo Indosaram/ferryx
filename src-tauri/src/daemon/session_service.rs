@@ -2179,9 +2179,12 @@ impl DaemonSessionService {
             .transpose()
             .map_err(|message| {
                 // A retiring daemon (control-v1 RetireWhenIdle / Shutdown) refuses with the typed
-                // DAEMON_RETIRING code instead of the generic handover message.
+                // DAEMON_RETIRING code, carried in the response's code field rather than its text.
                 if message.starts_with(crate::daemon::control::CODE_DAEMON_RETIRING) {
-                    SpawnError::Other(crate::daemon::control::CODE_DAEMON_RETIRING.into())
+                    SpawnError::Structured(crate::ipc::IpcError::new(
+                        crate::ipc::IpcErrorCode::DaemonRetiring,
+                        "Daemon is retiring and does not accept new sessions",
+                    ))
                 } else {
                     SpawnError::Other(
                         "Daemon handover is in progress and does not accept new sessions".into(),
