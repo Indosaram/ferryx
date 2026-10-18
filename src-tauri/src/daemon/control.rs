@@ -79,7 +79,7 @@ impl ControlRequest {
             ControlRequest::RequestUpgrade { .. } => OP_REQUEST_UPGRADE,
             ControlRequest::RetireWhenIdle => OP_RETIRE_WHEN_IDLE,
             ControlRequest::Shutdown { .. } => OP_SHUTDOWN,
-            ControlRequest::Unsupported { op } => op,
+            ControlRequest::Unsupported { op } => op.as_str(),
         }
     }
 }
@@ -445,8 +445,9 @@ pub async fn connect(runtime_dir: &std::path::Path) -> std::io::Result<ControlCo
         match tokio::net::UnixStream::connect(&path).await {
             Ok(stream) => {
                 let (read_half, write_half) = stream.into_split();
+                let read_half: Box<dyn tokio::io::AsyncRead + Send + Unpin> = Box::new(read_half);
                 Ok(ControlConnection::Connected(ControlClient {
-                    reader: tokio::io::BufReader::new(Box::new(read_half)),
+                    reader: tokio::io::BufReader::new(read_half),
                     writer: Box::new(write_half),
                     token: None,
                 }))
@@ -479,8 +480,9 @@ pub async fn connect(runtime_dir: &std::path::Path) -> std::io::Result<ControlCo
         match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
             Ok(stream) => {
                 let (read_half, write_half) = stream.into_split();
+                let read_half: Box<dyn tokio::io::AsyncRead + Send + Unpin> = Box::new(read_half);
                 Ok(ControlConnection::Connected(ControlClient {
-                    reader: tokio::io::BufReader::new(Box::new(read_half)),
+                    reader: tokio::io::BufReader::new(read_half),
                     writer: Box::new(write_half),
                     token: Some(token.trim().to_string()),
                 }))
