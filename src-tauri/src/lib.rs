@@ -1289,29 +1289,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
 
     let builder = builder
         .on_window_event(|window, event| {
-            // R6: a destroyed window must never leave preview capabilities
-            // (retained descriptors, capability URLs) behind.
             if let tauri::WindowEvent::Destroyed = event {
-                if let Some(service) = window
-                    .app_handle()
-                    .try_state::<Arc<crate::ipc::file_preview::FilePreviewService>>()
-                {
-                    service.close_window(window.label());
-                }
-                // R6: the Linux overlay store is keyed by window label, so a
-                // destroyed window must drop its overlay (and every webview it
-                // holds) or the entry survives for the process lifetime. A
-                // label that never had an overlay is a no-op, not a failure.
-                #[cfg(target_os = "linux")]
-                if let Err(error) =
-                    crate::browser::linux::implementation::remove_overlay_for_window(window.label())
-                {
-                    tracing::warn!(
-                        "Failed to remove browser overlay for window {}: {}",
-                        window.label(),
-                        error
-                    );
-                }
+                handle_window_destroyed(window);
             }
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::DragDrop(drag_event) = event {
@@ -2568,6 +2547,43 @@ mod tests {
     }
 }
 
+/// Window-destroy hook. Closing a window releases only GUI-side resources; it never stops,
+/// unloads or signals the daemon, which owns every PTY (pinned by `quit_path_tests`).
+fn handle_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    // R6: a destroyed window must never leave preview capabilities
+    // (retained descriptors, capability URLs) behind.
+    if let Some(service) = window
+        .app_handle()
+        .try_state::<Arc<crate::ipc::file_preview::FilePreviewService>>()
+    {
+        service.close_window(window.label());
+    }
+    // R6: the Linux overlay store is keyed by window label, so a
+    // destroyed window must drop its overlay (and every webview it
+    // holds) or the entry survives for the process lifetime. A
+    // label that never had an overlay is a no-op, not a failure.
+    #[cfg(target_os = "linux")]
+    if let Err(error) =
+        crate::browser::linux::implementation::remove_overlay_for_window(window.label())
+    {
+        tracing::warn!(
+            "Failed to remove browser overlay for window {}: {}",
+            window.label(),
+            error
+        );
+    }
+}
+
+/// App run-loop hook. Quitting the GUI stops only the GUI's own watchdog; it never stops,
+/// unloads or signals the daemon, which owns every PTY (pinned by `quit_path_tests`).
+fn handle_run_event<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, event: &tauri::RunEvent) {
+    if let tauri::RunEvent::Exit = event {
+        if let Some(watchdog) = app_handle.try_state::<crate::watchdog::WatchdogHandle>() {
+            watchdog.stop();
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = tracing_subscriber::fmt()
@@ -2578,11 +2594,154 @@ pub fn run() {
     create_app(tauri::Builder::default())
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
-                if let Some(watchdog) = app_handle.try_state::<crate::watchdog::WatchdogHandle>() {
-                    watchdog.stop();
-                }
+        .run(|app_handle, event| handle_run_event(app_handle, &event));
+}
+
+/// Todo 7 regression pin: quitting the app or destroying its window never sends a request to
+/// the daemon (in particular no `DaemonRequest::Shutdown`). A fake daemon on a private socket is
+/// managed as the app's daemon client, exactly as `create_app` manages the real one; it records
+/// every request it receives on any connection. After the handler runs, a control Ping through
+/// the same client proves the fake daemon is reachable, so an empty pre-ping log is meaningful.
+#[cfg(all(test, unix))]
+mod quit_path_tests {
+    use super::*;
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
+    use std::sync::Mutex;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+    struct FakeDaemon {
+        requests: Arc<Mutex<Vec<DaemonRequest>>>,
+        connections: Arc<std::sync::atomic::AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+        _dir: tempfile::TempDir,
+        socket_path: std::path::PathBuf,
+    }
+
+    fn reply_for(request: &DaemonRequest) -> DaemonResponse {
+        match request {
+            DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                version: DAEMON_PROTOCOL_VERSION,
+                pid: 4242,
+                epoch: 1,
+                binary_path: None,
+                binary_mtime_ms: None,
+                daemon_version: None,
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
+            },
+            _ => DaemonResponse::Pong,
+        }
+    }
+
+    fn start_fake_daemon() -> FakeDaemon {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind fake daemon");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (log, count) = (Arc::clone(&requests), Arc::clone(&connections));
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let log = Arc::clone(&log);
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                        if let Ok(request) = serde_json::from_str::<DaemonRequest>(line.trim()) {
+                            let mut reply =
+                                serde_json::to_string(&reply_for(&request)).expect("encode reply");
+                            reply.push('\n');
+                            log.lock().unwrap().push(request);
+                            if write_half.write_all(reply.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                        line.clear();
+                    }
+                });
             }
         });
+        FakeDaemon { requests, connections, task, _dir: dir, socket_path }
+    }
+
+    impl FakeDaemon {
+        fn snapshot(&self) -> (usize, Vec<DaemonRequest>) {
+            (
+                self.connections.load(std::sync::atomic::Ordering::SeqCst),
+                self.requests.lock().unwrap().clone(),
+            )
+        }
+
+        /// Positive control: the same managed client reaches this fake daemon, and the log
+        /// after the ping holds the ping's own handshake and nothing that ends the daemon.
+        async fn assert_reachable_and_never_shut_down(&self, client: &DaemonClient) {
+            client.ping().await.expect("fake daemon answers the control ping");
+            let (_, requests) = self.snapshot();
+            assert!(
+                requests.iter().any(|r| matches!(r, DaemonRequest::Ping)),
+                "control ping must reach the fake daemon: {requests:?}"
+            );
+            assert!(
+                !requests.iter().any(|r| matches!(r, DaemonRequest::Shutdown)),
+                "the GUI must never ask the daemon to shut down: {requests:?}"
+            );
+        }
+    }
+
+    fn mock_app_with_daemon(
+        fake: &FakeDaemon,
+    ) -> (tauri::App<tauri::test::MockRuntime>, Arc<DaemonClient>) {
+        let client = Arc::new(DaemonClient::new_with_socket(fake.socket_path.clone()));
+        let app = tauri::test::mock_builder()
+            .manage(Arc::clone(&client))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        (app, client)
+    }
+
+    #[tokio::test]
+    async fn app_exit_sends_no_request_to_the_daemon() {
+        let fake = start_fake_daemon();
+        let (app, client) = mock_app_with_daemon(&fake);
+        let reports = tempfile::tempdir().expect("watchdog report dir");
+        let watchdog = crate::watchdog::start_watchdog(
+            app.handle().clone(),
+            crate::watchdog::WatchdogConfig {
+                custom_report_dir: Some(reports.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        app.manage(watchdog);
+
+        handle_run_event(app.handle(), &tauri::RunEvent::Exit);
+
+        // The handler did run: the GUI watchdog it owns is stopped.
+        assert!(app.state::<crate::watchdog::WatchdogHandle>().is_stopped());
+        // And it touched nothing of the daemon's: no connection, no request.
+        let (connections, requests) = fake.snapshot();
+        assert_eq!(connections, 0, "exit must not connect to the daemon");
+        assert!(requests.is_empty(), "exit must not send daemon requests: {requests:?}");
+        fake.assert_reachable_and_never_shut_down(&client).await;
+        fake.task.abort();
+    }
+
+    #[tokio::test]
+    async fn window_destroy_sends_no_request_to_the_daemon() {
+        let fake = start_fake_daemon();
+        let (app, client) = mock_app_with_daemon(&fake);
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .build()
+            .expect("main window");
+
+        handle_window_destroyed(main.as_ref().window());
+        handle_run_event(app.handle(), &tauri::RunEvent::Exit);
+
+        let (connections, requests) = fake.snapshot();
+        assert_eq!(connections, 0, "window destroy must not connect to the daemon");
+        assert!(requests.is_empty(), "window destroy must not send daemon requests: {requests:?}");
+        fake.assert_reachable_and_never_shut_down(&client).await;
+        fake.task.abort();
+    }
 }
