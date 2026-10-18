@@ -416,7 +416,7 @@ pub fn first_frame_token_matches(frame: &Map<String, Value>, expected: &str) -> 
         None => false,
     }
 }
-+/// Client side. control::connect never falls back to the data protocol: no endpoint means a
+/// Client side. control::connect never falls back to the data protocol: no endpoint means a
 /// pre-plan daemon (Missing).
 pub enum ControlConnection {
     /// No control endpoint published: a daemon that predates control-v1, or none at all.
