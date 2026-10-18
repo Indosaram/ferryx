@@ -533,6 +533,88 @@ pub fn get_socket_path() -> PathBuf {
     get_runtime_dir().join("daemon.port")
 }
 
+/// Uncertain-write fixture (QA builds only): after a remote write reached the remote PTY,
+/// park before WriteOk while QaWriteAckHold is armed for the session. The park ends on
+/// release (returns true: send WriteOk) or when the connection's reader reaches EOF/error
+/// (returns false: the client is gone and the WriteOk is dropped), so a disconnected client
+/// never leaves the connection task parked. The EOF probe only fills the buffer and never
+/// consumes bytes; a pipelined request keeps the park waiting on release alone.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+async fn qa_hold_write_ack<R: tokio::io::AsyncBufRead + Unpin>(session_id: &str, reader: &mut R) -> bool {
+    let Some(release) = crate::ipc::qa_barrier::write_ack_hold().applied(session_id) else {
+        return true;
+    };
+    let closed = async {
+        let eof = std::future::poll_fn(|cx| {
+            std::pin::Pin::new(&mut *reader)
+                .poll_fill_buf(cx)
+                .map(|filled| filled.map_or(true, |buf| buf.is_empty()))
+        })
+        .await;
+        if !eof {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        _ = release.notified() => true,
+        _ = closed => false,
+    }
+}
+
+#[cfg(not(all(feature = "local-split-qa", feature = "native-terminal")))]
+async fn qa_hold_write_ack<R>(_session_id: &str, _reader: &mut R) -> bool {
+    true
+}
+
+#[cfg(all(test, feature = "local-split-qa", feature = "native-terminal"))]
+mod qa_write_ack_hold_close_tests {
+    use std::time::Duration;
+
+    fn connection() -> (tokio::io::DuplexStream, tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>, tokio::io::WriteHalf<tokio::io::DuplexStream>) {
+        let (client, server) = tokio::io::duplex(64);
+        let (read_half, write_half) = tokio::io::split(server);
+        (client, tokio::io::BufReader::new(read_half), write_half)
+    }
+
+    #[tokio::test]
+    async fn held_ack_is_dropped_when_connection_closes() {
+        let session = "qa-hold-close-on-disconnect";
+        let hold = crate::ipc::qa_barrier::write_ack_hold();
+        hold.arm(session);
+        let mut applied = hold.subscribe_applied();
+        let (client, mut reader, _write_half) = connection();
+        let parked = tokio::spawn(async move { super::qa_hold_write_ack(session, &mut reader).await });
+        // The write-applied event proves the task reached the park.
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), applied.recv()).await.unwrap().unwrap();
+            if event.session_id == session { break; }
+        }
+        assert!(!parked.is_finished(), "nothing released the hold and the client is still connected");
+        drop(client);
+        let deliver = tokio::time::timeout(Duration::from_secs(5), parked).await
+            .expect("connection close must end the park").unwrap();
+        assert!(!deliver, "WriteOk must be dropped for a closed connection");
+        assert!(hold.release(session), "close does not disarm; explicit release still does");
+    }
+
+    #[tokio::test]
+    async fn held_ack_is_delivered_on_release_while_connected() {
+        let session = "qa-hold-release-connected";
+        let hold = crate::ipc::qa_barrier::write_ack_hold();
+        hold.arm(session);
+        let mut applied = hold.subscribe_applied();
+        let (_client, mut reader, _write_half) = connection();
+        let parked = tokio::spawn(async move { super::qa_hold_write_ack(session, &mut reader).await });
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), applied.recv()).await.unwrap().unwrap();
+            if event.session_id == session { break; }
+        }
+        assert!(hold.release(session));
+        let deliver = tokio::time::timeout(Duration::from_secs(5), parked).await.unwrap().unwrap();
+        assert!(deliver);
+    }
+}
+
 pub fn get_lock_path() -> PathBuf {
     get_runtime_dir().join("daemon.lock")
 }
@@ -2153,6 +2235,243 @@ mod paired_host_native_tests {
 #[cfg(all(test, unix))]
 #[path = "a03_owner_cli_fixture.rs"]
 mod a03_owner_cli_fixture;
+
+/// Todo 11: live identity of a paired session across a client disconnect/reconnect (the
+/// daemon-side equivalent of GUI quit/relaunch), and the uncertain-write fixture proving an
+/// unacknowledged write is applied exactly once and never resent.
+#[cfg(all(test, unix))]
+mod live_inventory_paired_tests {
+    use super::*;
+    use axum::{
+        extract::ws::{Message, WebSocketUpgrade},
+        routing::{get, post},
+        Json, Router,
+    };
+    use serde_json::json;
+
+    const REMOTE_PID: u32 = 4242;
+
+    /// A paired host on loopback. Every binary frame (terminal input) it receives is appended
+    /// to `received`, so the test reads the host's exact received-byte count.
+    struct MockHost {
+        origin: String,
+        received: tokio::sync::watch::Receiver<Vec<u8>>,
+        shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    async fn mock_host() -> MockHost {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (received_tx, received) = tokio::sync::watch::channel(Vec::<u8>::new());
+        let received_tx = Arc::new(received_tx);
+        let session = || json!({
+            "target": {"machineId": "a", "daemonEpoch": "1", "sessionId": "s"},
+            "workspaceId": "w", "worktree": null, "cwd": "/fixture", "cols": 80, "rows": 24,
+            "running": true, "providerSession": null, "startSequence": "10", "endSequence": "10",
+            "pid": REMOTE_PID
+        });
+        let router = Router::new()
+            .route("/api/v1/pair/exchange", post(|| async {
+                Json(json!({"token": "fixture-secret", "machineId": "a", "device": {"id": "d", "name": "d",
+                    "permission": "control", "accessScope": "machine", "createdAt": 1, "lastSeenAt": 1}}))
+            }))
+            .route("/host/a/api/v1/capabilities", get(|| async {
+                Json(json!({"apiVersion": 1, "machineId": "a", "daemonEpoch": "1", "platform": "linux",
+                    "accessScope": "machine", "permission": "control",
+                    "capabilities": ["terminalCreateV1", "terminalStreamV1"],
+                    "limits": {"directoryEntries": 1000, "terminalSessions": 64}}))
+            }))
+            .route("/host/a/api/v1/sessions/s", get(move || async move {
+                Json(json!({"status": "running", "session": session()}))
+            }))
+            .route("/host/a/api/v1/socket-ticket", post(|| async { Json(json!({"ticket": "fixture-ticket"})) }))
+            .route("/host/a/api/v1/terminal/s", get(move |ws: WebSocketUpgrade| {
+                let received_tx = Arc::clone(&received_tx);
+                async move {
+                    ws.on_upgrade(move |mut socket| async move {
+                        let attached = json!({"type": "attached",
+                            "target": {"machineId": "a", "daemonEpoch": "1", "sessionId": "s"},
+                            "generation": "7", "cols": 80, "rows": 24, "startSequence": "10",
+                            "endSequence": "10", "replayGap": null});
+                        if socket.send(Message::Text(attached.to_string().into())).await.is_err() {
+                            return;
+                        }
+                        while let Some(message) = socket.recv().await {
+                            match message {
+                                Ok(Message::Binary(bytes)) => {
+                                    received_tx.send_modify(|all| all.extend_from_slice(&bytes));
+                                }
+                                Ok(Message::Close(_)) | Err(_) => break,
+                                Ok(_) => {}
+                            }
+                        }
+                    })
+                }
+            }));
+        let (shutdown, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async { let _ = stopped.await; })
+                .await
+                .unwrap();
+        });
+        MockHost { origin: format!("http://{address}"), received, shutdown: Some(shutdown), server }
+    }
+
+    /// A daemon serving UDS clients with a loopback paired-host inventory paired to `host`,
+    /// plus a descriptor for the host's session "s".
+    async fn daemon_with_paired_host(
+        root: &Path,
+        host: &MockHost,
+    ) -> (Arc<DaemonServer>, PathBuf, crate::terminal::paired_daemon::Descriptor, tokio::task::JoinHandle<()>) {
+        let data = root.join("data");
+        fs::create_dir_all(&data).unwrap();
+        let mut daemon = DaemonServer::new_with_paths(Some(data.join("config")), Some(data.join("auth")));
+        daemon.paired_hosts = crate::paired_host::service::PairedHostService::open_test_loopback(data.join("paired"));
+        let view = daemon.paired_hosts.pair(crate::paired_host::service::PairRequest {
+            relay_origin: host.origin.clone(),
+            pin: crate::paired_host::service::Secret("fixture".into()),
+            display_label: "fixture".into(),
+        }).await.unwrap();
+        let descriptor = crate::terminal::paired_daemon::Descriptor {
+            host_id: view.host_id,
+            generation: view.generation,
+            target: crate::remote::machine_protocol::RemoteTerminalTarget {
+                machine_id: "a".into(),
+                daemon_epoch: crate::scoped_contracts::Epoch(1),
+                session_id: "s".into(),
+            },
+            after_sequence: None,
+        };
+        let daemon = Arc::new(daemon);
+        let socket = root.join("live.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let owner = Arc::clone(&daemon);
+        let accept = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let owner = Arc::clone(&owner);
+                tokio::spawn(async move { owner.handle_client(stream).await });
+            }
+        });
+        (daemon, socket, descriptor, accept)
+    }
+
+    async fn live_entry(socket: &Path, id: &str) -> crate::daemon::protocol::LiveSessionInfo {
+        let client = crate::daemon::client::DaemonClient::new_with_socket(socket.to_owned());
+        let sessions = tokio::time::timeout(Duration::from_secs(10), client.describe_live_sessions())
+            .await
+            .expect("describe_live_sessions timed out")
+            .expect("describe_live_sessions failed");
+        sessions.into_iter().find(|s| s.backend_id == id).expect("paired session missing from inventory")
+    }
+
+    async fn teardown(mut host: MockHost, accept: tokio::task::JoinHandle<()>, daemon: Arc<DaemonServer>, id: &str) {
+        let _ = daemon.terminal_service.paired().detach(id).await;
+        accept.abort();
+        let _ = accept.await;
+        if let Some(shutdown) = host.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let _ = host.server.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn paired_session_keeps_backend_id_and_remote_pid_across_client_reconnect() {
+        let root = tempfile::tempdir().unwrap();
+        let host = mock_host().await;
+        let (daemon, socket, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
+
+        // First client attaches, observes the session, then disconnects (GUI quit).
+        let first = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
+        let (id, _generation) = first.paired_terminal_reattach(descriptor).await.unwrap();
+        let before = live_entry(&socket, &id).await;
+        drop(first);
+
+        // A fresh client (GUI relaunch) sees the same live identity.
+        let after = live_entry(&socket, &id).await;
+        assert_eq!(before.kind, crate::daemon::protocol::LiveSessionKind::Paired);
+        assert_eq!(after.backend_id, before.backend_id);
+        assert_eq!(before.remote_pid, Some(REMOTE_PID));
+        assert_eq!(after.remote_pid, before.remote_pid);
+        assert!(after.connected && after.reader_open, "{after:?}");
+        assert_eq!(after.local_child_pid, None, "a remote pid is never a local pid");
+        assert_eq!(after.local_child_start_time, None);
+
+        teardown(host, accept, daemon, &id).await;
+    }
+
+    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn held_write_ack_applies_marker_exactly_once_without_resend() {
+        let root = tempfile::tempdir().unwrap();
+        let host = mock_host().await;
+        let (daemon, socket, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
+        let attach = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
+        let (id, generation) = attach.paired_terminal_reattach(descriptor).await.unwrap();
+        drop(attach);
+        let before = live_entry(&socket, &id).await;
+        let mut received = host.received.clone();
+        let baseline = received.borrow().len();
+
+        let hold = crate::ipc::qa_barrier::write_ack_hold();
+        hold.arm(&id);
+        let mut applied = hold.subscribe_applied();
+        let marker = format!("todo11-marker-{}\n", uuid::Uuid::new_v4()).into_bytes();
+
+        // The writer's acknowledgement is held: it never returns on its own.
+        let writer = {
+            let client = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
+            let (id, marker) = (id.clone(), marker.clone());
+            tokio::spawn(async move { client.write_terminal_at_generation(&id, Some(generation.0), marker).await })
+        };
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(10), applied.recv())
+                .await
+                .expect("write-applied never emitted")
+                .unwrap();
+            if event.session_id == id {
+                break;
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(10), received.wait_for(|all| all.len() >= baseline + marker.len()))
+            .await
+            .expect("marker never reached the host")
+            .unwrap();
+        assert!(!writer.is_finished(), "WriteOk must stay held while armed");
+
+        // Disconnect before the acknowledgement is delivered.
+        writer.abort();
+        assert!(writer.await.unwrap_err().is_cancelled());
+        assert!(hold.release(&id), "connection close leaves the hold armed until released");
+
+        // Reconnect: same identity, and the next write is the next thing the host sees, so a
+        // resend of the marker would land between them.
+        let after = live_entry(&socket, &id).await;
+        assert_eq!(after.backend_id, before.backend_id);
+        assert_eq!(after.remote_pid, before.remote_pid);
+        assert!(after.connected, "{after:?}");
+        let sentinel = b"todo11-sentinel\n".to_vec();
+        let next = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
+        tokio::time::timeout(Duration::from_secs(10), next.write_terminal_at_generation(&id, Some(generation.0), sentinel.clone()))
+            .await
+            .expect("sentinel write timed out")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), received.wait_for(|all| all.len() >= baseline + marker.len() + sentinel.len()))
+            .await
+            .expect("sentinel never reached the host")
+            .unwrap();
+
+        let all = received.borrow().clone();
+        let delivered = &all[baseline..];
+        let occurrences = delivered.windows(marker.len()).filter(|w| *w == marker.as_slice()).count();
+        assert_eq!(occurrences, 1, "marker must reach the remote exactly once");
+        assert_eq!(delivered.len(), marker.len() + sentinel.len(), "host received bytes grew by exactly the marker (+ sentinel): no resend");
+        assert_eq!(delivered, [marker.as_slice(), sentinel.as_slice()].concat().as_slice());
+
+        teardown(host, accept, daemon, &id).await;
+    }
+}
 
 #[cfg(all(test, unix))]
 #[path = "a04_shared_services_tests.rs"]
@@ -3855,7 +4174,10 @@ impl DaemonServer {
                 },
                 Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
                     match self.terminal_service.write_input_operation(&session_id, generation, data) {
-                        Ok(op) => match op.await { Ok(()) => DaemonResponse::WriteOk, Err(e) => daemon_error(e.to_string()) },
+                        Ok(op) => match op.await {
+                            Ok(()) => if qa_hold_write_ack(&session_id, &mut reader).await { DaemonResponse::WriteOk } else { break },
+                            Err(e) => daemon_error(e.to_string()),
+                        },
                         Err(e) => daemon_error(e.to_string()),
                     }
                 }
@@ -3882,7 +4204,10 @@ impl DaemonServer {
                                 details: e.details,
                             },
                             Ok(()) => match self.terminal_service.remote().write(&session_id, generation, data) {
-                                Ok(op) => match op.await { Ok(()) => DaemonResponse::WriteOk, Err(failure) => DaemonResponse::RemoteSessionError { failure } },
+                                Ok(op) => match op.await {
+                                    Ok(()) => if qa_hold_write_ack(&session_id, &mut reader).await { DaemonResponse::WriteOk } else { break },
+                                    Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                                },
                                 Err(failure) => DaemonResponse::RemoteSessionError { failure },
                             }
                         }
@@ -4260,6 +4585,17 @@ impl DaemonServer {
                     DaemonResponse::ListSessionsOk {
                         epoch: self.epoch,
                         sessions,
+                    }
+                }
+                Ok(DaemonRequest::DescribeLiveSessions) => {
+                    let service = Arc::clone(&self.terminal_service);
+                    match crate::ipc::run_blocking(move || {
+                        Ok::<_, crate::ipc::IpcError>(service.describe_live_sessions())
+                    })
+                    .await
+                    {
+                        Ok(sessions) => DaemonResponse::DescribeLiveSessionsOk { epoch: self.epoch, sessions },
+                        Err(e) => daemon_error(e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::Attach {

@@ -640,6 +640,87 @@ impl TerminalService {
     pub fn get_session(&self, session_id: &str) -> Option<Arc<PtySession>> {
         self.pty_manager.get_session(session_id)
     }
+
+    /// Live identity of every session, kept separate from list_sessions registration IDs.
+    /// Blocking (reads kernel process start time); callers must use run_blocking.
+    pub fn describe_live_sessions(&self) -> Vec<crate::daemon::protocol::LiveSessionInfo> {
+        let mut out = Vec::new();
+        for id in self.pty_manager.list_sessions() {
+            let Some(session) = self.pty_manager.get_session(&id) else { continue };
+            let start = session.suspension_target().ok().and_then(|t| t.started_at_unix_ms);
+            out.push(local_live_info(id, session.pid(), start, session.is_reader_finished()));
+        }
+        for id in self.remote.list() {
+            let Some(details) = self.remote.details(&id) else { continue };
+            out.push(remote_live_info(id, details.state, details.pid));
+        }
+        for id in self.paired.list() {
+            // The host-reported pid and the actor's transport/exit state; never a local pid.
+            let Some(live) = self.paired.live_state(&id) else { continue };
+            out.push(crate::daemon::protocol::LiveSessionInfo::remote(
+                crate::daemon::protocol::LiveSessionKind::Paired,
+                id,
+                live.remote_pid,
+                live.reader_open,
+                live.connected,
+            ));
+        }
+        out
+    }
+}
+
+pub(crate) fn local_live_info(
+    id: String,
+    pid: Option<u32>,
+    start_time: Option<u64>,
+    reader_finished: bool,
+) -> crate::daemon::protocol::LiveSessionInfo {
+    crate::daemon::protocol::LiveSessionInfo::local(id, pid, start_time, !reader_finished)
+}
+
+pub(crate) fn remote_live_info(
+    id: String,
+    state: super::remote::RemoteConnectionState,
+    pid: Option<crate::ssh::bridge::RemotePid>,
+) -> crate::daemon::protocol::LiveSessionInfo {
+    use super::remote::RemoteConnectionState as S;
+    let connected = matches!(state, S::Connected);
+    let reader_open = matches!(state, S::Connected | S::Reconnecting);
+    crate::daemon::protocol::LiveSessionInfo::remote(
+        crate::daemon::protocol::LiveSessionKind::Ssh, id, pid, reader_open, connected,
+    )
+}
+
+#[cfg(test)]
+mod live_session_tests {
+    use super::*;
+    use crate::daemon::protocol::LiveSessionKind;
+    use crate::ssh::bridge::RemotePid;
+    use crate::terminal::remote::RemoteConnectionState;
+
+    #[test]
+    fn exited_local_pty_reports_reader_closed() {
+        let info = local_live_info("l".into(), Some(10), Some(5), true);
+        assert!(!info.reader_open);
+        assert!(!info.connected);
+        assert_eq!(info.kind, LiveSessionKind::Local);
+        assert_eq!(info.local_child_pid, Some(10));
+        let live = local_live_info("l".into(), Some(10), Some(5), false);
+        assert!(live.reader_open);
+    }
+
+    #[test]
+    fn disconnected_remote_entry_reports_not_connected() {
+        for state in [RemoteConnectionState::Disconnected, RemoteConnectionState::Expired, RemoteConnectionState::Reconnecting] {
+            let info = remote_live_info("r".into(), state, Some(RemotePid(77)));
+            assert!(!info.connected, "{state:?}");
+            assert_eq!(info.remote_pid, Some(77));
+            assert_eq!(info.local_child_pid, None);
+        }
+        let connected = remote_live_info("r".into(), RemoteConnectionState::Connected, Some(RemotePid(77)));
+        assert!(connected.connected && connected.reader_open);
+        assert_eq!(connected.kind, LiveSessionKind::Ssh);
+    }
 }
 
 fn actuate_suspension(

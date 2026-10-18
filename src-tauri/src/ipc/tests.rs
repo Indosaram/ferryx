@@ -1463,6 +1463,7 @@ async fn test_p10_ambiguous_create_session_reconciles_via_journal() {
         running: true,
         start_sequence: Epoch(0),
         end_sequence: Epoch(0),
+        pid: None,
         cwd: "/remote/dir".into(),
     };
 
@@ -1628,6 +1629,7 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
         running: true,
         start_sequence: Epoch(0),
         end_sequence: Epoch(0),
+        pid: None,
         cwd: "/remote/dir".into(),
     };
     let fixture_for_server = fixture_session.clone();
@@ -1805,6 +1807,7 @@ async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_sessi
         running: true,
         start_sequence: Epoch(0),
         end_sequence: Epoch(0),
+        pid: None,
         cwd: "/remote/dir".into(),
     };
     let fixture_for_server = fixture_session.clone();
@@ -2482,6 +2485,7 @@ async fn test_p10_pending_create_reaper_resolves_still_pending_records() {
         running: true,
         start_sequence: Epoch(0),
         end_sequence: Epoch(0),
+        pid: None,
         cwd: "/remote/dir".into(),
     };
 

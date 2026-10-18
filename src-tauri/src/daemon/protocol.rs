@@ -564,6 +564,9 @@ pub enum DaemonRequest {
         rows: u16,
     },
     ListSessions,
+    /// Read-only live identity of every session: local PTY child pid and start time,
+    /// host-scoped remote pid, reader and connection state. ListSessions is unchanged.
+    DescribeLiveSessions,
     #[serde(rename_all = "camelCase")]
     DescribeSession {
         session_id: String,
@@ -863,6 +866,11 @@ pub enum DaemonResponse {
         sessions: Vec<String>,
     },
     #[serde(rename_all = "camelCase")]
+    DescribeLiveSessionsOk {
+        epoch: u64,
+        sessions: Vec<LiveSessionInfo>,
+    },
+    #[serde(rename_all = "camelCase")]
     DescribeSessionOk {
         session: DaemonSessionDetails,
         /// Decimal owner epoch from the same description, never the gateway handshake.
@@ -1119,9 +1127,129 @@ pub fn decode_daemon_stream_frame(frame: &str) -> serde_json::Result<DaemonStrea
     serde_json::from_str(frame.trim())
 }
 
+/// Which runtime owns a live session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LiveSessionKind {
+    Local,
+    Ssh,
+    Paired,
+}
+
+/// One session's live identity, as opposed to its registered ID.
+///
+/// local_child_* is set only for Local; remote_pid only for Ssh/Paired and is host-scoped
+/// (it names a process on the remote host, never a local pid).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveSessionInfo {
+    pub kind: LiveSessionKind,
+    pub backend_id: String,
+    pub local_child_pid: Option<u32>,
+    pub local_child_start_time: Option<u64>,
+    pub remote_pid: Option<u32>,
+    pub reader_open: bool,
+    pub connected: bool,
+}
+
+impl LiveSessionInfo {
+    /// A local PTY. It has no transport, so it is connected exactly while its reader runs.
+    pub fn local(
+        backend_id: String,
+        child_pid: Option<u32>,
+        child_start_time: Option<u64>,
+        reader_open: bool,
+    ) -> Self {
+        Self {
+            kind: LiveSessionKind::Local,
+            backend_id,
+            local_child_pid: child_pid,
+            local_child_start_time: child_start_time,
+            remote_pid: None,
+            reader_open,
+            connected: reader_open,
+        }
+    }
+
+    /// An SSH or paired session. Takes the typed RemotePid so a remote pid can never be
+    /// passed where a local pid is expected; a Local kind is coerced to Ssh.
+    pub fn remote(
+        kind: LiveSessionKind,
+        backend_id: String,
+        remote_pid: Option<crate::ssh::bridge::RemotePid>,
+        reader_open: bool,
+        connected: bool,
+    ) -> Self {
+        let kind = match kind {
+            LiveSessionKind::Local => LiveSessionKind::Ssh,
+            other => other,
+        };
+        Self {
+            kind,
+            backend_id,
+            local_child_pid: None,
+            local_child_start_time: None,
+            remote_pid: remote_pid.map(|pid| pid.0),
+            reader_open,
+            connected,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn describe_live_sessions_request_is_additive_and_roundtrips() {
+        let json = serde_json::to_string(&DaemonRequest::DescribeLiveSessions).unwrap();
+        assert_eq!(json, r#"{"type":"describeLiveSessions"}"#);
+        let back: DaemonRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, DaemonRequest::DescribeLiveSessions));
+        assert_eq!(serde_json::to_string(&DaemonRequest::ListSessions).unwrap(), r#"{"type":"listSessions"}"#);
+    }
+
+    #[test]
+    fn describe_live_sessions_response_roundtrips_camel_case() {
+        let resp = DaemonResponse::DescribeLiveSessionsOk {
+            epoch: 7,
+            sessions: vec![
+                LiveSessionInfo::local("local-1".into(), Some(4242), Some(1_700_000_000_000), true),
+                LiveSessionInfo::remote(LiveSessionKind::Ssh, "ssh-1".into(), Some(crate::ssh::bridge::RemotePid(99)), true, false),
+            ],
+        };
+        let value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(value["type"], "describeLiveSessionsOk");
+        assert_eq!(value["sessions"][0]["kind"], "local");
+        assert_eq!(value["sessions"][0]["localChildPid"], 4242);
+        assert_eq!(value["sessions"][0]["localChildStartTime"], 1_700_000_000_000u64);
+        assert!(value["sessions"][0]["remotePid"].is_null());
+        assert_eq!(value["sessions"][1]["kind"], "ssh");
+        assert_eq!(value["sessions"][1]["remotePid"], 99);
+        assert_eq!(value["sessions"][1]["connected"], false);
+        let back: DaemonResponse = serde_json::from_value(value).unwrap();
+        match back {
+            DaemonResponse::DescribeLiveSessionsOk { epoch, sessions } => {
+                assert_eq!(epoch, 7);
+                assert_eq!(sessions.len(), 2);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_pid_is_never_placed_in_local_child_pid() {
+        for kind in [LiveSessionKind::Ssh, LiveSessionKind::Paired, LiveSessionKind::Local] {
+            let info = LiveSessionInfo::remote(kind, "r".into(), Some(crate::ssh::bridge::RemotePid(1234)), true, true);
+            assert_eq!(info.local_child_pid, None);
+            assert_eq!(info.local_child_start_time, None);
+            assert_eq!(info.remote_pid, Some(1234));
+            assert_ne!(info.kind, LiveSessionKind::Local);
+        }
+        let local = LiveSessionInfo::local("l".into(), Some(55), None, true);
+        assert_eq!(local.remote_pid, None);
+        assert_eq!(local.local_child_pid, Some(55));
+    }
 
     #[test]
     fn spawn_session_id_roundtrips_and_defaults_to_none() {

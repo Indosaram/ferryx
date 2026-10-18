@@ -916,6 +916,7 @@ impl DaemonSessionService {
                 provider_session,
                 start_sequence,
                 end_sequence,
+                pid: details.pid,
             });
         }
 
@@ -1001,6 +1002,7 @@ impl DaemonSessionService {
             provider_session,
             start_sequence,
             end_sequence,
+            pid: pty.pid().map(crate::ssh::bridge::RemotePid),
         })
     }
 
@@ -2533,6 +2535,7 @@ impl DaemonSessionService {
                                 start_sequence.unwrap_or(0),
                             ),
                             end_sequence: crate::scoped_contracts::Epoch(end_sequence.unwrap_or(0)),
+                            pid: None,
                         },
                         exit: None,
                     }

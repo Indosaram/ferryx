@@ -180,6 +180,8 @@ struct Owner {
     /// Constant for as long as this actor owns the id; a replacement actor (a reattach, or a
     /// reincarnation after the previous actor died) mints a different one.
     incarnation: String,
+    /// Live identity the actor republishes on every loop turn.
+    live: Arc<Mutex<super::paired_daemon::PairedLive>>,
     #[cfg(test)]
     completed: tokio::sync::watch::Receiver<bool>,
 }
@@ -359,6 +361,14 @@ impl Runtime {
     pub fn descriptor(&self, id: &str) -> Option<super::paired_daemon::Descriptor> {
         self.descriptors.lock().get(id).cloned()
     }
+    /// Live identity of the running actor for `id`; `None` once no live actor owns it.
+    pub fn live_state(&self, id: &str) -> Option<super::paired_daemon::PairedLive> {
+        self.owners
+            .lock()
+            .get(id)
+            .filter(|owner| !owner.task.is_finished())
+            .map(|owner| *owner.live.lock())
+    }
     pub fn remove_descriptor(&self, id: &str) {
         let path = self.store_path.lock().clone();
         let _persist_guard = match PERSIST_MUTEX.lock() {
@@ -436,6 +446,8 @@ impl Runtime {
         let descriptors = self.descriptors.clone();
         let store_path = self.store_path.clone();
         let task_id = id.clone();
+        let live = Arc::new(Mutex::new(proxy.live_state()));
+        let task_live = live.clone();
         let task = tokio::spawn(async move {
             let _reap = reap;
             let dirty = Arc::new(AtomicBool::new(false));
@@ -459,6 +471,7 @@ impl Runtime {
                 .checked_sub(PERSIST_MIN_INTERVAL)
                 .unwrap_or_else(tokio::time::Instant::now);
             loop {
+                *task_live.lock() = proxy.live_state();
                 tokio::select! {
                     biased;
                     command = receiver.recv() => match command {
@@ -667,6 +680,7 @@ impl Runtime {
                 task,
                 identity,
                 incarnation,
+                live,
                 #[cfg(test)]
                 completed,
             },

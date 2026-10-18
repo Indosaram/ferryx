@@ -2331,6 +2331,140 @@ fn run_headless_stages(
     })
 }
 
+/// One remote write that reached the remote PTY while its acknowledgement is held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QaWriteApplied {
+    pub session_id: String,
+    pub seq: u64,
+}
+
+/// Uncertain-write fixture: armed per session id, it holds the WriteOk of a remote write
+/// after the write op completed (the bytes reached the remote PTY) until released. The
+/// client therefore never learns the write was applied, which is exactly the state in
+/// which a resend would duplicate input.
+pub struct QaWriteAckHold {
+    armed: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+    seq: std::sync::atomic::AtomicU64,
+    applied_tx: tokio::sync::broadcast::Sender<QaWriteApplied>,
+}
+
+impl QaWriteAckHold {
+    pub fn new() -> Self {
+        let (applied_tx, _) = tokio::sync::broadcast::channel(64);
+        Self { armed: Mutex::new(HashMap::new()), seq: std::sync::atomic::AtomicU64::new(0), applied_tx }
+    }
+
+    pub fn arm(&self, session_id: &str) {
+        if let Ok(mut armed) = self.armed.lock() {
+            armed.insert(session_id.to_string(), Arc::new(tokio::sync::Notify::new()));
+        }
+    }
+
+    /// Releases (and disarms) a held acknowledgement. Returns false when nothing was armed.
+    pub fn release(&self, session_id: &str) -> bool {
+        let release = self.armed.lock().ok().and_then(|mut armed| armed.remove(session_id));
+        match release {
+            Some(notify) => {
+                notify.notify_one();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn subscribe_applied(&self) -> tokio::sync::broadcast::Receiver<QaWriteApplied> {
+        self.applied_tx.subscribe()
+    }
+
+    /// Called after the write op completed. When armed, emits write-applied and returns the
+    /// release signal the caller parks on before sending WriteOk; unarmed returns None.
+    pub fn applied(&self, session_id: &str) -> Option<Arc<tokio::sync::Notify>> {
+        let release = self.armed.lock().ok()?.get(session_id).cloned()?;
+        let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let _ = self.applied_tx.send(QaWriteApplied { session_id: session_id.to_string(), seq });
+        if let Some(channel) = active_channel() {
+            channel.emit_write_applied(session_id, seq);
+        }
+        Some(release)
+    }
+}
+
+impl Default for QaWriteAckHold {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static WRITE_ACK_HOLD: std::sync::OnceLock<QaWriteAckHold> = std::sync::OnceLock::new();
+
+/// The process-wide hold the daemon's RemoteWrite arms consult.
+pub fn write_ack_hold() -> &'static QaWriteAckHold {
+    WRITE_ACK_HOLD.get_or_init(QaWriteAckHold::new)
+}
+
+impl QaBarrierChannel {
+    /// Arms QaWriteAckHold for one session through the QA channel.
+    pub fn arm_write_ack_hold(&self, session_id: &str) {
+        write_ack_hold().arm(session_id);
+    }
+
+    pub fn release_write_ack_hold(&self, session_id: &str) -> bool {
+        write_ack_hold().release(session_id)
+    }
+
+    fn emit_write_applied(&self, session_id: &str, seq: u64) {
+        let payload = json!({ "name": "write-applied", "sessionId": session_id, "seq": seq,
+            "runId": self.run_id, "producerPid": self.pid, "heldAtMs": now_ms() });
+        let _ = self.held_tx.send(QaBarrierHeldEvent {
+            name: "write-applied".to_string(),
+            session_id: session_id.to_string(),
+            stage: "write-applied".to_string(),
+            payload,
+        });
+    }
+}
+
+#[cfg(test)]
+mod write_ack_hold_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unarmed_write_is_not_held() {
+        let hold = QaWriteAckHold::new();
+        let mut applied = hold.subscribe_applied();
+        assert!(hold.applied("s1").is_none());
+        assert!(applied.try_recv().is_err());
+        assert!(!hold.release("s1"));
+    }
+
+    #[tokio::test]
+    async fn armed_write_emits_applied_then_parks_until_released() {
+        let hold = Arc::new(QaWriteAckHold::new());
+        hold.arm("s1");
+        let mut applied = hold.subscribe_applied();
+        let release = hold.applied("s1").expect("armed write must be held");
+        let event = applied.recv().await.unwrap();
+        assert_eq!(event, QaWriteApplied { session_id: "s1".into(), seq: 1 });
+        // Other sessions are untouched.
+        assert!(hold.applied("s2").is_none());
+        let parked = tokio::spawn(async move { release.notified().await });
+        assert!(!parked.is_finished());
+        assert!(hold.release("s1"));
+        tokio::time::timeout(std::time::Duration::from_secs(5), parked).await.unwrap().unwrap();
+        // Release disarms: the next write passes straight through.
+        assert!(hold.applied("s1").is_none());
+    }
+
+    #[tokio::test]
+    async fn release_before_park_is_not_lost() {
+        let hold = QaWriteAckHold::new();
+        hold.arm("s1");
+        let release = hold.applied("s1").unwrap();
+        assert!(hold.release("s1"));
+        tokio::time::timeout(std::time::Duration::from_secs(5), release.notified()).await.unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

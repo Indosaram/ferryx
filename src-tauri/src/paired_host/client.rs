@@ -624,11 +624,11 @@ impl MachineClient {
                 Some("terminalStreamV1"),
             )
             .await?;
-        match response.result {
+        let remote_pid = match response.result {
             OperationResult::Session(m::SessionDetail::Running { session })
-                if session.target == descriptor.target => {}
+                if session.target == descriptor.target => session.pid,
             _ => return Err(ClientError::local("SESSION_EXPIRED")),
-        }
+        };
         let (host, lease) = service
             .capture_operation(descriptor.host_id.clone(), descriptor.generation)
             .await?;
@@ -663,6 +663,7 @@ impl MachineClient {
             socket,
             lease,
             direct_epoch,
+            remote_pid,
         })
     }
 
