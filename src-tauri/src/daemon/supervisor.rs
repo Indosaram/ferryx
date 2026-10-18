@@ -487,7 +487,7 @@ mod backend {
 #[cfg(target_os = "linux")]
 mod backend {
     use super::{Env, Result, SUPERVISOR_NAME_ENV};
-    use crate::daemon::supervisor_linux;
+    use crate::daemon::{runtime_stage, supervisor_linux};
     use std::path::{Path, PathBuf};
 
     pub const TARGET_HAS_BACKEND: bool = true;
@@ -513,19 +513,49 @@ mod backend {
         Ok((name, path))
     }
 
-    pub fn ensure(env: Env<'_>, executable: &Path) -> Result<bool> {
-        let (name, path) = unit(env)?;
-        let executable =
-            supervisor_linux::daemon_executable(env("APPIMAGE").as_deref(), executable);
-        supervisor_linux::ensure(&name, &path, &executable)
+    /// Stages this build's daemon runtime and names its generation unit
+    /// `<base>-<generation key>` next to the base unit. The unit runs the staged executable, never
+    /// the app install or AppImage path, so replacing the app leaves a running generation intact.
+    fn generation_unit(env: Env<'_>, executable: &Path) -> Result<(String, String, PathBuf, PathBuf)> {
+        let (base, base_path) = unit(env)?;
+        let source = supervisor_linux::daemon_executable(env("APPIMAGE").as_deref(), executable);
+        let root = crate::daemon::server::daemon_runtime_root()
+            .ok_or("Cannot determine the daemon runtime directory")?;
+        let staged = runtime_stage::stage_runtime(&root, &source).map_err(|e| e.to_string())?;
+        let name = supervisor_linux::generation_unit_name(&base, &staged.key)?;
+        let path = base_path.with_file_name(format!("{name}.service"));
+        Ok((base, name, path, staged.executable))
     }
 
-    /// Writes the unit and enables it for login without `--now`; a running unit is untouched.
+    /// Removes staged generations no process runs from and no unit file in `unit_dir` references.
+    fn collect_runtime_garbage(unit_dir: &Path) {
+        let Some(root) = crate::daemon::server::daemon_runtime_root() else {
+            return;
+        };
+        let usage = runtime_stage::SystemRuntimeUsage {
+            registered_job_executables: supervisor_linux::registered_job_executables(unit_dir),
+        };
+        if let Err(error) = runtime_stage::collect_garbage(&root, &usage) {
+            tracing::warn!(%error, "Could not collect unused daemon runtime generations");
+        }
+    }
+
+    /// Starts this build's generation unit when it is idle; a busy unit is left alone.
+    pub fn ensure(env: Env<'_>, executable: &Path) -> Result<bool> {
+        let (_, name, path, staged) = generation_unit(env, executable)?;
+        supervisor_linux::ensure(&name, &path, &staged)
+    }
+
+    /// Writes this build's generation unit and enables it for login without `--now`; older
+    /// generations are disabled without `--now`. A running unit is untouched. Garbage collection
+    /// runs after registration, so the unit just written already protects its runtime.
     pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
-        let (name, path) = unit(env)?;
-        let executable =
-            supervisor_linux::daemon_executable(env("APPIMAGE").as_deref(), executable);
-        supervisor_linux::register_for_login(&name, &path, &executable)
+        let (base, name, path, staged) = generation_unit(env, executable)?;
+        let rewritten = supervisor_linux::register_for_login(&base, &name, &path, &staged)?;
+        if let Some(unit_dir) = path.parent() {
+            collect_runtime_garbage(unit_dir);
+        }
+        Ok(rewritten)
     }
 
     pub fn reload(env: Env<'_>) -> Result<()> {
@@ -538,7 +568,12 @@ mod backend {
     }
 
     pub fn installed(env: Env<'_>) -> bool {
-        unit(env).is_ok_and(|(_, path)| path.exists())
+        unit(env).is_ok_and(|(base, path)| {
+            path.exists()
+                || path.parent().is_some_and(|dir| {
+                    !supervisor_linux::generation_units_in(dir, &base).is_empty()
+                })
+        })
     }
 
     fn systemctl(args: &[&str]) -> Result<bool> {

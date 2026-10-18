@@ -1,5 +1,12 @@
-//! Linux side of the daemon supervisor: the systemd user unit that owns the daemon's lifetime, and
+//! Linux side of the daemon supervisor: the systemd user units that own the daemon's lifetime, and
 //! the `sd_notify` messages the daemon sends to it.
+//!
+//! Each daemon generation (`daemon::runtime_stage`) gets its own unit
+//! `<base>-<generation key>.service` whose `ExecStart` is that generation's staged executable,
+//! never the app install. Starting is idempotent and never disturbs a running unit: an active unit
+//! gets zero `systemctl` mutations, an idle one is written, reloaded and `start --no-block`ed.
+//! Only the newest generation is enabled for login; older ones are disabled without `--now`, so
+//! they keep running until their daemon exits on its own.
 //!
 //! The unit is `Type=notify`: the daemon reports `READY=1` once it serves its socket. A handover
 //! successor is forked by the predecessor, so it lives in the unit's cgroup; it reports
@@ -47,6 +54,93 @@ pub(crate) fn unit_name(override_name: Option<&OsStr>) -> Result<String, String>
         return Err(format!("Invalid systemd unit name: {name:?}"));
     }
     Ok(name.to_string())
+}
+
+/// The unit of one daemon generation: `<base>-<key>`, validated like any unit name.
+pub(crate) fn generation_unit_name(base: &str, key: &str) -> Result<String, String> {
+    unit_name(Some(OsStr::new(&format!("{base}-{key}"))))
+}
+
+/// Whether `text` is a generation key `<version>-<8 lowercase hex>` (`runtime_stage::generation_key`).
+/// The version must start with a digit and hold no `-`, so a QA base such as `ferryx-daemon-qa-1`
+/// is never mistaken for a generation of `ferryx-daemon`.
+pub(crate) fn is_generation_key(text: &str) -> bool {
+    let Some((version, hash)) = text.rsplit_once('-') else {
+        return false;
+    };
+    let hash_ok = hash.len() == 8
+        && hash
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, 'a'..='f'));
+    let version_ok = version.starts_with(|ch: char| ch.is_ascii_digit())
+        && version.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '.');
+    hash_ok && version_ok
+}
+
+/// The generation units of `base` that have a unit file in `unit_dir`, sorted by name. The legacy
+/// single unit `<base>.service` is not a generation and is not listed.
+pub(crate) fn generation_units_in(unit_dir: &Path, base: &str) -> Vec<(String, PathBuf)> {
+    let prefix = format!("{base}-");
+    let Ok(entries) = fs::read_dir(unit_dir) else {
+        return Vec::new();
+    };
+    let mut units: Vec<(String, PathBuf)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let file_name = entry.file_name();
+            let stem = file_name.to_str()?.strip_suffix(".service")?;
+            let key = stem.strip_prefix(&prefix)?;
+            is_generation_key(key).then(|| (stem.to_string(), entry.path()))
+        })
+        .collect();
+    units.sort();
+    units
+}
+
+/// The executable a rendered unit's `ExecStart=` runs, undoing the quoting of [`render_unit`].
+pub(crate) fn unit_exec_start(content: &str) -> Option<PathBuf> {
+    let value = content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("ExecStart="))?;
+    let mut chars = value.chars().peekable();
+    let mut exe = String::new();
+    if chars.peek() == Some(&'"') {
+        chars.next();
+        loop {
+            match chars.next()? {
+                '"' => break,
+                '\\' => exe.push(chars.next()?),
+                ch @ ('%' | '$') => {
+                    if chars.peek() == Some(&ch) {
+                        chars.next();
+                    }
+                    exe.push(ch);
+                }
+                ch => exe.push(ch),
+            }
+        }
+    } else {
+        exe = chars.take_while(|ch| !ch.is_whitespace()).collect();
+    }
+    (!exe.is_empty()).then(|| PathBuf::from(exe))
+}
+
+/// Executables referenced by every unit file in `unit_dir` (any name, so a QA unit and the legacy
+/// unit count too). Garbage collection of staged runtimes never removes a generation one of these
+/// points into.
+pub(crate) fn registered_job_executables(unit_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(unit_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension() != Some(OsStr::new("service")) {
+                return None;
+            }
+            unit_exec_start(&fs::read_to_string(path).ok()?)
+        })
+        .collect()
 }
 
 /// `$XDG_CONFIG_HOME/systemd/user/<name>.service`, falling back to `~/.config` when the variable is
@@ -409,16 +503,80 @@ fn systemctl(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-#[cfg(target_os = "linux")]
-fn unit_is_running(name: &str) -> bool {
-    let unit = format!("{name}.service");
-    systemctl(&["show", "-p", "ActiveState", "--value", &unit]).is_ok_and(|state| {
-        matches!(state.as_str(), "active" | "activating" | "reloading")
-    })
+/// `systemctl --user`, injectable so the start and registration rules are testable without a
+/// user manager.
+pub(crate) trait Systemctl {
+    fn run(&self, args: &[&str]) -> Result<String, String>;
 }
 
-/// Writes the unit for `executable`, reloads systemd when it changed, and enables and starts it
-/// when it was rewritten or is not running. A running daemon is never restarted.
+/// The real `systemctl --user`.
+#[cfg(target_os = "linux")]
+pub(crate) struct UserSystemctl;
+
+#[cfg(target_os = "linux")]
+impl Systemctl for UserSystemctl {
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        systemctl(args)
+    }
+}
+
+/// Whether the unit is anything but idle. Only `inactive` and `failed` count as idle: an active,
+/// activating, reloading or deactivating unit, or any state systemd adds later, is left alone. A
+/// failed query is an error, never "idle".
+fn unit_is_busy(systemctl: &dyn Systemctl, name: &str) -> Result<bool, String> {
+    let unit = format!("{name}.service");
+    let state = systemctl.run(&["show", "-p", "ActiveState", "--value", &unit])?;
+    Ok(!matches!(state.trim(), "inactive" | "failed"))
+}
+
+/// Starts generation unit `name` when it is idle: writes `content` to `path`, reloads systemd when
+/// the file changed, then `start --no-block`. A busy unit gets no `systemctl` mutation and no
+/// rewrite. Never `enable --now`, `restart` or `stop`. Returns whether a start was issued.
+pub(crate) fn ensure_generation_with(
+    systemctl: &dyn Systemctl,
+    name: &str,
+    path: &Path,
+    content: &str,
+) -> Result<bool, String> {
+    if unit_is_busy(systemctl, name)? {
+        return Ok(false);
+    }
+    if write_unit(content, path)? {
+        systemctl.run(&["daemon-reload"])?;
+    }
+    systemctl.run(&["start", "--no-block", &format!("{name}.service")])?;
+    Ok(true)
+}
+
+/// Registers generation unit `newest` for the next login and drops login autostart from every
+/// older generation of `base` in the same directory. Only `enable` and `disable` without `--now`:
+/// no unit is started, stopped or restarted. Returns whether the newest unit file changed.
+pub(crate) fn register_generation_with(
+    systemctl: &dyn Systemctl,
+    base: &str,
+    newest: &str,
+    path: &Path,
+    content: &str,
+) -> Result<bool, String> {
+    let rewritten = write_unit(content, path)?;
+    if rewritten {
+        systemctl.run(&["daemon-reload"])?;
+    }
+    systemctl.run(&["enable", &format!("{newest}.service")])?;
+    let unit_dir = path.parent().unwrap_or(Path::new(""));
+    for (older, _) in generation_units_in(unit_dir, base) {
+        if older == newest {
+            continue;
+        }
+        if let Err(error) = systemctl.run(&["disable", &format!("{older}.service")]) {
+            tracing::warn!(%error, unit = %older, "Could not drop login autostart from an older daemon generation");
+        }
+    }
+    Ok(rewritten)
+}
+
+/// [`ensure_generation_with`] for the real user manager, keeping the unit's secret env file in sync
+/// first.
 #[cfg(target_os = "linux")]
 pub(crate) fn ensure(name: &str, path: &Path, executable: &Path) -> Result<bool, String> {
     let vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
@@ -428,15 +586,7 @@ pub(crate) fn ensure(name: &str, path: &Path, executable: &Path) -> Result<bool,
     if let Err(error) = sync_secret_env(name, &vars) {
         tracing::warn!(%error, unit = %name, "Could not update the daemon secret env file");
     }
-    let rewritten = write_unit(&content, path)?;
-    if rewritten {
-        systemctl(&["daemon-reload"])?;
-    }
-    if rewritten || !unit_is_running(name) {
-        systemctl(&["enable", "--now", "--no-block", &format!("{name}.service")])?;
-        return Ok(true);
-    }
-    Ok(false)
+    ensure_generation_with(&UserSystemctl, name, path, &content)
 }
 
 /// Starts the unit again; a unit stopped by its start limit is reset first.
@@ -447,18 +597,18 @@ pub(crate) fn start(name: &str) -> Result<(), String> {
     systemctl(&["start", "--no-block", &unit]).map(|_| ())
 }
 
-/// Writes the unit and enables it for the next login. Never `--now`, `start`, or `restart`:
+/// [`register_generation_with`] for the real user manager. Never `--now`, `start`, or `restart`:
 /// a running daemon keeps its process and PTYs.
 #[cfg(target_os = "linux")]
-pub(crate) fn register_for_login(name: &str, path: &Path, executable: &Path) -> Result<bool, String> {
+pub(crate) fn register_for_login(
+    base: &str,
+    name: &str,
+    path: &Path,
+    executable: &Path,
+) -> Result<bool, String> {
     let vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     let content = render_unit(executable, &vars)?;
-    let rewritten = write_unit(&content, path)?;
-    if rewritten {
-        systemctl(&["daemon-reload"])?;
-    }
-    systemctl(&["enable", &format!("{name}.service")])?;
-    Ok(rewritten)
+    register_generation_with(&UserSystemctl, base, name, path, &content)
 }
 
 /// `disable --now` and delete the unit file; a missing unit is success.
@@ -943,5 +1093,223 @@ mod tests {
         send_notify(socket_path.as_os_str(), READY).unwrap();
         let read = receiver.recv(&mut buffer).unwrap();
         assert_eq!(&buffer[..read], b"READY=1");
+    }
+
+    /// Records every `systemctl --user` call; `show` answers from `states` (a missing unit is an
+    /// error, like a user manager that cannot be queried).
+    struct FakeSystemctl {
+        states: HashMap<String, &'static str>,
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+
+    impl FakeSystemctl {
+        fn with_states(states: &[(&str, &'static str)]) -> Self {
+            Self {
+                states: states
+                    .iter()
+                    .map(|(unit, state)| (format!("{unit}.service"), *state))
+                    .collect(),
+                calls: Default::default(),
+            }
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.borrow().clone()
+        }
+
+        /// Every call that is not a read-only `show`.
+        fn mutations(&self) -> Vec<Vec<String>> {
+            self.calls()
+                .into_iter()
+                .filter(|call| call.first().map(String::as_str) != Some("show"))
+                .collect()
+        }
+    }
+
+    impl Systemctl for FakeSystemctl {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|arg| arg.to_string()).collect());
+            if args.first() == Some(&"show") {
+                let unit = args.last().unwrap();
+                return self
+                    .states
+                    .get(*unit)
+                    .map(|state| state.to_string())
+                    .ok_or_else(|| format!("no state for {unit}"));
+            }
+            Ok(String::new())
+        }
+    }
+
+    const KEY: &str = "2026.1013.2-0a1b2c3d";
+    const OLDER_KEY: &str = "2026.1012.1-ffee0011";
+    const STAGED: &str = "/home/u/.local/share/ferryx/daemon-runtime/2026.1013.2-0a1b2c3d/ferryx";
+
+    fn call(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn generation_unit_runs_the_staged_executable() {
+        let name = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        assert_eq!(name, "ferryx-daemon-2026.1013.2-0a1b2c3d");
+        assert_eq!(
+            generation_unit_name("ferryx-daemon-qa", KEY).unwrap(),
+            "ferryx-daemon-qa-2026.1013.2-0a1b2c3d",
+            "a QA base keeps its own prefix"
+        );
+        let unit = render(STAGED);
+        assert!(unit.contains(&format!("ExecStart=\"{STAGED}\" --daemon\n")), "{unit}");
+        assert!(!unit.contains(".AppImage"), "{unit}");
+        let lines = service_lines(&unit);
+        assert!(lines.contains(&"KillMode=process"), "{unit}");
+        assert!(lines.contains(&"Restart=on-failure"), "{unit}");
+        assert!(lines.contains(&"WantedBy=default.target"), "{unit}");
+        assert_eq!(unit_exec_start(&unit), Some(PathBuf::from(STAGED)));
+        assert_eq!(
+            secret_env_path(Some(OsStr::new("/run/user/1000")), &name),
+            Some(PathBuf::from(
+                "/run/user/1000/ferryx/ferryx-daemon-2026.1013.2-0a1b2c3d.env"
+            )),
+            "each generation unit keeps its own secret env file"
+        );
+    }
+
+    #[test]
+    fn running_generation_gets_zero_systemctl_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        let path = dir.path().join(format!("{name}.service"));
+        for state in ["active", "activating", "reloading", "deactivating", "refreshing"] {
+            let systemctl = FakeSystemctl::with_states(&[(&name, state)]);
+            assert_eq!(
+                ensure_generation_with(&systemctl, &name, &path, &render(STAGED)),
+                Ok(false),
+                "{state}"
+            );
+            assert_eq!(systemctl.mutations(), Vec::<Vec<String>>::new(), "{state}");
+            assert!(!path.exists(), "a busy unit's file must not be rewritten ({state})");
+        }
+    }
+
+    #[test]
+    fn unqueryable_generation_is_an_error_without_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        let path = dir.path().join(format!("{name}.service"));
+        let systemctl = FakeSystemctl::with_states(&[]);
+        assert!(ensure_generation_with(&systemctl, &name, &path, &render(STAGED)).is_err());
+        assert_eq!(systemctl.mutations(), Vec::<Vec<String>>::new());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn idle_generation_is_written_reloaded_and_started_without_enable_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        let path = dir.path().join(format!("{name}.service"));
+        let content = render(STAGED);
+        for state in ["inactive", "failed"] {
+            let _ = fs::remove_file(&path);
+            let systemctl = FakeSystemctl::with_states(&[(&name, state)]);
+            assert_eq!(ensure_generation_with(&systemctl, &name, &path, &content), Ok(true));
+            assert_eq!(
+                systemctl.mutations(),
+                [
+                    call(&["daemon-reload"]),
+                    call(&["start", "--no-block", &format!("{name}.service")]),
+                ],
+                "{state}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), content);
+        }
+        // An unchanged unit file needs no daemon-reload.
+        let systemctl = FakeSystemctl::with_states(&[(&name, "inactive")]);
+        assert_eq!(ensure_generation_with(&systemctl, &name, &path, &content), Ok(true));
+        assert_eq!(
+            systemctl.mutations(),
+            [call(&["start", "--no-block", &format!("{name}.service")])]
+        );
+        for call in systemctl.calls() {
+            for forbidden in ["--now", "restart", "stop", "enable", "disable", "kill"] {
+                assert!(!call.iter().any(|arg| arg == forbidden), "{call:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn older_generation_gets_disable_without_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let newest = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        let older = generation_unit_name(DEFAULT_UNIT_NAME, OLDER_KEY).unwrap();
+        let older_path = dir.path().join(format!("{older}.service"));
+        let older_unit = render("/home/u/.local/share/ferryx/daemon-runtime/2026.1012.1-ffee0011/ferryx");
+        fs::write(&older_path, &older_unit).unwrap();
+        // Neither the legacy single unit nor a QA unit sharing the prefix is a generation.
+        fs::write(dir.path().join("ferryx-daemon.service"), render("/opt/ferryx/ferryx")).unwrap();
+        fs::write(dir.path().join("ferryx-daemon-qa-1.service"), render("/opt/qa/ferryx")).unwrap();
+
+        let systemctl = FakeSystemctl::with_states(&[(&older, "active")]);
+        let path = dir.path().join(format!("{newest}.service"));
+        assert_eq!(
+            register_generation_with(&systemctl, DEFAULT_UNIT_NAME, &newest, &path, &render(STAGED)),
+            Ok(true)
+        );
+        assert_eq!(
+            systemctl.calls(),
+            [
+                call(&["daemon-reload"]),
+                call(&["enable", &format!("{newest}.service")]),
+                call(&["disable", &format!("{older}.service")]),
+            ],
+            "registration only enables the newest and disables older generations"
+        );
+        assert_eq!(
+            fs::read_to_string(&older_path).unwrap(),
+            older_unit,
+            "the older generation's unit file stays, so its running daemon keeps its definition"
+        );
+    }
+
+    #[test]
+    fn generation_units_and_registered_executables_are_discovered() {
+        assert!(is_generation_key(KEY));
+        assert!(is_generation_key("2026.1013.2-00000000"));
+        assert!(!is_generation_key("qa-1"), "a QA suffix is not a generation key");
+        assert!(!is_generation_key("2026.1013.2-0A1B2C3D"), "the hash is lowercase hex");
+        assert!(!is_generation_key("2026.1013.2-0a1b2c3"));
+        assert!(!is_generation_key("v2026-0a1b2c3d"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let newest = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        let older = generation_unit_name(DEFAULT_UNIT_NAME, OLDER_KEY).unwrap();
+        fs::write(dir.path().join(format!("{newest}.service")), render(STAGED)).unwrap();
+        fs::write(dir.path().join(format!("{older}.service")), render("/data/100%/$x/fe\"r")).unwrap();
+        fs::write(dir.path().join("ferryx-daemon.service"), render("/opt/ferryx/ferryx")).unwrap();
+        fs::write(dir.path().join("notes.txt"), "ExecStart=/not/a/unit").unwrap();
+
+        let names: Vec<String> = generation_units_in(dir.path(), DEFAULT_UNIT_NAME)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        let mut expected = vec![newest.clone(), older.clone()];
+        expected.sort();
+        assert_eq!(names, expected);
+
+        let mut executables = registered_job_executables(dir.path());
+        executables.sort();
+        let mut expected = vec![
+            PathBuf::from("/data/100%/$x/fe\"r"),
+            PathBuf::from(STAGED),
+            PathBuf::from("/opt/ferryx/ferryx"),
+        ];
+        expected.sort();
+        assert_eq!(
+            executables, expected,
+            "every unit's ExecStart (generation, legacy) protects its runtime from garbage collection"
+        );
+        assert!(registered_job_executables(&dir.path().join("missing")).is_empty());
     }
 }
