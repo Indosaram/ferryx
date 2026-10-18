@@ -1610,7 +1610,7 @@ async fn ssh_reconnect_to_exited_target_publishes_its_final_output() {
     tx.send(Ok(output(7, false))).unwrap();
     dialer.clock.add_permits(1);
     let gone = state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
-    assert_eq!(gone.failure.unwrap().kind, RemoteFailureKind::Missing);
+    assert_eq!(gone.failure.unwrap().kind, RemoteFailureKind::Expired);
     let published = tokio::time::timeout(Duration::from_secs(3), hub_output.recv())
         .await
         .expect("final output published before expiry")
@@ -1698,4 +1698,86 @@ async fn ssh_imported_transport_recovers_after_control_disconnect() {
     assert_eq!(dialer.fake.writes.load(Ordering::SeqCst), 1);
     assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 0);
     assert_eq!(dialer.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn ssh_target_not_found_is_retryable_disconnected_owner_unknown_not_expired() {
+    let (runtime, _hub, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+
+    tx.send(Err(BridgeError::TargetNotFound)).unwrap();
+    let disconnected = state(&mut updates, |d| d.state == RemoteConnectionState::Disconnected).await;
+    assert_eq!(disconnected.failure.as_ref().unwrap().kind, RemoteFailureKind::Missing);
+
+    // retry() must be accepted because session is Disconnected (not terminal Expired)
+    assert!(runtime.retry("local-stable").is_ok());
+    let details = runtime.details("local-stable").unwrap();
+    assert_eq!(details.state, RemoteConnectionState::Reconnecting);
+}
+
+#[tokio::test]
+async fn ssh_helper_exit_proof_remains_terminal_expired() {
+    let (runtime, _hub, _dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+
+    // Simulate helper reporting confirmed remote target exit
+    tx.send(Err(BridgeError::RemoteTargetExpired)).unwrap();
+    let expired = state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
+    assert_eq!(expired.failure.as_ref().unwrap().kind, RemoteFailureKind::Expired);
+
+    // An expired target cannot be revived by retry RPC
+    let err = runtime.retry("local-stable").unwrap_err();
+    assert_eq!(err.kind, RemoteFailureKind::Expired);
+}
+
+#[tokio::test]
+async fn ssh_authentication_read_failure_does_not_auto_redial() {
+    let (runtime, _hub, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+    reads_started(&dialer.fake, 1).await;
+    let initial_dials = dialer.calls.load(Ordering::SeqCst);
+    let owner = runtime.take_recovery_owner_for_test("local-stable").unwrap();
+    tx.send(Err(BridgeError::ProcessExited {
+        code: Some(255),
+        stderr: "Permission denied (publickey)".into(),
+    }))
+    .unwrap();
+    let failed = state(&mut updates, |d| d.state == RemoteConnectionState::Disconnected).await;
+    assert_eq!(failed.failure.unwrap().kind, RemoteFailureKind::Authentication);
+    tokio::time::timeout(Duration::from_secs(3), owner)
+        .await
+        .expect("authentication failure terminates the recovery owner")
+        .expect("recovery owner completes without panic or cancellation");
+    assert_eq!(dialer.calls.load(Ordering::SeqCst), initial_dials);
+    assert!(runtime.retry("local-stable").is_ok());
+    assert_eq!(runtime.details("local-stable").unwrap().state, RemoteConnectionState::Reconnecting);
+}
+
+#[tokio::test]
+async fn ssh_protocol_read_failure_does_not_auto_redial() {
+    let (runtime, _hub, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+    reads_started(&dialer.fake, 1).await;
+    let initial_dials = dialer.calls.load(Ordering::SeqCst);
+    let owner = runtime.take_recovery_owner_for_test("local-stable").unwrap();
+
+    tx.send(Err(BridgeError::Protocol("invalid response".into())))
+        .unwrap();
+    let failed = state(&mut updates, |d| d.state == RemoteConnectionState::Disconnected).await;
+    assert_eq!(failed.failure.unwrap().kind, RemoteFailureKind::Protocol);
+    tokio::time::timeout(Duration::from_secs(3), owner)
+        .await
+        .expect("protocol failure terminates the recovery owner")
+        .expect("recovery owner completes without panic or cancellation");
+    assert_eq!(dialer.calls.load(Ordering::SeqCst), initial_dials);
+    assert!(runtime.retry("local-stable").is_ok());
+    assert_eq!(runtime.details("local-stable").unwrap().state, RemoteConnectionState::Reconnecting);
 }

@@ -372,3 +372,114 @@ fn origin_normalization_is_identity_stable() {
         "https://relay.example"
     );
 }
+
+#[test]
+fn legacy_host_view_decodes_without_device_id_and_omits_none_in_wire_format() {
+    let legacy_json = r#"{
+        "hostId": "https://relay.example/host/legacy-01",
+        "relayOrigin": "https://relay.example",
+        "machineId": "legacy-01",
+        "displayLabel": "Legacy 01",
+        "grantScope": "machine",
+        "generation": "1",
+        "authStatus": "paired",
+        "online": true,
+        "sshHostId": null
+    }"#;
+    let view: HostView = serde_json::from_str(legacy_json).expect("legacy HostView must decode");
+    assert_eq!(view.host_id, "https://relay.example/host/legacy-01");
+    assert_eq!(view.relay_origin, "https://relay.example");
+    assert_eq!(view.machine_id, "legacy-01");
+    assert_eq!(view.display_label, "Legacy 01");
+    assert_eq!(view.grant_scope, GrantScope::Machine);
+    assert_eq!(view.generation, Epoch(1));
+    assert_eq!(view.auth_status, AuthStatus::Paired);
+    assert_eq!(view.online, true);
+    assert_eq!(view.ssh_host_id, None);
+    assert_eq!(view.device_id, None);
+
+    let serialized = serde_json::to_string(&view).expect("HostView serializes");
+    assert!(!serialized.contains("deviceId"));
+}
+
+#[test]
+fn host_view_roundtrips_explicit_device_id_machine_values() {
+    let explicit_json = r#"{
+        "hostId": "https://relay.example/host/explicit-01",
+        "relayOrigin": "https://relay.example",
+        "machineId": "explicit-01",
+        "displayLabel": "Explicit 01",
+        "grantScope": "machine",
+        "generation": "3",
+        "authStatus": "paired",
+        "online": true,
+        "sshHostId": "saved-ssh-42",
+        "deviceId": "dev-explicit-authenticated-01"
+    }"#;
+    let view: HostView = serde_json::from_str(explicit_json).expect("HostView with deviceId must decode");
+    assert_eq!(view.host_id, "https://relay.example/host/explicit-01");
+    assert_eq!(view.device_id.as_deref(), Some("dev-explicit-authenticated-01"));
+    assert_eq!(view.ssh_host_id.as_deref(), Some("saved-ssh-42"));
+    assert_eq!(view.generation, Epoch(3));
+
+    let serialized = serde_json::to_string(&view).expect("HostView serializes");
+    assert!(serialized.contains(r#""deviceId":"dev-explicit-authenticated-01""#));
+}
+
+#[test]
+fn legacy_inventory_disk_record_decodes_without_device_id() {
+    let root = fixture();
+    let legacy_disk = r#"{
+        "version": 1,
+        "hosts": {
+            "https://relay.example/host/legacy-disk-01": {
+                "relayOrigin": "https://relay.example",
+                "machineId": "legacy-disk-01",
+                "displayLabel": "Legacy Disk",
+                "grantScope": "machine",
+                "deviceToken": "legacy-secret-token-1234",
+                "generation": "1",
+                "authStatus": "paired"
+            }
+        },
+        "generations": {
+            "https://relay.example/host/legacy-disk-01": "1"
+        }
+    }"#;
+    fs::write(path(root.path()), legacy_disk.as_bytes()).unwrap();
+
+    let store = Inventory::open(root.path()).expect("legacy disk must load");
+    let hosts = store.list();
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0].host_id, "https://relay.example/host/legacy-disk-01");
+    assert_eq!(hosts[0].device_id, None);
+    assert_eq!(hosts[0].generation, Epoch(1));
+    assert_eq!(hosts[0].auth_status, AuthStatus::Paired);
+    root.close().unwrap();
+}
+
+#[test]
+fn pair_with_device_persists_explicit_device_id_across_reopen() {
+    let root = fixture();
+    let input = pairing("device-persist");
+    let mut store = Inventory::open(root.path()).unwrap();
+    let row = store
+        .pair_with_device(&input, Some("dev-authenticated-99".into()))
+        .expect("pair_with_device succeeds");
+    assert_eq!(row.device_id.as_deref(), Some("dev-authenticated-99"));
+
+    let disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(path(root.path())).unwrap()).unwrap();
+    assert_eq!(
+        disk["hosts"][&row.host_id]["deviceId"],
+        "dev-authenticated-99"
+    );
+
+    drop(store);
+    let reopened = Inventory::open(root.path()).expect("reopen inventory");
+    let list = reopened.list();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].host_id, row.host_id);
+    assert_eq!(list[0].device_id.as_deref(), Some("dev-authenticated-99"));
+    root.close().unwrap();
+}

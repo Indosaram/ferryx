@@ -1267,6 +1267,42 @@ fn install_notification_activation_routing<R: tauri::Runtime>(
     Ok(())
 }
 
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+fn qa_primary_window_profile(barrier_dir: &str, run_id: &str) -> Result<std::path::PathBuf, String> {
+    use std::path::Path;
+    let barriers = Path::new(barrier_dir);
+    if run_id.trim().is_empty() || barriers.file_name().and_then(|name| name.to_str()) != Some("barriers") {
+        return Err("QA primary window requires a run id and isolated barriers directory".into());
+    }
+    let root = barriers.parent().ok_or_else(|| "QA barriers directory has no profile root".to_string())?;
+    if !barriers.is_dir() || root.file_name().and_then(|name| name.to_str()) != Some(run_id) {
+        return Err("QA barrier directory does not match the isolated run profile".into());
+    }
+    Ok(root.join("webview"))
+}
+
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+fn configure_qa_primary_window<R: tauri::Runtime>(
+    context: &mut tauri::Context<R>,
+    profile: &std::path::Path,
+) -> Result<(), String> {
+    let window = context
+        .config_mut()
+        .app
+        .windows
+        .iter_mut()
+        .find(|window| window.label == "main")
+        .ok_or_else(|| "QA config has no main window".to_string())?;
+    window.create = false;
+    QA_PRIMARY_WINDOW_PROFILE.with(|slot| *slot.borrow_mut() = Some(profile.to_path_buf()));
+    Ok(())
+}
+
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+thread_local! {
+    static QA_PRIMARY_WINDOW_PROFILE: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     let daemon_client = Arc::new(DaemonClient::new());
     let bridge_daemon_client = Arc::clone(&daemon_client);
@@ -1413,6 +1449,19 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 app.handle(),
                 app.state::<Arc<browser::BrowserManager>>().inner(),
             );
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            if let Some(profile) = QA_PRIMARY_WINDOW_PROFILE.with(|slot| slot.borrow_mut().take()) {
+                let window_config = app
+                    .config()
+                    .app
+                    .windows
+                    .iter()
+                    .find(|window| window.label == "main")
+                    .ok_or_else(|| std::io::Error::other("QA config has no main window"))?;
+                tauri::WebviewWindowBuilder::from_config(app, window_config)?
+                    .data_directory(profile)
+                    .build()?;
+            }
             // Hand the daemon's lifetime to the supervisor before a terminal can ask for one, so
             // quitting, crashing, or replacing this app can no longer take the PTYs with it. The
             // daemon client repeats this on demand, which is what makes the race harmless; this
@@ -1577,7 +1626,15 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     #[cfg(feature = "native-terminal")]
     let builder = builder.manage(native_terminal_surface_host);
 
-    builder.invoke_handler(tauri::generate_handler![
+    #[tauri::command]
+    fn cmd_native_qa_enabled() -> bool {
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        { return crate::ipc::qa_barrier::active_channel().is_some(); }
+        #[cfg(not(all(feature = "local-split-qa", feature = "native-terminal")))]
+        { false }
+    }
+    let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+        cmd_native_qa_enabled,
         crate::ipc::account::cmd_account_enrollment_status,
         crate::ipc::account::cmd_account_enroll_this_machine,
         crate::ipc::paired_host::paired_host_list,
@@ -1588,6 +1645,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::paired_host::paired_host_migrate_legacy,
         crate::ipc::paired_host::paired_host_forget,
         crate::ipc::paired_host::paired_host_attach_session,
+        crate::ipc::paired_host::cmd_retry_paired_session,
         crate::ipc::file_preview::cmd_file_preview_open,
         crate::ipc::file_preview::cmd_file_preview_open_child,
         crate::ipc::file_preview::cmd_file_preview_open_child_document,
@@ -1765,7 +1823,33 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         dag_watch_ssh_project,
         dag_unwatch_project,
         dag_discover_watch_roots,
-    ])
+    ]);
+    builder.invoke_handler(move |invoke: tauri::ipc::Invoke<R>| {
+        if invoke.message.command() == "cmd_retry_paired_session" {
+            let handler: Box<tauri::ipc::InvokeHandler<R>> =
+                Box::new(tauri::generate_handler![crate::ipc::paired_host::cmd_retry_paired_session]);
+            return handler(invoke);
+        }
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        if invoke.message.command() == "cmd_qa_native_binding_persisted" {
+            let handler: Box<tauri::ipc::InvokeHandler<R>> =
+                Box::new(tauri::generate_handler![crate::ipc::qa_barrier::cmd_qa_native_binding_persisted]);
+            return handler(invoke);
+        }
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        if invoke.message.command() == "cmd_qa_native_recovery_snapshot" {
+            let handler: Box<tauri::ipc::InvokeHandler<R>> =
+                Box::new(tauri::generate_handler![crate::ipc::qa_barrier::cmd_qa_native_recovery_snapshot]);
+            return handler(invoke);
+        }
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        if invoke.message.command() == "cmd_qa_native_recovery_event" {
+            let handler: Box<tauri::ipc::InvokeHandler<R>> =
+                Box::new(tauri::generate_handler![crate::ipc::qa_barrier::cmd_qa_native_recovery_event]);
+            return handler(invoke);
+        }
+        product_handler(invoke)
+    })
 }
 
 #[cfg(test)]
@@ -2489,8 +2573,26 @@ pub fn run() {
         .with_max_level(tracing::Level::INFO)
         .try_init();
 
+    let mut context = tauri::generate_context!();
+    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+    let qa_profile = match (
+        std::env::var("FERRYX_QA_BARRIER_DIR"),
+        std::env::var("FERRYX_QA_RUN_ID"),
+    ) {
+        (Ok(barriers), Ok(run_id)) => Some(
+            qa_primary_window_profile(&barriers, &run_id)
+                .expect("QA GUI launch requires a valid isolated profile"),
+        ),
+        (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => None,
+        _ => panic!("QA GUI launch requires both barrier directory and run id"),
+    };
+    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+    if let Some(profile) = qa_profile.as_deref() {
+        configure_qa_primary_window(&mut context, profile)
+            .expect("QA GUI config must contain the main window");
+    }
     create_app(tauri::Builder::default())
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {

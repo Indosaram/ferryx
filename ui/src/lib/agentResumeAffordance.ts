@@ -81,7 +81,7 @@ export function extractNormalizedProviderSession(session: TerminalSession): Agen
 }
 
 function hasLiveBackend(session: TerminalSession): boolean {
-  return session.backendSessionId !== null && !isStandbyBackendSessionId(session.backendSessionId);
+  return session.lifecycle !== "exited" && session.backendSessionId !== null && !isStandbyBackendSessionId(session.backendSessionId);
 }
 
 export function findConflictingActiveSession(

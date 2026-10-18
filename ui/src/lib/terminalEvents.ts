@@ -10,6 +10,8 @@ import {
   TerminalOutputDecoderRegistry,
 } from "./terminalOutput";
 import { metricsNow, terminalThroughputMetricsEnabled } from "./terminalThroughputMetrics";
+import { observeNativeOutput } from "./nativeQaReceipts";
+import { getDurableNativeBinding } from "./nativeTerminalLifecycle";
 import type { TerminalLifecyclePayload, TerminalOutputPayload, TerminalSession } from "./types";
 
 const MAX_BACKLOG_BYTES = 512 * 1024;
@@ -413,6 +415,7 @@ export class TerminalEventBus {
     daemonEpoch?: string | null,
     receivedAtMs?: number,
   ) {
+    observeNativeOutput(getDurableNativeBinding(sessionId), data, sequence, daemonEpoch);
     // Only retain a replay backlog while an output listener is attached to this session.
     // Unconsumed native sessions must not accumulate bytes.
     if (data.byteLength > 0 && (this.outputListeners.get(sessionId)?.size ?? 0) > 0) {
@@ -485,7 +488,7 @@ export async function attachNativeTerminalRebind(
       daemonEpoch: result.daemonEpoch,
       frontendSessionId: localSession.id,
       paneIdentity: localSession.id,
-      bindingKey: `${result.sessionId}:${result.daemonEpoch}:${localSession.remoteGeneration ?? 0}:${localSession.remoteConnectionState ?? ""}`,
+      bindingKey: `${result.sessionId}:${result.daemonEpoch}:${localSession.remoteGeneration ?? 0}:${localSession.remoteConnectionState ?? ""}${result.session.incarnation != null ? `:${result.session.incarnation}` : ""}`,
       attemptGeneration: (localSession.attachTuple?.attemptGeneration ?? 0) + 1,
     },
   });

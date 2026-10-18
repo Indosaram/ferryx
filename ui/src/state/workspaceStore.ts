@@ -11,7 +11,7 @@ import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
 import { closeBrowser, createBrowser, createPopupBrowser, navigateBrowser, reloadBrowser, type BrowserReloadOptions, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
-import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit, type SpawnTerminalRequest } from "../lib/tauri";
+import { closeTerminal, describeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit, type SpawnTerminalRequest } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { isAbsoluteTerminalCwd } from "../lib/terminalCwd";
@@ -52,6 +52,7 @@ import type {
   TerminalLifecycle,
   TerminalLifecyclePayload,
   FileTab,
+  SessionRecoveryState,
   TerminalSession,
   TerminalTab,
   WorkspaceTab,
@@ -64,8 +65,490 @@ import { moveTabIntoPaneSplit } from "./tabPaneDrop";
 import { notificationCenterStore, type NotificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
 import { hasRecentObservationInteraction } from "../lib/notificationCenter/activityRecording";
 import { countAttentionEntries, liveActivityLookup } from "../features/ferryx/attention/attentionModel";
+import { formatRecoveryKey, RecoveryScheduler, type AuthorityCorrectionReceipt, type RecoveryClock } from "../lib/sessionRecovery";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
+export type LocalRecoveryAdmissionResult =
+  | { kind: "pending" }
+  | { kind: "ready"; session: TerminalSession }
+  | { kind: "blocked"; reason: "identity_conflict" | "SESSION_EXPIRED" | "CONTROL_CONFLICT" |
+      "STALE_GENERATION" | "PAIRED_HOST_STALE_GENERATION" | "PAIRED_HOST_UNAUTHORIZED" |
+      "UNAUTHORIZED" | "PERMISSION_DENIED" | "PAIRED_HOST_WRONG_MACHINE" |
+      "PAIRED_HOST_INVALID_RESPONSE" | "PAIRED_HOST_MIGRATION_PENDING" | "UNSUPPORTED_PROTOCOL" }
+  | { kind: "exited" }
+  | { kind: "cancelled" };
+type LocalRecoveryOwner = { workspaceId: string; sessionId: string; captured: TerminalSession;
+  scheduler: RecoveryScheduler; admitting: boolean; requesters: Set<(result: LocalRecoveryAdmissionResult) => void> };
+const localRecoveryOwners = new Map<string, LocalRecoveryOwner>();
+const localRecoveryReceipts = new Map<string, Map<string, TerminalSession>>();
+function hasPendingLocalSplit(session: TerminalSession | undefined | null): boolean {
+  const intent = localSplitIntent(session);
+  return Boolean(intent && (!intent.ready || intent.cancelRequested));
+}
+function matchesLocalRecoveryReceipt(current: TerminalSession | undefined, receipt: TerminalSession): boolean {
+  return Boolean(current && current.id === receipt.id && current.workspaceId === receipt.workspaceId &&
+    current.backendSessionId === receipt.backendSessionId && current.incarnation === receipt.incarnation &&
+    current.daemonEpoch === receipt.daemonEpoch && current.recoveryKey === receipt.recoveryKey &&
+    current.recoveryToken === receipt.recoveryToken && current.lifecycle === "running" &&
+    current.reconnectLifecycle === "idle" && current.remoteConnectionState === receipt.remoteConnectionState &&
+    !current.backendUnavailableReason && !current.reconnectError && !hasPendingLocalSplit(current));
+}
+const localRecoveryAdmissions = new Map<string, (action: WorkspaceAction) => void>();
+let persistLocalRecovery: ((workspaceId: string, state: WorkspaceState, current: () => boolean) => Promise<void>) | undefined;
+let localRecoveryClock: RecoveryClock | undefined;
+let reconcilingLocalRecovery = false;
+
+export function setLocalRecoveryClockForTests(clock?: RecoveryClock): void {
+  localRecoveryClock = clock;
+}
+
+export function resetLocalRecoveryForTests(): void {
+  for (const owner of localRecoveryOwners.values()) owner.scheduler.dispose();
+  localRecoveryOwners.clear();
+  localRecoveryReceipts.clear();
+  localRecoveryAdmissions.clear();
+  persistLocalRecovery = undefined;
+  localRecoveryClock = undefined;
+  reconcilingLocalRecovery = false;
+}
+
+if (import.meta.hot) import.meta.hot.dispose(() => resetLocalRecoveryForTests());
+
+export function setLocalRecoveryPersistence(persist: typeof persistLocalRecovery): void {
+  persistLocalRecovery = persist;
+  reconcileLoadedLocalRecovery();
+}
+
+function applyLocalRecovery(workspaceId: string, action: WorkspaceAction): void {
+  const admission = localRecoveryAdmissions.get(workspaceId);
+  const snapshot = getWorkspaceSnapshot(workspaceId);
+  if (!snapshot) return;
+  const next = workspaceReducer(snapshot, action);
+  setHmrWorkspaceState(workspaceId, next);
+  setWorkspaceSnapshot(workspaceId, next);
+  admission?.(action);
+}
+
+export function wakeLocalSessionRecovery(workspaceId: string, sessionId?: string): void {
+  if (sessionId) {
+    const snapshot = getWorkspaceSnapshot(workspaceId);
+    const session = snapshot?.sessions[sessionId];
+    if (!session || session.lifecycle === "exited" || session.backendUnavailableReason === "identity_conflict" ||
+      session.reconnectError?.code === "IDENTITY_CONFLICT" || session.remoteConnectionState !== "reconnecting") return;
+    if (snapshot && session && !isPairedWorkspaceId(workspaceId) && !isRemoteWorkspaceId(workspaceId) && session.backendSessionId) {
+      setWorkspaceSnapshot(workspaceId, { ...snapshot, sessions: { ...snapshot.sessions,
+        [sessionId]: { ...session, remoteConnectionState: "reconnecting" },
+      } });
+    }
+  }
+  reconcileLoadedLocalRecovery();
+  for (const owner of localRecoveryOwners.values()) {
+    if (owner.workspaceId === workspaceId && (!sessionId || owner.sessionId === sessionId) &&
+      getWorkspaceSnapshot(workspaceId)?.sessions[owner.sessionId]?.backendUnavailableReason !== "identity_conflict") owner.scheduler.wake();
+  }
+}
+
+export function requestLocalRecoveryAdmission(workspaceId: string, frontendSessionId: string,
+  revalidate: boolean, onResult: (result: LocalRecoveryAdmissionResult) => void): () => void {
+  const snapshot = getWorkspaceSnapshot(workspaceId);
+  const retained = snapshot?.sessions[frontendSessionId];
+  if (!retained || isRemoteWorkspaceId(workspaceId) || isPairedWorkspaceId(workspaceId)) {
+    onResult({ kind: "cancelled" }); return () => {};
+  }
+  if (retained.lifecycle === "exited") {
+    onResult({ kind: "exited" }); return () => {};
+  }
+  if (!retained.backendSessionId) {
+    onResult({ kind: "cancelled" }); return () => {};
+  }
+  if (!revalidate && (retained.backendUnavailableReason === "identity_conflict" || retained.reconnectError?.code === "IDENTITY_CONFLICT")) {
+    if (retained.remoteConnectionState === "reconnecting") {
+      const snap = getWorkspaceSnapshot(workspaceId);
+      if (snap?.sessions[frontendSessionId]) {
+        reconcilingLocalRecovery = true;
+        try {
+          setWorkspaceSnapshot(workspaceId, {
+            ...snap,
+            sessions: {
+              ...snap.sessions,
+              [frontendSessionId]: { ...snap.sessions[frontendSessionId], remoteConnectionState: undefined },
+            },
+          });
+        } finally {
+          reconcilingLocalRecovery = false;
+        }
+      }
+    }
+    onResult({ kind: "blocked", reason: "identity_conflict" }); return () => {};
+  }
+  const receipt = localRecoveryReceipts.get(workspaceId)?.get(frontendSessionId);
+  if (!revalidate && receipt && matchesLocalRecoveryReceipt(retained, receipt)) {
+    onResult({ kind: "ready", session: retained }); return () => {};
+  }
+  let live = true;
+  let owner: LocalRecoveryOwner | undefined;
+  let unsubscribe = () => {};
+  const finish = (result: LocalRecoveryAdmissionResult) => {
+    if (!live) return;
+    live = false; owner?.requesters.delete(finish); unsubscribe(); onResult(result);
+  };
+  const join = (candidate: LocalRecoveryOwner) => {
+    if (!live || candidate.workspaceId !== workspaceId || candidate.sessionId !== frontendSessionId) return;
+    owner = candidate; owner.requesters.add(finish);
+  };
+  unsubscribe = subscribeWorkspaceSnapshots(() => {
+    if (!live || owner?.admitting) return;
+    const current = getWorkspaceSnapshot(workspaceId)?.sessions[frontendSessionId];
+    const expected = owner?.captured ?? retained;
+    if (!current || current.backendSessionId !== expected.backendSessionId || current.incarnation !== expected.incarnation ||
+      current.daemonEpoch !== expected.daemonEpoch || current.recoveryKey !== expected.recoveryKey ||
+      current.recoveryToken !== expected.recoveryToken) finish({ kind: "cancelled" });
+    else if (current.lifecycle === "exited") finish({ kind: "exited" });
+  });
+  onResult({ kind: "pending" });
+  const key = JSON.stringify([workspaceId, formatRecoveryKey({ kind: "local", frontendSessionId,
+    backendSessionId: retained.backendSessionId, expectedIncarnation: retained.incarnation })]);
+  const existing = localRecoveryOwners.get(key);
+  if (existing) {
+    join(existing);
+    if (revalidate && existing.scheduler.getPhase() === "blocked") {
+      const capturedOwner = existing;
+      const capturedToken = existing.scheduler.getToken();
+      const capturedKey = existing.scheduler.getIdentityKey();
+      void (async () => {
+        try {
+          const details = await describeTerminal(retained.backendSessionId!);
+          if (!live) return;
+          const currentTarget = getWorkspaceSnapshot(workspaceId)?.sessions[frontendSessionId];
+          const ownerStillValid =
+            localRecoveryOwners.get(key) === capturedOwner &&
+            capturedOwner.scheduler.getToken() === capturedToken &&
+            capturedOwner.scheduler.getIdentityKey() === capturedKey &&
+            capturedOwner.scheduler.getPhase() === "blocked" &&
+            Boolean(
+              currentTarget &&
+              currentTarget.backendSessionId === retained.backendSessionId &&
+              currentTarget.incarnation === retained.incarnation &&
+              currentTarget.daemonEpoch === retained.daemonEpoch &&
+              currentTarget.recoveryKey === retained.recoveryKey &&
+              currentTarget.recoveryToken === retained.recoveryToken &&
+              currentTarget.lifecycle !== "exited"
+            );
+          if (!ownerStillValid) {
+            finish({ kind: "cancelled" });
+            return;
+          }
+          const authority = details?.recoveryAuthority;
+          const resolvedDaemonEpoch = details?.daemonEpoch ?? authority?.daemonEpoch;
+          const isAffirmativeOriginal = Boolean(
+            details &&
+            details.sessionId === retained.backendSessionId &&
+            details.running &&
+            resolvedDaemonEpoch &&
+            retained.incarnation &&
+            details.incarnation === retained.incarnation &&
+            authority?.status === "running" &&
+            authority.incarnation === retained.incarnation &&
+            authority.daemonEpoch === resolvedDaemonEpoch
+          );
+          if (isAffirmativeOriginal) {
+            const proof: AuthorityCorrectionReceipt = {
+              currentToken: capturedToken,
+              currentIdentityKey: capturedKey,
+              revalidatedIdentity: {
+                kind: "local",
+                frontendSessionId,
+                backendSessionId: retained.backendSessionId!,
+                expectedIncarnation: retained.incarnation,
+              },
+              clearedConflict: true,
+            };
+            const unblocked = capturedOwner.scheduler.retryExplicit(proof);
+            if (!unblocked) {
+              const currentSnapshot = getWorkspaceSnapshot(workspaceId);
+              const current = currentSnapshot?.sessions[frontendSessionId];
+              if (currentSnapshot && current && current.remoteConnectionState === "reconnecting") {
+                reconcilingLocalRecovery = true;
+                try {
+                  setWorkspaceSnapshot(workspaceId, {
+                    ...currentSnapshot,
+                    sessions: {
+                      ...currentSnapshot.sessions,
+                      [frontendSessionId]: { ...current, remoteConnectionState: undefined, backendUnavailableReason: "identity_conflict" },
+                    },
+                  });
+                } finally {
+                  reconcilingLocalRecovery = false;
+                }
+              }
+              finish({ kind: "blocked", reason: "identity_conflict" });
+            }
+          } else {
+            const currentSnapshot = getWorkspaceSnapshot(workspaceId);
+            const current = currentSnapshot?.sessions[frontendSessionId];
+            if (currentSnapshot && current && current.remoteConnectionState === "reconnecting") {
+              reconcilingLocalRecovery = true;
+              try {
+                setWorkspaceSnapshot(workspaceId, {
+                  ...currentSnapshot,
+                  sessions: {
+                    ...currentSnapshot.sessions,
+                    [frontendSessionId]: { ...current, remoteConnectionState: undefined, backendUnavailableReason: "identity_conflict" },
+                  },
+                });
+              } finally {
+                reconcilingLocalRecovery = false;
+              }
+            }
+            finish({ kind: "blocked", reason: "identity_conflict" });
+          }
+        } catch {
+          if (live) finish({ kind: "blocked", reason: "identity_conflict" });
+        }
+      })();
+    } else {
+      existing.scheduler.wake();
+    }
+  }
+  else {
+    if (!persistLocalRecovery || hasPendingLocalSplit(retained)) { finish({ kind: "cancelled" }); return () => {}; }
+    if (revalidate && (retained.backendUnavailableReason === "identity_conflict" || retained.reconnectError?.code === "IDENTITY_CONFLICT")) {
+      void (async () => {
+        try {
+          const details = await describeTerminal(retained.backendSessionId!);
+          if (!live) return;
+          const currentSnapshot = getWorkspaceSnapshot(workspaceId);
+          const currentTarget = currentSnapshot?.sessions[frontendSessionId];
+          if (!currentSnapshot || !currentTarget) {
+            finish({ kind: "cancelled" });
+            return;
+          }
+          const targetStillMatches =
+            currentTarget.backendSessionId === retained.backendSessionId &&
+            currentTarget.incarnation === retained.incarnation &&
+            currentTarget.daemonEpoch === retained.daemonEpoch &&
+            currentTarget.recoveryKey === retained.recoveryKey &&
+            currentTarget.recoveryToken === retained.recoveryToken &&
+            currentTarget.lifecycle !== "exited";
+          if (!targetStillMatches) {
+            finish({ kind: "cancelled" });
+            return;
+          }
+          const authority = details?.recoveryAuthority;
+          const resolvedDaemonEpoch = details?.daemonEpoch ?? authority?.daemonEpoch;
+          const isAffirmativeOriginal = Boolean(
+            details &&
+            details.sessionId === retained.backendSessionId &&
+            details.running &&
+            resolvedDaemonEpoch &&
+            retained.incarnation &&
+            details.incarnation === retained.incarnation &&
+            authority?.status === "running" &&
+            authority.incarnation === retained.incarnation &&
+            authority.daemonEpoch === resolvedDaemonEpoch
+          );
+          if (isAffirmativeOriginal) {
+            reconcilingLocalRecovery = true;
+            try {
+              setWorkspaceSnapshot(workspaceId, {
+                ...currentSnapshot,
+                sessions: {
+                  ...currentSnapshot.sessions,
+                  [frontendSessionId]: {
+                    ...currentTarget,
+                    remoteConnectionState: "reconnecting",
+                    backendUnavailableReason: null,
+                    reconnectError: undefined,
+                  },
+                },
+              });
+            } finally {
+              reconcilingLocalRecovery = false;
+            }
+            reconcileLoadedLocalRecovery(join);
+          } else {
+            reconcilingLocalRecovery = true;
+            try {
+              if (currentTarget.remoteConnectionState === "reconnecting") {
+                setWorkspaceSnapshot(workspaceId, {
+                  ...currentSnapshot,
+                  sessions: {
+                    ...currentSnapshot.sessions,
+                    [frontendSessionId]: { ...currentTarget, remoteConnectionState: undefined, backendUnavailableReason: "identity_conflict" },
+                  },
+                });
+              }
+            } finally {
+              reconcilingLocalRecovery = false;
+            }
+            finish({ kind: "blocked", reason: "identity_conflict" });
+          }
+        } catch {
+          if (live) {
+            const currentSnapshot = getWorkspaceSnapshot(workspaceId);
+            const currentTarget = currentSnapshot?.sessions[frontendSessionId];
+            if (currentSnapshot && currentTarget && currentTarget.remoteConnectionState === "reconnecting") {
+              reconcilingLocalRecovery = true;
+              try {
+                setWorkspaceSnapshot(workspaceId, {
+                  ...currentSnapshot,
+                  sessions: {
+                    ...currentSnapshot.sessions,
+                    [frontendSessionId]: { ...currentTarget, remoteConnectionState: undefined, backendUnavailableReason: "identity_conflict" },
+                  },
+                });
+              } finally {
+                reconcilingLocalRecovery = false;
+              }
+            }
+            finish({ kind: "blocked", reason: "identity_conflict" });
+          }
+        }
+      })();
+      return () => { if (!live) return; live = false; owner?.requesters.delete(finish); unsubscribe(); };
+    }
+    reconcilingLocalRecovery = true;
+    try {
+      const currentSnapshot = getWorkspaceSnapshot(workspaceId) ?? snapshot!;
+      const currentTarget = currentSnapshot.sessions[frontendSessionId] ?? retained;
+      setWorkspaceSnapshot(workspaceId, { ...currentSnapshot, sessions: { ...currentSnapshot.sessions,
+        [frontendSessionId]: { ...currentTarget, remoteConnectionState: "reconnecting" } } });
+    } finally { reconcilingLocalRecovery = false; }
+    reconcileLoadedLocalRecovery(join);
+  }
+  return () => { if (!live) return; live = false; owner?.requesters.delete(finish); unsubscribe(); };
+}
+
+function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void): void {
+  if (reconcilingLocalRecovery) return;
+  reconcilingLocalRecovery = true;
+  try {
+    for (const [workspaceId, receipts] of localRecoveryReceipts) {
+      const sessions = getWorkspaceSnapshot(workspaceId)?.sessions;
+      for (const [sessionId, receipt] of receipts) {
+        if (!matchesLocalRecoveryReceipt(sessions?.[sessionId], receipt)) receipts.delete(sessionId);
+      }
+      if (!receipts.size) localRecoveryReceipts.delete(workspaceId);
+    }
+    for (const [key, owner] of localRecoveryOwners) {
+      const current = getWorkspaceSnapshot(owner.workspaceId)?.sessions[owner.sessionId];
+      if (owner.admitting) continue;
+      if (!current || current.backendSessionId !== owner.captured.backendSessionId ||
+          current.incarnation !== owner.captured.incarnation || current.daemonEpoch !== owner.captured.daemonEpoch ||
+          current.recoveryKey !== owner.captured.recoveryKey || current.recoveryToken !== owner.captured.recoveryToken ||
+          current.lifecycle === "exited") {
+        for (const requester of [...owner.requesters]) requester(current?.lifecycle === "exited" ? { kind: "exited" } : { kind: "cancelled" });
+        owner.scheduler.dispose();
+        localRecoveryOwners.delete(key);
+      }
+    }
+    if (!persistLocalRecovery) return;
+    for (const [workspaceId, state] of listWorkspaceSnapshots()) {
+      if (isRemoteWorkspaceId(workspaceId) || isPairedWorkspaceId(workspaceId)) continue;
+      for (const session of Object.values(state.sessions)) {
+        if (!session.backendSessionId || hasPendingLocalSplit(session) || session.lifecycle === "exited" ||
+            session.backendUnavailableReason === "identity_conflict" ||
+            session.remoteConnectionState !== "reconnecting") continue;
+        const identity = { kind: "local" as const, frontendSessionId: session.id,
+          backendSessionId: session.backendSessionId, expectedIncarnation: session.incarnation };
+        const key = JSON.stringify([workspaceId, formatRecoveryKey(identity)]);
+        if (localRecoveryOwners.has(key)) continue;
+        const owner: LocalRecoveryOwner = { workspaceId, sessionId: session.id, captured: session,
+          scheduler: null! as RecoveryScheduler, admitting: false, requesters: new Set() };
+        owner.scheduler = new RecoveryScheduler({ identity, clock: localRecoveryClock, attemptAction: async (attempt) => {
+          const before = getWorkspaceSnapshot(workspaceId)?.sessions[session.id];
+          if (!before || before.backendSessionId !== owner.captured.backendSessionId ||
+              before.incarnation !== owner.captured.incarnation || before.daemonEpoch !== owner.captured.daemonEpoch ||
+              before.recoveryKey !== owner.captured.recoveryKey || before.recoveryToken !== owner.captured.recoveryToken) return { kind: "cancelled" };
+          const admissionKey = formatRecoveryKey(identity);
+          const admissionToken = attempt.token;
+          // Expect our own publication before synchronous snapshot listeners run. An
+          // external replacement still differs from this captured admission identity.
+          owner.captured = { ...before, recoveryKey: admissionKey, recoveryToken: admissionToken };
+          applyLocalRecovery(workspaceId, { type: "LOCAL_RECOVERY_ATTEMPT", sessionId: session.id, key: admissionKey, token: admissionToken });
+          const fresh = () => {
+            const current = getWorkspaceSnapshot(workspaceId)?.sessions[session.id];
+            return !attempt.isCancelled() && localRecoveryOwners.get(key) === owner && Boolean(current &&
+              current.backendSessionId === session.backendSessionId && current.incarnation === session.incarnation &&
+              current.daemonEpoch === session.daemonEpoch && current.lifecycle !== "exited" &&
+              current.recoveryKey === admissionKey && current.recoveryToken === admissionToken);
+          };
+          if (!fresh()) return { kind: "cancelled" };
+          const details = await describeTerminal(session.backendSessionId!);
+          if (!fresh()) return { kind: "cancelled" };
+          if (!details || details.sessionId !== session.backendSessionId || details.isPairedProxy) return { kind: "retryable", reason: "owner_unknown" };
+          if (session.incarnation && details.incarnation && session.incarnation !== details.incarnation) return { kind: "blocked", reason: "identity_conflict" };
+          const authority = details.recoveryAuthority;
+          if (authority?.status === "blocked" || authority?.status === "identity_conflict" || authority?.status === "correction_required") return { kind: "blocked", reason: "identity_conflict", error: authority };
+          const resolvedDaemonEpoch = details.daemonEpoch ?? authority?.daemonEpoch;
+          if (!session.incarnation || details.incarnation !== session.incarnation || !resolvedDaemonEpoch) return { kind: "retryable", reason: "owner_unknown" };
+          if (authority?.status === "affirmative_exit" && authority.incarnation === session.incarnation &&
+              authority.daemonEpoch === session.daemonEpoch) {
+            applyLocalRecovery(workspaceId, { type: "SESSION_AFFIRMATIVE_EXIT", sessionId: session.id,
+              backendSessionId: session.backendSessionId!, incarnation: session.incarnation, daemonEpoch: session.daemonEpoch,
+              key: admissionKey, token: admissionToken, exitCode: authority.exitCode });
+            return getWorkspaceSnapshot(workspaceId)?.sessions[session.id]?.lifecycle === "exited"
+              ? { kind: "exited", exitCode: authority.exitCode } : { kind: "cancelled" };
+          }
+          if (!details.running || authority?.status !== "running" || authority.incarnation !== session.incarnation ||
+              authority.daemonEpoch !== resolvedDaemonEpoch) return { kind: "retryable", reason: "owner_unknown" };
+          const snapshot = getWorkspaceSnapshot(workspaceId)!;
+          const action: WorkspaceAction = { type: "REBIND_SESSION_BACKEND", sessionId: session.id,
+            backendSessionId: session.backendSessionId!, daemonEpoch: resolvedDaemonEpoch,
+            incarnation: session.incarnation, recoveryKey: formatRecoveryKey(identity), recoveryToken: attempt.token };
+          const next = workspaceReducer(snapshot, action);
+          if (!fresh() || !persistLocalRecovery) return { kind: "cancelled" };
+          await persistLocalRecovery(workspaceId, next, fresh);
+          if (!fresh()) return { kind: "cancelled" };
+          owner.admitting = true;
+          try { applyLocalRecovery(workspaceId, action); }
+          finally { owner.admitting = false; }
+          const admitted = getWorkspaceSnapshot(workspaceId)?.sessions[session.id];
+          if (admitted?.backendSessionId !== session.backendSessionId || admitted.incarnation !== session.incarnation ||
+              admitted.lifecycle === "exited" || admitted.daemonEpoch !== resolvedDaemonEpoch || admitted.recoveryToken !== admissionToken ||
+              admitted.recoveryKey !== admissionKey || admitted.remoteConnectionState === "reconnecting") return { kind: "cancelled" };
+          owner.captured = admitted;
+          return { kind: "ready" };
+        }, onOutcomeChange: (outcome) => {
+          if (outcome.phase === "ready") {
+            const current = getWorkspaceSnapshot(workspaceId)?.sessions[session.id];
+            if (!matchesLocalRecoveryReceipt(current, owner.captured)) {
+              localRecoveryOwners.delete(key);
+              for (const requester of [...owner.requesters]) requester({ kind: "cancelled" });
+              return;
+            }
+            let receipts = localRecoveryReceipts.get(workspaceId);
+            if (!receipts) { receipts = new Map(); localRecoveryReceipts.set(workspaceId, receipts); }
+            receipts.set(session.id, owner.captured);
+            localRecoveryOwners.delete(key);
+            for (const requester of [...owner.requesters]) requester({ kind: "ready", session: owner.captured });
+            return;
+          }
+          if (outcome.phase === "exited" || outcome.phase === "cancelled") {
+            for (const requester of [...owner.requesters]) requester({ kind: outcome.phase });
+            return;
+          }
+          if (outcome.phase !== "blocked") return;
+          const current = getWorkspaceSnapshot(workspaceId)?.sessions[session.id];
+          if (current?.recoveryKey !== outcome.identityKey || current.recoveryToken !== outcome.token) return;
+          applyLocalRecovery(workspaceId, { type: "SESSION_BACKEND_UNAVAILABLE", sessionId: session.id,
+            backendSessionId: session.backendSessionId!, attemptKey: outcome.identityKey, attemptToken: outcome.token,
+            outcome: "blocked", reason: outcome.reason });
+          for (const requester of [...owner.requesters]) requester({ kind: "blocked", reason: "identity_conflict" });
+        } });
+        localRecoveryOwners.set(key, owner);
+        join?.(owner);
+        owner.scheduler.start();
+      }
+    }
+  } finally { reconcilingLocalRecovery = false; }
+}
+
+const unsubscribeLocalRecoverySnapshots = subscribeWorkspaceSnapshots(() => reconcileLoadedLocalRecovery());
+if (import.meta.hot) import.meta.hot.dispose(() => {
+  unsubscribeLocalRecoverySnapshots();
+  resetLocalRecoveryForTests();
+});
 /** Lower bound between two fallback session-id probes for the same pane and agent. */
 const PROVIDER_SESSION_PROBE_INTERVAL_MS = 2_000;
 
@@ -162,10 +645,11 @@ export {
 } from "./hmrWorkspaceState";
 
 import { getHmrWorkspaceState, setHmrWorkspaceState } from "./hmrWorkspaceState";
-import { getWorkspaceSnapshot, listWorkspaceSnapshots, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
+import { getWorkspaceSnapshot, listWorkspaceSnapshots, setWorkspaceSnapshot, subscribeWorkspaceSnapshots } from "./workspaceSnapshotCache";
 import { getWorkspaceRestoreStatus } from "./workspaceRestore";
 
 export type WorkspaceAction =
+  | { type: "LOCAL_RECOVERY_ATTEMPT"; sessionId: string; key: string; token: number }
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
   | { type: "RESTORE_WORKSPACE"; state: WorkspaceState }
   | { type: "SELECT_WORKTREE"; path: string }
@@ -233,19 +717,37 @@ export type WorkspaceAction =
   | { type: "EQUALIZE_TAB_GROUP_RUN"; path: string }
   | { type: "EQUALIZE_PANE_RUN"; tabId: string; path: string }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
-  | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle }
+  | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle; incarnation?: string | null; daemonEpoch?: string | null }
   | {
       type: "SESSION_BACKEND_UNAVAILABLE";
       sessionId: string;
       backendSessionId: string | null;
+      spawnFailed?: boolean;
       bindingKey?: string | null;
+      attemptKey?: string | null;
+      attemptToken?: string | number | null;
+      recoveryKey?: string | null;
+      recoveryToken?: number | null;
+      outcome?: "retryable" | "blocked";
+      recoveryState?: SessionRecoveryState;
       reason: string;
+    }
+  | {
+      type: "SESSION_AFFIRMATIVE_EXIT";
+      sessionId: string;
+      backendSessionId: string;
+      incarnation?: string | null;
+      daemonEpoch?: string | null;
+      token?: number | null;
+      key?: string | null;
+      exitCode?: number | null;
+      reason?: string | null;
     }
   | { type: "LOCAL_SPLIT_UPDATE"; session: LocalSplitSession }
   | { type: "LOCAL_SPLIT_REMOVE"; sessionId: string }
   | {
       type: "LOCAL_SESSIONS_RECONCILED";
-      live: Map<string, { daemonEpoch: string | null; running: boolean; incarnation?: string | null }> | null;
+      live: import("./workspaceRestore").LocalLiveSessionMap | null;
     }
   | { type: "SESSION_REMOTE_STATUS"; status: import("../lib/types").SshRecoveryStatus; daemonEpoch?: string | null }
   | {
@@ -265,6 +767,8 @@ export type WorkspaceAction =
       incarnation?: string | null;
       clearAgent?: boolean;
       pendingAttachment?: boolean;
+      recoveryKey?: string | null;
+      recoveryToken?: number | null;
     }
   | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string; observed?: boolean }
   | {
@@ -460,6 +964,14 @@ export function useWorkspaceStore({
     bumpParkedActivity();
   }, [dispatch, bumpParkedActivity]);
 
+  useLayoutEffect(() => {
+    localRecoveryAdmissions.set(workspaceId, dispatch);
+    setWorkspaceSnapshot(workspaceId, stateRef.current);
+    return () => {
+      if (localRecoveryAdmissions.get(workspaceId) === dispatch) localRecoveryAdmissions.delete(workspaceId);
+    };
+  }, [workspaceId, dispatch]);
+
   useEffect(() => {
     const owningWorkspaceId = renderedState.workspaceId ?? workspaceId;
     setHmrWorkspaceState(owningWorkspaceId, renderedState);
@@ -524,12 +1036,18 @@ export function useWorkspaceStore({
         type: "SESSION_LIFECYCLE",
         backendSessionId: payload.sessionId,
         lifecycle: mapBackendLifecycle(payload),
+        incarnation: payload.incarnation ?? null,
+        daemonEpoch: payload.daemonEpoch ?? null,
       };
-      const mountedOwnsSession = Object.values(stateRef.current.sessions).some(
+      const session = Object.values(stateRef.current.sessions).find(
         (candidate) => candidate.backendSessionId === payload.sessionId,
       );
-      if (!mountedOwnsSession && dispatchToParkedWorkspace(payload.sessionId, () => action)) return;
-      dispatch(action);
+      const mountedOwnsSession = Boolean(session);
+      const routedToParkedWorkspace = !mountedOwnsSession &&
+        dispatchToParkedWorkspace(payload.sessionId, () => action);
+      if (!routedToParkedWorkspace) dispatch(action);
+
+      reconcileLoadedLocalRecovery();
     });
 
     let unlistenTitle: (() => void) | undefined;
@@ -825,14 +1343,22 @@ export function useWorkspaceStore({
   const sshRearmsRef = useRef(new Map<string, number>());
   const sshRecoveryKey = useMemo(
     () => Object.values(renderedState.sessions)
-      .filter(session => isRemoteWorkspaceId(session.workspaceId))
-      .map(session => `${session.id}:${session.backendSessionId}:${session.remoteConnectionState ?? ""}`).join("|"),
+      .filter(session => isRemoteWorkspaceId(session.workspaceId) && session.lifecycle !== "exited")
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map(session => {
+        const worktreeTag = session.worktree ? `${session.worktree.wsId}:${session.worktree.slug}` : "";
+        const hostAuthority = `${session.ownerId ?? ""}:${session.daemonEpoch ?? ""}:${session.workspaceId ?? ""}:${worktreeTag}`;
+        return `${session.id}:${session.backendSessionId ?? ""}:${session.incarnation ?? ""}:${hostAuthority}`;
+      })
+      .join("|"),
     [renderedState.sessions],
   );
   useEffect(() => {
     if (!tauriIpc.isTauriRuntime() || !sshRecoveryKey) return;
     const recovery = startSshRecovery({
-      sessions: Object.values(stateRef.current.sessions).filter(session => isRemoteWorkspaceId(session.workspaceId)),
+      sessions: Object.values(stateRef.current.sessions).filter(
+        session => isRemoteWorkspaceId(session.workspaceId) && session.lifecycle !== "exited",
+      ),
       dispatch,
       onError: error => console.error("SSH session reconciliation failed:", error),
       rearms: sshRearmsRef.current,
@@ -1354,6 +1880,7 @@ export function useWorkspaceStore({
           type: "SESSION_BACKEND_UNAVAILABLE",
           sessionId: localSessionId,
           backendSessionId: null,
+          spawnFailed: true,
           reason: toIpcError(error).message,
         }, owningWorkspaceId);
         throw error;
@@ -1985,12 +2512,45 @@ export function useWorkspaceStore({
       backendSessionId: string,
       reason: string,
       bindingKey?: string | null,
+      attemptKey?: string | null,
+      attemptToken?: number | null,
+      outcome?: "retryable" | "blocked",
     ) => {
+      // A local loss is fenced by the session's current recovery owner context. Apply it once
+      // through dispatch so the hook state, its ref and the snapshot cache stay identical; a
+      // snapshot-only write is overwritten by the hook's own (rejected, still running) state.
+      const current = stateRef.current.sessions[sessionId];
+      const local = current?.backendSessionId === backendSessionId &&
+        !isPairedWorkspaceId(workspaceId) && !isRemoteWorkspaceId(workspaceId);
       dispatch({
         type: "SESSION_BACKEND_UNAVAILABLE",
         sessionId,
         backendSessionId,
         bindingKey,
+        attemptKey: attemptKey ?? (local ? current.recoveryKey : undefined),
+        attemptToken: attemptToken ?? (local ? current.recoveryToken : undefined),
+        outcome,
+        reason,
+      });
+      if (local) wakeLocalSessionRecovery(workspaceId, sessionId);
+    },
+    markSessionAffirmativeExit: (
+      sessionId: string,
+      backendSessionId: string,
+      incarnation: string,
+      daemonEpoch?: string | null,
+      token?: number | null,
+      exitCode?: number | null,
+      reason?: string | null,
+    ) => {
+      dispatch({
+        type: "SESSION_AFFIRMATIVE_EXIT",
+        sessionId,
+        backendSessionId,
+        incarnation,
+        daemonEpoch,
+        token,
+        exitCode,
         reason,
       });
     },
@@ -2006,6 +2566,142 @@ export function useWorkspaceStore({
     markSessionActivitySeen: (sessionId: string, owner?: string) =>
       dispatchToOwner({ type: "MARK_SESSION_ACTIVITY_SEEN", sessionId }, owner),
   };
+}
+
+/**
+ * Authoritative describe-to-exit consumer:
+ * Queries routed DescribeSession for a terminal session and, only if affirmative matching exit proof
+ * is established with matching incarnation, dispatches SESSION_AFFIRMATIVE_EXIT.
+ * If the session is running or absent/uncertain, preserves retained ID and activity.
+ */
+export async function reconcileSessionFromDescribe(
+  sessionId: string,
+  backendSessionId: string,
+  expectedIncarnation: string | null | undefined,
+  dispatch: (action: WorkspaceAction) => void,
+  expectedEpoch?: string | null,
+  expectedToken?: number | null,
+  expectedKey?: string | null,
+  getCurrentSession?: () => TerminalSession | undefined,
+): Promise<"exited" | "active" | "uncertain" | "conflict"> {
+  // Pre-check current session state before query when accessor is provided
+  if (getCurrentSession) {
+    const pre = getCurrentSession();
+    if (!pre) {
+      return "uncertain";
+    }
+    if (
+      pre.backendSessionId !== backendSessionId ||
+      (expectedIncarnation && pre.incarnation !== expectedIncarnation) ||
+      (expectedEpoch && pre.daemonEpoch !== expectedEpoch) ||
+      (expectedToken !== undefined && expectedToken !== null && pre.recoveryToken !== expectedToken) ||
+      (expectedKey && (!pre.recoveryKey || pre.recoveryKey !== expectedKey))
+    ) {
+      return "conflict";
+    }
+  }
+  try {
+    const details = await describeTerminal(backendSessionId);
+    if (!details) {
+      return "uncertain";
+    }
+
+    // Target response validation:
+    if (details.sessionId !== backendSessionId) {
+      return "uncertain";
+    }
+
+    // Paired proxy actor absence is connection loss / uncertainty (INV-4), NEVER active PTY and NEVER process death
+    if (details.isPairedProxy || details.recoveryAuthority?.isPairedProxy) {
+      if (details.running && details.recoveryAuthority?.status === "proxy_actor_active") {
+        return "active";
+      }
+      return "uncertain";
+    }
+
+    if (
+      expectedIncarnation &&
+      details.incarnation &&
+      details.incarnation !== expectedIncarnation
+    ) {
+      return "conflict";
+    }
+
+    const authority = details.recoveryAuthority;
+    const isAffirmative = Boolean(
+      authority &&
+      typeof authority === "object" &&
+      authority.status === "affirmative_exit"
+    );
+
+    if (isAffirmative) {
+      // Affirmative exit requires proven matching incarnation context
+      if (!expectedIncarnation || !details.incarnation || details.incarnation !== expectedIncarnation) {
+        return "uncertain";
+      }
+
+      // Affirmative exit requires proven matching owner epoch context
+      const exitEpoch = authority?.daemonEpoch ?? details.daemonEpoch ?? null;
+      if (!expectedEpoch || !exitEpoch || exitEpoch !== expectedEpoch) {
+        return "uncertain";
+      }
+
+      // Affirmative exit requires proven matching numeric token context
+      if (expectedToken === undefined || expectedToken === null) {
+        return "uncertain";
+      }
+
+      // Late rebind / replacement check post-await against current session state:
+      if (getCurrentSession) {
+        const current = getCurrentSession();
+        if (!current) return "uncertain";
+        if (
+          current.backendSessionId !== backendSessionId ||
+          current.incarnation !== expectedIncarnation ||
+          (expectedEpoch && current.daemonEpoch !== expectedEpoch) ||
+          (expectedToken !== undefined && expectedToken !== null && current.recoveryToken !== expectedToken) ||
+          (expectedKey && (!current.recoveryKey || current.recoveryKey !== expectedKey))
+        ) {
+          return "conflict";
+        }
+      }
+
+      dispatch({
+        type: "SESSION_AFFIRMATIVE_EXIT",
+        sessionId,
+        backendSessionId,
+        incarnation: details.incarnation,
+        daemonEpoch: exitEpoch,
+        token: expectedToken,
+        key: expectedKey ?? null,
+        exitCode: authority?.exitCode ?? null,
+        reason: authority?.exitReason ?? null,
+      });
+
+      // Post-await admission verification (missing session or un-admitted transition fails closed):
+      if (getCurrentSession) {
+        const post = getCurrentSession();
+        if (!post || post.lifecycle !== "exited") {
+          return "uncertain";
+        }
+      }
+      return "exited";
+    }
+
+    // When details.running is false without affirmative matching proof:
+    if (!details.running) {
+      return "uncertain";
+    }
+
+    // If running, verify identity proof if expected:
+    if (expectedIncarnation && !details.incarnation) {
+      return "uncertain";
+    }
+
+    return "active";
+  } catch {
+    return "uncertain";
+  }
 }
 
 export function selectAgents(state: WorkspaceState): ActiveAgent[] {
@@ -2310,6 +3006,13 @@ function createInitialState(worktrees: Worktree[], workspaceId?: string): Worksp
 }
 
 export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
+  if (action.type === "LOCAL_RECOVERY_ATTEMPT") {
+    const session = state.sessions[action.sessionId];
+    if (!session) return state;
+    return { ...state, sessions: { ...state.sessions, [action.sessionId]: {
+      ...session, recoveryKey: action.key, recoveryToken: action.token,
+    } } };
+  }
   if (action.type === "LOCAL_SPLIT_UPDATE") {
     const current = state.sessions[action.session.id];
     if (!current) return state;
@@ -2893,7 +3596,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         if (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)) continue;
         changed = true;
         if (action.live === null) {
-          sessions[id] = { ...session, remoteConnectionState: "disconnected" };
+          sessions[id] = { ...session, remoteConnectionState: "reconnecting" };
           continue;
         }
         const liveInfo = session.backendSessionId ? action.live.get(session.backendSessionId) : undefined;
@@ -2902,18 +3605,11 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           const liveIncarnation = liveInfo.incarnation ?? null;
           const sessionIncarnation = session.incarnation ?? null;
           const sameIncarnationProven = sessionIncarnation && liveIncarnation && sessionIncarnation === liveIncarnation;
-          if (epochChanged && sessionIncarnation && liveIncarnation && sessionIncarnation !== liveIncarnation) {
-            // The id is live under another epoch, but both incarnations are known and differ: it is
-            // a different process, so the PTY this pane was bound to is gone.
-            sessions[id] = exitedLocalSession(session);
-            deadSessionIds.push(id);
-          } else if (epochChanged && !sameIncarnationProven) {
-            // Legacy records without an incarnation cannot prove either way; keep the binding so the
-            // pane can still reattach.
+          if (!sameIncarnationProven) {
             sessions[id] = {
               ...session,
-              remoteConnectionState: "disconnected",
-              reconnectLifecycle: "failed",
+              remoteConnectionState: sessionIncarnation && liveIncarnation ? "disconnected" : "reconnecting",
+              reconnectLifecycle: sessionIncarnation && liveIncarnation ? "failed" : "idle",
             };
           } else {
             sessions[id] = {
@@ -2925,13 +3621,30 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
               ...(liveIncarnation ? { incarnation: liveIncarnation } : {}),
             };
           }
-        } else {
-          // The daemon answered with its full inventory, which includes the sessions of draining
-          // predecessor daemons. Absent or not running there means the PTY is gone, exactly as the
-          // authoritative restore path concludes; parking it as `disconnected` only offered a
-          // reattach that can never succeed.
-          sessions[id] = exitedLocalSession(session);
+        } else if (
+          liveInfo?.recoveryAuthority &&
+          liveInfo.recoveryAuthority.status === "affirmative_exit" &&
+          liveInfo.incarnation &&
+          session.incarnation &&
+          liveInfo.incarnation === session.incarnation
+          && liveInfo.recoveryAuthority.incarnation === session.incarnation
+          && Boolean(session.daemonEpoch && liveInfo.recoveryAuthority.daemonEpoch === session.daemonEpoch && liveInfo.daemonEpoch === session.daemonEpoch)
+        ) {
           deadSessionIds.push(id);
+          sessions[id] = {
+            ...session,
+            lifecycle: "exited",
+            backendSessionId: null,
+            remoteConnectionState: undefined,
+            reconnectLifecycle: "idle",
+            backendUnavailableReason: liveInfo.recoveryAuthority.exitReason ?? null,
+          };
+        } else {
+          sessions[id] = {
+            ...session,
+            remoteConnectionState: "reconnecting",
+            reconnectLifecycle: "idle",
+          };
         }
       }
       if (!changed) return state;
@@ -2942,6 +3655,25 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const sessions = Object.fromEntries(
         Object.entries(state.sessions).map(([id, session]) => {
           if (session.backendSessionId !== action.backendSessionId) return [id, session];
+          // For terminal exit/failed lifecycle events:
+          if (action.lifecycle === "exited" || action.lifecycle === "failed") {
+            // Proven matching current incarnation context is required to establish exit.
+            // An unfenced lifecycle event (missing incarnation or mismatched incarnation)
+            // must NOT kill the pane; it requests reconcile safely instead.
+            const hasProvenIncarnationContext = Boolean(
+              action.incarnation &&
+              session.incarnation &&
+              action.incarnation === session.incarnation
+            );
+            const matchesEpoch = Boolean(
+              action.daemonEpoch && session.daemonEpoch && action.daemonEpoch === session.daemonEpoch
+            );
+
+            if (!hasProvenIncarnationContext || !matchesEpoch) {
+              // Unfenced lifecycle event triggers reconcile safely, preserving backendSessionId & activity
+              return [id, { ...session, remoteConnectionState: "reconnecting" }];
+            }
+          }
           if (isRemoteWorkspaceId(session.workspaceId) && action.lifecycle === "exited") {
             return [id, { ...session, remoteConnectionState: "reconnecting", remoteGeneration: null }];
           }
@@ -2967,58 +3699,29 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       }
       return nextState;
     }
-    case "SESSION_BACKEND_UNAVAILABLE": {
+    case "SESSION_AFFIRMATIVE_EXIT": {
       const session = state.sessions[action.sessionId];
       if (!session) return state;
-      if (action.backendSessionId !== null) {
-        if (session.backendSessionId !== action.backendSessionId) return state;
-      } else {
-        if (session.backendSessionId !== null) return state;
+      if (session.backendSessionId !== action.backendSessionId) return state;
+      // Strict affirmative proof requirement: missing or mismatched incarnation rejected
+      if (!action.incarnation || !session.incarnation || action.incarnation !== session.incarnation) {
+        return state;
       }
-      if (action.bindingKey && session.backendSessionId) {
-        const currentBindingKey = `${session.backendSessionId}:${session.daemonEpoch ?? ""}:${session.remoteGeneration ?? 0}:${session.remoteConnectionState ?? ""}`;
-        if (action.bindingKey !== currentBindingKey) return state;
+      // Complete captured authority context required: missing epoch or missing token must not become positive exit
+      if (!action.daemonEpoch || !session.daemonEpoch || action.daemonEpoch !== session.daemonEpoch) {
+        return state;
       }
-      if (localSplitIntent(session)) {
-        return {
-          ...state,
-          sessions: {
-            ...state.sessions,
-            [session.id]: {
-              ...session,
-              reconnectLifecycle: "failed",
-              reconnectError: {
-                code: "INTERNAL_ERROR",
-                message: action.reason,
-                details: { delivery: "confirmed", stage: "presentation" },
-              },
-            },
-          },
-        };
+      if (
+        action.token === undefined ||
+        action.token === null ||
+        session.recoveryToken === undefined ||
+        session.recoveryToken === null ||
+        action.token !== session.recoveryToken
+      ) {
+        return state;
       }
-      if (isRemoteWorkspaceId(session.workspaceId)) {
-        // A confirmed-missing daemon session is proof the remote PTY is gone, so the in-flight
-        // work claim has to settle here exactly as it does for a local session below.
-        return settleActivityForDeadSessions(
-          {
-            ...state,
-            sessions: {
-              ...state.sessions,
-              [action.sessionId]: {
-                ...session,
-                remoteConnectionState: "disconnected",
-                remoteGeneration: null,
-                remoteFailure: {
-                  kind: "network",
-                  message: action.reason ?? "Failed to spawn terminal",
-                },
-                lifecycle: "exited",
-                reconnectLifecycle: "idle",
-              },
-            },
-          },
-          [action.sessionId],
-        );
+      if (!action.key || !session.recoveryKey || action.key !== session.recoveryKey) {
+        return state;
       }
       const updatedSession: TerminalSession = {
         ...session,
@@ -3026,9 +3729,8 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         backendSessionId: null,
         reconnectLifecycle: "idle",
         ...clearedTransportState(session),
-        // Keep the failure on the pane. Without it a failed spawn or attach leaves the pane on the
-        // "Shell exited" overlay with no explanation of what went wrong.
         backendUnavailableReason: action.reason ?? null,
+        recoveryState: { phase: "exited", reason: action.reason ?? null },
       };
       let nextState: WorkspaceState = {
         ...state,
@@ -3039,6 +3741,165 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       };
       nextState = settleActivityForDeadSessions(nextState, [action.sessionId]);
       return nextState;
+    }
+    case "SESSION_BACKEND_UNAVAILABLE": {
+      const session = state.sessions[action.sessionId];
+      if (!session) return state;
+      // Explicit spawn rejection has no retained process whose status is uncertain.
+      if (action.spawnFailed && action.backendSessionId === null && session.backendSessionId === null) {
+        return settleActivityForDeadSessions({ ...state, sessions: { ...state.sessions, [session.id]: {
+          ...session, lifecycle: "exited", reconnectLifecycle: "idle",
+          remoteConnectionState: "disconnected", backendUnavailableReason: action.reason ?? null,
+          recoveryState: { phase: "exited", reason: action.reason ?? null },
+        } } }, [session.id]);
+      }
+      if (action.backendSessionId !== null) {
+        if (session.backendSessionId !== action.backendSessionId) return state;
+      } else {
+        if (session.backendSessionId !== null) return state;
+      }
+      if (action.bindingKey) {
+        const expected = [
+          session.backendSessionId ?? "",
+          session.daemonEpoch ?? "",
+          session.remoteGeneration ?? "",
+          session.incarnation ?? "",
+        ].join(":");
+        if (action.bindingKey !== expected) {
+          return state;
+        }
+      }
+
+      const sessionHasOwnerContext = (session.recoveryKey !== undefined && session.recoveryKey !== null) ||
+                                     (session.recoveryToken !== undefined && session.recoveryToken !== null);
+      const actionHasAttemptEvidence = (action.attemptKey !== undefined && action.attemptKey !== null) ||
+                                       (action.attemptToken !== undefined && action.attemptToken !== null);
+
+      if (sessionHasOwnerContext || actionHasAttemptEvidence) {
+        // Strict verification against current recovery owner key and token (no coercion, no fail-open):
+        if (
+          !action.attemptKey ||
+          !session.recoveryKey ||
+          action.attemptKey !== session.recoveryKey ||
+          action.attemptToken === undefined ||
+          action.attemptToken === null ||
+          session.recoveryToken === undefined ||
+          session.recoveryToken === null ||
+          action.attemptToken !== session.recoveryToken
+        ) {
+          return state; // Stale, mismatched, or absent key/token rejected (INV-7)
+        }
+
+        if (localSplitIntent(session)) {
+          return {
+            ...state,
+            sessions: {
+              ...state.sessions,
+              [session.id]: {
+                ...session,
+                reconnectLifecycle: "failed",
+                recoveryState: { phase: "blocked", reason: action.reason },
+                reconnectError: {
+                  code: "INTERNAL_ERROR",
+                  message: action.reason,
+                  details: { delivery: "confirmed", stage: "presentation" },
+                },
+              },
+            },
+          };
+        }
+
+        if (isRemoteWorkspaceId(session.workspaceId)) {
+          return {
+            ...state,
+            sessions: {
+              ...state.sessions,
+              [action.sessionId]: {
+                ...session,
+                remoteConnectionState: "disconnected",
+                remoteGeneration: null,
+                remoteFailure: {
+                  kind: "network",
+                  message: action.reason ?? "Failed to connect terminal",
+                },
+                reconnectLifecycle: action.outcome === "blocked" ? "failed" : (session.reconnectLifecycle ?? "idle"),
+                backendUnavailableReason: action.reason ?? null,
+                recoveryState: action.recoveryState ?? { phase: action.outcome === "blocked" ? "blocked" : "recovering", reason: action.reason },
+              },
+            },
+          };
+        }
+
+        const updatedSession: TerminalSession = {
+          ...session,
+          remoteConnectionState: "reconnecting",
+          reconnectLifecycle: action.outcome === "blocked" ? "failed" : (session.reconnectLifecycle ?? "idle"),
+          backendUnavailableReason: action.reason ?? null,
+          recoveryState: action.recoveryState ?? { phase: action.outcome === "blocked" ? "blocked" : "recovering", reason: action.reason },
+        };
+
+        return {
+          ...state,
+          sessions: {
+            ...state.sessions,
+            [action.sessionId]: updatedSession,
+          },
+        };
+      } else {
+        // Legacy path (neither session nor action has recoveryKey/recoveryToken):
+        if (localSplitIntent(session)) {
+          return {
+            ...state,
+            sessions: {
+              ...state.sessions,
+              [session.id]: {
+                ...session,
+                reconnectLifecycle: "failed",
+                recoveryState: { phase: "blocked", reason: action.reason },
+                reconnectError: {
+                  code: "INTERNAL_ERROR",
+                  message: action.reason,
+                  details: { delivery: "confirmed", stage: "presentation" },
+                },
+              },
+            },
+          };
+        }
+
+        if (isRemoteWorkspaceId(session.workspaceId)) {
+          return {
+            ...state,
+            sessions: {
+              ...state.sessions,
+              [action.sessionId]: {
+                ...session,
+                remoteConnectionState: "disconnected",
+                remoteGeneration: null,
+                remoteFailure: {
+                  kind: "network",
+                  message: action.reason ?? "Failed to connect terminal",
+                },
+                reconnectLifecycle: session.reconnectLifecycle ?? "idle",
+                backendUnavailableReason: action.reason ?? null,
+                recoveryState: { phase: "recovering", reason: action.reason },
+              },
+            },
+          };
+        }
+
+        return {
+          ...state,
+          sessions: {
+            ...state.sessions,
+            [action.sessionId]: {
+              ...session,
+              remoteConnectionState: "reconnecting",
+              backendUnavailableReason: action.reason ?? null,
+              recoveryState: { phase: "recovering", reason: action.reason },
+            },
+          },
+        };
+      }
     }
     case "SET_RECONNECT_LIFECYCLE": {
       const session = state.sessions[action.sessionId];
@@ -3106,11 +3967,23 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             cwd: action.cwd && isAbsoluteTerminalCwd(action.cwd) ? action.cwd : session.cwd,
             daemonEpoch: action.daemonEpoch ?? null,
             ...(action.incarnation != null ? { incarnation: action.incarnation } : {}),
+            recoveryKey: action.recoveryKey ?? session.recoveryKey ?? formatRecoveryKey({
+              kind: isRemoteWorkspaceId(session.workspaceId) ? "ssh" : "local",
+              frontendSessionId: action.sessionId,
+              backendSessionId: action.backendSessionId,
+              expectedIncarnation: action.incarnation ?? session.incarnation ?? null,
+            }),
+            ...(action.recoveryToken != null
+              ? { recoveryToken: action.recoveryToken }
+              : session.recoveryToken != null
+                ? { recoveryToken: session.recoveryToken + 1 }
+                : {}),
             lastOutputSequence: null,
             lifecycle: action.pendingAttachment ? session.lifecycle : "running",
             reconnectLifecycle: action.pendingAttachment ? "binding" : "idle",
             reconnectError: null,
             backendUnavailableReason: null,
+            recoveryState: null,
             reconnectRequestId: action.pendingAttachment ? session.reconnectRequestId : null,
             ...(shouldClearAgent
               ? {
@@ -3449,18 +4322,6 @@ function clearedTransportState(session: TerminalSession): Partial<TerminalSessio
     remoteFailure: null,
     remoteReplayGap: null,
     ...(session.processState === "running" ? { processState: "standby" as const } : {}),
-  };
-}
-
-function exitedLocalSession(session: TerminalSession): TerminalSession {
-  return {
-    ...session,
-    lifecycle: "exited",
-    backendSessionId: null,
-    daemonEpoch: null,
-    lastOutputSequence: null,
-    reconnectLifecycle: "idle",
-    ...clearedTransportState(session),
   };
 }
 

@@ -1910,7 +1910,6 @@ export const RemoteHostConnection: React.FC<{
       optimisticSocketClosedRef.current = true;
     } else {
       optimisticSocketSessionIdRef.current = null;
-      setTerminalRetryGeneration((generation) => generation + 1);
     }
   }, []);
 
@@ -4023,7 +4022,7 @@ export const RemoteHostConnection: React.FC<{
               token={token}
               title={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
               transportUrl={transportBaseUrl}
-              onTransportFailure={transport.url !== relayUrl ? rollbackTransport : undefined}
+              onTransportFailure={rollbackTransport}
               activeTabId={model.context.activeTabId}
               onBack={() => setViewMode("chat")}
               embedded
@@ -4031,7 +4030,8 @@ export const RemoteHostConnection: React.FC<{
               onSwipeNextTab={handleSwipeNextTab}
               onSocketLifecycle={handleTerminalSocketLifecycle}
               isAccountSession={Boolean(activeTunnelConnection)}
-              daemonEpoch={sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId)}
+              daemonEpoch={sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId) ??
+                (model.context.activeTerminal?.sessionId === effectiveSessionId ? model.context.daemonEpoch : undefined)}
               onAgentStateFrame={handleMachineAgentStateFrame}
               createWebSocket={terminalCreateWebSocket}
             />

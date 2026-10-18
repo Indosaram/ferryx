@@ -1,7 +1,7 @@
 use super::*;
 use crate::remote::protocol::RemoteEventMessage;
 use crate::remote::state::REMOTE_ACTIVE_SELECTION_CHANGED_EVENT;
-use crate::terminal::TerminalService;
+use crate::terminal::{SessionAttachment, TerminalService};
 use crate::worktree::WorktreeIdentity;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,6 +46,28 @@ fn test_auth_manager_pairing_and_revocation() {
         auth.validate_token(&token),
         Err(AuthError::Unauthorized)
     ));
+}
+
+#[test]
+fn paired_outcome_wire_preserves_atomic_identity_and_unknown_generation() {
+    let outcome = crate::remote::backend::RemotePairedRecoveryOutcome {
+        backend_session_id: "paired-1".into(), daemon_epoch: "epoch-1".into(),
+        incarnation: "incarnation-1".into(), generation: Some(u64::MAX),
+        state: "blocked".into(), blocked_reason: Some("permission_denied".into()), exit_code: None,
+    };
+    let axum::extract::ws::Message::Text(text) = crate::remote::server::terminal_outcome_message("paired-1", outcome.clone()) else { panic!("expected text"); };
+    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(frame["target"]["daemonEpoch"], "epoch-1");
+    assert_eq!(frame["target"]["backendSessionId"], "paired-1");
+    assert_eq!(frame["incarnation"], "incarnation-1");
+    assert_eq!(frame["generation"], u64::MAX.to_string());
+    assert_eq!(frame["blockedReason"], "permission_denied");
+    let mut unknown = outcome;
+    unknown.generation = None;
+    let axum::extract::ws::Message::Text(text) = crate::remote::server::terminal_outcome_message("paired-1", unknown) else { panic!("expected text"); };
+    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(frame["generation"].is_null());
+    assert!(frame["exitCode"].is_null());
 }
 
 #[tokio::test]
@@ -1957,6 +1979,275 @@ async fn test_grid_render_attach_sends_full_frame_with_session_dimensions() {
     pty.close_session(&session_id)
         .await
         .expect("cleanup grid mirror session");
+}
+
+#[tokio::test]
+async fn recovery_consistency_quiet_grid_socket_initial_snapshot() {
+    let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+    command.arg("-c");
+    command.arg("IFS= read -r _");
+    let harness = GridSocketTestHarness::start(command, 80, 24).await;
+
+    let mut stream = open_grid_socket(&harness).await;
+    let initial = read_grid_text_frame(&mut stream).await;
+    assert_eq!(initial["type"], "grid");
+    assert_eq!(initial["cols"], 80);
+    assert_eq!(initial["rows"], 24);
+    assert!(initial.get("lines").is_some());
+    assert!(initial.get("cursor").is_some());
+
+    harness.stop().await;
+}
+
+fn render_frame_text(frame: &serde_json::Value) -> String {
+    frame["lines"]
+        .as_array()
+        .map(|lines| {
+            lines
+                .iter()
+                .flat_map(|line| line["runs"].as_array().into_iter().flatten())
+                .filter_map(|run| run["text"].as_str())
+                .collect::<String>()
+        })
+        .unwrap_or_default()
+}
+
+async fn read_grid_text_until(
+    stream: &mut tokio::net::TcpStream,
+    marker: &str,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let frame = tokio::time::timeout_at(deadline, read_grid_text_frame(stream))
+            .await
+            .expect("timed out waiting for matching grid frame");
+        if render_frame_text(&frame).contains(marker) {
+            return frame;
+        }
+    }
+}
+
+#[tokio::test]
+async fn recovery_consistency_grid_socket_replay_gap_recovers_retained_snapshot_prior_to_new_output() {
+    let (tx, _) = tokio::sync::broadcast::channel(16);
+    let session_id = "test-gap-retained-snapshot".to_string();
+    let marker = "RETAINED_BEFORE_GAP";
+    let backend = Arc::new(GapChunkTestBackend {
+        session_id: session_id.clone(),
+        tx: tx.clone(),
+        snapshot_history: format!("{marker}\r\n").into_bytes(),
+        snapshot_sequence: 10,
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(backend, crate::worktree::WorkspaceRegistry::new()));
+    *state.config.write() = RemoteGatewayConfig { mode: RemoteNetworkMode::LocalNetwork, port: 0, allow_control: true, relay_url: None };
+    state.set_active_selection(RemoteActiveDesktopSelection { session_id: Some(session_id.clone()), ..Default::default() });
+    let pairing_code = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (token, _) = state.auth_manager.exchange_pairing_code(&pairing_code, "GridSocketTest").expect("pair client");
+    let (handle, addr) = start_remote_server(state).await.expect("start server");
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        open_ws_stream(addr, &format!("/api/v1/terminal/{session_id}?render=grid"), Some(&token)),
+    ).await.expect("timed out opening grid websocket");
+
+    let initial = read_grid_text_frame(&mut stream).await;
+    assert_eq!(initial["type"], "grid");
+    assert_eq!(initial["cols"], 80);
+    assert_eq!(initial["rows"], 24);
+    assert!(render_frame_text(&initial).contains(marker));
+    backend_test_send_gap(&tx, 11);
+
+    // Observe that the gap immediately produces a full grid frame carrying the retained screen content,
+    // PRIOR to any subsequent new output being published.
+    let gap_frame = read_grid_text_frame(&mut stream).await;
+    assert_eq!(gap_frame["type"], "grid", "gap recovery must emit a full grid frame");
+    assert_eq!(gap_frame["cols"], 80);
+    assert_eq!(gap_frame["rows"], 24);
+    let rendered = render_frame_text(&gap_frame);
+    assert!(
+        rendered.contains(marker),
+        "gap recovery frame must preserve retained snapshot content prior to new output, got: {gap_frame}"
+    );
+
+    // Now publish subsequent new output after gap convergence.
+    let post_marker = "AFTER_GAP_OUTPUT";
+    backend_test_send_output(&tx, 12, format!("{post_marker}\\r\\n").into_bytes());
+
+    let post_update = read_grid_text_until(&mut stream, post_marker).await;
+    let post_rendered = render_frame_text(&post_update);
+    assert!(
+        post_rendered.contains(post_marker),
+        "subsequent output must arrive after gap recovery, got: {post_update}"
+    );
+
+    handle.stop();
+}
+
+struct GapChunkTestBackend {
+    session_id: String,
+    tx: tokio::sync::broadcast::Sender<crate::terminal::output_hub::OutputChunk>,
+    snapshot_history: Vec<u8>,
+    snapshot_sequence: u64,
+}
+
+fn backend_test_send_gap(
+    tx: &tokio::sync::broadcast::Sender<crate::terminal::output_hub::OutputChunk>,
+    sequence: u64,
+) {
+    tx.send(crate::terminal::output_hub::OutputChunk {
+        sequence,
+        bytes: std::sync::Arc::from([]),
+        metrics_read_unix_micros: None,
+        replay_gap: Some(crate::terminal::output_hub::ReplayGap {
+            requested_after_sequence: sequence.saturating_sub(1),
+            available_from_sequence: sequence,
+        }),
+    }).expect("grid websocket receiver must be subscribed before test event");
+}
+
+fn backend_test_send_output(
+    tx: &tokio::sync::broadcast::Sender<crate::terminal::output_hub::OutputChunk>,
+    sequence: u64,
+    bytes: Vec<u8>,
+) {
+    tx.send(crate::terminal::output_hub::OutputChunk {
+        sequence,
+        bytes: std::sync::Arc::from(bytes),
+        metrics_read_unix_micros: None,
+        replay_gap: None,
+    }).expect("grid websocket receiver must be subscribed before test event");
+}
+
+impl RemoteSessionBackend for GapChunkTestBackend {
+    fn list_sessions(&self) -> futures_util::future::BoxFuture<'_, Vec<String>> {
+        let id = self.session_id.clone();
+        Box::pin(async move { vec![id] })
+    }
+    fn describe_session<'a>(
+        &'a self,
+        _session_id: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<RemoteSessionDetails, String>> {
+        let id = self.session_id.clone();
+        Box::pin(async move {
+            Ok(RemoteSessionDetails {
+                session_id: id,
+                workspace_id: None,
+                worktree_label: None,
+                worktree_path: None,
+                running: true,
+                cols: 80,
+                rows: 24,
+            })
+        })
+    }
+    fn attach_with_sequence<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _after_sequence: Option<u64>,
+    ) -> futures_util::future::BoxFuture<'a, Result<SessionAttachment, String>> {
+        let attachment = SessionAttachment {
+            snapshot: crate::terminal::output_hub::AttachmentSnapshot {
+                session_id: self.session_id.clone(),
+                history_start_sequence: Some(1),
+                history_end_sequence: Some(self.snapshot_sequence),
+                history: self.snapshot_history.clone(),
+                history_segments: Vec::new(),
+                gap: Some(crate::terminal::output_hub::ReplayGap {
+                    requested_after_sequence: 1,
+                    available_from_sequence: self.snapshot_sequence + 1,
+                }),
+            },
+            receiver: self.tx.subscribe(),
+        };
+        Box::pin(async move { Ok(attachment) })
+    }
+    fn write_input<'a>(&'a self, _session_id: &'a str, _data: &'a [u8]) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn resize<'a>(&'a self, _session_id: &'a str, _cols: u16, _rows: u16) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn signal<'a>(&'a self, _session_id: &'a str, _signal: crate::terminal::TerminalSignal) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test]
+async fn recovery_consistency_grid_socket_non_empty_gap_chunk_covered_by_snapshot_does_not_duplicate() {
+    let (tx, _rx) = tokio::sync::broadcast::channel(16);
+    let session_id = "test-gap-non-empty-session".to_string();
+    let backend = Arc::new(GapChunkTestBackend {
+        session_id: session_id.clone(),
+        tx: tx.clone(),
+        snapshot_history: b"NON_DUPLICATE_TEXT\r\n".to_vec(),
+        snapshot_sequence: 10,
+    });
+
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        backend,
+        crate::worktree::WorkspaceRegistry::new(),
+    ));
+    *state.config.write() = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::LocalNetwork,
+        port: 0,
+        allow_control: true,
+        relay_url: None,
+    };
+    state.set_active_selection(RemoteActiveDesktopSelection {
+        workspace_id: None,
+        worktree_slug: None,
+        worktree_label: None,
+        session_id: Some(session_id.clone()),
+        ..Default::default()
+    });
+
+    let pairing_code = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pairing_code, "GridSocketTest")
+        .expect("pair client");
+    let (handle, addr) = start_remote_server(Arc::clone(&state))
+        .await
+        .expect("start server");
+
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        open_ws_stream(
+            addr,
+            &format!("/api/v1/terminal/{session_id}?render=grid"),
+            Some(&token),
+        ),
+    )
+    .await
+    .expect("timed out opening websocket");
+
+    let initial = read_grid_text_frame(&mut stream).await;
+    assert_eq!(initial["type"], "grid");
+
+    // Send a replay-gap chunk that has NON-EMPTY bytes and whose sequence (10)
+    // is already covered by the snapshot's history_end_sequence (10).
+    tx.send(crate::terminal::output_hub::OutputChunk {
+        sequence: 10,
+        bytes: std::sync::Arc::from(b"NON_DUPLICATE_TEXT\r\n".as_slice()),
+        metrics_read_unix_micros: None,
+        replay_gap: Some(crate::terminal::output_hub::ReplayGap {
+            requested_after_sequence: 1,
+            available_from_sequence: 11,
+        }),
+    })
+    .expect("send gap chunk with non-empty bytes");
+
+    let gap_frame = read_grid_text_frame(&mut stream).await;
+    assert_eq!(gap_frame["type"], "grid");
+    let rendered = render_frame_text(&gap_frame);
+    assert_eq!(
+        rendered.matches("NON_DUPLICATE_TEXT").count(),
+        1,
+        "covered non-empty gap chunk bytes must not be duplicated: {rendered}"
+    );
+
+    handle.stop();
 }
 
 #[tokio::test]
@@ -4009,6 +4300,9 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                                     registry_suspended: None,
                                     suspension_source: None,
                                     incarnation: None, // Legacy remote fixture.
+                                    recovery_authority: None,
+                                    is_paired_proxy: None,
+                                    generation: None,
                                 },
                             })
                             .unwrap()
@@ -4336,6 +4630,9 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
                                     registry_suspended: None,
                                     suspension_source: None,
                                     incarnation: None, // Legacy handover fixture.
+                                    recovery_authority: None,
+                                    is_paired_proxy: None,
+                                    generation: None,
                                 },
                             })
                             .unwrap()

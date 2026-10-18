@@ -45,6 +45,8 @@ function stateWithWorkingSession(session: Partial<TerminalSession> = {}): Worksp
     worktree: { wsId: "ws-main", slug: "main" },
     backendSessionId: "backend-a",
     lifecycle: "working",
+    incarnation: "inc-a",
+    daemonEpoch: "epoch-a",
     ...session,
   };
   return {
@@ -78,6 +80,8 @@ function exitedState(lifecycle: "exited" | "failed" = "exited"): WorkspaceState 
     type: "SESSION_LIFECYCLE",
     backendSessionId: "backend-a",
     lifecycle,
+    incarnation: "inc-a",
+    daemonEpoch: "epoch-a",
   });
 }
 
@@ -126,14 +130,38 @@ describe("remote status death clears live agent work", () => {
 });
 
 describe("confirmed-missing remote backend clears live agent work", () => {
-  // SESSION_BACKEND_UNAVAILABLE is only dispatched for a `confirmed-missing` attach classification
-  // (the daemon answered that the session does not exist) or a spawn that produced no PTY.
-  // Operational/network errors classify as `operational-error` and never reach this reducer.
+  // SESSION_BACKEND_UNAVAILABLE retains uncertainty under INV-1, while affirmative exit
+  // settles the live agent work under INV-2 once process exit is daemon-confirmed.
   it("settles the working activity for a remote session whose daemon session is gone", () => {
-    const next = workspaceReducer(remoteState(), {
+    const sessionWithRecovery: TerminalSession = {
+      ...remoteState().sessions["session-a"],
+      recoveryKey: "ssh:session-a:backend-a:inc-a",
+      recoveryToken: 1,
+    };
+    const initial = { ...remoteState(), sessions: { "session-a": sessionWithRecovery } };
+
+    // 1. Unavailable owner retains activity under INV-1
+    const unavail = workspaceReducer(initial, {
       type: "SESSION_BACKEND_UNAVAILABLE",
       sessionId: "session-a",
       backendSessionId: "backend-a",
+      attemptKey: "ssh:session-a:backend-a:inc-a",
+      attemptToken: 1,
+      reason: "daemon-attach-not-found",
+    });
+    expect(unavail.sessions["session-a"].lifecycle).toBe("working");
+    expect(unavail.activityBySessionId?.["session-a"]?.state).toBe("working");
+
+    // 2. Affirmative exit settles the working activity under INV-2
+    const next = workspaceReducer(unavail, {
+      type: "SESSION_AFFIRMATIVE_EXIT",
+      sessionId: "session-a",
+      backendSessionId: "backend-a",
+      incarnation: "inc-a",
+      daemonEpoch: "epoch-a",
+      token: 1,
+      key: "ssh:session-a:backend-a:inc-a",
+      exitCode: 1,
       reason: "daemon-attach-not-found",
     });
 
@@ -203,6 +231,8 @@ describe("activity cannot resurrect a dead session", () => {
       type: "SESSION_LIFECYCLE",
       backendSessionId: "backend-a",
       lifecycle: "exited",
+      incarnation: "inc-a",
+      daemonEpoch: "epoch-a",
     });
     expect(exited.activityBySessionId?.["session-a"]?.state).toBe("done");
 

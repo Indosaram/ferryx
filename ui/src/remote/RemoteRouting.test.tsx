@@ -1,12 +1,12 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { createRemoteHostStore, remoteHostKey, remoteHostStore, REMOTE_HOST_STORAGE_KEY } from "../state/remoteHostStore";
-import { hostTransportUrl, remoteSocketUrl } from "./remoteClient";
+import { hostTransportUrl, remoteSocketUrl, SocketTicketError } from "./remoteClient";
 import { RemoteApp } from "./RemoteApp";
 
 vi.mock("./RemoteTerminal", () => ({
-  RemoteTerminal: ({ transportUrl, onTransportFailure }: { transportUrl: string; onTransportFailure?: () => void }) => (
-    <button data-testid="terminal-transport" onClick={onTransportFailure}>{transportUrl}</button>
+  RemoteTerminal: ({ transportUrl, onTransportFailure, daemonEpoch }: { transportUrl: string; onTransportFailure?: () => void; daemonEpoch?: string | number | null }) => (
+    <button data-testid="terminal-transport" data-epoch={daemonEpoch ?? ""} onClick={onTransportFailure}>{transportUrl}</button>
   ),
 }));
 
@@ -73,6 +73,26 @@ afterEach(() => {
   window.history.replaceState(null, "", "/");
   EventSocket.instances = [];
   vi.unstubAllGlobals();
+});
+
+it("retains the published context epoch when session discovery is unavailable without creating a terminal", async () => {
+  localStorage.setItem(`ferryx_remote_token_local:${window.location.origin}`, "local-token");
+  const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/v1/socket-ticket")) return Response.json({ ticket: "ticket" });
+    if (url.includes("/api/v1/sessions")) return Response.json({ error: "OWNER_UNAVAILABLE" }, { status: 503 });
+    if (url.includes("/api/v1/workspace/state")) return Response.json({
+      activeContext: { workspaceId: "workspace", sessionId: "terminal", daemonEpoch: "42", terminalTabs: [] },
+      projects: [], sessions: [],
+    });
+    return chatLaneFixture(url) ?? Response.json({});
+  });
+  vi.stubGlobal("fetch", fetcher);
+  vi.stubGlobal("WebSocket", EventSocket);
+  await act(async () => { render(<RemoteApp />); });
+  await act(async () => { fireEvent.click(screen.getByTestId("remote-view-mode-terminal")); });
+  expect(screen.getByTestId("terminal-transport")).toHaveAttribute("data-epoch", "42");
+  expect(fetcher.mock.calls.some(([url]) => String(url).includes("/api/v1/workspace/select"))).toBe(false);
 });
 
 it("switches API and event sockets to the selected host without reusing local credentials", async () => {
@@ -236,4 +256,23 @@ it("parses fragment PIN and hints separately and keeps transport on the relay", 
   await act(async () => { screen.getByTestId("terminal-transport").click(); });
   expect(screen.getByTestId("terminal-transport").textContent).toBe(window.location.origin);
   expect(EventSocket.instances.at(-1)?.url).toContain(window.location.host);
+});
+
+it("remoteSocketUrl throws structured SocketTicketError distinguishing authoritative 401/403 from 5xx", async () => {
+  let status = 401;
+  const fetcher = vi.fn(async () => new Response("Ticket denied", { status }));
+  vi.stubGlobal("fetch", fetcher);
+
+  const baseUrl = "https://relay.example";
+  await expect(remoteSocketUrl(baseUrl, "/api/v1/terminal/session", "tok"))
+    .rejects.toMatchObject({ name: "SocketTicketError", status: 401, isAuthDenial: true });
+
+  status = 403;
+  await expect(remoteSocketUrl(baseUrl, "/api/v1/terminal/session", "tok"))
+    .rejects.toMatchObject({ name: "SocketTicketError", status: 403, isAuthDenial: true });
+
+  status = 500;
+  await expect(remoteSocketUrl(baseUrl, "/api/v1/terminal/session", "tok"))
+    .rejects.toMatchObject({ name: "SocketTicketError", status: 500, isAuthDenial: false });
+  expect(new SocketTicketError(401)).toBeInstanceOf(Error);
 });

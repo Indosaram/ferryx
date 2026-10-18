@@ -111,7 +111,8 @@ export type ReconnectLocalSessionDependencies = {
   list?: () => Promise<Array<{ sessionId: string; daemonEpoch?: string | null; incarnation?: string | null; worktreePath?: string | null; running?: boolean }>>;
   dispatch: (action: RebindAction) => void;
   persist?: (session: TerminalSession) => void | Promise<void>;
-  openNewShell: (sessionId: string) => Promise<void> | void;
+  openNewShell?: (sessionId: string) => Promise<void> | void;
+  recover?: (sessionId: string) => Promise<void> | void;
 };
 
 export async function reconnectLocalSession(
@@ -121,35 +122,86 @@ export async function reconnectLocalSession(
   const session = dependencies.getSessions()[sessionId];
   if (!session) return;
 
+  // Share retained recovery owner with automatic paths when recover dependency is provided
+  if (dependencies.recover) {
+    await dependencies.recover(sessionId);
+    return;
+  }
+
   if (session.backendSessionId) {
+    const fresh = () => {
+      const current = dependencies.getSessions()[sessionId];
+      return Boolean(current && current.backendSessionId === session.backendSessionId &&
+        current.incarnation === session.incarnation && current.daemonEpoch === session.daemonEpoch &&
+        current.recoveryKey === session.recoveryKey && current.recoveryToken === session.recoveryToken);
+    };
     try {
       const liveSummaries = await (dependencies.list ?? listTerminalSessions)();
+
+      // Post-await fence against state change during query
+      const currentPostQuery = dependencies.getSessions()[sessionId];
+      if (!currentPostQuery || !fresh()) {
+        return;
+      }
+
       const live = liveSummaries.find(
         (candidate) => candidate.sessionId === session.backendSessionId && candidate.running !== false,
       );
       if (live) {
-        const daemonEpoch = live.daemonEpoch ?? session.daemonEpoch;
-        const incarnation = live.incarnation ?? session.incarnation ?? null;
+        // Reject an observed different incarnation rather than adopt it (identity conflict)
+        const liveIncarnation = live.incarnation ?? null;
+        const currentIncarnation = currentPostQuery.incarnation ?? null;
+        if (!currentIncarnation || !liveIncarnation || currentIncarnation !== liveIncarnation || !live.daemonEpoch) {
+          return;
+        }
+
+        const daemonEpoch = live.daemonEpoch ?? currentPostQuery.daemonEpoch;
+        const incarnation = liveIncarnation ?? currentIncarnation;
         const updatedSession: TerminalSession = {
-          ...session,
+          ...currentPostQuery,
+          lifecycle: "running",
+          remoteConnectionState: undefined,
           daemonEpoch,
           ...(incarnation != null ? { incarnation } : {}),
         };
-        await dependencies.persist?.(updatedSession);
+
+        // Fence before and after persist
+        if (!fresh()) return;
+        if (dependencies.persist) {
+          await dependencies.persist(updatedSession);
+        }
+        const currentPostPersist = dependencies.getSessions()[sessionId];
+        if (!currentPostPersist || !fresh()) {
+          return;
+        }
+
         dependencies.dispatch({
           type: "REBIND_SESSION_BACKEND",
           sessionId,
           backendSessionId: session.backendSessionId,
-          cwd: session.cwd,
+          cwd: currentPostPersist.cwd,
           daemonEpoch,
           ...(incarnation != null ? { incarnation } : {}),
         });
         return;
       }
+      // Scoped absence / unknown liveness does NOT permit spawning a replacement shell (INV-1 / Task 3)
+      return;
     } catch {
-      // Backend session dead or daemon unreachable; fall through to openNewShell
+      // Query failure / daemon unreachable is transient uncertainty, NOT permission to spawn a shell
+      return;
     }
   }
 
-  await dependencies.openNewShell(sessionId);
+  // Distinguish historically retained null IDs from genuinely never-created sessions
+  const hasHistoricalRecoveryProvenance = Boolean(
+    session.recoveryKey != null ||
+    session.remoteConnectionState === "reconnecting" ||
+    session.reconnectLifecycle != null ||
+    session.recoveryToken != null ||
+    session.backendUnavailableReason != null
+  );
+  if (!session.backendSessionId && !hasHistoricalRecoveryProvenance && dependencies.openNewShell) {
+    await dependencies.openNewShell(sessionId);
+  }
 }

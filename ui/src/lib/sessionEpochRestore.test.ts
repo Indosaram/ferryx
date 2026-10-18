@@ -52,9 +52,10 @@ function workspaceWithRunningAgent(): WorkspaceState {
 
 function restore(
   liveEpoch: string,
-  options: { persistedEpoch?: string; liveSessionId?: string } = {},
+  options: { persistedEpoch?: string; liveSessionId?: string; incarnation?: string } = {},
 ) {
   const state = workspaceWithRunningAgent();
+  state.sessions["session:ui-1"]!.incarnation = options.incarnation;
   if (options.persistedEpoch !== undefined) {
     state.sessions["session:ui-1"]!.daemonEpoch = options.persistedEpoch;
   }
@@ -63,6 +64,7 @@ function restore(
     {
       sessionId: options.liveSessionId ?? "backend-alive",
       daemonEpoch: liveEpoch,
+      incarnation: options.incarnation,
       worktreePath: "/repo/maho",
     },
   ]);
@@ -74,11 +76,14 @@ describe("restoring a session whose PTY is still alive in the daemon", () => {
 
     expect(session?.backendSessionId).toBe("backend-alive");
     expect(session?.lifecycle).not.toBe("exited");
-    expect(session?.lastOutputSequence).toBeNull();
+    expect(session?.lastOutputSequence).toBe("42");
   });
 
   it("adopts the live epoch so the next save can detect a real daemon restart", () => {
-    const restored = restore(DAEMON_EPOCH);
+    const restored = restore(DAEMON_EPOCH, {
+      persistedEpoch: "1000000000000",
+      incarnation: "incarnation-alive",
+    });
     expect(restored?.sessions["session:ui-1"]?.daemonEpoch).toBe(DAEMON_EPOCH);
 
     const resaved = serializeWorkspaceState("maho-workspace", "/repo/maho", restored!);
@@ -101,10 +106,14 @@ describe("restoring a session whose PTY is still alive in the daemon", () => {
     expect(session).toMatchObject({ backendSessionId: "backend-alive", daemonEpoch: "1000000000000", remoteConnectionState: "reconnecting" });
   });
 
-  it("abandons a session the daemon no longer lists", () => {
+  it("retains a session the current daemon inventory does not list", () => {
     const session = restore(DAEMON_EPOCH, { liveSessionId: "someone-else" })?.sessions["session:ui-1"];
 
-    expect(session?.backendSessionId).toBeNull();
-    expect(session?.lifecycle).toBe("exited");
+    expect(session).toMatchObject({
+      backendSessionId: "backend-alive",
+      daemonEpoch: null,
+      lifecycle: "working",
+      remoteConnectionState: "reconnecting",
+    });
   });
 });

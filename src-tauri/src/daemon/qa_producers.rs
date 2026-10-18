@@ -89,13 +89,258 @@ pub async fn channel() -> Option<Arc<QaBarrierChannel>> {
     Some(installed)
 }
 
+use std::sync::Mutex;
+use std::sync::OnceLock;
+
+#[derive(Default)]
+struct DaemonMutationState {
+    next_seq: u64,
+    requests: Vec<Value>,
+    deliveries: Vec<Value>,
+}
+
+static DAEMON_MUTATIONS: OnceLock<Mutex<DaemonMutationState>> = OnceLock::new();
+
+fn daemon_mutations() -> &'static Mutex<DaemonMutationState> {
+    DAEMON_MUTATIONS.get_or_init(|| Mutex::new(DaemonMutationState::default()))
+}
+
+/// Ingress producer: records incoming daemon mutation before execution.
+pub fn record_daemon_mutation_ingress(session_id: &str, operation: &str, data: &[u8]) -> String {
+    let mut state = daemon_mutations().lock().unwrap();
+    state.next_seq += 1;
+    let seq = state.next_seq;
+    let mutation_id = format!("daemon-mut-{session_id}-{seq}");
+    let row = json!({
+        "ownerId": format!("daemon:{}", std::process::id()),
+        "pid": std::process::id(),
+        "executable": std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        "processStart": now_ms().to_string(),
+        "seq": seq,
+        "kind": "request",
+        "operation": operation,
+        "sessionId": session_id,
+        "mutationId": mutation_id,
+        "payload": {
+            "bytesLen": data.len()
+        }
+    });
+    state.requests.push(row);
+    mutation_id
+}
+
+/// Delivery producer: records successful PTY execution of mutation with exact correlation.
+pub fn record_daemon_mutation_delivery(session_id: &str, operation: &str, mutation_id: &str) {
+    let mut state = daemon_mutations().lock().unwrap();
+    state.next_seq += 1;
+    let seq = state.next_seq;
+    let row = json!({
+        "ownerId": format!("daemon:{}", std::process::id()),
+        "pid": std::process::id(),
+        "executable": std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        "processStart": now_ms().to_string(),
+        "seq": seq,
+        "kind": "delivery",
+        "operation": operation,
+        "sessionId": session_id,
+        "mutationId": mutation_id,
+        "payload": {
+            "accepted": true
+        }
+    });
+    state.deliveries.push(row);
+}
+
 /// Daemon boot hook. No-op without the runner's private env.
 pub async fn install_and_start(server: &Arc<super::server::DaemonServer>) {
     let Some(channel) = channel().await else {
         return;
     };
     let server = Arc::clone(server);
-    tokio::spawn(async move { run_held_rpc_watcher(server, channel).await });
+    let channel_for_held = Arc::clone(&channel);
+    tokio::spawn(async move { run_held_rpc_watcher(server, channel_for_held).await });
+    tokio::spawn(async move { run_daemon_owner_audit_watcher(channel).await });
+}
+
+/// Process-local daemon owner audit watcher managing commandSeq acks and physical audit packets.
+/// All disk I/O runs via crate::ipc::run_blocking off the Tokio reactor.
+async fn run_daemon_owner_audit_watcher(channel: Arc<QaBarrierChannel>) {
+    let Some(dir) = barrier_dir() else { return; };
+    let mut baseline_seq: u64 = 0;
+    let mut last_command_seq: u64 = 0;
+
+    loop {
+        tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
+        let Some(op_id) = channel.operation_id() else { continue; };
+
+        // Process daemon-owner-open command via run_blocking
+        let dir_clone = dir.clone();
+        let open_req_path = dir_clone.join("daemon-owner-open.request.json");
+        let open_req = crate::ipc::run_blocking(move || {
+            if open_req_path.exists() {
+                Ok(std::fs::read_to_string(&open_req_path).ok())
+            } else {
+                Ok(None)
+            }
+        }).await.ok().flatten();
+
+        if let Some(text) = open_req {
+            if let Ok(req) = serde_json::from_str::<Value>(&text) {
+                if req.get("runId").and_then(Value::as_str) == Some(channel.run_id())
+                    && req.get("operationId").and_then(Value::as_str) == Some(&op_id) {
+                    let cmd_seq = req.get("commandSeq").and_then(Value::as_u64).unwrap_or(1);
+                    if cmd_seq > last_command_seq {
+                        last_command_seq = cmd_seq;
+                        // Intervals reset/filtered by real baseline, not supplied guessed counts
+                        baseline_seq = daemon_mutations().lock().unwrap().next_seq;
+                        let ack = json!({
+                            "commandId": format!("ack-daemon-open-{cmd_seq}"),
+                            "accepted": true,
+                            "commandSeq": cmd_seq
+                        });
+                        let dir_clone = dir.clone();
+                        let _ = crate::ipc::run_blocking(move || {
+                            crate::ipc::qa_barrier::write_json_atomic(&dir_clone, &format!("daemon-owner-open.ack.{cmd_seq}.json"), &ack)
+                                .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))
+                        }).await;
+                    }
+                }
+            }
+        }
+
+        // Process daemon-owner-read command via run_blocking
+        let dir_clone = dir.clone();
+        let read_req_path = dir_clone.join("daemon-owner-read.request.json");
+        let read_req = crate::ipc::run_blocking(move || {
+            if read_req_path.exists() {
+                Ok(std::fs::read_to_string(&read_req_path).ok())
+            } else {
+                Ok(None)
+            }
+        }).await.ok().flatten();
+
+        if let Some(text) = read_req {
+            if let Ok(req) = serde_json::from_str::<Value>(&text) {
+                if req.get("runId").and_then(Value::as_str) == Some(channel.run_id())
+                    && req.get("operationId").and_then(Value::as_str) == Some(&op_id) {
+                    let cmd_seq = req.get("commandSeq").and_then(Value::as_u64).unwrap_or(2);
+                    if cmd_seq > last_command_seq {
+                        last_command_seq = cmd_seq;
+                        let audit_id = req.get("auditId").and_then(Value::as_str).unwrap_or("audit-daemon");
+                        let (interval_requests, interval_deliveries) = {
+                            let state = daemon_mutations().lock().unwrap();
+                            let reqs: Vec<Value> = state.requests.iter()
+                                .filter(|r| r["seq"].as_u64().unwrap_or(0) > baseline_seq)
+                                .cloned().collect();
+                            let dels: Vec<Value> = state.deliveries.iter()
+                                .filter(|d| d["seq"].as_u64().unwrap_or(0) > baseline_seq)
+                                .cloned().collect();
+                            (reqs, dels)
+                        };
+                        let _ = write_daemon_audit_packet(&channel, audit_id, &op_id, baseline_seq, interval_requests, interval_deliveries, false).await;
+                        let ack = json!({
+                            "commandId": format!("ack-daemon-read-{cmd_seq}"),
+                            "accepted": true,
+                            "commandSeq": cmd_seq
+                        });
+                        let dir_clone = dir.clone();
+                        let _ = crate::ipc::run_blocking(move || {
+                            crate::ipc::qa_barrier::write_json_atomic(&dir_clone, &format!("daemon-owner-read.ack.{cmd_seq}.json"), &ack)
+                                .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))
+                        }).await;
+                    }
+                }
+            }
+        }
+
+        // Process daemon-owner-close command via run_blocking
+        let dir_clone = dir.clone();
+        let close_req_path = dir_clone.join("daemon-owner-close.request.json");
+        let close_req = crate::ipc::run_blocking(move || {
+            if close_req_path.exists() {
+                Ok(std::fs::read_to_string(&close_req_path).ok())
+            } else {
+                Ok(None)
+            }
+        }).await.ok().flatten();
+
+        if let Some(text) = close_req {
+            if let Ok(req) = serde_json::from_str::<Value>(&text) {
+                if req.get("runId").and_then(Value::as_str) == Some(channel.run_id())
+                    && req.get("operationId").and_then(Value::as_str) == Some(&op_id) {
+                    let cmd_seq = req.get("commandSeq").and_then(Value::as_u64).unwrap_or(3);
+                    if cmd_seq > last_command_seq {
+                        last_command_seq = cmd_seq;
+                        let audit_id = req.get("auditId").and_then(Value::as_str).unwrap_or("audit-daemon");
+                        let (interval_requests, interval_deliveries) = {
+                            let state = daemon_mutations().lock().unwrap();
+                            let reqs: Vec<Value> = state.requests.iter()
+                                .filter(|r| r["seq"].as_u64().unwrap_or(0) > baseline_seq)
+                                .cloned().collect();
+                            let dels: Vec<Value> = state.deliveries.iter()
+                                .filter(|d| d["seq"].as_u64().unwrap_or(0) > baseline_seq)
+                                .cloned().collect();
+                            (reqs, dels)
+                        };
+                        let _ = write_daemon_audit_packet(&channel, audit_id, &op_id, baseline_seq, interval_requests, interval_deliveries, true).await;
+                        let ack = json!({
+                            "commandId": format!("ack-daemon-close-{cmd_seq}"),
+                            "accepted": true,
+                            "commandSeq": cmd_seq
+                        });
+                        let dir_clone = dir.clone();
+                        let _ = crate::ipc::run_blocking(move || {
+                            crate::ipc::qa_barrier::write_json_atomic(&dir_clone, &format!("daemon-owner-close.ack.{cmd_seq}.json"), &ack)
+                                .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))
+                        }).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Emits an instrumented daemon request/delivery audit interval packet to the barrier dir.
+/// Enforces exact mutationId token correlation closure off the Tokio reactor.
+pub async fn write_daemon_audit_packet(
+    channel: &QaBarrierChannel,
+    audit_id: &str,
+    operation_id: &str,
+    baseline_seq: u64,
+    requests: Vec<Value>,
+    deliveries: Vec<Value>,
+    complete: bool,
+) -> Result<Value, String> {
+    let Some(dir) = barrier_dir() else { return Err("Missing barrier dir".into()); };
+    let owner_id = format!("daemon:{}:{}", channel.run_id(), std::process::id());
+    let end_seq = baseline_seq + (requests.len() + deliveries.len()) as u64;
+    let complete = complete && requests.iter().all(|req| {
+        req.get("mutationId").is_some_and(|token| deliveries.iter().any(|del| del.get("mutationId") == Some(token)))
+    });
+    let packet = json!({
+        "auditId": audit_id,
+        "owner": {
+            "ownerId": owner_id,
+            "pid": std::process::id(),
+            "executable": std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            "processStart": now_ms().to_string(),
+            "component": "daemon"
+        },
+        "baselineSeq": baseline_seq,
+        "endSeq": end_seq,
+        "complete": complete,
+        "runId": channel.run_id(),
+        "operationId": operation_id,
+        "requests": requests,
+        "deliveries": deliveries
+    });
+    let dir_clone = dir.clone();
+    let packet_clone = packet.clone();
+    crate::ipc::run_blocking(move || {
+        crate::ipc::qa_barrier::write_json_atomic(&dir_clone, "daemon-owner-audit.json", &packet_clone)
+            .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))
+    }).await.map_err(|e| e.to_string())?;
+    Ok(packet)
 }
 
 /// A control that does not echo this run's nonces is never honored.

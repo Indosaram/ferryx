@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LayoutState, SystemPermissionsStatus, TerminalSession } from "../lib/types";
+import type { LocalRecoveryAdmissionResult } from "../state/workspaceStore";
 import { resetNotificationSettings } from "../lib/notificationSettings";
 import { TerminalSplitView } from "./TerminalSplitView";
 
@@ -444,6 +445,200 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
       );
 
       expect(terminalPaneProps.bySessionId.get("session-wire-test").onRefreshSessionIdentity).toBe(onRefreshSessionIdentity);
+    });
+
+    it("forwards onRefreshSessionIdentity to child TerminalPane for the exact session without tab creation, new shell spawn, or focus change", async () => {
+      const onRefreshSessionIdentity = vi.fn((_sessionId: string, onResult: (res: LocalRecoveryAdmissionResult) => void): (() => void) => {
+        onResult({ kind: "pending" });
+        return () => undefined;
+      });
+      const onAddTab = vi.fn();
+      const onOpenNewShell = vi.fn();
+      const onActivateTab = vi.fn();
+      const onFocusPane = vi.fn();
+
+      const sessionRunning: TerminalSession = {
+        id: "session-pane-1",
+        cwd: "/repo",
+        worktreePath: "/repo",
+        workspaceId: "ws-1",
+        worktree: null,
+        backendSessionId: "backend-pane-1",
+        lifecycle: "running",
+      };
+
+      const sessionBlocked: TerminalSession = {
+        id: "session-pane-2",
+        cwd: "/repo",
+        worktreePath: "/repo",
+        workspaceId: "ws-1",
+        worktree: null,
+        backendSessionId: "backend-pane-2",
+        lifecycle: "exited",
+        recoveryState: { phase: "blocked", reason: "daemon_crashed" },
+      };
+
+      const tabId = "tab-split";
+      const layout: LayoutState = {
+        tabs: [{ id: tabId, label: "Split View", sessionId: "session-pane-1" }],
+        activeTabId: tabId,
+        layoutsByTabId: {
+          [tabId]: {
+            root: {
+              type: "split",
+              direction: "horizontal",
+              ratio: 0.5,
+              first: { type: "leaf", leafId: "leaf-1" },
+              second: { type: "leaf", leafId: "leaf-2" },
+            },
+            activeLeafId: "leaf-1",
+            expandedLeafId: null,
+            sessionIdsByLeafId: {
+              "leaf-1": "session-pane-1",
+              "leaf-2": "session-pane-2",
+            },
+          },
+        },
+      };
+
+      render(
+        <TerminalSplitView
+          layout={layout}
+          sessions={{
+            "session-pane-1": sessionRunning,
+            "session-pane-2": sessionBlocked,
+          }}
+          onRefreshSessionIdentity={onRefreshSessionIdentity}
+          onAddTab={onAddTab}
+          onOpenNewShell={onOpenNewShell}
+          onActivateTab={onActivateTab}
+          onFocusPane={onFocusPane}
+        />,
+      );
+
+      const pane2Props = terminalPaneProps.bySessionId.get("session-pane-2");
+      expect(pane2Props).toBeDefined();
+      expect(pane2Props.session?.id).toBe("session-pane-2");
+      expect(pane2Props.onRefreshSessionIdentity).toBe(onRefreshSessionIdentity);
+
+      // SOURCE forwarding test: proves TerminalSplitView forwards callback faithfully
+      const admissionCallback = vi.fn((_res: LocalRecoveryAdmissionResult) => undefined);
+      await act(async () => {
+        pane2Props.onRefreshSessionIdentity("session-pane-2", admissionCallback);
+      });
+
+      expect(onRefreshSessionIdentity).toHaveBeenCalledTimes(1);
+      expect(onRefreshSessionIdentity).toHaveBeenCalledWith("session-pane-2", admissionCallback);
+      expect(admissionCallback).toHaveBeenCalledWith({ kind: "pending" });
+
+      // Verifies zero create, focus, or layout mutation side-effects at container boundary
+      expect(onAddTab).not.toHaveBeenCalled();
+      expect(onOpenNewShell).not.toHaveBeenCalled();
+      expect(onActivateTab).not.toHaveBeenCalled();
+      expect(onFocusPane).not.toHaveBeenCalled();
+      expect(layout.activeTabId).toBe("tab-split");
+      expect(layout.layoutsByTabId["tab-split"].activeLeafId).toBe("leaf-1");
+    });
+
+    it("proves split consumer forwarding isolation and leaf identity preservation across re-renders", async () => {
+      const stopListeningMock = vi.fn();
+      const onRefreshSessionIdentity = vi.fn((_sessionId: string, onResult: (res: LocalRecoveryAdmissionResult) => void): (() => void) => {
+        onResult({ kind: "pending" });
+        return stopListeningMock;
+      });
+
+      const session1: TerminalSession = {
+        id: "session-left",
+        cwd: "/repo",
+        worktreePath: "/repo",
+        workspaceId: "ws-1",
+        worktree: null,
+        backendSessionId: "backend-left",
+        lifecycle: "running",
+      };
+
+      const session2: TerminalSession = {
+        id: "session-right",
+        cwd: "/repo",
+        worktreePath: "/repo",
+        workspaceId: "ws-1",
+        worktree: null,
+        backendSessionId: "backend-right",
+        lifecycle: "exited",
+        recoveryState: { phase: "recovering", reason: "recovering" },
+      };
+
+      const tabId = "tab-fence";
+      const layout: LayoutState = {
+        tabs: [{ id: tabId, label: "Fenced Split", sessionId: "session-left" }],
+        activeTabId: tabId,
+        layoutsByTabId: {
+          [tabId]: {
+            root: {
+              type: "split",
+              direction: "horizontal",
+              ratio: 0.5,
+              first: { type: "leaf", leafId: "leaf-left" },
+              second: { type: "leaf", leafId: "leaf-right" },
+            },
+            activeLeafId: "leaf-left",
+            expandedLeafId: null,
+            sessionIdsByLeafId: {
+              "leaf-left": "session-left",
+              "leaf-right": "session-right",
+            },
+          },
+        },
+      };
+
+      const { rerender } = render(
+        <TerminalSplitView
+          layout={layout}
+          sessions={{
+            "session-left": session1,
+            "session-right": session2,
+          }}
+          onRefreshSessionIdentity={onRefreshSessionIdentity}
+        />,
+      );
+
+      const rightPaneProps = terminalPaneProps.bySessionId.get("session-right");
+      let cancelUnlisten: (() => void) | undefined;
+      const admissionResult = vi.fn((_res: LocalRecoveryAdmissionResult) => undefined);
+
+      await act(async () => {
+        cancelUnlisten = rightPaneProps.onRefreshSessionIdentity("session-right", admissionResult);
+      });
+
+      // SOURCE forwarding isolation: target pane callback does NOT leak to adjacent pane
+      expect(onRefreshSessionIdentity).toHaveBeenCalledWith("session-right", admissionResult);
+      expect(onRefreshSessionIdentity).not.toHaveBeenCalledWith("session-left", expect.anything());
+
+      // Forwarded cancellation teardown handle is callable
+      expect(cancelUnlisten).toBe(stopListeningMock);
+      cancelUnlisten?.();
+      expect(stopListeningMock).toHaveBeenCalledTimes(1);
+
+      // Re-render with updated session status preserves leaf-to-session identity bindings
+      const session2Updated: TerminalSession = {
+        ...session2,
+        recoveryState: { phase: "blocked", reason: "reconnect_failed" },
+      };
+
+      rerender(
+        <TerminalSplitView
+          layout={layout}
+          sessions={{
+            "session-left": session1,
+            "session-right": session2Updated,
+          }}
+          onRefreshSessionIdentity={onRefreshSessionIdentity}
+        />,
+      );
+
+      expect(terminalPaneProps.bySessionId.get("session-left").session.id).toBe("session-left");
+      expect(terminalPaneProps.bySessionId.get("session-right").session.id).toBe("session-right");
+      expect(terminalPaneProps.bySessionId.get("session-right").session.recoveryState?.phase).toBe("blocked");
     });
   });
 });

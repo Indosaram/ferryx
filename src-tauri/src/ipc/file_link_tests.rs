@@ -25,6 +25,9 @@ fn details(workspace_id: Option<&str>, cwd: Option<&str>) -> DaemonSessionDetail
         registry_suspended: None,
         suspension_source: None,
         incarnation: None, // File-link fixture has no local split incarnation.
+        recovery_authority: None,
+        is_paired_proxy: None,
+        generation: None,
     }
 }
 

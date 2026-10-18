@@ -275,17 +275,22 @@ describe("getAgentReconnectAffordance", () => {
 
     it("allows reconnect after a live backend reports exit without losing the provider reference", () => {
       // Given: a running agent owns a live PTY and its own resumable conversation.
-      const initial = createSession({ lifecycle: "running", backendSessionId: "pty-running" });
+      const initial = createSession({
+        lifecycle: "running", backendSessionId: "pty-running",
+        incarnation: "incarnation-running", daemonEpoch: "epoch-running",
+      });
 
       // When: that PTY exits.
       const next = workspaceReducer(createInitialWorkspace(initial), {
         type: "SESSION_LIFECYCLE",
         backendSessionId: "pty-running",
         lifecycle: "exited",
+        incarnation: "incarnation-running",
+        daemonEpoch: "epoch-running",
       });
       const exited = next.sessions[initial.id];
 
-      // Then: the dead binding is released, but the conversation remains reconnectable.
+      // Then: historical identity is retained, but does not prevent reconnecting.
       expect(exited.backendSessionId).toBeNull();
       expect(exited.providerSession).toEqual(initial.providerSession);
       expect(getAgentReconnectAffordance(exited, next.sessions)).toMatchObject({

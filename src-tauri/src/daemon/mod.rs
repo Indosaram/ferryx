@@ -25,6 +25,8 @@ pub mod session_lifecycle;
 pub mod session_service;
 pub mod split_journal;
 pub mod workspace_service;
+#[cfg(test)]
+pub mod recovery_consistency_tests;
 
 /// Shared headless authority supplied only by the session-owning daemon.
 pub struct MachineServices {

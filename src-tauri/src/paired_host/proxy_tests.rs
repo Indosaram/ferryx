@@ -34,7 +34,7 @@ async fn a23_dropping_connected_proxy_releases_socket_and_hub() {
 }
 
 #[tokio::test]
-async fn spontaneous_eof_reaps_native_owner() {
+async fn spontaneous_eof_retains_native_owner_until_detach() {
     socket_fixture(true, false, Some(false)).await;
 }
 
@@ -54,6 +54,7 @@ async fn socket_fixture(native: bool, drop_connected: bool, spontaneous: Option<
     let closed_tx = Arc::new(tokio::sync::Mutex::new(Some(closed_tx)));
     let (terminate_tx, terminate_rx) = tokio::sync::oneshot::channel::<()>();
     let terminate_rx = Arc::new(tokio::sync::Mutex::new(Some(terminate_rx)));
+    let attaches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let router = Router::new()
         .route("/api/v1/pair/exchange", post(|| async { Json(json!({"token":"fixture-secret","machineId":"a","device":{"id":"d","name":"d","permission":"control","accessScope":"machine","createdAt":1,"lastSeenAt":1}})) }))
         .route("/host/a/api/v1/capabilities", get(|| async { Json(json!({"apiVersion":1,"machineId":"a","daemonEpoch":"1","platform":"linux","accessScope":"machine","permission":"control","capabilities":["terminalCreateV1","terminalStreamV1"],"limits":{"directoryEntries":1000,"terminalSessions":64}})) }))
@@ -63,11 +64,21 @@ async fn socket_fixture(native: bool, drop_connected: bool, spontaneous: Option<
             let input_tx = input_tx.clone();
             let closed_tx = closed_tx.clone();
             let terminate_rx = terminate_rx.clone();
+            let connection = attaches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             async move {
                 assert_eq!(headers["authorization"], "Bearer fixture-secret");
-                assert_eq!(uri.query(), Some("daemonEpoch=1&ticket=fixture-ticket"));
+                assert_eq!(uri.query(), Some(if connection == 0 {
+                    "daemonEpoch=1&ticket=fixture-ticket"
+                } else {
+                    assert_eq!(spontaneous, Some(false));
+                    "daemonEpoch=1&afterSequence=11&ticket=fixture-ticket"
+                }));
                 ws.on_upgrade(move |mut socket| async move {
                     socket.send(Message::Text(json!({"type":"attached","target":{"machineId":"a","daemonEpoch":"1","sessionId":"s"},"generation":"7","cols":80,"rows":24,"startSequence":"10","endSequence":"10","replayGap":null}).to_string().into())).await.unwrap();
+                    if connection > 0 {
+                        while let Some(message) = socket.recv().await { if matches!(message, Ok(Message::Close(_)) | Err(_)) { break; } }
+                        return;
+                    }
                     socket.send(Message::Binary(encode_frame(Metadata::Replay { start: Some(10), end: Some(10), gap: None }, b"hello", false).unwrap().into())).await.unwrap();
                     let mut messages = Vec::new();
                     for _ in 0..3 { messages.push(socket.recv().await.unwrap().unwrap()); }
@@ -76,7 +87,7 @@ async fn socket_fixture(native: bool, drop_connected: bool, spontaneous: Option<
                     if let Some(remote_exit) = spontaneous {
                         terminate_rx.lock().await.take().unwrap().await.unwrap();
                         if remote_exit {
-                            socket.send(Message::Text(json!({"type":"exit","target":{"machineId":"a","daemonEpoch":"1","sessionId":"s"}}).to_string().into())).await.unwrap();
+                            socket.send(Message::Text(json!({"type":"exit","target":{"machineId":"a","daemonEpoch":"1","sessionId":"s"},"exit":{"code":0,"signal":null}}).to_string().into())).await.unwrap();
                             while let Some(message) = socket.recv().await { if matches!(message, Ok(Message::Close(_)) | Err(_)) { break; } }
                         }
                     } else {
@@ -209,17 +220,24 @@ async fn socket_fixture(native: bool, drop_connected: bool, spontaneous: Option<
         assert_eq!(&*live.bytes, b"world");
         assert!(live.sequence > first.sequence);
         if spontaneous.is_some() {
-            let pending = terminal
-                .write_input_operation(&id, 7, b"racing".to_vec())
-                .unwrap();
-            let completed = terminal.paired().completion_probe(&id, pending);
+            let incarnation = terminal.paired().session_incarnation(&id).unwrap();
+            let mut outcome = terminal.paired().subscribe_recovery_outcome(&id).unwrap();
             terminate_tx.send(()).unwrap();
-            tokio::time::timeout(Duration::from_secs(5), completed)
-                .await
-                .unwrap();
-            assert!(
-                matches!(terminal.write_input_operation(&id, 7, b"dead".to_vec()), Err(crate::terminal::PtyError::Other(code)) if code == "PAIRED_PROXY_MISSING")
-            );
+            let expected = if spontaneous == Some(true) { "affirmative_exit" } else { "owner_unavailable" };
+            tokio::time::timeout(Duration::from_secs(5), outcome.wait_for(|value| value.state == expected)).await.unwrap().unwrap();
+            assert_eq!(outcome.borrow().incarnation, incarnation);
+            assert_eq!(outcome.borrow().daemon_epoch, "1");
+            assert_eq!(terminal.paired().descriptor(&id).unwrap().after_sequence, Some(Epoch(11)));
+            if spontaneous == Some(true) {
+                assert_eq!(outcome.borrow().exit_code, Some(0));
+            } else {
+                assert!(terminal.paired().contains(&id));
+                assert!(hub.has_session(&id));
+            }
+            let pending = terminal.write_input_operation(&id, 7, b"racing".to_vec()).unwrap();
+            let completed = terminal.paired().completion_probe(&id, pending);
+            terminal.paired().detach(&id).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), completed).await.unwrap();
         } else {
             terminal.paired().detach(&id).await.unwrap();
         }
@@ -403,8 +421,10 @@ async fn direct_stream_loss_resumes_over_relay_from_cursor() {
     }
     assert_eq!(proxy.descriptor().after_sequence, Some(Epoch(11)));
 
-    // Direct dies: receive recovers over the relay instead of ending the stream.
-    assert!(tokio::time::timeout(bound, proxy.receive()).await.unwrap().unwrap().is_none());
+    assert_eq!(tokio::time::timeout(bound, proxy.receive()).await.unwrap().unwrap_err().code, "HOST_UNAVAILABLE");
+    assert_eq!(proxy.controller(), None);
+    assert_eq!(proxy.descriptor().after_sequence, Some(Epoch(11)));
+    tokio::time::timeout(bound, proxy.recover()).await.unwrap().unwrap();
     assert_eq!(proxy.controller(), Some(Epoch(8)));
     assert_eq!(GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id), None);
     assert_eq!(proxy.write(Epoch(7), b"stale").await.unwrap_err().code, "STALE_GENERATION");

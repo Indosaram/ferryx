@@ -35,6 +35,299 @@ use tauri::Manager;
 pub const PRODUCER_ID: &str = "ipc-qa-barrier";
 pub const WRITE_BARRIER: &str = "backend-write";
 pub const PRESENTATION_BARRIER: &str = "presentation";
+
+static NATIVE_EVENT_WRITE: Mutex<()> = Mutex::new(());
+
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+#[tauri::command]
+pub async fn cmd_qa_native_recovery_snapshot<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
+    mut snapshot: Value,
+) -> Result<(), crate::ipc::IpcError> {
+    let channel = active_channel().ok_or_else(|| crate::ipc::IpcError::new(
+        crate::ipc::IpcErrorCode::IoError, "QA channel is inactive"))?;
+    if let Ok(pos) = window.inner_position() {
+        let origin = json!({ "x": pos.x as f64, "y": pos.y as f64 });
+        if let Some(bounds) = snapshot.get_mut("paneBounds").and_then(Value::as_object_mut) {
+            bounds.entry("windowOrigin").or_insert_with(|| origin.clone());
+        }
+        if let Some(bounds) = snapshot
+            .get_mut("snapshot")
+            .and_then(|s| s.get_mut("paneBounds"))
+            .and_then(Value::as_object_mut)
+        {
+            bounds.entry("windowOrigin").or_insert(origin);
+        }
+    }
+    crate::ipc::run_blocking(move || {
+        match snapshot.get("qaSnapshotAction").and_then(Value::as_str) {
+            Some("ready") | Some("unready") => channel.snapshot_listener_ready(&snapshot),
+            Some("response") => channel.write_requested_snapshot_response(snapshot),
+            _ => channel.write_native_recovery_snapshot(snapshot),
+        }
+    }).await
+}
+
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+#[tauri::command]
+pub async fn cmd_qa_native_recovery_event(event: Value) -> Result<Value, crate::ipc::IpcError> {
+    let channel = active_channel().ok_or_else(|| crate::ipc::IpcError::new(
+        crate::ipc::IpcErrorCode::IoError, "QA channel is inactive"))?;
+    crate::ipc::run_blocking(move || channel.append_native_recovery_event(event)).await
+}
+
+#[cfg(test)]
+mod native_persist_receipt_tests {
+    use super::*;
+    fn tuple() -> crate::daemon::protocol::PaneAttachTuple {
+        crate::daemon::protocol::PaneAttachTuple {
+            backend_session_id: "backend".into(), incarnation: Some("incarnation".into()),
+            daemon_epoch: "epoch".into(), frontend_session_id: "frontend".into(),
+            pane_identity: "pane".into(), binding_key: "binding".into(), attempt_generation: 2,
+        }
+    }
+    fn channel(root: &std::path::Path) -> QaBarrierChannel {
+        std::fs::create_dir(root.join("barriers")).unwrap();
+        let mut channel = QaBarrierChannel::new(root.join("barriers"), "run".into());
+        channel.operation_nonce = Some("operation".into());
+        channel
+    }
+    #[test]
+    fn committed_append_is_readable_with_fixed_correlation() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = channel(root.path());
+        std::fs::create_dir(root.path().join("receipts")).unwrap();
+        channel.append_native_binding_persisted(&tuple()).unwrap();
+        let bytes = std::fs::read_to_string(root.path().join("receipts/native-events.jsonl")).unwrap();
+        let receipt: Value = serde_json::from_str(bytes.trim()).unwrap();
+        assert_eq!(receipt["runId"], "run");
+        assert_eq!(receipt["operationId"], "operation");
+        assert_eq!(receipt["producerPid"], std::process::id());
+        assert_eq!(receipt["kind"], "binding-persisted");
+        assert_eq!(receipt["attachTuple"], serde_json::to_value(tuple()).unwrap());
+    }
+    #[test]
+    fn current_snapshot_is_atomic_and_contains_measured_fields_and_full_tuple() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = channel(root.path());
+        std::fs::create_dir(root.path().join("receipts")).unwrap();
+        let tuple = serde_json::to_value(tuple()).unwrap();
+        let snapshot = json!({ "attachTuple": tuple, "producerComponent": "native-frontend-snapshot", "target": { "inputPoint": { "x": 40.0, "y": 50.0 } },
+            "focus": { "focused": true, "inputPoint": { "x": 40.0, "y": 50.0 } },
+            "paneBounds": { "x": 0.0, "y": 0.0, "width": 80.0, "height": 24.0, "scaleFactor": 2.0,
+                "inputPoint": { "x": 40.0, "y": 50.0 }, "focusedInputPoint": { "x": 38.0, "y": 48.0 } } });
+        channel.write_native_recovery_snapshot(snapshot).unwrap();
+        let receipt: Value = serde_json::from_slice(&std::fs::read(root.path().join("receipts/native-current.json")).unwrap()).unwrap();
+        assert_eq!(receipt["runId"], "run");
+        assert_eq!(receipt["operationId"], "operation");
+        assert_eq!(receipt["attachTuple"]["backendSessionId"], "backend");
+        assert_eq!(receipt["target"]["inputPoint"]["x"], 40.0);
+        assert_eq!(receipt["paneBounds"]["scaleFactor"], 2.0);
+    }
+    #[test]
+    fn snapshot_without_measured_input_point_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = channel(root.path());
+        std::fs::create_dir(root.path().join("receipts")).unwrap();
+        let snapshot = json!({ "attachTuple": serde_json::to_value(tuple()).unwrap(), "producerComponent": "native-frontend-snapshot",
+            "target": {}, "focus": { "focused": false },
+            "paneBounds": { "x": 0.0, "y": 0.0, "width": 80.0, "height": 24.0, "scaleFactor": 2.0,
+                "inputPoint": { "x": 40.0, "y": 50.0 }, "focusedInputPoint": { "x": 38.0, "y": 48.0 } } });
+        assert!(channel.write_native_recovery_snapshot(snapshot).is_err());
+        assert!(!root.path().join("receipts/native-current.json").exists());
+    }
+    #[test]
+    fn native_event_preserves_kind_tuple_and_producer_payload() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = channel(root.path());
+        std::fs::create_dir(root.path().join("receipts")).unwrap();
+        let event = json!({ "kind": "attach-complete", "attachTuple": serde_json::to_value(tuple()).unwrap(),
+            "producerComponent": "native-frontend-attach", "payload": { "sessionId": "backend" } });
+        channel.append_native_recovery_event(event).unwrap();
+        let line = std::fs::read_to_string(root.path().join("receipts/native-events.jsonl")).unwrap();
+        let receipt: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(receipt["kind"], "attach-complete");
+        assert_eq!(receipt["attachTuple"]["attemptGeneration"], 2);
+        assert_eq!(receipt["payload"]["sessionId"], "backend");
+    }
+    #[test]
+    fn append_acknowledges_physical_jsonl_line_index_and_path() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = channel(root.path());
+        std::fs::create_dir(root.path().join("receipts")).unwrap();
+        let first = channel.append_native_recovery_event(json!({ "kind": "focus", "attachTuple": serde_json::to_value(tuple()).unwrap(),
+            "producerComponent": "native-frontend-focus" })).unwrap();
+        let second = channel.append_native_recovery_event(json!({ "kind": "output-published", "attachTuple": serde_json::to_value(tuple()).unwrap(),
+            "producerComponent": "native-frontend-terminal-output" })).unwrap();
+        assert_eq!(first["path"], root.path().join("receipts/native-events.jsonl").to_string_lossy().as_ref());
+        assert_eq!(first["lineIndex"], 0);
+        assert_eq!(second["lineIndex"], 1);
+        assert_eq!(second["event"]["kind"], "output-published");
+        assert_eq!(std::fs::read_to_string(root.path().join("receipts/native-events.jsonl")).unwrap().lines().count(), 2);
+    }
+    #[test]
+    fn snapshot_missing_separate_active_or_focused_point_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = channel(root.path());
+        std::fs::create_dir(root.path().join("receipts")).unwrap();
+        let base = json!({ "attachTuple": serde_json::to_value(tuple()).unwrap(), "producerComponent": "native-frontend-snapshot",
+            "target": { "inputPoint": { "x": 3.0, "y": 4.0 } }, "focus": { "focused": false },
+            "paneBounds": { "x": 0.0, "y": 0.0, "width": 80.0, "height": 24.0, "scaleFactor": 2.0,
+                "inputPoint": { "x": 3.0, "y": 4.0 } } });
+        assert!(channel.write_native_recovery_snapshot(base).is_err());
+    }
+    #[test]
+    fn missing_directory_and_incomplete_tuple_return_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = channel(root.path());
+        assert!(channel.append_native_binding_persisted(&tuple()).is_err());
+        std::fs::create_dir(root.path().join("receipts")).unwrap();
+        let mut incomplete = tuple(); incomplete.incarnation = None;
+        assert!(channel.append_native_binding_persisted(&incomplete).is_err());
+        assert!(!root.path().join("receipts/native-events.jsonl").exists());
+    }
+    #[test]
+    fn absent_operation_is_not_acknowledged() {
+        let root = tempfile::tempdir().unwrap();
+        let mut channel = channel(root.path()); channel.operation_nonce = None;
+        assert!(channel.append_native_binding_persisted(&tuple()).is_err());
+    }
+    fn snapshot_request(channel: &QaBarrierChannel, id: &str, pane: &str) -> Value {
+        let mut target = serde_json::to_value(tuple()).unwrap();
+        target["paneIdentity"] = json!(pane);
+        let request = json!({ "runId": "run", "operationId": "operation", "requestId": id,
+            "attachTuple": target, "timeoutMs": 5000 });
+        write_json_atomic(channel.dir(), &format!("native-snapshot-{id}.request.json"), &request).unwrap();
+        request
+    }
+    #[test]
+    fn requested_snapshots_keep_exact_target_responses_independent() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = channel(root.path());
+        for (id, pane) in [("00000000-0000-4000-8000-000000000001", "first"),
+            ("00000000-0000-4000-8000-000000000002", "second")] {
+            let mut response = snapshot_request(&channel, id, pane);
+            response["status"] = json!("ok");
+            response["snapshot"] = json!({ "attachTuple": response["attachTuple"], "producerComponent": "native-frontend-snapshot",
+                "target": { "inputPoint": { "x": 20, "y": 30 } },
+                "focus": { "focused": false, "paneIdentity": "actual", "inputPoint": { "x": 40, "y": 50 } },
+                "paneBounds": { "x": 0, "y": 0, "width": 80, "height": 60, "scaleFactor": 1,
+                    "inputPoint": { "x": 20, "y": 30 }, "focusedInputPoint": { "x": 40, "y": 50 } } });
+            channel.write_requested_snapshot_response(response.clone()).unwrap();
+            assert!(channel.write_requested_snapshot_response(response).is_err());
+        }
+        for (id, pane) in [("00000000-0000-4000-8000-000000000001", "first"),
+            ("00000000-0000-4000-8000-000000000002", "second")] {
+            let packet: Value = serde_json::from_slice(&std::fs::read(channel.dir().join(format!("native-snapshot-{id}.response.json"))).unwrap()).unwrap();
+            assert_eq!(packet["attachTuple"]["paneIdentity"], pane);
+            assert_eq!(packet["snapshot"]["focus"]["paneIdentity"], "actual");
+            assert_eq!(packet["requestId"], id);
+        }
+        assert!(!root.path().join("receipts/native-current.json").exists());
+    }
+    #[test]
+    fn requested_snapshot_rejects_foreign_correlation_and_settles_typed_timeout() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = channel(root.path());
+        let id = "00000000-0000-4000-8000-000000000003";
+        let mut response = snapshot_request(&channel, id, "target");
+        response["status"] = json!("refused");
+        response["code"] = json!("SNAPSHOT_TIMEOUT");
+        for field in ["runId", "operationId", "attachTuple"] {
+            let mut foreign = response.clone();
+            foreign[field] = json!("foreign");
+            assert!(channel.write_requested_snapshot_response(foreign).is_err());
+        }
+        channel.write_requested_snapshot_response(response).unwrap();
+        let packet: Value = serde_json::from_slice(&std::fs::read(channel.dir().join(format!("native-snapshot-{id}.response.json"))).unwrap()).unwrap();
+        assert_eq!(packet["status"], "refused");
+        assert_eq!(packet["code"], "SNAPSHOT_TIMEOUT");
+    }
+    #[test]
+    fn old_listener_cleanup_cannot_remove_new_ready_listener() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = channel(root.path());
+        channel.snapshot_listener_ready(&json!({ "qaSnapshotAction": "ready", "listenerId": "new" })).unwrap();
+        channel.snapshot_listener_ready(&json!({ "qaSnapshotAction": "unready", "listenerId": "old" })).unwrap();
+        assert!(channel.correlated_control("native-snapshot", "listener-ready.json").is_some());
+        channel.snapshot_listener_ready(&json!({ "qaSnapshotAction": "unready", "listenerId": "new" })).unwrap();
+        assert!(channel.correlated_control("native-snapshot", "listener-ready.json").is_none());
+    }
+    #[test]
+    fn concurrent_appends_are_complete_lines() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = Arc::new(channel(root.path()));
+        std::fs::create_dir(root.path().join("receipts")).unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let channel = Arc::clone(&channel);
+                scope.spawn(move || channel.append_native_binding_persisted(&tuple()).unwrap());
+            }
+        });
+        let bytes = std::fs::read_to_string(root.path().join("receipts/native-events.jsonl")).unwrap();
+        assert_eq!(bytes.lines().count(), 4);
+        for line in bytes.lines() {
+            let receipt: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(receipt["attachTuple"], serde_json::to_value(tuple()).unwrap());
+        }
+    }
+ 
+    #[test]
+    fn snapshot_validation_accepts_window_origin() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = channel(root.path());
+        let snapshot = json!({
+            "attachTuple": tuple(),
+            "producerComponent": "test-snapshot",
+            "target": { "inputPoint": { "x": 10.0, "y": 20.0 } },
+            "focus": { "focused": true, "inputPoint": { "x": 10.0, "y": 20.0 } },
+            "paneBounds": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 800.0,
+                "height": 600.0,
+                "scaleFactor": 2.0,
+                "inputPoint": { "x": 10.0, "y": 20.0 },
+                "focusedInputPoint": { "x": 10.0, "y": 20.0 },
+                "windowOrigin": { "x": 100.0, "y": 150.0 }
+            }
+        });
+        assert!(channel.validate_recovery_snapshot(&snapshot).is_ok());
+    }
+
+    #[test]
+    fn append_native_recovery_event_preserves_runner_top_level_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = channel(root.path());
+        std::fs::create_dir(root.path().join("receipts")).unwrap();
+        let event = json!({
+            "kind": "status",
+            "attachTuple": serde_json::to_value(tuple()).unwrap(),
+            "producerComponent": "native-recovery-controller",
+            "outcome": "retryable",
+            "attempt": 3,
+            "active": true,
+            "bytes": "MARKER_123",
+            "payload": { "outcome": "retryable" }
+        });
+        let ack = channel.append_native_recovery_event(event).unwrap();
+        assert_eq!(ack["event"]["outcome"], "retryable");
+        assert_eq!(ack["event"]["attempt"], 3);
+        assert_eq!(ack["event"]["active"], true);
+        assert_eq!(ack["event"]["bytes"], "MARKER_123");
+        assert_eq!(ack["event"]["target"], "backend");
+    }
+}
+
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+#[tauri::command]
+pub async fn cmd_qa_native_binding_persisted(
+    attach_tuple: crate::daemon::protocol::PaneAttachTuple,
+) -> Result<(), crate::ipc::IpcError> {
+    let channel = active_channel().ok_or_else(|| crate::ipc::IpcError::new(
+        crate::ipc::IpcErrorCode::IoError, "QA channel is inactive"))?;
+    crate::ipc::run_blocking(move || channel.append_native_binding_persisted(&attach_tuple)).await
+}
 /// Runner contract: the operation nonce is handed to the product through the
 /// private inherited env as well as through every arm file. Scenarios that
 /// pre-arm no barrier (split-cancel, suspension-ownership, stale-binding) have
@@ -422,13 +715,207 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn write_json_atomic(dir: &std::path::Path, file: &str, value: &Value) -> std::io::Result<()> {
+pub(crate) fn write_json_atomic(dir: &std::path::Path, file: &str, value: &Value) -> std::io::Result<()> {
     let tmp = dir.join(format!(".{file}.tmp-{}", std::process::id()));
     std::fs::write(&tmp, serde_json::to_vec_pretty(value).unwrap_or_default())?;
     std::fs::rename(tmp, dir.join(file))
 }
 
 impl QaBarrierChannel {
+    fn snapshot_listener_ready(&self, observation: &Value) -> Result<(), crate::ipc::IpcError> {
+        let _guard = NATIVE_EVENT_WRITE.lock().map_err(|_| crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::IoError, "Snapshot listener writer poisoned"))?;
+        if observation["qaSnapshotAction"] == "unready" {
+            if self.correlated_control("native-snapshot", "listener-ready.json")
+                .is_some_and(|current| current["listenerId"] == observation["listenerId"]) {
+                std::fs::remove_file(self.dir.join("native-snapshot.listener-ready.json"))
+                    .map_err(|error| crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::IoError, error.to_string()))?;
+            }
+            return Ok(());
+        }
+        write_json_atomic(&self.dir, "native-snapshot.listener-ready.json", &json!({
+            "runId": self.run_id, "operationId": self.operation_id(), "producerPid": self.pid,
+            "listenerId": observation["listenerId"],
+        })).map_err(|error| crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::IoError, error.to_string()))
+    }
+
+    fn snapshot_response_path(&self, request: &Value) -> Option<PathBuf> {
+        let id = request.get("requestId")?.as_str()?;
+        if uuid::Uuid::parse_str(id).ok()?.to_string() != id { return None; }
+        Some(self.dir.join(format!("native-snapshot-{id}.response.json")))
+    }
+
+    fn write_requested_snapshot_response(&self, response: Value) -> Result<(), crate::ipc::IpcError> {
+        let error = |message: &str| crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::IoError, message);
+        let id = response.get("requestId").and_then(Value::as_str).ok_or_else(|| error("Snapshot request ID absent"))?;
+        if uuid::Uuid::parse_str(id).ok().map(|value| value.to_string()).as_deref() != Some(id) {
+            return Err(error("Invalid snapshot request ID"));
+        }
+        let request = self.correlated_control(&format!("native-snapshot-{id}"), "request.json")
+            .ok_or_else(|| error("Snapshot request is absent or foreign"))?;
+        let path = self.snapshot_response_path(&request).ok_or_else(|| error("Invalid snapshot request ID"))?;
+        if response["runId"] != request["runId"] || response["operationId"] != request["operationId"] ||
+            response["requestId"] != request["requestId"] || response["attachTuple"] != request["attachTuple"] {
+            return Err(error("Snapshot response correlation mismatch"));
+        }
+        let _guard = NATIVE_EVENT_WRITE.lock().map_err(|_| error("Snapshot response writer poisoned"))?;
+        if path.exists() { return Err(error("Snapshot request already settled")); }
+        if response["status"] == "ok" {
+            self.validate_native_tuple(&request["attachTuple"])?;
+            let snapshot = &response["snapshot"];
+            if snapshot["attachTuple"] != request["attachTuple"] ||
+                snapshot["focus"]["paneIdentity"].as_str().is_none_or(str::is_empty) ||
+                snapshot["focus"]["inputPoint"].get("x").and_then(Value::as_f64).is_none() ||
+                snapshot["focus"]["inputPoint"].get("y").and_then(Value::as_f64).is_none() ||
+                snapshot["focus"]["inputPoint"] != snapshot["paneBounds"]["focusedInputPoint"] ||
+                snapshot["target"]["inputPoint"] != snapshot["paneBounds"]["inputPoint"] ||
+                snapshot["focus"]["focused"].as_bool() != Some(snapshot["focus"]["paneIdentity"] == request["attachTuple"]["paneIdentity"]) {
+                return Err(error("Snapshot lacks exact target or measured focus identity"));
+            }
+            // Apply the same strict point/bounds gates without touching the
+            // legacy last-writer file. Request responses are independent.
+            self.validate_recovery_snapshot(snapshot)?;
+        } else if response["status"] != "refused" || response["code"].as_str().is_none_or(str::is_empty) {
+            return Err(error("Snapshot response requires success or typed refusal"));
+        }
+        let mut packet = response;
+        packet["producerPid"] = json!(self.pid);
+        packet["producer"] = json!(PRODUCER_ID);
+        packet.as_object_mut().ok_or_else(|| error("Invalid snapshot response"))?.remove("qaSnapshotAction");
+        write_json_atomic(&self.dir, path.file_name().and_then(|name| name.to_str()).ok_or_else(|| error("Invalid snapshot path"))?, &packet)
+            .map_err(|cause| error(&cause.to_string()))
+    }
+
+    fn validate_native_tuple(&self, tuple: &Value) -> Result<String, crate::ipc::IpcError> {
+        use crate::ipc::{IpcError, IpcErrorCode};
+        let error = |message: String| IpcError::new(IpcErrorCode::IoError, message);
+        let operation = self.operation_id().ok_or_else(|| error("QA operation is absent".into()))?;
+        let fields = ["backendSessionId", "incarnation", "daemonEpoch", "frontendSessionId", "paneIdentity", "bindingKey", "attemptGeneration"];
+        if fields.iter().any(|field| tuple.get(field).is_none_or(Value::is_null)) ||
+            fields[..6].iter().any(|field| tuple.get(field).and_then(Value::as_str).is_none_or(str::is_empty)) ||
+            tuple.get("attemptGeneration").and_then(Value::as_u64).is_none() {
+            return Err(error("Native QA observation requires the complete seven-field attach tuple".into()));
+        }
+        if self.dir.file_name().and_then(|name| name.to_str()) != Some("barriers") {
+            return Err(error("Native QA observation requires the isolated barriers directory".into()));
+        }
+        Ok(operation)
+    }
+
+    fn native_receipts_dir(&self) -> Result<PathBuf, crate::ipc::IpcError> {
+        use crate::ipc::{IpcError, IpcErrorCode};
+        let parent = self.dir.parent().ok_or_else(|| IpcError::new(IpcErrorCode::IoError, "QA profile is absent"))?;
+        Ok(parent.join("receipts"))
+    }
+
+    fn validate_recovery_snapshot(&self, snapshot: &Value) -> Result<(), crate::ipc::IpcError> {
+        use crate::ipc::{IpcError, IpcErrorCode};
+        let error = |message: String| IpcError::new(IpcErrorCode::IoError, message);
+        let tuple = snapshot.get("attachTuple").ok_or_else(|| error("Native snapshot attach tuple is absent".into()))?;
+        self.validate_native_tuple(tuple)?;
+        let target = snapshot.get("target").and_then(|v| v.get("inputPoint"));
+        let bounds = snapshot.get("paneBounds");
+        let focus = snapshot.get("focus");
+        let point = |value: Option<&Value>| value.is_some_and(|p| p.get("x").and_then(Value::as_f64).is_some() && p.get("y").and_then(Value::as_f64).is_some());
+        let bounds_valid = bounds.is_some_and(|b| ["x", "y", "width", "height", "scaleFactor"].iter().all(|k| b.get(*k).and_then(Value::as_f64).is_some()));
+        if !point(target) || !bounds_valid || !focus.is_some_and(|f| f.get("focused").and_then(Value::as_bool).is_some()) ||
+            !point(bounds.and_then(|b| b.get("inputPoint"))) || !point(bounds.and_then(|b| b.get("focusedInputPoint"))) {
+            return Err(error("Native snapshot requires measured target, active pane and focused pane input points, pane bounds and focus state".into()));
+        }
+        if focus.and_then(|f| f.get("focused")).and_then(Value::as_bool) == Some(true) &&
+            !point(focus.and_then(|f| f.get("inputPoint"))) {
+            return Err(error("Focused native pane requires its measured focus input point".into()));
+        }
+        snapshot.get("producerComponent").and_then(Value::as_str).filter(|v| !v.is_empty())
+            .ok_or_else(|| error("Native snapshot producer component is absent".into()))?;
+        Ok(())
+    }
+
+    fn write_native_recovery_snapshot(&self, snapshot: Value) -> Result<(), crate::ipc::IpcError> {
+        self.validate_recovery_snapshot(&snapshot)?;
+        let tuple = &snapshot["attachTuple"];
+        let operation = self.validate_native_tuple(tuple)?;
+        let focus = snapshot.get("focus");
+        let component = &snapshot["producerComponent"];
+        let error = |message: String| crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::IoError, message);
+        let payload = json!({ "runId": self.run_id, "operationId": operation,
+            "producer": PRODUCER_ID, "producerPid": self.pid,
+            "producerComponent": component, "kind": "current-binding",
+            "attachTuple": tuple, "target": snapshot["target"], "focus": focus.unwrap(), "paneBounds": snapshot["paneBounds"] });
+        let _guard = NATIVE_EVENT_WRITE.lock().map_err(|_| error("Native receipt writer poisoned".into()))?;
+        write_json_atomic(&self.native_receipts_dir().map_err(|e| error(e.to_string()))?, "native-current.json", &payload)
+            .map_err(|cause| error(cause.to_string()))
+    }
+
+    fn append_native_recovery_event(&self, event: Value) -> Result<Value, crate::ipc::IpcError> {
+        use crate::ipc::{IpcError, IpcErrorCode};
+        use std::io::Write;
+        let error = |message: String| IpcError::new(IpcErrorCode::IoError, message);
+        let kind = event.get("kind").and_then(Value::as_str).filter(|v| !v.is_empty())
+            .ok_or_else(|| error("Native event kind is absent".into()))?;
+        let tuple = event.get("attachTuple").ok_or_else(|| error("Native event attach tuple is absent".into()))?;
+        let operation = self.validate_native_tuple(tuple)?;
+        let component = event.get("producerComponent").and_then(Value::as_str).filter(|v| !v.is_empty())
+            .ok_or_else(|| error("Native event producer component is absent".into()))?;
+        let path = self.native_receipts_dir().map_err(|e| error(e.to_string()))?.join("native-events.jsonl");
+        let _guard = NATIVE_EVENT_WRITE.lock().map_err(|_| error("Native receipt writer poisoned".into()))?;
+        let mut file = std::fs::OpenOptions::new().read(true).append(true).create(true)
+            .open(&path).map_err(|cause| error(cause.to_string()))?;
+        let mut existing = String::new();
+        std::io::Read::read_to_string(&mut file, &mut existing).map_err(|cause| error(cause.to_string()))?;
+        let line_index = existing.lines().count();
+        let mut payload = json!({ "runId": self.run_id, "operationId": operation,
+            "producer": PRODUCER_ID, "producerPid": self.pid, "producerComponent": component,
+            "kind": kind, "attachTuple": tuple, "payload": event.get("payload"),
+            "lineIndex": line_index });
+        if let Some(obj) = payload.as_object_mut() {
+            for key in ["active", "outcome", "attempt", "bytes", "mutationId", "target"] {
+                if let Some(val) = event.get(key) {
+                    obj.insert(key.to_string(), val.clone());
+                }
+            }
+            if !obj.contains_key("target") {
+                if let Some(session_id) = tuple.get("backendSessionId") {
+                    obj.insert("target".to_string(), session_id.clone());
+                }
+            }
+        }
+        use std::io::Seek;
+        file.seek(std::io::SeekFrom::End(0)).map_err(|cause| error(cause.to_string()))?;
+        file.write_all(format!("{payload}\n").as_bytes()).map_err(|cause| error(cause.to_string()))?;
+        file.sync_all().map_err(|cause| error(cause.to_string()))?;
+        Ok(json!({ "path": path, "lineIndex": line_index, "event": payload }))
+    }
+
+    fn append_native_binding_persisted(
+        &self,
+        tuple: &crate::daemon::protocol::PaneAttachTuple,
+    ) -> Result<(), crate::ipc::IpcError> {
+        use crate::ipc::{IpcError, IpcErrorCode};
+        use std::io::Write;
+        let error = |message: String| IpcError::new(IpcErrorCode::IoError, message);
+        let operation = self.operation_id().ok_or_else(|| error("QA operation is absent".into()))?;
+        if [&tuple.backend_session_id, &tuple.daemon_epoch, &tuple.frontend_session_id,
+            &tuple.pane_identity, &tuple.binding_key].iter().any(|value| value.trim().is_empty()) ||
+            tuple.incarnation.as_ref().map_or(true, |value| value.trim().is_empty()) {
+            return Err(error("Native receipt requires the complete attach tuple".into()));
+        }
+        if self.dir.file_name().and_then(|name| name.to_str()) != Some("barriers") {
+            return Err(error("Native receipt requires the isolated barriers directory".into()));
+        }
+        let parent = self.dir.parent().ok_or_else(|| error("QA profile is absent".into()))?;
+        let _guard = NATIVE_EVENT_WRITE.lock().map_err(|_| error("Native receipt writer poisoned".into()))?;
+        let payload = json!({ "runId": self.run_id, "operationId": operation,
+            "producer": PRODUCER_ID, "producerPid": self.pid,
+            "producerComponent": "native-persistence-completion", "kind": "binding-persisted",
+            "attachTuple": tuple });
+        let mut file = std::fs::OpenOptions::new().append(true).create(true)
+            .open(parent.join("receipts").join("native-events.jsonl"))
+            .map_err(|cause| error(cause.to_string()))?;
+        file.write_all(format!("{payload}\n").as_bytes()).map_err(|cause| error(cause.to_string()))?;
+        file.sync_all().map_err(|cause| error(cause.to_string()))?;
+        Ok(())
+    }
+
     pub fn new(dir: PathBuf, run_id: String) -> Self {
         let (held_tx, _) = tokio::sync::broadcast::channel(64);
         let (receipt_tx, _) = tokio::sync::broadcast::channel(64);
@@ -1433,6 +1920,65 @@ pub fn start_gui_boot_channel<R: tauri::Runtime>(
     // The GUI lane's own daemon client, kept for the settlements that must report
     // the daemon's reader/kernel facts instead of inventing them.
     install_daemon_client(Arc::clone(&daemon_client));
+    let snapshot_channel = Arc::clone(&boot.channel);
+    let snapshot_app = app.clone();
+    // QA-only file controls already use a bounded private watch. Keep all disk
+    // access on this dedicated thread, never on the GUI/Tokio runtime threads.
+    if let Err(error) = std::thread::Builder::new().name("ferryx-qa-snapshot".into()).spawn(move || {
+        use tauri::Emitter;
+        let mut seen = std::collections::HashSet::new();
+        let mut pending = HashMap::new();
+        while active_channel().is_some_and(|c| Arc::ptr_eq(&c, &snapshot_channel)) && snapshot_channel.dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&snapshot_channel.dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let Some(name) = name.to_str().and_then(|name| name.strip_suffix(".request.json")) else { continue; };
+                    if !name.starts_with("native-snapshot-") || seen.contains(name) { continue; }
+                    let Some(request) = snapshot_channel.correlated_control(name, "request.json") else { continue; };
+                    let Some(path) = snapshot_channel.snapshot_response_path(&request) else { continue; };
+                    if name != format!("native-snapshot-{}", request["requestId"].as_str().unwrap_or_default()) { continue; }
+                    seen.insert(name.to_string());
+                    if !path.exists() {
+                        let budget = request["timeoutMs"].as_u64().filter(|ms| (1..=5_000).contains(ms));
+                        let valid = budget.is_some() && snapshot_channel.validate_native_tuple(&request["attachTuple"]).is_ok();
+                        pending.insert(name.to_string(), (request, path, std::time::Instant::now() + std::time::Duration::from_millis(budget.unwrap_or(1)), valid, false));
+                    }
+                }
+            }
+            let ready = snapshot_channel.correlated_control("native-snapshot", "listener-ready.json")
+                .is_some_and(|value| value["producerPid"].as_u64() == Some(snapshot_channel.pid as u64));
+            pending.retain(|_, (request, path, deadline, valid, dispatched)| {
+                if path.exists() { return false; }
+                if !*valid || std::time::Instant::now() >= *deadline {
+                    let mut response = request.clone();
+                    response["qaSnapshotAction"] = json!("response");
+                    response["status"] = json!("refused");
+                    response["code"] = json!(if *valid { "SNAPSHOT_TIMEOUT" } else { "SNAPSHOT_REQUEST_INVALID" });
+                    if let Err(error) = snapshot_channel.write_requested_snapshot_response(response) {
+                        eprintln!("FERRYX_QA_SNAPSHOT_SETTLEMENT_FAILED: {error}");
+                    }
+                    return false;
+                }
+                if ready && !*dispatched {
+                    match snapshot_app.emit("native_qa_snapshot_request", request.clone()) {
+                        Ok(()) => *dispatched = true,
+                        Err(error) => eprintln!("FERRYX_QA_SNAPSHOT_DISPATCH_FAILED: {error}"),
+                    }
+                }
+                true
+            });
+            std::thread::sleep(std::time::Duration::from_millis(RELEASE_POLL_MS));
+        }
+        for (_, (request, path, _, valid, _)) in pending {
+            if !path.exists() {
+                let mut response = request;
+                response["qaSnapshotAction"] = json!("response");
+                response["status"] = json!("refused");
+                response["code"] = json!(if valid { "SNAPSHOT_TIMEOUT" } else { "SNAPSHOT_REQUEST_INVALID" });
+                let _ = snapshot_channel.write_requested_snapshot_response(response);
+            }
+        }
+    }) { eprintln!("FERRYX_QA_SNAPSHOT_WATCH_UNSTARTED: {error}"); }
     // The runner's fixture request travels in the same private env as the channel
     // itself. A name this lane does not know constructs nothing and is reported: a
     // runner typo must fail loudly rather than build a half fixture that then
@@ -1724,6 +2270,7 @@ async fn create_plain_fixture_session(
             Some(cwd.to_string()),
             FIXTURE_COLS,
             FIXTURE_ROWS,
+            None,
             None,
             None,
         ),

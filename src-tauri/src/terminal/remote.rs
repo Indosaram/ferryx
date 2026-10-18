@@ -322,6 +322,20 @@ pub struct RemoteRuntime {
     hub: Arc<TerminalOutputHub>,
     connector: Arc<dyn Connector>,
     agent_sink: Arc<parking_lot::RwLock<Option<Arc<dyn AgentStateSink>>>>,
+    #[cfg(feature = "local-split-qa")]
+    transport_qa_audit: Arc<parking_lot::Mutex<HashMap<String, Vec<TransportQaOwnerEvent>>>>,
+}
+
+#[cfg(feature = "local-split-qa")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransportQaOwnerEvent {
+    pub sequence: u64,
+    pub operation: String,
+    pub outcome: String,
+    pub backend_session_id: String,
+    pub target: TargetRef,
+    pub generation: Option<u64>,
 }
 /// Transport outages are retried for as long as the session lives: a parked session never
 /// recovers on its own, so the reconnect loop instead backs off to a bounded interval
@@ -350,6 +364,8 @@ impl RemoteRuntime {
             hub,
             connector,
             agent_sink: Arc::new(parking_lot::RwLock::new(None)),
+            #[cfg(feature = "local-split-qa")]
+            transport_qa_audit: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
     #[cfg(test)]
@@ -363,6 +379,8 @@ impl RemoteRuntime {
             hub,
             connector,
             agent_sink: Arc::new(parking_lot::RwLock::new(Some(sink))),
+            #[cfg(feature = "local-split-qa")]
+            transport_qa_audit: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
     pub(crate) fn set_agent_sink(&self, sink: Arc<dyn AgentStateSink>) {
@@ -417,6 +435,171 @@ impl RemoteRuntime {
         };
         self.insert(d.clone(), Some(Arc::new(client)))?;
         Ok(d)
+    }
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) async fn create_for_transport_qa(
+        &self,
+        config: RemoteSessionConfig,
+        params: SpawnParams,
+        client_request_id: String,
+    ) -> Result<(RemoteSessionDescriptor, RemoteSessionDetails), RemoteFailure> {
+        let descriptor = self.create(config, params, client_request_id).await?;
+        self.record_transport_qa_event("create", "registered", &descriptor, None);
+        let details = self.details(&descriptor.backend_session_id).ok_or_else(|| {
+            RemoteFailure::new(RemoteFailureKind::Missing, "Created QA session disappeared")
+        })?;
+        Ok((descriptor, details))
+    }
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) fn transport_qa_audit(&self, id: &str) -> Vec<TransportQaOwnerEvent> {
+        self.transport_qa_audit.lock().get(id).cloned().unwrap_or_default()
+    }
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) fn transport_qa_subscribe(
+        &self,
+        id: &str,
+    ) -> Result<watch::Receiver<RemoteSessionDetails>, RemoteFailure> {
+        self.subscribe(id)
+    }
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) async fn transport_qa_wait_state(
+        &self,
+        id: &str,
+        state: RemoteConnectionState,
+    ) -> Result<RemoteSessionDetails, RemoteFailure> {
+        let mut updates = self.transport_qa_subscribe(id)?;
+        loop {
+            let current = updates.borrow().clone();
+            if current.state == state { return Ok(current); }
+            updates.changed().await.map_err(|_| RemoteFailure::new(
+                RemoteFailureKind::Disconnected, "Remote state subscription closed"))?;
+        }
+    }
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) async fn transport_qa_wait_refusals(
+        &self,
+        id: &str,
+        count: u32,
+    ) -> Result<RemoteSessionDetails, RemoteFailure> {
+        let entry = self.entry(id)?;
+        let mut updates = self.transport_qa_subscribe(id)?;
+        let initial = entry.state.lock().details.clone();
+        let descriptor = initial.descriptor;
+        let initial_attempts = initial.attempts;
+        if initial.state != RemoteConnectionState::Disconnected {
+            return Err(RemoteFailure::new(RemoteFailureKind::Busy,
+                "Refusal count subscription must precede fault activation"));
+        }
+        loop {
+            let details = updates.borrow().clone();
+            if details.state == RemoteConnectionState::Disconnected
+                && details.failure.as_ref().is_some_and(|failure| failure.kind == RemoteFailureKind::Transport)
+                && details.attempts.saturating_sub(initial_attempts) >= count
+            {
+                return Ok(details);
+            }
+            if details.state == RemoteConnectionState::Expired {
+                return Err(RemoteFailure::new(RemoteFailureKind::Disconnected,
+                    "Owner left reconnecting state before refusal threshold"));
+            }
+            if updates.changed().await.is_err() {
+                return Err(RemoteFailure::new(RemoteFailureKind::Disconnected,
+                    "Remote state subscription closed"));
+            }
+            let current = updates.borrow().clone();
+            if current.descriptor.backend_session_id != descriptor.backend_session_id || current.descriptor.target != descriptor.target {
+                return Err(RemoteFailure::new(RemoteFailureKind::Protocol,
+                    "Remote owner identity changed during refusal window"));
+            }
+        }
+    }
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) fn transport_qa_release_fault_route(
+        &self,
+        id: &str,
+    ) -> Result<RemoteSessionDetails, RemoteFailure> {
+        let entry = self.entry(id)?;
+        let details = entry.state.lock().details.clone();
+        if details.state != RemoteConnectionState::Disconnected
+            || details.failure.as_ref().is_none_or(|failure| failure.kind != RemoteFailureKind::Transport)
+        {
+            return Err(RemoteFailure::new(RemoteFailureKind::Busy,
+                "Fault route can only be released after a transport disconnect"));
+        }
+        self.record_transport_qa_event("fault-route", "release-authorized", &details.descriptor, Some(details.generation));
+        Ok(details)
+    }
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) async fn transport_qa_close(&self, id: &str) -> Result<(), RemoteFailure> {
+        let descriptor = self.entry(id)?.state.lock().details.descriptor.clone();
+        self.record_transport_qa_event("close", "requested", &descriptor, None);
+        match self.close(id).await {
+            Ok(()) => {
+                self.record_transport_qa_event("close", "completed", &descriptor, None);
+                Ok(())
+            }
+            Err(failure) => {
+                self.record_transport_qa_event("close", "failed", &descriptor, None);
+                Err(failure)
+            }
+        }
+    }
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) async fn transport_qa_write(
+        &self,
+        id: &str,
+        generation: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(), RemoteFailure> {
+        let descriptor = self.entry(id)?.state.lock().details.descriptor.clone();
+        let operation = match self.write(id, generation, bytes) {
+            Ok(operation) => operation,
+            Err(failure) => {
+                self.record_transport_qa_event("write", "not-dispatched", &descriptor, Some(generation));
+                return Err(failure);
+            }
+        };
+        self.record_transport_qa_event("write", "dispatched", &descriptor, Some(generation));
+        match operation.await {
+            Ok(()) => {
+                self.record_transport_qa_event("write", "completed", &descriptor, Some(generation));
+                Ok(())
+            }
+            Err(failure) => {
+                self.record_transport_qa_event("write", "failed", &descriptor, Some(generation));
+                Err(failure)
+            }
+        }
+    }
+    #[cfg(feature = "local-split-qa")]
+    fn record_transport_qa_event(
+        &self,
+        operation: &str,
+        outcome: &str,
+        descriptor: &RemoteSessionDescriptor,
+        generation: Option<u64>,
+    ) {
+        let mut audits = self.transport_qa_audit.lock();
+        let events = audits.entry(descriptor.backend_session_id.clone()).or_default();
+        events.push(TransportQaOwnerEvent {
+            sequence: events.len() as u64 + 1,
+            operation: operation.to_owned(),
+            outcome: outcome.to_owned(),
+            backend_session_id: descriptor.backend_session_id.clone(),
+            target: descriptor.target.clone(),
+            generation,
+        });
+    }
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) fn transport_qa_recover(&self, id: &str) -> Result<(), RemoteFailure> {
+        let entry = self.entry(id)?;
+        let before = entry.state.lock().details.clone();
+        self.record_transport_qa_event("recovery", "requested", &before.descriptor, Some(before.generation));
+        self.retry(id)?;
+        let after = self.details(id).ok_or_else(|| RemoteFailure::new(RemoteFailureKind::Missing, "QA session details disappeared"))?;
+        let outcome = if after.generation > before.generation { "rearmed" } else { "deduplicated" };
+        self.record_transport_qa_event("recovery", outcome, &after.descriptor, Some(after.generation));
+        Ok(())
     }
     /// Registers persisted identity and reattaches; never spawns a PTY.
     pub fn restore(&self, descriptor: RemoteSessionDescriptor) -> Result<(), RemoteFailure> {
@@ -510,6 +693,15 @@ impl RemoteRuntime {
     #[cfg(test)]
     pub(crate) fn entry_for_test(&self, id: &str) -> Result<Arc<Entry>, RemoteFailure> {
         self.entry(id)
+    }
+    #[cfg(test)]
+    pub(crate) fn take_recovery_owner_for_test(
+        &self,
+        id: &str,
+    ) -> Result<tokio::task::JoinHandle<()>, RemoteFailure> {
+        self.entry(id)?.state.lock().task.take().ok_or_else(|| {
+            RemoteFailure::new(RemoteFailureKind::Missing, "Recovery owner not registered")
+        })
     }
     #[cfg(test)]
     pub(crate) fn hold_dispatch_gate_for_test(
@@ -1003,7 +1195,7 @@ fn check_connected(s: &Session, generation: u64) -> Result<(), RemoteFailure> {
 fn fail(s: &mut Session, failure: RemoteFailure) {
     s.transport = None;
     s.details.state = match failure.kind {
-        RemoteFailureKind::Expired | RemoteFailureKind::Missing => RemoteConnectionState::Expired,
+        RemoteFailureKind::Expired => RemoteConnectionState::Expired,
         RemoteFailureKind::Transport => RemoteConnectionState::Reconnecting,
         _ => RemoteConnectionState::Disconnected,
     };
@@ -1123,7 +1315,7 @@ async fn run(
                         }
                     }
                 }
-                return Err(BridgeError::TargetNotFound);
+                return Err(BridgeError::RemoteTargetExpired);
             }
             if !client.supports_agent_state() {
                 tracing::info!(
@@ -1252,7 +1444,7 @@ async fn run(
                 }
                 Entry::notify(&s);
                 if read.exited {
-                    return Err(BridgeError::TargetNotFound);
+                    return Err(BridgeError::RemoteTargetExpired);
                 }
             }
         }
@@ -1412,7 +1604,7 @@ async fn run_live(
         }
         Entry::notify(&s);
         if read.exited {
-            let failure = RemoteFailure::new(RemoteFailureKind::Missing, "Remote target exited");
+            let failure = RemoteFailure::new(RemoteFailureKind::Expired, "Remote target exited");
             fail(&mut s, failure);
             return;
         }

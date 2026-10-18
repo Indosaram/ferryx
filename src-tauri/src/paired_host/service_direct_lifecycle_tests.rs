@@ -137,3 +137,24 @@ async fn stale_generation_failure_keeps_fresh_direct_route() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn pair_exposes_authenticated_exchange_device_id_on_host_view() {
+    bounded(async {
+        let fixture = Fixture::start().await;
+        let host = fixture.pair("pair-device-id").await;
+        assert_eq!(
+            host.device_id.as_deref(),
+            Some("fixture"),
+            "authenticated exchange device id is preserved on HostView"
+        );
+        let list = fixture.service.list().await.unwrap();
+        assert_eq!(
+            list[0].device_id.as_deref(),
+            Some("fixture"),
+            "device identity is retained in persistent inventory"
+        );
+        fixture.finish().await;
+    })
+    .await;
+}

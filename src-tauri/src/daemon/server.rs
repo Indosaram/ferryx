@@ -415,6 +415,47 @@ pub(crate) fn session_dir_override() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+#[cfg(feature = "local-split-qa")]
+fn transport_qa_isolated_profile(runtime_dir: &Path, data_dir: Option<&std::ffi::OsStr>) -> bool {
+    let Some(data_dir) = data_dir.filter(|dir| !dir.is_empty()) else {
+        return false;
+    };
+    let data_dir = Path::new(data_dir);
+    let Ok(runtime_dir) = runtime_dir.canonicalize() else {
+        return false;
+    };
+    let Ok(data_dir) = data_dir.canonicalize() else {
+        return false;
+    };
+    runtime_dir != Path::new("/") && data_dir != Path::new("/")
+        && runtime_dir != data_dir && !runtime_dir.starts_with(&data_dir) && !data_dir.starts_with(&runtime_dir)
+}
+
+#[cfg(feature = "local-split-qa")]
+fn active_transport_qa_profile() -> bool {
+    transport_qa_isolated_profile(&get_runtime_dir(), std::env::var_os("FERRYX_DATA_DIR").as_deref())
+}
+
+#[cfg(all(test, feature = "local-split-qa"))]
+#[test]
+fn transport_qa_profile_refuses_missing_and_shared_profile_paths() {
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    let root = tempfile::tempdir().expect("isolated guard fixture");
+    let profile = root.path().join("profile");
+    let runtime = profile.join("runtime");
+    let sibling = root.path().join("other");
+    std::fs::create_dir_all(&runtime).expect("profile runtime");
+    std::fs::create_dir_all(&sibling).expect("sibling data dir");
+
+    assert!(!transport_qa_isolated_profile(&runtime, None));
+    assert!(!transport_qa_isolated_profile(&runtime, Some(profile.as_os_str())));
+    assert!(!transport_qa_isolated_profile(&profile, Some(profile.as_os_str())));
+    assert!(transport_qa_isolated_profile(&runtime, Some(sibling.as_os_str())));
+    assert!(!transport_qa_isolated_profile(Path::new("/qa/runtime"), Some(OsStr::new("/"))));
+}
+
 pub(crate) fn resolve_session_path(
     env_dir: Option<&Path>,
     is_dev: bool,
@@ -2465,7 +2506,7 @@ impl DaemonServer {
         &self.session_service
     }
 
-    async fn describe_session_identity(&self, session_id: &str) -> DaemonResponse {
+    pub(crate) async fn describe_session_identity(&self, session_id: &str) -> DaemonResponse {
         if self.session_router.is_local_session(session_id) {
             match self.handle_describe_session(session_id) {
                 DaemonResponse::DescribeSessionOk { mut session, .. } => {
@@ -2473,6 +2514,9 @@ impl DaemonServer {
                         session.cwd = crate::ipc::run_blocking::<Option<PathBuf>, _>(move || {
                             Ok(crate::ipc::terminal::process_cwd(pid))
                         }).await.ok().flatten().map(|path| path.to_string_lossy().into_owned());
+                    }
+                    if let Some(ref mut auth) = session.recovery_authority {
+                        auth.daemon_epoch = Some(self.epoch.to_string());
                     }
                     DaemonResponse::DescribeSessionOk {
                         session,
@@ -2486,10 +2530,30 @@ impl DaemonServer {
                 Ok((session, daemon_epoch)) => DaemonResponse::DescribeSessionOk {
                     session, daemon_epoch,
                 },
-                Err(message) => daemon_error(message),
+                Err(message) => DaemonResponse::Error {
+                    message,
+                    code: Some("SESSION_NOT_FOUND".to_string()),
+                    details: Some(serde_json::json!({
+                        "source": "daemon_describe",
+                        "kind": "owner_unavailable",
+                        "sessionId": session_id,
+                        "recoveryOutcome": "retryable",
+                        "reason": "legacy_peer_unreachable",
+                    })),
+                },
             }
         } else {
-            daemon_session_not_found(session_id, "daemon_describe")
+            DaemonResponse::Error {
+                message: format!("Session '{session_id}' not found"),
+                code: Some("SESSION_NOT_FOUND".to_string()),
+                details: Some(serde_json::json!({
+                    "source": "daemon_describe",
+                    "kind": "session_not_found",
+                    "sessionId": session_id,
+                    "recoveryOutcome": "retryable",
+                    "reason": "scoped_missing",
+                })),
+            }
         }
     }
 
@@ -3674,6 +3738,95 @@ impl DaemonServer {
                         }
                     }
                 }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaCreateRemoteSession { config, params, client_request_id }) => {
+                    if !active_transport_qa_profile() {
+                        DaemonResponse::Error {
+                            message: "Transport QA session creation requires an isolated QA runtime and data directory".into(),
+                            code: Some("QA_ISOLATION_REQUIRED".into()),
+                            details: None,
+                        }
+                    } else {
+                    match self.terminal_service.remote()
+                        .create_for_transport_qa(config, params, client_request_id).await
+                    {
+                        Ok((descriptor, details)) => DaemonResponse::QaCreateRemoteSessionOk { descriptor, details },
+                        Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                    }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaRemoteOwnerMutation { session_id, operation, generation, data }) => {
+                    if !active_transport_qa_profile() {
+                        DaemonResponse::Error { message: "Transport QA owner mutation requires an isolated QA runtime".into(), code: Some("QA_ISOLATION_REQUIRED".into()), details: None }
+                    } else {
+                        let remote = self.terminal_service.remote();
+                        let result = match operation.as_str() {
+                            "write" => match generation {
+                                Some(generation) => remote.transport_qa_write(&session_id, generation, data).await,
+                                None => Err(crate::terminal::remote::RemoteFailure { kind: crate::terminal::remote::RemoteFailureKind::Protocol, message: "write requires generation".into() }),
+                            },
+                            "close" => remote.transport_qa_close(&session_id).await,
+                            "recover" => remote.transport_qa_recover(&session_id),
+                            _ => Err(crate::terminal::remote::RemoteFailure { kind: crate::terminal::remote::RemoteFailureKind::Protocol, message: "unsupported QA owner mutation".into() }),
+                        };
+                        match result {
+                            Ok(()) => match remote.details(&session_id) {
+                                Some(details) => DaemonResponse::QaRemoteOwnerAuditOk {
+                                    events: remote.transport_qa_audit(&session_id), details,
+                                },
+                                None => daemon_error("QA session details disappeared"),
+                            },
+                            Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                        }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaRemoteOwnerAudit { session_id }) => {
+                    if !active_transport_qa_profile() {
+                        DaemonResponse::Error { message: "Transport QA owner audit requires an isolated QA runtime".into(), code: Some("QA_ISOLATION_REQUIRED".into()), details: None }
+                    } else {
+                        match self.terminal_service.remote().details(&session_id) {
+                            Some(details) => DaemonResponse::QaRemoteOwnerAuditOk {
+                                events: self.terminal_service.remote().transport_qa_audit(&session_id), details,
+                            },
+                            None => daemon_error("QA session not found"),
+                        }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaRemoteOwnerWaitState { session_id, state }) => {
+                    if !active_transport_qa_profile() {
+                        DaemonResponse::Error { message: "Transport QA owner state wait requires an isolated QA runtime".into(), code: Some("QA_ISOLATION_REQUIRED".into()), details: None }
+                    } else {
+                        match self.terminal_service.remote().transport_qa_wait_state(&session_id, state).await {
+                            Ok(details) => DaemonResponse::QaRemoteOwnerWaitStateOk { details },
+                            Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                        }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaRemoteOwnerWaitRefusals { session_id, count }) => {
+                    if !active_transport_qa_profile() {
+                        DaemonResponse::Error { message: "Transport QA refusal wait requires an isolated QA runtime".into(), code: Some("QA_ISOLATION_REQUIRED".into()), details: None }
+                    } else {
+                        match self.terminal_service.remote().transport_qa_wait_refusals(&session_id, count).await {
+                            Ok(details) => DaemonResponse::QaRemoteOwnerWaitRefusalsOk { details },
+                            Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                        }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaRemoteOwnerReleaseFaultRoute { session_id }) => {
+                    if !active_transport_qa_profile() {
+                        DaemonResponse::Error { message: "Transport QA fault route requires an isolated QA runtime".into(), code: Some("QA_ISOLATION_REQUIRED".into()), details: None }
+                    } else {
+                        match self.terminal_service.remote().transport_qa_release_fault_route(&session_id) {
+                            Ok(details) => DaemonResponse::QaRemoteOwnerReleaseFaultRouteOk { details },
+                            Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                        }
+                    }
+                }
                 Ok(DaemonRequest::MachineGateway) => {
                     if let Err(error) = write_half.write_all(b"{\"type\":\"machineGatewayOk\"}\n").await {
                         tracing::warn!(%error, "Legacy machine gateway admission failed");
@@ -4022,14 +4175,24 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Write { session_id, data }) => {
+                    #[cfg(feature = "local-split-qa")]
+                    let tok = super::qa_producers::record_daemon_mutation_ingress(&session_id, "write", &data);
                     if self.session_router.is_local_session(&session_id) {
                         match self.write_session_input(&session_id, data).await {
-                            Ok(()) => DaemonResponse::WriteOk,
+                            Ok(()) => {
+                                #[cfg(feature = "local-split-qa")]
+                                super::qa_producers::record_daemon_mutation_delivery(&session_id, "write", &tok);
+                                DaemonResponse::WriteOk
+                            }
                             Err(e) => daemon_error(e.to_string(),),
                         }
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.write_input(&session_id, &data).await {
-                            Ok(()) => DaemonResponse::WriteOk,
+                            Ok(()) => {
+                                #[cfg(feature = "local-split-qa")]
+                                super::qa_producers::record_daemon_mutation_delivery(&session_id, "write", &tok);
+                                DaemonResponse::WriteOk
+                            }
                             Err(message) => daemon_error(message),
                         }
                     } else {
@@ -4042,14 +4205,24 @@ impl DaemonServer {
                     rows,
                 }) => {
                     self.record_desktop_geometry(&session_id, cols, rows);
+                    #[cfg(feature = "local-split-qa")]
+                    let tok = super::qa_producers::record_daemon_mutation_ingress(&session_id, "resize", format!("{cols}x{rows}").as_bytes());
                     if self.session_router.is_local_session(&session_id) {
                         match self.resize_session(&session_id, cols, rows).await {
-                            Ok(()) => DaemonResponse::ResizeOk,
+                            Ok(()) => {
+                                #[cfg(feature = "local-split-qa")]
+                                super::qa_producers::record_daemon_mutation_delivery(&session_id, "resize", &tok);
+                                DaemonResponse::ResizeOk
+                            }
                             Err(e) => daemon_error(e.to_string(),),
                         }
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.resize(&session_id, cols, rows).await {
-                            Ok(()) => DaemonResponse::ResizeOk,
+                            Ok(()) => {
+                                #[cfg(feature = "local-split-qa")]
+                                super::qa_producers::record_daemon_mutation_delivery(&session_id, "resize", &tok);
+                                DaemonResponse::ResizeOk
+                            }
                             Err(message) => daemon_error(message),
                         }
                     } else {
@@ -4072,15 +4245,23 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Close { session_id }) => {
+                    #[cfg(feature = "local-split-qa")]
+                    let tok = super::qa_producers::record_daemon_mutation_ingress(&session_id, "close", b"close");
                     if self.session_router.is_local_session(&session_id) {
                         match self.handle_close(&session_id).await {
-                            Ok(()) => DaemonResponse::CloseOk,
+                            Ok(()) => {
+                                #[cfg(feature = "local-split-qa")]
+                                super::qa_producers::record_daemon_mutation_delivery(&session_id, "close", &tok);
+                                DaemonResponse::CloseOk
+                            }
                             Err(crate::terminal::PtyError::SessionNotFound(_)) => daemon_session_not_found(&session_id, "daemon_close"),
                             Err(e) => daemon_error(e),
                         }
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.close(&session_id).await {
                             Ok(()) => {
+                                #[cfg(feature = "local-split-qa")]
+                                super::qa_producers::record_daemon_mutation_delivery(&session_id, "close", &tok);
                                 self.agent_states.remove(&session_id);
                                 DaemonResponse::CloseOk
                             }
@@ -4088,6 +4269,8 @@ impl DaemonServer {
                         }
                     } else {
                         // Idempotent close: closing an already closed or non-existent session is a success.
+                        #[cfg(feature = "local-split-qa")]
+                        super::qa_producers::record_daemon_mutation_delivery(&session_id, "close", &tok);
                         DaemonResponse::CloseOk
                     }
                 }
@@ -4287,13 +4470,9 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::PairedTerminalReattach { descriptor }) => {
-                    let result = async {
-                        let mut proxy = crate::terminal::paired_daemon::Proxy::new(descriptor, self.terminal_service.output_hub().clone())?;
-                        proxy.reattach(&crate::paired_host::client::MachineClient::new(), &self.paired_hosts).await?;
-                        let generation = proxy.controller().ok_or_else(|| crate::paired_host::client::ClientError::local("PAIRED_PROXY_UNAVAILABLE"))?;
-                        let session_id = self.terminal_service.paired().install(proxy).map_err(|_| crate::paired_host::client::ClientError::local("CONTROL_CONFLICT"))?;
-                        Ok::<_, crate::paired_host::client::ClientError>((session_id, generation))
-                    }.await;
+                    let result = self.terminal_service.paired().get_or_rearm(
+                        descriptor, self.terminal_service.output_hub().clone(), self.paired_hosts.clone(),
+                    );
                     match result {
                         Ok((session_id, generation)) => DaemonResponse::PairedTerminalReattachOk { session_id, generation },
                         Err(error) => DaemonResponse::PairedHostOperationError { error },
@@ -4303,6 +4482,199 @@ impl DaemonServer {
                     Ok(()) => DaemonResponse::CloseOk,
                     Err(message) => daemon_error(message),
                 },
+                Ok(DaemonRequest::RetryPairedSession { backend_session_id, daemon_epoch, incarnation }) => {
+                    match self.terminal_service.paired().retry_owned(&backend_session_id, &daemon_epoch, &incarnation).await {
+                        Ok(result) => DaemonResponse::RetryPairedSessionResult {
+                            admitted: result.admitted,
+                            owner_unavailable: result.owner_unavailable,
+                            stale_tuple: result.stale_tuple,
+                            blocked: result.blocked,
+                            affirmative_exit: result.affirmative_exit,
+                        },
+                        Err(code) => daemon_error(code),
+                    }
+                }
+                Ok(DaemonRequest::PairedRecoveryOutcome { backend_session_id }) => {
+                    DaemonResponse::PairedRecoveryOutcomeResult {
+                        outcome: self.terminal_service.paired().recovery_outcome(&backend_session_id),
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaPairedDropLoopbackTransport { backend_session_id }) => {
+                    if !active_transport_qa_profile() {
+                        daemon_error("QA_ISOLATION_REQUIRED")
+                    } else {
+                        match self.terminal_service.paired().qa_drop_loopback_transport(&backend_session_id).await {
+                            Ok(()) => DaemonResponse::CloseOk,
+                            Err(code) => daemon_error(code),
+                        }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaPairedCancelPendingDial { backend_session_id }) => {
+                    if !active_transport_qa_profile() {
+                        daemon_error("QA_ISOLATION_REQUIRED")
+                    } else {
+                        match self.terminal_service.paired().qa_cancel_pending_dial(&backend_session_id).await {
+                            Ok(()) => DaemonResponse::CloseOk,
+                            Err(code) => daemon_error(code),
+                        }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaPairedRouteReceipt { backend_session_id }) => {
+                    if !active_transport_qa_profile() {
+                        daemon_error("QA_ISOLATION_REQUIRED")
+                    } else {
+                        match self.terminal_service.paired().qa_route_receipt(&backend_session_id).await {
+                            Ok(receipt) => DaemonResponse::QaPairedRouteReceiptOk { receipt },
+                            Err(code) => daemon_error(code),
+                        }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaPairedColdDescriptor { backend_session_id }) => {
+                    if !active_transport_qa_profile() {
+                        daemon_error("QA_ISOLATION_REQUIRED")
+                    } else {
+                        match self.terminal_service.paired().qa_cold_descriptor(&backend_session_id).await {
+                            Ok(descriptor) => DaemonResponse::PairedTerminalDescriptorOk { descriptor: Some(descriptor) },
+                            Err(code) => daemon_error(code),
+                        }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaPairedMutation { backend_session_id, daemon_epoch, incarnation, generation, operation, intent_id, data }) => {
+                    if !active_transport_qa_profile() {
+                        daemon_error("QA_ISOLATION_REQUIRED")
+                    } else {
+                        async {
+                            let paired = self.terminal_service.paired();
+                            let pending = paired.qa_mutation_owned(&backend_session_id, &daemon_epoch,
+                                &incarnation, generation, &operation, intent_id.clone(), data);
+                            match pending {
+                                Ok(pending) => match pending.await {
+                                    Ok(()) => DaemonResponse::QaPairedMutationOk { intent_id },
+                                    Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                                },
+                                Err(error) => daemon_error(error),
+                            }
+                        }.await
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaPairedDialAudit { backend_session_id }) => {
+                    if !active_transport_qa_profile() {
+                        daemon_error("QA_ISOLATION_REQUIRED")
+                    } else {
+                        match self.terminal_service.paired().qa_dial_audit(&backend_session_id).await {
+                            Ok(audit) => DaemonResponse::QaPairedDialAuditOk { audit },
+                            Err(code) => daemon_error(code),
+                        }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaPairedOwnerAudit { backend_session_id }) => {
+                    if !active_transport_qa_profile() {
+                        daemon_error("QA_ISOLATION_REQUIRED")
+                    } else if let Some((outcome, incarnation, generation, descriptor)) = self.terminal_service.paired().qa_owner_audit(&backend_session_id) {
+                        DaemonResponse::QaPairedOwnerAuditOk {
+                            outcome,
+                            daemon_epoch: descriptor.target.daemon_epoch.0.to_string(),
+                            incarnation,
+                            generation: generation.map(|epoch| epoch.0),
+                            descriptor: Some(descriptor),
+                        }
+                    } else {
+                        DaemonResponse::Error { message: "Paired owner unavailable".into(), code: Some("OWNER_UNAVAILABLE".into()), details: None }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaPairedOwnerWaitState { backend_session_id, state }) => {
+                    if !active_transport_qa_profile() {
+                        daemon_error("QA_ISOLATION_REQUIRED")
+                    } else {
+                        match self.terminal_service.paired().qa_wait_owner_state(&backend_session_id, &state, std::time::Duration::from_secs(10)).await {
+                            Ok((outcome, generation)) => DaemonResponse::QaPairedOwnerWaitStateOk { outcome, generation: generation.map(|epoch| epoch.0) },
+                            Err(code) => daemon_error(code),
+                        }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaPairedOwnerRetry { backend_session_id, daemon_epoch, incarnation }) => {
+                    if !active_transport_qa_profile() {
+                        daemon_error("QA_ISOLATION_REQUIRED")
+                    } else {
+                        match self.terminal_service.paired().retry_owned(&backend_session_id, &daemon_epoch, &incarnation).await {
+                            Ok(result) => DaemonResponse::QaPairedOwnerRetryOk { result },
+                            Err(code) => daemon_error(code),
+                        }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaPairedHostDeliveryArmFence { target, device_id, generation, expected_write_multiplicity, expected_signal_multiplicity }) => {
+                    if !active_transport_qa_profile() {
+                        daemon_error("QA_ISOLATION_REQUIRED")
+                    } else {
+                        async {
+                        let Some(services) = self.remote_state.machine_services.as_ref() else {
+                            return daemon_error("MACHINE_SERVICES_UNAVAILABLE");
+                        };
+                        if let Err(err) = services.sessions.validate_machine_target(&target).await {
+                            return daemon_error(err);
+                        }
+                        let controllers = services.sessions.machine_controllers.lock().await;
+                        let Some(c) = controllers.get(&target.session_id) else {
+                            return daemon_error("CONTROLLER_NOT_FOUND");
+                        };
+                        if c.device != device_id {
+                            return daemon_error("CONTROLLER_DEVICE_MISMATCH");
+                        }
+                        if c.generation != generation.0 {
+                            return daemon_error("STALE_CONTROLLER_GENERATION");
+                        }
+                        if c.disconnected.lock().is_some() {
+                            return daemon_error("CONTROLLER_DISCONNECTED");
+                        }
+                        let res = crate::remote::server::machine_delivery_observer::arm_fence(
+                            &target,
+                            generation,
+                            expected_write_multiplicity,
+                            expected_signal_multiplicity,
+                        );
+                        drop(controllers);
+                        match res {
+                            Ok(fence_id) => DaemonResponse::QaPairedHostDeliveryArmFenceOk { fence_id },
+                            Err(code) => daemon_error(code),
+                        }
+                        }.await
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaPairedHostDeliverySealFence { fence_id, target }) => {
+                    if !active_transport_qa_profile() {
+                        daemon_error("QA_ISOLATION_REQUIRED")
+                    } else {
+                        match crate::remote::server::machine_delivery_observer::seal_fence(&fence_id, &target) {
+                            Ok(fence) => match serde_json::to_value(fence) {
+                                Ok(fence) => DaemonResponse::QaPairedHostDeliverySealFenceOk { fence },
+                                Err(error) => daemon_error(error),
+                            },
+                            Err(code) => daemon_error(code),
+                        }
+                    }
+                }
+                #[cfg(feature = "local-split-qa")]
+                Ok(DaemonRequest::QaPairedHostDeliveryAudit { target, fence_id }) => {
+                    if !active_transport_qa_profile() {
+                        daemon_error("QA_ISOLATION_REQUIRED")
+                    } else {
+                        match crate::remote::server::machine_delivery_observer::audit(&target, &fence_id) {
+                            Ok(audit) => DaemonResponse::QaPairedHostDeliveryAuditOk { audit },
+                            Err(code) => daemon_error(code),
+                        }
+                    }
+                }
                 Ok(DaemonRequest::PairedTerminalDescriptor { session_id }) => {
                     let descriptor = self.terminal_service.paired().descriptor(&session_id);
                     DaemonResponse::PairedTerminalDescriptorOk { descriptor }
@@ -5330,6 +5702,73 @@ impl DaemonServer {
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send,
     {
+        let paired = self.terminal_service.paired();
+        if let Some(mut updates) = paired.subscribe_recovery_outcome(&session_id) {
+            let Some(descriptor) = paired.descriptor(&session_id) else { return; };
+            let initial = updates.borrow().clone();
+            if descriptor.target.daemon_epoch.0.to_string() != initial.daemon_epoch { return; }
+            let (input, output) = tokio::io::duplex(64 * 1024);
+            let pump = Self::pump_sequenced_stream_with_agent_state(
+                session_id.clone(), rx, hub, output, agent_rx, client_reader,
+            );
+            tokio::pin!(pump);
+            let mut lines = BufReader::new(input).lines();
+            loop {
+                let outcome = updates.borrow_and_update().clone();
+                if outcome.backend_session_id != initial.backend_session_id
+                    || outcome.daemon_epoch != initial.daemon_epoch
+                    || outcome.incarnation != initial.incarnation { return; }
+                let state = match outcome.state.as_str() {
+                    "proxy_attached" => crate::terminal::remote::RemoteConnectionState::Connected,
+                    "affirmative_exit" => crate::terminal::remote::RemoteConnectionState::Expired,
+                    "blocked" => crate::terminal::remote::RemoteConnectionState::Disconnected,
+                    _ => crate::terminal::remote::RemoteConnectionState::Reconnecting,
+                };
+                if state == crate::terminal::remote::RemoteConnectionState::Connected && outcome.generation.is_none() {
+                    return;
+                }
+                let failure = outcome
+                    .blocked_reason
+                    .as_ref()
+                    .map(|reason| crate::terminal::remote::RemoteFailure {
+                        kind: crate::terminal::remote::RemoteFailureKind::Disconnected,
+                        message: reason.clone(),
+                    })
+                    .or_else(|| {
+                        (outcome.state == "blocked").then(|| crate::terminal::remote::RemoteFailure {
+                            kind: crate::terminal::remote::RemoteFailureKind::Disconnected,
+                            message: "blocked".to_string(),
+                        })
+                    });
+                let status = DaemonStreamMessage::RemoteStatus {
+                    session_id: Cow::Borrowed(&session_id),
+                    state,
+                    generation: outcome.generation.unwrap_or(0),
+                    failure,
+                    replay_gap: None,
+                    descriptor: Some(serde_json::json!({
+                        "backendSessionId": outcome.backend_session_id,
+                        "hostId": descriptor.host_id,
+                        "target": descriptor.target,
+                        "incarnation": outcome.incarnation,
+                        "daemonEpoch": outcome.daemon_epoch,
+                    })),
+                };
+                let Ok(frame) = crate::daemon::protocol::encode_daemon_stream_frame(&status) else { return; };
+                if writer.write_all(frame.as_bytes()).await.is_err() || writer.flush().await.is_err() { return; }
+                loop {
+                    tokio::select! {
+                        _ = &mut pump => return,
+                        changed = updates.changed() => { if changed.is_err() { return; } break; },
+                        line = lines.next_line() => {
+                            let Ok(Some(mut line)) = line else { return; };
+                            line.push('\n');
+                            if writer.write_all(line.as_bytes()).await.is_err() || writer.flush().await.is_err() { return; }
+                        }
+                    }
+                }
+            }
+        }
         let Ok(mut updates) = self.terminal_service.remote().subscribe(&session_id) else {
             Self::pump_sequenced_stream_with_agent_state(
                 session_id,
@@ -5361,6 +5800,7 @@ impl DaemonServer {
                 generation: details.generation,
                 failure: details.failure,
                 replay_gap: details.replay_gap,
+                descriptor: Some(serde_json::json!(details.descriptor)),
             };
             let Ok(frame) = crate::daemon::protocol::encode_daemon_stream_frame(&status) else {
                 break;
@@ -7520,6 +7960,9 @@ mod tests {
         };
         assert_eq!(daemon_epoch.as_deref(), Some("9007199254740993"));
         assert!(local_details.incarnation.is_some());
+        let local_auth = local_details.recovery_authority.as_ref().expect("recovery_authority must be present");
+        assert_eq!(local_auth.daemon_epoch.as_deref(), Some("9007199254740993"));
+        assert_eq!(local_auth.incarnation, local_details.incarnation);
 
         let root = tempfile::Builder::new().prefix("fx-owner").tempdir_in("/tmp").unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -7544,6 +7987,9 @@ mod tests {
         assert_eq!(daemon_epoch.as_deref(), Some("9007199254740993"));
         assert_ne!(daemon_epoch, Some(gateway.epoch.to_string()));
         assert_eq!(session.incarnation, local_details.incarnation);
+        let routed_auth = session.recovery_authority.as_ref().expect("routed recovery_authority must be present");
+        assert_eq!(routed_auth.daemon_epoch.as_deref(), Some("9007199254740993"));
+        assert_eq!(routed_auth.incarnation, local_details.incarnation);
         tokio::time::timeout(Duration::from_secs(10), serving).await.unwrap().unwrap();
         owner.handle_close(&session_id).await.unwrap();
     }
@@ -9017,5 +9463,77 @@ mod instance_lock_deadline_tests {
         drop(client_lines);
         let _ = server_handler.await;
         peer_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_paired_recovery_outcome_preserves_typed_blocked_reason_on_wire() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Arc::new(DaemonServer::new_with_paths(
+            Some(dir.path().join("config")),
+            Some(dir.path().join("auth")),
+        ));
+        let hub = server.terminal_service.output_hub().clone();
+        let target = crate::remote::machine_protocol::RemoteTerminalTarget {
+            machine_id: "m1".into(),
+            daemon_epoch: crate::scoped_contracts::Epoch(1),
+            session_id: "s1".into(),
+        };
+        let descriptor = crate::terminal::paired_daemon::Descriptor {
+            host_id: "https://relay.example.com".into(),
+            generation: crate::scoped_contracts::Epoch(1),
+            target,
+            after_sequence: None,
+        };
+        let mut proxy = crate::terminal::paired_daemon::Proxy::new(descriptor, hub.clone()).unwrap();
+        proxy.recovery_failed(&crate::paired_host::client::ClientError::local("PAIRED_HOST_UNAUTHORIZED"));
+        let session_id = server.terminal_service.paired().install(proxy).unwrap();
+
+        let (client, server_writer) = tokio::io::duplex(32 * 1024);
+        let (_, rx) = hub.register_session_channels(&session_id);
+
+        let pump_server = server.clone();
+        let pump_session_id = session_id.clone();
+        let pump_task = tokio::spawn(async move {
+            pump_server
+                .pump_session_stream::<_, tokio::io::Empty>(
+                    pump_session_id,
+                    rx,
+                    hub,
+                    server_writer,
+                    None,
+                    None,
+                )
+                .await;
+        });
+
+        let mut lines = BufReader::new(client).lines();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), lines.next_line())
+            .await
+            .expect("timeout reading frame")
+            .expect("read error")
+            .expect("eof");
+        let msg: DaemonStreamMessage = serde_json::from_str(&frame).expect("valid frame");
+        match msg {
+            DaemonStreamMessage::RemoteStatus {
+                state,
+                failure,
+                descriptor,
+                ..
+            } => {
+                assert_eq!(
+                    state,
+                    crate::terminal::remote::RemoteConnectionState::Disconnected
+                );
+                let failure = failure.expect("failure must be preserved for blocked state");
+                assert_eq!(
+                    failure.kind,
+                    crate::terminal::remote::RemoteFailureKind::Disconnected
+                );
+                assert_eq!(failure.message, "PAIRED_HOST_UNAUTHORIZED");
+                assert!(descriptor.is_some());
+            }
+            other => panic!("expected RemoteStatus, got: {other:?}"),
+        }
+        pump_task.abort();
     }
 }

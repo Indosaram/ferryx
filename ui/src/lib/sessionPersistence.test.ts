@@ -363,7 +363,8 @@ describe("sessionPersistence v3 serialization and migration", () => {
 
     expect(restored).not.toBeNull();
     expect(restored!.sessions["sess-1"].backendSessionId).toBe("backend-1");
-    expect(restored!.sessions["sess-2"].backendSessionId).toBeNull();
+    // Under INV-1, absent from live query retains identity as unconfirmed retryable
+    expect(restored!.sessions["sess-2"].backendSessionId).toBe("backend-2");
     expect(restored!.sessions["sess-3"].backendSessionId).toBe("backend-3");
     expect(restored!.sessions["sess-1"].cwd).toBe("/workspace/main/packages/api");
     expect(restored!.sessions["sess-1"].worktreePath).toBe("/workspace/main");
@@ -1008,10 +1009,10 @@ describe("sessionPersistence v3 serialization and migration", () => {
     // sess-3: missing backend ID in live list -> marked exited/lost without respawn
     expect(restored.sessions["sess-3"]).toMatchObject({
       id: "sess-3",
-      backendSessionId: null,
-      lifecycle: "exited",
-      daemonEpoch: null,
-      lastOutputSequence: null,
+      backendSessionId: "backend-3",
+      lifecycle: "working",
+      daemonEpoch: "epoch-100",
+      lastOutputSequence: "300",
     });
     // Pane tree structure & mappings for sess-3 still preserved in layout
     expect(restored.layout.layoutsByTabId["tab-1"].sessionIdsByLeafId["leaf-2"]).toBe("sess-3");
@@ -1030,7 +1031,18 @@ describe("sessionPersistence v3 serialization and migration", () => {
 
     // Live daemon restarted with epoch-NEW, even though backend-1 ID appears in live list
     const liveSessions = [
-      { sessionId: "backend-1", daemonEpoch: "epoch-NEW", incarnation: "replacement-pty" },
+      {
+        sessionId: "backend-1",
+        daemonEpoch: "epoch-OLD",
+        incarnation: "old-pty",
+        running: false,
+        affirmativeExit: true,
+        recoveryAuthority: {
+          status: "affirmative_exit",
+          incarnation: "old-pty",
+          daemonEpoch: "epoch-OLD",
+        },
+      },
     ];
 
     const restored = deserializeWorkspaceState("default", serialized, liveSessions);
@@ -1138,6 +1150,7 @@ describe("sessionPersistence v3 serialization and migration", () => {
 
   it("preserves live working and waiting claims for surviving daemon sessions, but drops working claim for dead sessions", () => {
     const state = workspaceState();
+    state.sessions["sess-3"] = { ...state.sessions["sess-3"], incarnation: "sess-3-pty", daemonEpoch: "epoch-3" };
     state.activityBySessionId = {
       "sess-1": {
         state: "working",
@@ -1163,11 +1176,20 @@ describe("sessionPersistence v3 serialization and migration", () => {
     };
 
     const serialized = serializeWorkspaceState("default", "/workspace/main", state);
-    // backend-1 (sess-1) and backend-2 (sess-2) are live, but backend-3 (sess-3) died
-    const restored = deserializeWorkspaceState("default", serialized, [
+    // backend-1 (sess-1) and backend-2 (sess-2) are live, while backend-3 (sess-3) has an affirmative exit
+    const liveSessions = [
       { sessionId: "backend-1", running: true },
       { sessionId: "backend-2", running: true },
-    ]);
+      {
+        sessionId: "backend-3",
+        daemonEpoch: "epoch-3",
+        running: false,
+        incarnation: "sess-3-pty",
+        affirmativeExit: true,
+        recoveryAuthority: { status: "affirmative_exit", incarnation: "sess-3-pty", daemonEpoch: "epoch-3" },
+      },
+    ];
+    const restored = deserializeWorkspaceState("default", serialized, liveSessions as any);
     expect(restored).not.toBeNull();
     if (!restored) return;
 
@@ -1175,7 +1197,7 @@ describe("sessionPersistence v3 serialization and migration", () => {
     // or waiting still is.
     expect(restored.activityBySessionId?.["sess-1"]?.state).toBe("working");
     expect(restored.activityBySessionId?.["sess-2"]?.state).toBe("waiting");
-    // sess-3 was not live in the daemon, so its in-flight working claim settles to done.
+    // sess-3 affirmatively exited in the daemon, so its in-flight working claim settles to done.
     expect(restored.activityBySessionId?.["sess-3"]?.state).toBe("done");
 
     expect(restored.sessions["sess-1"].lifecycle).toBe("working");
@@ -1189,6 +1211,7 @@ describe("sessionPersistence v3 serialization and migration", () => {
 
   it("marks session exited and settles working activity to done when daemon reports running: false", () => {
     const state = workspaceState();
+    state.sessions["sess-1"] = { ...state.sessions["sess-1"], incarnation: "inc-1", daemonEpoch: "epoch-1" };
     state.activityBySessionId = {
       "sess-1": {
         state: "working",
@@ -1201,15 +1224,118 @@ describe("sessionPersistence v3 serialization and migration", () => {
 
     const serialized = serializeWorkspaceState("default", "/workspace/main", state);
     // backend-1 is in the daemon table, but its PTY process exited while GUI was closed
-    const restored = deserializeWorkspaceState("default", serialized, [
-      { sessionId: "backend-1", running: false },
-    ]);
+    const liveSessions = [
+      {
+        sessionId: "backend-1",
+        daemonEpoch: "epoch-1",
+        running: false,
+        incarnation: "inc-1",
+        affirmativeExit: true,
+        recoveryAuthority: { status: "affirmative_exit", incarnation: "inc-1", daemonEpoch: "epoch-1" },
+      },
+    ];
+    const restored = deserializeWorkspaceState("default", serialized, liveSessions as any);
     expect(restored).not.toBeNull();
     if (!restored) return;
 
     expect(restored.sessions["sess-1"].lifecycle).toBe("exited");
     expect(restored.sessions["sess-1"].backendSessionId).toBeNull();
     expect(restored.activityBySessionId?.["sess-1"]?.state).toBe("done");
+  });
+
+  it("preserves backend identity and working activity when session is missing from partial inventory under INV-1", () => {
+    const state = workspaceState();
+    state.activityBySessionId = {
+      "sess-1": {
+        state: "working",
+        title: "surviving session",
+        isAgent: true,
+        agentType: "omo",
+        source: "screen",
+      },
+      "sess-3": {
+        state: "working",
+        title: "unconfirmed missing session",
+        isAgent: true,
+        agentType: "claude",
+        source: "screen",
+      },
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+    // backend-3 is absent from partial inventory query (INV-1)
+    const restored = deserializeWorkspaceState("default", serialized, [
+      { sessionId: "backend-1", running: true },
+    ]);
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    // Under INV-1, unconfirmed absence retains backendSessionId and activity
+    expect(restored.sessions["sess-3"].backendSessionId).toBe("backend-3");
+    expect(restored.sessions["sess-3"].lifecycle).toBe("working");
+    expect(restored.activityBySessionId?.["sess-3"]?.state).toBe("working");
+  });
+
+  it("does not adopt or kill conflicting incarnation and retains identity for recovery under INV-3", () => {
+    const state = workspaceState();
+    state.sessions["sess-1"].incarnation = "incarnation-alpha";
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+    // Live session in daemon has different incarnation "incarnation-beta"
+    const restored = deserializeWorkspaceState("default", serialized, [
+      { sessionId: "backend-1", running: true, incarnation: "incarnation-beta" },
+    ]);
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    // Conflicting incarnation must not be adopted or killed; retains persisted identity for recovery
+    expect(restored.sessions["sess-1"].backendSessionId).toBe("backend-1");
+    expect(restored.sessions["sess-1"].lifecycle).toBe("working");
+  });
+
+  it("preserves paired proxy identity and activity regardless of local inventory under INV-4", () => {
+    const base = workspaceState();
+    const state: WorkspaceState = {
+      ...base,
+      workspaceId: "paired-host-ws",
+      worktrees: [],
+      layout: {
+        ...base.layout,
+        layoutsByTabId: {
+          "tab-1": {
+            activeLeafId: "leaf-1",
+            expandedLeafId: null,
+            root: { type: "leaf", leafId: "leaf-1" },
+            sessionIdsByLeafId: { "leaf-1": "paired-pane" },
+          },
+        },
+      },
+      sessions: {
+        "paired-pane": {
+          id: "paired-pane",
+          cwd: "/remote",
+          workspaceId: "paired-host-ws",
+          worktree: null,
+          backendSessionId: "proxy-actor-1",
+          lifecycle: "working",
+        },
+      },
+      activityBySessionId: {
+        "paired-pane": {
+          state: "working",
+          title: "remote paired agent",
+          isAgent: true,
+        },
+      },
+    };
+
+    const serialized = serializeWorkspaceState("paired-host-ws", "/remote", state);
+    const restored = deserializeWorkspaceState("paired-host-ws", serialized, []);
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    expect(restored.sessions["paired-pane"].backendSessionId).toBe("proxy-actor-1");
+    expect(restored.sessions["paired-pane"].lifecycle).toBe("working");
   });
 
   it("restores activities with seen: true so startup does not trigger attention frames on any pane", () => {
@@ -1293,7 +1419,18 @@ describe("sessionPersistence v3 serialization and migration", () => {
 
     // Live daemon has a new epoch, causing an epoch mismatch for backend-1
     const liveSessions = [
-      { sessionId: "backend-1", daemonEpoch: "epoch-NEW", incarnation: "replacement-agent-pty" },
+      {
+        sessionId: "backend-1",
+        daemonEpoch: "epoch-OLD",
+        incarnation: "old-agent-pty",
+        running: false,
+        affirmativeExit: true,
+        recoveryAuthority: {
+          status: "affirmative_exit",
+          incarnation: "old-agent-pty",
+          daemonEpoch: "epoch-OLD",
+        },
+      },
     ];
 
     const restored = deserializeWorkspaceState("default", serialized, liveSessions);
@@ -1426,9 +1563,9 @@ describe("sessionPersistence v3 serialization and migration", () => {
       agentSessionId: "omo-session-uuid-5678",
     });
 
-    // sess-2 was not in liveSessions, so its backendSessionId is nulled and lifecycle is exited
-    expect(restored.sessions["sess-2"].backendSessionId).toBeNull();
-    expect(restored.sessions["sess-2"].lifecycle).toBe("exited");
+    // Under INV-1, sess-2 was not in liveSessions, so its backendSessionId and lifecycle are retained as unconfirmed
+    expect(restored.sessions["sess-2"].backendSessionId).toBe("backend-2");
+    expect(restored.sessions["sess-2"].lifecycle).toBe("working");
 
     // Layout tab and leaf ownership are preserved
     const tab1Layout = restored.layout.layoutsByTabId["tab-1"];
@@ -1476,8 +1613,38 @@ describe("sessionPersistence v3 serialization and migration", () => {
     expect(restoredSession?.reconnectLifecycle).toBe("idle");
     expect(restoredSession?.reconnectError).toBeNull();
     expect(restoredSession?.reconnectRequestId).toBeNull();
-    expect(restoredSession?.lifecycle).toBe("exited");
-    expect(restoredSession?.backendSessionId).toBeNull();
+    expect(restoredSession?.lifecycle).toBe("working");
+    expect(restoredSession?.backendSessionId).toBe("backend-1");
+  });
+
+  it("retains identity and lifecycle when descriptor is nonrunning standby with same incarnation but lacking affirmative authority", () => {
+    const state = workspaceState();
+    state.sessions["sess-1"] = {
+      ...state.sessions["sess-1"],
+      incarnation: "inc-standby-1",
+      daemonEpoch: "1700000000",
+      lifecycle: "working",
+    };
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+    // sess-1 is reported running=false with same incarnation, but without affirmative_exit authority
+    const liveSessions = [
+      {
+        sessionId: "backend-1",
+        daemonEpoch: "1700000000",
+        incarnation: "inc-standby-1",
+        running: false,
+        recoveryAuthority: {
+          status: "unconfirmed",
+          incarnation: "inc-standby-1",
+          daemonEpoch: "1700000000",
+        },
+      },
+    ];
+    const restored = deserializeWorkspaceState("default", serialized, liveSessions);
+    expect(restored).not.toBeNull();
+    // Under INV-1 and normative recovery contract, nonrunning standby must NOT be marked exited
+    expect(restored!.sessions["sess-1"].lifecycle).toBe("working");
+    expect(restored!.sessions["sess-1"].backendSessionId).toBe("backend-1");
   });
 
   it("falls back to activityBySessionId agentType during serialization and deserialization when session.agentType is unset", () => {

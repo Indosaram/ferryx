@@ -1400,6 +1400,9 @@ export function buildWindowsNewPaneScript(pid, options = {}) {
     '  $chosenIndex = [int]$actionableIndexes[0];',
     '  $diag.chosen = $candidates[$chosenIndex];',
     '  $chosen = $elements[$chosenIndex];',
+    ...(options.readOnly === true ? [
+      "  $diag.result = 'PANE_TARGET';",
+    ] : [
     '  try {',
     '    $invoke = $chosen.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern);',
     '    $invoke.Invoke();',
@@ -1408,6 +1411,7 @@ export function buildWindowsNewPaneScript(pid, options = {}) {
     "    $diag.failure = 'PANE_AFFORDANCE_DISABLED';",
     '    $diag.detail = "InvokePattern failed: " + $_.Exception.Message;',
     '  }',
+    ]),
     '}',
     'Emit;',
   ].join('\n');

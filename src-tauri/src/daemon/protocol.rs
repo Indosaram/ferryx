@@ -311,6 +311,22 @@ pub mod base64_serde {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RecoveryAuthorityEvidence {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_epoch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_paired_proxy: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DaemonSessionDetails {
     pub session_id: String,
     pub workspace_id: Option<String>,
@@ -346,6 +362,14 @@ pub struct DaemonSessionDetails {
     /// Absent from older daemons, which decode as None (recoverable-unconfirmed legacy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incarnation: Option<String>,
+    /// Optional affirmative exit or recovery authority evidence.
+    /// Absent from older daemons, which decode as None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_authority: Option<RecoveryAuthorityEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_paired_proxy: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
 }
 
 impl DaemonSessionDetails {
@@ -355,6 +379,22 @@ impl DaemonSessionDetails {
 
     pub fn matches_incarnation(&self, expected: &str) -> bool {
         self.incarnation.as_deref() == Some(expected)
+    }
+
+    pub fn is_affirmative_exit(&self) -> bool {
+        self.recovery_authority
+            .as_ref()
+            .map(|a| a.status == "affirmative_exit")
+            .unwrap_or(false)
+    }
+
+    pub fn is_paired_proxy_actor(&self) -> bool {
+        self.is_paired_proxy.unwrap_or(false)
+            || self
+                .recovery_authority
+                .as_ref()
+                .and_then(|a| a.is_paired_proxy)
+                .unwrap_or(false)
     }
 
     pub fn new(
@@ -387,6 +427,9 @@ impl DaemonSessionDetails {
             registry_suspended: None,
             suspension_source: None,
             incarnation: None,
+            recovery_authority: None,
+            is_paired_proxy: None,
+            generation: None,
         }
     }
 }
@@ -542,6 +585,39 @@ pub enum DaemonRequest {
     RemoteSessionDetails {
         session_id: String,
     },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaCreateRemoteSession {
+        config: crate::terminal::remote::RemoteSessionConfig,
+        params: crate::ssh::bridge::SpawnParams,
+        client_request_id: String,
+    },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaRemoteOwnerMutation {
+        session_id: String,
+        operation: String,
+        generation: Option<u64>,
+        #[serde(default, with = "base64_serde")]
+        data: Vec<u8>,
+    },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaRemoteOwnerAudit {
+        session_id: String,
+    },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaRemoteOwnerWaitState {
+        session_id: String,
+        state: crate::terminal::remote::RemoteConnectionState,
+    },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaRemoteOwnerWaitRefusals { session_id: String, count: u32 },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaRemoteOwnerReleaseFaultRoute { session_id: String },
     #[serde(rename_all = "camelCase")]
     DetectManualSsh {
         session_id: String,
@@ -595,6 +671,70 @@ pub enum DaemonRequest {
     },
     PairedTerminalDetach {
         session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    RetryPairedSession {
+        backend_session_id: String,
+        daemon_epoch: String,
+        incarnation: String,
+    },
+    PairedRecoveryOutcome { backend_session_id: String },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedOwnerAudit { backend_session_id: String },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedOwnerWaitState { backend_session_id: String, state: String },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedOwnerRetry { backend_session_id: String, daemon_epoch: String, incarnation: String },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedDropLoopbackTransport { backend_session_id: String },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedCancelPendingDial { backend_session_id: String },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedRouteReceipt { backend_session_id: String },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedColdDescriptor { backend_session_id: String },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedDialAudit { backend_session_id: String },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedMutation {
+        backend_session_id: String,
+        daemon_epoch: String,
+        incarnation: String,
+        generation: u64,
+        operation: String,
+        intent_id: String,
+        #[serde(default, with = "base64_serde")]
+        data: Vec<u8>,
+    },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedHostDeliveryArmFence {
+        target: crate::remote::machine_protocol::RemoteTerminalTarget,
+        device_id: String,
+        generation: crate::scoped_contracts::Epoch,
+        expected_write_multiplicity: Option<usize>,
+        expected_signal_multiplicity: Option<usize>,
+    },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedHostDeliverySealFence {
+        fence_id: String,
+        target: crate::remote::machine_protocol::RemoteTerminalTarget,
+    },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedHostDeliveryAudit {
+        target: crate::remote::machine_protocol::RemoteTerminalTarget,
+        fence_id: String,
     },
     #[serde(rename_all = "camelCase")]
     PairedTerminalDescriptor {
@@ -706,6 +846,15 @@ pub enum DaemonResponse {
         session_id: String,
         generation: crate::scoped_contracts::Epoch,
     },
+    #[serde(rename_all = "camelCase")]
+    RetryPairedSessionResult {
+        admitted: bool,
+        owner_unavailable: bool,
+        stale_tuple: bool,
+        blocked: bool,
+        affirmative_exit: bool,
+    },
+    PairedRecoveryOutcomeResult { outcome: Option<crate::terminal::paired_runtime::PairedRecoveryOutcome> },
     #[serde(rename_all = "camelCase")]
     PairedTerminalDescriptorOk {
         descriptor: Option<crate::terminal::paired_daemon::Descriptor>,
@@ -825,11 +974,66 @@ pub enum DaemonResponse {
         details: Option<crate::terminal::remote::RemoteSessionDetails>,
         legacy_direct_ssh: bool,
     },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaCreateRemoteSessionOk {
+        descriptor: crate::terminal::remote::RemoteSessionDescriptor,
+        details: crate::terminal::remote::RemoteSessionDetails,
+    },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaRemoteOwnerAuditOk {
+        events: Vec<crate::terminal::remote::TransportQaOwnerEvent>,
+        details: crate::terminal::remote::RemoteSessionDetails,
+    },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaRemoteOwnerWaitStateOk {
+        details: crate::terminal::remote::RemoteSessionDetails,
+    },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaRemoteOwnerWaitRefusalsOk {
+        details: crate::terminal::remote::RemoteSessionDetails,
+    },
+    #[cfg(feature = "local-split-qa")]
+    QaRemoteOwnerReleaseFaultRouteOk { details: crate::terminal::remote::RemoteSessionDetails },
     #[serde(rename_all = "camelCase")]
     RemoteSessionError {
         failure: crate::terminal::remote::RemoteFailure,
     },
     RetryRemoteSessionOk,
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedOwnerAuditOk {
+        outcome: String,
+        daemon_epoch: String,
+        incarnation: String,
+        generation: Option<u64>,
+        descriptor: Option<crate::terminal::paired_daemon::Descriptor>,
+    },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedOwnerWaitStateOk { outcome: String, generation: Option<u64> },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedOwnerRetryOk { result: crate::terminal::paired_runtime::RetryOwnedResult },
+    #[cfg(feature = "local-split-qa")]
+    QaPairedRouteReceiptOk { receipt: crate::terminal::paired_daemon::PairedRouteReceipt },
+    #[cfg(feature = "local-split-qa")]
+    QaPairedDialAuditOk { audit: crate::terminal::paired_runtime::PairedDialAudit },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedMutationOk { intent_id: String },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedHostDeliveryArmFenceOk { fence_id: String },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedHostDeliverySealFenceOk { fence: serde_json::Value },
+    #[cfg(feature = "local-split-qa")]
+    #[serde(rename_all = "camelCase")]
+    QaPairedHostDeliveryAuditOk { audit: serde_json::Value },
     #[serde(rename_all = "camelCase")]
     MachineSessionDetailOk {
         detail: crate::remote::machine_protocol::SessionDetail,
@@ -1012,6 +1216,8 @@ pub enum DaemonStreamMessage<'a> {
         generation: u64,
         failure: Option<crate::terminal::remote::RemoteFailure>,
         replay_gap: Option<crate::terminal::remote::RemoteReplayGap>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        descriptor: Option<serde_json::Value>,
     },
     #[serde(rename_all = "camelCase")]
     Exit {
@@ -1331,6 +1537,30 @@ mod tests {
             }
             _ => panic!("unexpected response variant"),
         }
+    }
+
+    #[test]
+    fn retry_paired_session_protocol_round_trip_preserves_tuple_and_exclusive_outcomes() {
+        let request = DaemonRequest::RetryPairedSession {
+            backend_session_id: "daemon-session:host/session".into(),
+            daemon_epoch: "10".into(),
+            incarnation: "actor-incarnation".into(),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["type"], "retryPairedSession");
+        assert_eq!(json["backendSessionId"], "daemon-session:host/session");
+        assert_eq!(json["daemonEpoch"], "10");
+        assert_eq!(json["incarnation"], "actor-incarnation");
+        let decoded: DaemonRequest = serde_json::from_value(json).unwrap();
+        assert!(matches!(decoded, DaemonRequest::RetryPairedSession { backend_session_id, daemon_epoch, incarnation }
+            if backend_session_id == "daemon-session:host/session" && daemon_epoch == "10" && incarnation == "actor-incarnation"));
+
+        let response = DaemonResponse::RetryPairedSessionResult {
+            admitted: false, owner_unavailable: false, stale_tuple: true, blocked: false, affirmative_exit: false,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["type"], "retryPairedSessionResult");
+        assert_eq!(value["staleTuple"], true);
     }
 
     #[test]
@@ -1893,6 +2123,9 @@ mod tests {
                 registry_suspended: None,
                 suspension_source: None,
                 incarnation: None,
+                recovery_authority: None,
+                is_paired_proxy: None,
+                generation: None,
             },
         };
         let desc_resp_json = serde_json::to_string(&desc_resp).expect("serialize describe resp");

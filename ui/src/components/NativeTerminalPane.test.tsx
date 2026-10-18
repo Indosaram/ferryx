@@ -805,6 +805,17 @@ describe("snapBoundsToDevicePixels", () => {
 });
 
 describe("NativeTerminalPane geometry reporting contract", () => {
+  const PRESENTED = {
+    presented: true, cursorCol: 2, cursorRow: 3, cellWidthPx: 10, cellHeightPx: 20,
+  };
+  type NativeTerminalReceipt = typeof PRESENTED;
+
+  function deferred<T = void>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((res) => { resolve = res; });
+    return { promise, resolve };
+  }
+
   let originalPixelRatio: number;
   let originalGetBoundingClientRect: typeof HTMLElement.prototype.getBoundingClientRect;
 
@@ -1367,6 +1378,19 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     const firstSession = createSession("term-session-1");
     const secondSession = createSession("term-session-2");
     const { rerender } = await renderNative(<NativeTerminalPane sessionId={firstSession.id} session={firstSession} />);
+    const replacementBounds = deferred<NativeTerminalReceipt>();
+    const replacementPresented = deferred();
+    const outgoingDetached = deferred();
+    const invocation = tauriCoreMocks.invoke.getMockImplementation();
+    tauriCoreMocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "cmd_native_terminal_set_bounds" && args?.sessionId === secondSession.backendSessionId) {
+        const receipt = await replacementBounds.promise;
+        if (receipt?.presented === true) replacementPresented.resolve();
+        return receipt;
+      }
+      if (command === "cmd_native_terminal_detach" && args?.sessionId === firstSession.backendSessionId) outgoingDetached.resolve();
+      return invocation?.(command, args);
+    });
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
@@ -1378,16 +1402,16 @@ describe("NativeTerminalPane geometry reporting contract", () => {
 
     rerender(<NativeTerminalPane sessionId={secondSession.id} session={secondSession} />);
 
-    await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
-        "cmd_native_terminal_set_bounds",
-        expect.objectContaining({ sessionId: secondSession.backendSessionId }),
-      );
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_detach", {
-        attachTuple: expectedNativeBinding(firstSession.backendSessionId),
-        sessionId: firstSession.backendSessionId,
-      });
+    await waitFor(() => expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+      "cmd_native_terminal_set_bounds",
+      expect.objectContaining({ sessionId: secondSession.backendSessionId }),
+    ));
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_detach", {
+      attachTuple: expectedNativeBinding(firstSession.backendSessionId),
+      sessionId: firstSession.backendSessionId,
     });
+    await act(async () => { replacementBounds.resolve({ ...PRESENTED, presented: true }); await replacementPresented.promise; });
+    await act(async () => { await outgoingDetached.promise; });
 
     const commands = tauriCoreMocks.invoke.mock.calls.map(([command]) => command);
     expect(commands.indexOf("cmd_native_terminal_set_bounds")).toBeLessThan(
@@ -1399,10 +1423,13 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     const firstSession = createSession("term-session-1");
     const secondSession = createSession("term-session-2");
     const thirdSession = createSession("term-session-3");
-    let resolveSecondBounds!: (value: undefined) => void;
-    const secondBounds = new Promise<undefined>((resolve) => {
+    let resolveSecondBounds!: (value: NativeTerminalReceipt) => void;
+    const secondBounds = new Promise<NativeTerminalReceipt>((resolve) => {
       resolveSecondBounds = resolve;
     });
+    const thirdBounds = deferred<NativeTerminalReceipt>();
+    const thirdPresented = deferred<NativeTerminalReceipt>();
+    const detachedSessions = new Set<string>();
     tauriCoreMocks.invoke.mockImplementation(async (command, args) => {
       if (
         command === "cmd_native_terminal_set_bounds" &&
@@ -1410,6 +1437,12 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       ) {
         return secondBounds;
       }
+      if (command === "cmd_native_terminal_set_bounds" && args?.sessionId === thirdSession.backendSessionId) {
+        const receipt = await thirdBounds.promise;
+        if (receipt.presented === true) thirdPresented.resolve(receipt);
+        return receipt;
+      }
+      if (command === "cmd_native_terminal_detach") detachedSessions.add(args?.sessionId);
       return undefined;
     });
 
@@ -1435,26 +1468,23 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     });
 
     rerender(<NativeTerminalPane sessionId={thirdSession.id} session={thirdSession} />);
+    await waitFor(() => expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+      "cmd_native_terminal_set_bounds",
+      expect.objectContaining({ sessionId: thirdSession.backendSessionId }),
+    ));
+    expect(detachedSessions).not.toContain(firstSession.backendSessionId);
+    expect(detachedSessions).not.toContain(secondSession.backendSessionId);
+    await act(async () => { thirdBounds.resolve({ ...PRESENTED, presented: true }); await thirdPresented.promise; });
     await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
-        "cmd_native_terminal_set_bounds",
-        expect.objectContaining({ sessionId: thirdSession.backendSessionId }),
-      );
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_detach", {
-        attachTuple: expectedNativeBinding(firstSession.backendSessionId),
-        sessionId: firstSession.backendSessionId,
-      });
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_detach", {
-        attachTuple: expectedNativeBinding(secondSession.backendSessionId),
-        sessionId: secondSession.backendSessionId,
-      });
+      expect(detachedSessions).toContain(firstSession.backendSessionId);
+      expect(detachedSessions).toContain(secondSession.backendSessionId);
     });
 
     const commands = tauriCoreMocks.invoke.mock.calls.map(([command]) => command);
     const thirdBoundsIndex = commands.lastIndexOf("cmd_native_terminal_set_bounds");
     expect(thirdBoundsIndex).toBeLessThan(commands.indexOf("cmd_native_terminal_detach"));
 
-    resolveSecondBounds(undefined);
+    resolveSecondBounds({ ...PRESENTED, presented: true });
   });
 
   it("does not report Tauri geometry bounds in remote/web non-Tauri mode", async () => {
@@ -5890,7 +5920,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     // 2. Native focus must NOT be sent when backendSessionId is null
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     act(() => {
-      textarea.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      textarea.focus();
     });
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_set_focus", expect.anything());
 
@@ -5925,6 +5955,10 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       }),
     );
 
+    act(() => {
+      textarea.focus();
+    });
+
     await waitFor(() => {
       expect(document.activeElement).toBe(textarea);
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_focus", {
@@ -5956,6 +5990,17 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     rightInput.focus();
     tauriCoreMocks.invoke.mockClear();
 
+    let resolveAttach: () => void = () => {};
+    const attachDeferred = new Promise<void>((resolve) => {
+      resolveAttach = resolve;
+    });
+    tauriCoreMocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "cmd_native_terminal_attach" && args?.sessionId === "backend-resumed-left") {
+        await attachDeferred;
+      }
+      return undefined;
+    });
+
     rerender(
       <div>
         <NativeTerminalPane
@@ -5966,7 +6011,19 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       </div>,
     );
 
-    await waitFor(() => expect(document.activeElement).toBe(leftInput));
+    // Release deferred attach and wait for exact attach completion (signaled by set_bounds)
+    await act(async () => {
+      resolveAttach();
+    });
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+        "cmd_native_terminal_set_bounds",
+        expect.objectContaining({ sessionId: "backend-resumed-left" }),
+      );
+    });
+
+    // Rebind must not steal focus from the user's currently focused element
+    expect(document.activeElement).toBe(rightInput);
     expect(tauriCoreMocks.invoke.mock.calls.filter(
       ([command, args]) => command === "cmd_native_terminal_attach" && args?.sessionId === "backend-resumed-left",
     )).toHaveLength(1);
@@ -5975,7 +6032,9 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       sessionId: "backend-right",
     });
 
+    leftInput.focus();
     tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockImplementation(async () => undefined);
     act(() => {
       leftInput.value = "left only";
       leftInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -5989,6 +6048,61 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       "cmd_native_terminal_send_input",
       expect.objectContaining({ sessionId: "backend-right" }),
     );
+  });
+
+  it("preserves non-terminal button focus when a background pane receives a reconnect binding", async () => {
+    const leftCold = createSession("frontend-left-btn", null);
+    const rightLive = createSession("frontend-right-btn", "backend-right-btn");
+
+    const toolbarButton = document.createElement("button");
+    document.body.appendChild(toolbarButton);
+    toolbarButton.focus();
+    expect(document.activeElement).toBe(toolbarButton);
+
+    const { rerender } = await renderNative(<div>
+        <NativeTerminalPane sessionId={leftCold.id} session={leftCold} />
+        <NativeTerminalPane sessionId={rightLive.id} session={rightLive} />
+      </div>);
+
+    toolbarButton.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    let resolveAttach: () => void = () => {};
+    const attachDeferred = new Promise<void>((resolve) => {
+      resolveAttach = resolve;
+    });
+    tauriCoreMocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "cmd_native_terminal_attach" && args?.sessionId === "backend-resumed-left-btn") {
+        await attachDeferred;
+      }
+      return undefined;
+    });
+
+    rerender(
+      <div>
+        <NativeTerminalPane
+          sessionId={leftCold.id}
+          session={{ ...leftCold, backendSessionId: "backend-resumed-left-btn" }}
+        />
+        <NativeTerminalPane sessionId={rightLive.id} session={rightLive} />
+      </div>,
+    );
+
+    // Release deferred attach and wait for exact attach completion (signaled by set_bounds)
+    await act(async () => {
+      resolveAttach();
+    });
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+        "cmd_native_terminal_set_bounds",
+        expect.objectContaining({ sessionId: "backend-resumed-left-btn" }),
+      );
+    });
+
+    // Toolbar button stays in the DOM through attach completion and its focus is preserved
+    expect(document.activeElement).toBe(toolbarButton);
+    toolbarButton.remove();
+    tauriCoreMocks.invoke.mockImplementation(async () => undefined);
   });
 
   it("resets daemon replay before a reconnect result is bound", async () => {
@@ -6040,7 +6154,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
         daemonEpoch: "epoch-new",
         frontendSessionId: coldSession.id,
         paneIdentity: coldSession.id,
-        bindingKey: "backend-resumed-1:epoch-new:0:",
+        bindingKey: "backend-resumed-1:epoch-new:0::incarnation-new",
         attemptGeneration: 1,
       },
     });
@@ -7570,7 +7684,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     view2.unmount();
 
     // Scenario 3: quarantined (input failure; the recovery reattach finds the session missing)
-    const quarantineSession = createSession("term-session-drop-quarantine");
+    const quarantineSession = {
+      ...createSession("term-session-drop-quarantine"),
+      daemonEpoch: "epoch-quarantine",
+      incarnation: "inc-quarantine",
+    };
     let quarantineAttachCalls = 0;
     tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
       if (cmd === "cmd_native_terminal_send_input") {
@@ -7594,6 +7712,9 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
             sessionId: "term-session-drop-quarantine",
             source: "daemon_attach",
             kind: "session_not_found",
+            affirmativeExit: true,
+            daemonEpoch: "epoch-quarantine",
+            incarnation: "inc-quarantine",
           },
         });
         throw err;

@@ -60,6 +60,8 @@ pub struct HostView {
     pub online: bool,
     /// Set only when the user explicitly links a saved SSH host to this machine.
     pub ssh_host_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 // Deliberately no Debug or outward Serialize on inputs or credential leases.
@@ -97,6 +99,8 @@ struct Record {
     auth_status: AuthStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ssh_host_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device_id: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +257,7 @@ fn pairing_record(
                 GrantScope::Mirror => AuthStatus::NeedsMachineGrant,
             },
             ssh_host_id: None,
+            device_id: None,
         },
     ))
 }
@@ -282,6 +287,11 @@ fn load(path: &Path, loopback_http: bool) -> Result<Disk> {
             || disk.generations.get(id) != Some(&row.generation)
         {
             return Err(InventoryError::Unavailable);
+        }
+        if let Some(device_id) = &row.device_id {
+            if !valid_text(device_id, 256) {
+                return Err(InventoryError::Unavailable);
+            }
         }
         match (&row.device_token, row.auth_status, row.grant_scope) {
             (Some(token), AuthStatus::Paired, GrantScope::Machine)
@@ -333,6 +343,7 @@ impl Inventory {
                 },
                 online: !self.fenced && self.online.get(id).copied().unwrap_or(true),
                 ssh_host_id: row.ssh_host_id.clone(),
+                device_id: row.device_id.clone(),
             })
             .collect()
     }
@@ -455,10 +466,20 @@ impl Inventory {
             .map(Epoch)
             .ok_or(InventoryError::GenerationExhausted)
     }
-    /// Accept only an issuer-verified pairing result, not a renderer-supplied scope.
-    pub fn pair(&mut self, pairing: &Pairing) -> Result<HostView> {
+    /// Accept only an issuer-verified pairing result with optional authenticated device identity.
+    pub fn pair_with_device(
+        &mut self,
+        pairing: &Pairing,
+        device_id: Option<String>,
+    ) -> Result<HostView> {
         let (id, mut row) = pairing_record(pairing, Epoch(1), self.loopback_http)?;
+        if let Some(dev_id) = &device_id {
+            if !valid_text(dev_id, 256) {
+                return Err(InventoryError::InvalidInput);
+            }
+        }
         row.generation = self.next_generation(&id)?;
+        row.device_id = device_id;
         let mut candidate = self.disk.clone();
         candidate.generations.insert(id.clone(), row.generation);
         candidate.hosts.insert(id.clone(), row);
@@ -467,6 +488,11 @@ impl Inventory {
             .into_iter()
             .find(|row| row.host_id == id)
             .ok_or(InventoryError::Unavailable)
+    }
+
+    /// Accept only an issuer-verified pairing result, not a renderer-supplied scope.
+    pub fn pair(&mut self, pairing: &Pairing) -> Result<HostView> {
+        self.pair_with_device(pairing, None)
     }
     pub fn forget(&mut self, id: &str, generation: Epoch) -> Result<()> {
         self.validate_generation(id, generation)?;
@@ -511,6 +537,9 @@ impl Inventory {
         }
         if let Some(existing) = self.disk.hosts.get(&id) {
             record.generation = existing.generation;
+            // A legacy credential carries no device identity; compare authority fields only,
+            // keeping the authenticated device id recorded by the native pairing.
+            record.device_id = existing.device_id.clone();
             if existing != &record {
                 return Err(InventoryError::MigrationPending);
             }

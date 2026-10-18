@@ -3002,6 +3002,9 @@ impl DaemonSessionService {
                     // remote attach was rejected as unprovable (`Attach binding incarnation cannot
                     // be proven`, ipc/terminal.rs).
                     incarnation: Some(d.client_request_id.clone()),
+                    recovery_authority: None,
+                    is_paired_proxy: Some(false),
+                    generation: Some(details.generation.to_string()),
                 },
             };
         }
@@ -3012,11 +3015,21 @@ impl DaemonSessionService {
                     .output_hub()
                     .session_sequence_range(session_id)
                     .unwrap_or((None, None));
-                let running = self.terminal_service.paired().contains(session_id);
+                let status = self.terminal_service.paired().recovery_status(session_id);
+                let (outcome, generation, exit_code, reason) = status.unwrap_or_else(|| ("owner_unavailable".into(), None, None, None));
+                let running = outcome == "proxy_attached";
                 // The proxy actor's own lifetime incarnation. Reporting `None` here left the
                 // attach fence unable to prove identity, so every paired attach was rejected as
                 // unprovable (`Attach binding incarnation cannot be proven`, ipc/terminal.rs).
                 let incarnation = self.terminal_service.paired().session_incarnation(session_id);
+                let recovery_authority = Some(super::protocol::RecoveryAuthorityEvidence {
+                    status: outcome,
+                    exit_code,
+                    exit_reason: reason,
+                    incarnation: incarnation.clone(),
+                    daemon_epoch: None,
+                    is_paired_proxy: Some(true),
+                });
                 return DaemonResponse::DescribeSessionOk {
                     daemon_epoch: None,
                     session: DaemonSessionDetails {
@@ -3037,6 +3050,9 @@ impl DaemonSessionService {
                         registry_suspended: None,
                         suspension_source: None,
                         incarnation,
+                        recovery_authority,
+                        is_paired_proxy: Some(true),
+                        generation: generation.map(|g| g.0.to_string()),
                     },
                 };
             }
@@ -3049,15 +3065,42 @@ impl DaemonSessionService {
                     "source": "daemon_describe",
                     "kind": "session_not_found",
                     "sessionId": session_id,
+                    "recoveryOutcome": "retryable",
+                    "reason": "scoped_missing",
                 })),
             };
         };
 
         let (cols, rows) = pty_session.get_size();
+        let pty_state = pty_session.state();
         let running = matches!(
-            pty_session.state(),
+            pty_state,
             PtySessionState::Starting | PtySessionState::Running
         );
+        let exit_code = match pty_state {
+            PtySessionState::Exited { code } => code,
+            _ => None,
+        };
+        let is_affirmative_exit = matches!(
+            pty_state,
+            PtySessionState::Exited { .. } | PtySessionState::Failed { .. }
+        );
+        let status = if running {
+            "running"
+        } else if is_affirmative_exit {
+            "affirmative_exit"
+        } else {
+            "unconfirmed"
+        };
+        let pty_incarnation = pty_session.incarnation().map(str::to_owned);
+        let recovery_authority = Some(super::protocol::RecoveryAuthorityEvidence {
+            status: status.to_string(),
+            exit_code,
+            exit_reason: None,
+            incarnation: pty_incarnation.clone(),
+            daemon_epoch: None,
+            is_paired_proxy: Some(false),
+        });
         let (start_sequence, end_sequence) = self
             .terminal_service
             .output_hub()
@@ -3120,7 +3163,10 @@ impl DaemonSessionService {
                     }
                     .to_string(),
                 ),
-                incarnation: pty_session.incarnation().map(str::to_owned),
+                incarnation: pty_incarnation,
+                recovery_authority,
+                is_paired_proxy: Some(false),
+                generation: None,
             },
         }
     }

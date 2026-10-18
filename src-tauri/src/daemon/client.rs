@@ -462,6 +462,8 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
             | DaemonRequest::PairedTerminalDescriptor { .. }
+            | DaemonRequest::RetryPairedSession { .. }
+            | DaemonRequest::PairedRecoveryOutcome { .. }
             | DaemonRequest::UpgradeBinary { .. }
             | DaemonRequest::RemoteSessionDetails { .. }
             | DaemonRequest::RetryRemoteSession { .. }
@@ -511,6 +513,44 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::PairedHostList => "pairedHostList",
         DaemonRequest::PairedTerminalReattach { .. } => "pairedTerminalReattach",
         DaemonRequest::PairedTerminalDetach { .. } => "pairedTerminalDetach",
+        DaemonRequest::RetryPairedSession { .. } => "retryPairedSession",
+        DaemonRequest::PairedRecoveryOutcome { .. } => "pairedRecoveryOutcome",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaPairedOwnerAudit { .. } => "qaPairedOwnerAudit",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaPairedOwnerWaitState { .. } => "qaPairedOwnerWaitState",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaPairedOwnerRetry { .. } => "qaPairedOwnerRetry",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaPairedDropLoopbackTransport { .. } => "qaPairedDropLoopbackTransport",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaPairedCancelPendingDial { .. } => "qaPairedCancelPendingDial",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaPairedRouteReceipt { .. } => "qaPairedRouteReceipt",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaPairedColdDescriptor { .. } => "qaPairedColdDescriptor",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaPairedDialAudit { .. } => "qaPairedDialAudit",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaPairedMutation { .. } => "qaPairedMutation",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaPairedHostDeliveryArmFence { .. } => "qaPairedHostDeliveryArmFence",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaPairedHostDeliverySealFence { .. } => "qaPairedHostDeliverySealFence",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaPairedHostDeliveryAudit { .. } => "qaPairedHostDeliveryAudit",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaCreateRemoteSession { .. } => "qaCreateRemoteSession",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaRemoteOwnerMutation { .. } => "qaRemoteOwnerMutation",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaRemoteOwnerAudit { .. } => "qaRemoteOwnerAudit",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaRemoteOwnerWaitState { .. } => "qaRemoteOwnerWaitState",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaRemoteOwnerWaitRefusals { .. } => "qaRemoteOwnerWaitRefusals",
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaRemoteOwnerReleaseFaultRoute { .. } => "qaRemoteOwnerReleaseFaultRoute",
         DaemonRequest::PairedTerminalDescriptor { .. } => "pairedTerminalDescriptor",
         DaemonRequest::PairedHostOperation { .. } => "pairedHostOperation",
         DaemonRequest::PairedHostRead { .. } => "pairedHostRead",
@@ -1115,7 +1155,7 @@ impl DaemonClient {
 
     pub fn new() -> Self {
         Self {
-            socket_path: get_socket_path(),
+            socket_path: Self::resolve_default_socket_path(),
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
             spawn_connection: Arc::new(Mutex::new(None)),
@@ -1833,6 +1873,23 @@ impl DaemonClient {
             _ => Err(ClientError::local("PAIRED_PROXY_UNAVAILABLE")),
         }
     }
+
+    pub async fn retry_paired_session(
+        &self,
+        backend_session_id: String,
+        daemon_epoch: String,
+        incarnation: String,
+    ) -> Result<DaemonResponse, IpcError> {
+        self.paired_host_request(DaemonRequest::RetryPairedSession {
+            backend_session_id,
+            daemon_epoch,
+            incarnation,
+        }).await.map_err(|error| IpcError::new(IpcErrorCode::IoError, error.message))
+    }
+    pub async fn paired_recovery_outcome(&self, backend_session_id: String) -> Result<DaemonResponse, IpcError> {
+        self.paired_host_request(DaemonRequest::PairedRecoveryOutcome { backend_session_id })
+            .await.map_err(|error| IpcError::new(IpcErrorCode::IoError, error.message))
+    }
     pub async fn paired_terminal_detach(
         &self,
         session_id: String,
@@ -2066,6 +2123,14 @@ impl DaemonClient {
     }
 
     fn validate_existing_socket_path(path: &Path) -> Result<(), IpcError> {
+        #[cfg(feature = "local-split-qa")]
+        {
+            if let Some(forwarder) = Self::resolve_qa_forwarder_socket_path() {
+                if path == forwarder {
+                    return Ok(());
+                }
+            }
+        }
         // `new_with_socket` is a dependency-injection hook used by tests and local harnesses
         // with arbitrary temporary UDS paths. Section-9 trust requirements govern the fixed
         // production runtime endpoint, so do not impose `/tmp/rorca-{uid}` directory-mode
@@ -2098,6 +2163,84 @@ impl DaemonClient {
             .parse()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         DaemonStream::connect(format!("127.0.0.1:{port}")).await
+    }
+
+    #[cfg(feature = "local-split-qa")]
+    pub fn resolve_qa_forwarder_socket_path_from(
+        forwarder_override: Option<&Path>,
+        data_dir: Option<&Path>,
+        runtime_dir: Option<&Path>,
+    ) -> Option<PathBuf> {
+        let path = forwarder_override?;
+        let data_path = data_dir?;
+        let _runtime_path = runtime_dir?;
+
+        let parent = path.parent()?;
+        let Ok(canonical_parent) = parent.canonicalize() else {
+            return None;
+        };
+        let Ok(canonical_data) = data_path.canonicalize() else {
+            return None;
+        };
+
+        let Some(profile_dir) = canonical_data.parent() else {
+            return None;
+        };
+        if profile_dir == Path::new("/") || !canonical_parent.starts_with(profile_dir) {
+            return None;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let Ok(meta) = fs::metadata(&canonical_parent) else {
+                return None;
+            };
+            let current_uid = unsafe { libc::getuid() };
+            if meta.uid() != current_uid {
+                return None;
+            }
+            if let Ok(symlink_meta) = fs::symlink_metadata(&path) {
+                if symlink_meta.file_type().is_symlink() || symlink_meta.uid() != current_uid {
+                    return None;
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            if !canonical_parent.exists() {
+                return None;
+            }
+        }
+
+        Some(path.to_path_buf())
+    }
+
+    #[cfg(feature = "local-split-qa")]
+    pub fn resolve_qa_forwarder_socket_path() -> Option<PathBuf> {
+        let forwarder_raw = std::env::var_os("FERRYX_FORWARDER_SOCKET")?;
+        if forwarder_raw.is_empty() {
+            return None;
+        }
+        let data_raw = std::env::var_os("FERRYX_DATA_DIR")?;
+        let runtime_raw = std::env::var_os("FERRYX_RUNTIME_DIR")?;
+
+        Self::resolve_qa_forwarder_socket_path_from(
+            Some(Path::new(&forwarder_raw)),
+            Some(Path::new(&data_raw)),
+            Some(Path::new(&runtime_raw)),
+        )
+    }
+
+    pub(crate) fn resolve_default_socket_path() -> PathBuf {
+        #[cfg(feature = "local-split-qa")]
+        {
+            if let Some(forwarder) = Self::resolve_qa_forwarder_socket_path() {
+                return forwarder;
+            }
+        }
+        get_socket_path()
     }
 
     fn upgrade_rpc_client(&self) -> Self {
@@ -8017,5 +8160,47 @@ mod local_split_transport_tests {
         tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(peer, action); }).await.unwrap();
         drop(fixture.listener);
         fixture.root.close().unwrap();
+    }
+
+    #[cfg(all(test, feature = "local-split-qa"))]
+    #[test]
+    fn qa_forwarder_socket_resolves_under_validated_task_owned_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("task-profile");
+        let data = profile.join("data");
+        let runtime = profile.join("runtime");
+        let forwarder = profile.join("forwarder");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(&forwarder).unwrap();
+        let socket = forwarder.join("daemon.sock");
+
+        let resolved = DaemonClient::resolve_qa_forwarder_socket_path_from(
+            Some(&socket),
+            Some(&data),
+            Some(&runtime),
+        );
+        assert_eq!(resolved, Some(socket.clone()));
+    }
+
+    #[cfg(all(test, feature = "local-split-qa"))]
+    #[test]
+    fn qa_forwarder_socket_rejects_paths_outside_task_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("task-profile");
+        let data = profile.join("data");
+        let runtime = profile.join("runtime");
+        let outside = root.path().join("outside-forwarder");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let socket = outside.join("daemon.sock");
+
+        let resolved = DaemonClient::resolve_qa_forwarder_socket_path_from(
+            Some(&socket),
+            Some(&data),
+            Some(&runtime),
+        );
+        assert_eq!(resolved, None);
     }
 }

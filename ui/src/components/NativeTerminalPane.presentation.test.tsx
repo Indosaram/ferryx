@@ -107,7 +107,7 @@ describe("native terminal presentation retention", () => {
     // Given: backend replacement retains the previous completed attachment tuple.
     const oldTuple = {
       backendSessionId: "backend-a", incarnation: "life-a", daemonEpoch: "epoch-a",
-      frontendSessionId: "pane-a", paneIdentity: "pane-a", bindingKey: "backend-a:epoch-a:0:", attemptGeneration: 3,
+      frontendSessionId: "pane-a", paneIdentity: "pane-a", bindingKey: "backend-a:epoch-a:0::life-a", attemptGeneration: 3,
     };
     const owner: TerminalSession = {
       ...session("backend-b"), incarnation: "life-b", daemonEpoch: "epoch-b",
@@ -124,7 +124,7 @@ describe("native terminal presentation retention", () => {
     // Then: persistence, dispatch, and presentation use the same fresh seven-field identity.
     const expectedTuple = {
       backendSessionId: "backend-b", incarnation: "life-b", daemonEpoch: "epoch-b",
-      frontendSessionId: "pane-a", paneIdentity: "pane-a", bindingKey: "backend-b:epoch-b:0:", attemptGeneration: 4,
+      frontendSessionId: "pane-a", paneIdentity: "pane-a", bindingKey: "backend-b:epoch-b:0::life-b", attemptGeneration: 4,
     };
     expect(commands("cmd_native_terminal_attach")).toHaveLength(1);
     expect(commands("cmd_native_terminal_attach")[0][1]).toEqual(expect.objectContaining({
@@ -138,7 +138,7 @@ describe("native terminal presentation retention", () => {
     // Given: a completed split has a persisted tuple from the predecessor epoch.
     const oldTuple = {
       backendSessionId: "backend-a", incarnation: "life-a", daemonEpoch: "epoch-a",
-      frontendSessionId: "pane-a", paneIdentity: "pane-a", bindingKey: "backend-a:epoch-a:0:", attemptGeneration: 3,
+      frontendSessionId: "pane-a", paneIdentity: "pane-a", bindingKey: "backend-a:epoch-a:0::life-a", attemptGeneration: 3,
     };
     const intent = {
       requestId: "completed", prepared: null, generation: 3, createSent: true,
@@ -178,7 +178,7 @@ describe("native terminal presentation retention", () => {
     await act(async () => {});
 
     // Then: only the seven-field replacement tuple is dispatched and persisted.
-    const expectedTuple = { ...oldTuple, daemonEpoch: "epoch-b", bindingKey: "backend-a:epoch-b:0:", attemptGeneration: 4 };
+    const expectedTuple = { ...oldTuple, daemonEpoch: "epoch-b", bindingKey: "backend-a:epoch-b:0::life-a", attemptGeneration: 4 };
     expect(persistedBindings.get(owner.id)?.attachTuple).toEqual(expectedTuple);
     expect(commands("cmd_native_terminal_attach")).toHaveLength(1);
     expect(commands("cmd_native_terminal_attach")[0][1]?.attachTuple).toEqual(expectedTuple);
@@ -190,7 +190,7 @@ describe("native terminal presentation retention", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const tuple = {
       backendSessionId: "backend-a", incarnation: "life-a", daemonEpoch: "epoch-a",
-      frontendSessionId: "pane-a", paneIdentity: "pane-a", bindingKey: "backend-a:epoch-a:0:", attemptGeneration: 3,
+      frontendSessionId: "pane-a", paneIdentity: "pane-a", bindingKey: "backend-a:epoch-a:0::life-a", attemptGeneration: 3,
     };
     const owner: TerminalSession = { ...session(), incarnation: "life-a", daemonEpoch: "epoch-a", spawnIntent: {
       requestId: "completed", prepared: null, generation: 3, createSent: true,
@@ -202,14 +202,14 @@ describe("native terminal presentation retention", () => {
     });
     const view = render(<NativeTerminalPane session={owner} />);
     await act(async () => {});
-    expect(commands("cmd_native_terminal_attach")[0][1]?.attachTuple).toEqual(tuple);
+    expect(commands("cmd_native_terminal_attach")[0][1]?.attachTuple).toEqual({ ...tuple, attemptGeneration: 4 });
     // When: input failure invokes the real pane's forced reattachment path.
     await act(async () => {
       fireEvent.keyDown(view.getByTestId("native-terminal-focus-sink"), { key: "x", code: "KeyX" });
     });
 
     // Then: the exact identity is retained with a fresh fenced attempt generation.
-    const replacement = { ...tuple, attemptGeneration: 4 };
+    const replacement = { ...tuple, attemptGeneration: 5 };
     expect(commands("cmd_native_terminal_attach")).toHaveLength(2);
     expect(commands("cmd_native_terminal_attach")[1][1]?.attachTuple).toEqual(replacement);
     expect(persistedBindings.get(owner.id)?.attachTuple).toEqual(replacement);

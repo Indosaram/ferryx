@@ -83,6 +83,8 @@ impl TerminalService {
         // no-op and the daemon keeps no QA surface.
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         super::qa_liveness::start(service.clone());
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        super::qa_liveness::ensure_local_owner_control();
         service
     }
 

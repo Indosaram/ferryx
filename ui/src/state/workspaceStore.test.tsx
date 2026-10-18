@@ -1634,6 +1634,8 @@ describe("worktree tab and session isolation", () => {
         reconnectRequestId: null,
         daemonEpoch: null,
         lastOutputSequence: null,
+        recoveryKey: JSON.stringify(["local", "session-target", "backend-new-123", null]),
+        recoveryState: null,
       });
       expect(updatedState.sessions["session-other"]).toBe(initialTerminalState.sessions["session-other"]);
 

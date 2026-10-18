@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TerminalSession, TerminalTab } from "../lib/types";
-import { resetNativeTerminalLifecycleForTest } from "../lib/nativeTerminalLifecycle";
+import { resetNativeTerminalLifecycleForTest, registerDurableNativeBinding } from "../lib/nativeTerminalLifecycle";
 import { resetNativeTerminalPaneForTest } from "./NativeTerminalPane";
 import { TerminalPane } from "./TerminalPane";
 import { workspaceReducer, type WorkspaceState } from "../state/workspaceStore";
@@ -85,6 +85,17 @@ describe("TerminalPane exit attach integration", () => {
   });
 
   it("propagates session unavailable on attach failure, transitions session to exited, and displays Shell exited overlay without error badge", async () => {
+    const attachTuple = {
+      backendSessionId: "backend-dead-pty",
+      daemonEpoch: "epoch-1",
+      incarnation: "inc-1",
+      frontendSessionId: "term-pane-1",
+      paneIdentity: "term-pane-1",
+      bindingKey: "backend-dead-pty:epoch-1:0::inc-1",
+      attemptGeneration: 0,
+    };
+    registerDurableNativeBinding(attachTuple);
+
     let currentSession: TerminalSession = {
       id: "term-pane-1",
       cwd: "/repo/path",
@@ -92,6 +103,9 @@ describe("TerminalPane exit attach integration", () => {
       worktree: { wsId: "ws-local", slug: "main" },
       backendSessionId: "backend-dead-pty",
       lifecycle: "working",
+      daemonEpoch: "epoch-1",
+      incarnation: "inc-1",
+      attachTuple,
     };
 
     tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
@@ -103,6 +117,9 @@ describe("TerminalPane exit attach integration", () => {
             source: "daemon_attach",
             kind: "session_not_found",
             sessionId: "backend-dead-pty",
+            affirmativeExit: true,
+            daemonEpoch: "epoch-1",
+            incarnation: "inc-1",
           },
         };
       }
@@ -111,7 +128,7 @@ describe("TerminalPane exit attach integration", () => {
     });
 
     const onOpenNewShell = vi.fn();
-    const handleUnavailable = vi.fn((sessionId: string, backendSessionId: string, reason: string) => {
+    const handleUnavailable = vi.fn((sessionId: string, backendSessionId: string, reason: string, bindingKey?: string | null) => {
       const tab: TerminalTab = {
         id: "tab-1",
         label: "Test",
@@ -131,11 +148,20 @@ describe("TerminalPane exit attach integration", () => {
         activityBySessionId: {},
       };
 
-      const next = workspaceReducer(state, {
+      const unavailableState = workspaceReducer(state, {
         type: "SESSION_BACKEND_UNAVAILABLE",
         sessionId,
         backendSessionId,
         reason,
+        bindingKey,
+      });
+
+      const next = workspaceReducer(unavailableState, {
+        type: "SESSION_LIFECYCLE",
+        backendSessionId,
+        lifecycle: "exited",
+        daemonEpoch: currentSession.daemonEpoch,
+        incarnation: currentSession.incarnation,
       });
 
       currentSession = next.sessions[sessionId];
@@ -151,14 +177,14 @@ describe("TerminalPane exit attach integration", () => {
     );
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     expect(handleUnavailable).toHaveBeenCalledWith(
       "term-pane-1",
       "backend-dead-pty",
-      "daemon-attach-not-found",
-      "backend-dead-pty::0:",
+      "daemon-attach-affirmative-exit",
+      "backend-dead-pty:epoch-1:0::inc-1",
     );
     expect(currentSession.lifecycle).toBe("exited");
     expect(currentSession.backendSessionId).toBeNull();

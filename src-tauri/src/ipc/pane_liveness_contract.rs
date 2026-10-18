@@ -97,6 +97,9 @@ mod tests {
             registry_suspended: None,
             suspension_source: None,
             incarnation: Some("uuid-inc-1".to_string()),
+            recovery_authority: None,
+            is_paired_proxy: None,
+            generation: None,
         };
 
         let cases: Vec<SplitOperationResult<String>> = vec![
@@ -236,6 +239,9 @@ mod tests {
             registry_suspended: None,
             suspension_source: None,
             incarnation: None,
+            recovery_authority: None,
+            is_paired_proxy: None,
+            generation: None,
         };
         assert!(legacy_details.is_recoverable_legacy());
         assert!(!legacy_details.matches_incarnation("any-incarnation"));

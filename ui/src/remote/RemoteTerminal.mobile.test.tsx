@@ -33,6 +33,17 @@ function frame(y: number) {
     lines: [],
   }) } as MessageEvent));
 }
+function establishReady(y = 0) {
+  act(() => {
+    Socket.latest.onopen?.();
+    Socket.latest.onmessage?.({ data: JSON.stringify({
+      type: "grid", cols: 80, rows: 20,
+      cursor: { x: 3, y, visible: true, blinking: false, wideTail: false, visualStyle: "block" },
+      lines: [],
+    }) } as MessageEvent);
+  });
+  Socket.latest.send.mockClear();
+}
 
 describe("mobile terminal input lifecycle", () => {
   let resize: ResizeObserverCallback;
@@ -118,6 +129,7 @@ describe("mobile terminal input lifecycle", () => {
 
   it.each(["insertFromComposition", "insertText"])("sends Hangul once when %s follows compositionend", (inputType) => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     fireEvent.compositionStart(sink());
     fireEvent.input(sink(), { target: { value: "한" }, isComposing: true, inputType: "insertCompositionText" });
     expect(Socket.latest.send).not.toHaveBeenCalled();
@@ -131,6 +143,7 @@ describe("mobile terminal input lifecycle", () => {
 
   it("does not emit canceled or blurred preedit as separated jamo", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     fireEvent.compositionStart(sink());
     fireEvent.input(sink(), { target: { value: "ㅎ" }, isComposing: true });
     fireEvent.compositionEnd(sink(), { data: "" });
@@ -143,6 +156,7 @@ describe("mobile terminal input lifecycle", () => {
 
   it("honors native composing input even before compositionstart and lets sink printable keydown reach the IME", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     expect(fireEvent.keyDown(sink(), { key: "g", code: "KeyG" })).toBe(true);
     expect(Socket.latest.send).not.toHaveBeenCalled();
     fireEvent.input(sink(), { target: { value: "ㅎ" }, isComposing: true, inputType: "insertCompositionText" });
@@ -155,6 +169,7 @@ describe("mobile terminal input lifecycle", () => {
   // in place through plain input events whose isComposing is false (xtermjs/xterm.js#6084).
   it("holds the mutable Hangul tail of a composition-free IME instead of shipping lone jamo", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     const input = sink();
     const rewrite = (value: string) => fireEvent.input(input, { target: { value }, inputType: "insertText" });
 
@@ -176,6 +191,7 @@ describe("mobile terminal input lifecycle", () => {
 
   it("commits a held Hangul run before the key that ends the line", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     const input = sink();
     const rewrite = (value: string) => fireEvent.input(input, { target: { value }, inputType: "insertText" });
 
@@ -193,6 +209,7 @@ describe("mobile terminal input lifecycle", () => {
 
   it("lets Backspace edit a pending IME tail instead of deleting echoed terminal content", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     const input = sink();
     fireEvent.input(input, { target: { value: "한" }, inputType: "insertText" });
     expect(Socket.latest.send).not.toHaveBeenCalled();
@@ -209,6 +226,7 @@ describe("mobile terminal input lifecycle", () => {
 
   it("keeps settled ASCII immediate and never forwards WebKit's U+00A0 space", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     const input = sink();
 
     fireEvent.input(input, { target: { value: "l" }, inputType: "insertText" });
@@ -224,6 +242,7 @@ describe("mobile terminal input lifecycle", () => {
   // emitting each commit as it arrives is what shards 이렇게 into ㅇㅣㄹㅓㅎㄱㅔ in the PTY.
   it("reassembles jamo an IME commits one at a time into syllables", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     const input = sink();
     const commitJamo = (jamo: string) => {
       fireEvent.compositionStart(input);
@@ -243,6 +262,7 @@ describe("mobile terminal input lifecycle", () => {
 
   it("sends the reassembled jamo run before the key that ends the line", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     const input = sink();
     const commitJamo = (jamo: string) => {
       fireEvent.compositionStart(input);
@@ -259,6 +279,7 @@ describe("mobile terminal input lifecycle", () => {
 
   it("deletes one committed jamo per Backspace while the sink is empty", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     const input = sink();
     const commitJamo = (jamo: string) => {
       fireEvent.compositionStart(input);
@@ -286,6 +307,7 @@ describe("mobile terminal input lifecycle", () => {
 
   it("keeps repeated jamo in a held run instead of treating them as duplicates", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     const input = sink();
     const commitJamo = (jamo: string, inputType = "insertFromComposition") => {
       fireEvent.compositionStart(input);
@@ -304,6 +326,7 @@ describe("mobile terminal input lifecycle", () => {
 
   it("does not double a commit whose mirror insertion carries no input type", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     const input = sink();
     const commitJamo = (jamo: string) => {
       fireEvent.compositionStart(input);
@@ -324,6 +347,7 @@ describe("mobile terminal input lifecycle", () => {
 
   it("composes jamo a composition-free IME accumulates in the sink", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
+    establishReady();
     const input = sink();
     const jamo = "ㅇㅣㄹㅓㅎㄱㅔ";
     for (let end = 1; end <= jamo.length; end += 1) {
