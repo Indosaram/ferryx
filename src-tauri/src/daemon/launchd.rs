@@ -380,21 +380,37 @@ pub(crate) mod generation {
     /// Owner Absent + NotRegistered -> write plist, `launchctl bootstrap gui/<uid> <plist>`;
     /// owner Absent + RegisteredIdle -> `launchctl kickstart gui/<uid>/<label>` (never `-k`, no
     /// plist rewrite); owner Alive or Unknown, or job Running or Unverifiable -> zero mutations.
+    ///
+    /// With `login_autostart` false (autostart opt-out) a NotRegistered job gets a plist with no load-time launch
+    /// condition (`RunAtLoad` and `KeepAlive` false), so launchd never starts it at login; because
+    /// such a plist is not started by `bootstrap` either, the bootstrap is followed by one plain
+    /// `kickstart` (never `-k`). The start still goes through the job, never as a GUI child. A
+    /// RegisteredIdle job gets the same single kickstart and no plist rewrite either way.
     pub(crate) fn ensure_generation_job(
         launchctl: &dyn Launchctl,
         uid: u32,
         job: &GenerationJob,
         owner: &OwnerState,
+        login_autostart: bool,
     ) -> Result<EnsureOutcome, String> {
         if *owner != OwnerState::Absent {
             return Ok(EnsureOutcome::OwnerPresent);
         }
         match print_job(launchctl, uid, &job.label) {
             JobState::NotRegistered => {
-                write_plist_if_changed(&job.render(true), &job.log_dir, &job.plist_path)?;
+                let content = if login_autostart {
+                    job.render(true)
+                } else {
+                    without_load_time_launch(&job.render(false))
+                };
+                write_plist_if_changed(&content, &job.log_dir, &job.plist_path)?;
                 let domain = format!("gui/{uid}");
                 let plist = job.plist_path.to_string_lossy().into_owned();
                 mutate(launchctl, &["bootstrap", domain.as_str(), plist.as_str()])?;
+                if !login_autostart {
+                    let target = format!("gui/{uid}/{}", job.label);
+                    mutate(launchctl, &["kickstart", target.as_str()])?;
+                }
                 Ok(EnsureOutcome::Bootstrapped)
             }
             JobState::RegisteredIdle => {
@@ -451,19 +467,25 @@ pub(crate) mod generation {
         Ok(plists)
     }
 
-    /// Removes every load-time launch condition by rewriting the plist file only: `RunAtLoad` false
-    /// and `KeepAlive` false (`KeepAlive { SuccessfulExit }` implies `RunAtLoad`). launchd reads
-    /// the file at the next login and a running job keeps its current definition. A missing or
-    /// already-disabled plist is left unchanged. Returns whether the file changed.
+    /// The plist without any load-time launch condition: `RunAtLoad` false and `KeepAlive` false
+    /// (`KeepAlive { SuccessfulExit }` implies `RunAtLoad`). Everything else is unchanged.
+    fn without_load_time_launch(content: &str) -> String {
+        content
+            .replacen(RUN_AT_LOAD_TRUE, RUN_AT_LOAD_FALSE, 1)
+            .replacen(KEEP_ALIVE_ABNORMAL_EXIT, KEEP_ALIVE_FALSE, 1)
+    }
+
+    /// Removes every load-time launch condition ([`without_load_time_launch`]) by rewriting the
+    /// plist file only. launchd reads the file at the next login and a running job keeps its current
+    /// definition. A missing or already-disabled plist is left unchanged. Returns whether the file
+    /// changed.
     pub(crate) fn disable_login_autostart(plist_path: &Path) -> Result<bool, String> {
         let content = match fs::read_to_string(plist_path) {
             Ok(content) => content,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(format!("Failed to read {}: {e}", plist_path.display())),
         };
-        let disabled = content
-            .replacen(RUN_AT_LOAD_TRUE, RUN_AT_LOAD_FALSE, 1)
-            .replacen(KEEP_ALIVE_ABNORMAL_EXIT, KEEP_ALIVE_FALSE, 1);
+        let disabled = without_load_time_launch(&content);
         if disabled == content {
             return Ok(false);
         }
@@ -751,7 +773,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let job = job(dir.path());
             let launchctl = FakeLaunchctl::default().not_registered(&job.label);
-            let outcome = ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent).unwrap();
+            let outcome = ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent, true).unwrap();
             assert_eq!(outcome, EnsureOutcome::Bootstrapped);
             assert_eq!(
                 launchctl.mutations(),
@@ -765,7 +787,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let job = job(dir.path());
             let launchctl = FakeLaunchctl::default().idle(&job.label);
-            let outcome = ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent).unwrap();
+            let outcome = ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent, true).unwrap();
             assert_eq!(outcome, EnsureOutcome::Kickstarted);
             assert_eq!(launchctl.mutations(), vec![vec!["kickstart".to_string(), format!("gui/{UID}/{}", job.label)]]);
             assert!(!job.plist_path.exists(), "a kickstart must not rewrite the plist");
@@ -777,7 +799,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let job = job(dir.path());
             let launchctl = FakeLaunchctl::default().running(&job.label, 4242);
-            let outcome = ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent).unwrap();
+            let outcome = ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent, true).unwrap();
             assert_eq!(outcome, EnsureOutcome::Untouched(JobState::Running { pid: 4242 }));
             assert!(launchctl.mutations().is_empty());
             assert!(!job.plist_path.exists());
@@ -788,12 +810,12 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let job = job(dir.path());
             let launchctl = FakeLaunchctl::default().with_print(&job.label, false, "", "Operation not permitted");
-            let outcome = ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent).unwrap();
+            let outcome = ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent, true).unwrap();
             assert!(matches!(outcome, EnsureOutcome::Untouched(JobState::Unverifiable { .. })));
             assert!(launchctl.mutations().is_empty());
             // A print that cannot even run is unverifiable too.
             let silent = FakeLaunchctl::default();
-            let outcome = ensure_generation_job(&silent, UID, &job, &OwnerState::Absent).unwrap();
+            let outcome = ensure_generation_job(&silent, UID, &job, &OwnerState::Absent, true).unwrap();
             assert!(matches!(outcome, EnsureOutcome::Untouched(JobState::Unverifiable { .. })));
             assert!(silent.mutations().is_empty());
         }
@@ -807,7 +829,7 @@ mod tests {
                 OwnerState::Unknown { reason: "lock held, holder unreadable".into() },
             ] {
                 let launchctl = FakeLaunchctl::default().idle(&job.label);
-                let outcome = ensure_generation_job(&launchctl, UID, &job, &owner).unwrap();
+                let outcome = ensure_generation_job(&launchctl, UID, &job, &owner, true).unwrap();
                 assert_eq!(outcome, EnsureOutcome::OwnerPresent);
                 assert!(launchctl.calls().is_empty(), "{owner:?} must not reach launchctl");
                 assert!(!job.plist_path.exists());
@@ -891,6 +913,105 @@ mod tests {
             assert!(register_newest_for_login(&job).unwrap());
             assert!(!register_newest_for_login(&job).unwrap());
             assert!(job.log_dir.is_dir());
+        }
+
+        /// Opted out, an Absent owner still starts through the job (bootstrap, then one plain
+        /// kickstart, since a plist without load-time launch is not started by bootstrap), and the
+        /// plist it leaves has no login launch condition.
+        #[test]
+        fn opted_out_unregistered_job_is_bootstrapped_without_login_launch_and_kickstarted_once() {
+            let dir = tempfile::tempdir().unwrap();
+            let job = job(dir.path());
+            let launchctl = FakeLaunchctl::default().not_registered(&job.label);
+            let outcome =
+                ensure_generation_job(&launchctl, UID, &job, &OwnerState::Absent, false).unwrap();
+            assert_eq!(outcome, EnsureOutcome::Bootstrapped);
+            assert_eq!(
+                launchctl.mutations(),
+                vec![
+                    vec!["bootstrap".to_string(), format!("gui/{UID}"), job.plist_path.to_string_lossy().into_owned()],
+                    vec!["kickstart".to_string(), format!("gui/{UID}/{}", job.label)],
+                ]
+            );
+            assert_never_stops(&launchctl.calls());
+            let plist = fs::read_to_string(&job.plist_path).unwrap();
+            assert!(plist.contains("<key>RunAtLoad</key>\n    <false/>"), "{plist}");
+            assert!(plist.contains("<key>KeepAlive</key>\n    <false/>"), "{plist}");
+            assert!(!plist.contains("SuccessfulExit"), "KeepAlive SuccessfulExit implies RunAtLoad: {plist}");
+            assert_eq!(plist_program(&plist), Some(job.executable.to_str().unwrap()));
+            assert!(!disable_login_autostart(&job.plist_path).unwrap(), "already without login launch");
+
+            // Opting back in registers the newest generation for login again.
+            assert!(register_newest_for_login(&job).unwrap());
+            assert_eq!(fs::read_to_string(&job.plist_path).unwrap(), job.render(true));
+        }
+
+        #[test]
+        fn opted_out_launch_never_touches_a_running_unverifiable_or_owned_job() {
+            let dir = tempfile::tempdir().unwrap();
+            let job = job(dir.path());
+            let idle = FakeLaunchctl::default().idle(&job.label);
+            assert_eq!(
+                ensure_generation_job(&idle, UID, &job, &OwnerState::Absent, false).unwrap(),
+                EnsureOutcome::Kickstarted
+            );
+            assert_eq!(idle.mutations(), vec![vec!["kickstart".to_string(), format!("gui/{UID}/{}", job.label)]]);
+            assert!(!job.plist_path.exists(), "a kickstart must not rewrite the plist");
+
+            let running = FakeLaunchctl::default().running(&job.label, 4242);
+            assert_eq!(
+                ensure_generation_job(&running, UID, &job, &OwnerState::Absent, false).unwrap(),
+                EnsureOutcome::Untouched(JobState::Running { pid: 4242 })
+            );
+            assert!(running.mutations().is_empty());
+            let unverifiable = FakeLaunchctl::default().with_print(&job.label, false, "", "Operation not permitted");
+            assert!(matches!(
+                ensure_generation_job(&unverifiable, UID, &job, &OwnerState::Absent, false).unwrap(),
+                EnsureOutcome::Untouched(JobState::Unverifiable { .. })
+            ));
+            assert!(unverifiable.mutations().is_empty());
+            let owned = FakeLaunchctl::default().not_registered(&job.label);
+            assert_eq!(
+                ensure_generation_job(&owned, UID, &job, &OwnerState::Alive { pid: 7, start_time: 9 }, false).unwrap(),
+                EnsureOutcome::OwnerPresent
+            );
+            assert!(owned.calls().is_empty());
+            assert!(!job.plist_path.exists());
+        }
+
+        /// Opt-out over every generation plist (and the legacy one) is a file rewrite per plist: no
+        /// launchctl runs at all, so no job is unloaded, booted out or stopped.
+        #[test]
+        fn opt_out_disables_every_generation_and_the_legacy_plist_by_file_rewrite_only() {
+            let dir = tempfile::tempdir().unwrap();
+            let newest = job(dir.path());
+            let older_label = generation_label(BASE, "2026.1001.1-11111111");
+            let older = GenerationJob {
+                label: older_label.clone(),
+                executable: dir.path().join("daemon-runtime/2026.1001.1-11111111/ferryx"),
+                plist_path: dir.path().join(format!("{older_label}.plist")),
+                log_dir: newest.log_dir.clone(),
+            };
+            register_newest_for_login(&newest).unwrap();
+            fs::write(&older.plist_path, older.render(false)).unwrap();
+            let legacy = dir.path().join(format!("{BASE}.plist"));
+            fs::write(&legacy, super::super::generate_launchd_plist(BASE, "/Applications/Ferryx.app/Contents/MacOS/ferryx", &newest.log_dir, true)).unwrap();
+
+            let mut changed = Vec::new();
+            for (_, path) in generation_plists(dir.path(), BASE).unwrap() {
+                changed.push(disable_login_autostart(&path).unwrap());
+            }
+            changed.push(disable_login_autostart(&legacy).unwrap());
+            assert_eq!(changed, vec![true, true, true], "older, newest and legacy each lose their login launch");
+            for path in [&older.plist_path, &newest.plist_path, &legacy] {
+                let plist = fs::read_to_string(path).unwrap();
+                assert!(plist.contains("<key>RunAtLoad</key>\n    <false/>"), "{plist}");
+                assert!(!plist.contains("SuccessfulExit"), "{plist}");
+                assert!(plist.contains("<key>AbandonProcessGroup</key>\n    <true/>"));
+            }
+            for (_, path) in generation_plists(dir.path(), BASE).unwrap() {
+                assert!(!disable_login_autostart(&path).unwrap(), "idempotent");
+            }
         }
 
         #[test]

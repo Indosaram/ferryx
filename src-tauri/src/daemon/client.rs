@@ -2296,9 +2296,10 @@ impl DaemonClient {
         // of the app and died with it leaving no record. The detached spawn below stays as the
         // fallback for platforms with no agent and for isolated runtimes, where installing one would
         // point the user's login autostart at a test build.
-        // A user who turned autostart off gets the detached spawn directly: no agent install and no
-        // supervised wait. Nothing here ever reloads a job: the owner was Absent under admission.
-        if crate::daemon::supervisor::supported() && !crate::daemon::supervisor::user_opted_out() {
+        // A user who turned autostart off still gets the start through the OS job (never as a GUI
+        // child); the opt-out only keeps the job from launching at login. Nothing here ever
+        // reloads a job: the owner was Absent under admission.
+        if crate::daemon::supervisor::supported() {
             let agent = crate::ipc::run_blocking(|| {
                 crate::daemon::supervisor::ensure()
                     .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
