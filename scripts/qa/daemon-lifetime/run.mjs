@@ -221,14 +221,16 @@ async function main() {
     const fresh = artifactPaths({ platform: host.platform, targetDir: host.cargoTarget, productName, name });
     const destRoot = joinFor(host.platform, runDir, 'artifacts', name);
     await agent.call('mkdir', { dir: destRoot });
-    const src = fresh.appPath ?? path.dirname(fresh.guiExecutable);
+    // Host paths are parsed with the host's path flavour: posix basename/dirname do not split C:\ paths.
+    const hostPath = host.platform === 'windows' ? path.win32 : path.posix;
+    const src = fresh.appPath ?? hostPath.dirname(fresh.guiExecutable);
     if (host.platform === 'mac') await agent.call('exec', { command: 'ditto', args: [src, joinFor(host.platform, destRoot, path.basename(src))] });
     else await agent.call('exec', host.platform === 'windows'
       ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', `Copy-Item -LiteralPath '${fresh.guiExecutable}','${fresh.cliExecutable}' -Destination '${destRoot}'`] }
       : { command: 'cp', args: [fresh.guiExecutable, fresh.cliExecutable, destRoot] });
     const art = host.platform === 'mac'
       ? { name, appPath: joinFor(host.platform, destRoot, path.basename(src)), guiExecutable: macGuiExecutable(joinFor(host.platform, destRoot, path.basename(src))), cliExecutable: fresh.cliExecutable }
-      : { name, appPath: null, guiExecutable: joinFor(host.platform, destRoot, path.basename(fresh.guiExecutable)), cliExecutable: joinFor(host.platform, destRoot, path.basename(fresh.cliExecutable)) };
+      : { name, appPath: null, guiExecutable: joinFor(host.platform, destRoot, hostPath.basename(fresh.guiExecutable)), cliExecutable: joinFor(host.platform, destRoot, hostPath.basename(fresh.cliExecutable)) };
     if (host.platform === 'mac') {
       // todo 13: each QA artifact carries its own signed helper and a re-sealed outer signature.
       // mac artifacts live on this Mac: assemble + ad-hoc re-seal in-process (scripts/build-notarized-local.mjs order).
