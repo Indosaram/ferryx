@@ -157,17 +157,22 @@ async fn restart(root: &Path) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let origin = format!("http://{address}");
-    let mut tasks = tokio::task::JoinSet::new();
     // The serve future owns the relay listener, so the listener is closed exactly when this
-    // task has ended; cleanup asserts that through the task's own handle.
-    let relay_task = tasks.spawn(async move {
+    // task has ended. Cleanup stops it through its own shutdown signal and requires the serve
+    // future to return Ok on its own; an aborted (cancelled) task does not count as stopped.
+    let (stop_relay, relay_stop) = tokio::sync::oneshot::channel::<()>();
+    let relay_task = tokio::spawn(async move {
         axum::serve(
             listener,
             crate::remote::relay_server::relay_router(relay_state)
                 .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
+        .with_graceful_shutdown(async {
+            let _ = relay_stop.await;
+        })
         .await
     });
+    let relay_abort = relay_task.abort_handle();
     let gateway = Arc::new(DaemonServer::new_with_paths(
         Some(root.join("gateway/config")),
         Some(root.join("gateway/auth")),
@@ -209,11 +214,16 @@ async fn restart(root: &Path) -> anyhow::Result<()> {
         Ok::<_, anyhow::Error>(())
     }.await;
     drop(guard);
-    tasks.shutdown().await;
+    let _ = stop_relay.send(());
     // Not a connect probe: once released, the ephemeral port can be bound by any concurrent test
-    // in this binary, so a successful connect would not mean this relay survived.
-    let relay_ended = relay_task.is_finished() && tasks.is_empty();
-    eprintln!("A13 relay address={address} serve_task_ended={relay_ended}");
+    // in this binary, so a successful connect would not mean this relay survived. The serve
+    // future's own Ok return is the proof that it stopped and dropped its listener.
+    let joined = tokio::time::timeout(Duration::from_secs(10), relay_task).await;
+    let relay_ended = matches!(joined, Ok(Ok(Ok(()))));
+    if !relay_ended {
+        relay_abort.abort();
+    }
+    eprintln!("A13 relay address={address} serve_returned_ok={relay_ended} joined={joined:?}");
     ensure!(relay_ended, "relay survived cleanup");
     result
 }
