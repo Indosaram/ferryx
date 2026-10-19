@@ -107,6 +107,9 @@ async function prepareSelfTestWorktree({ host, agent, runId, source }) {
     const r = await agent.call('exec', { command: 'git', args, deadlineMs: 900_000 });
     if (r.status !== 0) throw new GuardError('SELF_TEST_SETUP_FAILED', `git ${args.join(' ')} exited ${r.status}: ${r.stderr}`);
   }
+  // A fresh worktree has no ui/node_modules; tauri's beforeBuildCommand (bun run --cwd ui build) needs them.
+  const deps = await agent.call('exec', { command: 'bun', args: ['install', '--cwd', joinFor(host.platform, worktree, 'ui'), '--frozen-lockfile'], deadlineMs: 900_000 });
+  if (deps.status !== 0) throw new GuardError('SELF_TEST_SETUP_FAILED', `bun install exited ${deps.status}: ${deps.stderr}`);
   const remove = async () => {
     await agent.call('exec', { command: 'git', args: ['-C', host.canonical, 'worktree', 'remove', '--force', worktree] });
     await agent.call('exec', { command: 'git', args: ['-C', host.canonical, 'worktree', 'prune'] });
