@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Sidebar } from "./Sidebar";
 import type { RegisteredProject } from "../lib/types";
@@ -176,7 +176,10 @@ it("groups matching remote project under existing local project as a remote work
 
   expect(screen.getByText("main")).toBeInTheDocument();
   expect(screen.getByText("Build machine")).toBeInTheDocument();
-  expect(screen.getByText("/srv/my-app")).toBeInTheDocument();
+  // Rows carry no path line: prove grouping by the remote checkout's row living in the local project's list.
+  const remoteRow = within(screen.getByRole("list", { name: "my-app worktrees" })).getByTitle(/Remote SSH root: \/srv\/my-app/);
+  expect(remoteRow).toHaveAttribute("data-shortcut-workspace-id", remoteProject.workspaceId);
+  expect(remoteRow).toHaveAttribute("data-shortcut-worktree-path", remoteProject.repoRoot);
 
   fireEvent.click(screen.getByText("Build machine"));
   expect(onSelectWorktree).toHaveBeenCalledWith(
@@ -219,7 +222,10 @@ it("groups remote project under local project when git remote matches even if fo
   expect(screen.queryByRole("button", { name: "frontend-prod (Build machine)" })).not.toBeInTheDocument();
 
   expect(screen.getByText("Build machine")).toBeInTheDocument();
-  expect(screen.getByText("/var/www/frontend-prod")).toBeInTheDocument();
+  // Rows carry no path line: prove grouping by the remote checkout's row living in the local project's list.
+  const remoteRow = within(screen.getByRole("list", { name: "frontend-local worktrees" })).getByTitle(/Remote SSH root: \/var\/www\/frontend-prod/);
+  expect(remoteRow).toHaveAttribute("data-shortcut-workspace-id", remoteProject.workspaceId);
+  expect(remoteRow).toHaveAttribute("data-shortcut-worktree-path", remoteProject.repoRoot);
 });
 
 it("preserves local worktrees in the sidebar and accurately highlights remote worktree when active", () => {

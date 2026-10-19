@@ -82,6 +82,8 @@ it("labels paired worktree rows with the header's status when reachability says 
   localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, "[]");
   renderPairedProject(true);
   expect(screen.getByRole("button", { name: "Offline: open remote settings for Gamma" })).toHaveTextContent("Offline");
-  expect(screen.getByText("/srv/app - Offline")).toBeInTheDocument();
+  // Rows carry no remote path line; the machine status rides on the row's host slot title.
+  expect(screen.queryByText("/srv/app - Offline")).not.toBeInTheDocument();
+  expect(screen.getByTestId("remote-machine-badge").getAttribute("title")).toContain("Offline");
   expect(screen.queryByText(/Online \(/)).not.toBeInTheDocument();
 });

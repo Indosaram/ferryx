@@ -54,7 +54,7 @@ const rootWorktree: Worktree = {
 afterEach(cleanup);
 
 describe("WorktreeList actions", () => {
-  it("renders worktree dirty status without a manual refresh control", () => {
+  it("keeps a dirty worktree row selectable without rendering git dirty status or a refresh control", () => {
     const onSelect = vi.fn();
     render(
       <WorktreeList
@@ -67,9 +67,11 @@ describe("WorktreeList actions", () => {
       />,
     );
 
-    expect(screen.getByText("Dirty · 1 file")).toBeInTheDocument();
+    expect(screen.queryByText(/Dirty/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /refresh worktree status/i })).not.toBeInTheDocument();
     expect(onSelect).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("feature"));
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(worktree);
   });
 
   it("renders the aggregated child activity as one live StatusDot", () => {
@@ -98,7 +100,6 @@ describe("WorktreeList actions", () => {
     );
 
     const dot = screen.getByTestId("worktree-status-dot");
-    expect(dot).toHaveAttribute("data-activity-state", "waiting");
     expect(dot.querySelector('[data-status-state="waiting"]')).toBeInTheDocument();
     expect(dot.querySelectorAll("[data-status-state]")).toHaveLength(1);
   });
@@ -125,7 +126,7 @@ describe("WorktreeList actions", () => {
         onDelete={vi.fn()}
       />,
     );
-    expect(screen.getByTestId("worktree-status-dot")).toHaveAttribute("data-activity-state", "unread");
+    expect(screen.getByTestId("worktree-status-dot").querySelector('[data-status-state="unread"]')).toBeInTheDocument();
 
     rerender(
       <WorktreeList
@@ -138,7 +139,7 @@ describe("WorktreeList actions", () => {
         onDelete={vi.fn()}
       />,
     );
-    expect(screen.getByTestId("worktree-status-dot")).toHaveAttribute("data-activity-state", "done");
+    expect(screen.getByTestId("worktree-status-dot").querySelector('[data-status-state="done"]')).toBeInTheDocument();
   });
 
   it("opens deletion from the worktree card action", () => {
@@ -158,7 +159,7 @@ describe("WorktreeList actions", () => {
     expect(onDelete).toHaveBeenCalledWith(worktree);
   });
 
-  it("badges the repository root as primary and omits delete action for it", () => {
+  it("renders no primary badge and still omits the delete action for the repository root", () => {
     render(
       <WorktreeList
         worktrees={[rootWorktree, worktree]}
@@ -170,8 +171,8 @@ describe("WorktreeList actions", () => {
       />,
     );
 
-    // Only the root worktree carries the primary badge.
-    expect(screen.getAllByText("primary")).toHaveLength(1);
+    // Root-worktree status is logic only: no badge text.
+    expect(screen.queryByText("primary")).not.toBeInTheDocument();
 
     // Primary worktree does not render a delete button; only non-primary worktrees expose delete.
     const deleteButtons = screen.getAllByRole("button", { name: "Delete worktree" });
@@ -301,7 +302,7 @@ describe("WorktreeList actions", () => {
 
     expect(screen.queryByText("Coder")).not.toBeInTheDocument();
     expect(screen.queryByText("Fix perf regressions")).not.toBeInTheDocument();
-    expect(screen.getByTestId("worktree-status-dot")).toHaveAttribute("data-activity-state", "working");
+    expect(screen.getByTestId("worktree-status-dot").querySelector('[data-status-state="working"]')).toBeInTheDocument();
   });
 
   it("renders plain-folder root rows like normal worktrees without an unavailable message", () => {
@@ -331,7 +332,7 @@ describe("WorktreeList actions", () => {
     expect(screen.queryByText(/detached HEAD/i)).not.toBeInTheDocument();
   });
 
-  it("renders idle status dot using theme token without hardcoded hex class", () => {
+  it("renders no status dot for an idle worktree", () => {
     render(
       <WorktreeList
         worktrees={[worktree]}
@@ -343,15 +344,12 @@ describe("WorktreeList actions", () => {
       />,
     );
 
-    const dotContainer = screen.getByTestId("worktree-status-dot");
-    expect(dotContainer).toHaveAttribute("data-activity-state", "idle");
-    const idleDot = dotContainer.firstElementChild;
-    expect(idleDot).not.toBeNull();
-    expect(idleDot?.className).toContain("bg-status-idle");
-    expect(idleDot?.className).not.toContain("#00bc7d");
+    expect(screen.queryByTestId("worktree-status-dot")).not.toBeInTheDocument();
+    const row = screen.getByText("feature").closest(".group\\/worktree-row")!;
+    expect(row.querySelector("[data-status-state]")).toBeNull();
   });
 
-  it("uses theme token for inactive worktree labels and preserves dark-pill contrast for active labels", () => {
+  it("styles the active row with the accent fill and ring rail instead of a border", () => {
     const { rerender } = render(
       <WorktreeList
         worktrees={[worktree]}
@@ -366,6 +364,7 @@ describe("WorktreeList actions", () => {
     const inactiveLabel = screen.getByText("feature");
     expect(inactiveLabel.className).toContain("text-worktree-sidebar-foreground");
     expect(inactiveLabel.className).not.toContain("text-[#fafafa]");
+    expect(screen.queryByTestId("worktree-rail-active")).not.toBeInTheDocument();
 
     rerender(
       <WorktreeList
@@ -379,7 +378,12 @@ describe("WorktreeList actions", () => {
     );
 
     const activeLabel = screen.getByText("feature");
-    expect(activeLabel.className).toContain("text-[#fafafa]");
+    expect(activeLabel.className).toContain("text-foreground");
+    const activeRow = activeLabel.closest(".group\\/worktree-row")!;
+    expect(activeRow).toHaveClass("bg-worktree-sidebar-accent");
+    expect(activeRow.className).not.toContain("border-[");
+    expect(activeRow.className).not.toMatch(/(^|\s)border(\s|$)/);
+    expect(screen.getByTestId("worktree-rail-active")).toHaveClass("bg-worktree-sidebar-ring");
   });
 
   it("opens native context menu on right click and triggers deletion from context menu", () => {
@@ -751,7 +755,7 @@ describe("WorktreeList actions", () => {
 
     // rootWorktree matches repoRoot: marked primary, no delete button
     const rootRow = screen.getByText("main").closest(".group\\/worktree-row")!;
-    expect(rootRow.textContent).toContain("primary");
+    expect(rootRow.textContent).not.toContain("primary");
     expect(rootRow.querySelector('button[aria-label="Delete worktree"]')).toBeNull();
 
     // externalWorktree path does NOT match repoRoot: NOT primary, delete button enabled

@@ -482,7 +482,8 @@ describe("Sidebar navigation", () => {
     expect(screen.queryByText("Active agents")).not.toBeInTheDocument();
     expect(screen.queryByText("Workspace")).not.toBeInTheDocument();
     expect(screen.queryByText("Search workspaces")).not.toBeInTheDocument();
-    expect(screen.queryByText("Projects")).not.toBeInTheDocument();
+    // The only list header is the "Projects N" section header (count = project groups).
+    expect(screen.getByText("Projects").parentElement).toHaveTextContent(`Projects${projects.length}`);
 
     const titlebar = screen.getByTestId("sidebar-drag-region");
     expect(within(titlebar).getByRole("button", { name: "Hide sidebar" })).toBeInTheDocument();
@@ -522,7 +523,8 @@ describe("Sidebar navigation", () => {
   it("nests each project's worktrees inside that project's own tree group", () => {
     renderSidebar({ projects, activeProjectId: "maho-workspace" });
 
-    expect(screen.queryByText("Projects")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Projects")).toHaveLength(1);
+    expect(screen.getByText("Projects").parentElement).toHaveTextContent(`Projects${projects.length}`);
     expect(screen.queryByText("Worktrees")).not.toBeInTheDocument();
 
     const activeToggle = projectToggle("maho-workspace");
@@ -661,20 +663,26 @@ describe("Sidebar navigation", () => {
     expect(onCreateWorktree).toHaveBeenCalledExactlyOnceWith(accordionProjects[1]);
   });
 
-  it("drops the per-worktree status refresh control", () => {
+  it("drops the per-worktree status refresh control and git dirty text while the dirty row stays selectable", () => {
+    const onSelectWorktree = vi.fn();
     renderSidebar({
       projects: accordionProjects,
       activeProjectId: "default",
       worktrees: [defaultWorktree, qaWorktree],
       activePath: defaultWorktree.path,
       statuses: { [defaultWorktree.path]: { isDirty: true, files: [{ statusCode: "M", path: "src/main.ts" }] } },
+      onSelectWorktree,
     });
 
     expect(screen.queryByRole("button", { name: /refresh worktree status/i })).not.toBeInTheDocument();
 
-    // Dirty state and deletion survive the refresh removal.
-    expect(screen.getByText("Dirty · 1 file")).toBeInTheDocument();
+    // Git dirty state is not displayed; the row and its delete action remain.
+    expect(screen.queryByText(/Dirty/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Delete worktree" })).toBeInTheDocument();
+    const dirtyRow = document.querySelector<HTMLButtonElement>(`button[data-shortcut-worktree-path="${defaultWorktree.path}"]`)!;
+    expect(dirtyRow).not.toBeNull();
+    fireEvent.click(dirtyRow);
+    expect(onSelectWorktree).toHaveBeenCalledWith(expect.objectContaining({ path: defaultWorktree.path }));
   });
 
   it("renders no empty-state row or message for a project with no worktrees", () => {
@@ -888,7 +896,7 @@ describe("Sidebar navigation", () => {
     expect(onOpenHistory).toHaveBeenCalledWith(testProjects[0]);
   });
 
-  it("shows the worktree tree by default and swaps to the inbox only through the inbox icon", () => {
+  it("shows the worktree tree by default and swaps to the inbox only through the inbox tab", () => {
     const attention = {
       rows: [{
         id: "row-1", revision: 1, workspaceId: "default", sessionId: "sess-1", state: "needs-you" as const,
@@ -906,8 +914,8 @@ describe("Sidebar navigation", () => {
     expect(screen.getByTestId("worktree-region")).toBeVisible();
     expect(screen.queryByTestId("attention-row")).toBeNull();
     expect(screen.queryByRole("button", { name: "Mark all read" })).toBeNull();
-    const inboxButton = screen.getByRole("button", { name: "Inbox (1)" });
-    expect(inboxButton).toHaveAttribute("aria-pressed", "false");
+    const inboxButton = screen.getByRole("tab", { name: "Inbox (1)" });
+    expect(inboxButton).toHaveAttribute("aria-selected", "false");
     expect(screen.getByTestId("sidebar-attention-badge")).toHaveTextContent("1");
     const group = screen.getByRole("list", { name: "maho-workspace worktrees" });
     fireEvent.click(within(group).getByRole("button", { name: /main/ }));
@@ -920,10 +928,10 @@ describe("Sidebar navigation", () => {
     view.rerender(<Sidebar {...baseProps({ attention: { ...attention, inboxOpen: true }, projects, activeProjectId: "maho-workspace", onSelectWorktree })} />);
     expect(screen.getByTestId("worktree-region")).not.toBeVisible();
     expect(screen.getByTestId("attention-row-text")).toHaveTextContent("Deploy — Ship it now?");
-    expect(screen.getByRole("button", { name: "Inbox (1)" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("tab", { name: "Inbox (1)" })).toHaveAttribute("aria-selected", "true");
     fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
     expect(attention.onDismissAll).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "Inbox (1)" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Worktrees" }));
     expect(attention.onInboxOpenChange).toHaveBeenLastCalledWith(false);
   });
 
