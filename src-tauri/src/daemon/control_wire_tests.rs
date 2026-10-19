@@ -231,9 +231,10 @@ impl ControlFixture {
     }
 
     fn marker(&self) -> PathBuf {
-        self.runtime
-            .path()
-            .join(format!("retired-{}.json", std::process::id()))
+        self.runtime.path().join(format!(
+            "retired-{}.json",
+            crate::daemon::owner_admission::current_generation_key()
+        ))
     }
 
     /// Opens one control connection, sends request and returns the reply.
@@ -614,6 +615,32 @@ async fn control_close_parked_after_session_removal_defers_exit_until_its_guard_
     assert!(fixture.marker().exists());
     drop(write_half);
     serving.abort();
+}
+
+/// Hello names the generation key owner.json carries, and the retirement marker the watchdog
+/// reads is retired-<generation_key>.json with that key and this pid in its body (todo 15, Q00).
+#[tokio::test]
+async fn control_hello_and_retirement_marker_carry_the_generation_key() {
+    let mut fixture = ControlFixture::new();
+    let key = crate::ipc::run_blocking(|| Ok(crate::daemon::owner_admission::current_generation_key()))
+        .await
+        .unwrap();
+    match fixture.control(ControlRequest::Hello, None).await {
+        ControlReply::Hello(hello) => assert_eq!(hello.generation_key.as_deref(), Some(key.as_str())),
+        other => panic!("expected a Hello reply, got {other:?}"),
+    }
+    assert_eq!(
+        fixture.control(ControlRequest::RetireWhenIdle, None).await,
+        ControlReply::Live { live: 0 }
+    );
+    assert_eq!(fixture.await_exit().await, 0);
+    let marker = fixture.runtime.path().join(format!("retired-{key}.json"));
+    let body: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&marker).expect("retired-<generation_key>.json was written"),
+    )
+    .unwrap();
+    assert_eq!(body["generation_key"], serde_json::Value::from(key.as_str()));
+    assert_eq!(body["pid"], serde_json::Value::from(std::process::id()));
 }
 
 /// RetireWhenIdle on an idle daemon: the client receives { ok: true } and only then the daemon
