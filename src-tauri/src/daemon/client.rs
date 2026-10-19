@@ -351,6 +351,20 @@ pub(crate) fn read_transport_token() -> Option<String> {
     None
 }
 
+/// Reads the transport token published beside endpoint, the port file a client is bound to. The
+/// daemon writes daemon.token next to daemon.port, so for the canonical endpoint this is exactly
+/// [read_transport_token]; a client bound to another endpoint (an isolated runtime or a test
+/// fixture) presents the token of that endpoint instead of the per-user runtime's one.
+#[cfg(not(unix))]
+pub(crate) fn read_transport_token_for(endpoint: &Path) -> Option<String> {
+    read_transport_token_at(&endpoint.with_file_name("daemon.token"))
+}
+
+#[cfg(unix)]
+pub(crate) fn read_transport_token_for(_endpoint: &Path) -> Option<String> {
+    None
+}
+
 /// The code the daemon answers with when the credential it was presented cannot belong to the
 /// port it answered on.
 const TRANSPORT_UNAUTHORIZED_CODE: &str = "TRANSPORT_UNAUTHORIZED";
@@ -586,146 +600,7 @@ fn daemon_protocol_mismatch_error(expected_version: u32, received_version: u32) 
     }))
 }
 
-/// Whether an incompatible predecessor daemon still owns its published endpoint.
-///
-/// The Windows kill path can decline to terminate: the pid guard rejects a system or own pid,
-/// the identity check refuses a recycled pid that is not a Ferryx image, `tasklist` can be
-/// unreadable, and the forced kill itself can fail. Every one of those is `NotTerminated`,
-/// because the predecessor may still be alive and holding `daemon.port`/`daemon.lock`.
-#[cfg(any(not(unix), test))]
-#[must_use = "a caller that ignores the outcome may delete a live daemon's endpoint files"]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StaleDaemonTermination {
-    /// The predecessor is gone: it exited inside the wait window, or `taskkill` removed it.
-    Terminated,
-    /// The predecessor was not terminated and may still own its endpoint files.
-    NotTerminated,
-}
 
-/// What one `tasklist` probe established about a pid.
-///
-/// The probe has three outcomes, not two: it can report the process, report that the pid is not
-/// running, or fail to answer at all. Collapsing the last into "not running" turns a missing or
-/// blocked `tasklist` into proof of death and authorises deleting a live daemon's endpoint files.
-#[cfg(any(not(unix), test))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ProcessLiveness {
-    /// The probe listed the pid under this image name.
-    Alive(String),
-    /// The probe succeeded and did not list the pid: the process is gone.
-    Absent,
-    /// The probe could not answer: it could not be spawned, exited non-zero, or produced output
-    /// that cannot be read.
-    Unknown,
-}
-
-/// Whether the endpoint files of an incompatible predecessor may be removed.
-///
-/// Deleting `daemon.port`/`daemon.lock` while a live daemon still owns them leaves the machine
-/// with no reachable endpoint at all, so the destructive steps are gated on a predecessor that
-/// is actually gone.
-#[cfg(any(not(unix), test))]
-fn stale_daemon_endpoint_files_removable(termination: StaleDaemonTermination) -> bool {
-    matches!(termination, StaleDaemonTermination::Terminated)
-}
-
-/// Image names `tasklist` may report for the Ferryx executable this process runs from.
-///
-/// Pure so the Windows kill path's identity check is testable without Windows.
-#[cfg(any(not(unix), test))]
-fn expected_daemon_image_names(exe: Option<&Path>) -> Vec<String> {
-    exe.and_then(Path::file_name)
-        .map(|name| vec![name.to_string_lossy().into_owned()])
-        .unwrap_or_default()
-}
-
-/// Extracts the image name `tasklist` reports for exactly `pid`.
-///
-/// The pid must equal the pid column of a row; a pid that merely appears inside another row's
-/// fields (memory usage, session number) is not the process being asked about.
-#[cfg(any(not(unix), test))]
-fn tasklist_image_name_for_pid(csv: &str, pid: u32) -> Option<String> {
-    for line in csv.lines() {
-        let fields = parse_tasklist_csv_row(line);
-        let (Some(image_name), Some(pid_field)) = (fields.first(), fields.get(1)) else {
-            continue;
-        };
-        if pid_field.trim().parse::<u32>() == Ok(pid) {
-            return Some(image_name.clone());
-        }
-    }
-    None
-}
-
-/// One `tasklist` probe: whether it exited zero and its raw stdout, or `None` when it could not
-/// be spawned at all.
-#[cfg(any(not(unix), test))]
-type TasklistProbe = Option<(bool, Vec<u8>)>;
-
-/// Classifies one `tasklist` probe into liveness.
-///
-/// Only a probe that succeeded and whose stdout can be read decides between `Alive` and
-/// `Absent`; a spawn failure, a non-zero exit, or unreadable output is `Unknown`, because "the
-/// probe failed" and "the process is gone" must never produce the same answer.
-#[cfg(any(not(unix), test))]
-fn classify_tasklist_liveness(probe: TasklistProbe, pid: u32) -> ProcessLiveness {
-    let Some((status_success, stdout)) = probe else {
-        return ProcessLiveness::Unknown;
-    };
-    if !status_success {
-        return ProcessLiveness::Unknown;
-    }
-    let Ok(stdout) = String::from_utf8(stdout) else {
-        return ProcessLiveness::Unknown;
-    };
-    match tasklist_image_name_for_pid(&stdout, pid) {
-        Some(image_name) => ProcessLiveness::Alive(image_name),
-        None => ProcessLiveness::Absent,
-    }
-}
-
-/// Splits one `tasklist /FO CSV` row into its quoted fields, keeping empty fields and treating
-/// separators inside quotes as data.
-#[cfg(any(not(unix), test))]
-fn parse_tasklist_csv_row(line: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' if in_quotes && chars.peek() == Some(&'"') => {
-                current.push('"');
-                chars.next();
-            }
-            '"' => in_quotes = !in_quotes,
-            ',' if !in_quotes => fields.push(std::mem::take(&mut current)),
-            other => current.push(other),
-        }
-    }
-    if !current.is_empty() || !fields.is_empty() {
-        fields.push(current);
-    }
-    fields
-}
-
-/// True when the image name `tasklist` reported for a pid is the expected Ferryx executable.
-///
-/// Comparison ignores case and the optional `.exe` suffix, so the reported image name and the
-/// basename of the running executable are comparable. Any other image, including a
-/// `ferryx`-prefixed helper, never matches, and an empty expectation never matches either.
-#[cfg(any(not(unix), test))]
-fn image_name_matches_expected_daemon_image(image_name: &str, expected: &[String]) -> bool {
-    fn normalize(name: &str) -> String {
-        name.trim()
-            .trim_matches('"')
-            .to_ascii_lowercase()
-            .trim_end_matches(".exe")
-            .to_string()
-    }
-    let candidate = normalize(image_name);
-    !candidate.is_empty() && expected.iter().any(|name| normalize(name) == candidate)
-}
 
 fn split_transport_error(
     mut error: IpcError,
@@ -1013,6 +888,209 @@ pub(crate) fn handover_would_lose_sessions(daemon_version: Option<&str>, live_se
     )
 }
 
+/// How a GUI of this plan may ask a running daemon to upgrade (todo 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UpgradeRoute {
+    /// No control-v1 endpoint: a pre-plan daemon. It is never sent UpgradeBinary or any control
+    /// op; it stays the Alive owner until it exits on its own (todo 14).
+    LegacyDaemon,
+    /// The daemon serves control-v1 but does not list RequestUpgrade and handover-v1 (e.g.
+    /// Windows): nothing is requested.
+    Unsupported,
+    /// The daemon lists RequestUpgrade and handover-v1: stage this build and send RequestUpgrade.
+    RequestUpgrade,
+}
+
+/// Pure route decision from the daemon's control Hello (None: no control endpoint).
+pub(crate) fn upgrade_route(hello: Option<&crate::daemon::control::HelloReply>) -> UpgradeRoute {
+    use crate::daemon::control::{HANDOVER_V1_OP, OP_REQUEST_UPGRADE};
+    let Some(hello) = hello else {
+        return UpgradeRoute::LegacyDaemon;
+    };
+    let lists = |op: &str| hello.ops.iter().any(|listed| listed == op);
+    if lists(OP_REQUEST_UPGRADE) && lists(HANDOVER_V1_OP) {
+        UpgradeRoute::RequestUpgrade
+    } else {
+        UpgradeRoute::Unsupported
+    }
+}
+
+/// Result of [`request_upgrade_via_control`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ControlUpgradeOutcome {
+    /// Pre-plan daemon: nothing was sent to it.
+    LegacyDaemonLeftAlone,
+    /// The daemon does not offer a handover upgrade; only Hello was sent.
+    Unsupported,
+    /// RequestUpgrade accepted: the successor generation job was started as a handover candidate.
+    Accepted,
+    /// RequestUpgrade answered with this failure code; the daemon keeps serving.
+    Refused(String),
+}
+
+/// Sends an upgrade request only through the control channel in `runtime_dir` (todo 8): Hello
+/// first, then, when the daemon lists RequestUpgrade and handover-v1, `stage` this build and send
+/// RequestUpgrade { staged_executable, generation_key }. A daemon without a control endpoint gets
+/// no frame at all, and the data protocol's UpgradeBinary is never used.
+pub(crate) async fn request_upgrade_via_control<F, Fut>(
+    runtime_dir: &Path,
+    stage: F,
+) -> Result<ControlUpgradeOutcome, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<crate::daemon::runtime_stage::StagedRuntime, String>>,
+{
+    use crate::daemon::control::{self, ControlConnection, ControlReply, ControlRequest};
+    let mut client = match control::connect(runtime_dir).await {
+        Ok(ControlConnection::Missing) => return Ok(ControlUpgradeOutcome::LegacyDaemonLeftAlone),
+        Ok(ControlConnection::Connected(client)) => client,
+        Err(error) => return Err(format!("control connect failed: {error}")),
+    };
+    let hello = match client.call(&ControlRequest::Hello).await {
+        Ok(ControlReply::Hello(hello)) => hello,
+        Ok(other) => return Err(format!("unexpected control Hello reply: {other:?}")),
+        Err(error) => return Err(format!("control Hello failed: {error}")),
+    };
+    match upgrade_route(Some(&hello)) {
+        UpgradeRoute::LegacyDaemon => return Ok(ControlUpgradeOutcome::LegacyDaemonLeftAlone),
+        UpgradeRoute::Unsupported => return Ok(ControlUpgradeOutcome::Unsupported),
+        UpgradeRoute::RequestUpgrade => {}
+    }
+    let staged = stage().await?;
+    let request = ControlRequest::RequestUpgrade {
+        staged_executable: staged.executable.to_string_lossy().into_owned(),
+        generation_key: Some(staged.key),
+    };
+    match client.call(&request).await {
+        Ok(ControlReply::UpgradeAccepted) => Ok(ControlUpgradeOutcome::Accepted),
+        Ok(ControlReply::Failed(failure)) => Ok(ControlUpgradeOutcome::Refused(failure.code)),
+        Ok(other) => Err(format!("unexpected RequestUpgrade reply: {other:?}")),
+        Err(error) => Err(format!("RequestUpgrade failed: {error}")),
+    }
+}
+
+/// Stages this GUI's daemon runtime (todo 3) for a RequestUpgrade.
+async fn stage_own_runtime() -> Result<crate::daemon::runtime_stage::StagedRuntime, String> {
+    let root = crate::daemon::server::daemon_runtime_root()
+        .ok_or_else(|| "Cannot determine the daemon runtime directory".to_string())?;
+    let exe = std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
+    #[cfg(unix)]
+    let exe = crate::daemon::supervisor_linux::daemon_executable(
+        std::env::var_os("APPIMAGE").as_deref(),
+        &exe,
+    );
+    crate::daemon::runtime_stage::stage_runtime_blocking(root, exe)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(all(test, unix))]
+mod control_upgrade_route_tests {
+    use super::*;
+    use crate::daemon::control::HelloReply;
+
+    fn hello(ops: &[&str]) -> HelloReply {
+        HelloReply {
+            daemon_version: "2026.1013.2".into(),
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            pid: 1,
+            start_time: 1,
+            generation_key: None,
+            epoch: 1,
+            ops: ops.iter().map(|op| op.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn upgrade_route_requires_request_upgrade_and_handover_v1() {
+        assert_eq!(upgrade_route(None), UpgradeRoute::LegacyDaemon);
+        assert_eq!(
+            upgrade_route(Some(&hello(&["Hello", "RequestUpgrade", "handover-v1"]))),
+            UpgradeRoute::RequestUpgrade
+        );
+        assert_eq!(
+            upgrade_route(Some(&hello(&["Hello", "RequestUpgrade"]))),
+            UpgradeRoute::Unsupported,
+            "a daemon without handover-v1 (Windows) is never asked to hand over"
+        );
+        assert_eq!(upgrade_route(Some(&hello(&["Hello", "handover-v1"]))), UpgradeRoute::Unsupported);
+    }
+
+    /// A pre-plan daemon publishes only its data socket. The new GUI must send it nothing: no
+    /// UpgradeBinary on the data socket and no control op, and it must not even stage a runtime.
+    #[tokio::test]
+    async fn legacy_daemon_without_control_endpoint_is_sent_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = std::os::unix::net::UnixListener::bind(dir.path().join("daemon.sock")).unwrap();
+        data.set_nonblocking(true).unwrap();
+        let staged = std::sync::atomic::AtomicBool::new(false);
+        let staged_flag = &staged;
+        let outcome = request_upgrade_via_control(dir.path(), move || async move {
+            staged_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Err::<crate::daemon::runtime_stage::StagedRuntime, String>("must not stage".into())
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome, ControlUpgradeOutcome::LegacyDaemonLeftAlone);
+        assert!(!staged.load(std::sync::atomic::Ordering::SeqCst), "no runtime is staged for a legacy daemon");
+        match data.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("the legacy daemon's data socket must receive no connection: {other:?}"),
+        }
+    }
+
+    /// A stale same-protocol pre-plan daemon (maybe_trigger_upgrade_if_stale's case) is reached
+    /// through upgrade_binary as well: the client answers UpgradeUnsupported and the data socket
+    /// sees no connection, so UpgradeBinary is never sent.
+    #[tokio::test]
+    async fn upgrade_binary_never_sends_upgrade_binary_to_a_legacy_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let data = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        data.set_nonblocking(true).unwrap();
+        let client = DaemonClient::new_with_socket(socket);
+        let response = client.upgrade_binary().await.unwrap();
+        assert!(matches!(response, DaemonResponse::UpgradeUnsupported), "{response:?}");
+        match data.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("UpgradeBinary must not reach a legacy daemon: {other:?}"),
+        }
+    }
+
+    /// A control daemon that lists no handover op gets Hello only, never RequestUpgrade.
+    #[tokio::test]
+    async fn control_daemon_without_handover_v1_gets_hello_only() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::UnixListener::bind(
+            dir.path().join(crate::daemon::control::CONTROL_SOCKET_FILE),
+        )
+        .unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = tokio::io::BufReader::new(read).lines();
+            let mut ops = Vec::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let request = crate::daemon::control::decode_request(&line).unwrap();
+                ops.push(request.op().to_string());
+                let reply = crate::daemon::control::ControlReply::Hello(hello(&["Hello", "RequestUpgrade"]));
+                let frame = crate::daemon::control::to_line(&crate::daemon::control::encode_reply(&reply));
+                write.write_all(frame.as_bytes()).await.unwrap();
+            }
+            ops
+        });
+        let outcome = request_upgrade_via_control(dir.path(), || async {
+            Err::<crate::daemon::runtime_stage::StagedRuntime, String>("must not stage".into())
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome, ControlUpgradeOutcome::Unsupported);
+        let ops = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        assert_eq!(ops, vec!["Hello".to_string()]);
+    }
+}
+
 /// Orders two CalVer strings (`YYYY.MDD.N`) numerically per dot-separated component.
 /// Returns `None` when either side is not fully numeric, so callers can pick their own fallback.
 fn compare_calver(left: &str, right: &str) -> Option<std::cmp::Ordering> {
@@ -1175,7 +1253,7 @@ impl DaemonClient {
             async {
                 crate::ipc::run_blocking(move || {
                     Self::validate_existing_socket_path(&path)?;
-                    let credential = read_transport_token();
+                    let credential = read_transport_token_for(&path);
                     #[cfg(unix)]
                     let endpoint = path;
                     #[cfg(not(unix))]
@@ -1811,7 +1889,7 @@ impl DaemonClient {
             crate::ipc::run_blocking(move || Self::validate_existing_socket_path(&socket_path)).await.map_err(|_| ServiceError::unavailable())?;
             // The credential is read before the port is, the order the daemon publishes them in:
             // the token presented can then never be newer than the port it is presented to.
-            let credential = read_transport_token();
+            let credential = read_transport_token_for(&self.socket_path);
             let stream = Self::connect_socket(&self.socket_path).await.map_err(|_| ServiceError::unavailable())?;
             let (reader, writer) = stream.into_split();
             let mut connection = ActiveConnection { reader: BufReader::new(reader), writer };
@@ -2062,14 +2140,27 @@ impl DaemonClient {
         }
     }
 
+    /// Asks the running daemon to hand over to this build's staged runtime generation through the
+    /// control channel (todo 8). A pre-plan daemon (no control endpoint) is left alone and
+    /// answers UpgradeUnsupported; the protocol-5 UpgradeBinary request is never sent.
     pub async fn upgrade_binary(&self) -> Result<DaemonResponse, IpcError> {
-        let own_binary_path = std::env::current_exe()
-            .ok()
-            .map(|p| p.to_string_lossy().to_string());
-        self.send_request(DaemonRequest::UpgradeBinary {
-            new_binary_path: own_binary_path,
+        let outcome = request_upgrade_via_control(&self.control_runtime_dir(), stage_own_runtime)
+            .await
+            .map_err(IpcError::internal)?;
+        Ok(match outcome {
+            ControlUpgradeOutcome::Accepted => DaemonResponse::UpgradeScheduled,
+            ControlUpgradeOutcome::LegacyDaemonLeftAlone
+            | ControlUpgradeOutcome::Unsupported
+            | ControlUpgradeOutcome::Refused(_) => DaemonResponse::UpgradeUnsupported,
         })
-        .await
+    }
+
+    /// The runtime dir whose control endpoint belongs to this client's data socket.
+    fn control_runtime_dir(&self) -> PathBuf {
+        self.socket_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(crate::daemon::server::get_runtime_dir)
     }
 
     pub fn epoch(&self) -> Option<u64> {
@@ -2502,7 +2593,7 @@ impl DaemonClient {
     /// One attempt: the credential is read before the port is, so the token presented can never be
     /// newer than the port it is presented to.
     async fn connect_and_handshake_once(&self) -> Result<ActiveConnection, IpcError> {
-        let credential = read_transport_token();
+        let credential = read_transport_token_for(&self.socket_path);
         let stream = self.connect_or_spawn().await?;
         // A port was published but the credential that authenticates it was not on disk when it
         // was read: the same straddled pair a rejection reports, so re-read both halves instead of
@@ -2554,120 +2645,28 @@ impl DaemonClient {
             ));
         }
 
-        let mut hs_resp: DaemonResponse = serde_json::from_str(line.trim()).map_err(|e| {
+        let hs_resp: DaemonResponse = serde_json::from_str(line.trim()).map_err(|e| {
             IpcError::new(
                 IpcErrorCode::ParseError,
                 format!("Handshake parse failed: {e}"),
             )
         })?;
-
-        // If the running daemon speaks an older protocol version, it closed the connection
-        // after emitting ProtocolMismatch. Reconnect with a fresh stream and perform a compatibility
-        // handshake so that we can send UpgradeBinary to trigger rolling handover.
-        if let DaemonResponse::ProtocolMismatch {
-            expected_version, ..
-        } = hs_resp
-        {
-            if let Ok(stream) = Self::connect_socket(&self.socket_path).await {
-                let (rh, mut wh) = stream.into_split();
-                let mut r = BufReader::new(rh);
-                let compat_hs = DaemonRequest::Handshake {
-                    version: expected_version,
-                    token: credential.clone(),
-                };
-                if let Ok(mut json) = serde_json::to_string(&compat_hs) {
-                    json.push('\n');
-                    if wh.write_all(json.as_bytes()).await.is_ok() && wh.flush().await.is_ok() {
-                        let mut compat_line = String::new();
-                        if let Ok(Ok(n)) = tokio::time::timeout(
-                            Duration::from_secs(5),
-                            r.read_line(&mut compat_line),
-                        )
-                        .await
-                        {
-                            if n > 0 {
-                                if let Ok(compat_resp) =
-                                    serde_json::from_str::<DaemonResponse>(compat_line.trim())
-                                {
-                                    reader = r;
-                                    write_half = wh;
-                                    hs_resp = compat_resp;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
+        // A data connection is admitted only at an equal DAEMON_PROTOCOL_VERSION; no old-wire codec
+        // is built. Every cross-version operation goes through the frozen control channel.
         match hs_resp {
             DaemonResponse::HandshakeOk {
                 version,
-                pid,
                 epoch,
                 binary_mtime_ms,
                 daemon_version,
                 ..
             } => {
                 if version != DAEMON_PROTOCOL_VERSION {
-                    if self.upgrade_requested.load(Ordering::SeqCst) {
-                        // This connection was created specifically to send an UpgradeBinary request
-                        // to the running daemon. Allow the connection to proceed so rolling handover
-                        // can be requested even across protocol version boundaries.
-                        *self.epoch.write() = Some(epoch);
-                        return Ok(ActiveConnection {
-                            reader,
-                            writer: write_half,
-                        });
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        tracing::warn!(
-                            old_version = version,
-                            expected_version = DAEMON_PROTOCOL_VERSION,
-                            old_pid = pid,
-                            "Incompatible daemon protocol version detected on Windows. Shutting down stale predecessor daemon."
-                        );
-                        let shutdown_req = DaemonRequest::Shutdown;
-                        if let Ok(mut s) = serde_json::to_string(&shutdown_req) {
-                            s.push('\n');
-                            let _ = write_half.write_all(s.as_bytes()).await;
-                            let _ = write_half.flush().await;
-                        }
-                        drop(reader);
-                        drop(write_half);
-
-                        Self::retarget_supervisor_before_replacing_daemon().await;
-                        let termination =
-                            Self::terminate_stale_daemon_process_windows(pid).await;
-                        if !stale_daemon_endpoint_files_removable(termination) {
-                            tracing::warn!(
-                                old_pid = pid,
-                                old_version = version,
-                                expected_version = DAEMON_PROTOCOL_VERSION,
-                                "A live, incompatible daemon could not be terminated; keeping its daemon.port and daemon.lock instead of deleting the endpoint of a daemon that still owns it"
-                            );
-                            return Err(daemon_protocol_mismatch_error(
-                                DAEMON_PROTOCOL_VERSION,
-                                version,
-                            ));
-                        }
-
-                        let _ = fs::remove_file(&self.socket_path);
-                        let lock_path = crate::daemon::server::get_lock_path();
-                        let _ = fs::remove_file(lock_path);
-
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        return Box::pin(self.connect_and_handshake()).await;
-                    }
-                    #[cfg(unix)]
-                    {
-                        self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
-                        return Err(daemon_protocol_mismatch_error(
-                            DAEMON_PROTOCOL_VERSION,
-                            version,
-                        ));
-                    }
+                    // Never Shutdown, terminate, retarget or spawn over a live owner of another
+                    // protocol: report the pending update and leave the old owner running.
+                    drop(reader);
+                    drop(write_half);
+                    return Err(self.enter_update_pending(daemon_version).await);
                 }
                 *self.epoch.write() = Some(epoch);
                 self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
@@ -2676,52 +2675,10 @@ impl DaemonClient {
                     writer: write_half,
                 })
             }
-            DaemonResponse::ProtocolMismatch {
-                expected_version,
-                received_version,
-            } => {
-                #[cfg(not(unix))]
-                {
-                    tracing::warn!(
-                        expected_version,
-                        received_version,
-                        "Incompatible daemon protocol mismatch could not be negotiated on Windows. Requesting shutdown and starting a declared successor instead of deleting the running daemon's endpoint."
-                    );
-                    // Mirrors the HandshakeOk mismatch arm, with one deliberate difference: this
-                    // variant carries no pid, so there is no identity-checked way to terminate the
-                    // holder (see terminate_stale_daemon_process_windows). Never delete
-                    // daemon.port or daemon.lock here: if the daemon that answered is still alive
-                    // and holding them, the successor cannot take the instance lock and the
-                    // machine is left with no reachable endpoint at all.
-                    let shutdown_req = DaemonRequest::Shutdown;
-                    if let Ok(mut s) = serde_json::to_string(&shutdown_req) {
-                        s.push('\n');
-                        let _ = write_half.write_all(s.as_bytes()).await;
-                        let _ = write_half.flush().await;
-                    }
-                    drop(reader);
-                    drop(write_half);
-
-                    Self::retarget_supervisor_before_replacing_daemon().await;
-                    if let Err(error) = self.spawn_successor_daemon().await {
-                        tracing::warn!(
-                            %error,
-                            "Successor daemon could not be started; the incompatible daemon keeps its endpoint"
-                        );
-                        return Err(daemon_protocol_mismatch_error(
-                            expected_version,
-                            received_version,
-                        ));
-                    }
-                    return Box::pin(self.connect_and_handshake()).await;
-                }
-                #[cfg(unix)]
-                {
-                    Err(daemon_protocol_mismatch_error(
-                        expected_version,
-                        received_version,
-                    ))
-                }
+            DaemonResponse::ProtocolMismatch { .. } => {
+                drop(reader);
+                drop(write_half);
+                Err(self.enter_update_pending(None).await)
             }
             DaemonResponse::Error { message, code, .. } => {
                 Err(handshake_error_for_response(message, code.as_deref()))
@@ -2733,152 +2690,56 @@ impl DaemonClient {
         }
     }
 
-    /// Points the Windows supervisor task at this build before an incompatible daemon is replaced.
-    ///
-    /// The watchdog respawns whatever executable the task names. Retargeting first means a crash of
-    /// the replacement, or of the old daemon while it is being replaced, is restarted with the new
-    /// build instead of the incompatible one. A failure is logged and does not block the
-    /// replacement: the task keeps its previous definition and the GUI retargets it on next start.
-    #[cfg(not(unix))]
-    async fn retarget_supervisor_before_replacing_daemon() {
-        let retarget = crate::ipc::run_blocking(|| {
-            crate::daemon::supervisor::retarget()
-                .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
-        })
-        .await;
-        match retarget {
-            Ok(changed) => tracing::info!(changed, "Supervisor task points at this build"),
-            Err(error) => tracing::warn!(
-                %error,
-                "Could not retarget the supervisor task before replacing the incompatible daemon"
-            ),
-        }
-    }
-
-    /// Starts a daemon allowed to outlast the instance lock of an incompatible predecessor.
-    ///
-    /// `FERRYX_DAEMON_SUCCESSOR` arms the child's instance-lock wait window
-    /// (`daemon::handover::successor_lock_wait`), which is what makes a takeover possible at all:
-    /// without it the child fails fast on the lock and exits, leaving the machine with no daemon.
-    /// The predecessor's `daemon.port` and `daemon.lock` are deliberately left in place; the child
-    /// removes the stale port file itself once it owns the lock.
-    #[cfg(not(unix))]
-    async fn spawn_successor_daemon(&self) -> Result<(), IpcError> {
-        let _spawn_guard = self.spawn_lock.lock().await;
-        let binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ferryx"));
-        let mut child = crate::util::no_window_tokio_command(&binary_path)
-            .arg("--daemon")
-            .env("FERRYX_DAEMON_SUCCESSOR", "1")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                IpcError::new(
-                    IpcErrorCode::InternalError,
-                    format!(
-                        "Failed to spawn Ferryx successor daemon process ({}): {e}",
-                        binary_path.display()
-                    ),
-                )
-            })?;
-
-        let stdout = child.stdout.take().ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::InternalError,
-                "Failed to capture successor daemon process stdout",
-            )
-        })?;
-
-        if let Err(error) =
-            wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
-        {
-            let _ = child.kill().await;
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    /// Terminates the stale predecessor daemon that owns `pid`, reporting whether it is gone.
-    ///
-    /// The identity check and the forced kill can both leave the process in place; that is
-    /// reported as `NotTerminated` so no caller treats an untouched live daemon as terminated.
-    #[cfg(not(unix))]
-    async fn terminate_stale_daemon_process_windows(pid: u32) -> StaleDaemonTermination {
-        if pid <= 4 || pid == std::process::id() {
-            return StaleDaemonTermination::NotTerminated;
-        }
-        for _ in 0..10 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            // Only a probe that positively answered "not running" proves the predecessor exited.
-            // An unanswered probe keeps waiting and then falls through to the identity-checked
-            // force-terminate path below, which refuses to touch a pid it cannot identify.
-            if matches!(Self::tasklist_liveness_windows(pid), ProcessLiveness::Absent) {
-                return StaleDaemonTermination::Terminated;
-            }
-        }
-        // A pid is not an identity: the predecessor can exit inside the wait window and Windows
-        // can hand the same pid to an unrelated process. Force-terminate only when the process
-        // that owns the pid right now is actually a Ferryx image.
-        let expected_images =
-            expected_daemon_image_names(std::env::current_exe().ok().as_deref());
-        let Some(image_name) = Self::tasklist_image_name_windows(pid) else {
-            return StaleDaemonTermination::NotTerminated;
-        };
-        if !image_name_matches_expected_daemon_image(&image_name, &expected_images) {
-            tracing::warn!(
-                pid,
-                image_name = %image_name,
-                "Refusing to force-terminate a recycled pid that is not a Ferryx process"
-            );
-            return StaleDaemonTermination::NotTerminated;
-        }
-        tracing::warn!(pid, "Stale predecessor daemon did not exit within timeout, forcing termination");
-        // The kill's own outcome is the evidence that the predecessor is gone: a `taskkill` that
-        // failed leaves a live daemon behind, while a process that exited in the race with the
-        // identity check is gone either way.
-        let kill = crate::util::no_window_tokio_command("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .output()
-            .await;
-        let killed = matches!(kill, Ok(output) if output.status.success());
-        if killed || matches!(Self::tasklist_liveness_windows(pid), ProcessLiveness::Absent) {
-            return StaleDaemonTermination::Terminated;
-        }
-        StaleDaemonTermination::NotTerminated
-    }
-
-    /// The tri-state `tasklist` probe for `pid`.
-    ///
-    /// `Unknown` is a real outcome, not a synonym for "gone": the probe could not be spawned,
-    /// exited non-zero, or printed bytes that cannot be read as text. Callers may act on `Absent`
-    /// only, because treating an unanswered probe as an exited process is what deletes a live
-    /// daemon's endpoint files.
-    #[cfg(not(unix))]
-    fn tasklist_liveness_windows(pid: u32) -> ProcessLiveness {
-        let probe = crate::util::no_window_command("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-            .output()
-            .ok()
-            .map(|output| (output.status.success(), output.stdout));
-        classify_tasklist_liveness(probe, pid)
-    }
-
-    /// Reads the image name `tasklist` reports for exactly `pid`.
-    ///
-    /// The CSV projection is required because the human-readable table cannot be parsed
-    /// reliably: matching the pid as a substring of it also matches a pid that only appears
-    /// inside another process's memory-usage column. Only an `Alive` probe yields a name, so a
-    /// probe that failed to answer never looks like an identified Ferryx process either.
-    #[cfg(not(unix))]
-    fn tasklist_image_name_windows(pid: u32) -> Option<String> {
-        match Self::tasklist_liveness_windows(pid) {
-            ProcessLiveness::Alive(image_name) => Some(image_name),
-            ProcessLiveness::Absent | ProcessLiveness::Unknown => None,
-        }
-    }
-
     pub async fn send_request(&self, req: DaemonRequest) -> Result<DaemonResponse, IpcError> {
         self.send_on_connection(&self.connection, req).await
+    }
+
+    /// The runtime dir holding this client's endpoint, where the owner's control endpoint lives.
+    fn update_pending_runtime_dir(&self) -> PathBuf {
+        self.socket_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(crate::daemon::server::get_runtime_dir)
+    }
+
+    /// The owner speaks another data protocol (todo 9). Nothing is sent over the data protocol and
+    /// nothing is shut down, terminated, retargeted or spawned. On Unix the GUI first asks for a
+    /// session-preserving upgrade over the control channel (todo 8's RequestUpgrade); only when
+    /// that is unsupported, refused, unavailable or fails, and always on Windows, it reads
+    /// Inventory, asks the owner once to RetireWhenIdle, and reports DAEMON_UPDATE_PENDING.
+    async fn enter_update_pending(&self, running_version: Option<String>) -> IpcError {
+        let runtime_dir = self.update_pending_runtime_dir();
+        #[cfg(unix)]
+        let upgrade = Some(request_upgrade_via_control(&runtime_dir, stage_own_runtime));
+        #[cfg(not(unix))]
+        let upgrade: Option<std::future::Ready<Result<ControlUpgradeOutcome, String>>> = None;
+        // No cache invalidation here: the caller may hold a connection slot lock, and the mismatched
+        // connection was never stored. The next request reconnects to whichever owner then answers.
+        crate::daemon::update_pending::resolve_mismatch(&runtime_dir, running_version, upgrade)
+            .await
+            .into_error()
+    }
+
+    /// The user confirmed "Restart terminals now" for confirm_live_sessions terminals.
+    pub async fn restart_previous_version_terminals(
+        &self,
+        confirm_live_sessions: u32,
+    ) -> Result<crate::daemon::update_pending::RestartOutcome, IpcError> {
+        let outcome = crate::daemon::update_pending::restart_terminals(
+            &self.update_pending_runtime_dir(),
+            confirm_live_sessions,
+        )
+        .await
+        .map_err(IpcError::internal)?;
+        if matches!(outcome, crate::daemon::update_pending::RestartOutcome::Accepted { .. }) {
+            self.invalidate_cached_connections().await;
+        }
+        Ok(outcome)
+    }
+
+    /// Re-reads the pending state (after CountChanged) without sending RetireWhenIdle twice.
+    pub async fn update_pending_status(&self) -> crate::daemon::update_pending::UpdatePending {
+        crate::daemon::update_pending::enter(&self.update_pending_runtime_dir(), None).await
     }
 
     /// Interactive requests (keystroke writes, resizes) use a dedicated connection so
@@ -3430,7 +3291,7 @@ impl DaemonClient {
         for req in [
             DaemonRequest::Handshake {
                 version: DAEMON_PROTOCOL_VERSION,
-                token: read_transport_token(),
+                token: read_transport_token_for(&self.socket_path),
             },
             DaemonRequest::SubscribeRemoteEvents,
         ] {
@@ -3538,7 +3399,7 @@ impl DaemonClient {
         for req in [
             DaemonRequest::Handshake {
                 version: DAEMON_PROTOCOL_VERSION,
-                token: read_transport_token(),
+                token: read_transport_token_for(&self.socket_path),
             },
             DaemonRequest::SubscribeDag {
                 workspace_id: workspace_id.to_string(),
@@ -3665,7 +3526,7 @@ impl DaemonClient {
 
         let handshake = DaemonRequest::Handshake {
             version: DAEMON_PROTOCOL_VERSION,
-            token: read_transport_token(),
+            token: read_transport_token_for(&self.socket_path),
         };
         let mut json = serde_json::to_string(&handshake).map_err(|e| {
             IpcError::new(
@@ -7015,190 +6876,6 @@ mod tests {
     }
 }
 
-/// Windows stale-daemon identity checks: `tasklist` output parsing and the image-name
-/// comparison that gates `taskkill`. Platform independent so the pid-reuse guard is testable
-/// without Windows.
-#[cfg(test)]
-mod tasklist_identity_tests {
-    use super::{
-        classify_tasklist_liveness, expected_daemon_image_names,
-        image_name_matches_expected_daemon_image, parse_tasklist_csv_row,
-        stale_daemon_endpoint_files_removable, tasklist_image_name_for_pid, ProcessLiveness,
-        StaleDaemonTermination,
-    };
-    use std::path::Path;
-
-    const TASKLIST_CSV_NO_HEADER: &str = concat!(
-        "\"Ferryx.exe\",\"21432\",\"Console\",\"1\",\"412,340 K\"\r\n",
-        "\"notepad.exe\",\"777\",\"Console\",\"1\",\"12,345 K\"\r\n"
-    );
-
-    #[test]
-    fn image_name_is_read_from_the_exact_pid_column() {
-        assert_eq!(
-            tasklist_image_name_for_pid(TASKLIST_CSV_NO_HEADER, 21432).as_deref(),
-            Some("Ferryx.exe")
-        );
-        assert_eq!(
-            tasklist_image_name_for_pid(TASKLIST_CSV_NO_HEADER, 777).as_deref(),
-            Some("notepad.exe")
-        );
-        assert_eq!(tasklist_image_name_for_pid(TASKLIST_CSV_NO_HEADER, 21433), None);
-    }
-
-    #[test]
-    fn pid_inside_another_rows_fields_is_not_the_requested_process() {
-        // 432 appears inside the memory usage of pid 21432 and the session number of the row
-        // below. A substring check over the tasklist table reports pid 432 as alive and would
-        // force-kill an unrelated process; the pid column comparison must not.
-        let csv = concat!(
-            "\"Ferryx.exe\",\"21432\",\"Console\",\"432\",\"1,432 K\"\r\n",
-            "\"notepad.exe\",\"777\",\"Console\",\"1\",\"432 K\"\r\n"
-        );
-        assert_eq!(tasklist_image_name_for_pid(csv, 432), None);
-        assert_eq!(
-            tasklist_image_name_for_pid(csv, 21432).as_deref(),
-            Some("Ferryx.exe")
-        );
-    }
-
-    #[test]
-    fn missing_process_and_filter_info_line_report_no_process() {
-        assert_eq!(tasklist_image_name_for_pid("", 1234), None);
-        assert_eq!(
-            tasklist_image_name_for_pid(
-                "INFO: No tasks are running which match the specified criteria.\r\n",
-                1234
-            ),
-            None
-        );
-        assert_eq!(tasklist_image_name_for_pid("\r\n", 1234), None);
-    }
-
-    #[test]
-    fn csv_fields_keep_commas_inside_quotes_and_empty_fields() {
-        assert_eq!(
-            parse_tasklist_csv_row("\"Ferryx.exe\",\"21432\",\"Console\",\"1\",\"412,340 K\""),
-            vec![
-                "Ferryx.exe".to_string(),
-                "21432".to_string(),
-                "Console".to_string(),
-                "1".to_string(),
-                "412,340 K".to_string(),
-            ]
-        );
-        assert_eq!(
-            parse_tasklist_csv_row("\"Ferryx.exe\",\"\",\"Services\",\"0\",\"N/A\""),
-            vec![
-                "Ferryx.exe".to_string(),
-                String::new(),
-                "Services".to_string(),
-                "0".to_string(),
-                "N/A".to_string(),
-            ]
-        );
-        assert!(parse_tasklist_csv_row("").is_empty());
-    }
-
-    #[test]
-    fn only_the_running_ferryx_image_matches() {
-        let expected =
-            expected_daemon_image_names(Some(Path::new("C:/Program Files/Ferryx/Ferryx.exe")));
-        assert_eq!(expected, vec!["Ferryx.exe".to_string()]);
-        assert!(image_name_matches_expected_daemon_image(
-            "Ferryx.exe",
-            &expected
-        ));
-        assert!(image_name_matches_expected_daemon_image(
-            "ferryx.EXE",
-            &expected
-        ));
-        // The reported image name may omit the extension the executable keeps.
-        assert!(image_name_matches_expected_daemon_image(
-            "ferryx",
-            &expected
-        ));
-        assert!(!image_name_matches_expected_daemon_image(
-            "notepad.exe",
-            &expected
-        ));
-        assert!(!image_name_matches_expected_daemon_image(
-            "ferryx-helper.exe",
-            &expected
-        ));
-        assert!(!image_name_matches_expected_daemon_image("", &expected));
-    }
-
-    #[test]
-    fn unknown_executable_name_never_matches() {
-        assert!(expected_daemon_image_names(None).is_empty());
-        let unknown = expected_daemon_image_names(None);
-        assert!(!image_name_matches_expected_daemon_image(
-            "Ferryx.exe",
-            &unknown
-        ));
-    }
-
-    #[test]
-    fn a_daemon_that_could_not_be_terminated_keeps_its_endpoint_files() {
-        assert!(stale_daemon_endpoint_files_removable(
-            StaleDaemonTermination::Terminated
-        ));
-        assert!(
-            !stale_daemon_endpoint_files_removable(StaleDaemonTermination::NotTerminated),
-            "a predecessor that is still alive must keep daemon.port and daemon.lock"
-        );
-    }
-
-    #[test]
-    fn liveness_is_alive_only_when_a_successful_probe_lists_the_pid() {
-        let csv = TASKLIST_CSV_NO_HEADER.as_bytes().to_vec();
-        assert_eq!(
-            classify_tasklist_liveness(Some((true, csv.clone())), 21432),
-            ProcessLiveness::Alive("Ferryx.exe".to_string())
-        );
-        assert_eq!(
-            classify_tasklist_liveness(Some((true, csv)), 21433),
-            ProcessLiveness::Absent
-        );
-    }
-
-    #[test]
-    fn a_successful_probe_without_the_pid_is_absent() {
-        // The documented no-match output of `tasklist /FI ... /NH /FO CSV` at exit code 0.
-        assert_eq!(
-            classify_tasklist_liveness(
-                Some((
-                    true,
-                    b"INFO: No tasks are running which match the specified criteria.\r\n".to_vec()
-                )),
-                21432
-            ),
-            ProcessLiveness::Absent
-        );
-    }
-
-    #[test]
-    fn a_probe_that_could_not_answer_is_unknown_never_absent() {
-        // A probe that could not be spawned never produces output at all.
-        assert_eq!(
-            classify_tasklist_liveness(None, 21432),
-            ProcessLiveness::Unknown
-        );
-        for probe in [
-            // `tasklist` missing, blocked, or denied exits non-zero.
-            Some((false, Vec::new())),
-            // Unreadable bytes cannot be parsed into rows.
-            Some((true, b"not utf8 \xff\xfe".to_vec())),
-        ] {
-            assert_eq!(
-                classify_tasklist_liveness(probe, 21432),
-                ProcessLiveness::Unknown,
-                "an unanswered probe is not a confirmed exit"
-            );
-        }
-    }
-}
 
 #[cfg(test)]
 mod local_split_transport_tests {
@@ -7423,6 +7100,9 @@ mod local_split_transport_tests {
             let listener = {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 fs::write(&path, listener.local_addr().unwrap().port().to_string()).unwrap();
+                // The daemon publishes daemon.token beside its port; a client bound to this
+                // endpoint presents the token found beside it (read_transport_token_for).
+                fs::write(path.with_file_name("daemon.token"), "fixture-transport-token").unwrap();
                 listener
             };
             Self {

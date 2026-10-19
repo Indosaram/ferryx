@@ -78,6 +78,9 @@ function resolveAffordanceErrorDescription(affordance: ReturnType<typeof getAgen
       if (code === "DAEMON_PROTOCOL_MISMATCH") {
         return "Daemon protocol mismatch while reconnecting.";
       }
+      if (code === "DAEMON_UPDATE_PENDING") {
+        return "Update installed; this terminal reconnects after the previous version's terminals close.";
+      }
       return "Reconnect failed.";
     }
     default:

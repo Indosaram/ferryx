@@ -38,6 +38,9 @@ pub mod supervisor_windows;
 // systemd user unit and sd_notify for the Linux supervisor backend.
 #[cfg(unix)]
 pub mod supervisor_linux;
+// Todo 9: the pending-update state when the live owner speaks another data protocol; only the
+// control channel is used, and the owner is never ended without the user's exact-count consent.
+pub mod update_pending;
 pub mod workspace_service;
 
 /// Shared headless authority supplied only by the session-owning daemon.
