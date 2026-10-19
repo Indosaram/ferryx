@@ -987,6 +987,35 @@ mod tests {
         assert_eq!(job.plist_path, agents.join("ferryx-qa-1.2026.1013.2-0a1b2c3d.plist"));
     }
 
+    /// The barrier env reaches the job daemon only through a QA-named generation plist: job_for
+    /// renders it into EnvironmentVariables, and the user's job (no QA name) carries none.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_qa_job_plist_carries_the_barrier_env_to_its_daemon() {
+        let home = tempfile::tempdir().unwrap();
+        let staged = crate::daemon::runtime_stage::StagedRuntime {
+            key: "2026.1013.2-0a1b2c3d".to_string(),
+            executable: home.path().join("daemon-runtime/2026.1013.2-0a1b2c3d/Ferryx Daemon.app/Contents/MacOS/ferryx"),
+        };
+        let home_str = home.path().to_str().unwrap();
+        let barrier = [("FERRYX_QA_BARRIER_DIR", "/qa/barrier"), ("FERRYX_QA_RUN_ID", "run-1")];
+        let user: Vec<(&str, &str)> = [("HOME", home_str)].into_iter().chain(barrier).collect();
+        let plist = backend::job_for(&env_of(&user), &staged).unwrap().render(true);
+        assert!(!plist.contains("EnvironmentVariables") && !plist.contains("/qa/barrier"));
+
+        let qa: Vec<(&str, &str)> = [("HOME", home_str), (SUPERVISOR_NAME_ENV, "ferryx-qa-run-1"), ("FERRYX_RUNTIME_DIR", "/qa/run")]
+            .into_iter()
+            .chain(barrier)
+            .collect();
+        let plist = backend::job_for(&env_of(&qa), &staged).unwrap().render(true);
+        let forwarded = cfg!(feature = "local-split-qa");
+        for (key, value) in barrier.iter().chain([&("FERRYX_RUNTIME_DIR", "/qa/run")]) {
+            let pair = format!("<key>{key}</key>\n        <string>{value}</string>");
+            let expected = forwarded || !key.starts_with("FERRYX_QA_");
+            assert_eq!(plist.contains(&pair), expected, "{key} in\n{plist}");
+        }
+    }
+
     /// The macOS legacy migration covers `com.ferryx.daemon` and the pre-rebrand
     /// `com.rorca.daemon`; a QA run (name override) migrates only its own QA-named legacy job and
     /// never the user's real ones.

@@ -939,6 +939,13 @@ mod tests {
         } else {
             assert_eq!(keys, ["FERRYX_DATA_DIR"]);
         }
+        // The rendered unit is what systemd hands the daemon: the barrier env is an Environment=
+        // line of a QA-named unit only.
+        let unit = render_unit(Path::new("/opt/ferryx/ferryx"), &qa).unwrap();
+        let line = "Environment=\"FERRYX_QA_BARRIER_DIR=/qa/b\"\n";
+        assert_eq!(unit.contains(line), cfg!(feature = "local-split-qa"), "{unit}");
+        let unit = render_unit(Path::new("/opt/ferryx/ferryx"), &plain).unwrap();
+        assert!(!unit.contains("FERRYX_QA_"), "{unit}");
     }
 
     #[test]

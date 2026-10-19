@@ -1569,6 +1569,35 @@ mod tests {
         }
     }
 
+    /// The task XML is the only channel to the watchdog (a scheduled task has no environment
+    /// block): the barrier env is rendered into its Arguments only for a QA-named task, and the
+    /// watchdog's own parser gives it back so run_daemon_supervisor sets it before spawning the
+    /// daemon, which inherits it.
+    #[test]
+    fn qa_task_arguments_carry_the_barrier_env_to_the_watchdog() {
+        let f = Fixture::new();
+        let staged = f.staged("2026.1013.2-0a1b2c3d");
+        let base = [("LOCALAPPDATA", f.local.to_str().unwrap()), ("USERNAME", "sook"), ("USERDOMAIN", "DESKTOP-1")];
+        let barrier = [("FERRYX_QA_BARRIER_DIR", r"C:\qa\barrier"), ("FERRYX_QA_RUN_ID", "run-1")];
+        let user: Vec<(&str, &str)> = base.into_iter().chain(barrier).collect();
+        assert!(!generation_definition(&env_of(&user), &staged).unwrap().contains("FERRYX_QA_"));
+
+        let qa: Vec<(&str, &str)> = base.into_iter().chain([(SUPERVISOR_NAME_ENV, "DaemonQa")]).chain(barrier).collect();
+        let forwarded = forwarded_env(&env_of(&qa));
+        let xml = generation_definition(&env_of(&qa), &staged).unwrap();
+        assert!(xml.contains(&xml_escape(&task_arguments(&forwarded))), "{xml}");
+        let args: Vec<String> = std::iter::once(SUPERVISOR_ARG.to_string())
+            .chain(forwarded.iter().flat_map(|(k, v)| [ENV_ARG.to_string(), format!("{k}={v}")]))
+            .collect();
+        let parsed = parse_supervisor_args(&args).unwrap().unwrap();
+        let keys: Vec<&str> = parsed.iter().map(|(k, _)| k.as_str()).collect();
+        if cfg!(feature = "local-split-qa") {
+            assert_eq!(keys, [SUPERVISOR_NAME_ENV, "FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"]);
+        } else {
+            assert_eq!(keys, [SUPERVISOR_NAME_ENV]);
+        }
+    }
+
     #[test]
     fn missing_task_is_created_from_the_staged_runtime_and_run_when_absent() {
         let f = Fixture::new();
