@@ -2,7 +2,7 @@
 
 import path from 'node:path';
 import { assertion, block } from '../lib/summary.mjs';
-import { HANDOVER_FAULTS } from '../lib/hooks.mjs';
+import { HANDOVER_FAULTS, TRANSFER_FAULTS, FORCED_COMMIT_FAILURE } from '../lib/hooks.mjs';
 import { data as D, helloSupportsHandover, inventoryTotal } from '../lib/wire.mjs';
 import {
   evidence, dataConn, controlConn, ownerIdentity, nonceRoundTrip, assertInventoryKept, assertSameOwner,
@@ -151,7 +151,10 @@ async function upgradeStep(ctx, result, artifact, pair, tag) {
   return { pred, succ };
 }
 
-/** One injected transfer failure: the predecessor keeps both sessions writable, the candidate exits 0. */
+/**
+ * One injected handover failure: the predecessor keeps both sessions writable, the candidate
+ * exits. A todo 8 transfer failure (TRANSFER_FAULTS) also never reaches CommitHandover.
+ */
 async function faultVariant(ctx, result, fault, artifact, pair) {
   const pred = await ownerIdentity(ctx);
   const op = `fault-${fault}-${ctx.runId}`;
@@ -180,6 +183,9 @@ async function faultVariant(ctx, result, fault, artifact, pair) {
     assertSameOwner(result, pred, after, `${fault}: predecessor remains owner`);
     assertion(result, `${fault}: candidate never adopted or recovered authority`, !candidateStages.some((s) => s === 'authority-adopted' || s === 'authority-recovered'), candidateStages);
     assertion(result, `${fault}: predecessor never committed`, !stages.some((s) => s.producerPid === pred.pid && s.stage === 'predecessor-committed'), stages.map((s) => `${s.producerPid}:${s.stage}`));
+    if (TRANSFER_FAULTS.includes(fault)) {
+      assertion(result, `${fault}: candidate aborted before commit (candidate-aborted, no commit-sent)`, candidateStages.includes('candidate-aborted') && !candidateStages.includes('commit-sent'), candidateStages);
+    }
   } else {
     assertion(result, `${fault}: candidate recovered the committed handover from the recorded decision`, Boolean(settled.matched), settled);
     assertion(result, `${fault}: the recorded decision made the candidate the owner`, after.pid === candidatePid, { after: after.pid, candidatePid });
@@ -219,13 +225,19 @@ export async function Q08(ctx, result) {
   assertion(result, 'A exited only after the SSH session closed', !aExited.timedOut, aExited);
   const manifest = await ctx.agent.call('readFile', { file: path.join(ctx.layout.runtime, 'handover_routes.json') });
   assertion(result, 'A route removed from the manifest', !manifest || !JSON.parse(manifest).routes?.some((r) => r.sessions?.includes(pair.ssh)), manifest);
-  // Four transfer failure variants plus a forced commit failure, each from C to B.
-  if (!ctx.hooks.handoverFaultArm?.present) {
-    assertion(result, 'transfer failure variants runnable', false, `HOOK_MISSING: ${ctx.hooks.handoverFaultArm?.owner}`);
-    return;
+  // todo 8's four authority-transfer failure variants (missing fd kind, getsockname mismatch,
+  // lock fd not locked, request expired), then the forced commit failure as its own case, then
+  // the remaining commit-phase faults; each from C to B, each leaving both sessions writable.
+  for (const hook of ['handoverFaultArm', 'transferFaultArm']) {
+    if (!ctx.hooks[hook]?.present) {
+      assertion(result, 'transfer failure variants runnable', false, `HOOK_MISSING: ${ctx.hooks[hook]?.owner}`);
+      return;
+    }
   }
   const pair2 = await seedPair(ctx, ctx.state.conn, 'Q08F');
-  for (const fault of HANDOVER_FAULTS) await faultVariant(ctx, result, fault, ctx.artifacts.B, pair2);
+  for (const fault of TRANSFER_FAULTS) await faultVariant(ctx, result, fault, ctx.artifacts.B, pair2);
+  await faultVariant(ctx, result, FORCED_COMMIT_FAILURE, ctx.artifacts.B, pair2);
+  for (const fault of HANDOVER_FAULTS.filter((f) => f !== FORCED_COMMIT_FAILURE)) await faultVariant(ctx, result, fault, ctx.artifacts.B, pair2);
 }
 
 export async function Q08b(ctx, result) {

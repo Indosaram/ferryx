@@ -22,14 +22,23 @@ export const HOOKS = Object.freeze([
   { id: 'macPlistForwardsIsolationEnv', owner: 'todo 4 (QA plist must carry FERRYX_DATA_DIR/RUNTIME_DIR/SESSION_DIR, else the job daemon uses the dev runtime)', files: ['src-tauri/src/daemon/launchd.rs'], pattern: /EnvironmentVariables/, scenarios: ['Q00'], platforms: ['mac'], gatesAll: true },
   { id: 'jobForwardsQaBarrier', owner: 'todos 4-6 (job daemon receives FERRYX_QA_BARRIER_DIR/FERRYX_QA_RUN_ID under local-split-qa)', files: ['src-tauri/src/daemon/launchd.rs', 'src-tauri/src/daemon/supervisor_linux.rs', 'src-tauri/src/daemon/supervisor_windows.rs'], pattern: /FERRYX_QA_BARRIER_DIR/, scenarios: ['Q04', 'Q11'] },
   { id: 'handoverFaultArm', owner: 'todo 8 (qa_producers.rs HANDOVER_FAULT_REQUEST: <barrier>/handover-fault.request.json { runId, operationId, fault } read at PrepareHandover and at candidate boot)', files: ['src-tauri/src/daemon/qa_producers.rs'], pattern: /HANDOVER_FAULT_REQUEST: &str = "handover-fault\.request\.json"/, scenarios: ['Q08'], platforms: ['mac', 'linux'] },
+  { id: 'transferFaultArm', owner: 'todo 12 (qa_producers.rs TRANSFER_FAULT_*: todo 8 authority-transfer failure variants armed through handover-fault.request.json)', files: ['src-tauri/src/daemon/qa_producers.rs'], pattern: /pub const TRANSFER_FAULT_REQUEST_EXPIRED: &str = "request-expired-mid-transfer"/, scenarios: ['Q08'], platforms: ['mac', 'linux'] },
   { id: 'candidateAcceptCounters', owner: 'todo 8 (qa_producers.rs note_authority_stage: per-stage acceptCounts of every inherited listener in handover-authority.receipt.jsonl)', files: ['src-tauri/src/daemon/qa_producers.rs'], pattern: /pub const AUTHORITY_STAGE: &str = "handover-authority"[\s\S]*"acceptCounts": accept_counts/, scenarios: ['Q08', 'Q08b'], platforms: ['mac', 'linux'] },
   { id: 'forceFallback', owner: 'todo 12 (FERRYX_QA_FORCE_FALLBACK=1 under local-split-qa routes connect_or_spawn to the detached fallback)', files: ['src-tauri/src/daemon/owner_admission.rs'], pattern: /FORCE_FALLBACK_ENV: &str = "FERRYX_QA_FORCE_FALLBACK"/, scenarios: ['Q06', 'Q06w'] },
   { id: 'detachGuard', owner: 'todo 6 carry-over (Windows detach guard returns DAEMON_DETACH_UNAVAILABLE inside a no-breakaway job)', files: ['src-tauri/src/daemon/client.rs'], pattern: /code = "DAEMON_DETACH_UNAVAILABLE"/, scenarios: ['Q06w'], platforms: ['windows'] },
 ]);
 
-/** todo 8's FERRYX_QA_HANDOVER_FAULT values (daemon/qa_producers.rs on feat/daemon-lifetime-w4-t8). */
+/** todo 8's FERRYX_QA_HANDOVER_FAULT commit-phase values (daemon/qa_producers.rs). */
 export const HANDOVER_FAULT_ENV = 'FERRYX_QA_HANDOVER_FAULT';
 export const HANDOVER_FAULTS = Object.freeze(['decision-write-failure', 'drop-commit-ok-before-record', 'drop-commit-ok-after-record', 'abort-after-adopt']);
+/**
+ * todo 8's four authority-transfer failure variants (task-8-handover.log 10-17), the
+ * qa_producers.rs TRANSFER_FAULT_* values. Each aborts before commit: the predecessor stays owner
+ * and the candidate exits.
+ */
+export const TRANSFER_FAULTS = Object.freeze(['authority-frame-missing-fd-kind', 'listener-getsockname-mismatch', 'lock-fd-not-locked', 'request-expired-mid-transfer']);
+/** The plan's forced commit failure, run as its own Q08 case. */
+export const FORCED_COMMIT_FAILURE = 'decision-write-failure';
 
 export function probeHooks(checkout, platform, readFile = (f) => readFileSync(f, 'utf8'), exists = existsSync) {
   const result = {};

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isLive, liveSessions, compareInventories, control, inventoryTotal, helloSupportsHandover, generationKey, assertDistinctKeys, endpoints, data } from './lib/wire.mjs';
 import { parseLaunchctlPrint, launchctlProgram, parseSystemctlShow, windowsTaskTree, parseScheduledTaskState, supervisorMutations } from './lib/os-jobs.mjs';
-import { HOOKS, HANDOVER_FAULTS, HANDOVER_FAULT_ENV, probeHooks, missingHooksFor } from './lib/hooks.mjs';
+import { HOOKS, HANDOVER_FAULTS, HANDOVER_FAULT_ENV, TRANSFER_FAULTS, FORCED_COMMIT_FAILURE, probeHooks, missingHooksFor } from './lib/hooks.mjs';
 import { hostFor, buildPlan, assertQaBuild } from './lib/hosts.mjs';
 import { agentCommand } from './lib/remote.mjs';
 import { macForceTerminateScript, macQuitScript, linuxScopeUnit, windowsLauncherCommand } from './lib/gui.mjs';
@@ -123,6 +123,18 @@ test('authority invariant flags pre-commit accepts, a free lock and a missing so
 test('handover fault names are todo 8 FERRYX_QA_HANDOVER_FAULT values', () => {
   assert.equal(HANDOVER_FAULT_ENV, 'FERRYX_QA_HANDOVER_FAULT');
   assert.deepEqual([...HANDOVER_FAULTS], ['decision-write-failure', 'drop-commit-ok-before-record', 'drop-commit-ok-after-record', 'abort-after-adopt']);
+});
+
+test('Q08 runs todo 8 four transfer failure variants from the product, plus the forced commit failure', () => {
+  const producers = readFileSync(new URL('../../../src-tauri/src/daemon/qa_producers.rs', import.meta.url), 'utf8');
+  const transfer = [...producers.matchAll(/pub const TRANSFER_FAULT_[A-Z_]+: &str = "([a-z-]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(transfer, [...TRANSFER_FAULTS]);
+  assert.equal(TRANSFER_FAULTS.length, 4);
+  assert.ok(HANDOVER_FAULTS.includes(FORCED_COMMIT_FAILURE));
+  assert.ok(!TRANSFER_FAULTS.includes(FORCED_COMMIT_FAILURE));
+  const q08 = readFileSync(new URL('./scenarios/q07-q09.mjs', import.meta.url), 'utf8');
+  assert.match(q08, /for \(const fault of TRANSFER_FAULTS\) await faultVariant/);
+  assert.match(q08, /await faultVariant\(ctx, result, FORCED_COMMIT_FAILURE/);
 });
 
 test('Q04 stall arm outlasts the GUI wait and Windows launcher forbids breakaway on request', () => {
