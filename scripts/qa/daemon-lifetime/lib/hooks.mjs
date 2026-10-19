@@ -21,7 +21,12 @@ export const HOOKS = Object.freeze([
   { id: 'writeAckHoldArm', owner: 'todo 11/12 (runner-facing arm for QaWriteAckHold through the QA channel)', files: ['src-tauri/src/daemon/qa_producers.rs', 'src-tauri/src/ipc/qa_barrier.rs'], pattern: /"write-ack-hold"|WRITE_ACK_HOLD_ARM/, scenarios: ['Q11'] },
   { id: 'macPlistForwardsIsolationEnv', owner: 'todo 4 (QA plist must carry FERRYX_DATA_DIR/RUNTIME_DIR/SESSION_DIR, else the job daemon uses the dev runtime)', files: ['src-tauri/src/daemon/launchd.rs'], pattern: /EnvironmentVariables/, scenarios: ['Q00'], platforms: ['mac'], gatesAll: true },
   { id: 'jobForwardsQaBarrier', owner: 'todos 4-6 (job daemon receives FERRYX_QA_BARRIER_DIR/FERRYX_QA_RUN_ID under local-split-qa)', files: ['src-tauri/src/daemon/launchd.rs', 'src-tauri/src/daemon/supervisor_linux.rs', 'src-tauri/src/daemon/supervisor_windows.rs'], pattern: /FERRYX_QA_BARRIER_DIR/, scenarios: ['Q04', 'Q11'] },
+  { id: 'handoverFaultArm', owner: 'todo 8 (runner arms one transfer fault per handover: <barrier>/handover-fault.request.json { runId, operationId, fault })', files: ['src-tauri/src/daemon/qa_producers.rs', 'src-tauri/src/daemon/server.rs'], pattern: /handover-fault/, scenarios: ['Q08'], platforms: ['mac', 'linux'] },
+  { id: 'candidateAcceptCounters', owner: 'todo 8 (candidate accept counters exposed through the QA channel: <barrier>/candidate-accepts.json)', files: ['src-tauri/src/daemon/qa_producers.rs', 'src-tauri/src/daemon/server.rs'], pattern: /candidate-accepts/, scenarios: ['Q08'], platforms: ['mac', 'linux'] },
 ]);
+
+/** Fault names of todo 8's four transfer failure variants plus the forced commit failure. */
+export const HANDOVER_FAULTS = Object.freeze(['authority-missing-fd', 'listener-path-mismatch', 'lock-fd-not-locked', 'commit-ok-dropped-before-record', 'decision-write-fails']);
 
 export function probeHooks(checkout, platform, readFile = (f) => readFileSync(f, 'utf8'), exists = existsSync) {
   const result = {};
