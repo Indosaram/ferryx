@@ -100,7 +100,8 @@ pub async fn install_and_start(server: &Arc<super::server::DaemonServer>) {
     tokio::spawn(run_write_ack_hold_watcher(Arc::clone(&channel)));
     tokio::spawn(async move { run_held_rpc_watcher(server, channel).await });
 }
-+/// Runner-facing arm for QaWriteAckHold (todo 11's uncertain-write fixture, todo 12 Q11). The
+
+/// Runner-facing arm for QaWriteAckHold (todo 11's uncertain-write fixture, todo 12 Q11). The
 /// runner writes `<barrier>/write-ack-hold.request.json` { runId, operationId, sessionId } to arm
 /// the hold for that session, and `write-ack-hold.release.json` with the same three fields to
 /// release it. Every transition and every write-applied event is a line in
@@ -891,7 +892,7 @@ mod tests {
 
     const TEST_RUN_ID: &str = "qa-run-daemon";
     const TEST_OPERATION_ID: &str = "qa-op-daemon";
-+
+
     #[test]
     fn write_ack_hold_is_armed_and_released_only_by_this_runs_controls() {
         let root = tempfile::tempdir().unwrap();

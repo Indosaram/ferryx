@@ -354,7 +354,7 @@ pub(crate) mod generation {
             )
         }
     }
-+    /// Isolation variables a QA generation job carries into its daemon (todo 12): the private
+    /// Isolation variables a QA generation job carries into its daemon (todo 12): the private
     /// runtime the QA GUI uses, so the job's daemon serves that runtime and not the user's. Only a
     /// QA-named job (`FERRYX_DAEMON_SUPERVISOR_NAME` set) forwards anything; every other job keeps
     /// a plist with no `EnvironmentVariables` at all. Same keys as the Windows watchdog's
