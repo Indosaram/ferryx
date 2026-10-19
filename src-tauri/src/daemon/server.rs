@@ -3453,6 +3453,9 @@ impl DaemonServer {
                 }
                 crate::daemon::handover_request::StartupRole::Exit { reason } => {
                     tracing::warn!(%reason, "Handover request rejected; exiting 0 without taking any lock");
+                    // A Type=notify unit that exits before READY=1 counts as failed; report
+                    // ready so this clean exit is not restarted.
+                    crate::daemon::supervisor_linux::notify_ready();
                     return Ok(());
                 }
             }
