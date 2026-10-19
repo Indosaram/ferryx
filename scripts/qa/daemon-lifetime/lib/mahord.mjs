@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { withDeadline } from './proc.mjs';
 
-export const TOOLS = Object.freeze({ click: 'remote_mouse_click', type: 'remote_type_text', key: 'remote_key_press', screenshot: 'remote_take_screenshot' });
+export const TOOLS = Object.freeze({ click: 'remote_mouse_click', type: 'remote_type_text', key: 'remote_key_press', hotkey: 'remote_hotkey', screenshot: 'remote_take_screenshot' });
 
 export function mahordArgs({ host, pairingId }) {
   return ['--host', host, '--pairing-id', pairingId, '--mcp'];
@@ -59,6 +59,8 @@ export async function connectMahord(gui, { binary = 'maho-client', log = () => {
     click: (x, y) => call(TOOLS.click, { x, y, button: 'left', count: 1, normalized: false }),
     type: (text) => call(TOOLS.type, { text, delay_ms: 0 }),
     key: (key) => call(TOOLS.key, { key }),
+    // Chords: remote_key_press accepts a single key name only (maho-client tools/list schema).
+    hotkey: (keys) => call(TOOLS.hotkey, { keys }),
     screenshot: async () => {
       const r = await call(TOOLS.screenshot, { format: 'png' });
       const img = r?.content?.find((c) => c.type === 'image');

@@ -170,6 +170,14 @@ test('agent command: local node or quoted ssh', () => {
   assert.match(win.args.at(-1), /^"node" "C:\\a\\agent\.mjs"/);
 });
 
+test('MahoRD chords go through remote_hotkey, single keys through remote_key_press', async () => {
+  const { TOOLS } = await import('./lib/mahord.mjs');
+  assert.equal(TOOLS.hotkey, 'remote_hotkey');
+  assert.equal(TOOLS.key, 'remote_key_press');
+  const gui = readFileSync(new URL('./lib/gui.mjs', import.meta.url), 'utf8');
+  assert.ok(!/mahord\.key\('[^']*\+/.test(gui), 'no chord passed to remote_key_press');
+});
+
 test('GUI scripts target exactly the QA bundle id', () => {
   const id = `com.ferryx.app.qa-${RUN}`;
   assert.match(macForceTerminateScript(id), new RegExp(`runningApplicationsWithBundleIdentifier\\('${id.replace(/\./g, '\\.')}'\\)`));

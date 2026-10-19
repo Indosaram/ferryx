@@ -73,9 +73,11 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     await agent.call('writeFile', { file: envFile, content: JSON.stringify(fullEnv) });
     const cmd = windowsLauncherCommand({ root: layout.root, exe, envFile, tag, noBreakaway });
     await mahord.click(3000, 1580); // blank taskbar: focus the shell so Win+R reaches it
-    await mahord.key('Meta+r');
+    await mahord.hotkey(['Meta', 'r']);
+    // The Run dialog pre-fills its last entry and typed text is appended to it: select it first.
+    await mahord.hotkey(['Control', 'a']);
     await mahord.type(cmd);
-    await mahord.key('Return');
+    await mahord.key('Enter');
     const published = `${layout.root}\\gui-${tag}.json`;
     const ok = await agent.call('waitPath', { file: published, deadlineMs: 60_000 });
     if (!ok) throw new Error(`launcher did not publish ${published}`);
@@ -91,7 +93,10 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
       await agent.call('exec', { command: '/usr/bin/osascript', args: ['-e', macQuitScript(bundleId)] });
     } else {
       if (!mahord) throw new Error('remote GUI quit needs MahoRD');
-      await mahord.key(platform === 'windows' ? 'Alt+F4' : 'ctrl+q');
+      // MahoRD remote_key_press takes one key; chords go through remote_hotkey. Windows closes the
+      // focused window with Alt+F4; omarchy's Hyprland binds SUPER+Q to close window
+      // (~/.config/hypr/bindings.lua:52) and Ferryx has no Ctrl+Q quit on Linux (shortcuts.ts:453 is macOS only).
+      await mahord.hotkey(platform === 'windows' ? ['Alt', 'F4'] : ['Meta', 'q']);
     }
     return exited;
   }
