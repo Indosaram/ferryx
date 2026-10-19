@@ -336,6 +336,8 @@ struct PrivateDaemons {
     /// Value applied to `FERRYX_HANDOVER_V5` for every spawned daemon. `None` leaves the variable
     /// absent so the compiled-in default decides the handover path.
     v5_flag: Option<&'static str>,
+    /// Extra environment applied only to a successor launched with --handover-from.
+    successor_env: Vec<(&'static str, &'static str)>,
 }
 
 impl PrivateDaemons {
@@ -353,6 +355,7 @@ impl PrivateDaemons {
             root,
             children: Vec::new(),
             v5_flag,
+            successor_env: Vec::new(),
         }
     }
 
@@ -420,6 +423,9 @@ impl PrivateDaemons {
         let mut cmd = self.command();
         if let Some(leg) = legacy {
             cmd.arg("--handover-from").arg(leg);
+            for (key, value) in &self.successor_env {
+                cmd.env(key, value);
+            }
         }
         let mut child = cmd.spawn().expect("spawn daemon");
         let stdout = child.stdout.take().expect("stdout");
@@ -1070,6 +1076,79 @@ async fn before_commit_hello_names_the_predecessor_and_the_candidate_accepts_not
     TestDaemonClient::connect(&socket_path, pid_d1)
         .await
         .expect("the predecessor keeps serving after the abort");
+}
+
+fn owner_record_pid(runtime: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(runtime.join("owner.json")).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text).ok()?["pid"].as_u64()
+}
+
+/// todo 8: owner.json publication failing for the first 3 attempts (injected) does not affect
+/// serving: the committed successor keeps the transferred local PTY (input accepted, output
+/// continues) while owner.json does not name it; the retry task then publishes it.
+#[cfg(feature = "local-split-qa")]
+#[tokio::test]
+async fn owner_publication_failures_do_not_stop_the_successor_serving() {
+    use notify::Watcher;
+    let mut daemons = PrivateDaemons::with_v5_flag(None);
+    daemons.successor_env.push(("FERRYX_QA_OWNER_PUBLISH_FAILURES", "3"));
+    let socket_path = daemons.socket();
+    let runtime = daemons.root.path().join("runtime");
+    let d1 = daemons.launch(None).await;
+    let pid_d1 = daemons.pid(d1);
+    let repo = daemons.repo();
+    let mut client1 = TestDaemonClient::connect(&socket_path, pid_d1).await.expect("connect D1");
+    client1.register_workspace("ws-owner-retry", &repo).await.expect("register ws");
+    let session = client1
+        .spawn_with_shell("req-owner-retry", "ws-owner-retry", 80, 24, Some("/bin/sh"), Some(&repo))
+        .await
+        .expect("spawn on D1");
+    let legacy = match client1.send_request(&DaemonRequest::PrepareHandover).await.expect("prepare") {
+        DaemonResponse::PrepareHandoverOk { legacy_socket_path, .. } => legacy_socket_path,
+        other => panic!("Expected PrepareHandoverOk, got {other:?}"),
+    };
+
+    let (event_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        drop(event_tx.send(event));
+    })
+    .expect("owner watcher");
+    watcher
+        .watch(&runtime, notify::RecursiveMode::NonRecursive)
+        .expect("watch runtime");
+
+    let d2 = daemons.launch(Some(Path::new(&legacy))).await;
+    let pid_d2 = daemons.pid(d2);
+    let mut client2 = TestDaemonClient::connect(&socket_path, pid_d2).await.expect("connect D2");
+    let mut attach = TestAttachStream::attach(&socket_path, pid_d2, &session, None)
+        .await
+        .expect("attach on D2");
+    if owner_record_pid(&runtime) != Some(u64::from(pid_d2)) {
+        // Still unpublished: the transferred PTY is served anyway.
+        client2
+            .write_input(&session, b"printf 'OWNER_%s\\n' 'RETRY_SERVED'\n")
+            .await
+            .expect("input accepted while owner.json is unpublished");
+        attach
+            .await_pattern_in_history_or_stream("OWNER_RETRY_SERVED", Duration::from_secs(10))
+            .await
+            .expect("output continues while owner.json is unpublished");
+    }
+    timeout(Duration::from_secs(30), async {
+        while owner_record_pid(&runtime) != Some(u64::from(pid_d2)) {
+            let _ = events.recv().await.expect("watcher ended");
+        }
+    })
+    .await
+    .expect("the retry task never published the successor as owner");
+    client2
+        .write_input(&session, b"printf 'OWNER_%s\\n' 'PUBLISHED_SERVED'\n")
+        .await
+        .expect("input accepted after publication");
+    attach
+        .await_pattern_in_history_or_stream("OWNER_PUBLISHED_SERVED", Duration::from_secs(10))
+        .await
+        .expect("output continues after publication");
 }
 
 #[tokio::test]
