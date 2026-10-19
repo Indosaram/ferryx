@@ -589,6 +589,34 @@ pub(crate) fn ensure(name: &str, path: &Path, executable: &Path) -> Result<bool,
     ensure_generation_with(&UserSystemctl, name, path, &content)
 }
 
+/// Autostart opt-out: `disable` (never `--now`) on every generation unit of `base` in `unit_dir`
+/// and on the legacy base unit `<base>.service` when its file exists. No unit is stopped, no unit
+/// file is removed, and nothing is reloaded, so a running daemon keeps its process, PTYs and
+/// definition, and an opted-out GUI can still `start` the newest generation. Every unit is tried
+/// even when one fails; the failures are reported together.
+pub(crate) fn remove_login_autostart_with(
+    systemctl: &dyn Systemctl,
+    unit_dir: &Path,
+    base: &str,
+) -> Result<(), String> {
+    let mut units: Vec<String> = generation_units_in(unit_dir, base)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    if unit_dir.join(format!("{base}.service")).exists() {
+        units.push(base.to_string());
+    }
+    let failures: Vec<String> = units
+        .iter()
+        .filter_map(|name| systemctl.run(&["disable", &format!("{name}.service")]).err())
+        .collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
 /// Starts the unit again; a unit stopped by its start limit is reset first.
 #[cfg(target_os = "linux")]
 pub(crate) fn start(name: &str) -> Result<(), String> {
@@ -1271,6 +1299,90 @@ mod tests {
             older_unit,
             "the older generation's unit file stays, so its running daemon keeps its definition"
         );
+    }
+
+    /// Opt-out disables every generation and the legacy unit, never with `--now` and never with
+    /// `stop`/`restart`/`kill`, and leaves every unit file in place (a running daemon keeps its
+    /// definition). A unit with no file (no legacy unit) is not touched.
+    #[test]
+    fn opt_out_disables_every_generation_and_the_legacy_unit_without_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let newest = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        let older = generation_unit_name(DEFAULT_UNIT_NAME, OLDER_KEY).unwrap();
+        let newest_unit = render(STAGED);
+        let older_unit = render("/home/u/.local/share/ferryx/daemon-runtime/2026.1012.1-ffee0011/ferryx");
+        let legacy_unit = render("/opt/ferryx/ferryx");
+        fs::write(dir.path().join(format!("{newest}.service")), &newest_unit).unwrap();
+        fs::write(dir.path().join(format!("{older}.service")), &older_unit).unwrap();
+        fs::write(dir.path().join("ferryx-daemon.service"), &legacy_unit).unwrap();
+        // Another base's unit sharing the prefix is not ours.
+        fs::write(dir.path().join("ferryx-daemon-qa-1.service"), render("/opt/qa/ferryx")).unwrap();
+
+        let systemctl = FakeSystemctl::with_states(&[(&newest, "active"), (&older, "active")]);
+        assert_eq!(remove_login_autostart_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME), Ok(()));
+        let mut calls = systemctl.calls();
+        calls.sort();
+        let mut expected = vec![
+            call(&["disable", &format!("{newest}.service")]),
+            call(&["disable", &format!("{older}.service")]),
+            call(&["disable", "ferryx-daemon.service"]),
+        ];
+        expected.sort();
+        assert_eq!(calls, expected);
+        for call in systemctl.calls() {
+            for forbidden in ["--now", "stop", "restart", "kill", "daemon-reload", "start"] {
+                assert!(!call.iter().any(|arg| arg == forbidden), "{call:?}");
+            }
+        }
+        assert_eq!(fs::read_to_string(dir.path().join(format!("{newest}.service"))).unwrap(), newest_unit);
+        assert_eq!(fs::read_to_string(dir.path().join(format!("{older}.service"))).unwrap(), older_unit);
+        assert_eq!(fs::read_to_string(dir.path().join("ferryx-daemon.service")).unwrap(), legacy_unit);
+
+        // Without a legacy unit file, only the generations are disabled.
+        fs::remove_file(dir.path().join("ferryx-daemon.service")).unwrap();
+        let systemctl = FakeSystemctl::with_states(&[]);
+        remove_login_autostart_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME).unwrap();
+        assert_eq!(systemctl.calls().len(), 2, "{:?}", systemctl.calls());
+    }
+
+    /// After opt-out the GUI still starts an idle newest generation with `start` through the user
+    /// manager, never `enable`, so the opt-out survives the start.
+    #[test]
+    fn opted_out_launch_starts_the_idle_newest_unit_without_enabling_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        let path = dir.path().join(format!("{name}.service"));
+        let systemctl = FakeSystemctl::with_states(&[(&name, "inactive")]);
+        remove_login_autostart_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME).unwrap();
+        assert_eq!(ensure_generation_with(&systemctl, &name, &path, &render(STAGED)), Ok(true));
+        assert_eq!(
+            systemctl.mutations(),
+            [call(&["daemon-reload"]), call(&["start", "--no-block", &format!("{name}.service")])]
+        );
+        // Opt-out after the start disables it again without stopping it.
+        let systemctl = FakeSystemctl::with_states(&[(&name, "active")]);
+        remove_login_autostart_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME).unwrap();
+        assert_eq!(systemctl.calls(), [call(&["disable", &format!("{name}.service")])]);
+    }
+
+    #[test]
+    fn opt_out_tries_every_unit_and_reports_each_failure() {
+        struct Failing(std::cell::RefCell<Vec<Vec<String>>>);
+        impl Systemctl for Failing {
+            fn run(&self, args: &[&str]) -> Result<String, String> {
+                self.0.borrow_mut().push(call(args));
+                Err(format!("refused {}", args[1]))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let newest = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        let older = generation_unit_name(DEFAULT_UNIT_NAME, OLDER_KEY).unwrap();
+        fs::write(dir.path().join(format!("{newest}.service")), render(STAGED)).unwrap();
+        fs::write(dir.path().join(format!("{older}.service")), render(STAGED)).unwrap();
+        let systemctl = Failing(Default::default());
+        let error = remove_login_autostart_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME).unwrap_err();
+        assert_eq!(systemctl.0.borrow().len(), 2, "a failure must not skip the remaining units");
+        assert!(error.contains(&newest) && error.contains(&older), "{error}");
     }
 
     #[test]
