@@ -48,6 +48,12 @@ async fn commit_exchange(server: &Arc<DaemonServer>) -> Option<DaemonResponse> {
     (read > 0).then(|| serde_json::from_str(line.trim()).unwrap())
 }
 
+/// v5 ownership transfer exists only on Unix: is_v5_ownership_transfer_enabled is false on
+/// Windows, so commit_handover takes the v4 route path there. That path writes the route
+/// manifest beside the real per-user runtime endpoint and never consults the injected
+/// after-record or decision-write faults. The tests that need commit_handover_v5 are therefore
+/// Unix-only. The before-record fault is checked in handle_client before any commit runs, so
+/// it stays cross-platform.
 fn prepared_v5_predecessor(root: &std::path::Path) -> (Arc<DaemonServer>, std::path::PathBuf) {
     let server = Arc::new(DaemonServer::new_with_paths(
         Some(root.join("config")),
@@ -61,6 +67,7 @@ fn prepared_v5_predecessor(root: &std::path::Path) -> (Arc<DaemonServer>, std::p
 
 /// CommitHandoverOk dropped after the predecessor recorded Retired: the candidate reads the
 /// decision, is the owner, and serves; the predecessor accepts nothing more.
+#[cfg(unix)]
 #[tokio::test]
 async fn commit_ok_dropped_after_record_resolves_to_the_candidate_as_owner() {
     let root = tempfile::tempdir().unwrap();
@@ -104,6 +111,7 @@ async fn commit_ok_dropped_before_record_makes_the_candidate_abort() {
 
 /// Decision write failure over the wire: the commit is answered with an error, the gate
 /// reopens, the predecessor serves new requests, and the candidate's abort is accepted.
+#[cfg(unix)]
 #[tokio::test]
 async fn decision_write_failure_is_answered_and_the_predecessor_keeps_serving() {
     let root = tempfile::tempdir().unwrap();
