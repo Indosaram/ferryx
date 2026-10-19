@@ -689,6 +689,12 @@ fn ssh_fixture_output(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_session_stays_with_the_committed_predecessor_and_the_successor_restores_no_controller() {
     let dir = tempfile::tempdir().unwrap();
+    // dir stands in for the daemon runtime directory that holds the legacy handover sockets;
+    // LegacyPeer only connects to a socket in a 0700 directory (validate_runtime_socket_path).
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let predecessor = Arc::new(DaemonServer::new_with_paths(
         Some(dir.path().join("pred/config")),
         Some(dir.path().join("pred/auth")),

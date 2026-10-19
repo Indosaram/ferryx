@@ -1028,7 +1028,9 @@ async fn before_commit_hello_names_the_predecessor_and_the_candidate_accepts_not
             .expect("recv_session")
             .is_some()
         {}
-        ferryx_lib::daemon::handover_socket::request_authority(&stream, "hello-before-commit")
+        // handover-v1 frames carry a 36-byte transfer id (tests/fixtures/handover-v1.json).
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        ferryx_lib::daemon::handover_socket::request_authority(&stream, &transfer_id)
             .expect("the predecessor answers the authority request")
     });
     match client1

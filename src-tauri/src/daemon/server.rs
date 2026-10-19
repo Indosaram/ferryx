@@ -2343,6 +2343,13 @@ mod live_inventory_paired_tests {
         root: &Path,
         host: &MockHost,
     ) -> (Arc<DaemonServer>, PathBuf, crate::terminal::paired_daemon::Descriptor, tokio::task::JoinHandle<()>) {
+        // root stands in for the daemon runtime directory: legacy handover sockets live there,
+        // and LegacyPeer refuses a socket whose directory is not 0700 (validate_runtime_socket_path),
+        // which would make the successor drop the predecessor's route as unreachable.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let data = root.join("data");
         fs::create_dir_all(&data).unwrap();
         let mut daemon = DaemonServer::new_with_paths(Some(data.join("config")), Some(data.join("auth")));
