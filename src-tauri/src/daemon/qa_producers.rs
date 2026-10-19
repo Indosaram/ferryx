@@ -451,15 +451,103 @@ pub fn commit_fault_from_env() -> Option<crate::daemon::handover::CommitFault> {
     commit_fault_named(injected_handover_fault().as_deref())
 }
 
-/// Predecessor, at PrepareHandover: the runner's request for this handover selects the commit
-/// fault; without one the env default applies, so an earlier request never leaks into a later
-/// handover.
-pub async fn arm_commit_fault(manager: &crate::daemon::handover::HandoverManager) {
+/// todo 8's four authority-transfer failure variants (task-8-handover.log), applied by the
+/// predecessor to the authority it sends, except request expiry, which the candidate applies to
+/// its own request deadline. Each one must abort before commit with the predecessor still owner.
+pub const TRANSFER_FAULT_MISSING_FD_KIND: &str = "authority-frame-missing-fd-kind";
+pub const TRANSFER_FAULT_GETSOCKNAME_MISMATCH: &str = "listener-getsockname-mismatch";
+pub const TRANSFER_FAULT_LOCK_NOT_LOCKED: &str = "lock-fd-not-locked";
+pub const TRANSFER_FAULT_REQUEST_EXPIRED: &str = "request-expired-mid-transfer";
+
+/// Predecessor-side authority corruptions (the request-expiry variant is candidate-side).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferFault {
+    /// The frame carries no canonical_listener (handover_socket.rs
+    /// authority_frame_missing_each_fd_kind_is_refused_and_the_predecessor_stays_owner).
+    MissingFdKind,
+    /// canonical_listener is a listener bound to another path
+    /// (listener_bound_to_another_path_is_refused).
+    GetsocknameMismatch,
+    /// legacy_lock is a fresh open of the lock file, not the description holding the lock
+    /// (lock_fd_that_holds_no_lock_is_refused).
+    LockNotLocked,
+}
+
+fn transfer_fault_named(name: Option<&str>) -> Option<TransferFault> {
+    match name {
+        Some("authority-frame-missing-fd-kind") => Some(TransferFault::MissingFdKind),
+        Some("listener-getsockname-mismatch") => Some(TransferFault::GetsocknameMismatch),
+        Some("lock-fd-not-locked") => Some(TransferFault::LockNotLocked),
+        _ => None,
+    }
+}
+
+/// The transfer fault this predecessor armed at its last prepare; cleared by the next prepare.
+static ARMED_TRANSFER_FAULT: std::sync::Mutex<Option<TransferFault>> = std::sync::Mutex::new(None);
+
+pub fn armed_transfer_fault() -> Option<TransferFault> {
+    ARMED_TRANSFER_FAULT.lock().ok().and_then(|armed| *armed)
+}
+
+fn arm_transfer_fault(fault: Option<TransferFault>) {
+    if let Ok(mut armed) = ARMED_TRANSFER_FAULT.lock() {
+        *armed = fault;
+    }
+}
+
+/// Predecessor, at every prepare (the PrepareHandover request and control RequestUpgrade go
+/// through the same DaemonServer::prepare_handover_shared): the runner's request for this
+/// handover selects the commit fault or the authority-transfer fault; without one the env default
+/// applies, so an earlier request never leaks into a later handover.
+pub async fn arm_handover_faults(manager: &crate::daemon::handover::HandoverManager) {
     let requested = match channel().await {
         Some(channel) => requested_handover_fault(&channel).await,
         None => None,
     };
-    manager.inject_commit_fault(commit_fault_named(requested.as_deref()).or_else(commit_fault_from_env));
+    let requested = requested.or_else(injected_handover_fault);
+    manager.inject_commit_fault(commit_fault_named(requested.as_deref()));
+    arm_transfer_fault(transfer_fault_named(requested.as_deref()));
+}
+
+/// Applies an armed transfer fault to the authority about to be sent, exactly as todo 8's unit
+/// seams build it. Sync filesystem and socket work: call it off the Tokio workers. Returns the
+/// stray listener (GetsocknameMismatch), which must outlive the send.
+#[cfg(unix)]
+pub fn apply_transfer_fault(
+    fault: TransferFault,
+    sources: &mut crate::daemon::handover_socket::AuthoritySources,
+    legacy_lock_path: &Path,
+    stray_socket_path: &Path,
+) -> std::io::Result<Option<std::os::unix::net::UnixListener>> {
+    use std::os::fd::{AsRawFd, OwnedFd};
+    match fault {
+        TransferFault::MissingFdKind => {
+            sources.canonical_listener = None;
+            Ok(None)
+        }
+        TransferFault::GetsocknameMismatch => {
+            let _ = std::fs::remove_file(stray_socket_path);
+            let stray = std::os::unix::net::UnixListener::bind(stray_socket_path)?;
+            sources.canonical_listener = Some(
+                crate::daemon::handover_socket::dup_for_authority(stray.as_raw_fd())
+                    .map_err(|error| std::io::Error::other(error.to_string()))?,
+            );
+            Ok(Some(stray))
+        }
+        TransferFault::LockNotLocked => {
+            let unlocked: OwnedFd = std::fs::OpenOptions::new().read(true).open(legacy_lock_path)?.into();
+            sources.legacy_lock = unlocked;
+            Ok(None)
+        }
+    }
+}
+
+/// Candidate: true when the runner asked for todo 8's request-expiry variant. The candidate then
+/// treats its request as expired right after TransferSessions is answered, so the real
+/// mid-transfer expiry path aborts the handover.
+pub fn request_expiry_requested() -> bool {
+    let fault = injected_handover_fault().or_else(|| BOOT_FAULT_REQUEST.get().cloned().flatten());
+    fault.as_deref() == Some(TRANSFER_FAULT_REQUEST_EXPIRED)
 }
 
 /// One QA receipt per handover state transition (todo 8): the candidate's accept counters on
@@ -939,6 +1027,57 @@ mod tests {
 
     const TEST_RUN_ID: &str = "qa-run-daemon";
     const TEST_OPERATION_ID: &str = "qa-op-daemon";
+
+    /// todo 8's three predecessor-side transfer failure variants: each armed fault, applied to a
+    /// real authority and sent over a real socketpair, is refused by the candidate's own
+    /// validation, and the predecessor's locks stay held and its public socket stays bound.
+    #[cfg(unix)]
+    #[test]
+    fn armed_transfer_faults_are_refused_by_candidate_validation_and_keep_the_authority() {
+        use crate::daemon::handover_socket::{
+            dup_for_authority, lock_is_held_elsewhere, request_authority, serve_authority_request,
+            validate_authority, AuthoritySources, ExpectedAuthority,
+        };
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name);
+        let canonical = UnixListener::bind(path("daemon.sock")).unwrap();
+        let lock_file = std::fs::OpenOptions::new().read(true).write(true).create(true).open(path("daemon.lock")).unwrap();
+        assert_eq!(unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        let expected = ExpectedAuthority {
+            canonical_socket: path("daemon.sock"),
+            legacy_lock: path("daemon.lock"),
+            persistent_lock: None,
+            control_socket: None,
+            agent_state_socket: None,
+        };
+        for name in [TRANSFER_FAULT_MISSING_FD_KIND, TRANSFER_FAULT_GETSOCKNAME_MISMATCH, TRANSFER_FAULT_LOCK_NOT_LOCKED] {
+            let fault = transfer_fault_named(Some(name)).expect(name);
+            let mut sources = AuthoritySources {
+                canonical_listener: Some(dup_for_authority(canonical.as_raw_fd()).unwrap()),
+                legacy_lock: dup_for_authority(lock_file.as_raw_fd()).unwrap(),
+                persistent_lock: None,
+                control_listener: None,
+                agent_state_listener: None,
+            };
+            let stray = apply_transfer_fault(fault, &mut sources, &path("daemon.lock"), &path("stray.sock")).unwrap();
+            let (candidate, predecessor) = UnixStream::pair().unwrap();
+            let serving = std::thread::spawn(move || serve_authority_request(&predecessor, sources));
+            let refused = request_authority(&candidate, "t12-transfer-fault")
+                .and_then(|authority| validate_authority(&authority, &expected));
+            serving.join().unwrap().unwrap();
+            assert!(refused.is_err(), "{name}: the corrupted authority was accepted");
+            drop(stray);
+            assert!(lock_is_held_elsewhere(&path("daemon.lock")).unwrap(), "{name}: the lock was released");
+            assert!(UnixStream::connect(path("daemon.sock")).is_ok(), "{name}: the public socket stopped accepting");
+        }
+        assert_eq!(transfer_fault_named(Some(TRANSFER_FAULT_REQUEST_EXPIRED)), None, "expiry is candidate-side");
+        assert_eq!(commit_fault_named(Some(TRANSFER_FAULT_REQUEST_EXPIRED)), None);
+        for name in [TRANSFER_FAULT_MISSING_FD_KIND, TRANSFER_FAULT_GETSOCKNAME_MISMATCH, TRANSFER_FAULT_LOCK_NOT_LOCKED] {
+            assert_eq!(commit_fault_named(Some(name)), None, "{name} is not a commit fault");
+        }
+    }
 
     #[test]
     fn handover_fault_request_is_read_only_for_this_run_and_maps_to_commit_faults() {

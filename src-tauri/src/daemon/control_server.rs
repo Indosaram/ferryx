@@ -416,15 +416,9 @@ impl DaemonServer {
         let Some(start_time) = start_time else {
             return failed(control::CODE_UPGRADE_REFUSED);
         };
-        // prepare_handover removes, binds and chmods the legacy socket.
-        let prepared = {
-            let (manager, terminals) = (Arc::clone(&self.handover_manager), Arc::clone(&self.terminal_service));
-            crate::ipc::run_blocking(move || {
-                manager.prepare_handover(&terminals).map_err(crate::ipc::IpcError::internal)
-            })
-            .await
-        };
-        let (legacy_path, _, legacy_listener) = match prepared {
+        // The shared prepare path (server.rs): QA fault arm, prepare_handover off the workers,
+        // predecessor-prepared receipt; the same one PrepareHandover uses.
+        let (legacy_path, _, legacy_listener) = match self.prepare_handover_shared().await {
             Ok(prepared) => prepared,
             Err(error) => {
                 tracing::warn!(%error, "RequestUpgrade refused: handover could not be prepared");
