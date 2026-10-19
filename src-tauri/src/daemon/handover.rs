@@ -1201,6 +1201,7 @@ impl HandoverManager {
     }
 
     /// Arms one commit fault (tests, and the QA channel under local-split-qa).
+    #[cfg(any(test, all(feature = "local-split-qa", feature = "native-terminal")))]
     pub(crate) fn inject_commit_fault(&self, fault: Option<CommitFault>) {
         *self.commit_fault.lock() = fault;
     }
@@ -1338,6 +1339,8 @@ impl HandoverManager {
         self.accept_counts[role.index()].fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Accepts on one adopted listener; read by the QA producers' authority receipt.
+    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
     pub(crate) fn accept_count(&self, role: AuthorityListenerRole) -> u64 {
         self.accept_counts[role.index()].load(Ordering::SeqCst)
     }
@@ -1393,6 +1396,7 @@ impl HandoverManager {
         self.retiring_ready.clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn retiring_signalled(&self) -> bool {
         self.retiring_signalled.load(Ordering::SeqCst)
     }

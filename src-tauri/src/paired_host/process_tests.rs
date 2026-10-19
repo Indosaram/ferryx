@@ -158,7 +158,9 @@ async fn restart(root: &Path) -> anyhow::Result<()> {
     let address = listener.local_addr()?;
     let origin = format!("http://{address}");
     let mut tasks = tokio::task::JoinSet::new();
-    tasks.spawn(async move {
+    // The serve future owns the relay listener, so the listener is closed exactly when this
+    // task has ended; cleanup asserts that through the task's own handle.
+    let relay_task = tasks.spawn(async move {
         axum::serve(
             listener,
             crate::remote::relay_server::relay_router(relay_state)
@@ -208,8 +210,10 @@ async fn restart(root: &Path) -> anyhow::Result<()> {
     }.await;
     drop(guard);
     tasks.shutdown().await;
-    let refused = tokio::net::TcpStream::connect(address).await.is_err();
-    eprintln!("A13 relay listener_refused={refused}");
-    ensure!(refused, "relay survived cleanup");
+    // Not a connect probe: once released, the ephemeral port can be bound by any concurrent test
+    // in this binary, so a successful connect would not mean this relay survived.
+    let relay_ended = relay_task.is_finished() && tasks.is_empty();
+    eprintln!("A13 relay address={address} serve_task_ended={relay_ended}");
+    ensure!(relay_ended, "relay survived cleanup");
     result
 }

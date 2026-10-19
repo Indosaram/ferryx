@@ -2724,6 +2724,88 @@ fn daemon_error(message: impl ToString) -> DaemonResponse {
     }
 }
 
+/// Sends TRANSFER_DONE to the handover candidate. A failure is logged and recorded in failures;
+/// returns whether the frame was sent.
+#[cfg(unix)]
+fn send_transfer_done_recorded(
+    stream: &std::os::unix::net::UnixStream,
+    transfer_id: &str,
+    seq: u64,
+    failures: &mut Vec<String>,
+) -> bool {
+    match crate::daemon::handover_socket::send_transfer_done(stream, transfer_id, seq) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "Failed to send TRANSFER_DONE to the successor; the transfer is incomplete and this daemon keeps serving"
+            );
+            failures.push(format!("transfer done not sent: {error}"));
+            false
+        }
+    }
+}
+
+/// The TransferSessions answer. Without a delivered TRANSFER_DONE the transfer is not complete,
+/// so it is an error rather than TransferSessionsOk; the candidate then aborts and the
+/// predecessor, which never stopped serving, keeps every session.
+#[cfg(unix)]
+fn transfer_sessions_reply(done: bool, count: usize, requested: usize, failures: &[String]) -> DaemonResponse {
+    if !done {
+        return daemon_error(format!(
+            "Session transfer incomplete ({count} of {requested} sent): {}",
+            failures.join("; ")
+        ));
+    }
+    tracing::info!(
+        requested,
+        transferred = count,
+        "Transferred sessions to the successor over the handover socket"
+    );
+    DaemonResponse::TransferSessionsOk {
+        transferred_count: count,
+        requested_count: requested,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod transfer_done_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_transfer_done_is_recorded_and_the_reply_is_an_error() {
+        let (stream, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(peer);
+        let mut failures = Vec::new();
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        let done = send_transfer_done_recorded(&stream, &transfer_id, 3, &mut failures);
+        assert!(!done, "a closed candidate stream cannot receive TRANSFER_DONE");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].starts_with("transfer done not sent"), "{failures:?}");
+        match transfer_sessions_reply(done, 2, 2, &failures) {
+            DaemonResponse::Error { message, .. } => assert!(message.contains("2 of 2"), "{message}"),
+            other => panic!("a failed TRANSFER_DONE must not answer TransferSessionsOk: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_delivered_transfer_done_answers_transfer_sessions_ok() {
+        let (stream, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut failures = Vec::new();
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        assert!(send_transfer_done_recorded(&stream, &transfer_id, 1, &mut failures), "{failures:?}");
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(
+            crate::daemon::handover_socket::recv_session_with_owner(&peer).unwrap().is_none(),
+            "the candidate reads TRANSFER_DONE"
+        );
+        assert!(matches!(
+            transfer_sessions_reply(true, 1, 1, &failures),
+            DaemonResponse::TransferSessionsOk { transferred_count: 1, requested_count: 1 }
+        ));
+    }
+}
+
 /// Maps a handover failure to its typed outcome. A refusal produced by the in-flight spawn
 /// gate is the retryable busy outcome -- `HandoverRejected` carrying the guard identity in
 /// `reason` -- because the gate reopens as soon as that spawn's guard drops, and the caller
@@ -3890,10 +3972,7 @@ impl DaemonServer {
                                 expires,
                                 crate::daemon::owner_admission::unix_now_ms(),
                             )
-                            .map_err(|reason| {
-                                expired_before_commit = true;
-                                reason
-                            })?;
+                            .inspect_err(|_| expired_before_commit = true)?;
                             match tokio::time::timeout(budget, transfer_request).await {
                                 Ok(answer) => answer,
                                 Err(_) => {
@@ -3924,10 +4003,7 @@ impl DaemonServer {
                             expires,
                             crate::daemon::owner_admission::unix_now_ms(),
                         )
-                        .map_err(|reason| {
-                            expired_before_commit = true;
-                            reason
-                        })?,
+                        .inspect_err(|_| expired_before_commit = true)?,
                         None => std::time::Duration::MAX,
                     };
                     // QA only: todo 8's request-expiry variant, armed by the runner for this
@@ -3969,10 +4045,7 @@ impl DaemonServer {
                             expires,
                             crate::daemon::owner_admission::unix_now_ms(),
                         )
-                        .map_err(|reason| {
-                            expired_before_commit = true;
-                            reason
-                        })?;
+                        .inspect_err(|_| expired_before_commit = true)?;
                     }
                     let exported: std::collections::HashSet<String> =
                         exports.iter().map(|(export, _owner)| export.session_id.clone()).collect();
@@ -4182,10 +4255,7 @@ impl DaemonServer {
                             expires,
                             crate::daemon::owner_admission::unix_now_ms(),
                         )
-                        .map_err(|reason| {
-                            expired_before_commit = true;
-                            reason
-                        })?;
+                        .inspect_err(|_| expired_before_commit = true)?;
                     }
                     commit_started = true;
                     #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
@@ -5819,68 +5889,74 @@ impl DaemonServer {
                                             }
                                         }
                                     }
-                                    let _ = crate::daemon::handover_socket::send_transfer_done(&stream, &transfer_id, seq);
-                                    // Authority transfer (todo 8): the candidate keeps this stream
-                                    // open and asks for the public listeners and lock fds once it
-                                    // has adopted the sessions, before it sends CommitHandover. The
-                                    // answer carries duplicates only; this daemon keeps serving on
-                                    // its own copies until its commit decision is written. A
-                                    // candidate that closes the stream without asking (a pre-plan
-                                    // v5 successor) gets nothing.
-                                    match self.handover_manager.authority_sources() {
-                                        Ok(sources) => {
-                                            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-                                            let transfer_fault = crate::daemon::qa_producers::armed_transfer_fault();
-                                            tokio::task::spawn_blocking(move || {
+                                    // A TRANSFER_DONE that never reached the candidate leaves it
+                                    // without a complete transfer: record it, skip the authority
+                                    // offer on the broken stream, and answer an error below so the
+                                    // candidate aborts and this predecessor keeps serving.
+                                    let done = send_transfer_done_recorded(&stream, &transfer_id, seq, &mut failures);
+                                    if done {
+                                        // Authority transfer (todo 8): the candidate keeps this stream
+                                        // open and asks for the public listeners and lock fds once it
+                                        // has adopted the sessions, before it sends CommitHandover. The
+                                        // answer carries duplicates only; this daemon keeps serving on
+                                        // its own copies until its commit decision is written. A
+                                        // candidate that closes the stream without asking (a pre-plan
+                                        // v5 successor) gets nothing.
+                                        match self.handover_manager.authority_sources() {
+                                            Ok(sources) => {
                                                 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-                                                let mut sources = sources;
-                                                // QA only: todo 8's authority-transfer failure
-                                                // variants, armed by the runner for this handover.
-                                                // The stray listener lives until the send is done.
-                                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-                                                let stray_path = get_runtime_dir().join(format!("qa-stray-{}.sock", std::process::id()));
-                                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-                                                let _stray = match transfer_fault {
-                                                    Some(fault) => match crate::daemon::qa_producers::apply_transfer_fault(
-                                                        fault,
-                                                        &mut sources,
-                                                        &get_lock_path(),
-                                                        &stray_path,
-                                                    ) {
-                                                        Ok(stray) => {
-                                                            tracing::warn!(?fault, "QA transfer fault applied to the authority");
-                                                            stray
-                                                        }
-                                                        Err(error) => {
-                                                            tracing::warn!(%error, ?fault, "QA transfer fault could not be applied; authority not served");
-                                                            return;
-                                                        }
-                                                    },
-                                                    None => None,
-                                                };
-                                                // The authority request is read with the request's
-                                                // own TTL as its bound; without one the worker could
-                                                // block forever, so a failure ends this request.
-                                                if let Err(error) = stream.set_read_timeout(Some(Duration::from_millis(
-                                                    crate::daemon::handover_request::REQUEST_TTL_MS,
-                                                ))) {
-                                                    tracing::warn!(%error, "Authority request not served: could not bound its read with a timeout");
-                                                    return;
-                                                }
-                                                match crate::daemon::handover_socket::serve_authority_request(&stream, sources) {
-                                                    Ok(()) => tracing::info!("Sent authority descriptors to the handover candidate"),
-                                                    Err(crate::daemon::handover_socket::HandoverSocketError::Wire(
-                                                        crate::daemon::handover_wire::HandoverWireError::Closed,
-                                                    )) => {}
-                                                    Err(error) => tracing::warn!(%error, "Authority request was not served"),
-                                                }
-                                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-                                                if _stray.is_some() {
-                                                    let _ = std::fs::remove_file(&stray_path);
-                                                }
-                                            });
+                                                let transfer_fault = crate::daemon::qa_producers::armed_transfer_fault();
+                                                tokio::task::spawn_blocking(move || {
+                                                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                                    let mut sources = sources;
+                                                    // QA only: todo 8's authority-transfer failure
+                                                    // variants, armed by the runner for this handover.
+                                                    // The stray listener lives until the send is done.
+                                                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                                    let stray_path = get_runtime_dir().join(format!("qa-stray-{}.sock", std::process::id()));
+                                                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                                    let _stray = match transfer_fault {
+                                                        Some(fault) => match crate::daemon::qa_producers::apply_transfer_fault(
+                                                            fault,
+                                                            &mut sources,
+                                                            &get_lock_path(),
+                                                            &stray_path,
+                                                        ) {
+                                                            Ok(stray) => {
+                                                                tracing::warn!(?fault, "QA transfer fault applied to the authority");
+                                                                stray
+                                                            }
+                                                            Err(error) => {
+                                                                tracing::warn!(%error, ?fault, "QA transfer fault could not be applied; authority not served");
+                                                                return;
+                                                            }
+                                                        },
+                                                        None => None,
+                                                    };
+                                                    // The authority request is read with the request's
+                                                    // own TTL as its bound; without one the worker could
+                                                    // block forever, so a failure ends this request.
+                                                    if let Err(error) = stream.set_read_timeout(Some(Duration::from_millis(
+                                                        crate::daemon::handover_request::REQUEST_TTL_MS,
+                                                    ))) {
+                                                        tracing::warn!(%error, "Authority request not served: could not bound its read with a timeout");
+                                                        return;
+                                                    }
+                                                    match crate::daemon::handover_socket::serve_authority_request(&stream, sources) {
+                                                        Ok(()) => tracing::info!("Sent authority descriptors to the handover candidate"),
+                                                        Err(crate::daemon::handover_socket::HandoverSocketError::Wire(
+                                                            crate::daemon::handover_wire::HandoverWireError::Closed,
+                                                        )) => {}
+                                                        Err(error) => tracing::warn!(%error, "Authority request was not served"),
+                                                    }
+                                                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                                    if _stray.is_some() {
+                                                        let _ = std::fs::remove_file(&stray_path);
+                                                    }
+                                                });
+                                            }
+                                            Err(error) => tracing::warn!(%error, "No authority descriptors to offer the handover candidate"),
                                         }
-                                        Err(error) => tracing::warn!(%error, "No authority descriptors to offer the handover candidate"),
                                     }
                                     // The gap between what this predecessor was asked for and what it
                                     // could actually export is the shape of a lossy handover.
@@ -5893,15 +5969,7 @@ impl DaemonServer {
                                             "Handover will lose sessions: they could not be exported or sent"
                                         );
                                     }
-                                    tracing::info!(
-                                        requested,
-                                        transferred = count,
-                                        "Transferred sessions to the successor over the handover socket"
-                                    );
-                                    DaemonResponse::TransferSessionsOk {
-                                        transferred_count: count,
-                                        requested_count: requested,
-                                    }
+                                    transfer_sessions_reply(done, count, requested, &failures)
                                 }
                                 Err(e) => daemon_error(format!("Failed to connect to handover socket: {e}")),
                             }
@@ -6275,16 +6343,11 @@ impl DaemonServer {
     #[cfg(unix)]
     pub(crate) fn serve_legacy_handover_socket(self: Arc<Self>, listener: UnixListener) {
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let s = Arc::clone(&self);
-                        tokio::spawn(async move {
-                            s.handle_client(stream).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let s = Arc::clone(&self);
+                tokio::spawn(async move {
+                    s.handle_client(stream).await;
+                });
             }
         });
     }

@@ -2155,7 +2155,8 @@ impl DaemonClient {
         })
     }
 
-    /// The runtime dir whose control endpoint belongs to this client's data socket.
+    /// The runtime dir holding this client's data endpoint, where the owner's control endpoint
+    /// lives (control-channel upgrade and the update-pending state).
     fn control_runtime_dir(&self) -> PathBuf {
         self.socket_path
             .parent()
@@ -2699,21 +2700,13 @@ impl DaemonClient {
         self.send_on_connection(&self.connection, req).await
     }
 
-    /// The runtime dir holding this client's endpoint, where the owner's control endpoint lives.
-    fn update_pending_runtime_dir(&self) -> PathBuf {
-        self.socket_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(crate::daemon::server::get_runtime_dir)
-    }
-
     /// The owner speaks another data protocol (todo 9). Nothing is sent over the data protocol and
     /// nothing is shut down, terminated, retargeted or spawned. On Unix the GUI first asks for a
     /// session-preserving upgrade over the control channel (todo 8's RequestUpgrade); only when
     /// that is unsupported, refused, unavailable or fails, and always on Windows, it reads
     /// Inventory, asks the owner once to RetireWhenIdle, and reports DAEMON_UPDATE_PENDING.
     async fn enter_update_pending(&self, running_version: Option<String>) -> IpcError {
-        let runtime_dir = self.update_pending_runtime_dir();
+        let runtime_dir = self.control_runtime_dir();
         #[cfg(unix)]
         let upgrade = Some(request_upgrade_via_control(&runtime_dir, stage_own_runtime));
         #[cfg(not(unix))]
@@ -2731,7 +2724,7 @@ impl DaemonClient {
         confirm_live_sessions: u32,
     ) -> Result<crate::daemon::update_pending::RestartOutcome, IpcError> {
         let outcome = crate::daemon::update_pending::restart_terminals(
-            &self.update_pending_runtime_dir(),
+            &self.control_runtime_dir(),
             confirm_live_sessions,
         )
         .await
@@ -2744,7 +2737,7 @@ impl DaemonClient {
 
     /// Re-reads the pending state (after CountChanged) without sending RetireWhenIdle twice.
     pub async fn update_pending_status(&self) -> crate::daemon::update_pending::UpdatePending {
-        crate::daemon::update_pending::enter(&self.update_pending_runtime_dir(), None).await
+        crate::daemon::update_pending::enter(&self.control_runtime_dir(), None).await
     }
 
     /// Interactive requests (keystroke writes, resizes) use a dedicated connection so

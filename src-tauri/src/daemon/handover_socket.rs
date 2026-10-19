@@ -109,7 +109,7 @@ pub struct ExpectedAuthority {
 /// The adopted form of a validated authority. Built only after the predecessor's decision reads
 /// Retired: until then the descriptors stay plain OwnedFd values, whose drop closes this
 /// process's copy without LOCK_UN (DaemonLockFiles would unlock the shared open file description).
-pub struct AdoptedAuthority {
+pub(crate) struct AdoptedAuthority {
     pub canonical_listener: StdUnixListener,
     pub control_listener: Option<StdUnixListener>,
     pub agent_state_listener: Option<StdUnixListener>,
@@ -461,7 +461,7 @@ pub fn validate_authority(
 
 /// Turns a validated authority into listeners and lock files. Call only after the predecessor's
 /// recorded decision is Retired.
-pub fn adopt_validated_authority(
+pub(crate) fn adopt_validated_authority(
     authority: TransferredAuthority,
 ) -> Result<AdoptedAuthority, HandoverSocketError> {
     let canonical = authority
@@ -702,6 +702,7 @@ mod tests {
                     .read(true)
                     .write(true)
                     .create(true)
+                    .truncate(false)
                     .open(dir.path().join(name))
                     .expect("lock file");
                 assert_eq!(
