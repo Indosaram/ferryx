@@ -97,6 +97,11 @@ export async function Q10b(ctx, result) {
   assertion(result, 'CLI client listed sessions through the daemon', list.status === 0, list.status);
   const conn = await dataConn(ctx);
   ctx.state.conn = conn;
+  // Plan deviation (recorded in the DoneClaim): src-tauri/src/bin/cli.rs has no spawn-capable
+  // subcommand (`agents` offers list/read/send/answer/stop only, agent_control/mod.rs
+  // parse_agents_cli), and todo 12 adds no CLI command. The local session is spawned through the
+  // QA build's own daemon client protocol (data-protocol Spawn) from the harness instead.
+  await evidence(ctx, result, 'spawn-path.json', { deviation: 'no spawn subcommand in src-tauri/src/bin/cli.rs; spawned over the QA daemon data protocol', cli: ctx.artifacts.A.cliExecutable });
   const spawned = await conn.call(D.spawnLocal({ clientRequestId: `qa-headless-${nonce('R')}`, workspaceId: ctx.workspaceId, cwd: ctx.repoDir }));
   if (spawned.type === 'error' && !ctx.workspaceRegistered) await conn.call(D.registerWorkspace(ctx.workspaceId, ctx.repoDir));
   const sid = spawned.sessionId ?? (await conn.call(D.spawnLocal({ clientRequestId: `qa-headless-${nonce('R')}`, workspaceId: ctx.workspaceId, cwd: ctx.repoDir }))).sessionId;
