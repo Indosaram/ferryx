@@ -149,6 +149,12 @@ export function isolationLayout(runDir, platform) {
   return dirs;
 }
 
+/**
+ * Linux keeps the real HOME/XDG_CONFIG_HOME: systemd --user reads units only from the user's own
+ * ~/.config/systemd/user, so QA units must land there (named ferryx-qa-<runId>-*). Windows keeps
+ * LOCALAPPDATA for the same reason (task definitions). Only macOS moves HOME, because launchd
+ * plists go to FERRYX_DAEMON_PLIST_PATH and nothing else needs the real home.
+ */
 export function isolationEnv({ runId, layout, platform, base = {} }) {
   const env = {
     ...base,
@@ -160,11 +166,7 @@ export function isolationEnv({ runId, layout, platform, base = {} }) {
     FERRYX_QA_BARRIER_DIR: layout.barrier,
   };
   if (platform === 'mac') env.FERRYX_DAEMON_PLIST_PATH = layout.launchAgents;
-  if (platform !== 'windows') {
-    env.HOME = layout.home;
-    env.XDG_CONFIG_HOME = layout.config;
-    env.XDG_DATA_HOME = layout.xdgData;
-  }
+  if (platform === 'mac') env.HOME = layout.home;
   return env;
 }
 
