@@ -6,6 +6,7 @@ pub mod browser;
 pub mod browser_cli;
 pub mod cli_install;
 pub mod dag;
+pub mod daemon_update;
 pub mod debug;
 pub mod design_feedback;
 pub mod diagnostics;
