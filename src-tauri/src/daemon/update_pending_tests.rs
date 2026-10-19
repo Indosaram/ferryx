@@ -282,3 +282,82 @@ async fn handshake_ok_of_another_version_never_shuts_down_terminates_or_spawns()
     })
     .await;
 }
+
+/// Probe whose owner record names pid 77; alive toggles whether that process (and its watchdog
+/// 78) still exist. The daemon lock is free and the endpoint missing, as after the old owner and
+/// its watchdog exit.
+struct GoneOwnerProbe {
+    owner_alive: bool,
+    watchdog_alive: bool,
+}
+
+impl crate::daemon::owner_admission::OwnerProbe for GoneOwnerProbe {
+    fn lock_state(&self) -> crate::daemon::owner_admission::LockState {
+        crate::daemon::owner_admission::LockState::Free
+    }
+    fn read_record(&self) -> Result<Option<crate::daemon::owner_admission::OwnerRecord>, String> {
+        Ok(Some(crate::daemon::owner_admission::OwnerRecord {
+            pid: 77,
+            start_time: 700,
+            generation_key: "old-generation".into(),
+            epoch: 1,
+            supervisor_pid: Some(78),
+            supervisor_start_time: Some(780),
+        }))
+    }
+    fn process_start_time(&self, pid: u32) -> Option<u64> {
+        match pid {
+            77 if self.owner_alive => Some(700),
+            78 if self.watchdog_alive => Some(780),
+            _ => None,
+        }
+    }
+    fn endpoint(&self) -> Result<crate::daemon::owner_admission::Endpoint, String> {
+        Ok(crate::daemon::owner_admission::Endpoint::Missing)
+    }
+    fn read_starting(&self) -> Result<Option<crate::daemon::owner_admission::StartingRecord>, String> {
+        Ok(None)
+    }
+    fn now_unix_ms(&self) -> u64 {
+        1_000_000
+    }
+}
+
+struct CountingStart(std::cell::Cell<u32>);
+
+impl crate::daemon::owner_admission::StartRunner for CountingStart {
+    fn start(&self) -> Result<(), String> {
+        self.0.set(self.0.get() + 1);
+        Ok(())
+    }
+}
+
+/// The newest generation is started only once the old owner and its watchdog are gone (rows
+/// 2/5c Unknown before that), and then exactly once.
+#[test]
+fn newest_generation_starts_once_only_after_old_owner_and_watchdog_are_gone() {
+    use crate::daemon::owner_admission::{
+        admit_and_start, classify_owner_with, Admission, AdmissionPaths, OwnerState,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let paths = AdmissionPaths::for_endpoint(&dir.path().join("daemon.sock"));
+    let runner = CountingStart(std::cell::Cell::new(0));
+
+    // Old owner still running (it kept its terminals): Unknown, nothing started.
+    let alive = GoneOwnerProbe { owner_alive: true, watchdog_alive: true };
+    assert!(matches!(classify_owner_with(&alive, true), OwnerState::Unknown { .. }));
+    // Owner exited but its Windows watchdog has not yet stopped: still Unknown (row 5c).
+    let watchdog = GoneOwnerProbe { owner_alive: false, watchdog_alive: true };
+    assert!(matches!(classify_owner_with(&watchdog, true), OwnerState::Unknown { .. }));
+    let result = admit_and_start(&paths, &alive, &runner, "newest", Duration::ZERO, Duration::ZERO).unwrap();
+    assert!(matches!(result, Admission::NotStarted(_)));
+    assert_eq!(runner.0.get(), 0, "no start while the old owner lives");
+
+    // Both gone: Absent, exactly one newest-generation start.
+    let gone = GoneOwnerProbe { owner_alive: false, watchdog_alive: false };
+    assert_eq!(classify_owner_with(&gone, true), OwnerState::Absent);
+    let result = admit_and_start(&paths, &gone, &runner, "newest", Duration::ZERO, Duration::ZERO).unwrap();
+    assert!(matches!(result, Admission::Started { .. }));
+    assert_eq!(runner.0.get(), 1);
+    assert!(paths.starting.exists(), "the start is recorded so concurrent callers see row 5b");
+}
