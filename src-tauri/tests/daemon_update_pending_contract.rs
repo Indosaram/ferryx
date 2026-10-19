@@ -172,7 +172,10 @@ async fn incompatible_old_owner_keeps_its_terminals_and_retires_when_idle() -> T
     assert_eq!(spawned["type"], "spawnOk", "{spawned}");
     let session_id = spawned["sessionId"].as_str().ok_or("no session id")?.to_string();
 
-    // This normal (protocol 5) build connects: pending, never a Shutdown, terminate or spawn.
+    // This normal (protocol 5) build connects: pending, never a Shutdown, terminate or spawn. On
+    // Unix the client first asks for a control-channel upgrade; this owner answers
+    // RequestUpgrade with UPGRADE_UNSUPPORTED (until todo 8's daemon side), so it is the refused
+    // path that enters pending. On Windows pending is entered directly.
     let client = DaemonClient::new_with_socket(endpoint(&runtime));
     let error = timeout(DEADLINE, client.list_sessions()).await?.unwrap_err();
     assert_eq!(error.code, IpcErrorCode::DaemonUpdatePending, "{error:?}");
