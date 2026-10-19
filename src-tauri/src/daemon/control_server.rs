@@ -444,10 +444,25 @@ impl DaemonServer {
         let transfers_before = request_file::transfers_started();
         let outcome = {
             let (runtime_dir, request) = (runtime_dir.clone(), request.clone());
+            #[cfg(test)]
+            let test_starter = self.handover_manager.candidate_starter();
             crate::ipc::run_blocking(move || {
-                request_file::write_request(&runtime_dir, &request)
-                    .and_then(|()| crate::daemon::supervisor::start_handover_candidate(&request))
-                    .map_err(crate::ipc::IpcError::internal)
+                let start = || -> Result<CandidateStart, String> {
+                    request_file::write_request(&runtime_dir, &request)?;
+                    #[cfg(test)]
+                    if let Some(starter) = test_starter {
+                        return request_file::start_handover_candidate_with(
+                            &runtime_dir,
+                            &crate::daemon::owner_admission::AdmissionPaths::for_runtime().admission_lock,
+                            &request,
+                            std::process::id(),
+                            starter.as_ref(),
+                            crate::daemon::owner_admission::ADMISSION_LOCK_DEADLINE,
+                        );
+                    }
+                    crate::daemon::supervisor::start_handover_candidate(&request)
+                };
+                start().map_err(crate::ipc::IpcError::internal)
             })
             .await
         };

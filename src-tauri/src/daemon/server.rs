@@ -2742,9 +2742,30 @@ fn handover_failure_response(context: Option<&str>, message: String) -> DaemonRe
 
 /// Connects once to the candidate's own handover socket so its blocking accept worker returns
 /// after an expiry abort (todo 8). The connect is a socket syscall, so it runs off the workers.
+/// A failed connect or a failed join is returned: the accept worker may then stay parked and
+/// keep this process from exiting, so the caller must report it.
 #[cfg(unix)]
-async fn wake_handover_accept(path: PathBuf) {
-    let _ = tokio::task::spawn_blocking(move || drop(std::os::unix::net::UnixStream::connect(&path))).await;
+async fn wake_handover_accept(path: PathBuf) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || std::os::unix::net::UnixStream::connect(&path).map(drop))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+/// Expiry abort: wakes the parked accept worker and returns the abort reason, extended with the
+/// wake failure when the wake did not happen.
+#[cfg(unix)]
+async fn expiry_abort_reason(handover_socket_path: &Path, reason: &str) -> String {
+    match wake_handover_accept(handover_socket_path.to_path_buf()).await {
+        Ok(()) => reason.to_string(),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path = %handover_socket_path.display(),
+                "Could not wake the handover accept worker after the request expired"
+            );
+            format!("{reason}; waking the handover accept worker at {} failed: {error}", handover_socket_path.display())
+        }
+    }
 }
 
 /// QA gate (local-split-qa): while the file named by FERRYX_QA_OWNER_PUBLISH_HOLD exists, every
@@ -3877,8 +3898,11 @@ impl DaemonServer {
                                 Ok(answer) => answer,
                                 Err(_) => {
                                     expired_before_commit = true;
-                                    wake_handover_accept(handover_socket_path.clone()).await;
-                                    return Err("handover request expired during TransferSessions".to_string());
+                                    return Err(expiry_abort_reason(
+                                        &handover_socket_path,
+                                        "handover request expired during TransferSessions",
+                                    )
+                                    .await);
                                 }
                             }
                         }
@@ -3912,8 +3936,11 @@ impl DaemonServer {
                             expired_before_commit = true;
                             // Wake the blocking accept so its worker returns instead of
                             // keeping this process alive after the clean exit.
-                            wake_handover_accept(handover_socket_path.clone()).await;
-                            return Err("handover request expired mid-transfer".to_string());
+                            return Err(expiry_abort_reason(
+                                &handover_socket_path,
+                                "handover request expired mid-transfer",
+                            )
+                            .await);
                         }
                     };
                     let (handover_stream, exports) = received

@@ -958,6 +958,9 @@ pub struct HandoverManager {
     transferred_locals: Mutex<std::collections::HashSet<String>>,
     #[cfg(test)]
     committing_hook: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    /// Test seam: replaces only the OS job start of a RequestUpgrade candidate start.
+    #[cfg(test)]
+    candidate_starter: Mutex<Option<Arc<dyn crate::daemon::handover_request::CandidateStarter + Send + Sync>>>,
     retirement_action: RwLock<Arc<dyn Fn() + Send + Sync>>,
     /// Terminal service recorded when the control channel entered Retiring, so a dropping
     /// SpawnOwnerGuard can re-check the exit predicate.
@@ -1075,6 +1078,8 @@ impl HandoverManager {
             transferred_locals: Mutex::new(std::collections::HashSet::new()),
             #[cfg(test)]
             committing_hook: Mutex::new(None),
+            #[cfg(test)]
+            candidate_starter: Mutex::new(None),
             retirement_action: RwLock::new(Arc::new(|| std::process::exit(0))),
             retiring_terminals: Mutex::new(None),
             retiring_ready: Arc::new(tokio::sync::Notify::new()),
@@ -1241,6 +1246,23 @@ impl HandoverManager {
     #[cfg(test)]
     pub(crate) fn notify_when_committing(&self, hook: std::sync::mpsc::Sender<()>) {
         *self.committing_hook.lock() = Some(hook);
+    }
+
+    /// Test hook: RequestUpgrade starts its candidate through this starter instead of the OS
+    /// supervisor; the request write, its authorization and the admission lock stay real.
+    #[cfg(test)]
+    pub(crate) fn set_candidate_starter(
+        &self,
+        starter: Arc<dyn crate::daemon::handover_request::CandidateStarter + Send + Sync>,
+    ) {
+        *self.candidate_starter.lock() = Some(starter);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn candidate_starter(
+        &self,
+    ) -> Option<Arc<dyn crate::daemon::handover_request::CandidateStarter + Send + Sync>> {
+        self.candidate_starter.lock().clone()
     }
 
     /// Waits until no request holds a RetirementGuard, up to deadline. True when drained.

@@ -1084,8 +1084,10 @@ async fn a_failed_transfer_leaves_every_predecessor_session_readable_and_writabl
                 .unwrap_or(true),
         "no Retired decision may exist after a failed transfer"
     );
-    // AbortHandoverOk is sent after the predecessor resumed every paused reader; the session
-    // must still be running there before input is written to it.
+    // AbortHandoverOk is sent only after the predecessor resumed every paused reader, so it is
+    // the resume signal. This describe is not a synchronization point (the session never
+    // stopped); it only guards against an abort that ended the child, which the write below
+    // would otherwise report as a vague output timeout.
     let resumed = client.describe_session(&session).await.expect("describe after AbortHandover");
     assert!(resumed.running, "the predecessor still runs the session after the abort: {resumed:?}");
 
