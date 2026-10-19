@@ -123,8 +123,12 @@ async function upgradeStep(ctx, result, artifact, pair, tag) {
   assertion(result, `${tag}: public socket path present at every stage`, stages.length > 0 && inv.socketMissingAt.length === 0, inv.socketMissingAt);
   // successor parent = OS job
   const row = (await ctx.agent.call('table')).find((r) => r.pid === succ.pid);
-  const job = await ctx.jobs.inspect(staged.key);
-  assertion(result, `${tag}: successor runs under its own generation job`, job.pid === succ.pid, { jobPid: job.pid, succ: succ.pid });
+  // Windows: Get-ScheduledTask exposes no pid (jobs.inspect pid is null); the generation's task
+  // runs a --daemon-supervisor watchdog from <stagedRoot>\<key>, whose --daemon child is the owner.
+  const job = ctx.platform === 'windows'
+    ? { pid: (await ctx.jobs.windowsTree(hjoin(ctx.stagedRoot, staged.key))).daemon?.pid ?? null }
+    : await ctx.jobs.inspect(staged.key);
+  assertion(result, `${tag}: successor runs under its own generation job`, job.pid !== null && job.pid === succ.pid, { jobPid: job.pid, succ: succ.pid });
   assertion(result, `${tag}: successor parent is not the predecessor`, row && row.ppid !== pred.pid, row);
   // predecessor keeps serving the SSH session, drains, and is still alive
   assertion(result, `${tag}: predecessor still alive while it owns the SSH session`, (await ctx.agent.call('probe', { pid: pred.pid })) !== null, pred.pid);
