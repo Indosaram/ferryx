@@ -53,6 +53,10 @@ export async function startSshd(ctx) {
   const hostKey = hjoin(dir, 'host_ed25519');
   const clientKey = hjoin(dir, 'client_ed25519');
   for (const key of [hostKey, clientKey]) {
+    // A previous attempt in this run (e.g. Q08 failing after keygen) leaves the key files; ssh-keygen
+    // then prompts to overwrite on a closed stdin and fails with empty stderr. Start from no keys.
+    await ctx.agent.call('remove', { target: key });
+    await ctx.agent.call('remove', { target: `${key}.pub` });
     const r = await ctx.agent.call('exec', { command: 'ssh-keygen', args: ['-q', '-t', 'ed25519', '-N', '', '-f', key] });
     if (r.status !== 0) return { unavailable: `ssh-keygen failed: ${r.stderr}` };
   }
