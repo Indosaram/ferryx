@@ -23,6 +23,13 @@ impl Fixture {
     }
     async fn serve(&mut self, router: axum::Router) -> anyhow::Result<String> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        self.serve_on(listener, router)
+    }
+    fn serve_on(
+        &mut self,
+        listener: tokio::net::TcpListener,
+        router: axum::Router,
+    ) -> anyhow::Result<String> {
         let address = listener.local_addr()?;
         self.addresses.push(address);
         self.tasks.spawn(async move {
@@ -219,9 +226,15 @@ async fn exercise(root: &Path, fixture: &mut Fixture) -> anyhow::Result<()> {
     })
     .await
     .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let origin = fixture
-        .serve(crate::remote::relay_server::relay_router(relay))
-        .await?;
+    // The relay keeps one socket for the whole test: each serve gets a duplicate of it, so the
+    // restart below reuses the same origin without releasing and rebinding the port, which a
+    // concurrent test could take in between.
+    let relay_socket = std::net::TcpListener::bind("127.0.0.1:0")?;
+    relay_socket.set_nonblocking(true)?;
+    let origin = fixture.serve_on(
+        tokio::net::TcpListener::from_std(relay_socket.try_clone()?)?,
+        crate::remote::relay_server::relay_router(relay),
+    )?;
     let a = fixture.gateway(root.join("a"), origin.clone()).await?;
     let b = fixture.gateway(root.join("b"), origin.clone()).await?;
     let client = fixture.native(root.to_owned()).await?;
@@ -285,25 +298,18 @@ async fn exercise(root: &Path, fixture: &mut Fixture) -> anyhow::Result<()> {
     let old = std::mem::replace(fixture, Fixture::new());
     old.close().await?;
     let relay_path = root.join("relay.json");
-    // Keep the original relay origin by rebinding its released address.
-    let address: std::net::SocketAddr = origin.trim_start_matches("http://").parse()?;
     let relay = crate::ipc::run_blocking(move || {
         crate::remote::relay_server::RelayState::new_with_key_store(vec![], relay_path)
             .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))
     })
     .await
     .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let listener = tokio::net::TcpListener::bind(address).await?;
-    fixture.addresses.push(address);
-    fixture.tasks.spawn(async move {
-        axum::serve(
-            listener,
-            crate::remote::relay_server::relay_router(relay)
-                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
+    // Same origin: serve the relay again on a duplicate of the socket held since the start.
+    let restarted = fixture.serve_on(
+        tokio::net::TcpListener::from_std(relay_socket.try_clone()?)?,
+        crate::remote::relay_server::relay_router(relay),
+    )?;
+    ensure!(restarted == origin, "relay origin changed across the restart");
     let a = fixture.gateway(root.join("a"), origin.clone()).await?;
     let b = fixture.gateway(root.join("b"), origin.clone()).await?;
     let client = fixture.native(root.to_owned()).await?;
