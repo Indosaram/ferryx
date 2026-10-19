@@ -351,6 +351,20 @@ pub(crate) fn read_transport_token() -> Option<String> {
     None
 }
 
+/// Reads the transport token published beside endpoint, the port file a client is bound to. The
+/// daemon writes daemon.token next to daemon.port, so for the canonical endpoint this is exactly
+/// [read_transport_token]; a client bound to another endpoint (an isolated runtime or a test
+/// fixture) presents the token of that endpoint instead of the per-user runtime's one.
+#[cfg(not(unix))]
+pub(crate) fn read_transport_token_for(endpoint: &Path) -> Option<String> {
+    read_transport_token_at(&endpoint.with_file_name("daemon.token"))
+}
+
+#[cfg(unix)]
+pub(crate) fn read_transport_token_for(_endpoint: &Path) -> Option<String> {
+    None
+}
+
 /// The code the daemon answers with when the credential it was presented cannot belong to the
 /// port it answered on.
 const TRANSPORT_UNAUTHORIZED_CODE: &str = "TRANSPORT_UNAUTHORIZED";
@@ -1036,7 +1050,7 @@ impl DaemonClient {
             async {
                 crate::ipc::run_blocking(move || {
                     Self::validate_existing_socket_path(&path)?;
-                    let credential = read_transport_token();
+                    let credential = read_transport_token_for(&path);
                     #[cfg(unix)]
                     let endpoint = path;
                     #[cfg(not(unix))]
@@ -1672,7 +1686,7 @@ impl DaemonClient {
             crate::ipc::run_blocking(move || Self::validate_existing_socket_path(&socket_path)).await.map_err(|_| ServiceError::unavailable())?;
             // The credential is read before the port is, the order the daemon publishes them in:
             // the token presented can then never be newer than the port it is presented to.
-            let credential = read_transport_token();
+            let credential = read_transport_token_for(&self.socket_path);
             let stream = Self::connect_socket(&self.socket_path).await.map_err(|_| ServiceError::unavailable())?;
             let (reader, writer) = stream.into_split();
             let mut connection = ActiveConnection { reader: BufReader::new(reader), writer };
@@ -2362,7 +2376,7 @@ impl DaemonClient {
     /// One attempt: the credential is read before the port is, so the token presented can never be
     /// newer than the port it is presented to.
     async fn connect_and_handshake_once(&self) -> Result<ActiveConnection, IpcError> {
-        let credential = read_transport_token();
+        let credential = read_transport_token_for(&self.socket_path);
         let stream = self.connect_or_spawn().await?;
         // A port was published but the credential that authenticates it was not on disk when it
         // was read: the same straddled pair a rejection reports, so re-read both halves instead of
@@ -2461,6 +2475,45 @@ impl DaemonClient {
 
     pub async fn send_request(&self, req: DaemonRequest) -> Result<DaemonResponse, IpcError> {
         self.send_on_connection(&self.connection, req).await
+    }
+
+    /// The runtime dir holding this client's endpoint, where the owner's control endpoint lives.
+    fn update_pending_runtime_dir(&self) -> PathBuf {
+        self.socket_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(crate::daemon::server::get_runtime_dir)
+    }
+
+    /// The owner speaks another data protocol (todo 9). Nothing is sent over the data protocol and
+    /// nothing is shut down, terminated, retargeted or spawned: the GUI reads Inventory over the
+    /// control channel, asks the owner once to RetireWhenIdle, and reports DAEMON_UPDATE_PENDING.
+    async fn enter_update_pending(&self, running_version: Option<String>) -> IpcError {
+        crate::daemon::update_pending::enter(&self.update_pending_runtime_dir(), running_version)
+            .await
+            .into_error()
+    }
+
+    /// The user confirmed "Restart terminals now" for confirm_live_sessions terminals.
+    pub async fn restart_previous_version_terminals(
+        &self,
+        confirm_live_sessions: u32,
+    ) -> Result<crate::daemon::update_pending::RestartOutcome, IpcError> {
+        let outcome = crate::daemon::update_pending::restart_terminals(
+            &self.update_pending_runtime_dir(),
+            confirm_live_sessions,
+        )
+        .await
+        .map_err(IpcError::internal)?;
+        if matches!(outcome, crate::daemon::update_pending::RestartOutcome::Accepted { .. }) {
+            self.invalidate_cached_connections().await;
+        }
+        Ok(outcome)
+    }
+
+    /// Re-reads the pending state (after CountChanged) without sending RetireWhenIdle twice.
+    pub async fn update_pending_status(&self) -> crate::daemon::update_pending::UpdatePending {
+        crate::daemon::update_pending::enter(&self.update_pending_runtime_dir(), None).await
     }
 
     /// Interactive requests (keystroke writes, resizes) use a dedicated connection so
@@ -3012,7 +3065,7 @@ impl DaemonClient {
         for req in [
             DaemonRequest::Handshake {
                 version: DAEMON_PROTOCOL_VERSION,
-                token: read_transport_token(),
+                token: read_transport_token_for(&self.socket_path),
             },
             DaemonRequest::SubscribeRemoteEvents,
         ] {
@@ -3120,7 +3173,7 @@ impl DaemonClient {
         for req in [
             DaemonRequest::Handshake {
                 version: DAEMON_PROTOCOL_VERSION,
-                token: read_transport_token(),
+                token: read_transport_token_for(&self.socket_path),
             },
             DaemonRequest::SubscribeDag {
                 workspace_id: workspace_id.to_string(),
@@ -3241,13 +3294,12 @@ impl DaemonClient {
         session_id: &str,
         after_sequence: Option<u64>,
     ) -> Result<DaemonAttachment, IpcError> {
-        let stream = self.connect_or_spawn().await?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
         let handshake = DaemonRequest::Handshake {
             version: DAEMON_PROTOCOL_VERSION,
-            token: read_transport_token(),
+            token: read_transport_token_for(&self.socket_path),
         };
         let mut json = serde_json::to_string(&handshake).map_err(|e| {
             IpcError::new(
@@ -6821,6 +6873,9 @@ mod local_split_transport_tests {
             let listener = {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 fs::write(&path, listener.local_addr().unwrap().port().to_string()).unwrap();
+                // The daemon publishes daemon.token beside its port; a client bound to this
+                // endpoint presents the token found beside it (read_transport_token_for).
+                fs::write(path.with_file_name("daemon.token"), "fixture-transport-token").unwrap();
                 listener
             };
             Self {
