@@ -3294,6 +3294,7 @@ impl DaemonClient {
         session_id: &str,
         after_sequence: Option<u64>,
     ) -> Result<DaemonAttachment, IpcError> {
+        let stream = self.connect_or_spawn().await?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
