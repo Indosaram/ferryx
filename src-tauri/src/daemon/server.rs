@@ -4252,6 +4252,13 @@ impl DaemonServer {
                                         .await;
                                     }
                                 }
+                                if handover_expires_at.is_some() {
+                                    // The decision is not Retired: the predecessor kept its
+                                    // authority and resumed; this candidate exits 0.
+                                    tracing::warn!(%reason, ?decision, "Unconfirmed commit aborted; exiting 0");
+                                    crate::daemon::supervisor_linux::notify_ready();
+                                    return Ok(());
+                                }
                                 return Err(format!("{reason}; recorded decision: {decision:?}"));
                             }
                         } else {
@@ -4307,11 +4314,11 @@ impl DaemonServer {
                                 );
                             }
                         }
-                        if crate::daemon::handover_request::expired_candidate_exits_cleanly(
-                            expired_before_commit,
+                        if crate::daemon::handover_request::candidate_exits_cleanly(
+                            handover_expires_at.is_some(),
                             rolled_back,
                         ) {
-                            tracing::warn!(%reason, "Handover request expired before commit; predecessor resumed, exiting 0");
+                            tracing::warn!(%reason, expired_before_commit, "HandoverCandidate aborted before commit; predecessor resumed, exiting 0");
                             crate::daemon::supervisor_linux::notify_ready();
                             return Ok(());
                         }
