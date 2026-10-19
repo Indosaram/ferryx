@@ -1216,6 +1216,17 @@ impl DaemonLockFiles {
             _legacy: DaemonLockFile::from_locked_file(legacy),
         }
     }
+
+    /// Raw descriptors of the held locks (persistent, legacy), for duplication into an
+    /// authority transfer. The returned fds stay owned by self.
+    #[cfg(unix)]
+    pub(crate) fn raw_fds(&self) -> (Option<std::os::fd::RawFd>, std::os::fd::RawFd) {
+        use std::os::fd::AsRawFd;
+        (
+            self._persistent.as_ref().map(|lock| lock._file.as_raw_fd()),
+            self._legacy._file.as_raw_fd(),
+        )
+    }
 }
 
 fn try_lock_file(file: File) -> Result<DaemonLockFile, String> {
@@ -3163,29 +3174,67 @@ impl DaemonServer {
 
     #[cfg(unix)]
     pub fn spawn_agent_state_listener(self: &Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
+        use crate::daemon::handover::AuthorityListenerRole;
         let path = get_agent_state_socket_path();
-        let _ = fs::remove_file(&path);
-        let listener = match UnixListener::bind(&path) {
-            Ok(listener) => listener,
-            Err(error) => {
-                tracing::warn!(%error, "Failed to bind agent state socket");
-                return None;
+        // A committed HandoverCandidate keeps serving the agent-state listener it inherited
+        // (todo 8): the path panes already hold never disappears.
+        let inherited = self
+            .handover_manager
+            .take_inherited_listener(AuthorityListenerRole::AgentState)
+            .and_then(|listener| match UnixListener::from_std(listener) {
+                Ok(listener) => Some(listener),
+                Err(error) => {
+                    tracing::warn!(%error, "Failed to serve the inherited agent state listener");
+                    None
+                }
+            });
+        let listener = match inherited {
+            Some(listener) => listener,
+            None => {
+                let _ = fs::remove_file(&path);
+                let listener = match UnixListener::bind(&path) {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        tracing::warn!(%error, "Failed to bind agent state socket");
+                        return None;
+                    }
+                };
+                if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+                    tracing::warn!(%error, "Failed to secure agent state socket");
+                }
+                listener
             }
         };
-        if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
-            tracing::warn!(%error, "Failed to secure agent state socket");
+        {
+            use std::os::fd::AsRawFd;
+            if let Err(error) = self
+                .handover_manager
+                .register_authority_listener(AuthorityListenerRole::AgentState, listener.as_raw_fd())
+            {
+                tracing::warn!(%error, "Agent state listener cannot be handed to a successor");
+            }
         }
 
         let server = Arc::clone(self);
         let states = Arc::clone(&self.agent_states);
         let sessions = self.session_service.clone();
         let epoch = crate::scoped_contracts::Epoch(self.epoch);
+        let manager = Arc::clone(&self.handover_manager);
         Some(tokio::spawn(async move {
             let mut clients = tokio::task::JoinSet::new();
             loop {
-                let Ok((stream, _)) = listener.accept().await else {
+                if !manager.accept_gate_open() {
+                    manager.wait_accept_open().await;
+                    continue;
+                }
+                let accepted = tokio::select! {
+                    accepted = listener.accept() => accepted,
+                    () = manager.wait_accept_closed() => continue,
+                };
+                let Ok((stream, _)) = accepted else {
                     continue;
                 };
+                manager.note_accept(AuthorityListenerRole::AgentState);
                 let states = Arc::clone(&states);
                 let sessions = sessions.clone();
                 let server = Arc::clone(&server);
@@ -3466,6 +3515,12 @@ impl DaemonServer {
 
         let socket_path = get_socket_path();
         let lock_path = get_lock_path();
+        // A committed HandoverCandidate serves the predecessor's own public listener and holds
+        // its locks through the descriptors it inherited (todo 8): no bind and no lock
+        // acquisition happen after commit, so the locks are never free and the public socket
+        // path never disappears.
+        #[cfg(unix)]
+        let mut inherited_canonical: Option<std::os::unix::net::UnixListener> = None;
 
         if let Some(ref legacy_path) = handover_from {
             tracing::info!(
@@ -3511,6 +3566,9 @@ impl DaemonServer {
                 let mut adopted_records: Vec<crate::daemon::qa_producers::HandoverSessionRecord> =
                     Vec::new();
                 let mut commit_started = false;
+                // The predecessor's authority descriptors, validated but not yet used. Dropping
+                // them only closes this process's copies: the predecessor keeps serving.
+                let mut received_authority: Option<crate::daemon::handover_socket::TransferredAuthority> = None;
                 let handover_socket_path =
                     crate::daemon::handover_socket::get_handover_socket_path(&transfer_id);
                 let listener = crate::daemon::handover_socket::HandoverSocketListener::bind(
@@ -3532,7 +3590,7 @@ impl DaemonServer {
                             Err(error) => return Err((error, exports.len())),
                         }
                     }
-                    Ok::<_, (crate::daemon::handover_socket::HandoverSocketError, usize)>(exports)
+                    Ok::<_, (crate::daemon::handover_socket::HandoverSocketError, usize)>((stream, exports))
                 });
 
                 let transfer_outcome: Result<(usize, usize, usize, u64), String> = async {
@@ -3553,7 +3611,7 @@ impl DaemonServer {
                         other => return Err(format!("TransferSessions failed: {other:?}")),
                     };
 
-                    let exports = accept_handle
+                    let (handover_stream, exports) = accept_handle
                         .await
                         .map_err(|e| format!("Handover worker panicked: {e}"))?
                         .map_err(|(error, received)| {
@@ -3725,6 +3783,45 @@ impl DaemonServer {
                         }
                     }
 
+                    // Authority transfer (todo 8): over the same handover socket, before
+                    // CommitHandover, the candidate receives duplicates of the predecessor's
+                    // public listeners and lock fds and validates every one of them. It accepts on
+                    // none. Any failure here aborts before commit and the predecessor keeps
+                    // serving. A pre-plan predecessor closes the stream without answering; only
+                    // then does this candidate fall back to taking the locks after commit.
+                    let expected = crate::daemon::handover_socket::ExpectedAuthority {
+                        canonical_socket: socket_path.clone(),
+                        legacy_lock: lock_path.clone(),
+                        persistent_lock: get_persistent_lock_path(),
+                        control_socket: (!control_server::control_disabled_for_qa())
+                            .then(control_server::control_socket_path),
+                        agent_state_socket: Some(get_agent_state_socket_path()),
+                    };
+                    let authority_transfer_id = transfer_id.clone();
+                    received_authority = tokio::task::spawn_blocking(move || {
+                        use crate::daemon::handover_socket::{
+                            request_authority, validate_authority, HandoverSocketError,
+                        };
+                        use crate::daemon::handover_wire::HandoverWireError;
+                        match request_authority(&handover_stream, &authority_transfer_id) {
+                            Ok(authority) => {
+                                validate_authority(&authority, &expected)
+                                    .map_err(|error| format!("Predecessor authority rejected: {error}"))?;
+                                Ok(Some(authority))
+                            }
+                            Err(HandoverSocketError::Wire(HandoverWireError::Closed)) => Ok(None),
+                            Err(error) => Err(format!("Predecessor authority transfer failed: {error}")),
+                        }
+                    })
+                    .await
+                    .map_err(|error| format!("Authority worker panicked: {error}"))??;
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    crate::daemon::qa_producers::note_authority_stage(
+                        "authority-validated",
+                        &self.handover_manager,
+                    )
+                    .await;
+
                     commit_started = true;
                     let commit_started_at = tokio::time::Instant::now();
                     let commit_resp = legacy_peer
@@ -3751,6 +3848,9 @@ impl DaemonServer {
 
                 match transfer_outcome {
                     Ok((offered, accepted, restorable, commit_latency_ms)) => {
+                        if let Some(authority) = received_authority.take() {
+                            inherited_canonical = Some(self.install_adopted_authority(authority)?);
+                        }
                         tracing::info!(
                             accepted,
                             offered,
@@ -3796,10 +3896,16 @@ impl DaemonServer {
                                 .await.map_err(|error| error.to_string())?;
                             if decision == Some(super::handover_transaction::HandoverState::Retired) {
                                 tracing::info!("Recovered committed handover from recorded transaction decision");
+                                if let Some(authority) = received_authority.take() {
+                                    inherited_canonical = Some(self.install_adopted_authority(authority)?);
+                                }
                                 // The predecessor committed and is retiring with exit 0; take over as
                                 // the unit's main process exactly as the confirmed path does.
                                 crate::daemon::supervisor_linux::notify_main_pid_ready();
                             } else {
+                                // Not Retired: the predecessor never closed its authority. Closing
+                                // these copies releases nothing it holds.
+                                drop(received_authority.take());
                                 release_after_unconfirmed_commit(async {
                                     for session_id in &adopted_sessions {
                                         self.terminal_service.pty_manager().relinquish_transferred_session(session_id)
@@ -3832,6 +3938,7 @@ impl DaemonServer {
                                 return Err(format!("{reason}; recorded decision: {decision:?}"));
                             }
                         } else {
+                        drop(received_authority.take());
                         let rollback = rollback_transferred_readers(async {
                             for session_id in &adopted_sessions {
                                 self.terminal_service.pty_manager().relinquish_transferred_session(session_id)
@@ -3918,8 +4025,16 @@ impl DaemonServer {
             }
         }
 
-        let lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
-        self.handover_manager.set_lock_files(lock_files);
+        #[cfg(unix)]
+        let adopted_authority = inherited_canonical.is_some();
+        #[cfg(not(unix))]
+        let adopted_authority = false;
+        // The ordinary acquire/bind path is skipped when authority was adopted: the inherited
+        // lock fds were already installed by install_adopted_authority.
+        if !adopted_authority {
+            let lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
+            self.handover_manager.set_lock_files(lock_files);
+        }
         // Publish who owns the locks so launchers can tell this daemon from a reused pid, and
         // clear the launcher's pending-start marker. A failure only weakens admission to
         // Unknown (never a second start), so it is logged rather than fatal.
@@ -3933,15 +4048,29 @@ impl DaemonServer {
         }
 
         // Clean up stale socket only after lock acquisition and safe ownership check.
-        remove_stale_socket_after_lock(&socket_path)?;
+        if !adopted_authority {
+            remove_stale_socket_after_lock(&socket_path)?;
+        }
 
         #[cfg(unix)]
-        let listener = UnixListener::bind(&socket_path).map_err(|e| {
-            format!(
-                "Failed to bind UDS socket at {}: {e}",
-                socket_path.display()
-            )
-        })?;
+        let listener = match inherited_canonical.take() {
+            Some(inherited) => UnixListener::from_std(inherited)
+                .map_err(|e| format!("Failed to serve the inherited daemon listener: {e}"))?,
+            None => UnixListener::bind(&socket_path).map_err(|e| {
+                format!(
+                    "Failed to bind UDS socket at {}: {e}",
+                    socket_path.display()
+                )
+            })?,
+        };
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            self.handover_manager.register_authority_listener(
+                crate::daemon::handover::AuthorityListenerRole::Canonical,
+                listener.as_raw_fd(),
+            )?;
+        }
 
         #[cfg(not(unix))]
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -4016,8 +4145,20 @@ impl DaemonServer {
         }
 
         loop {
-            match listener.accept().await {
+            // Public accepts stop while a commit is decided and forever once this daemon has
+            // handed its listener to a successor (todo 8); the legacy socket is not gated.
+            if !self.handover_manager.accept_gate_open() {
+                self.handover_manager.wait_accept_open().await;
+                continue;
+            }
+            let accepted = tokio::select! {
+                accepted = listener.accept() => accepted,
+                () = self.handover_manager.wait_accept_closed() => continue,
+            };
+            match accepted {
                 Ok((stream, _)) => {
+                    self.handover_manager
+                        .note_accept(crate::daemon::handover::AuthorityListenerRole::Canonical);
                     let server = Arc::clone(&self);
                     tokio::spawn(async move {
                         server.handle_client(stream).await;
@@ -5243,6 +5384,30 @@ impl DaemonServer {
                                         }
                                     }
                                     let _ = crate::daemon::handover_socket::send_transfer_done(&stream, &transfer_id, seq);
+                                    // Authority transfer (todo 8): the candidate keeps this stream
+                                    // open and asks for the public listeners and lock fds once it
+                                    // has adopted the sessions, before it sends CommitHandover. The
+                                    // answer carries duplicates only; this daemon keeps serving on
+                                    // its own copies until its commit decision is written. A
+                                    // candidate that closes the stream without asking (a pre-plan
+                                    // v5 successor) gets nothing.
+                                    match self.handover_manager.authority_sources() {
+                                        Ok(sources) => {
+                                            tokio::task::spawn_blocking(move || {
+                                                let _ = stream.set_read_timeout(Some(Duration::from_millis(
+                                                    crate::daemon::handover_request::REQUEST_TTL_MS,
+                                                )));
+                                                match crate::daemon::handover_socket::serve_authority_request(&stream, sources) {
+                                                    Ok(()) => tracing::info!("Sent authority descriptors to the handover candidate"),
+                                                    Err(crate::daemon::handover_socket::HandoverSocketError::Wire(
+                                                        crate::daemon::handover_wire::HandoverWireError::Closed,
+                                                    )) => {}
+                                                    Err(error) => tracing::warn!(%error, "Authority request was not served"),
+                                                }
+                                            });
+                                        }
+                                        Err(error) => tracing::warn!(%error, "No authority descriptors to offer the handover candidate"),
+                                    }
                                     // The gap between what this predecessor was asked for and what it
                                     // could actually export is the shape of a lossy handover.
                                     if !failures.is_empty() {
@@ -5607,6 +5772,23 @@ impl DaemonServer {
                 }
             }
         });
+    }
+
+    /// Takes over a validated authority after the predecessor's decision is Retired: installs
+    /// the inherited locks, parks the control and agent-state listeners for their serve paths,
+    /// and returns the canonical data listener. Never binds and never locks.
+    #[cfg(unix)]
+    fn install_adopted_authority(
+        &self,
+        authority: crate::daemon::handover_socket::TransferredAuthority,
+    ) -> Result<std::os::unix::net::UnixListener, String> {
+        let adopted = crate::daemon::handover_socket::adopt_validated_authority(authority)
+            .map_err(|error| format!("Failed to adopt the committed authority: {error}"))?;
+        self.handover_manager.set_lock_files(adopted.lock_files);
+        self.handover_manager
+            .stash_inherited_listeners(adopted.control_listener, adopted.agent_state_listener);
+        tracing::info!("Adopted the predecessor's listeners and locks without a bind or lock gap");
+        Ok(adopted.canonical_listener)
     }
 
     /// Protocol-5 UpgradeBinary path kept unchanged for pre-plan GUIs: the successor is this

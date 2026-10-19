@@ -13,12 +13,12 @@ mod control_wire_tests;
 
 /// Under local-split-qa only: skip binding the control endpoint (todo 12, Q09).
 #[cfg(feature = "local-split-qa")]
-fn control_disabled_for_qa() -> bool {
+pub(crate) fn control_disabled_for_qa() -> bool {
     std::env::var("FERRYX_QA_DISABLE_CONTROL").as_deref() == Ok("1")
 }
 
 #[cfg(not(feature = "local-split-qa"))]
-fn control_disabled_for_qa() -> bool {
+pub(crate) fn control_disabled_for_qa() -> bool {
     false
 }
 
@@ -70,18 +70,47 @@ impl DaemonServer {
         #[cfg(unix)]
         {
             let path = control_socket_path();
-            remove_stale_socket_after_lock(&path)?;
-            let listener = UnixListener::bind(&path).map_err(|e| {
-                format!("Failed to bind control socket at {}: {e}", path.display())
-            })?;
-            validate_safe_ownership_and_type(&path, RuntimeNodeKind::Socket)?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                .map_err(|error| format!("Failed to secure control socket: {error}"))?;
+            use crate::daemon::handover::AuthorityListenerRole;
+            // A committed HandoverCandidate serves the control listener it inherited from its
+            // predecessor (todo 8) instead of unlinking and re-binding the path.
+            let listener = match self
+                .handover_manager
+                .take_inherited_listener(AuthorityListenerRole::Control)
+            {
+                Some(inherited) => UnixListener::from_std(inherited).map_err(|e| {
+                    format!("Failed to serve the inherited control listener: {e}")
+                })?,
+                None => {
+                    remove_stale_socket_after_lock(&path)?;
+                    let listener = UnixListener::bind(&path).map_err(|e| {
+                        format!("Failed to bind control socket at {}: {e}", path.display())
+                    })?;
+                    validate_safe_ownership_and_type(&path, RuntimeNodeKind::Socket)?;
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                        .map_err(|error| format!("Failed to secure control socket: {error}"))?;
+                    listener
+                }
+            };
+            {
+                use std::os::fd::AsRawFd;
+                self.handover_manager
+                    .register_authority_listener(AuthorityListenerRole::Control, listener.as_raw_fd())?;
+            }
             let server = Arc::clone(self);
             tokio::spawn(async move {
+                let manager = Arc::clone(&server.handover_manager);
                 loop {
-                    match listener.accept().await {
+                    if !manager.accept_gate_open() {
+                        manager.wait_accept_open().await;
+                        continue;
+                    }
+                    let accepted = tokio::select! {
+                        accepted = listener.accept() => accepted,
+                        () = manager.wait_accept_closed() => continue,
+                    };
+                    match accepted {
                         Ok((stream, _)) => {
+                            manager.note_accept(AuthorityListenerRole::Control);
                             let server = Arc::clone(&server);
                             tokio::spawn(async move {
                                 server.handle_control_connection(stream, None).await;

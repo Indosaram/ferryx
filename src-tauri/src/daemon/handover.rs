@@ -490,6 +490,39 @@ pub(crate) struct RetirementGuard {
     terminals: Arc<TerminalService>,
 }
 
+/// The public listeners a daemon can hand to its successor (todo 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthorityListenerRole {
+    Canonical,
+    Control,
+    AgentState,
+}
+
+impl AuthorityListenerRole {
+    fn index(self) -> usize {
+        match self {
+            Self::Canonical => 0,
+            Self::Control => 1,
+            Self::AgentState => 2,
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct AuthorityListeners {
+    canonical: Option<std::os::fd::OwnedFd>,
+    control: Option<std::os::fd::OwnedFd>,
+    agent_state: Option<std::os::fd::OwnedFd>,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct InheritedListeners {
+    control: Option<std::os::unix::net::UnixListener>,
+    agent_state: Option<std::os::unix::net::UnixListener>,
+}
+
 impl Drop for RetirementGuard {
     fn drop(&mut self) {
         let mut requests = self.manager.in_flight.lock();
@@ -780,6 +813,21 @@ mod spawn_owner_tests {
 
 pub struct HandoverManager {
     status: Arc<RwLock<HandoverStatus>>,
+    /// Duplicates of this daemon's public listening sockets (canonical data, control,
+    /// agent-state), kept so a HandoverCandidate can be sent the same sockets (todo 8). Closing
+    /// these never unlinks a path or closes the socket the other copies share.
+    #[cfg(unix)]
+    authority_listeners: Mutex<AuthorityListeners>,
+    /// Listeners a committed candidate inherited and has not started serving yet.
+    #[cfg(unix)]
+    inherited_listeners: Mutex<InheritedListeners>,
+    /// Open while this daemon may accept on its public data, control and agent-state
+    /// listeners. Closed while a commit is decided (Committing) and permanently once the
+    /// decision is Retired, so a retired predecessor never accepts on a socket it handed over.
+    accept_gate: tokio::sync::watch::Sender<bool>,
+    /// Accepts completed per public listener (canonical, control, agent-state); exposed on the
+    /// QA channel so a candidate can prove it accepted nothing before commit.
+    accept_counts: [std::sync::atomic::AtomicU64; 3],
     spawn_owners: std::sync::atomic::AtomicUsize,
     legacy_socket_path: Arc<RwLock<Option<PathBuf>>>,
     canonical_lock_files: Arc<Mutex<Option<DaemonLockFiles>>>,
@@ -886,6 +934,12 @@ impl HandoverManager {
         let (client_abort_tx, _) = broadcast::channel(16);
         Self {
             status: Arc::new(RwLock::new(HandoverStatus::Active)),
+            #[cfg(unix)]
+            authority_listeners: Mutex::new(AuthorityListeners::default()),
+            #[cfg(unix)]
+            inherited_listeners: Mutex::new(InheritedListeners::default()),
+            accept_gate: tokio::sync::watch::channel(true).0,
+            accept_counts: Default::default(),
             spawn_owners: std::sync::atomic::AtomicUsize::new(0),
             legacy_socket_path: Arc::new(RwLock::new(None)),
             canonical_lock_files: Arc::new(Mutex::new(None)),
@@ -928,8 +982,116 @@ impl HandoverManager {
         *self.canonical_lock_files.lock() = Some(lock_files);
     }
 
+    /// Records one public listener this daemon serves, so it can be transferred later.
+    #[cfg(unix)]
+    pub(crate) fn register_authority_listener(
+        &self,
+        role: AuthorityListenerRole,
+        fd: std::os::fd::RawFd,
+    ) -> Result<(), String> {
+        let duplicate = crate::daemon::handover_socket::dup_for_authority(fd)
+            .map_err(|error| error.to_string())?;
+        let mut listeners = self.authority_listeners.lock();
+        let slot = match role {
+            AuthorityListenerRole::Canonical => &mut listeners.canonical,
+            AuthorityListenerRole::Control => &mut listeners.control,
+            AuthorityListenerRole::AgentState => &mut listeners.agent_state,
+        };
+        *slot = Some(duplicate);
+        Ok(())
+    }
+
+    /// Fresh F_DUPFD_CLOEXEC copies of every authority descriptor, for one send_authority.
+    /// The lock copies share this daemon's open file descriptions, so the locks are never free.
+    #[cfg(unix)]
+    pub(crate) fn authority_sources(
+        &self,
+    ) -> Result<crate::daemon::handover_socket::AuthoritySources, String> {
+        use crate::daemon::handover_socket::{dup_for_authority, AuthoritySources};
+        use std::os::fd::AsRawFd;
+        let dup = |fd: std::os::fd::RawFd| dup_for_authority(fd).map_err(|error| error.to_string());
+        let (persistent, legacy) = self
+            .canonical_lock_files
+            .lock()
+            .as_ref()
+            .map(DaemonLockFiles::raw_fds)
+            .ok_or("This daemon holds no lock files to transfer")?;
+        let listeners = self.authority_listeners.lock();
+        let listener = |fd: &Option<std::os::fd::OwnedFd>| {
+            fd.as_ref().map(|fd| dup(fd.as_raw_fd())).transpose()
+        };
+        Ok(AuthoritySources {
+            canonical_listener: listener(&listeners.canonical)?,
+            legacy_lock: dup(legacy)?,
+            persistent_lock: persistent.map(dup).transpose()?,
+            control_listener: listener(&listeners.control)?,
+            agent_state_listener: listener(&listeners.agent_state)?,
+        })
+    }
+
+    /// Closes this daemon's kept listener copies (after commit). The sockets stay open and
+    /// bound through the successor's copies.
+    #[cfg(unix)]
+    fn release_authority_listeners(&self) {
+        *self.authority_listeners.lock() = AuthorityListeners::default();
+    }
+
+    /// A committed candidate parks the control and agent-state listeners it inherited here until
+    /// the matching serve path picks them up instead of binding.
+    #[cfg(unix)]
+    pub(crate) fn stash_inherited_listeners(
+        &self,
+        control: Option<std::os::unix::net::UnixListener>,
+        agent_state: Option<std::os::unix::net::UnixListener>,
+    ) {
+        let mut inherited = self.inherited_listeners.lock();
+        inherited.control = control;
+        inherited.agent_state = agent_state;
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn take_inherited_listener(
+        &self,
+        role: AuthorityListenerRole,
+    ) -> Option<std::os::unix::net::UnixListener> {
+        let mut inherited = self.inherited_listeners.lock();
+        match role {
+            AuthorityListenerRole::Canonical => None,
+            AuthorityListenerRole::Control => inherited.control.take(),
+            AuthorityListenerRole::AgentState => inherited.agent_state.take(),
+        }
+    }
+
     pub fn is_draining(&self) -> bool {
         self.is_draining.load(Ordering::SeqCst)
+    }
+
+    fn set_accept_gate(&self, open: bool) {
+        self.accept_gate.send_replace(open);
+    }
+
+    pub(crate) fn accept_gate_open(&self) -> bool {
+        *self.accept_gate.borrow()
+    }
+
+    /// Resolves once public accepts are allowed.
+    pub(crate) async fn wait_accept_open(&self) {
+        let mut gate = self.accept_gate.subscribe();
+        let _ = gate.wait_for(|open| *open).await;
+    }
+
+    /// Resolves once public accepts are stopped.
+    pub(crate) async fn wait_accept_closed(&self) {
+        let mut gate = self.accept_gate.subscribe();
+        let _ = gate.wait_for(|open| !*open).await;
+    }
+
+    pub(crate) fn note_accept(&self, role: AuthorityListenerRole) {
+        self.accept_counts[role.index()].fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn accept_count(&self, role: AuthorityListenerRole) -> u64 {
+        self.accept_counts[role.index()].load(Ordering::SeqCst)
     }
 
     pub fn status(&self) -> HandoverStatus {
@@ -1154,6 +1316,9 @@ impl HandoverManager {
         if let Some(locks) = self.canonical_lock_files.lock().take() {
             let _ = locks.detach_without_unlock();
         }
+        #[cfg(unix)]
+        self.release_authority_listeners();
+        self.set_accept_gate(false);
 
         let callbacks = std::mem::take(&mut *self.commit_callbacks.lock());
         for cb in callbacks {
