@@ -1,6 +1,6 @@
 // Q04-Q06: an unresponsive, unverifiable or contended owner never causes a stop, reload or second owner.
 
-import path from 'node:path';
+import { hjoin } from '../lib/hostpath.mjs';
 import { assertion, block } from '../lib/summary.mjs';
 import { supervisorMutations } from '../lib/os-jobs.mjs';
 import { evidence, dataConn, controlConn, ownerIdentity, seedLocalSession, nonceRoundTrip, assertSameOwner, retireOwner, freshOwner, SUPERVISED_START_WAIT_MS, DAEMON_READY_TIMEOUT_MS } from './common.mjs';
@@ -13,15 +13,15 @@ export const PROBE_FAULTS = Object.freeze(['inspect-denied', 'start-time-mismatc
 
 /** Barrier arm file for one named QA fixture (qa_barrier.rs runner contract). */
 export function armFile(layout, name, runId, operationId, extra = {}) {
-  return { file: path.join(layout.barrier, `${name}.arm.json`), content: JSON.stringify({ name, runId, operationId, ...extra }) };
+  return { file: hjoin(layout.barrier, `${name}.arm.json`), content: JSON.stringify({ name, runId, operationId, ...extra }) };
 }
 
 export function releaseFile(layout, name, runId, operationId) {
-  return { file: path.join(layout.barrier, `${name}.release.json`), content: JSON.stringify({ name, runId, operationId }) };
+  return { file: hjoin(layout.barrier, `${name}.release.json`), content: JSON.stringify({ name, runId, operationId }) };
 }
 
 async function guiLogMutations(ctx, gui) {
-  const text = (await ctx.agent.call('readFile', { file: path.join(ctx.layout.logs, `gui-${gui.tag}.log`) })) ?? '';
+  const text = (await ctx.agent.call('readFile', { file: hjoin(ctx.layout.logs, `gui-${gui.tag}.log`) })) ?? '';
   return { mutations: supervisorMutations(text.split('\n')), text };
 }
 
@@ -40,7 +40,7 @@ export async function Q04(ctx, result) {
   // the QA job) reads this arm on every accepted data connection and holds the handshake.
   const arm = armFile(ctx.layout, LISTENER_STALL, ctx.runId, op, { deadlineMs: LISTENER_STALL_DEADLINE_MS });
   await ctx.agent.call('writeFile', arm);
-  const held = path.join(ctx.layout.barrier, `${LISTENER_STALL}.held.json`);
+  const held = hjoin(ctx.layout.barrier, `${LISTENER_STALL}.held.json`);
   // A fresh data connection makes the daemon enter the stall (accept, no handshake answer).
   const probe = ctx.agent.call('dataOpen', { runtimeDir: ctx.layout.runtime }).catch((e) => ({ error: e.message }));
   const stalled = await ctx.agent.call('waitPath', { file: held, deadlineMs: 15_000 });
@@ -49,7 +49,7 @@ export async function Q04(ctx, result) {
   const gui = await ctx.gui.launch(ctx.artifacts.A);
   ctx.state.gui = gui;
   // The GUI must wait past SUPERVISED_START_WAIT (and up to DAEMON_READY_TIMEOUT) without touching the job.
-  const busy = await ctx.agent.call('waitLog', { file: path.join(ctx.layout.logs, `gui-${gui.tag}.log`), pattern: 'DAEMON_BUSY|DaemonBusy', deadlineMs: DAEMON_READY_TIMEOUT_MS + SUPERVISED_START_WAIT_MS + 15_000 });
+  const busy = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.logs, `gui-${gui.tag}.log`), pattern: 'DAEMON_BUSY|DaemonBusy', deadlineMs: DAEMON_READY_TIMEOUT_MS + SUPERVISED_START_WAIT_MS + 15_000 });
   const pidDuring = await jobPid(ctx, ctx.keys.A);
   const { mutations, text } = await guiLogMutations(ctx, gui);
   await evidence(ctx, result, 'gui-during-stall.log', text);
@@ -88,7 +88,7 @@ export async function Q04b(ctx, result) {
   const retire = await ctl.retireWhenIdle();
   const exited = await exit;
   assertion(result, 'idle daemon retired with exit (RetireWhenIdle ok)', retire?.ok === true && !exited.timedOut, { retire, exited });
-  const plist = path.join(ctx.layout.launchAgents, `${ctx.jobs.label(key)}.plist`);
+  const plist = hjoin(ctx.layout.launchAgents, `${ctx.jobs.label(key)}.plist`);
   const statBefore = await ctx.agent.call('stat', { file: plist });
   const idle = await ctx.jobs.inspect(key);
   await evidence(ctx, result, 'job-idle.json', idle);
@@ -117,7 +117,7 @@ export async function Q05(ctx, result) {
     await ctx.gui.quit(ctx.state.gui);
     const gui = await ctx.gui.launch(ctx.artifacts.A, { env: { FERRYX_QA_PROBE_FAULT: fault } });
     ctx.state.gui = gui;
-    const logFile = path.join(ctx.layout.logs, `gui-${gui.tag}.log`);
+    const logFile = hjoin(ctx.layout.logs, `gui-${gui.tag}.log`);
     const unknown = await ctx.agent.call('waitLog', { file: logFile, pattern: `Unknown[^\\n]*${fault}|${fault}[^\\n]*Unknown`, deadlineMs: DAEMON_READY_TIMEOUT_MS + 15_000 });
     const ownerAfter = await ownerIdentity(ctx);
     const pidAfter = await jobPid(ctx, ctx.keys.A);
@@ -157,7 +157,7 @@ export async function Q06(ctx, result) {
   const owner = await ctx.agent.call('waitOwnerChange', { runtimeDir: ctx.layout.runtime, fromPid: before.pid, deadlineMs: DAEMON_READY_TIMEOUT_MS * 2 });
   // Let every launcher finish admission: each GUI reports attached or busy in its log.
   for (const g of launches) {
-    await ctx.agent.call('waitLog', { file: path.join(ctx.layout.logs, `gui-${g.tag}.log`), pattern: 'attached|DAEMON_BUSY|handshake ok|Connected', flags: 'i', deadlineMs: DAEMON_READY_TIMEOUT_MS * 2 });
+    await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.logs, `gui-${g.tag}.log`), pattern: 'attached|DAEMON_BUSY|handshake ok|Connected', flags: 'i', deadlineMs: DAEMON_READY_TIMEOUT_MS * 2 });
   }
   const daemons = await daemonProcesses(ctx);
   await evidence(ctx, result, 'daemons.json', { launches, owner, daemons, ownersSeen: owner.seen });
@@ -184,11 +184,11 @@ export async function Q06w(ctx, result) {
   if (!retired.retired) return;
   const gui = await ctx.gui.launch(ctx.artifacts.A, { tag: 'q06w', noBreakaway: true, env: { FERRYX_QA_FORCE_FALLBACK: '1' } });
   assertion(result, 'GUI runs inside a job that forbids breakaway', gui.jobAssigned === true && gui.noBreakaway === true, gui);
-  const logFile = path.join(ctx.layout.logs, `gui-${gui.tag}.log`);
+  const logFile = hjoin(ctx.layout.logs, `gui-${gui.tag}.log`);
   const refused = await ctx.agent.call('waitLog', { file: logFile, pattern: 'DAEMON_DETACH_UNAVAILABLE', deadlineMs: DAEMON_READY_TIMEOUT_MS + 15_000 });
   const daemons = await daemonProcesses(ctx);
-  const owner = await ctx.agent.call('readFile', { file: path.join(ctx.layout.runtime, 'owner.json') });
-  const starting = await ctx.agent.call('readFile', { file: path.join(ctx.layout.runtime, 'starting.json') });
+  const owner = await ctx.agent.call('readFile', { file: hjoin(ctx.layout.runtime, 'owner.json') });
+  const starting = await ctx.agent.call('readFile', { file: hjoin(ctx.layout.runtime, 'starting.json') });
   const { mutations, text } = await guiLogMutations(ctx, gui);
   await evidence(ctx, result, 'gui-q06w.log', text);
   await evidence(ctx, result, 'q06w-state.json', { gui, refused, daemons, owner, starting, mutations });

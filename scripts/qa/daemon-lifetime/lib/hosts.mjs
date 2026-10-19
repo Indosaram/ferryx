@@ -24,10 +24,11 @@ export const HOSTS = Object.freeze({
     platform: 'linux',
     name: 'omarchy',
     transport: { kind: 'ssh', target: 'omarchy', address: '100.91.254.71', user: 'indo' },
-    canonical: '~/code/ferryx',
-    worktreeRoot: '~/code/ferryx-wt',
-    cargoTarget: '~/code/ferryx-wt/.target-daemon-lifetime-qa',
-    evidenceRoot: '~/code/ferryx-wt/.evidence/daemon-independent-lifetime-20261017',
+    canonical: '/home/indo/code/ferryx',
+    worktreeRoot: '/home/indo/code/ferryx-wt',
+    cargoTarget: '/home/indo/code/ferryx-wt/.target-w5qa-20261019',
+    guiEnv: { WAYLAND_DISPLAY: 'wayland-1', DISPLAY: ':0', XDG_RUNTIME_DIR: '/run/user/1000' },
+    evidenceRoot: '/home/indo/code/ferryx-wt/.evidence/daemon-independent-lifetime-20261017',
     runRoot: '/tmp/ferryx-qa-daemon-lifetime',
     node: 'node',
     gui: { kind: 'mahord', host: '100.91.254.71', pairingId: 'AF12D209-AB76-401E-BDB2-0D80E01FC2C8' },
@@ -36,12 +37,16 @@ export const HOSTS = Object.freeze({
   windows: Object.freeze({
     platform: 'windows',
     name: 'maho-win',
-    transport: { kind: 'ssh', target: 'maho-win', address: '100.68.224.49', user: 'sook', shell: 'powershell' },
+    transport: { kind: 'ssh', target: 'maho-win', address: '100.68.224.49', user: 'sook', shell: 'cmd' }, // sshd DefaultShell is cmd.exe (measured 2026-10-19)
     canonical: 'C:\\Users\\sook\\ferryx',
     worktreeRoot: 'C:\\Users\\sook\\ferryx-wt',
-    cargoTarget: 'C:\\Users\\sook\\ferryx-wt\\.target',
+    cargoTarget: 'C:\\Users\\sook\\ferryx-wt\\.target-w5qa-20261019',
+    buildEnv: { ZIG: 'C:\\Users\\sook\\ferryx-wt\\.zig-0.16.0\\zig.exe' },
     evidenceRoot: 'C:\\Users\\sook\\ferryx-wt\\.evidence\\daemon-independent-lifetime-20261017',
-    runRoot: 'C:\\Users\\sook\\ferryx-wt\\.qa-daemon-lifetime',
+    // No '-' or '_' in the 8.3 form: the GUI launch types a short path through MahoRD, which drops
+    // both on maho-win. Measured: C:\Users\sook\ferryx-wt\qaruns\<runId>\l1.cmd ->
+    // C:\Users\sook\FERRYX~1\qaruns\202610~1\l1.cmd. The old .qa-daemon-lifetime was QA-DAE~1.
+    runRoot: 'C:\\Users\\sook\\ferryx-wt\\qaruns',
     node: 'node',
     // The 4F8ADF2E pairing is stale; 9929DC13 is the one that completes a handshake (2026-10-15).
     gui: { kind: 'mahord', host: '100.68.224.49', pairingId: '9929DC13-3841-4182-A399-9E1323F961A2', physical: { width: 3840, height: 1600 } },
@@ -73,12 +78,13 @@ export function worktreePaths(host, slug) {
  *  baseline pre-plan baseline rev, plain cargo build daemon only, for Q13
  */
 export function buildPlan({ host, runDir, worktree, v1Worktree, baselineWorktree }) {
-  const targetEnv = { CARGO_TARGET_DIR: host.cargoTarget };
+  const targetEnv = { ...(host.buildEnv ?? {}), CARGO_TARGET_DIR: host.cargoTarget };
   const config = host.platform === 'windows' ? `${runDir}\\tauri.qa.json` : `${runDir}/tauri.qa.json`;
   const tauri = (features, salt, cwd) => ({
     cwd,
     command: 'cargo',
-    args: ['tauri', 'build', '--debug', '--features', features, '--config', config],
+    // Linux and Windows run target/debug/ferryx directly; only macOS uses the .app bundle.
+    args: ['tauri', 'build', '--debug', ...(host.platform === 'mac' ? [] : ['--no-bundle']), '--features', features, '--config', config],
     env: { ...targetEnv, FERRYX_QA_BUILD_SALT: salt },
   });
   return {
@@ -88,7 +94,7 @@ export function buildPlan({ host, runDir, worktree, v1Worktree, baselineWorktree
     bump: tauri('local-split-qa,qa-protocol-bump', 'BUMP', worktree),
     v1bump: v1Worktree ? tauri('local-split-qa,qa-protocol-bump', 'V1', v1Worktree) : null,
     baseline: baselineWorktree
-      ? { cwd: baselineWorktree, command: 'cargo', args: ['build', '--manifest-path', 'src-tauri/Cargo.toml'], env: { CARGO_TARGET_DIR: `${host.cargoTarget}-baseline` } }
+      ? { cwd: baselineWorktree, command: 'cargo', args: ['build', '--manifest-path', 'src-tauri/Cargo.toml'], env: { ...(host.buildEnv ?? {}), CARGO_TARGET_DIR: `${host.cargoTarget}-baseline` } }
       : null,
   };
 }

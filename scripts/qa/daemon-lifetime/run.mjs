@@ -27,7 +27,7 @@ import { probeHooks, missingHooksFor } from './lib/hooks.mjs';
 import { generationKey, assertDistinctKeys } from './lib/wire.mjs';
 import { startAgent } from './lib/remote.mjs';
 import { createJobs } from './lib/jobs.mjs';
-import { createGuiDriver, macGuiExecutable } from './lib/gui.mjs';
+import { mahordTypable, createGuiDriver, macGuiExecutable } from './lib/gui.mjs';
 import { assembleDaemonHelper } from '../../macos-daemon-helper.mjs';
 import { finalizeMacosBundle } from '../../lib/release-platforms.mjs';
 import { connectMahord } from './lib/mahord.mjs';
@@ -157,12 +157,14 @@ async function main() {
   const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }));
 
   summary.revisions.head = (await run('git', ['-C', REPO, 'rev-parse', 'HEAD'])).stdout.trim();
+  summary.revisions.tree = (await run('git', ['-C', REPO, 'rev-parse', 'HEAD^{tree}'])).stdout.trim();
+  summary.revisions.dirty = (await run('git', ['-C', REPO, 'status', '--porcelain', '--untracked-files=no'])).stdout.trim().split('\n').filter(Boolean);
   summary.hooks = probeHooks(REPO, host.platform);
   writeSummary();
 
   const agentPath = joinFor(host.platform, host.transport.kind === 'local' ? HERE : '', 'lib', 'agent.mjs');
   const remoteHarness = host.transport.kind === 'local' ? HERE : joinFor(host.platform, worktreePaths(host, opts.worktreeSlug ?? 'daemon-lifetime-w5-t12-20261018').worktree, 'scripts', 'qa', 'daemon-lifetime');
-  const agent = await startAgent(host, { agentPath: host.transport.kind === 'local' ? agentPath : joinFor(host.platform, remoteHarness, 'lib', 'agent.mjs'), runId, runDir, allowRoots: [host.cargoTarget] }, { log });
+  const agent = await startAgent(host, { agentPath: host.transport.kind === 'local' ? agentPath : joinFor(host.platform, remoteHarness, 'lib', 'agent.mjs'), runId, runDir, allowRoots: [host.cargoTarget, `${host.cargoTarget}-baseline`] }, { log });
   const uid = host.platform === 'windows' ? null : Number((await agent.call('exec', { command: 'id', args: ['-u'] })).stdout.trim());
   const home = host.transport.kind === 'local' ? os.homedir() : (await agent.call('exec', host.platform === 'windows' ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', '$env:USERPROFILE'] } : { command: 'sh', args: ['-c', 'printf %s "$HOME"'] })).stdout.trim();
   const forbidden = forbiddenRoots({ platform: host.platform, home, uid });
@@ -190,6 +192,11 @@ async function main() {
   for (const dir of Object.values(layout)) await agent.call('mkdir', { dir, mode: 0o700 });
   await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'tauri.qa.json'), content: JSON.stringify(tauriQaConfig(runId), null, 2) });
   const worktree = host.transport.kind === 'local' ? REPO : worktreePaths(host, 'daemon-lifetime-w5-t12-20261018').worktree;
+  const remoteGit = async (dir) => ({ dir, head: (await agent.call('exec', { command: 'git', args: ['-C', dir, 'rev-parse', 'HEAD'] })).stdout.trim(), dirty: (await agent.call('exec', { command: 'git', args: ['-C', dir, 'status', '--porcelain', '--untracked-files=no'] })).stdout.trim().split('\n').filter(Boolean) });
+  summary.revisions.buildTree = await remoteGit(worktree);
+  if (opts.v1Worktree) summary.revisions.handoverV1Rev = await remoteGit(opts.v1Worktree);
+  if (opts.baselineWorktree) summary.revisions.baselineRev = await remoteGit(opts.baselineWorktree);
+  writeSummary();
   // --self-test-reload: every QA artifact is built from the patched throwaway worktree.
   const selfTest = opts.selfTestReload ? await prepareSelfTestWorktree({ host, agent, runId, source: worktree }) : null;
   if (selfTest) summary.selfTestReload = { worktree: selfTest.worktree, head: selfTest.head, patch: SELF_TEST_PATCH, expect: 'Q04 FAIL' };
@@ -203,7 +210,7 @@ async function main() {
     const step = plan[name];
     if (!step) continue;
     assertQaBuild(step);
-    const built = await agent.call('exec', { command: step.command, args: step.args, cwd: step.cwd, env: step.env, deadlineMs: 3_600_000 });
+    const built = await agent.call('exec', { command: step.command, args: step.args, cwd: step.cwd, env: step.env, deadlineMs: 4 * 3_600_000 });
     writeFileSync(path.join(localEvidence, `build-${name}.log`), `exit ${built.status}\n${built.stdout}\n${built.stderr}`);
     if (built.status !== 0) throw new GuardError('BUILD_FAILED', `${name} exited ${built.status}`);
     if (name === 'baseline') {
@@ -214,14 +221,16 @@ async function main() {
     const fresh = artifactPaths({ platform: host.platform, targetDir: host.cargoTarget, productName, name });
     const destRoot = joinFor(host.platform, runDir, 'artifacts', name);
     await agent.call('mkdir', { dir: destRoot });
-    const src = fresh.appPath ?? path.dirname(fresh.guiExecutable);
+    // Host paths are parsed with the host's path flavour: posix basename/dirname do not split C:\ paths.
+    const hostPath = host.platform === 'windows' ? path.win32 : path.posix;
+    const src = fresh.appPath ?? hostPath.dirname(fresh.guiExecutable);
     if (host.platform === 'mac') await agent.call('exec', { command: 'ditto', args: [src, joinFor(host.platform, destRoot, path.basename(src))] });
     else await agent.call('exec', host.platform === 'windows'
       ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', `Copy-Item -LiteralPath '${fresh.guiExecutable}','${fresh.cliExecutable}' -Destination '${destRoot}'`] }
       : { command: 'cp', args: [fresh.guiExecutable, fresh.cliExecutable, destRoot] });
     const art = host.platform === 'mac'
       ? { name, appPath: joinFor(host.platform, destRoot, path.basename(src)), guiExecutable: macGuiExecutable(joinFor(host.platform, destRoot, path.basename(src))), cliExecutable: fresh.cliExecutable }
-      : { name, appPath: null, guiExecutable: joinFor(host.platform, destRoot, path.basename(fresh.guiExecutable)), cliExecutable: joinFor(host.platform, destRoot, path.basename(fresh.cliExecutable)) };
+      : { name, appPath: null, guiExecutable: joinFor(host.platform, destRoot, hostPath.basename(fresh.guiExecutable)), cliExecutable: joinFor(host.platform, destRoot, hostPath.basename(fresh.cliExecutable)) };
     if (host.platform === 'mac') {
       // todo 13: each QA artifact carries its own signed helper and a re-sealed outer signature.
       // mac artifacts live on this Mac: assemble + ad-hoc re-seal in-process (scripts/build-notarized-local.mjs order).
@@ -244,13 +253,13 @@ async function main() {
   summary.artifacts = Object.fromEntries(Object.entries(artifacts).map(([k, v]) => [k, { ...v, key: keys[k] ?? null }]));
   writeSummary();
 
-  const allowedRoots = [runDir, host.cargoTarget];
+  const allowedRoots = [runDir, host.cargoTarget, `${host.cargoTarget}-baseline`];
   for (const art of Object.values(artifacts)) {
     for (const exe of [art.guiExecutable, art.daemonExecutable].filter(Boolean)) assertQaExecutable(exe, { allowedRoots, forbidden, platform: host.platform });
   }
   const mahord = host.gui.kind === 'mahord' ? await connectMahord(host.gui, { log }) : null;
   const jobs = createJobs({ host, agent, runId, layout, uid });
-  const gui = createGuiDriver({ host, agent, runId, layout, allowedRoots, forbidden, mahord, guiEnv: env });
+  const gui = createGuiDriver({ host, agent, runId, layout, allowedRoots, forbidden, mahord, guiEnv: { ...(host.guiEnv ?? {}), ...env } });
   if (host.platform === 'windows') {
     const launcher = await import('node:fs').then((fs) => fs.readFileSync(path.join(HERE, 'fixtures', 'windows-gui-launcher.ps1'), 'utf8'));
     await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'launcher.ps1'), content: launcher });
@@ -263,7 +272,7 @@ async function main() {
     platform: host.platform, runId, host, agent, jobs, gui, mahord, layout, uid, artifacts, keys, hooks: summary.hooks,
     revisions: summary.revisions, isolationEnv: env, repoDir, workspaceId: 'qa-daemon-lifetime', workspaceRegistered: false,
     stagedRoot: joinFor(host.platform, layout.data, 'daemon-runtime'),
-    qaRoots: [runDir, host.cargoTarget], guiExecutables: Object.values(artifacts).map((a) => a.guiExecutable).filter(Boolean),
+    qaRoots: [runDir, host.cargoTarget, `${host.cargoTarget}-baseline`], guiExecutables: Object.values(artifacts).map((a) => a.guiExecutable).filter(Boolean),
     hostUser: host.transport.user ?? os.userInfo().username, sshPort: 20000 + (Number(runId.slice(-5, -1)) % 20000),
     evidenceDir: localEvidence.split(path.sep).join('/'), state: {}, carry: [], sshd: null,
     writeEvidence: async (file, content) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, content); },
@@ -282,7 +291,14 @@ async function main() {
     typeIntoSession: async (guiProc, sessionId, text) => {
       // macOS: no desktop input on the user's MacBook; the data-protocol write is the GUI-equivalent
       // client write. Remote hosts type through MahoRD into the focused QA window.
-      if (mahord) return mahord.type(text);
+      if (mahord) {
+        // MahoRD drops '-' and '_' on maho-win and types no newline: refuse untypable text instead
+        // of letting a marker arrive mangled, and send Enter as a key.
+        const line = text.replace(/\r?\n$/, '');
+        if (host.platform === 'windows' && !mahordTypable(line)) throw new Error(`MahoRD cannot type '-' or '_' on maho-win: ${line}`);
+        await mahord.type(line);
+        return text.endsWith('\n') ? mahord.key('Enter') : true;
+      }
       const { conn } = { conn: ctx.state.conn };
       return conn.call({ type: 'write', sessionId, data: Buffer.from(text).toString('base64') });
     },

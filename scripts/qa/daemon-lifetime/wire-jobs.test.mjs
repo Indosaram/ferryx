@@ -166,6 +166,16 @@ test('agent command: local node or quoted ssh', () => {
   assert.ok(ssh.args.includes('BatchMode=yes'));
   assert.match(ssh.args.at(-1), /'\/a b\/agent'\\''s\.mjs'/);
   assert.match(ssh.args.at(-1), /'--allow-root' '\/t'/);
+  const win = agentCommand(hostFor('windows'), { agentPath: 'C:\\a\\agent.mjs', runId: RUN, runDir: 'C:\\r' });
+  assert.match(win.args.at(-1), /^"node" "C:\\a\\agent\.mjs"/);
+});
+
+test('MahoRD chords go through remote_hotkey, single keys through remote_key_press', async () => {
+  const { TOOLS } = await import('./lib/mahord.mjs');
+  assert.equal(TOOLS.hotkey, 'remote_hotkey');
+  assert.equal(TOOLS.key, 'remote_key_press');
+  const gui = readFileSync(new URL('./lib/gui.mjs', import.meta.url), 'utf8');
+  assert.ok(!/mahord\.key\('[^']*\+/.test(gui), 'no chord passed to remote_key_press');
 });
 
 test('GUI scripts target exactly the QA bundle id', () => {
@@ -187,4 +197,26 @@ test('private sshd: loopback only, key auth only; workspace id matches projects.
   const id = remoteWorkspaceId('h', '/r');
   assert.match(id, /^ssh:[0-9a-f]{64}$/);
   assert.notEqual(id, remoteWorkspaceId('h', '/r2'));
+});
+
+test('host paths join in the host flavour, not the controller flavour', async () => {
+  const { hjoin } = await import('./lib/hostpath.mjs');
+  assert.equal(hjoin('C:\\Users\\sook\\ferryx-wt\\.qa-daemon-lifetime\\r', 'run', 'owner.json'), 'C:\\Users\\sook\\ferryx-wt\\.qa-daemon-lifetime\\r\\run\\owner.json');
+  assert.equal(hjoin('/tmp/ferryx-qa-daemon-lifetime/r', 'run', 'owner.json'), '/tmp/ferryx-qa-daemon-lifetime/r/run/owner.json');
+  for (const f of ['lib/sshd.mjs', 'scenarios/common.mjs', 'scenarios/q00-q03.mjs', 'scenarios/q04-q06.mjs', 'scenarios/q07-q09.mjs', 'scenarios/q10-q13.mjs', 'lib/gui.mjs']) {
+    assert.ok(!/(?<![.\w])path\.join\(/.test(readFileSync(new URL('./' + f, import.meta.url), 'utf8')), f);
+  }
+});
+
+test('Windows GUI launch types only a short path MahoRD can deliver', async () => {
+  const { mahordTypable, windowsShortPath } = await import('./lib/gui.mjs');
+  assert.equal(mahordTypable('C:\\Users\\sook\\FERRYX~1\\qaruns\\202610~1\\launchg1.cmd'), true);
+  assert.equal(mahordTypable('C:\\Users\\sook\\ferryx-wt\\.qa-daemon-lifetime'), false);
+  const agent = (stdout) => ({ call: async () => ({ status: 0, stdout, stderr: '' }) });
+  assert.equal(await windowsShortPath(agent('C:\\Users\\sook\\FERRYX~1\\qaruns\\202610~1\\launchg1.cmd\r\n'), 'x'), 'C:\\Users\\sook\\FERRYX~1\\qaruns\\202610~1\\launchg1.cmd');
+  await assert.rejects(windowsShortPath(agent('C:\\Users\\sook\\FERRYX~1\\QA-DAE~1\\l.cmd'), 'x'), /MahoRD cannot type/);
+  // The long runRoot legitimately contains 'ferryx-wt'; only its 8.3 form is typed, and
+  // windowsShortPath refuses a short path that still carries '-' or '_' at run time.
+  const { HOSTS } = await import('./lib/hosts.mjs');
+  assert.ok(!/[-_]/.test(HOSTS.windows.runRoot.split('\\').pop()), 'the run root leaf itself has no - or _');
 });

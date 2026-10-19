@@ -119,7 +119,7 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
       const { conn, handshake } = await connectData(runtimeDir, platform, { version, allowMismatch });
       const handle = nextHandle++;
       const output = new Map();
-      conn.onStream((m) => {
+      const route = (m) => {
         if (m.type !== 'output') return;
         const sid = m.sessionId ?? '*';
         output.set(sid, (output.get(sid) ?? '') + Buffer.from(m.data, 'base64').toString());
@@ -127,8 +127,9 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
           const text = output.get(w.sessionId) ?? output.get('*') ?? '';
           if (text.includes(w.marker)) { handles.get(handle).waiters.delete(w); w.resolve(text); }
         }
-      });
-      handles.set(handle, { conn, kind: 'data', output, waiters: new Set() });
+      };
+      conn.onStream(route);
+      handles.set(handle, { conn, kind: 'data', output, waiters: new Set(), runtimeDir, version, route, streams: new Map() });
       return { handle, handshake };
     },
     controlOpen: async ({ runtimeDir }) => {
@@ -141,7 +142,19 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
     call: async ({ handle, frame, deadlineMs = 30_000 }) => {
       const h = handles.get(handle);
       if (!h) throw new Error(`no handle ${handle}`);
-      const resp = await h.conn.call(frame, deadlineMs);
+      // The daemon turns a data connection into an output stream once it answers Attach, and closes
+      // it on any further client bytes (server.rs pump_session_stream). Each attach therefore gets
+      // its own stream connection, routed into this handle's output; requests stay on h.conn.
+      let resp;
+      if (h.kind === 'data' && frame?.type === 'attach') {
+        h.streams.get(frame.sessionId)?.close();
+        const { conn: stream } = await connectData(h.runtimeDir, platform, { version: h.version });
+        stream.onStream(h.route);
+        h.streams.set(frame.sessionId, stream);
+        resp = await stream.call(frame, deadlineMs);
+      } else {
+        resp = await h.conn.call(frame, deadlineMs);
+      }
       if (h.kind === 'data' && resp?.type === 'attachOk' && frame.sessionId) {
         const prior = h.output.get(frame.sessionId) ?? '';
         h.output.set(frame.sessionId, Buffer.from(resp.history ?? '', 'base64').toString() + prior);
@@ -208,7 +221,13 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
       const h = handles.get(handle);
       try { return await withDeadline(h.conn.closedPromise, deadlineMs, 'connection close'); } catch { return { timedOut: true }; }
     },
-    close: async ({ handle }) => { handles.get(handle)?.conn.close(); handles.delete(handle); return true; },
+    close: async ({ handle }) => {
+      const h = handles.get(handle);
+      for (const s of h?.streams?.values() ?? []) s.close();
+      h?.conn.close();
+      handles.delete(handle);
+      return true;
+    },
     teardownRecorded: async () => {
       const out = { killed: [], refused: [], gone: [] };
       for (const entry of registry.list()) {
