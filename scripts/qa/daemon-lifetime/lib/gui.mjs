@@ -5,11 +5,11 @@
 //   linux:   systemd-run --user --scope --unit=<qa>-gui-<tag> (Q03 kills that scope); quit via MahoRD.
 //   windows: launcher.ps1 started through MahoRD Win+R; Q03 TerminateJobObject; quit via MahoRD.
 
-import path from 'node:path';
+import { hjoin } from './hostpath.mjs';
 import { assertBundleIdentifier, assertQaExecutable, qaBundleIdentifier, qaSupervisorName } from './guards.mjs';
 
 export function macGuiExecutable(appPath) {
-  return path.join(appPath, 'Contents', 'MacOS', 'ferryx');
+  return hjoin(appPath, 'Contents', 'MacOS', 'ferryx');
 }
 
 /** JXA that terminates only running applications with exactly this bundle identifier. */
@@ -43,7 +43,7 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
   let launches = 0;
 
   async function verifiedBundle(appPath) {
-    const r = await agent.call('exec', { command: '/usr/libexec/PlistBuddy', args: ['-c', 'Print :CFBundleIdentifier', path.join(appPath, 'Contents', 'Info.plist')] });
+    const r = await agent.call('exec', { command: '/usr/libexec/PlistBuddy', args: ['-c', 'Print :CFBundleIdentifier', hjoin(appPath, 'Contents', 'Info.plist')] });
     assertBundleIdentifier(r.stdout.trim(), runId);
   }
 
@@ -53,17 +53,17 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     const fullEnv = { ...guiEnv, ...env };
     if (platform === 'mac') {
       await verifiedBundle(artifact.appPath);
-      const entry = await agent.call('spawn', { command: exe, args: [], env: fullEnv, role: `gui-${tag}`, executable: exe, logFile: path.join(layout.logs, `gui-${tag}.log`) });
+      const entry = await agent.call('spawn', { command: exe, args: [], env: fullEnv, role: `gui-${tag}`, executable: exe, logFile: hjoin(layout.logs, `gui-${tag}.log`) });
       return { tag, pid: entry.pid, executable: exe, startTime: entry.startTime };
     }
     if (platform === 'linux') {
       const unit = linuxScopeUnit(runId, tag);
       const spawned = await agent.call('spawn', {
         command: 'systemd-run', args: ['--user', '--scope', `--unit=${unit}`, '--', exe], env: fullEnv,
-        role: `gui-${tag}`, executable: exe, logFile: path.join(layout.logs, `gui-${tag}.log`), record: false,
+        role: `gui-${tag}`, executable: exe, logFile: hjoin(layout.logs, `gui-${tag}.log`), record: false,
       });
       // systemd-run --scope execs the GUI in place, so the spawned pid becomes the GUI.
-      const ready = await agent.call('waitLog', { file: path.join(layout.logs, `gui-${tag}.log`), pattern: 'Running scope as unit', deadlineMs: 30_000 });
+      const ready = await agent.call('waitLog', { file: hjoin(layout.logs, `gui-${tag}.log`), pattern: 'Running scope as unit', deadlineMs: 30_000 });
       const entry = await agent.call('record', { pid: spawned.pid, role: `gui-${tag}`, executable: exe });
       return { tag, pid: entry.pid, executable: exe, startTime: entry.startTime, scope: unit, scopeReady: Boolean(ready.matched) };
     }

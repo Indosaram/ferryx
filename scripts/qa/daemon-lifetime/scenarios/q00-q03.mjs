@@ -1,12 +1,13 @@
 // Q00-Q03: ownership precondition and GUI-independence on quit, kill and OS termination.
 
 import path from 'node:path';
+import { hjoin } from '../lib/hostpath.mjs';
 import { assertion, block } from '../lib/summary.mjs';
 import { evidence, dataConn, ownerIdentity, seedLocalSession, nonceRoundTrip, assertInventoryKept, assertSameOwner, DAEMON_READY_TIMEOUT_MS } from './common.mjs';
 
 /** Launches GUI A and waits for its daemon to publish owner.json. */
 export async function launchGuiAndOwner(ctx, artifact = ctx.artifacts.A, opts = {}) {
-  const ownerFile = path.join(ctx.layout.runtime, 'owner.json');
+  const ownerFile = hjoin(ctx.layout.runtime, 'owner.json');
   const prior = await ctx.agent.call('readFile', { file: ownerFile });
   const fromPid = prior ? JSON.parse(prior).pid : null;
   const gui = await ctx.gui.launch(artifact, opts);
@@ -45,7 +46,7 @@ export async function Q00(ctx, result) {
   assertion(result, 'daemon executable is the staged runtime copy, not the app bundle', exe.toLowerCase().startsWith(ctx.stagedRoot.toLowerCase()), { exe, stagedRoot: ctx.stagedRoot });
   if (ctx.platform === 'mac') {
     assertion(result, 'launchd program is the staged helper executable', String(job.program ?? '').includes('Ferryx Daemon.app/Contents/MacOS/ferryx'), job.program);
-    const verify = await ctx.agent.call('exec', { command: 'codesign', args: ['--verify', '--deep', '--strict', '--verbose=2', path.join(ctx.stagedRoot, key, 'Ferryx Daemon.app')] });
+    const verify = await ctx.agent.call('exec', { command: 'codesign', args: ['--verify', '--deep', '--strict', '--verbose=2', hjoin(ctx.stagedRoot, key, 'Ferryx Daemon.app')] });
     await evidence(ctx, result, 'codesign-staged.log', `exit ${verify.status}\n${verify.stdout}${verify.stderr}`);
     assertion(result, 'staged helper passes codesign --verify --deep --strict', verify.status === 0, verify.status);
   }

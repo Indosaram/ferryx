@@ -1,6 +1,7 @@
 // Q07-Q09: app replacement, control-channel upgrades (Unix), cross-revision owner, Windows pending.
 
 import path from 'node:path';
+import { hjoin } from '../lib/hostpath.mjs';
 import { assertion, block } from '../lib/summary.mjs';
 import { HANDOVER_FAULTS, TRANSFER_FAULTS, FORCED_COMMIT_FAILURE } from '../lib/hooks.mjs';
 import { data as D, helloSupportsHandover, inventoryTotal } from '../lib/wire.mjs';
@@ -15,7 +16,7 @@ import { AUTHORITY_ARM, AUTHORITY_STAGE, HANDOVER_FAULT_REQUEST, receiptFile, au
 /** Arms the handover-authority receipts for one upgrade; the daemon acks it on its next stage. */
 async function armAuthority(ctx, tag) {
   const operationId = `${tag}-${ctx.runId}`;
-  await ctx.agent.call('writeFile', { file: path.join(ctx.layout.barrier, `${AUTHORITY_ARM}.arm.json`), content: JSON.stringify({ name: AUTHORITY_ARM, runId: ctx.runId, operationId }) });
+  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barrier, `${AUTHORITY_ARM}.arm.json`), content: JSON.stringify({ name: AUTHORITY_ARM, runId: ctx.runId, operationId }) });
   const text = await ctx.agent.call('readFile', { file: receiptFile(ctx.layout, AUTHORITY_STAGE) });
   return { operationId, from: receiptCount(text) };
 }
@@ -40,7 +41,7 @@ export async function Q07(ctx, result) {
   await evidence(ctx, result, 'after.json', { before, after, ownerBefore, ownerAfter });
   assertSameOwner(result, ownerBefore, ownerAfter, 'A generation');
   assertion(result, 'owner still serves generation A', ownerAfter.hello?.generation_key === ctx.keys.A, ownerAfter.hello?.generation_key);
-  assertion(result, 'A staged runtime dir intact', await ctx.agent.call('exists', { file: path.join(ctx.stagedRoot, ctx.keys.A) }), ctx.keys.A);
+  assertion(result, 'A staged runtime dir intact', await ctx.agent.call('exists', { file: hjoin(ctx.stagedRoot, ctx.keys.A) }), ctx.keys.A);
   assertInventoryKept(result, before, after, 'B attaches the same sessions');
   await nonceRoundTrip(ctx, conn, ctx.state.localA, result, 'B GUI on A session');
   // Replacing the app on disk is not a handover: no process wrote an authority stage.
@@ -82,8 +83,9 @@ export function counterProgress(text, tag) {
 async function stageGeneration(ctx, artifact) {
   // The GUI stages its runtime on launch (todo 3); here the harness reads back the staged path.
   const exe = ctx.platform === 'mac'
-    ? path.join(ctx.stagedRoot, ctx.keys[artifact.name], 'Ferryx Daemon.app', 'Contents', 'MacOS', 'ferryx')
-    : path.join(ctx.stagedRoot, ctx.keys[artifact.name], 'ferryx');
+    ? hjoin(ctx.stagedRoot, ctx.keys[artifact.name], 'Ferryx Daemon.app', 'Contents', 'MacOS', 'ferryx')
+    // runtime_stage.rs:38 stages ferryx.exe on Windows.
+    : hjoin(ctx.stagedRoot, ctx.keys[artifact.name], ctx.platform === 'windows' ? 'ferryx.exe' : 'ferryx');
   return { exe, key: ctx.keys[artifact.name], present: await ctx.agent.call('exists', { file: exe }) };
 }
 
@@ -158,7 +160,7 @@ async function upgradeStep(ctx, result, artifact, pair, tag) {
 async function faultVariant(ctx, result, fault, artifact, pair) {
   const pred = await ownerIdentity(ctx);
   const op = `fault-${fault}-${ctx.runId}`;
-  await ctx.agent.call('writeFile', { file: path.join(ctx.layout.barrier, HANDOVER_FAULT_REQUEST), content: JSON.stringify({ runId: ctx.runId, operationId: op, fault }) });
+  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barrier, HANDOVER_FAULT_REQUEST), content: JSON.stringify({ runId: ctx.runId, operationId: op, fault }) });
   const authority = await armAuthority(ctx, `F_${fault}`);
   const staged = await stageGeneration(ctx, artifact);
   const ctl = await controlConn(ctx);
@@ -198,7 +200,7 @@ async function faultVariant(ctx, result, fault, artifact, pair) {
   await conn.close();
   await ctl.close();
   // The request selects only this handover: a later upgrade (Q08b) must run fault-free.
-  await ctx.agent.call('remove', { target: path.join(ctx.layout.barrier, HANDOVER_FAULT_REQUEST) });
+  await ctx.agent.call('remove', { target: hjoin(ctx.layout.barrier, HANDOVER_FAULT_REQUEST) });
 }
 
 export async function Q08(ctx, result) {
@@ -223,7 +225,7 @@ export async function Q08(ctx, result) {
   await ctx.state.conn.call(D.close(pair.ssh));
   const aExited = await aExit;
   assertion(result, 'A exited only after the SSH session closed', !aExited.timedOut, aExited);
-  const manifest = await ctx.agent.call('readFile', { file: path.join(ctx.layout.runtime, 'handover_routes.json') });
+  const manifest = await ctx.agent.call('readFile', { file: hjoin(ctx.layout.runtime, 'handover_routes.json') });
   assertion(result, 'A route removed from the manifest', !manifest || !JSON.parse(manifest).routes?.some((r) => r.sessions?.includes(pair.ssh)), manifest);
   // todo 8's four authority-transfer failure variants (missing fd kind, getsockname mismatch,
   // lock fd not locked, request expired), then the forced commit failure as its own case, then
@@ -263,7 +265,7 @@ export async function Q08b(ctx, result) {
   assertion(result, 'control Hello succeeds across revisions', hello?.ok === true && hello.pid === old.pid, hello);
   assertion(result, 'control Inventory succeeds across revisions', inv?.ok === true && inventoryTotal(inv) >= 1, inv);
   if (ctx.platform === 'windows') {
-    const pending = await ctx.agent.call('waitLog', { file: path.join(ctx.layout.logs, `gui-${gui.tag}.log`), pattern: 'DAEMON_UPDATE_PENDING|DaemonUpdatePending', deadlineMs: DAEMON_READY_TIMEOUT_MS });
+    const pending = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.logs, `gui-${gui.tag}.log`), pattern: 'DAEMON_UPDATE_PENDING|DaemonUpdatePending', deadlineMs: DAEMON_READY_TIMEOUT_MS });
     assertion(result, 'Windows enters the pending state', Boolean(pending.matched), pending);
     assertion(result, 'old owner untouched', (await ctx.agent.call('probe', { pid: old.pid })) !== null, old.pid);
   } else {
@@ -280,7 +282,7 @@ export async function Q09(ctx, result) {
   for (const hook of ['protocolBump', 'windowsPending', 'disableControl']) {
     if (!ctx.hooks[hook]?.present) return block(result, 'HOOK_MISSING', ctx.hooks[hook].owner);
   }
-  const shotDir = path.join(ctx.layout.root, 'shots');
+  const shotDir = hjoin(ctx.layout.root, 'shots');
   const shot = async (name) => {
     const png = await ctx.mahord.screenshot();
     if (png) await ctx.writeEvidence(path.posix.join(ctx.evidenceDir, `Q09-${name}.png`), png);
@@ -295,7 +297,7 @@ export async function Q09(ctx, result) {
   await ctx.gui.quit(ctx.state.gui);
   const gui = await ctx.gui.launch(ctx.artifacts.A);
   ctx.state.gui = gui;
-  const logFile = path.join(ctx.layout.logs, `gui-${gui.tag}.log`);
+  const logFile = hjoin(ctx.layout.logs, `gui-${gui.tag}.log`);
   const pending = await ctx.agent.call('waitLog', { file: logFile, pattern: `DaemonUpdatePending[^\\n]*\\b${n}\\b|DAEMON_UPDATE_PENDING[^\\n]*\\b${n}\\b`, deadlineMs: DAEMON_READY_TIMEOUT_MS });
   await shot('pending');
   assertion(result, `typed pending state with the exact count ${n}`, Boolean(pending.matched), pending);
@@ -315,7 +317,7 @@ export async function Q09(ctx, result) {
   for (const sid of [ctx.state.localA, extra.sessionId]) await ctx.state.conn.call(D.close(sid));
   const aDone = await aExit;
   const wDone = await wExit;
-  const marker = await ctx.agent.call('exists', { file: path.join(ctx.layout.runtime, `retired-${ctx.keys.bump}.json`) });
+  const marker = await ctx.agent.call('exists', { file: hjoin(ctx.layout.runtime, `retired-${ctx.keys.bump}.json`) });
   const changed = await newOwner;
   await evidence(ctx, result, 'retire-when-idle.json', { aDone, wDone, marker, changed, watchdog });
   assertion(result, 'A exited by RetireWhenIdle when its last terminal closed', !aDone.timedOut && marker, { aDone, marker });
@@ -345,7 +347,7 @@ export async function Q09(ctx, result) {
   await ctx.gui.quit(ctx.state.gui);
   const g3 = await ctx.gui.launch(ctx.artifacts.A);
   ctx.state.gui = g3;
-  const disabled = await ctx.agent.call('waitLog', { file: path.join(ctx.layout.logs, `gui-${g3.tag}.log`), pattern: 'DaemonUpdatePending[^\\n]*(liveSessions|live_sessions)":null|DAEMON_UPDATE_PENDING[^\\n]*null', deadlineMs: DAEMON_READY_TIMEOUT_MS });
+  const disabled = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.logs, `gui-${g3.tag}.log`), pattern: 'DaemonUpdatePending[^\\n]*(liveSessions|live_sessions)":null|DAEMON_UPDATE_PENDING[^\\n]*null', deadlineMs: DAEMON_READY_TIMEOUT_MS });
   await shot('no-control');
   assertion(result, 'pending state with unknown count (button disabled)', Boolean(disabled.matched), disabled);
   assertion(result, 'A untouched', (await ctx.agent.call('check', { pid: a3.pid })) === 'match', a3.pid);

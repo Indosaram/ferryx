@@ -1,6 +1,7 @@
 // Shared scenario context helpers for the daemon-lifetime QA harness.
 
 import path from 'node:path';
+import { hjoin } from '../lib/hostpath.mjs';
 import { randomBytes } from 'node:crypto';
 import { data as D, control as C, liveSessions, compareInventories, identityOf, isLive } from '../lib/wire.mjs';
 import { assertion } from '../lib/summary.mjs';
@@ -70,7 +71,7 @@ export async function ownerIdentity(ctx, runtimeDir = ctx.layout.runtime) {
   const ctl = await controlConn(ctx, runtimeDir);
   const hello = ctl ? await ctl.hello() : null;
   if (ctl) await ctl.close();
-  const ownerJson = await ctx.agent.call('readFile', { file: path.join(runtimeDir, 'owner.json') });
+  const ownerJson = await ctx.agent.call('readFile', { file: hjoin(runtimeDir, 'owner.json') });
   const owner = ownerJson ? JSON.parse(ownerJson) : null;
   const pid = hello?.pid ?? owner?.pid ?? null;
   const os = pid ? await ctx.agent.call('probe', { pid }) : null;
@@ -150,7 +151,7 @@ export async function retireOwner(ctx) {
 
 /** Launches a GUI, waits for a new owner and seeds one local session; records the daemon pid. */
 export async function freshOwner(ctx, artifact, { env = {}, tag = 'QA_A', dataVersion = 5 } = {}) {
-  const before = await ctx.agent.call('readFile', { file: `${ctx.layout.runtime}/owner.json` });
+  const before = await ctx.agent.call('readFile', { file: hjoin(ctx.layout.runtime, 'owner.json') });
   const fromPid = before ? JSON.parse(before).pid : null;
   const gui = await ctx.gui.launch(artifact, { env });
   ctx.state.gui = gui;

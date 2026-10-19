@@ -3,7 +3,7 @@
 // so a spawn with startup { kind: remoteSsh } resolves to this sshd and nothing else.
 
 import { createHash } from 'node:crypto';
-import path from 'node:path';
+import { hjoin } from './hostpath.mjs';
 
 export const SSHD_BINARIES = Object.freeze({
   mac: '/usr/sbin/sshd',
@@ -48,34 +48,34 @@ export function sshInventory({ hostId, port, user, identityFile, repoRoot }) {
 export async function startSshd(ctx) {
   const bin = SSHD_BINARIES[ctx.platform];
   if (!(await ctx.agent.call('exists', { file: bin }))) return { unavailable: `sshd not found at ${bin}` };
-  const dir = path.join(ctx.layout.root, 'sshd');
+  const dir = hjoin(ctx.layout.root, 'sshd');
   await ctx.agent.call('mkdir', { dir, mode: 0o700 });
-  const hostKey = path.join(dir, 'host_ed25519');
-  const clientKey = path.join(dir, 'client_ed25519');
+  const hostKey = hjoin(dir, 'host_ed25519');
+  const clientKey = hjoin(dir, 'client_ed25519');
   for (const key of [hostKey, clientKey]) {
     const r = await ctx.agent.call('exec', { command: 'ssh-keygen', args: ['-q', '-t', 'ed25519', '-N', '', '-f', key] });
     if (r.status !== 0) return { unavailable: `ssh-keygen failed: ${r.stderr}` };
   }
   const pub = await ctx.agent.call('readFile', { file: `${clientKey}.pub` });
-  const authorizedKeys = path.join(dir, 'authorized_keys');
+  const authorizedKeys = hjoin(dir, 'authorized_keys');
   await ctx.agent.call('writeFile', { file: authorizedKeys, content: pub, mode: 0o600 });
   const user = ctx.hostUser;
   const port = ctx.sshPort;
-  const pidFile = path.join(dir, 'sshd.pid');
-  const config = path.join(dir, 'sshd_config');
+  const pidFile = hjoin(dir, 'sshd.pid');
+  const config = hjoin(dir, 'sshd_config');
   await ctx.agent.call('writeFile', { file: config, content: sshdConfig({ port, hostKey, authorizedKeys, pidFile, user }) });
-  const logFile = path.join(ctx.layout.logs, 'sshd.log');
+  const logFile = hjoin(ctx.layout.logs, 'sshd.log');
   const entry = await ctx.agent.call('spawn', { command: bin, args: ['-D', '-e', '-f', config], role: 'sshd', executable: bin, logFile });
   const listening = await ctx.agent.call('waitLog', { file: logFile, pattern: `Server listening on 127\\.0\\.0\\.1 port ${port}`, deadlineMs: 15_000 });
   if (!listening.matched) return { unavailable: 'sshd did not report listening', pid: entry.pid };
   const hostPub = (await ctx.agent.call('readFile', { file: `${hostKey}.pub` })).trim().split(' ').slice(0, 2).join(' ');
-  const knownHosts = path.join(dir, 'known_hosts');
+  const knownHosts = hjoin(dir, 'known_hosts');
   await ctx.agent.call('writeFile', { file: knownHosts, content: `[127.0.0.1]:${port} ${hostPub}\n` });
-  const repoRoot = path.join(ctx.layout.root, 'ssh-repo');
+  const repoRoot = hjoin(ctx.layout.root, 'ssh-repo');
   await ctx.agent.call('mkdir', { dir: repoRoot });
   await ctx.agent.call('exec', { command: 'git', args: ['init', '-q', repoRoot] });
   const inv = sshInventory({ hostId: `qa-sshd-${ctx.runId}`, port, user, identityFile: clientKey, repoRoot });
-  await ctx.agent.call('writeFile', { file: path.join(ctx.layout.data, 'ssh_hosts.json'), content: JSON.stringify(inv.hosts) });
-  await ctx.agent.call('writeFile', { file: path.join(ctx.layout.data, 'remote_projects.json'), content: JSON.stringify(inv.projects) });
-  return { pid: entry.pid, port, user, clientKey, knownHosts, workspaceId: inv.workspaceId, hostStorePath: path.join(ctx.layout.data, 'ssh_hosts.json'), repoRoot };
+  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.data, 'ssh_hosts.json'), content: JSON.stringify(inv.hosts) });
+  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.data, 'remote_projects.json'), content: JSON.stringify(inv.projects) });
+  return { pid: entry.pid, port, user, clientKey, knownHosts, workspaceId: inv.workspaceId, hostStorePath: hjoin(ctx.layout.data, 'ssh_hosts.json'), repoRoot };
 }

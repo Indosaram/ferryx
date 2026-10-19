@@ -2,6 +2,7 @@
 // and legacy single-job migration.
 
 import path from 'node:path';
+import { hjoin } from '../lib/hostpath.mjs';
 import { assertion, block } from '../lib/summary.mjs';
 import { data as D, isLive, liveSessions } from '../lib/wire.mjs';
 import {
@@ -14,7 +15,7 @@ export const OPTOUT_FILE = 'daemon-supervisor.optout'; // supervisor.rs OPTOUT_F
 
 async function loginRegistration(ctx, key) {
   if (ctx.platform === 'mac') {
-    const plist = (await ctx.agent.call('readFile', { file: path.join(ctx.layout.launchAgents, `${ctx.jobs.label(key)}.plist`) })) ?? '';
+    const plist = (await ctx.agent.call('readFile', { file: hjoin(ctx.layout.launchAgents, `${ctx.jobs.label(key)}.plist`) })) ?? '';
     return { runAtLoad: /<key>RunAtLoad<\/key>\s*<true\/>/.test(plist), raw: plist };
   }
   if (ctx.platform === 'linux') {
@@ -30,7 +31,7 @@ const autostarts = (reg) => reg.runAtLoad ?? reg.enabled ?? reg.logonTrigger;
 export async function Q10(ctx, result) {
   const key = ctx.keys.A;
   const owner = await ownerIdentity(ctx);
-  const optout = path.join(ctx.layout.data, 'remote', OPTOUT_FILE);
+  const optout = hjoin(ctx.layout.data, 'remote', OPTOUT_FILE);
   const regBefore = await loginRegistration(ctx, key);
   assertion(result, 'newest generation registered for login before opt-out', autostarts(regBefore) === true, regBefore.raw?.slice?.(0, 400) ?? regBefore.raw);
   // Toggle through the product: the CLI-free path is the settings toggle, which writes the marker
@@ -38,7 +39,7 @@ export async function Q10(ctx, result) {
   await ctx.gui.quit(ctx.state.gui);
   await ctx.agent.call('writeFile', { file: optout, content: '' });
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A);
-  const settled = await ctx.agent.call('waitLog', { file: path.join(ctx.layout.logs, `gui-${ctx.state.gui.tag}.log`), pattern: 'autostart|opt-?out', flags: 'i', deadlineMs: DAEMON_READY_TIMEOUT_MS });
+  const settled = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.logs, `gui-${ctx.state.gui.tag}.log`), pattern: 'autostart|opt-?out', flags: 'i', deadlineMs: DAEMON_READY_TIMEOUT_MS });
   const regAfter = await loginRegistration(ctx, key);
   const ownerAfter = await ownerIdentity(ctx);
   await evidence(ctx, result, 'toggle.json', { regBefore, regAfter, settled, owner, ownerAfter });
@@ -55,11 +56,11 @@ export async function Q10(ctx, result) {
   if (ctx.platform === 'mac') {
     // Make the generation job NotRegistered so the opted-out bootstrap + plain kickstart path runs.
     await ctx.agent.call('exec', { command: 'launchctl', args: ['bootout', `gui/${ctx.uid}/${ctx.jobs.label(key)}`] });
-    await ctx.agent.call('remove', { target: path.join(ctx.layout.launchAgents, `${ctx.jobs.label(key)}.plist`) });
+    await ctx.agent.call('remove', { target: hjoin(ctx.layout.launchAgents, `${ctx.jobs.label(key)}.plist`) });
   }
   const fresh = await freshOwner(ctx, ctx.artifacts.A);
   const job = await ctx.jobs.inspect(key);
-  const guiText = (await ctx.agent.call('readFile', { file: path.join(ctx.layout.logs, `gui-${ctx.state.gui.tag}.log`) })) ?? '';
+  const guiText = (await ctx.agent.call('readFile', { file: hjoin(ctx.layout.logs, `gui-${ctx.state.gui.tag}.log`) })) ?? '';
   await evidence(ctx, result, 'optout-launch.json', { fresh, job });
   await evidence(ctx, result, 'optout-launch-gui.log', guiText);
   const jobPid = ctx.platform === 'windows' ? (await ctx.jobs.windowsTree(ctx.stagedRoot)).daemon?.pid : job.pid;
@@ -124,7 +125,7 @@ export async function Q11(ctx, result) {
   assertion(result, 'SSH session spawned against the private sshd', spawned.type === 'spawnOk', spawned);
   if (spawned.type !== 'spawnOk') return;
   const sid = spawned.sessionId;
-  const input = path.join(ctx.sshd.repoRoot, 'ssh-input.log');
+  const input = hjoin(ctx.sshd.repoRoot, 'ssh-input.log');
   await conn.call(D.attach(sid, 0));
   await conn.call(D.write(sid, `cat >> ${input}\n`));
   const before = await conn.describe();
@@ -133,16 +134,16 @@ export async function Q11(ctx, result) {
   assertion(result, 'SSH session live with a host-scoped remote pid', sBefore?.connected && sBefore?.remotePid != null && sBefore?.localChildPid == null, sBefore);
   // Arm the hold, type the marker through the GUI, wait for write-applied, quit while held.
   const op = `q11-${ctx.runId}`;
-  await ctx.agent.call('writeFile', { file: path.join(ctx.layout.barrier, 'write-ack-hold.request.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
+  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barrier, 'write-ack-hold.request.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
   const marker = nonce('UNCERTAIN');
   await ctx.typeIntoSession(ctx.state.gui, sid, `${marker}\n`);
-  const applied = await ctx.agent.call('waitLog', { file: path.join(ctx.layout.barrier, 'write-ack-hold.receipt.jsonl'), pattern: `"write-applied"[^\\n]*"${sid}"`, deadlineMs: 30_000 });
+  const applied = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.barrier, 'write-ack-hold.receipt.jsonl'), pattern: `"write-applied"[^\\n]*"${sid}"`, deadlineMs: 30_000 });
   assertion(result, 'write-applied observed while the ack is held', Boolean(applied.matched), applied);
   const quit = await ctx.gui.quit(ctx.state.gui);
   // The held WriteOk went down with the quit GUI's connection; release the arm so later writes
   // to this session (the interrupt below) are acknowledged normally.
-  await ctx.agent.call('writeFile', { file: path.join(ctx.layout.barrier, 'write-ack-hold.release.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
-  const released = await ctx.agent.call('waitLog', { file: path.join(ctx.layout.barrier, 'write-ack-hold.receipt.jsonl'), pattern: `"released"[^\\n]*"${sid}"`, deadlineMs: 10_000 });
+  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barrier, 'write-ack-hold.release.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
+  const released = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.barrier, 'write-ack-hold.receipt.jsonl'), pattern: `"released"[^\\n]*"${sid}"`, deadlineMs: 10_000 });
   assertion(result, 'write-ack hold released after the GUI quit', Boolean(released.matched), released);
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A);
   const conn2 = await dataConn(ctx);
@@ -207,7 +208,7 @@ export async function Q13(ctx, result) {
   const legacyEnv = { FERRYX_DATA_DIR: ctx.layout.data, FERRYX_RUNTIME_DIR: ctx.layout.runtime, FERRYX_SESSION_DIR: ctx.layout.sessions };
   const installed = await ctx.jobs.installLegacy({ executable: ctx.artifacts.baseline.daemonExecutable, env: legacyEnv });
   await evidence(ctx, result, 'legacy-install.json', installed);
-  const ready = await ctx.agent.call('waitPath', { file: ctx.platform === 'windows' ? path.join(ctx.layout.runtime, 'daemon.port') : path.join(ctx.layout.runtime, 'daemon.sock'), deadlineMs: DAEMON_READY_TIMEOUT_MS });
+  const ready = await ctx.agent.call('waitPath', { file: ctx.platform === 'windows' ? hjoin(ctx.layout.runtime, 'daemon.port') : hjoin(ctx.layout.runtime, 'daemon.sock'), deadlineMs: DAEMON_READY_TIMEOUT_MS });
   assertion(result, 'legacy daemon published its endpoint', ready, null);
   const conn = await dataConn(ctx);
   const legacyPid = conn.handshake.pid;
@@ -221,7 +222,7 @@ export async function Q13(ctx, result) {
   // New GUI meets the legacy owner.
   const gui = await ctx.gui.launch(ctx.artifacts.A);
   ctx.state.gui = gui;
-  const guiLog = path.join(ctx.layout.logs, `gui-${gui.tag}.log`);
+  const guiLog = hjoin(ctx.layout.logs, `gui-${gui.tag}.log`);
   await ctx.agent.call('waitLog', { file: guiLog, pattern: 'legacy|attached|handshake', flags: 'i', deadlineMs: DAEMON_READY_TIMEOUT_MS });
   await conn.call(D.attach(sp.sessionId, 0));
   await nonceRoundTrip(ctx, conn, sp.sessionId, result, 'legacy session usable with the new GUI attached');
@@ -239,7 +240,7 @@ export async function Q13(ctx, result) {
     ctx.carry.push({ item: 'todo 14: Get-ScheduledTask State read of the legacy task on maho-win', evidence: path.posix.join(ctx.evidenceDir, 'Q13-legacy-job.json') });
   } else {
     const reg = ctx.platform === 'mac'
-      ? /<key>RunAtLoad<\/key>\s*<false\/>/.test((await ctx.agent.call('readFile', { file: path.join(ctx.layout.launchAgents, `${ctx.jobs.base}.plist`) })) ?? '')
+      ? /<key>RunAtLoad<\/key>\s*<false\/>/.test((await ctx.agent.call('readFile', { file: hjoin(ctx.layout.launchAgents, `${ctx.jobs.base}.plist`) })) ?? '')
       : legacyJob.unitFileState !== 'enabled';
     assertion(result, 'legacy job lost login autostart without being stopped', reg, legacyJob.unitFileState ?? null);
   }

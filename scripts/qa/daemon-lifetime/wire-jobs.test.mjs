@@ -198,3 +198,12 @@ test('private sshd: loopback only, key auth only; workspace id matches projects.
   assert.match(id, /^ssh:[0-9a-f]{64}$/);
   assert.notEqual(id, remoteWorkspaceId('h', '/r2'));
 });
+
+test('host paths join in the host flavour, not the controller flavour', async () => {
+  const { hjoin } = await import('./lib/hostpath.mjs');
+  assert.equal(hjoin('C:\\Users\\sook\\ferryx-wt\\.qa-daemon-lifetime\\r', 'run', 'owner.json'), 'C:\\Users\\sook\\ferryx-wt\\.qa-daemon-lifetime\\r\\run\\owner.json');
+  assert.equal(hjoin('/tmp/ferryx-qa-daemon-lifetime/r', 'run', 'owner.json'), '/tmp/ferryx-qa-daemon-lifetime/r/run/owner.json');
+  for (const f of ['lib/sshd.mjs', 'scenarios/common.mjs', 'scenarios/q00-q03.mjs', 'scenarios/q04-q06.mjs', 'scenarios/q07-q09.mjs', 'scenarios/q10-q13.mjs', 'lib/gui.mjs']) {
+    assert.ok(!/(?<![.\w])path\.join\(/.test(readFileSync(new URL('./' + f, import.meta.url), 'utf8')), f);
+  }
+});
