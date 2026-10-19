@@ -166,6 +166,8 @@ test('agent command: local node or quoted ssh', () => {
   assert.ok(ssh.args.includes('BatchMode=yes'));
   assert.match(ssh.args.at(-1), /'\/a b\/agent'\\''s\.mjs'/);
   assert.match(ssh.args.at(-1), /'--allow-root' '\/t'/);
+  const win = agentCommand(hostFor('windows'), { agentPath: 'C:\\a\\agent.mjs', runId: RUN, runDir: 'C:\\r' });
+  assert.match(win.args.at(-1), /^"node" "C:\\a\\agent\.mjs"/);
 });
 
 test('GUI scripts target exactly the QA bundle id', () => {

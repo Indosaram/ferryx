@@ -10,7 +10,7 @@ export function agentCommand(host, { agentPath, runId, runDir, allowRoots = [] }
   if (host.transport.kind === 'local') return { command: host.node, args };
   const quote = (s) => (host.platform === 'windows' ? `"${String(s).replace(/"/g, '\\"')}"` : `'${String(s).replace(/'/g, "'\\''")}'`);
   const remote = [host.node, ...args].map(quote).join(' ');
-  return { command: 'ssh', args: ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', host.transport.target, host.platform === 'windows' ? `& ${remote}` : remote] };
+  return { command: 'ssh', args: ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', host.transport.target, host.transport.shell === 'powershell' ? `& ${remote}` : remote] };
 }
 
 export async function startAgent(host, opts, { log = () => {} } = {}) {

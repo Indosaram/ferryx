@@ -37,7 +37,7 @@ export const HOSTS = Object.freeze({
   windows: Object.freeze({
     platform: 'windows',
     name: 'maho-win',
-    transport: { kind: 'ssh', target: 'maho-win', address: '100.68.224.49', user: 'sook', shell: 'powershell' },
+    transport: { kind: 'ssh', target: 'maho-win', address: '100.68.224.49', user: 'sook', shell: 'cmd' }, // sshd DefaultShell is cmd.exe (measured 2026-10-19)
     canonical: 'C:\\Users\\sook\\ferryx',
     worktreeRoot: 'C:\\Users\\sook\\ferryx-wt',
     cargoTarget: 'C:\\Users\\sook\\ferryx-wt\\.target-w5qa-20261019',
