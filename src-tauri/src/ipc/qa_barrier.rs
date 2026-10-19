@@ -2442,13 +2442,14 @@ pub(crate) fn pending_listener_stall(dir: &std::path::Path, run_id: &str) -> Opt
 /// QaFixtureKind::DaemonListenerStall: when armed, parks the caller (a freshly accepted daemon
 /// connection, before it reads the handshake) until the matching release or the arm's deadline.
 /// Returns `None` when nothing is armed, so the connection proceeds at once.
-pub async fn hold_listener_stall(channel: &QaBarrierChannel) -> Option<ReleaseOutcome> {
+pub async fn hold_listener_stall(channel: &Arc<QaBarrierChannel>) -> Option<ReleaseOutcome> {
     let dir = channel.dir.clone();
     let run_id = channel.run_id.clone();
     let spec = crate::ipc::run_blocking(move || Ok(pending_listener_stall(&dir, &run_id))).await.ok()??;
-    channel.write_held(&spec, "", "handshake-stalled", json!({ "deadlineMs": spec.deadline_ms }));
+    // Held record and receipt are file writes: keep them off this runtime worker.
+    write_held_off_runtime(channel, &spec, "", "handshake-stalled", json!({ "deadlineMs": spec.deadline_ms })).await;
     let outcome = channel.wait_for_release(&spec).await;
-    channel.append_receipt(LISTENER_STALL_BARRIER, &spec.operation_id, json!({ "outcome": outcome.as_str() }));
+    append_receipt_off_runtime(channel, LISTENER_STALL_BARRIER, &spec.operation_id, json!({ "outcome": outcome.as_str() })).await;
     Some(outcome)
 }
 
