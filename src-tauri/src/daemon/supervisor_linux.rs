@@ -199,6 +199,19 @@ fn forwarded_key(key: &str) -> bool {
     locale || FORWARDED_FERRYX_KEYS.contains(&key)
 }
 
+/// QA barrier channel of a `local-split-qa` build (todo 12): forwarded only into a QA-named unit,
+/// so the job's daemon installs the runner's QA channel.
+#[cfg(feature = "local-split-qa")]
+const QA_BARRIER_KEYS: [&str; 2] = ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"];
+#[cfg(not(feature = "local-split-qa"))]
+const QA_BARRIER_KEYS: [&str; 0] = [];
+
+fn qa_named(vars: &[(OsString, OsString)]) -> bool {
+    vars.iter().any(|(key, value)| {
+        key.to_str() == Some(crate::daemon::supervisor::SUPERVISOR_NAME_ENV) && !value.is_empty()
+    })
+}
+
 /// The non-empty single-line UTF-8 entries of `vars` whose key `keep` accepts, sorted so an
 /// unchanged environment renders byte-identical output and nothing is rewritten.
 fn filtered_env(vars: &[(OsString, OsString)], keep: fn(&str) -> bool) -> Vec<(String, String)> {
@@ -220,7 +233,12 @@ fn filtered_env(vars: &[(OsString, OsString)], keep: fn(&str) -> bool) -> Vec<(S
 /// PTY child, and anything else would freeze one GUI session's environment into the user's login
 /// service.
 pub(crate) fn forwarded_env(vars: &[(OsString, OsString)]) -> Vec<(String, String)> {
-    filtered_env(vars, forwarded_key)
+    let mut forwarded = filtered_env(vars, forwarded_key);
+    if qa_named(vars) {
+        forwarded.extend(filtered_env(vars, |key| QA_BARRIER_KEYS.contains(&key)));
+        forwarded.sort();
+    }
+    forwarded
 }
 
 /// The secrets of `vars` the daemon needs after a supervisor restart.
@@ -902,6 +920,25 @@ mod tests {
             unit,
             "environment order must not change the rendered unit"
         );
+    }
+
+    #[test]
+    fn qa_barrier_env_reaches_only_a_qa_named_unit() {
+        let plain = vars(&[("FERRYX_DATA_DIR", "/qa"), ("FERRYX_QA_BARRIER_DIR", "/qa/b"), ("FERRYX_QA_RUN_ID", "r1")]);
+        let keys: Vec<String> = forwarded_env(&plain).into_iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, ["FERRYX_DATA_DIR"], "no QA name, no barrier env");
+        let qa = vars(&[
+            ("FERRYX_DATA_DIR", "/qa"),
+            ("FERRYX_DAEMON_SUPERVISOR_NAME", "ferryx-qa-r1"),
+            ("FERRYX_QA_BARRIER_DIR", "/qa/b"),
+            ("FERRYX_QA_RUN_ID", "r1"),
+        ]);
+        let keys: Vec<String> = forwarded_env(&qa).into_iter().map(|(key, _)| key).collect();
+        if cfg!(feature = "local-split-qa") {
+            assert_eq!(keys, ["FERRYX_DATA_DIR", "FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"]);
+        } else {
+            assert_eq!(keys, ["FERRYX_DATA_DIR"]);
+        }
     }
 
     #[test]
