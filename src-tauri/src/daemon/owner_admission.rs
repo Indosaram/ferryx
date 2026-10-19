@@ -1447,7 +1447,7 @@ mod tests {
                             }
                         }
                     },
-                    || {
+                    || -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
                         let tick_rx = tick_rx.clone();
                         Box::pin(async move {
                             let _ = tick_rx.lock().await.recv().await;

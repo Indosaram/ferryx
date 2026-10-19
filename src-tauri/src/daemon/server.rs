@@ -4067,6 +4067,12 @@ impl DaemonServer {
                     Ok((offered, accepted, restorable, commit_latency_ms)) => {
                         if let Some(authority) = received_authority.take() {
                             inherited_canonical = Some(self.install_adopted_authority(authority)?);
+                            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                            crate::daemon::qa_producers::note_authority_stage(
+                                "authority-adopted",
+                                &self.handover_manager,
+                            )
+                            .await;
                         }
                         tracing::info!(
                             accepted,
@@ -6081,7 +6087,7 @@ impl DaemonServer {
             {
                 tracing::warn!(%session_id, %error, "Could not drop the transferred session entry");
             }
-            self.session_metadata.write().remove(&session_id);
+            self.session_service.session_metadata.write().remove(&session_id);
         }
     }
 
@@ -6121,7 +6127,9 @@ impl DaemonServer {
                         .map_err(|error| error.to_string())
                     }
                 },
-                || Box::pin(tokio::time::sleep(OWNER_PUBLISH_RETRY)),
+                || -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+                    Box::pin(tokio::time::sleep(OWNER_PUBLISH_RETRY))
+                },
             )
             .await
         })
