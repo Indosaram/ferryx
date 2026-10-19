@@ -987,6 +987,91 @@ async fn a_v5_successor_adopts_the_public_socket_and_locks_without_a_gap() {
         .expect("the successor answers on the inherited socket");
 }
 
+/// todo 8: before CommitHandover the candidate holds duplicates of the predecessor's public
+/// listener and locks but accepts on none of them. Every Hello on the public socket in that
+/// window is answered by the predecessor's pid, and the candidate's listener copy has accepted
+/// nothing (its accept queue is empty). After AbortHandover the predecessor still answers.
+#[tokio::test]
+async fn before_commit_hello_names_the_predecessor_and_the_candidate_accepts_nothing() {
+    use std::os::unix::net::UnixListener as StdUnixListener;
+    let mut daemons = PrivateDaemons::with_v5_flag(None);
+    let socket_path = daemons.socket();
+    let d1 = daemons.launch(None).await;
+    let pid_d1 = daemons.pid(d1);
+    let mut client1 = TestDaemonClient::connect(&socket_path, pid_d1)
+        .await
+        .expect("connect to D1");
+    match client1
+        .send_request(&DaemonRequest::PrepareHandover)
+        .await
+        .expect("PrepareHandover")
+    {
+        DaemonResponse::PrepareHandoverOk { .. } => {}
+        other => panic!("Expected PrepareHandoverOk, got {other:?}"),
+    }
+
+    // The test is the candidate: it receives the sessions and the authority, then stops short
+    // of CommitHandover.
+    let handover_sock_path = daemons.root.path().join("runtime/handover-hello-test.sock");
+    let listener =
+        ferryx_lib::daemon::handover_socket::HandoverSocketListener::bind(&handover_sock_path)
+            .expect("bind handover socket listener");
+    let candidate = std::thread::spawn(move || {
+        let (stream, _creds) = listener.accept().expect("accept on handover socket");
+        while ferryx_lib::daemon::handover_socket::recv_session(&stream)
+            .expect("recv_session")
+            .is_some()
+        {}
+        ferryx_lib::daemon::handover_socket::request_authority(&stream, "hello-before-commit")
+            .expect("the predecessor answers the authority request")
+    });
+    match client1
+        .send_request(&DaemonRequest::TransferSessions {
+            handover_socket_path: handover_sock_path.to_string_lossy().into_owned(),
+        })
+        .await
+        .expect("TransferSessions")
+    {
+        DaemonResponse::TransferSessionsOk { .. } => {}
+        other => panic!("Expected TransferSessionsOk, got {other:?}"),
+    }
+    let authority = candidate.join().expect("candidate thread");
+    let canonical: StdUnixListener = authority
+        .canonical_listener
+        .expect("the predecessor offers its public listener")
+        .into();
+    assert_authority_held(&daemons, "candidate holds the authority before commit");
+
+    for _ in 0..3 {
+        // connect() asserts HandshakeOk carries exactly pid_d1.
+        TestDaemonClient::connect(&socket_path, pid_d1)
+            .await
+            .expect("before commit, Hello names the predecessor pid");
+    }
+    // Every connection above was accepted by the predecessor; the candidate's copy has nothing
+    // to accept, so its accept count is 0. (The listener is already non-blocking in D1.)
+    canonical.set_nonblocking(true).expect("non-blocking probe");
+    match canonical.accept() {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("the candidate must accept nothing before commit: {other:?}"),
+    }
+    drop(canonical);
+    drop(authority.legacy_lock);
+    drop(authority.persistent_lock);
+    drop(authority.control_listener);
+    drop(authority.agent_state_listener);
+    assert_authority_held(&daemons, "candidate copies closed");
+
+    let abort = client1
+        .send_request(&DaemonRequest::AbortHandover)
+        .await
+        .expect("AbortHandover");
+    assert!(matches!(abort, DaemonResponse::AbortHandoverOk), "{abort:?}");
+    TestDaemonClient::connect(&socket_path, pid_d1)
+        .await
+        .expect("the predecessor keeps serving after the abort");
+}
+
 #[tokio::test]
 async fn a_multi_session_v5_handover_preserves_every_session_id() {
     // 1. Launch D1 and spawn 6 interactive /bin/sh sessions.
