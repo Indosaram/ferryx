@@ -156,15 +156,13 @@ export async function Q12(ctx, result) {
   const spawned = await conn.call(D.spawnLocal({ clientRequestId: `qa-q12-${nonce('R')}`, workspaceId: ctx.workspaceId, cwd: ctx.repoDir }));
   const exited = spawned.sessionId;
   await conn.call(D.attach(exited, 0));
+  const child = (await conn.describe()).sessions.find((s) => s.backendId === exited)?.localChildPid;
+  // Subscribe to the shell's exit before asking it to exit, then read the inventory once.
+  const gone = child ? ctx.agent.call('waitExit', { pid: child, deadlineMs: 15_000 }) : Promise.resolve({ timedOut: true });
   await conn.call(D.write(exited, ctx.platform === 'windows' ? 'exit\r\n' : 'exit\n'));
-  // the reader closes when the shell exits: wait for the inventory to say so via a fresh describe
-  let desc;
-  for (const deadline = Date.now() + 15_000; Date.now() < deadline;) {
-    desc = await conn.describe();
-    const e = desc.sessions.find((s) => s.backendId === exited);
-    if (!e || e.readerOpen === false) break;
-    await conn.waitOutput(exited, '\u0000never', 500);
-  }
+  const childExit = await gone;
+  assertion(result, 'exited session child process is gone', !childExit.timedOut, { child, childExit });
+  const desc = await conn.describe();
   const entry = desc.sessions.find((s) => s.backendId === exited);
   assertion(result, 'exited local PTY reports readerOpen=false (or is gone)', !entry || entry.readerOpen === false, entry);
   assertion(result, 'exited entry is not counted live', !liveSessions(desc).some((s) => s.backendId === exited), null);
