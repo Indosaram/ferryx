@@ -108,8 +108,12 @@ ${envXml}
     }
     const args = ['--daemon', ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`])];
     void args; // the pre-plan baseline daemon has no watchdog --env forwarding; run it via cmd with env
-    const cmd = `cmd /c "${Object.entries(env).map(([k, v]) => `set ${k}=${v}&&`).join('')} "${executable}" --daemon"`;
-    await agent.call('exec', { command: 'schtasks', args: ['/Create', '/TN', task(null), '/SC', 'ONLOGON', '/TR', cmd, '/F'] });
+    // schtasks /TR is limited to 261 characters, and inline `set` chains with three run-dir paths
+    // plus the baseline exe exceed it. A launcher script in the run dir keeps /TR short.
+    const launcher = `${layout.root}\\legacy-daemon.cmd`;
+    const script = ['@echo off', ...Object.entries(env).map(([k, v]) => `set "${k}=${v}"`), `"${executable}" --daemon`, ''].join('\r\n');
+    await agent.call('writeFile', { file: launcher, content: script });
+    await agent.call('exec', { command: 'schtasks', args: ['/Create', '/TN', task(null), '/SC', 'ONLOGON', '/TR', launcher, '/F'] });
     return agent.call('exec', { command: 'schtasks', args: ['/Run', '/TN', task(null)] });
   }
 
