@@ -594,6 +594,83 @@ async fn ssh_handover_persistence_keeps_predecessor_owned_records() {
     assert!(ids.contains(&"local-session".to_string()));
 }
 
+/// todo 8 (GAP-10), SSH fixture beside the paired one: a predecessor that owns an SSH session
+/// commits through the real v5 commit and keeps it (Draining). The successor adopts the
+/// written route, then runs its real restore path over the persisted remote snapshot and
+/// creates no controller for the retained session; a query through the successor is answered
+/// by the predecessor, which still owns the same backend session id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ssh_session_stays_with_the_committed_predecessor_and_the_successor_restores_no_controller() {
+    let dir = tempfile::tempdir().unwrap();
+    let predecessor = Arc::new(DaemonServer::new_with_paths(
+        Some(dir.path().join("pred/config")),
+        Some(dir.path().join("pred/auth")),
+    ));
+    let descriptor: crate::terminal::remote::RemoteSessionDescriptor = serde_json::from_value(
+        handover_persistence_record("retained-ssh", "retained-target")["descriptor"].clone(),
+    )
+    .unwrap();
+    predecessor.terminal_service.remote().restore(descriptor).unwrap();
+    let durable = dir.path().join("remote_sessions.json");
+    // TransferSessions persists the remote snapshot before anything moves.
+    predecessor.persist_remote_sessions_at(durable.clone()).await.unwrap();
+
+    let legacy = dir.path().join("legacy-ssh.sock");
+    Arc::clone(&predecessor)
+        .serve_legacy_handover_socket(tokio::net::UnixListener::bind(&legacy).unwrap());
+    predecessor.handover_manager.force_prepared_for_test(legacy.clone());
+    let (retired_tx, _retired_rx) = std::sync::mpsc::channel::<()>();
+    let retired_tx = std::sync::Mutex::new(retired_tx);
+    predecessor.handover_manager.set_retirement_action(move || {
+        let _ = retired_tx.lock().unwrap().send(());
+    });
+    let manager = Arc::clone(&predecessor.handover_manager);
+    let service = Arc::clone(&predecessor.terminal_service);
+    tokio::task::spawn_blocking(move || manager.commit_handover_v5(&service))
+        .await
+        .unwrap()
+        .expect("commit with a retained SSH session");
+    assert_eq!(
+        predecessor.handover_manager.status(),
+        crate::daemon::handover::HandoverStatus::Draining
+    );
+    let routes = dir.path().join("handover_routes.json");
+    let manifest = crate::daemon::manifest::HandoverManifest::load_from_path(&routes);
+    assert!(manifest
+        .routes
+        .iter()
+        .any(|r| r.legacy_socket_path == legacy && r.sessions.contains(&"retained-ssh".to_string())));
+
+    let successor = Arc::new(DaemonServer::new_with_paths(
+        Some(dir.path().join("succ/config")),
+        Some(dir.path().join("succ/auth")),
+    ));
+    successor
+        .session_router
+        .adopt_routes_from_manifest_at(routes)
+        .await
+        .unwrap();
+    successor.restore_remote_sessions_at(durable.clone()).await.unwrap();
+    assert!(
+        successor.terminal_service.remote().list().is_empty(),
+        "the successor created an SSH controller for a retained session"
+    );
+    assert!(successor.terminal_service.paired().list().is_empty());
+    assert!(persisted_durable_ids(&durable).contains(&"retained-ssh".to_string()));
+
+    let reply = request_response(
+        &successor,
+        serde_json::json!({"type":"remoteSessionDetails","sessionId":"retained-ssh"}),
+    )
+    .await;
+    let DaemonResponse::RemoteSessionDetailsOk { details, .. } = reply else {
+        panic!("expected remoteSessionDetailsOk, got {reply:?}");
+    };
+    let details = details.expect("the predecessor still owns the retained SSH session");
+    assert_eq!(details.descriptor.backend_session_id, "retained-ssh");
+    assert!(predecessor.terminal_service.remote().contains("retained-ssh"));
+}
+
 /// A failed durable-snapshot read must abort the checkpoint without overwriting
 /// the prior bytes: preservation failure is an error, never a destructive write.
 #[tokio::test]
