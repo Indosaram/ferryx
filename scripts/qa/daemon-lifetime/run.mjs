@@ -85,7 +85,8 @@ async function main() {
   assertRunnersComplete(RUNNERS, selected);
   const runDir = joinFor(host.platform, host.runRoot, runId);
   const layout = isolationLayout(runDir, host.platform);
-  const localEvidence = opts.evidenceDir ?? path.join(worktreePaths(hostFor('mac'), '').evidence.replace(/q12-mac$/, ''), `q12-${host.platform}`, runId);
+  // Evidence always lands on this Mac: <evidenceRoot>/q12-<platform>/<runId>.
+  const localEvidence = opts.evidenceDir ?? path.join(hostFor('mac').evidenceRoot, `q12-${host.platform}`, runId);
   mkdirSync(localEvidence, { recursive: true });
   const summary = newSummary({ runId, platform: host.platform, host: host.name });
   const summaryPath = path.join(localEvidence, 'summary.json');
