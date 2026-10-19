@@ -2374,6 +2374,10 @@ impl DaemonClient {
                     .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
             })
             .await?;
+            tracing::warn!(
+                code = "DAEMON_DETACH_UNAVAILABLE",
+                "Detach guard: the launcher's job forbids breakaway; no daemon was started"
+            );
             return Err(IpcError::new(
                 IpcErrorCode::DaemonDetachUnavailable,
                 "Ferryx runs inside a job object that forbids breakaway; a daemon started from \
