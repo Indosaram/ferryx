@@ -3861,6 +3861,9 @@ impl DaemonServer {
                         Ok(received) => received,
                         Err(_) => {
                             expired_before_commit = true;
+                            // Wake the blocking accept so its worker returns instead of
+                            // keeping this process alive after the clean exit.
+                            drop(std::os::unix::net::UnixStream::connect(&handover_socket_path));
                             return Err("handover request expired mid-transfer".to_string());
                         }
                     };
