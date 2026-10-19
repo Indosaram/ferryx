@@ -310,7 +310,7 @@ fn decode_task_xml(bytes: &[u8]) -> String {
     if let Some(text) = decode_utf16_with_bom(bytes) {
         return text;
     }
-    let looks_utf16 = bytes.len() >= 2 && bytes.len() % 2 == 0 && bytes[1] == 0;
+    let looks_utf16 = bytes.len() >= 2 && bytes.len().is_multiple_of(2) && bytes[1] == 0;
     if looks_utf16 {
         let units: Vec<u16> = bytes
             .chunks_exact(2)
@@ -876,7 +876,7 @@ pub fn run_watchdog_with(host: &mut dyn WatchdogHost) -> i32 {
 
 #[cfg(windows)]
 pub use platform::{
-    ensure, installed, register_for_login, reload, remove_autostart, retarget, run_watchdog,
+    ensure, installed, register_for_login, reload, remove_autostart, run_watchdog,
     uninstall,
 };
 
@@ -1025,11 +1025,6 @@ mod platform {
     /// [`migrate_legacy_task_with`] against the real Task Scheduler.
     pub fn migrate_legacy_task(env: Env<'_>, owner_absent: bool) -> Result<bool> {
         migrate_legacy_task_with(env, &mut SystemScheduler, owner_absent)
-    }
-
-    /// Registration only, for the protocol-mismatch path: never `/Run`, never replaces a task.
-    pub fn retarget(env: Env<'_>, executable: &Path) -> Result<bool> {
-        register_for_login(env, executable)
     }
 
     /// Starts this build's generation only when no owner exists; never restarts a running one.

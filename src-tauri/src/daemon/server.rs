@@ -3970,10 +3970,7 @@ impl DaemonServer {
                                 expires,
                                 crate::daemon::owner_admission::unix_now_ms(),
                             )
-                            .map_err(|reason| {
-                                expired_before_commit = true;
-                                reason
-                            })?;
+                            .inspect_err(|_| expired_before_commit = true)?;
                             match tokio::time::timeout(budget, transfer_request).await {
                                 Ok(answer) => answer,
                                 Err(_) => {
@@ -4004,10 +4001,7 @@ impl DaemonServer {
                             expires,
                             crate::daemon::owner_admission::unix_now_ms(),
                         )
-                        .map_err(|reason| {
-                            expired_before_commit = true;
-                            reason
-                        })?,
+                        .inspect_err(|_| expired_before_commit = true)?,
                         None => std::time::Duration::MAX,
                     };
                     // QA only: todo 8's request-expiry variant, armed by the runner for this
@@ -4049,10 +4043,7 @@ impl DaemonServer {
                             expires,
                             crate::daemon::owner_admission::unix_now_ms(),
                         )
-                        .map_err(|reason| {
-                            expired_before_commit = true;
-                            reason
-                        })?;
+                        .inspect_err(|_| expired_before_commit = true)?;
                     }
                     let exported: std::collections::HashSet<String> =
                         exports.iter().map(|(export, _owner)| export.session_id.clone()).collect();
@@ -4262,10 +4253,7 @@ impl DaemonServer {
                             expires,
                             crate::daemon::owner_admission::unix_now_ms(),
                         )
-                        .map_err(|reason| {
-                            expired_before_commit = true;
-                            reason
-                        })?;
+                        .inspect_err(|_| expired_before_commit = true)?;
                     }
                     commit_started = true;
                     #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
@@ -6353,16 +6341,11 @@ impl DaemonServer {
     #[cfg(unix)]
     pub(crate) fn serve_legacy_handover_socket(self: Arc<Self>, listener: UnixListener) {
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let s = Arc::clone(&self);
-                        tokio::spawn(async move {
-                            s.handle_client(stream).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let s = Arc::clone(&self);
+                tokio::spawn(async move {
+                    s.handle_client(stream).await;
+                });
             }
         });
     }

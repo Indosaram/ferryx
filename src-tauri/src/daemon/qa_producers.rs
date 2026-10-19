@@ -447,7 +447,7 @@ fn commit_fault_named(name: Option<&str>) -> Option<crate::daemon::handover::Com
 }
 
 /// Predecessor-side commit faults selected by FERRYX_QA_HANDOVER_FAULT (todo 8 variants).
-pub fn commit_fault_from_env() -> Option<crate::daemon::handover::CommitFault> {
+pub(crate) fn commit_fault_from_env() -> Option<crate::daemon::handover::CommitFault> {
     commit_fault_named(injected_handover_fault().as_deref())
 }
 
@@ -1043,7 +1043,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = |name: &str| dir.path().join(name);
         let canonical = UnixListener::bind(path("daemon.sock")).unwrap();
-        let lock_file = std::fs::OpenOptions::new().read(true).write(true).create(true).open(path("daemon.lock")).unwrap();
+        let lock_file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path("daemon.lock")).unwrap();
         assert_eq!(unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
         let expected = ExpectedAuthority {
             canonical_socket: path("daemon.sock"),

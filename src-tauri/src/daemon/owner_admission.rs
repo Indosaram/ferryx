@@ -110,9 +110,9 @@ fn record_owner_alive(probe: &dyn OwnerProbe, record: &OwnerRecord) -> bool {
 /// 3. Held otherwise -> Unknown
 /// 4. Free + endpoint Answers or Silent -> Unknown
 /// 5. Free + Missing + record pid alive with equal start time -> Unknown
-/// 5b. Free + Missing + starting.json younger than 2 x DAEMON_READY_TIMEOUT -> Unknown
-/// 5c. (Windows only) Free + Missing + the record's watchdog alive with equal start time ->
-///     Unknown: that watchdog may still respawn its daemon, so starting another would race it.
+///    5b. Free + Missing + starting.json younger than 2 x DAEMON_READY_TIMEOUT -> Unknown
+///    5c. (Windows only) Free + Missing + the record's watchdog alive with equal start time ->
+///    Unknown: that watchdog may still respawn its daemon, so starting another would race it.
 /// 6. Free + Missing otherwise (no record, dead pid, different start time) -> Absent
 pub(crate) fn classify_owner(probe: &dyn OwnerProbe) -> OwnerState {
     let state = classify_owner_with(probe, cfg!(windows));
@@ -746,6 +746,8 @@ impl std::fmt::Display for AdmissionError {
 }
 
 /// The one start operation admission may issue (job ensure/start/run or a detached spawn).
+/// Test seam only: production start sites take [`admit`] and issue their own start.
+#[cfg(test)]
 pub(crate) trait StartRunner {
     fn start(&self) -> Result<(), String>;
 }
@@ -794,6 +796,7 @@ pub(crate) fn record_pending_start(
     )
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Admission {
     /// The owner was Absent and exactly one start was issued. `ready` is true when the new
@@ -805,6 +808,7 @@ pub(crate) enum Admission {
 
 /// Classifies the owner under admission.lock and issues at most one start, only for Absent.
 /// The lock stays held after the start until the daemon is Alive or `ready_timeout` passes.
+#[cfg(test)]
 pub(crate) fn admit_and_start(
     paths: &AdmissionPaths,
     probe: &dyn OwnerProbe,
@@ -1197,7 +1201,6 @@ mod tests {
     // ---- runtime helpers, admission lock, admit_and_start ----
 
     use std::cell::Cell;
-    use std::io::Write as _;
 
     fn paths_in(dir: &Path) -> AdmissionPaths {
         AdmissionPaths {

@@ -244,6 +244,8 @@ impl IpcErrorCode {
             "SPAWN_CANCELLED" => Self::SpawnCancelled,
             "DAEMON_RETIRING" => Self::DaemonRetiring,
             "DAEMON_UPDATE_PENDING" => Self::DaemonUpdatePending,
+            "DAEMON_BUSY" => Self::DaemonBusy,
+            "DAEMON_DETACH_UNAVAILABLE" => Self::DaemonDetachUnavailable,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -567,6 +569,10 @@ mod tests {
             (IpcErrorCode::SpawnAttemptTimeout, "SPAWN_ATTEMPT_TIMEOUT"),
             (IpcErrorCode::SpawnCancelled, "SPAWN_CANCELLED"),
             (IpcErrorCode::SessionIdConflict, "SESSION_ID_CONFLICT"),
+            (IpcErrorCode::DaemonRetiring, "DAEMON_RETIRING"),
+            (IpcErrorCode::DaemonUpdatePending, "DAEMON_UPDATE_PENDING"),
+            (IpcErrorCode::DaemonBusy, "DAEMON_BUSY"),
+            (IpcErrorCode::DaemonDetachUnavailable, "DAEMON_DETACH_UNAVAILABLE"),
         ];
         for (code, wire) in cases {
             let encoded = serde_json::to_value(&code).expect("encode typed error");

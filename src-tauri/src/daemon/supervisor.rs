@@ -239,7 +239,7 @@ impl crate::daemon::owner_admission::SupervisorOps for ProcessSupervisorOps {
 /// second run is a no-op. The newest generation is registered for login by
 /// [`reconcile_login_registration`]. Runs whether or not the user opted out of autostart, since
 /// it only ever removes login autostart. Returns whether anything changed.
-pub fn migrate_legacy_job(owner: &crate::daemon::owner_admission::OwnerState) -> Result<bool> {
+pub(crate) fn migrate_legacy_job(owner: &crate::daemon::owner_admission::OwnerState) -> Result<bool> {
     if !supported() {
         return Ok(false);
     }
@@ -307,34 +307,6 @@ pub fn uninstall() -> Result<()> {
         return Err("No daemon supervisor is supported in this runtime".to_string());
     }
     backend::uninstall(&process_env)
-}
-
-/// Points the scheduled task at this executable without starting it. The protocol-mismatch path
-/// calls this before it replaces an older daemon, so the watchdog's next respawn runs this build.
-/// A user who turned autostart off ([`user_opted_out`]) is a no-op that returns `false`, so the
-/// scheduled task is never re-registered behind their back.
-#[cfg(windows)]
-pub fn retarget() -> Result<bool> {
-    retarget_unless_opted_out(user_opted_out(), || {
-        if !supported() {
-            return Ok(false);
-        }
-        let executable =
-            std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
-        crate::daemon::supervisor_windows::retarget(&process_env, &executable)
-    })
-}
-
-/// [`retarget`] behind the user's opt-out: the backend is never touched for an opted-out user.
-#[cfg(any(windows, test))]
-fn retarget_unless_opted_out(
-    opted_out: bool,
-    retarget: impl FnOnce() -> Result<bool>,
-) -> Result<bool> {
-    if opted_out {
-        return Ok(false);
-    }
-    retarget()
 }
 
 #[cfg(target_os = "macos")]
@@ -925,29 +897,6 @@ mod tests {
             Ok(()),
             "clearing a missing opt-out is success"
         );
-    }
-
-    #[test]
-    fn retarget_is_noop_when_user_opted_out() {
-        let mut called = false;
-        assert_eq!(
-            retarget_unless_opted_out(true, || {
-                called = true;
-                Ok(true)
-            }),
-            Ok(false)
-        );
-        assert!(!called, "an opted-out user must never reach the retarget backend");
-
-        let mut called = false;
-        assert_eq!(
-            retarget_unless_opted_out(false, || {
-                called = true;
-                Ok(true)
-            }),
-            Ok(true)
-        );
-        assert!(called, "without the opt-out the backend still runs");
     }
 
     /// The macOS job of a generation runs the staged runtime copy, never the GUI's executable in
