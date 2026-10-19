@@ -12,7 +12,7 @@ import path from 'node:path';
 export const HOOKS = Object.freeze([
   { id: 'listenerStall', owner: 'todo 12 (ipc/qa_barrier.rs QaFixtureKind::DaemonListenerStall)', files: ['src-tauri/src/ipc/qa_barrier.rs'], pattern: /DaemonListenerStall/, scenarios: ['Q04'] },
   { id: 'probeFault', owner: 'todo 12 (OwnerProbe reads FERRYX_QA_PROBE_FAULT under local-split-qa)', files: ['src-tauri/src/daemon/owner_admission.rs'], pattern: /FERRYX_QA_PROBE_FAULT/, scenarios: ['Q05'] },
-  { id: 'buildSalt', owner: 'todo 12 (option_env!("FERRYX_QA_BUILD_SALT") #[used] static under local-split-qa)', files: ['src-tauri/src/lib.rs', 'src-tauri/src/main.rs', 'src-tauri/src/daemon/mod.rs', 'src-tauri/src/ipc/qa_barrier.rs'], pattern: /FERRYX_QA_BUILD_SALT/, scenarios: ['Q07', 'Q08'] },
+  { id: 'buildSalt', owner: 'todo 12 (daemon/qa_build_salt.rs: option_env!("FERRYX_QA_BUILD_SALT") #[used] static under local-split-qa)', files: ['src-tauri/src/daemon/qa_build_salt.rs'], pattern: /#\[used\][\s\S]*option_env!\("FERRYX_QA_BUILD_SALT"\)/, scenarios: ['Q07', 'Q08'] },
   { id: 'protocolBump', owner: 'todo 9 (Cargo feature qa-protocol-bump -> DAEMON_PROTOCOL_VERSION 6)', files: ['src-tauri/Cargo.toml'], pattern: /^qa-protocol-bump\s*=/m, scenarios: ['Q08b', 'Q09'] },
   { id: 'disableControl', owner: 'todo 15 (FERRYX_QA_DISABLE_CONTROL)', files: ['src-tauri/src/daemon/control_server.rs'], pattern: /FERRYX_QA_DISABLE_CONTROL/, scenarios: ['Q09'] },
   { id: 'handoverCandidate', owner: 'todo 8 (handover-request.json + start_handover_candidate)', files: ['src-tauri/src/daemon/handover_request.rs', 'src-tauri/src/daemon/supervisor.rs'], pattern: /start_handover_candidate/, scenarios: ['Q08', 'Q08b'], platforms: ['mac', 'linux'] },
@@ -21,13 +21,15 @@ export const HOOKS = Object.freeze([
   { id: 'writeAckHoldArm', owner: 'todo 11/12 (runner-facing arm for QaWriteAckHold through the QA channel)', files: ['src-tauri/src/daemon/qa_producers.rs', 'src-tauri/src/ipc/qa_barrier.rs'], pattern: /"write-ack-hold"|WRITE_ACK_HOLD_ARM/, scenarios: ['Q11'] },
   { id: 'macPlistForwardsIsolationEnv', owner: 'todo 4 (QA plist must carry FERRYX_DATA_DIR/RUNTIME_DIR/SESSION_DIR, else the job daemon uses the dev runtime)', files: ['src-tauri/src/daemon/launchd.rs'], pattern: /EnvironmentVariables/, scenarios: ['Q00'], platforms: ['mac'], gatesAll: true },
   { id: 'jobForwardsQaBarrier', owner: 'todos 4-6 (job daemon receives FERRYX_QA_BARRIER_DIR/FERRYX_QA_RUN_ID under local-split-qa)', files: ['src-tauri/src/daemon/launchd.rs', 'src-tauri/src/daemon/supervisor_linux.rs', 'src-tauri/src/daemon/supervisor_windows.rs'], pattern: /FERRYX_QA_BARRIER_DIR/, scenarios: ['Q04', 'Q11'] },
-  { id: 'handoverFaultArm', owner: 'todo 8 (runner arms one transfer fault per handover: <barrier>/handover-fault.request.json { runId, operationId, fault })', files: ['src-tauri/src/daemon/qa_producers.rs', 'src-tauri/src/daemon/server.rs'], pattern: /handover-fault/, scenarios: ['Q08'], platforms: ['mac', 'linux'] },
+  { id: 'handoverFaultArm', owner: 'todo 8 (qa_producers.rs FERRYX_QA_HANDOVER_FAULT read per handover; the runner arms it per variant through <barrier>/handover-fault.request.json { runId, operationId, fault })', files: ['src-tauri/src/daemon/qa_producers.rs'], pattern: /handover-fault\.request/, scenarios: ['Q08'], platforms: ['mac', 'linux'] },
   { id: 'candidateAcceptCounters', owner: 'todo 8 (candidate accept counters exposed through the QA channel: <barrier>/candidate-accepts.json)', files: ['src-tauri/src/daemon/qa_producers.rs', 'src-tauri/src/daemon/server.rs'], pattern: /candidate-accepts/, scenarios: ['Q08'], platforms: ['mac', 'linux'] },
-  { id: 'forceFallback', owner: 'todo 12 (FERRYX_QA_FORCE_FALLBACK=1 under local-split-qa routes connect_or_spawn to the detached fallback)', files: ['src-tauri/src/daemon/client.rs'], pattern: /FERRYX_QA_FORCE_FALLBACK/, scenarios: ['Q06'] },
+  { id: 'forceFallback', owner: 'todo 12 (FERRYX_QA_FORCE_FALLBACK=1 under local-split-qa routes connect_or_spawn to the detached fallback)', files: ['src-tauri/src/daemon/owner_admission.rs'], pattern: /FORCE_FALLBACK_ENV: &str = "FERRYX_QA_FORCE_FALLBACK"/, scenarios: ['Q06', 'Q06w'] },
+  { id: 'detachGuard', owner: 'todo 6 carry-over (Windows detach guard returns DAEMON_DETACH_UNAVAILABLE inside a no-breakaway job)', files: ['src-tauri/src/daemon/client.rs'], pattern: /code = "DAEMON_DETACH_UNAVAILABLE"/, scenarios: ['Q06w'], platforms: ['windows'] },
 ]);
 
-/** Fault names of todo 8's four transfer failure variants plus the forced commit failure. */
-export const HANDOVER_FAULTS = Object.freeze(['authority-missing-fd', 'listener-path-mismatch', 'lock-fd-not-locked', 'commit-ok-dropped-before-record', 'decision-write-fails']);
+/** todo 8's FERRYX_QA_HANDOVER_FAULT values (daemon/qa_producers.rs on feat/daemon-lifetime-w4-t8). */
+export const HANDOVER_FAULT_ENV = 'FERRYX_QA_HANDOVER_FAULT';
+export const HANDOVER_FAULTS = Object.freeze(['decision-write-failure', 'drop-commit-ok-before-record', 'drop-commit-ok-after-record', 'abort-after-adopt']);
 
 export function probeHooks(checkout, platform, readFile = (f) => readFileSync(f, 'utf8'), exists = existsSync) {
   const result = {};

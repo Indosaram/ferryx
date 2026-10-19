@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isLive, liveSessions, compareInventories, control, inventoryTotal, helloSupportsHandover, generationKey, assertDistinctKeys, endpoints, data } from './lib/wire.mjs';
 import { parseLaunchctlPrint, launchctlProgram, parseSystemctlShow, windowsTaskTree, parseScheduledTaskState, supervisorMutations } from './lib/os-jobs.mjs';
-import { HOOKS, probeHooks, missingHooksFor } from './lib/hooks.mjs';
+import { HOOKS, HANDOVER_FAULTS, HANDOVER_FAULT_ENV, probeHooks, missingHooksFor } from './lib/hooks.mjs';
 import { hostFor, buildPlan, assertQaBuild } from './lib/hosts.mjs';
 import { agentCommand } from './lib/remote.mjs';
-import { macForceTerminateScript, macQuitScript, linuxScopeUnit } from './lib/gui.mjs';
+import { macForceTerminateScript, macQuitScript, linuxScopeUnit, windowsLauncherCommand } from './lib/gui.mjs';
+import { armFile, LISTENER_STALL, LISTENER_STALL_DEADLINE_MS } from './scenarios/q04-q06.mjs';
 import { counterProgress } from './scenarios/q07-q09.mjs';
 import { remoteWorkspaceId, sshdConfig } from './lib/sshd.mjs';
 
@@ -72,6 +73,34 @@ test('hook probe marks absent product hooks and gates the scenarios that need th
   const q04 = missingHooksFor('Q04', hooks).map((h) => h.id);
   assert.ok(q04.includes('listenerStall'));
   assert.ok(!missingHooksFor('Q01', hooks).some((h) => h.id === 'listenerStall'));
+});
+
+test('todo 12 product hooks exist in this checkout; only todo 8/9 hooks may still block', () => {
+  const repo = new URL('../../../', import.meta.url).pathname;
+  const todo12 = ['listenerStall', 'probeFault', 'buildSalt', 'forceFallback', 'macPlistForwardsIsolationEnv', 'jobForwardsQaBarrier', 'detachGuard'];
+  for (const platform of ['mac', 'linux', 'windows']) {
+    const hooks = probeHooks(repo, platform);
+    for (const id of todo12) assert.equal(hooks[id].present, true, `${platform}: ${id} must be present`);
+    for (const [id, r] of Object.entries(hooks)) {
+      if (!r.present) assert.match(HOOKS.find((h) => h.id === id).owner, /^todo (8|9|11\/12)\b/, `${platform}: ${id} missing for a non-todo-8/9 reason`);
+    }
+    for (const id of ['Q00', 'Q04', 'Q05', 'Q06', 'Q06w', 'Q07']) assert.deepEqual(missingHooksFor(id, hooks), [], `${platform} ${id}`);
+  }
+});
+
+test('handover fault names are todo 8 FERRYX_QA_HANDOVER_FAULT values', () => {
+  assert.equal(HANDOVER_FAULT_ENV, 'FERRYX_QA_HANDOVER_FAULT');
+  assert.deepEqual([...HANDOVER_FAULTS], ['decision-write-failure', 'drop-commit-ok-before-record', 'drop-commit-ok-after-record', 'abort-after-adopt']);
+});
+
+test('Q04 stall arm outlasts the GUI wait and Windows launcher forbids breakaway on request', () => {
+  const arm = armFile({ barrier: '/r/barrier' }, LISTENER_STALL, RUN, 'op', { deadlineMs: LISTENER_STALL_DEADLINE_MS });
+  assert.equal(arm.file, '/r/barrier/daemon-listener-stall.arm.json');
+  assert.deepEqual(JSON.parse(arm.content), { name: 'daemon-listener-stall', runId: RUN, operationId: 'op', deadlineMs: LISTENER_STALL_DEADLINE_MS });
+  assert.ok(LISTENER_STALL_DEADLINE_MS > 35_000);
+  const cmd = windowsLauncherCommand({ root: 'C:\\r', exe: 'C:\\r\\ferryx.exe', envFile: 'C:\\r\\e.json', tag: 'q06w', noBreakaway: true });
+  assert.ok(cmd.endsWith('-Tag q06w -NoBreakaway'), cmd);
+  assert.ok(!windowsLauncherCommand({ root: 'C:\\r', exe: 'x', envFile: 'e', tag: 't' }).includes('NoBreakaway'));
 });
 
 test('builds: only debug QA bundles with a private target dir', () => {

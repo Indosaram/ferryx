@@ -3,10 +3,12 @@
 import path from 'node:path';
 import { assertion, block } from '../lib/summary.mjs';
 import { supervisorMutations } from '../lib/os-jobs.mjs';
-import { evidence, dataConn, controlConn, ownerIdentity, seedLocalSession, nonceRoundTrip, assertSameOwner, SUPERVISED_START_WAIT_MS, DAEMON_READY_TIMEOUT_MS } from './common.mjs';
+import { evidence, dataConn, controlConn, ownerIdentity, seedLocalSession, nonceRoundTrip, assertSameOwner, retireOwner, freshOwner, SUPERVISED_START_WAIT_MS, DAEMON_READY_TIMEOUT_MS } from './common.mjs';
 import { launchGuiAndOwner } from './q00-q03.mjs';
 
 export const LISTENER_STALL = 'daemon-listener-stall';
+/** The stall must outlast the GUI's whole wait (SUPERVISED_START_WAIT then DAEMON_READY_TIMEOUT). */
+export const LISTENER_STALL_DEADLINE_MS = DAEMON_READY_TIMEOUT_MS + SUPERVISED_START_WAIT_MS + 120_000;
 export const PROBE_FAULTS = Object.freeze(['inspect-denied', 'start-time-mismatch', 'record-unreadable']);
 
 /** Barrier arm file for one named QA fixture (qa_barrier.rs runner contract). */
@@ -34,7 +36,9 @@ export async function Q04(ctx, result) {
   const ownerBefore = await ownerIdentity(ctx);
   const quit = await ctx.gui.quit(ctx.state.gui);
   await evidence(ctx, result, 'gui-quit.json', quit);
-  const arm = armFile(ctx.layout, LISTENER_STALL, ctx.runId, op);
+  // qa_barrier.rs QaFixtureKind::DaemonListenerStall: the job daemon (QA barrier env forwarded into
+  // the QA job) reads this arm on every accepted data connection and holds the handshake.
+  const arm = armFile(ctx.layout, LISTENER_STALL, ctx.runId, op, { deadlineMs: LISTENER_STALL_DEADLINE_MS });
   await ctx.agent.call('writeFile', arm);
   const held = path.join(ctx.layout.barrier, `${LISTENER_STALL}.held.json`);
   // A fresh data connection makes the daemon enter the stall (accept, no handshake answer).
@@ -136,10 +140,6 @@ async function daemonProcesses(ctx) {
 }
 
 export async function Q06(ctx, result) {
-  if (!ctx.hooks.forceFallback?.present) {
-    block(result, 'HOOK_MISSING', ctx.hooks.forceFallback?.owner ?? 'forceFallback');
-    return;
-  }
   await ctx.gui.quit(ctx.state.gui);
   await closeAllSessions(ctx, ctx.state.conn);
   const before = await ownerIdentity(ctx);
@@ -170,4 +170,33 @@ export async function Q06(ctx, result) {
   ctx.state.daemon = identity;
   ctx.state.conn = await dataConn(ctx);
   ctx.state.localA = await seedLocalSession(ctx, ctx.state.conn, 'QA_A');
+}
+
+/**
+ * Q06w (Windows, todo 6 carry-over): a GUI inside a job that forbids breakaway, with no owner and
+ * the supervised start bypassed (FERRYX_QA_FORCE_FALLBACK=1), must refuse the detached fallback
+ * with DAEMON_DETACH_UNAVAILABLE instead of spawning a daemon that would die with the job. Then a
+ * normal GUI restores the QA owner for the following scenarios.
+ */
+export async function Q06w(ctx, result) {
+  const retired = await retireOwner(ctx);
+  assertion(result, 'owner retired: next admission sees Absent', retired.retired, retired);
+  if (!retired.retired) return;
+  const gui = await ctx.gui.launch(ctx.artifacts.A, { tag: 'q06w', noBreakaway: true, env: { FERRYX_QA_FORCE_FALLBACK: '1' } });
+  assertion(result, 'GUI runs inside a job that forbids breakaway', gui.jobAssigned === true && gui.noBreakaway === true, gui);
+  const logFile = path.join(ctx.layout.logs, `gui-${gui.tag}.log`);
+  const refused = await ctx.agent.call('waitLog', { file: logFile, pattern: 'DAEMON_DETACH_UNAVAILABLE', deadlineMs: DAEMON_READY_TIMEOUT_MS + 15_000 });
+  const daemons = await daemonProcesses(ctx);
+  const owner = await ctx.agent.call('readFile', { file: path.join(ctx.layout.runtime, 'owner.json') });
+  const starting = await ctx.agent.call('readFile', { file: path.join(ctx.layout.runtime, 'starting.json') });
+  const { mutations, text } = await guiLogMutations(ctx, gui);
+  await evidence(ctx, result, 'gui-q06w.log', text);
+  await evidence(ctx, result, 'q06w-state.json', { gui, refused, daemons, owner, starting, mutations });
+  assertion(result, 'client refused the detached spawn with DAEMON_DETACH_UNAVAILABLE', Boolean(refused.matched), refused);
+  assertion(result, 'no daemon process was started', daemons.length === 0, daemons.map((d) => d.pid));
+  assertion(result, 'no new owner.json', owner === null || JSON.parse(owner).pid === retired.pid, owner);
+  assertion(result, 'pending start withdrawn (no starting.json left behind)', starting === null, starting);
+  assertion(result, 'zero supervisor mutations', mutations.length === 0, mutations);
+  await ctx.gui.quit(gui);
+  await freshOwner(ctx, ctx.artifacts.A, { tag: 'QA_A' });
 }

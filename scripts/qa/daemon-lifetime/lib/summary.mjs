@@ -14,6 +14,7 @@ export const SCENARIOS = Object.freeze([
   { id: 'Q04b', title: 'loaded-idle QA job: one plain kickstart', platforms: ['mac'] },
   { id: 'Q05', title: 'probe faults classify Unknown: zero mutations', platforms: PLATFORMS },
   { id: 'Q06', title: 'two cold GUI starts plus forced fallback: one owner', platforms: PLATFORMS },
+  { id: 'Q06w', title: 'Windows detach guard: no-breakaway job refuses the detached fallback', platforms: ['windows'] },
   { id: 'Q07', title: 'bundle A replaced by B on disk: A generation intact, B attaches', platforms: PLATFORMS },
   { id: 'Q08', title: 'A->B->C control upgrades with local and SSH sessions', platforms: ['mac', 'linux'] },
   { id: 'Q08b', title: 'cross-revision handover-v1 owner meets HEAD GUI', platforms: PLATFORMS },

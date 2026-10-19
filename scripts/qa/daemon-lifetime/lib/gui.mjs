@@ -31,6 +31,12 @@ export function linuxScopeUnit(runId, tag) {
   return `${qaSupervisorName(runId)}-gui-${tag}.scope`;
 }
 
+/** Win+R command line for the launcher; -NoBreakaway puts the GUI in a job that forbids breakaway (Q06w). */
+export function windowsLauncherCommand({ root, exe, envFile, tag, noBreakaway = false }) {
+  const flag = noBreakaway ? ' -NoBreakaway' : '';
+  return `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${root}\\launcher.ps1" -Exe "${exe}" -RunDir "${root}" -EnvFile "${envFile}" -Tag ${tag}${flag}`;
+}
+
 export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forbidden, mahord = null, guiEnv = {} }) {
   const platform = host.platform;
   const bundleId = qaBundleIdentifier(runId);
@@ -41,7 +47,7 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     assertBundleIdentifier(r.stdout.trim(), runId);
   }
 
-  async function launch(artifact, { env, tag = `g${++launches}` } = {}) {
+  async function launch(artifact, { env, tag = `g${++launches}`, noBreakaway = false } = {}) {
     const exe = artifact.guiExecutable;
     assertQaExecutable(exe, { allowedRoots, forbidden, platform });
     const fullEnv = { ...guiEnv, ...env };
@@ -65,7 +71,7 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     if (!mahord) throw new Error('Windows GUI launch needs MahoRD');
     const envFile = `${layout.root}\\gui-${tag}.env.json`;
     await agent.call('writeFile', { file: envFile, content: JSON.stringify(fullEnv) });
-    const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${layout.root}\\launcher.ps1" -Exe "${exe}" -RunDir "${layout.root}" -EnvFile "${envFile}" -Tag ${tag}`;
+    const cmd = windowsLauncherCommand({ root: layout.root, exe, envFile, tag, noBreakaway });
     await mahord.click(3000, 1580); // blank taskbar: focus the shell so Win+R reaches it
     await mahord.key('Meta+r');
     await mahord.type(cmd);
@@ -75,7 +81,7 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     if (!ok) throw new Error(`launcher did not publish ${published}`);
     const info = JSON.parse(await agent.call('readFile', { file: published }));
     const entry = await agent.call('record', { pid: info.pid, role: `gui-${tag}`, executable: exe });
-    return { tag, pid: entry.pid, executable: exe, startTime: entry.startTime, jobAssigned: info.jobAssigned };
+    return { tag, pid: entry.pid, executable: exe, startTime: entry.startTime, jobAssigned: info.jobAssigned, noBreakaway: info.noBreakaway === true };
   }
 
   /** Normal quit; resolves with the exit event of the recorded pid. */
