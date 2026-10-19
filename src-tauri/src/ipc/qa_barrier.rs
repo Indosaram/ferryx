@@ -3110,7 +3110,7 @@ mod tests {
         );
 
         let mut hooks = Vec::new();
-        for kind in [QaFixtureKind::Adopted] {
+        for kind in [QaFixtureKind::Adopted, QaFixtureKind::DaemonListenerStall] {
             match kind.creation() {
                 FixtureCreation::Unsupported(hook) => hooks.push(hook),
                 other => panic!("{} must not be constructible: {other:?}", kind.as_str()),
