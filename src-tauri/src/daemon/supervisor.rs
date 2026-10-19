@@ -355,6 +355,7 @@ mod backend {
             executable: staged.executable.clone(),
             plist_path,
             log_dir,
+            environment: generation::qa_job_environment(env),
         })
     }
 

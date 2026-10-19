@@ -205,7 +205,7 @@ pub(crate) mod generation {
 
     use super::generate_launchd_plist;
     use crate::daemon::owner_admission::OwnerState;
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
@@ -336,17 +336,82 @@ pub(crate) mod generation {
         pub executable: PathBuf,
         pub plist_path: PathBuf,
         pub log_dir: PathBuf,
+        /// `EnvironmentVariables` of the job: empty except for a QA-named job
+        /// ([`qa_job_environment`]).
+        pub environment: Vec<(String, String)>,
     }
 
     impl GenerationJob {
         pub(crate) fn render(&self, run_at_load: bool) -> String {
-            generate_launchd_plist(
-                &self.label,
-                &self.executable.to_string_lossy(),
-                &self.log_dir,
-                run_at_load,
+            with_environment(
+                generate_launchd_plist(
+                    &self.label,
+                    &self.executable.to_string_lossy(),
+                    &self.log_dir,
+                    run_at_load,
+                ),
+                &self.environment,
             )
         }
+    }
++    /// Isolation variables a QA generation job carries into its daemon (todo 12): the private
+    /// runtime the QA GUI uses, so the job's daemon serves that runtime and not the user's. Only a
+    /// QA-named job (`FERRYX_DAEMON_SUPERVISOR_NAME` set) forwards anything; every other job keeps
+    /// a plist with no `EnvironmentVariables` at all. Same keys as the Windows watchdog's
+    /// `FORWARDED_ENV`.
+    pub(crate) const QA_JOB_ENV: [&str; 4] = [
+        "FERRYX_DATA_DIR",
+        "FERRYX_RUNTIME_DIR",
+        "FERRYX_SESSION_DIR",
+        crate::daemon::supervisor::SUPERVISOR_NAME_ENV,
+    ];
+
+    /// QA barrier channel of a `local-split-qa` build, forwarded with the isolation variables so
+    /// the job's daemon installs the runner's QA channel (listener stall, write-ack hold).
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) const QA_JOB_BARRIER_ENV: [&str; 2] = ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"];
+    #[cfg(not(feature = "local-split-qa"))]
+    pub(crate) const QA_JOB_BARRIER_ENV: [&str; 0] = [];
+
+    /// The `EnvironmentVariables` of this generation's job, from `env`: empty unless the job is
+    /// QA-named; then the non-empty, single-line UTF-8 values of [`QA_JOB_ENV`] and
+    /// [`QA_JOB_BARRIER_ENV`], in that fixed order so an unchanged env renders identical bytes.
+    pub(crate) fn qa_job_environment(env: &dyn Fn(&str) -> Option<OsString>) -> Vec<(String, String)> {
+        let value = |key: &str| {
+            env(key)
+                .and_then(|value| value.into_string().ok())
+                .filter(|value| !value.is_empty() && !value.contains(['\n', '\r']))
+        };
+        if value(crate::daemon::supervisor::SUPERVISOR_NAME_ENV).is_none() {
+            return Vec::new();
+        }
+        QA_JOB_ENV
+            .iter()
+            .chain(QA_JOB_BARRIER_ENV.iter())
+            .filter_map(|key| value(key).map(|value| (key.to_string(), value)))
+            .collect()
+    }
+
+    fn plist_escape(text: &str) -> String {
+        text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
+    /// Inserts an `EnvironmentVariables` dict before `RunAtLoad`; an empty list leaves the plist
+    /// unchanged, so a non-QA job never carries the key.
+    pub(crate) fn with_environment(plist: String, environment: &[(String, String)]) -> String {
+        if environment.is_empty() {
+            return plist;
+        }
+        let mut dict = String::from("<key>EnvironmentVariables</key>\n    <dict>\n");
+        for (key, value) in environment {
+            dict.push_str(&format!(
+                "        <key>{}</key>\n        <string>{}</string>\n",
+                plist_escape(key),
+                plist_escape(value)
+            ));
+        }
+        dict.push_str("    </dict>\n    <key>RunAtLoad</key>");
+        plist.replacen("<key>RunAtLoad</key>", &dict, 1)
     }
 
     /// Writes `content` only when it differs and reports whether it did. Creates the log dir,
@@ -791,6 +856,7 @@ mod tests {
                 label,
                 executable: dir.join(format!("daemon-runtime/{KEY}/Ferryx Daemon.app/Contents/MacOS/ferryx")),
                 log_dir: dir.join("logs"),
+                environment: Vec::new(),
             }
         }
 
@@ -819,6 +885,54 @@ mod tests {
             assert!(plist.contains("<key>SuccessfulExit</key>\n        <false/>"));
             assert!(plist.contains("<key>RunAtLoad</key>\n    <true/>"));
             assert!(job.render(false).contains("<key>RunAtLoad</key>\n    <false/>"));
+            assert!(!plist.contains("EnvironmentVariables"), "a non-QA job carries no environment");
+        }
+
+        fn env_from(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+            move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| std::ffi::OsString::from(v))
+        }
+
+        #[test]
+        fn isolation_env_is_forwarded_only_into_a_qa_named_job() {
+            const ISOLATED: &[(&str, &str)] = &[
+                ("FERRYX_DATA_DIR", "/qa/data"),
+                ("FERRYX_RUNTIME_DIR", "/qa/run"),
+                ("FERRYX_SESSION_DIR", "/qa/sessions"),
+                ("FERRYX_AGENT_STATE_TOKEN", "secret"),
+                ("FERRYX_QA_BARRIER_DIR", "/qa/barrier"),
+                ("FERRYX_QA_RUN_ID", "run-1"),
+                ("PATH", "/usr/bin"),
+            ];
+            assert!(qa_job_environment(&env_from(ISOLATED)).is_empty(), "no QA name, no forwarding");
+
+            const QA: &[(&str, &str)] = &[
+                ("FERRYX_DAEMON_SUPERVISOR_NAME", "ferryx-qa-run-1"),
+                ("FERRYX_DATA_DIR", "/qa/data"),
+                ("FERRYX_RUNTIME_DIR", "/qa/run & <x>"),
+                ("FERRYX_SESSION_DIR", ""),
+                ("FERRYX_AGENT_STATE_TOKEN", "secret"),
+                ("FERRYX_QA_BARRIER_DIR", "/qa/barrier"),
+                ("FERRYX_QA_RUN_ID", "run-1"),
+                ("PATH", "/usr/bin"),
+            ];
+            let environment = qa_job_environment(&env_from(QA));
+            let keys: Vec<&str> = environment.iter().map(|(k, _)| k.as_str()).collect();
+            let mut expected = vec!["FERRYX_DATA_DIR", "FERRYX_RUNTIME_DIR", "FERRYX_DAEMON_SUPERVISOR_NAME"];
+            if cfg!(feature = "local-split-qa") {
+                expected.extend(["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"]);
+            }
+            assert_eq!(keys, expected, "only the allowlist, empty values dropped");
+
+            let dir = tempfile::tempdir().unwrap();
+            let qa_job = GenerationJob { environment, ..job(dir.path()) };
+            let plist = qa_job.render(true);
+            assert!(plist.contains("<key>EnvironmentVariables</key>\n    <dict>\n        <key>FERRYX_DATA_DIR</key>\n        <string>/qa/data</string>"));
+            assert!(plist.contains("<string>/qa/run &amp; &lt;x&gt;</string>"));
+            assert!(!plist.contains("secret") && !plist.contains("/usr/bin"));
+            assert!(plist.contains("    </dict>\n    <key>RunAtLoad</key>\n    <true/>"));
+            assert_eq!(plist_program(&plist), Some(qa_job.executable.to_str().unwrap()));
+            // Opt-out rewriting still finds RunAtLoad after the inserted dict.
+            assert!(qa_job.render(false).contains("<key>RunAtLoad</key>\n    <false/>"));
         }
 
         #[test]
@@ -914,6 +1028,7 @@ mod tests {
                     executable: dir.path().join(format!("daemon-runtime/{label}/ferryx")),
                     plist_path: dir.path().join(format!("{label}.plist")),
                     log_dir: newest.log_dir.clone(),
+                    environment: Vec::new(),
                 };
                 fs::write(&older.plist_path, older.render(true)).unwrap();
             }
@@ -1056,6 +1171,7 @@ mod tests {
                 executable: dir.path().join("daemon-runtime/2026.1001.1-11111111/ferryx"),
                 plist_path: dir.path().join(format!("{older_label}.plist")),
                 log_dir: newest.log_dir.clone(),
+                environment: Vec::new(),
             };
             register_newest_for_login(&newest).unwrap();
             fs::write(&older.plist_path, older.render(false)).unwrap();
