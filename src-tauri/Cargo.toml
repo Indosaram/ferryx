@@ -56,6 +56,9 @@ default = ["native-terminal"]
 # classifier headless harness. Compile-time gated; never enabled in release
 # builds. No code outside #[cfg(feature = "local-split-qa")] is reachable.
 local-split-qa = []
+# Todo 9 QA only: a genuinely incompatible daemon (DAEMON_PROTOCOL_VERSION 6) used as the old owner
+# against a normal build, so the update-pending path is exercised against a real process.
+qa-protocol-bump = ["local-split-qa"]
 # Native GPU presentation is optional; real libghostty-vt parsing is always built.
 native-terminal = [
     "dep:wgpu",

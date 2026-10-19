@@ -589,6 +589,34 @@ pub(crate) fn ensure(name: &str, path: &Path, executable: &Path) -> Result<bool,
     ensure_generation_with(&UserSystemctl, name, path, &content)
 }
 
+/// Autostart opt-out: `disable` (never `--now`) on every generation unit of `base` in `unit_dir`
+/// and on the legacy base unit `<base>.service` when its file exists. No unit is stopped, no unit
+/// file is removed, and nothing is reloaded, so a running daemon keeps its process, PTYs and
+/// definition, and an opted-out GUI can still `start` the newest generation. Every unit is tried
+/// even when one fails; the failures are reported together.
+pub(crate) fn remove_login_autostart_with(
+    systemctl: &dyn Systemctl,
+    unit_dir: &Path,
+    base: &str,
+) -> Result<(), String> {
+    let mut units: Vec<String> = generation_units_in(unit_dir, base)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    if unit_dir.join(format!("{base}.service")).exists() {
+        units.push(base.to_string());
+    }
+    let failures: Vec<String> = units
+        .iter()
+        .filter_map(|name| systemctl.run(&["disable", &format!("{name}.service")]).err())
+        .collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
 /// Starts the unit again; a unit stopped by its start limit is reset first.
 #[cfg(target_os = "linux")]
 pub(crate) fn start(name: &str) -> Result<(), String> {
@@ -627,6 +655,68 @@ pub(crate) fn uninstall(name: &str, path: &Path) -> Result<(), String> {
     }
     remove_secret_env(name)?;
     systemctl(&["daemon-reload"]).map(|_| ())
+}
+
+/// Migrates the legacy single unit `name` (`ferryx-daemon`, or the QA base) at `path` for the
+/// owner admission classified under its lock (todo 14).
+///
+/// Enablement is read from the `default.target.wants` link next to the unit file, so a unit that
+/// is already disabled costs no `systemctl` call. An enabled legacy unit is `disable`d without
+/// `--now`, so the next login starts only the newest generation and a running legacy daemon keeps
+/// its process and PTYs. With an Alive or Unknown owner that is all. With an Absent owner the unit
+/// file is also removed and systemd reloaded, but only when the unit itself is idle (`inactive` or
+/// `failed`); a busy unit, or one whose state cannot be read (an error), keeps its file. Never
+/// `stop`, `restart`, `kill` or `--now`. A second run after the migration issues nothing.
+/// Returns whether anything changed.
+pub(crate) fn migrate_legacy_unit_with(
+    systemctl: &dyn Systemctl,
+    name: &str,
+    path: &Path,
+    owner_absent: bool,
+) -> Result<bool, String> {
+    let unit = format!("{name}.service");
+    let wants = path
+        .parent()
+        .unwrap_or(Path::new(""))
+        .join("default.target.wants")
+        .join(&unit);
+    let present = |path: &Path| match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("Failed to inspect {}: {error}", path.display())),
+    };
+    let has_file = present(path)?;
+    let enabled = present(&wants)?;
+    let mut changed = false;
+    if enabled {
+        systemctl.run(&["disable", &unit])?;
+        changed = true;
+    }
+    if !owner_absent || !has_file {
+        return Ok(changed);
+    }
+    if unit_is_busy(systemctl, name)? {
+        tracing::info!(unit = %name, "The legacy daemon unit is not idle; it keeps running and only lost login autostart");
+        return Ok(changed);
+    }
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(changed),
+        Err(error) => return Err(format!("Failed to remove {}: {error}", path.display())),
+    }
+    systemctl.run(&["daemon-reload"])?;
+    Ok(true)
+}
+
+/// [`migrate_legacy_unit_with`] for the real user manager; a removed unit also loses its secret
+/// env file.
+#[cfg(target_os = "linux")]
+pub(crate) fn migrate_legacy_unit(name: &str, path: &Path, owner_absent: bool) -> Result<bool, String> {
+    let changed = migrate_legacy_unit_with(&UserSystemctl, name, path, owner_absent)?;
+    if owner_absent && !path.exists() {
+        remove_secret_env(name)?;
+    }
+    Ok(changed)
 }
 
 static NOTIFY_SOCKET: OnceLock<Option<OsString>> = OnceLock::new();
@@ -1273,6 +1363,90 @@ mod tests {
         );
     }
 
+    /// Opt-out disables every generation and the legacy unit, never with `--now` and never with
+    /// `stop`/`restart`/`kill`, and leaves every unit file in place (a running daemon keeps its
+    /// definition). A unit with no file (no legacy unit) is not touched.
+    #[test]
+    fn opt_out_disables_every_generation_and_the_legacy_unit_without_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let newest = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        let older = generation_unit_name(DEFAULT_UNIT_NAME, OLDER_KEY).unwrap();
+        let newest_unit = render(STAGED);
+        let older_unit = render("/home/u/.local/share/ferryx/daemon-runtime/2026.1012.1-ffee0011/ferryx");
+        let legacy_unit = render("/opt/ferryx/ferryx");
+        fs::write(dir.path().join(format!("{newest}.service")), &newest_unit).unwrap();
+        fs::write(dir.path().join(format!("{older}.service")), &older_unit).unwrap();
+        fs::write(dir.path().join("ferryx-daemon.service"), &legacy_unit).unwrap();
+        // Another base's unit sharing the prefix is not ours.
+        fs::write(dir.path().join("ferryx-daemon-qa-1.service"), render("/opt/qa/ferryx")).unwrap();
+
+        let systemctl = FakeSystemctl::with_states(&[(&newest, "active"), (&older, "active")]);
+        assert_eq!(remove_login_autostart_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME), Ok(()));
+        let mut calls = systemctl.calls();
+        calls.sort();
+        let mut expected = vec![
+            call(&["disable", &format!("{newest}.service")]),
+            call(&["disable", &format!("{older}.service")]),
+            call(&["disable", "ferryx-daemon.service"]),
+        ];
+        expected.sort();
+        assert_eq!(calls, expected);
+        for call in systemctl.calls() {
+            for forbidden in ["--now", "stop", "restart", "kill", "daemon-reload", "start"] {
+                assert!(!call.iter().any(|arg| arg == forbidden), "{call:?}");
+            }
+        }
+        assert_eq!(fs::read_to_string(dir.path().join(format!("{newest}.service"))).unwrap(), newest_unit);
+        assert_eq!(fs::read_to_string(dir.path().join(format!("{older}.service"))).unwrap(), older_unit);
+        assert_eq!(fs::read_to_string(dir.path().join("ferryx-daemon.service")).unwrap(), legacy_unit);
+
+        // Without a legacy unit file, only the generations are disabled.
+        fs::remove_file(dir.path().join("ferryx-daemon.service")).unwrap();
+        let systemctl = FakeSystemctl::with_states(&[]);
+        remove_login_autostart_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME).unwrap();
+        assert_eq!(systemctl.calls().len(), 2, "{:?}", systemctl.calls());
+    }
+
+    /// After opt-out the GUI still starts an idle newest generation with `start` through the user
+    /// manager, never `enable`, so the opt-out survives the start.
+    #[test]
+    fn opted_out_launch_starts_the_idle_newest_unit_without_enabling_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        let path = dir.path().join(format!("{name}.service"));
+        let systemctl = FakeSystemctl::with_states(&[(&name, "inactive")]);
+        remove_login_autostart_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME).unwrap();
+        assert_eq!(ensure_generation_with(&systemctl, &name, &path, &render(STAGED)), Ok(true));
+        assert_eq!(
+            systemctl.mutations(),
+            [call(&["daemon-reload"]), call(&["start", "--no-block", &format!("{name}.service")])]
+        );
+        // Opt-out after the start disables it again without stopping it.
+        let systemctl = FakeSystemctl::with_states(&[(&name, "active")]);
+        remove_login_autostart_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME).unwrap();
+        assert_eq!(systemctl.calls(), [call(&["disable", &format!("{name}.service")])]);
+    }
+
+    #[test]
+    fn opt_out_tries_every_unit_and_reports_each_failure() {
+        struct Failing(std::cell::RefCell<Vec<Vec<String>>>);
+        impl Systemctl for Failing {
+            fn run(&self, args: &[&str]) -> Result<String, String> {
+                self.0.borrow_mut().push(call(args));
+                Err(format!("refused {}", args[1]))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let newest = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        let older = generation_unit_name(DEFAULT_UNIT_NAME, OLDER_KEY).unwrap();
+        fs::write(dir.path().join(format!("{newest}.service")), render(STAGED)).unwrap();
+        fs::write(dir.path().join(format!("{older}.service")), render(STAGED)).unwrap();
+        let systemctl = Failing(Default::default());
+        let error = remove_login_autostart_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME).unwrap_err();
+        assert_eq!(systemctl.0.borrow().len(), 2, "a failure must not skip the remaining units");
+        assert!(error.contains(&newest) && error.contains(&older), "{error}");
+    }
+
     #[test]
     fn generation_units_and_registered_executables_are_discovered() {
         assert!(is_generation_key(KEY));
@@ -1311,5 +1485,91 @@ mod tests {
             "every unit's ExecStart (generation, legacy) protects its runtime from garbage collection"
         );
         assert!(registered_job_executables(&dir.path().join("missing")).is_empty());
+    }
+
+    /// The legacy single unit as installed before per-generation units: `ferryx-daemon.service`,
+    /// enabled through its `default.target.wants` link.
+    fn install_legacy_unit(unit_dir: &Path) -> (PathBuf, PathBuf) {
+        let path = unit_dir.join(format!("{DEFAULT_UNIT_NAME}.service"));
+        fs::write(&path, render("/opt/ferryx/ferryx")).unwrap();
+        let wants_dir = unit_dir.join("default.target.wants");
+        fs::create_dir_all(&wants_dir).unwrap();
+        let wants = wants_dir.join(format!("{DEFAULT_UNIT_NAME}.service"));
+        std::os::unix::fs::symlink(&path, &wants).unwrap();
+        (path, wants)
+    }
+
+    /// Commands that could end a running legacy daemon.
+    fn assert_never_stops(calls: &[Vec<String>]) {
+        for call in calls {
+            for forbidden in ["--now", "stop", "restart", "kill", "try-restart", "reload-or-restart"] {
+                assert!(!call.iter().any(|arg| arg == forbidden), "forbidden systemctl call {call:?}");
+            }
+        }
+    }
+
+    /// Todo 14: an Alive or Unknown legacy owner keeps its running unit and unit file; the unit only
+    /// loses login autostart (`disable` without `--now`), and a second run issues no call.
+    #[test]
+    fn legacy_unit_with_alive_or_unknown_owner_is_only_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, wants) = install_legacy_unit(dir.path());
+        let unit = format!("{DEFAULT_UNIT_NAME}.service");
+        let systemctl = FakeSystemctl::with_states(&[(DEFAULT_UNIT_NAME, "active")]);
+        assert_eq!(migrate_legacy_unit_with(&systemctl, DEFAULT_UNIT_NAME, &path, false), Ok(true));
+        assert_eq!(systemctl.calls(), [call(&["disable", &unit])]);
+        assert_never_stops(&systemctl.calls());
+        assert!(path.exists(), "the running legacy unit keeps its file");
+
+        // The real `disable` drops the wants link; the next run sees a disabled unit.
+        fs::remove_file(&wants).unwrap();
+        let again = FakeSystemctl::with_states(&[(DEFAULT_UNIT_NAME, "active")]);
+        assert_eq!(migrate_legacy_unit_with(&again, DEFAULT_UNIT_NAME, &path, false), Ok(false));
+        assert!(again.calls().is_empty(), "the second run issues nothing: {:?}", again.calls());
+    }
+
+    /// Todo 14: an Absent legacy owner's idle unit is disabled and removed once (no stop), and the
+    /// second run issues no call.
+    #[test]
+    fn legacy_unit_with_absent_owner_is_removed_once() {
+        for state in ["inactive", "failed"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (path, wants) = install_legacy_unit(dir.path());
+            let unit = format!("{DEFAULT_UNIT_NAME}.service");
+            let systemctl = FakeSystemctl::with_states(&[(DEFAULT_UNIT_NAME, state)]);
+            assert_eq!(migrate_legacy_unit_with(&systemctl, DEFAULT_UNIT_NAME, &path, true), Ok(true));
+            assert_eq!(
+                systemctl.mutations(),
+                [call(&["disable", &unit]), call(&["daemon-reload"])],
+                "{state}"
+            );
+            assert_never_stops(&systemctl.calls());
+            assert!(!path.exists(), "{state}: the idle legacy unit is removed");
+
+            fs::remove_file(&wants).unwrap();
+            let again = FakeSystemctl::with_states(&[]);
+            assert_eq!(migrate_legacy_unit_with(&again, DEFAULT_UNIT_NAME, &path, true), Ok(false));
+            assert!(again.calls().is_empty(), "the second run issues nothing: {:?}", again.calls());
+        }
+    }
+
+    /// A legacy unit that is still busy, or whose state cannot be read, is never removed or stopped
+    /// even when admission saw no owner; it only loses login autostart.
+    #[test]
+    fn busy_or_unreadable_legacy_unit_is_kept_for_an_absent_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = install_legacy_unit(dir.path());
+        let systemctl = FakeSystemctl::with_states(&[(DEFAULT_UNIT_NAME, "activating")]);
+        assert_eq!(migrate_legacy_unit_with(&systemctl, DEFAULT_UNIT_NAME, &path, true), Ok(true));
+        assert_eq!(
+            systemctl.mutations(),
+            [call(&["disable", &format!("{DEFAULT_UNIT_NAME}.service")])]
+        );
+        assert!(path.exists());
+
+        let unreadable = FakeSystemctl::with_states(&[]);
+        assert!(migrate_legacy_unit_with(&unreadable, DEFAULT_UNIT_NAME, &path, true).is_err());
+        assert_never_stops(&unreadable.calls());
+        assert!(path.exists(), "an unreadable unit state is never treated as idle");
     }
 }

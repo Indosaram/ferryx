@@ -118,7 +118,9 @@ fn set_user_opt_out_at(path: &Path, on: bool) -> Result<()> {
     }
 }
 
-/// Whether the user turned daemon autostart off; [`ensure`] then never (re)installs the unit.
+/// Whether the user turned daemon autostart off. It governs login registration only: an opted-out
+/// user gets no login autostart on any generation, but [`ensure`] still starts an Absent owner
+/// through the OS job (never as a GUI child).
 pub fn user_opted_out() -> bool {
     optout_path().is_some_and(|path| user_opted_out_at(&path))
 }
@@ -134,8 +136,11 @@ pub fn installed() -> bool {
     supported() && backend::installed(&process_env)
 }
 
-/// Removes the autostart unit without stopping the running daemon (its PTYs stay alive); the
-/// daemon simply is not started again at the next login. A missing unit is success.
+/// Autostart opt-out: removes the login launch from every daemon generation's job and from the
+/// legacy job, changing only future login registration (macOS `RunAtLoad`/`KeepAlive` false by
+/// plist rewrite, Linux `disable` without `--now`, Windows logon trigger and `RestartOnFailure`
+/// removal by definition re-import). Nothing is stopped, unloaded, ended or deleted, so a running
+/// daemon keeps its PTYs. A missing job is success.
 pub fn remove_autostart() -> Result<()> {
     if !supported() {
         return Ok(());
@@ -143,50 +148,38 @@ pub fn remove_autostart() -> Result<()> {
     backend::remove_autostart(&process_env)
 }
 
-/// `systemctl` arguments that drop the unit from login autostart. Never `--now` or `stop`: the
-/// running daemon owns every PTY and must keep running.
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-fn linux_remove_autostart_args(unit: &str) -> Vec<&str> {
-    vec!["--user", "disable", unit]
-}
-
-/// [`ensure_in`] behind the user's opt-out: an opted-out user never gets the unit back.
-fn ensure_unless_opted_out(
-    opted_out: bool,
+/// `login_autostart` false (the user opted out) still starts the job, but leaves it without any
+/// login launch condition.
+fn ensure_in(
     env: Env<'_>,
     dev_runtime: bool,
     executable: &Path,
+    login_autostart: bool,
 ) -> Result<bool> {
-    if opted_out {
-        return Ok(false);
-    }
-    ensure_in(env, dev_runtime, executable)
-}
-
-fn ensure_in(env: Env<'_>, dev_runtime: bool, executable: &Path) -> Result<bool> {
     if !supported_in(env, dev_runtime) {
         return Ok(false);
     }
-    backend::ensure(env, executable)
+    backend::ensure(env, executable, login_autostart)
 }
 
 /// Starts the supervised daemon for an Absent owner. Callers MUST hold owner admission
 /// (`owner_admission::admit` returned Start): on macOS this stages the runtime and bootstraps or
 /// kickstarts this generation's job, and never touches a running or unverifiable job. Returns
 /// `true` when a start was issued, `false` when nothing was started or the runtime is unsupported.
-/// A user who turned autostart off ([`user_opted_out`]) is a no-op that returns `false`.
+/// A user who turned autostart off ([`user_opted_out`]) still gets the start through the OS job
+/// (macOS bootstrap or plain kickstart, Linux `start`, Windows `/Run`), never as a GUI child; the
+/// job is left without any login launch condition.
 pub fn ensure() -> Result<bool> {
-    let opted_out = user_opted_out();
-    if opted_out || !supported() {
+    if !supported() {
         return Ok(false);
     }
     let executable =
         std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
-    ensure_unless_opted_out(
-        opted_out,
+    ensure_in(
         &process_env,
         crate::daemon::server::is_dev_runtime(),
         &executable,
+        !user_opted_out(),
     )
 }
 
@@ -223,9 +216,28 @@ impl crate::daemon::owner_admission::SupervisorOps for ProcessSupervisorOps {
         ensure()
     }
 
+    fn migrate_legacy_job(&self, owner: &crate::daemon::owner_admission::OwnerState) -> Result<()> {
+        migrate_legacy_job(owner).map(|_| ())
+    }
+
     fn reconcile_login_registration(&self) -> Result<()> {
         reconcile_login_registration().map(|_| ())
     }
+}
+
+/// Legacy single-job migration (macOS `com.ferryx.daemon` and the pre-rebrand
+/// `com.rorca.daemon`, Linux `ferryx-daemon.service`, Windows `Ferryx\Daemon`), run by
+/// [`ensure_if_absent`] under admission.lock with the owner it classified. An Alive or Unknown
+/// legacy owner keeps its job loaded and running; the job only loses login autostart. An Absent
+/// owner's legacy job is removed. Nothing is ever stopped, booted out, ended or unloaded, and a
+/// second run is a no-op. The newest generation is registered for login by
+/// [`reconcile_login_registration`]. Runs whether or not the user opted out of autostart, since
+/// it only ever removes login autostart. Returns whether anything changed.
+pub fn migrate_legacy_job(owner: &crate::daemon::owner_admission::OwnerState) -> Result<bool> {
+    if !supported() {
+        return Ok(false);
+    }
+    backend::migrate_legacy_job(&process_env, owner)
 }
 
 /// Registers this build for the next login without starting it or touching any running job
@@ -383,13 +395,15 @@ mod backend {
     /// Starts this build's generation job. Callers hold owner admission and saw an Absent owner
     /// (`owner_admission::admit` returned Start), so the owner passed to the job-state switch is
     /// Absent; a Running or Unverifiable job is still left alone. Returns whether a start was issued.
-    pub fn ensure(env: Env<'_>, executable: &Path) -> Result<bool> {
+    /// With `login_autostart` false the job's plist is left without a load-time launch condition.
+    pub fn ensure(env: Env<'_>, executable: &Path, login_autostart: bool) -> Result<bool> {
         let job = current_job(env, executable)?;
         let outcome = generation::ensure_generation_job(
             &generation::SystemLaunchctl,
             uid(),
             &job,
             &OwnerState::Absent,
+            login_autostart,
         )?;
         tracing::info!(label = %job.label, ?outcome, "Daemon generation job ensured");
         Ok(matches!(
@@ -531,11 +545,49 @@ mod backend {
         }
         Ok(())
     }
+
+    /// The legacy single jobs: `<base>` (`com.ferryx.daemon`, or the QA base), and, outside QA,
+    /// the pre-rebrand `com.rorca.daemon`.
+    pub(super) fn legacy_jobs(env: Env<'_>) -> Result<Vec<(String, PathBuf)>> {
+        let dir = agents_dir(env)?;
+        let mut labels = vec![label_base(env)];
+        if non_empty(env, SUPERVISOR_NAME_ENV).is_none() {
+            labels.push(launchd::RORCA_PLIST_LABEL.to_string());
+        }
+        Ok(labels
+            .into_iter()
+            .map(|label| {
+                let path = dir.join(format!("{label}.plist"));
+                (label, path)
+            })
+            .collect())
+    }
+
+    /// Migrates every legacy single job by plist rewrite (Alive/Unknown owner) or removal of a job
+    /// with no process (Absent owner); only `launchctl print` ever runs. Every job is attempted;
+    /// the first error is returned after the rest ran.
+    pub fn migrate_legacy_job(env: Env<'_>, owner: &OwnerState) -> Result<bool> {
+        let mut changed = false;
+        let mut first_error = None;
+        for (label, path) in legacy_jobs(env)? {
+            match generation::migrate_legacy_job(&generation::SystemLaunchctl, uid(), &label, &path, owner) {
+                Ok(job_changed) => changed |= job_changed,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(changed),
+        }
+    }
 }
 
 #[cfg(windows)]
 mod backend {
     use super::{Env, Result};
+    use crate::daemon::owner_admission::OwnerState;
     use crate::daemon::supervisor_windows as task;
     use std::path::Path;
 
@@ -551,8 +603,8 @@ mod backend {
         true
     }
 
-    pub fn ensure(env: Env<'_>, executable: &Path) -> Result<bool> {
-        task::ensure(env, executable)
+    pub fn ensure(env: Env<'_>, executable: &Path, login_autostart: bool) -> Result<bool> {
+        task::ensure(env, executable, login_autostart)
     }
 
     /// Registers this build's generation task for logon and demotes older generations, without
@@ -565,38 +617,32 @@ mod backend {
         task::reload(env)
     }
 
-    pub fn uninstall(env: Env<'_>) -> Result<()> {
-        task::uninstall(env)
+    /// The legacy `Ferryx\Daemon` task: logon trigger removed for an Alive/Unknown owner,
+    /// deleted for an Absent one; never `/End`.
+    pub fn migrate_legacy_job(env: Env<'_>, owner: &OwnerState) -> Result<bool> {
+        task::migrate_legacy_task(env, *owner == OwnerState::Absent)
     }
 
-    fn schtasks(args: &[&str]) -> Result<bool> {
-        crate::util::no_window_command("schtasks")
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .map_err(|e| format!("Failed to run schtasks: {e}"))
+    pub fn uninstall(env: Env<'_>) -> Result<()> {
+        task::uninstall(env)
     }
 
     pub fn installed(env: Env<'_>) -> bool {
         task::installed(env)
     }
 
-    /// Deletes the task definition only (no `/End`), so the running watchdog and daemon stay up.
+    /// Strips the logon trigger and `RestartOnFailure` from every generation task and the legacy
+    /// task by definition re-import; never `/End` or `/Delete`, so a running watchdog and its
+    /// daemon stay up and an opted-out GUI can still `/Run` the newest task.
     pub fn remove_autostart(env: Env<'_>) -> Result<()> {
-        let name = task::task_name(env);
-        if schtasks(&["/Query", "/TN", &name])? && !schtasks(&["/Delete", "/TN", &name, "/F"])? {
-            return Err(format!("schtasks /Delete failed for task {name}"));
-        }
-        Ok(())
+        task::remove_autostart(env)
     }
 }
 
 #[cfg(target_os = "linux")]
 mod backend {
     use super::{Env, Result, SUPERVISOR_NAME_ENV};
+    use crate::daemon::owner_admission::OwnerState;
     use crate::daemon::{runtime_stage, supervisor_linux};
     use std::path::{Path, PathBuf};
 
@@ -650,8 +696,9 @@ mod backend {
         }
     }
 
-    /// Starts this build's generation unit when it is idle; a busy unit is left alone.
-    pub fn ensure(env: Env<'_>, executable: &Path) -> Result<bool> {
+    /// Starts this build's generation unit when it is idle; a busy unit is left alone. The start
+    /// never enables the unit, so an opted-out user (`login_autostart` false) gets no login start.
+    pub fn ensure(env: Env<'_>, executable: &Path, _login_autostart: bool) -> Result<bool> {
         let (_, name, path, staged) = generation_unit(env, executable)?;
         supervisor_linux::ensure(&name, &path, &staged)
     }
@@ -687,6 +734,13 @@ mod backend {
         Ok(rewritten)
     }
 
+    /// The legacy single unit `<base>.service`: disabled without `--now` for an Alive/Unknown
+    /// owner, removed when idle for an Absent one; never stopped.
+    pub fn migrate_legacy_job(env: Env<'_>, owner: &OwnerState) -> Result<bool> {
+        let (name, path) = unit(env)?;
+        supervisor_linux::migrate_legacy_unit(&name, &path, *owner == OwnerState::Absent)
+    }
+
     pub fn reload(env: Env<'_>) -> Result<()> {
         supervisor_linux::start(&unit(env)?.0)
     }
@@ -705,35 +759,14 @@ mod backend {
         })
     }
 
-    fn systemctl(args: &[&str]) -> Result<bool> {
-        std::process::Command::new("systemctl")
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .map_err(|e| format!("Failed to run systemctl: {e}"))
-    }
-
-    /// Disables the unit (no `--now`, so the running daemon keeps its PTYs), deletes the unit file,
-    /// then reloads the user manager. Disable runs first because systemd cannot resolve the unit's
-    /// install links once its file is gone.
+    /// Disables every generation unit and the legacy base unit without `--now`; no unit file is
+    /// removed and nothing is stopped, so running daemons keep their PTYs and their definitions.
     pub fn remove_autostart(env: Env<'_>) -> Result<()> {
-        let (name, path) = unit(env)?;
-        if !systemctl(&super::linux_remove_autostart_args(&name))? {
-            tracing::warn!(unit = %name, "systemctl --user disable failed; removing the unit file anyway");
-        }
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("Failed to remove the systemd user unit: {e}")),
-        }
-        supervisor_linux::remove_secret_env(&name)?;
-        if !systemctl(&["--user", "daemon-reload"])? {
-            return Err("systemctl --user daemon-reload failed".to_string());
-        }
-        Ok(())
+        let (base, path) = unit(env)?;
+        let unit_dir = path
+            .parent()
+            .ok_or("Cannot determine the systemd user unit directory")?;
+        supervisor_linux::remove_login_autostart_with(&supervisor_linux::UserSystemctl, unit_dir, &base)
     }
 }
 
@@ -741,6 +774,7 @@ mod backend {
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod backend {
     use super::{Env, Result};
+    use crate::daemon::owner_admission::OwnerState;
     use std::path::Path;
 
     pub const TARGET_HAS_BACKEND: bool = false;
@@ -753,7 +787,7 @@ mod backend {
         false
     }
 
-    pub fn ensure(_env: Env<'_>, _executable: &Path) -> Result<bool> {
+    pub fn ensure(_env: Env<'_>, _executable: &Path, _login_autostart: bool) -> Result<bool> {
         Ok(false)
     }
 
@@ -786,6 +820,10 @@ mod backend {
 
     pub fn remove_autostart(_env: Env<'_>) -> Result<()> {
         Ok(())
+    }
+
+    pub fn migrate_legacy_job(_env: Env<'_>, _owner: &OwnerState) -> Result<bool> {
+        Ok(false)
     }
 }
 
@@ -844,8 +882,13 @@ mod tests {
             ("FERRYX_DATA_DIR", fixture.to_str().unwrap()),
         ]);
         assert_eq!(
-            ensure_in(&env, false, Path::new("/opt/ferryx/bin/ferryx")),
+            ensure_in(&env, false, Path::new("/opt/ferryx/bin/ferryx"), true),
             Ok(false)
+        );
+        assert_eq!(
+            ensure_in(&env, false, Path::new("/opt/ferryx/bin/ferryx"), false),
+            Ok(false),
+            "an isolated runtime starts nothing, opted out or not"
         );
         assert_eq!(
             std::fs::read_dir(home.path()).unwrap().count(),
@@ -854,26 +897,11 @@ mod tests {
         );
     }
 
+    /// The opt-out is a persisted marker. It changes only login registration: the per-backend
+    /// tests (`launchd`, `supervisor_linux`, `supervisor_windows`) prove an opted-out start
+    /// still goes through the OS job and that opting out never stops a job.
     #[test]
-    fn ensure_is_noop_when_user_opted_out() {
-        let home = tempfile::tempdir().unwrap();
-        // The QA name override makes the backend supported, so only the opt-out stops the install.
-        let env = env_of(&[
-            ("HOME", home.path().to_str().unwrap()),
-            ("XDG_CONFIG_HOME", home.path().join("config").to_str().unwrap()),
-            ("LOCALAPPDATA", home.path().join("local").to_str().unwrap()),
-            (SUPERVISOR_NAME_ENV, "com.ferryx.optout-test"),
-        ]);
-        assert_eq!(
-            ensure_unless_opted_out(true, &env, false, Path::new("/opt/ferryx/bin/ferryx")),
-            Ok(false)
-        );
-        assert_eq!(
-            std::fs::read_dir(home.path()).unwrap().count(),
-            0,
-            "an opted-out user must not get any unit or log file"
-        );
-
+    fn opt_out_marker_persists_and_clears() {
         let data = tempfile::tempdir().unwrap();
         let marker = optout_path_in(data.path());
         assert!(!user_opted_out_at(&marker));
@@ -911,16 +939,6 @@ mod tests {
         assert!(called, "without the opt-out the backend still runs");
     }
 
-    #[test]
-    fn linux_remove_autostart_args_never_stop_the_daemon() {
-        let args = linux_remove_autostart_args("ferryx-daemon.service");
-        assert!(args.contains(&"disable"));
-        assert!(args.contains(&"--user"));
-        assert!(!args.contains(&"--now"), "--now would stop the running daemon");
-        assert!(!args.contains(&"stop"));
-        assert_eq!(args.last(), Some(&"ferryx-daemon.service"));
-    }
-
     /// The macOS job of a generation runs the staged runtime copy, never the GUI's executable in
     /// the app bundle, under the per-generation label (QA override included).
     #[cfg(target_os = "macos")]
@@ -956,5 +974,33 @@ mod tests {
         let job = backend::job_for(&qa, &staged).unwrap();
         assert_eq!(job.label, "ferryx-qa-1.2026.1013.2-0a1b2c3d");
         assert_eq!(job.plist_path, agents.join("ferryx-qa-1.2026.1013.2-0a1b2c3d.plist"));
+    }
+
+    /// The macOS legacy migration covers `com.ferryx.daemon` and the pre-rebrand
+    /// `com.rorca.daemon`; a QA run (name override) migrates only its own QA-named legacy job and
+    /// never the user's real ones.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_legacy_jobs_cover_both_legacy_labels_and_qa_only_its_own() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join("Library/LaunchAgents");
+        let env = env_of(&[("HOME", home.path().to_str().unwrap())]);
+        assert_eq!(
+            backend::legacy_jobs(&env).unwrap(),
+            vec![
+                ("com.ferryx.daemon".to_string(), agents.join("com.ferryx.daemon.plist")),
+                ("com.rorca.daemon".to_string(), agents.join("com.rorca.daemon.plist")),
+            ]
+        );
+        let qa_agents = home.path().join("qa-agents");
+        let qa = env_of(&[
+            ("HOME", home.path().to_str().unwrap()),
+            (SUPERVISOR_NAME_ENV, "ferryx-qa-1"),
+            (crate::daemon::launchd::PLIST_PATH_ENV, qa_agents.to_str().unwrap()),
+        ]);
+        assert_eq!(
+            backend::legacy_jobs(&qa).unwrap(),
+            vec![("ferryx-qa-1".to_string(), qa_agents.join("ferryx-qa-1.plist"))]
+        );
     }
 }

@@ -725,13 +725,19 @@ pub(crate) trait SupervisorOps {
     /// Ensures and starts the supervised job. Only called for an Absent owner under admission.
     /// Returns whether a start was actually issued.
     fn start_absent_owner(&self) -> Result<bool, String>;
+    /// Migrates the legacy single job (todo 14) for the owner admission just classified, while
+    /// admission.lock is held. Alive or Unknown: the legacy job keeps running and only loses its
+    /// login autostart. Absent: the legacy job is removed. Never stops a running daemon.
+    fn migrate_legacy_job(&self, owner: &OwnerState) -> Result<(), String>;
     /// Registers this build for the next login without touching any running job.
     fn reconcile_login_registration(&self) -> Result<(), String>;
 }
 
-/// GUI setup: always reconciles login registration, and starts the supervised daemon only when
-/// the owner is Absent. Returns whether a start was issued. An Alive or Unknown owner is never
-/// reloaded, restarted, or stopped.
+/// GUI setup: under admission.lock it classifies the owner once, migrates the legacy single job
+/// for that classification, and starts the supervised daemon only when the owner is Absent; then
+/// it reconciles login registration. Returns whether a start was issued. An Alive or Unknown
+/// owner is never reloaded, restarted, or stopped. A failed legacy migration is logged and never
+/// blocks the start.
 pub(crate) fn ensure_if_absent_with(
     paths: &AdmissionPaths,
     probe: &dyn OwnerProbe,
@@ -739,8 +745,17 @@ pub(crate) fn ensure_if_absent_with(
     lock_deadline: Duration,
     ready_timeout: Duration,
 ) -> Result<bool, String> {
-    let started = match admit(paths, probe, &current_generation_key(), lock_deadline) {
-        Ok(Admit::Start(_guard)) => match ops.start_absent_owner() {
+    let guard =
+        acquire_admission_lock(&paths.admission_lock, lock_deadline).map_err(|error| error.to_string())?;
+    let state = classify_owner(probe);
+    // A legacy daemon shares the runtime dir, locks and endpoint, so this classification is the
+    // legacy owner's too; migrating under the same lock keeps it consistent with the start below.
+    if let Err(error) = ops.migrate_legacy_job(&state) {
+        tracing::warn!(%error, ?state, "Could not migrate the legacy daemon job; nothing was stopped");
+    }
+    let started = if state == OwnerState::Absent {
+        record_pending_start(paths, &current_generation_key(), probe.now_unix_ms())?;
+        match ops.start_absent_owner() {
             Ok(true) => {
                 if !wait_until_alive(probe, ready_timeout) {
                     tracing::warn!("The supervised daemon did not become ready in time");
@@ -755,13 +770,12 @@ pub(crate) fn ensure_if_absent_with(
                 withdraw_pending_start(paths)?;
                 return Err(error);
             }
-        },
-        Ok(Admit::Refuse(state)) => {
-            tracing::info!(?state, "A daemon owner exists; GUI setup starts nothing");
-            false
         }
-        Err(error) => return Err(error.to_string()),
+    } else {
+        tracing::info!(?state, "A daemon owner exists; GUI setup starts nothing");
+        false
     };
+    drop(guard);
     // Registration runs after any start so it cannot make the start look like a no-op change.
     ops.reconcile_login_registration()?;
     Ok(started)
@@ -1394,6 +1408,7 @@ mod tests {
     struct RecordingOps {
         starts: Cell<u32>,
         registrations: Cell<u32>,
+        migrations: std::cell::RefCell<Vec<OwnerState>>,
     }
 
     /// todo 8: a committed successor whose owner.json publication fails for the first 3
@@ -1485,6 +1500,10 @@ mod tests {
             self.starts.set(self.starts.get() + 1);
             Ok(true)
         }
+        fn migrate_legacy_job(&self, owner: &OwnerState) -> Result<(), String> {
+            self.migrations.borrow_mut().push(owner.clone());
+            Ok(())
+        }
         fn reconcile_login_registration(&self) -> Result<(), String> {
             self.registrations.set(self.registrations.get() + 1);
             Ok(())
@@ -1504,6 +1523,11 @@ mod tests {
         assert!(!started);
         assert_eq!(ops.starts.get(), 0, "an alive owner's job is never started or reloaded");
         assert_eq!(ops.registrations.get(), 1);
+        assert_eq!(
+            *ops.migrations.borrow(),
+            [OwnerState::Alive { pid: 10, start_time: 100 }],
+            "the legacy job is migrated once, for the alive owner"
+        );
         assert!(!paths.starting.exists());
     }
 
@@ -1539,5 +1563,85 @@ mod tests {
             admit_and_start(&paths, &probe, &runner, "gen", Duration::ZERO, Duration::ZERO).unwrap();
         assert!(matches!(result, Admission::NotStarted(OwnerState::Unknown { .. })));
         assert_eq!(runner.starts.get(), 0);
+    }
+
+    /// Records the order of supervisor operations and whether admission.lock was held during the
+    /// legacy migration (another handle must fail to take it).
+    struct OrderingOps {
+        admission_lock: PathBuf,
+        events: std::cell::RefCell<Vec<String>>,
+        fail_migration: bool,
+    }
+
+    impl SupervisorOps for OrderingOps {
+        fn start_absent_owner(&self) -> Result<bool, String> {
+            self.events.borrow_mut().push("start".to_string());
+            Ok(true)
+        }
+        fn migrate_legacy_job(&self, owner: &OwnerState) -> Result<(), String> {
+            let held = matches!(
+                acquire_admission_lock(&self.admission_lock, Duration::ZERO),
+                Err(AdmissionError::Busy(_))
+            );
+            let kind = match owner {
+                OwnerState::Alive { .. } => "alive",
+                OwnerState::Unknown { .. } => "unknown",
+                OwnerState::Absent => "absent",
+            };
+            self.events
+                .borrow_mut()
+                .push(format!("migrate:{kind}:locked={held}"));
+            if self.fail_migration {
+                return Err("legacy migration failed".to_string());
+            }
+            Ok(())
+        }
+        fn reconcile_login_registration(&self) -> Result<(), String> {
+            self.events.borrow_mut().push("register".to_string());
+            Ok(())
+        }
+    }
+
+    /// Todo 14: the legacy job is migrated exactly once per GUI setup, under admission.lock, with
+    /// the owner that lock's classification produced; it precedes any start, and a failed
+    /// migration never blocks the newest generation's start or login registration.
+    #[test]
+    fn legacy_migration_runs_under_admission_with_the_classified_owner() {
+        let cases: Vec<(FakeProbe, Vec<&str>)> = vec![
+            (
+                FakeProbe::new(LockState::Held, Endpoint::Answers)
+                    .with_record(10, 100)
+                    .with_process(10, 100),
+                vec!["migrate:alive:locked=true", "register"],
+            ),
+            (
+                FakeProbe::new(LockState::Free, Endpoint::Silent),
+                vec!["migrate:unknown:locked=true", "register"],
+            ),
+            (
+                FakeProbe::new(LockState::Free, Endpoint::Missing),
+                vec!["migrate:absent:locked=true", "start", "register"],
+            ),
+        ];
+        for fail_migration in [false, true] {
+            for (probe, expected) in &cases {
+                let dir = tempfile::tempdir().unwrap();
+                let paths = paths_in(dir.path());
+                let ops = OrderingOps {
+                    admission_lock: paths.admission_lock.clone(),
+                    events: Default::default(),
+                    fail_migration,
+                };
+                let started =
+                    ensure_if_absent_with(&paths, probe, &ops, Duration::ZERO, Duration::ZERO)
+                        .unwrap();
+                assert_eq!(started, expected.contains(&"start"));
+                assert_eq!(*ops.events.borrow(), *expected, "fail_migration={fail_migration}");
+                assert!(
+                    acquire_admission_lock(&paths.admission_lock, Duration::ZERO).is_ok(),
+                    "admission.lock is released after GUI setup"
+                );
+            }
+        }
     }
 }
