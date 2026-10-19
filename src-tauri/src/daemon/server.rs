@@ -2451,6 +2451,8 @@ mod live_inventory_paired_tests {
         let (id, generation) = client.paired_terminal_reattach(descriptor).await.unwrap();
         let before = live_entry(&socket, &id).await;
 
+        let durable = root.path().join("remote_sessions.json");
+        daemon.persist_remote_sessions_at(durable.clone()).await.unwrap();
         let legacy = commit_predecessor_keeping_retained(&daemon, root.path()).await;
         assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Draining);
         assert_eq!(
@@ -2472,6 +2474,10 @@ mod live_inventory_paired_tests {
             .adopt_routes_from_manifest_at(root.path().join("handover_routes.json"))
             .await
             .unwrap();
+        // The successor's real restore path, run after the route adoption exactly as the
+        // committed candidate does, creates no controller for the retained session.
+        successor.restore_remote_sessions_at(durable).await.unwrap();
+        assert!(successor.terminal_service.remote().list().is_empty(), "successor created an SSH controller");
         assert!(successor.terminal_service.paired().list().is_empty(), "successor created a controller");
         let successor_socket = root.path().join("successor.sock");
         let successor_listener = tokio::net::UnixListener::bind(&successor_socket).unwrap();
