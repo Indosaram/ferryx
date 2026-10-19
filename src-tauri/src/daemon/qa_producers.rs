@@ -40,6 +40,8 @@ pub const ABORT_ARM: &str = "abort";
 /// really adopted the exported sessions.
 pub const HANDOVER_FAULT_ENV: &str = "FERRYX_QA_HANDOVER_FAULT";
 pub const HANDOVER_FAULT_ABORT_AFTER_ADOPT: &str = "abort-after-adopt";
+/// Receipt name for todo 8's authority transfer stages.
+pub const AUTHORITY_STAGE: &str = "handover-authority";
 
 const TRIGGER_REMOTE_RPC: &str = "trigger-remote-rpc";
 const HELD_RPC_RPC_KIND: &str = "remote-query";
@@ -404,6 +406,64 @@ pub fn injected_handover_fault() -> Option<String> {
 /// variant, so the real rollback path runs instead of a commit.
 pub fn abort_after_adopt_requested() -> bool {
     injected_handover_fault().as_deref() == Some(HANDOVER_FAULT_ABORT_AFTER_ADOPT)
+}
+
+/// Predecessor-side commit faults selected by FERRYX_QA_HANDOVER_FAULT (todo 8 variants).
+pub fn commit_fault_from_env() -> Option<crate::daemon::handover::CommitFault> {
+    use crate::daemon::handover::CommitFault;
+    match injected_handover_fault().as_deref() {
+        Some("decision-write-failure") => Some(CommitFault::DecisionWrite),
+        Some("drop-commit-ok-before-record") => Some(CommitFault::DropReplyBeforeRecord),
+        Some("drop-commit-ok-after-record") => Some(CommitFault::DropReplyAfterRecord),
+        _ => None,
+    }
+}
+
+/// One QA receipt per handover state transition (todo 8): the candidate's accept counters on
+/// every inherited listener, and a probe flock on both lock files taken from a fresh open file
+/// description, exactly as another process would try. Sampled at the transition itself, never
+/// by timing.
+#[cfg(unix)]
+pub async fn note_authority_stage(
+    stage: &str,
+    manager: &crate::daemon::handover::HandoverManager,
+) {
+    use crate::daemon::handover::AuthorityListenerRole;
+    let Some(channel) = channel().await else { return };
+    let Some(operation_id) = channel.operation_id() else { return };
+    let accept_counts = json!({
+        "canonical": manager.accept_count(AuthorityListenerRole::Canonical),
+        "control": manager.accept_count(AuthorityListenerRole::Control),
+        "agentState": manager.accept_count(AuthorityListenerRole::AgentState),
+    });
+    let stage = stage.to_string();
+    // The flock probes and the socket stat are filesystem work: keep them off the Tokio workers.
+    let settlement = match tokio::task::spawn_blocking(move || {
+        let legacy = crate::daemon::server::get_lock_path();
+        let persistent = crate::daemon::server::get_persistent_lock_path();
+        let probe = |path: &Path| match crate::daemon::handover_socket::lock_is_held_elsewhere(path) {
+            Ok(held) => json!(held),
+            Err(error) => json!(error.to_string()),
+        };
+        json!({
+            "stage": stage,
+            "acceptCounts": accept_counts,
+            "probeFlockRefused": {
+                "legacy": probe(&legacy),
+                "persistent": persistent.as_deref().map(probe),
+            },
+            "publicSocketPresent": crate::daemon::server::get_socket_path().exists(),
+        })
+    })
+    .await
+    {
+        Ok(settlement) => settlement,
+        Err(error) => {
+            tracing::warn!(%error, "Authority stage probe task failed");
+            return;
+        }
+    };
+    qa_barrier::append_receipt_off_runtime(&channel, AUTHORITY_STAGE, &operation_id, settlement).await;
 }
 
 /// Predecessor spawn hook: the successor is spawned exactly as production spawns

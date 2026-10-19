@@ -34,6 +34,9 @@ pub enum IpcErrorCode {
     DaemonUpgradeRequired,
     /// The daemon is retiring (control-v1 RetireWhenIdle / Shutdown) and accepts no new session.
     DaemonRetiring,
+    /// An update is installed but the running daemon owner speaks another data protocol; it keeps
+    /// its terminals and retires when they close. details: { runningVersion, liveSessions }.
+    DaemonUpdatePending,
     /// A daemon owner is alive or cannot be identified, and it did not answer in time. Nothing
     /// was started or replaced.
     DaemonBusy,
@@ -240,6 +243,7 @@ impl IpcErrorCode {
             "SPAWN_ATTEMPT_TIMEOUT" => Self::SpawnAttemptTimeout,
             "SPAWN_CANCELLED" => Self::SpawnCancelled,
             "DAEMON_RETIRING" => Self::DaemonRetiring,
+            "DAEMON_UPDATE_PENDING" => Self::DaemonUpdatePending,
             other => Self::Custom(other.to_string()),
         }
     }

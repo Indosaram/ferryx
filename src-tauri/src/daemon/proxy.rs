@@ -732,7 +732,12 @@ impl SessionRouter {
     }
 
     pub async fn adopt_routes_from_manifest(&self) -> Result<(), String> {
-        let manifest_path = get_manifest_path();
+        self.adopt_routes_from_manifest_at(get_manifest_path()).await
+    }
+
+    /// adopt_routes_from_manifest for an explicit manifest (in-process fixtures).
+    pub(crate) async fn adopt_routes_from_manifest_at(&self, manifest_path: PathBuf) -> Result<(), String> {
+        let pruned_path = manifest_path.clone();
         if !manifest_path.exists() {
             return Ok(());
         }
@@ -776,7 +781,7 @@ impl SessionRouter {
         }
 
         if !unreachable_routes.is_empty() {
-            let manifest_path = get_manifest_path();
+            let manifest_path = pruned_path;
             let _ = crate::ipc::run_blocking(move || {
                 HandoverManifest::update_at_path(&manifest_path, |manifest| {
                     for path in &unreachable_routes {
@@ -797,11 +802,16 @@ impl SessionRouter {
     pub fn is_local_session(&self, session_id: &str) -> bool {
         self.terminal_service.get_session(session_id).is_some()
             || self.terminal_service.remote().contains(session_id)
-            || crate::terminal::paired_runtime::Runtime::owns(session_id)
+            || (crate::terminal::paired_runtime::Runtime::owns(session_id)
+                && self.find_legacy_peer_for_session(session_id).is_none())
     }
 
+    /// A paired session id is served here unless an older generation that kept it across an
+    /// upgrade (todo 8) still owns it and this daemon runs no actor for it.
     pub fn find_legacy_peer_for_session(&self, session_id: &str) -> Option<Arc<LegacyPeer>> {
-        if crate::terminal::paired_runtime::Runtime::owns(session_id) {
+        if crate::terminal::paired_runtime::Runtime::owns(session_id)
+            && self.terminal_service.paired().contains(session_id)
+        {
             return None;
         }
         let peers = self.legacy_peers.read();

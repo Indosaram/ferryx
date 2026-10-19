@@ -48,6 +48,9 @@ pub const CODE_UNSUPPORTED_OP: &str = "UNSUPPORTED_OP";
 pub const CODE_BAD_REQUEST: &str = "BAD_REQUEST";
 pub const CODE_UNSUPPORTED_CONTROL_VERSION: &str = "UNSUPPORTED_CONTROL_VERSION";
 pub const CODE_UPGRADE_UNSUPPORTED: &str = "UPGRADE_UNSUPPORTED";
+/// RequestUpgrade refused for now (the successor job is busy or could not be started, or a
+/// handover is already in progress); the daemon keeps serving everything. Additive (todo 8).
+pub const CODE_UPGRADE_REFUSED: &str = "UPGRADE_REFUSED";
 pub const CODE_HANDOVER_WIRE_UNSUPPORTED: &str = "HANDOVER_WIRE_UNSUPPORTED";
 pub const CODE_SPAWN_IN_FLIGHT: &str = "SPAWN_IN_FLIGHT";
 pub const CODE_NOT_ACTIVE_OWNER: &str = "NOT_ACTIVE_OWNER";

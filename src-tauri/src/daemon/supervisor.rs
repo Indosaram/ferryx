@@ -261,6 +261,46 @@ pub fn reconcile_login_registration() -> Result<bool> {
     backend::register_for_login(&process_env, &executable)
 }
 
+/// HandoverCandidate admission (todo 8): the only start allowed while an owner is Alive. Called
+/// only by the control-channel RequestUpgrade handler, after it verified the staged executable and
+/// wrote handover-request.json. Takes the admission lock, re-reads the request and starts the
+/// successor generation's job only when the request is exactly the caller's own (same nonce,
+/// generation key and predecessor identity, predecessor pid == this process). Owner state is
+/// ignored on purpose: the owner is the caller. The predecessor's own job is never touched.
+#[cfg(unix)]
+pub(crate) fn start_handover_candidate(
+    request: &crate::daemon::handover_request::HandoverRequest,
+) -> Result<crate::daemon::handover_request::CandidateStart> {
+    use crate::daemon::handover_request as handover_request;
+    if !supported() {
+        return Ok(handover_request::CandidateStart::Refused(
+            "No daemon supervisor is supported in this runtime".to_string(),
+        ));
+    }
+    let paths = crate::daemon::owner_admission::AdmissionPaths::for_runtime();
+    handover_request::start_handover_candidate_with(
+        &crate::daemon::server::get_runtime_dir(),
+        &paths.admission_lock,
+        request,
+        std::process::id(),
+        &ProcessCandidateStarter,
+        crate::daemon::owner_admission::ADMISSION_LOCK_DEADLINE,
+    )
+}
+
+#[cfg(unix)]
+struct ProcessCandidateStarter;
+
+#[cfg(unix)]
+impl crate::daemon::handover_request::CandidateStarter for ProcessCandidateStarter {
+    fn start_candidate(
+        &self,
+        request: &crate::daemon::handover_request::HandoverRequest,
+    ) -> Result<crate::daemon::handover_request::CandidateStart> {
+        backend::start_candidate(&process_env, &request.generation_key, &request.staged_executable)
+    }
+}
+
 /// Stops and removes the unit; a missing unit is success.
 pub fn uninstall() -> Result<()> {
     if !supported() {
@@ -377,6 +417,43 @@ mod backend {
             outcome,
             generation::EnsureOutcome::Bootstrapped | generation::EnsureOutcome::Kickstarted
         ))
+    }
+
+    /// Starts the successor generation's job for a handover (todo 8): NotRegistered -> plist +
+    /// `bootstrap`; RegisteredIdle -> plain `kickstart` (no `-k`); Running or Unverifiable ->
+    /// refused, so the predecessor keeps serving. The owner (the caller) is deliberately passed as
+    /// Absent to the job-state switch; the successor label is never the predecessor's own.
+    /// `login_autostart` is false: starting the candidate never registers it for login. Login
+    /// registration stays with [`super::reconcile_login_registration`] (newest generation only,
+    /// no launchctl), so a candidate that never commits leaves no `RunAtLoad` plist behind.
+    pub fn start_candidate(
+        env: Env<'_>,
+        key: &str,
+        executable: &Path,
+    ) -> Result<crate::daemon::handover_request::CandidateStart> {
+        use crate::daemon::handover_request::CandidateStart;
+        let staged = runtime_stage::StagedRuntime {
+            key: key.to_string(),
+            executable: executable.to_path_buf(),
+        };
+        let job = job_for(env, &staged)?;
+        let outcome = generation::ensure_generation_job(
+            &generation::SystemLaunchctl,
+            uid(),
+            &job,
+            &OwnerState::Absent,
+            false,
+        )?;
+        tracing::info!(label = %job.label, ?outcome, "Handover candidate job start");
+        Ok(match outcome {
+            generation::EnsureOutcome::Bootstrapped | generation::EnsureOutcome::Kickstarted => {
+                CandidateStart::Started
+            }
+            other => CandidateStart::Refused(format!(
+                "successor job {} was not started: {other:?}",
+                job.label
+            )),
+        })
     }
 
     /// Registers this build's generation for the next login (plist with `RunAtLoad` true, no
@@ -637,6 +714,25 @@ mod backend {
         supervisor_linux::ensure(&name, &path, &staged)
     }
 
+    /// Starts the successor generation's unit for a handover (todo 8): writes the unit if needed,
+    /// `daemon-reload` when it changed, `start --no-block`; an already active unit is refused.
+    /// The predecessor's own unit is never touched.
+    pub fn start_candidate(
+        env: Env<'_>,
+        key: &str,
+        executable: &Path,
+    ) -> Result<crate::daemon::handover_request::CandidateStart> {
+        use crate::daemon::handover_request::CandidateStart;
+        let (base, base_path) = unit(env)?;
+        let name = supervisor_linux::generation_unit_name(&base, key)?;
+        let path = base_path.with_file_name(format!("{name}.service"));
+        Ok(if supervisor_linux::ensure(&name, &path, executable)? {
+            CandidateStart::Started
+        } else {
+            CandidateStart::Refused(format!("successor unit {name} is already active"))
+        })
+    }
+
     /// Writes this build's generation unit and enables it for login without `--now`; older
     /// generations are disabled without `--now`. A running unit is untouched. Garbage collection
     /// runs after registration, so the unit just written already protects its runtime.
@@ -704,6 +800,17 @@ mod backend {
 
     pub fn ensure(_env: Env<'_>, _executable: &Path, _login_autostart: bool) -> Result<bool> {
         Ok(false)
+    }
+
+    #[cfg(unix)]
+    pub fn start_candidate(
+        _env: Env<'_>,
+        _key: &str,
+        _executable: &Path,
+    ) -> Result<crate::daemon::handover_request::CandidateStart> {
+        Ok(crate::daemon::handover_request::CandidateStart::Refused(
+            "No daemon supervisor backend on this target".to_string(),
+        ))
     }
 
     pub fn register_for_login(_env: Env<'_>, _executable: &Path) -> Result<bool> {

@@ -357,6 +357,33 @@ pub(crate) fn publish_owner(paths: &AdmissionPaths, generation_key: &str, epoch:
     withdraw_pending_start(paths)
 }
 
+/// Interval between owner.json publication attempts after a failure (todo 8).
+pub(crate) const OWNER_PUBLISH_RETRY: Duration = Duration::from_secs(1);
+
+/// Publishes owner.json, retrying every OWNER_PUBLISH_RETRY until one attempt succeeds. Serving
+/// never waits on it: until the record names this daemon, locks held + a record naming a dead
+/// predecessor classify as row 3 Unknown, so no start is admitted in the meantime. tick is the
+/// wait between attempts (a fixed 1 s in production; a test drives it with an event). Returns
+/// the number of attempts made.
+pub(crate) async fn publish_owner_until_published<P, T, F>(mut publish: P, mut tick: T) -> u32
+where
+    P: FnMut() -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+    T: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+{
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        match publish().await {
+            Ok(()) => return attempts,
+            Err(error) => {
+                tracing::warn!(attempts, %error, "Could not publish the daemon owner record; retrying");
+            }
+        }
+        tick().await;
+    }
+}
+
 /// Start time of a live process in a platform-specific monotonic unit, or None when the
 /// process is gone or the value cannot be read. Only equality between two readings matters.
 #[cfg(target_os = "macos")]
@@ -1568,6 +1595,90 @@ mod tests {
         starts: Cell<u32>,
         registrations: Cell<u32>,
         migrations: std::cell::RefCell<Vec<OwnerState>>,
+    }
+
+    /// todo 8: a committed successor whose owner.json publication fails for the first 3
+    /// attempts keeps serving while classify_owner reports Unknown (locks held + a record
+    /// naming a dead predecessor, row 3) and admission starts nothing; the 4th attempt
+    /// publishes and the probe reports Alive with this pid. Each retry tick is an event the
+    /// test releases, never a sleep.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_publication_retries_until_published_and_admits_nothing_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        // Inherited locks: held by this process. The record names a dead predecessor.
+        let _locks = crate::daemon::server::acquire_daemon_locks(None, &paths.legacy_lock).unwrap();
+        write_record_atomic(
+            &paths.owner,
+            &OwnerRecord {
+                pid: u32::MAX - 7,
+                start_time: 1,
+                generation_key: "gen-predecessor".into(),
+                epoch: 1,
+                supervisor_pid: None,
+                supervisor_start_time: None,
+            },
+        )
+        .unwrap();
+
+        let (tick_tx, tick_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let tick_rx = std::sync::Arc::new(tokio::sync::Mutex::new(tick_rx));
+        let (attempt_tx, mut attempts) = tokio::sync::mpsc::unbounded_channel::<u32>();
+        let failures = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(3));
+        let publisher = {
+            let paths = paths.clone();
+            let failures = failures.clone();
+            let tick_rx = tick_rx.clone();
+            tokio::spawn(async move {
+                let mut attempt = 0u32;
+                publish_owner_until_published(
+                    || {
+                        attempt += 1;
+                        let _ = attempt_tx.send(attempt);
+                        let failing = failures
+                            .fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |left| left.checked_sub(1))
+                            .is_ok();
+                        let paths = paths.clone();
+                        async move {
+                            if failing {
+                                Err("injected owner.json failure".to_string())
+                            } else {
+                                publish_owner(&paths, "gen-successor", 2)
+                            }
+                        }
+                    },
+                    || -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+                        let tick_rx = tick_rx.clone();
+                        Box::pin(async move {
+                            let _ = tick_rx.lock().await.recv().await;
+                        })
+                    },
+                )
+                .await
+            })
+        };
+
+        for failed in 1..=3u32 {
+            assert_eq!(attempts.recv().await, Some(failed));
+            let probe = RuntimeProbe { paths: &paths };
+            assert!(
+                matches!(classify_owner(&probe), OwnerState::Unknown { .. }),
+                "attempt {failed}: an unpublished successor must classify Unknown"
+            );
+            let ops = RecordingOps::default();
+            ensure_if_absent_with(&paths, &probe, &ops, Duration::ZERO, Duration::ZERO).unwrap();
+            assert_eq!(ops.starts.get(), 0, "attempt {failed}: a start was admitted");
+            tick_tx.send(()).unwrap();
+        }
+        assert_eq!(attempts.recv().await, Some(4));
+        assert_eq!(publisher.await.unwrap(), 4);
+        let probe = RuntimeProbe { paths: &paths };
+        let pid = std::process::id();
+        assert!(
+            matches!(classify_owner(&probe), OwnerState::Alive { pid: alive, .. } if alive == pid),
+            "the 4th attempt must publish this daemon as the Alive owner"
+        );
     }
 
     impl SupervisorOps for RecordingOps {
