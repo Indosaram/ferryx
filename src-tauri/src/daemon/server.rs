@@ -4020,6 +4020,9 @@ impl DaemonServer {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        // QaFixtureKind::DaemonListenerStall (QA builds only): accepted, handshake not answered until released.
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        crate::ipc::qa_barrier::daemon_listener_stall_gate().await;
         let (read_half, mut write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
