@@ -1171,8 +1171,9 @@ const PaneLeafView = React.memo(function PaneLeafView({
       }}
       className={`relative flex h-full w-full min-h-0 min-w-0 overflow-hidden bg-terminal ${
         droppable.isOver ? "ring-2 ring-primary/80 ring-inset" : ""
-      }`}
+      } ${isOnlyLeaf ? "" : `border ${isActive ? "border-primary/60" : "border-transparent"}`}`}
       data-testid="pane-leaf"
+      data-pane-focused={!isOnlyLeaf && isActive ? "true" : undefined}
       data-shortcut-scope-active={isActive && !showsDropFeedback}
       data-leaf-id={leafId}
       data-tab-id={tab.id}

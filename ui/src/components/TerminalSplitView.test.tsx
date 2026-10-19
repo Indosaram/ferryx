@@ -818,6 +818,21 @@ describe("TerminalSplitView group and pane rendering", () => {
     expect(paneLeaf).not.toHaveClass("transition-[height]");
   });
 
+  it("outlines only the focused pane of a split and leaves a lone pane unframed", () => {
+    const { unmount } = render(<TerminalSplitView layout={splitLayout()} sessions={splitSessions()} />);
+    const [first, second] = screen.getAllByTestId("pane-leaf");
+    expect(first).toHaveAttribute("data-pane-focused", "true");
+    expect(first).toHaveClass("border-primary/60");
+    expect(second).not.toHaveAttribute("data-pane-focused");
+    expect(second).toHaveClass("border-transparent");
+    unmount();
+
+    render(<TerminalSplitView layout={singleTabLayout()} sessions={{ "session-1": session("session-1", "backend-1") }} />);
+    const lone = screen.getByTestId("pane-leaf");
+    expect(lone).not.toHaveAttribute("data-pane-focused");
+    expect(lone).not.toHaveClass("border");
+  });
+
   it("does not apply amber ring class on pane leaf in any state, while forwarding needsAttention to terminal pane and rendering bottom DOM frame completion for waiting or unread done", () => {
     const layout = singleTabLayout();
     const sessions = { "session-1": session("session-1", "backend-1") };

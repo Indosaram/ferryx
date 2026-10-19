@@ -42,6 +42,10 @@ export type ShortcutActionId =
   | "terminal.unsplit"
   | "terminal.focusNext"
   | "terminal.focusPrevious"
+  | "terminal.focusLeft"
+  | "terminal.focusRight"
+  | "terminal.focusUp"
+  | "terminal.focusDown"
   | "terminal.search"
   | "terminal.copyMode"
   | "sidebar.left.toggle"
@@ -327,6 +331,34 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     group: "Terminal Panes",
     binding: { key: "[", mod: true },
     source: "original",
+  },
+  {
+    id: "terminal.focusLeft",
+    title: "Focus terminal pane to the left",
+    group: "Terminal Panes",
+    binding: { key: "ArrowLeft", mod: true, alt: true },
+    source: "ferryx",
+  },
+  {
+    id: "terminal.focusRight",
+    title: "Focus terminal pane to the right",
+    group: "Terminal Panes",
+    binding: { key: "ArrowRight", mod: true, alt: true },
+    source: "ferryx",
+  },
+  {
+    id: "terminal.focusUp",
+    title: "Focus terminal pane above",
+    group: "Terminal Panes",
+    binding: { key: "ArrowUp", mod: true, alt: true },
+    source: "ferryx",
+  },
+  {
+    id: "terminal.focusDown",
+    title: "Focus terminal pane below",
+    group: "Terminal Panes",
+    binding: { key: "ArrowDown", mod: true, alt: true },
+    source: "ferryx",
   },
   {
     id: "terminal.search",

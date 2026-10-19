@@ -165,6 +165,7 @@ import {
 import { registerWindowCloseGuard, startUpdatePolling } from "./lib/updater";
 import { maybeShowWindowsStoreMigrationNotice } from "./lib/windowsStoreMigration";
 import { collectLeafIds, type PaneDirection } from "./state/paneTree";
+import { findDirectionalLeafId, type PaneFocusDirection } from "./state/paneGeometry";
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspaceState";
@@ -2767,6 +2768,21 @@ function WorkspaceApp({
     [focusPane],
   );
 
+  const handleDirectionalPaneFocus = useCallback(
+    (direction: PaneFocusDirection) => {
+      if (activeRemoteHostRef.current) return;
+      const currentState = stateRef.current;
+      const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
+      if (!activeTab || activeTab.kind === "browser") return;
+      const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
+      if (!activeLayout || activeLayout.root.type === "leaf") return;
+      const activeLeafId = activeLayout.activeLeafId ?? collectLeafIds(activeLayout.root)[0];
+      const targetLeafId = findDirectionalLeafId(activeLayout.root, activeLeafId, direction);
+      if (targetLeafId) focusPane(activeTab.id, targetLeafId);
+    },
+    [focusPane],
+  );
+
   const handleOpenTerminalSearch = useCallback(() => {
     if (activeRemoteHostRef.current) return;
     const currentState = stateRef.current;
@@ -3628,6 +3644,10 @@ function WorkspaceApp({
         "terminal.unsplit": handleUnsplitActive,
         "terminal.focusNext": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(1),
         "terminal.focusPrevious": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(-1),
+        "terminal.focusLeft": browserShortcutsActive ? undefined : () => handleDirectionalPaneFocus("left"),
+        "terminal.focusRight": browserShortcutsActive ? undefined : () => handleDirectionalPaneFocus("right"),
+        "terminal.focusUp": browserShortcutsActive ? undefined : () => handleDirectionalPaneFocus("up"),
+        "terminal.focusDown": browserShortcutsActive ? undefined : () => handleDirectionalPaneFocus("down"),
         "terminal.search": browserShortcutsActive ? undefined : handleOpenTerminalSearch,
         "terminal.copyMode": browserShortcutsActive ? undefined : handleToggleTerminalCopyMode,
         "sidebar.left.toggle": toggleSidebar,
@@ -3646,6 +3666,7 @@ function WorkspaceApp({
       handleAddTerminalTab,
       handleCloseActiveSurface,
       handleCyclePaneFocus,
+      handleDirectionalPaneFocus,
       browserShortcutsActive,
       shortcutBrowserId,
       handleCycleTab,
