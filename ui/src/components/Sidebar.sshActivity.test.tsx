@@ -8,6 +8,7 @@ import { Sidebar } from "./Sidebar";
 vi.mock("../lib/sshHosts", () => ({
   useSshHosts: () => ({ hosts: [{ id: "build", label: "Build machine" }] }),
   getCachedSshHosts: () => [{ id: "build", label: "Build machine" }],
+  subscribeSshHosts: () => () => undefined,
 }));
 
 beforeEach(() => localStorage.clear());

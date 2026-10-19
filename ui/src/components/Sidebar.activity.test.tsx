@@ -53,7 +53,7 @@ describe("Sidebar project activity", () => {
     expect(within(project).getByTestId("project-attention-indicator")).toHaveAttribute("data-attention-state", "done");
   });
 
-  it("shows the aggregated running count and attention state on each registered project header", () => {
+  it("shows one state slot per project header: needs input beats running, unread stands alone", () => {
     render(
       <Sidebar
         projects={projects}
@@ -83,11 +83,13 @@ describe("Sidebar project activity", () => {
     );
 
     const defaultProject = screen.getByRole("button", { name: "default" });
-    expect(within(defaultProject).getByTestId("project-running-badge")).toHaveTextContent("2 running");
+    // (a) Waiting outranks running in one project: a single slot, labelled "needs input".
+    expect(within(defaultProject).queryByTestId("project-running-badge")).not.toBeInTheDocument();
     expect(within(defaultProject).getByTestId("project-attention-indicator")).toHaveAttribute(
       "data-attention-state",
       "waiting",
     );
+    expect(within(defaultProject).getByTestId("project-attention-indicator")).toHaveTextContent("needs input");
 
     const qaProject = screen.getByRole("button", { name: "qa" });
     expect(within(qaProject).queryByTestId("project-running-badge")).not.toBeInTheDocument();
@@ -95,6 +97,23 @@ describe("Sidebar project activity", () => {
       "data-attention-state",
       "unread",
     );
+  });
+
+  it("labels the running slot with the count only when more than one agent runs", () => {
+    const { rerender } = render(
+      <Sidebar projects={[projects[0]]} activeProjectId="default" worktrees={[defaultWorktree]} agents={[]}
+        activePath={defaultWorktree.path}
+        activityByWorktreePath={{ [defaultWorktree.path]: summary({ workingCount: 2, runningCount: 2, hasWorking: true }) }}
+        onSelectWorktree={vi.fn()} onCreateWorktree={vi.fn()} />,
+    );
+    expect(within(screen.getByRole("button", { name: "default" })).getByTestId("project-running-badge")).toHaveTextContent("2 running");
+    rerender(
+      <Sidebar projects={[projects[0]]} activeProjectId="default" worktrees={[defaultWorktree]} agents={[]}
+        activePath={defaultWorktree.path}
+        activityByWorktreePath={{ [defaultWorktree.path]: summary({ workingCount: 1, runningCount: 1, hasWorking: true }) }}
+        onSelectWorktree={vi.fn()} onCreateWorktree={vi.fn()} />,
+    );
+    expect(within(screen.getByRole("button", { name: "default" })).getByTestId("project-running-badge")).toHaveTextContent(/^running$/);
   });
 
   it("keeps the per-project add-worktree action outside the project's activity row button", () => {
@@ -118,7 +137,7 @@ describe("Sidebar project activity", () => {
     // The badge/indicator row button stays clean; creation lives beside it, not inside it.
     const defaultProject = screen.getByRole("button", { name: "default" });
     expect(within(defaultProject).queryByRole("button")).not.toBeInTheDocument();
-    expect(within(defaultProject).getByTestId("project-running-badge")).toHaveTextContent("1 running");
+    expect(within(defaultProject).getByTestId("project-running-badge")).toHaveTextContent(/^running$/);
 
     fireEvent.click(screen.getByRole("button", { name: "Add worktree to qa" }));
     expect(onCreateWorktree).toHaveBeenCalledExactlyOnceWith(projects[1]);

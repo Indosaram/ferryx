@@ -20,7 +20,7 @@ vi.mock("@dnd-kit/sortable", async (importOriginal) => {
     },
   };
 });
-vi.mock("../lib/sshHosts", () => ({ useSshHosts: () => ({ hosts: [] }) }));
+vi.mock("../lib/sshHosts", () => ({ useSshHosts: () => ({ hosts: [] }), subscribeSshHosts: () => () => undefined }));
 vi.mock("./notification/NotificationCenterButton", () => ({ NotificationCenterButton: () => null }));
 
 import { Sidebar, SIDEBAR_WORKTREE_ORDER_STORAGE_KEY } from "./Sidebar";

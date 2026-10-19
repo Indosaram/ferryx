@@ -161,7 +161,7 @@ if (root) {
         onSelectProject={markFixture("fixtureSelectedProject")}
         onSelectWorktree={markFixture("fixtureSelectedWorktree")}
         onCreateWorktree={markFixture("fixtureCreateWorktree")}
-        onOpenSettings={markFixture("fixtureOpenSettings")}
+        onOpenSettings={() => markFixture("fixtureOpenSettings")()}
       />
     </div>,
   );

@@ -71,6 +71,7 @@ import { getCurrentVersion } from "./lib/updater";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
 import type { SectionId } from "./components/settings/types";
+import type { RemoteContext } from "./lib/machineNavigation";
 import {
   AGENTS_SETTINGS_CHANGED_EVENT,
   detectionTargets,
@@ -1960,6 +1961,7 @@ function WorkspaceApp({
   const [onboardingPermissions, setOnboardingPermissions] = useState<SystemPermissionsStatus | null>(null);
   const [whatsNew, setWhatsNew] = useState<WhatsNewEntry | null>(null);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SectionId | undefined>(undefined);
+  const [settingsRemoteContext, setSettingsRemoteContext] = useState<RemoteContext | undefined>(undefined);
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
@@ -2891,7 +2893,7 @@ function WorkspaceApp({
       setIsCommandPaletteOpen(false);
     }
   }, [activeRemoteHost]);
-  const handleOpenSettings = useCallback((section?: SectionId) => {
+  const handleOpenSettings = useCallback((section?: SectionId, remoteContext?: RemoteContext) => {
     preloadSettingsDialog();
     const validSection =
       typeof section === "string" &&
@@ -2910,6 +2912,7 @@ function WorkspaceApp({
         ? (section as SectionId)
         : undefined;
     setSettingsInitialSection(validSection);
+    setSettingsRemoteContext(validSection === "remote" ? remoteContext : undefined);
     setIsSettingsOpen(true);
   }, []);
   handleOpenSettingsRef.current = handleOpenSettings;
@@ -2917,6 +2920,7 @@ function WorkspaceApp({
   const handleCloseSettings = useCallback(() => {
     setIsSettingsOpen(false);
     setSettingsInitialSection(undefined);
+    setSettingsRemoteContext(undefined);
   }, []);
 
   useEffect(() => {
@@ -3933,7 +3937,7 @@ function WorkspaceApp({
           }
         >
           <SettingsDialog open initialSection={settingsInitialSection} onClose={handleCloseSettings}
-            onOpenSshProject={handleOpenSshProject} />
+            onOpenSshProject={handleOpenSshProject} remoteContext={settingsRemoteContext} />
         </Suspense>
       ) : null}
       {isResourcesOpen ? (

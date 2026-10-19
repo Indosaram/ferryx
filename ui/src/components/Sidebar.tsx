@@ -19,7 +19,6 @@ import {
   Activity,
   CheckCheck,
   ChevronRight,
-  CircleSlash,
   Folder,
   Inbox,
   MoreHorizontal,
@@ -27,7 +26,7 @@ import {
   Plus,
   Settings2,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 
 import { combineActivitySummaries, resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
@@ -37,6 +36,14 @@ import { projectRootWorktree } from "../lib/projectIdentity";
 import { groupProjects, isProjectGroupActive } from "../lib/projectGrouping";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import { useSshHosts } from "../lib/sshHosts";
+import { MACHINE_STATE_LABELS, pairedMachineStatus } from "../lib/machineStatus";
+import type { RemoteContext } from "../lib/machineNavigation";
+import {
+  getPairedHostReachability,
+  subscribePairedHostReachability,
+  usePairedHostReachability,
+  type PairedHostReachabilityView,
+} from "../lib/pairedHostReachability";
 import { remoteHostStore, type RemoteHostState } from "../state/remoteHostStore";
 import { worktreeListingFailureStore } from "../state/worktreeListingFailures";
 import { resolveWorktreeOwnerId } from "../lib/worktreeOwnership";
@@ -67,6 +74,8 @@ import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/Sortabl
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
 import { IconButton } from "./ui/IconButton";
 import { StatusDot } from "./ui/StatusDot";
+import { SidebarStateSlot, type SidebarSlotState } from "./sidebar/SidebarStateSlot";
+import type { SectionId } from "./settings/types";
 import { EmptyWorktreesHint, fileManagerActionLabel, WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
 
 export {
@@ -114,7 +123,8 @@ type SidebarProps = {
   onManageDisk?: (project: RegisteredProject) => void;
   onOpenHistory?: (project: RegisteredProject) => void;
   onOpenCommandPalette?: () => void;
-  onOpenSettings?: () => void;
+  /** A remote context deep-links Settings > Remote to one machine (paired status slot). */
+  onOpenSettings?: (section?: SectionId, remoteContext?: RemoteContext) => void;
   onOpenResources?: () => void;
   onToggle?: () => void;
   onHide?: () => void;
@@ -240,6 +250,12 @@ export function Sidebar({
   const { hosts } = useSshHosts();
 
   const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
+  // Paired worktree rows read reachability non-reactively, so regroup whenever it changes.
+  const [reachabilityVersion, bumpReachabilityVersion] = useReducer((version: number) => version + 1, 0);
+  useEffect(() => {
+    const unsubscribe = subscribePairedHostReachability(bumpReachabilityVersion);
+    return () => { unsubscribe(); };
+  }, []);
   const naturalWorktreesByProject = useMemo(
     () => groupWorktreesByProject(
       worktrees,
@@ -249,7 +265,8 @@ export function Sidebar({
       hosts,
       remoteState,
     ),
-    [activeProjectId, hosts, inactiveProjectWorktrees, projects, worktrees, remoteState],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reachabilityVersion invalidates the store read inside
+    [activeProjectId, hosts, inactiveProjectWorktrees, projects, worktrees, remoteState, reachabilityVersion],
   );
   const worktreesByProject = useMemo(
     () => applyWorktreeOrder(naturalWorktreesByProject, worktreeOrder),
@@ -539,6 +556,7 @@ export function Sidebar({
                     onOpenHistory={onOpenHistory && isLocal ? () => onOpenHistory(project) : undefined}
                     isStandaloneRemote={isStandaloneRemote || (project.target?.kind === "pairedDaemon" && group.memberProjects.length === 1)}
                     staleSummary={staleSummary}
+                    onOpenRemoteSettings={onOpenSettings ? (context) => onOpenSettings("remote", context) : undefined}
                   />
                 );
 
@@ -636,7 +654,7 @@ export function Sidebar({
           <IconButton label="System resources" size="sm" onClick={onOpenResources}>
             <Activity className="size-3.5" />
           </IconButton>
-          <IconButton data-shortcut={onOpenSettings ? "settings.toggle" : undefined} label="Settings" size="sm" onClick={onOpenSettings}>
+          <IconButton data-shortcut={onOpenSettings ? "settings.toggle" : undefined} label="Settings" size="sm" onClick={() => onOpenSettings?.()}>
             <Settings2 className="size-3.5" />
           </IconButton>
         </div>
@@ -724,6 +742,7 @@ type ProjectHeaderProps = {
   inert?: boolean;
   isStandaloneRemote?: boolean;
   staleSummary?: string;
+  onOpenRemoteSettings?: (context: RemoteContext) => void;
 };
 
 function ProjectHeader({
@@ -741,9 +760,11 @@ function ProjectHeader({
   inert = false,
   isStandaloneRemote = true,
   staleSummary,
+  onOpenRemoteSettings,
 }: ProjectHeaderProps) {
   const { hosts } = useSshHosts();
   const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
+  const reachability = usePairedHostReachability(project.target?.kind === "pairedDaemon" ? project.target.hostId : "");
   const listingFailure = useSyncExternalStore(
     worktreeListingFailureStore.subscribe,
     worktreeListingFailureStore.getState,
@@ -759,6 +780,34 @@ function ProjectHeader({
     ? (isStandaloneRemote && hostLabel ? `${folderName} (${hostLabel})` : folderName)
     : project.workspaceId;
   const menuUnlistenRef = useRef<(() => void) | null>(null);
+  const slot = projectSlot({
+    listingFailure,
+    activity,
+    attentionState,
+    paired: remote?.kind === "pairedDaemon"
+      ? { staleSummary, ...pairedSlotStatus(remote.hostId, remoteState, reachability) }
+      : null,
+  });
+  const pairedHostId = remote?.kind === "pairedDaemon" ? remote.hostId : null;
+  const activateSlot = slot.kind === "paired" && !slot.connected && pairedHostId && onOpenRemoteSettings && !inert
+    ? () => onOpenRemoteSettings({
+        page: "machines",
+        filter: "all",
+        machine: { kind: "pairedDaemon", hostId: pairedHostId, generation: remoteState.hosts[pairedHostId]?.generation ?? "" },
+      })
+    : undefined;
+  const slotElement = slot.kind === "none" ? null : (
+    <SidebarStateSlot
+      state={slot.state}
+      label={slot.label}
+      title={slot.title}
+      className={slot.kind === "failure" ? "text-destructive" : undefined}
+      data-testid={slot.testId}
+      data-attention-state={slot.kind === "attention" ? slot.state ?? undefined : undefined}
+      onActivate={activateSlot}
+      ariaLabel={activateSlot ? `${slot.label}: open remote settings for ${hostLabel ?? projectLabel}` : undefined}
+    />
+  );
 
   useEffect(() => {
     return () => {
@@ -852,41 +901,11 @@ function ProjectHeader({
           title={remote ? `SSH: ${hostLabel} - ${project.repoRoot}` : project.repoRoot}
           className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
         >
-          <span className="relative inline-flex shrink-0">
-            <Folder className="size-3.5" />
-            {listingFailure ? (
-              <span
-                data-testid="project-worktrees-unavailable"
-                role="img"
-                aria-label={`Couldn't load worktrees: ${listingFailure}`}
-                title={`Couldn't load worktrees: ${listingFailure}`}
-                className="absolute -bottom-1 -right-1 inline-flex rounded-full bg-worktree-sidebar"
-              >
-                <CircleSlash className="size-2.5 text-destructive" strokeWidth={3} />
-              </span>
-            ) : null}
-          </span>
+          <Folder className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{projectLabel}</span>
-          {remote?.kind === "pairedDaemon" ? <span className="text-[10px] text-status-idle">{staleSummary ?? pairedConnectionStatus(remote.hostId, remoteState)}</span> : null}
-          {activity.runningCount > 0 ? (
-            <span
-              data-testid="project-running-badge"
-              className="shrink-0 rounded-full bg-status-working/12 px-1.5 py-px text-[9px] font-medium leading-none text-status-working"
-            >
-              {activity.runningCount} running
-            </span>
-          ) : null}
-          {attentionState ? (
-            <span
-              data-testid="project-attention-indicator"
-              data-attention-state={attentionState}
-              title={attentionState === "waiting" ? "Agent needs attention" : "Unread activity"}
-              className="inline-flex size-3 shrink-0 items-center justify-center"
-            >
-              <StatusDot state={attentionState} />
-            </span>
-          ) : activity.hasWorking ? <StatusDot state="working" /> : null}
+          {activateSlot ? null : slotElement}
         </button>
+        {activateSlot ? slotElement : null}
         {project.gitRoot !== null ? (
           <IconButton
             label={`Add worktree to ${project.workspaceId}`}
@@ -915,14 +934,78 @@ function ProjectHeader({
   );
 }
 
-function pairedConnectionStatus(hostId: string, state: RemoteHostState): string {
+type ProjectSlot =
+  | { kind: "none" }
+  | { kind: "failure" | "attention" | "working" | "paired"; state: SidebarSlotState; label?: string; title?: string; testId?: string; connected?: boolean };
+
+/**
+ * One status slot per project row (ui/DESIGN.md section 4 rule 7): listing failure > needs input >
+ * unseen completion > running > unread > paired machine state. An unseen completion outranks live
+ * work, as in resolveActivityIndicator, so a finished agent is never hidden behind a spinner.
+ */
+function projectSlot({ listingFailure, activity, attentionState, paired }: {
+  listingFailure: string | undefined;
+  activity: ActivitySummary;
+  attentionState: "waiting" | "done" | "unread" | null;
+  paired: { staleSummary?: string; label: string; connected: boolean; reason: string | null } | null;
+}): ProjectSlot {
+  if (listingFailure) {
+    return { kind: "failure", state: null, label: "Unavailable", title: `Couldn't load worktrees: ${listingFailure}`, testId: "project-worktrees-unavailable" };
+  }
+  if (attentionState && (attentionState === "waiting" || activity.hasDone || !activity.hasWorking)) {
+    return {
+      kind: "attention",
+      state: attentionState,
+      title: attentionState === "waiting" ? "Agent needs attention" : "Unread activity",
+      testId: "project-attention-indicator",
+    };
+  }
+  if (activity.hasWorking) {
+    return {
+      kind: "working",
+      state: "working",
+      label: activity.runningCount > 1 ? `${activity.runningCount} running` : undefined,
+      testId: "project-running-badge",
+    };
+  }
+  if (paired) {
+    const connected = paired.connected && !paired.staleSummary;
+    return {
+      kind: "paired",
+      state: null,
+      label: paired.staleSummary ?? paired.label,
+      title: connected ? undefined : paired.reason ?? undefined,
+      connected,
+    };
+  }
+  return { kind: "none" };
+}
+
+/**
+ * Paired machine text for the project slot and its worktree rows, from the shared remote status
+ * vocabulary, so the header and the rows never disagree.
+ */
+function pairedSlotStatus(
+  hostId: string,
+  state: RemoteHostState,
+  reachability: PairedHostReachabilityView,
+): { label: string; connected: boolean; reason: string | null } {
   const host = state.hosts[hostId];
-  if (state.machineFeaturesEnabled === false) return "Disabled";
-  if (state.nativeStatus !== "ready") return "Unavailable";
-  if (!host) return "Unavailable";
-  if (host.authStatus === "revoked") return "Revoked";
-  if (host.authStatus !== "paired" || host.grantScope !== "machine") return "Re-pair required";
-  return host.online ? `Online (${host.transport})` : "Offline";
+  if (state.machineFeaturesEnabled === false) return { label: MACHINE_STATE_LABELS.disabled, connected: false, reason: null };
+  // Native inventory still booting: not an error yet.
+  if (state.nativeStatus !== "ready") return { label: MACHINE_STATE_LABELS.checking, connected: false, reason: null };
+  if (!host) return { label: "Unavailable", connected: false, reason: null };
+  const status = pairedMachineStatus({
+    host,
+    nativeReady: true,
+    accountEnrolled: false,
+    reachability,
+  });
+  return { label: status.label, connected: status.state === "connected", reason: status.reason };
+}
+
+function pairedRowSummary(hostId: string, state: RemoteHostState | undefined): string {
+  return state ? pairedSlotStatus(hostId, state, getPairedHostReachability(hostId)).label : "Unavailable";
 }
 
 function projectAttentionState(activity: ActivitySummary): "waiting" | "done" | "unread" | null {
@@ -1058,13 +1141,13 @@ function groupWorktreesByProject(
               const isStale = Boolean(row.stale || row.freshness?.stale);
               const summary = isStale && row.hostSummary
                 ? row.hostSummary
-                : (remoteState ? pairedConnectionStatus(target.hostId, remoteState) : "Unavailable");
+                : pairedRowSummary(target.hostId, remoteState);
               bucket[i] = { ...row, workspaceId: member.workspaceId, hostLabel, hostSummary: summary };
             }
           }
         }
         if (existingIndex === -1) {
-          bucket.push({ ...projectRootWorktree(member, hostLabel), ...(target.kind === "pairedDaemon" ? { hostSummary: remoteState ? pairedConnectionStatus(target.hostId, remoteState) : "Unavailable" } : {}) });
+          bucket.push({ ...projectRootWorktree(member, hostLabel), ...(target.kind === "pairedDaemon" ? { hostSummary: pairedRowSummary(target.hostId, remoteState) } : {}) });
         } else {
           const row = bucket[existingIndex];
           const remoteFolder = target.kind === "ssh" && member.gitRoot !== null && member.gitRoot !== undefined &&
