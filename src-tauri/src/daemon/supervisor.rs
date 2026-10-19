@@ -213,6 +213,12 @@ pub(crate) struct ProcessSupervisorOps;
 
 impl crate::daemon::owner_admission::SupervisorOps for ProcessSupervisorOps {
     fn start_absent_owner(&self) -> Result<bool> {
+        // QA: a forced-fallback GUI leaves the start to its client's detached fallback.
+        #[cfg(feature = "local-split-qa")]
+        if crate::daemon::owner_admission::qa_probe_fault::force_fallback() {
+            tracing::info!("FERRYX_QA_FORCE_FALLBACK=1: GUI setup issues no supervised start");
+            return Ok(false);
+        }
         ensure()
     }
 

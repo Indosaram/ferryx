@@ -534,6 +534,19 @@ pub(crate) mod qa_probe_fault {
     pub(crate) fn arm_on_this_thread(fault: ProbeFault) {
         ACTIVE.with(|active| active.set(Some(fault)));
     }
+    /// QA-only forced fallback (todo 12 Q06). `FERRYX_QA_FORCE_FALLBACK=1` on a QA GUI makes
+    /// both of its start paths skip the OS job: GUI setup issues no supervised start, and
+    /// `DaemonClient::connect_or_spawn` goes straight to the detached fallback spawn. Admission
+    /// is unchanged, so the forced launcher still starts only on Absent, under admission.lock.
+    pub(crate) const FORCE_FALLBACK_ENV: &str = "FERRYX_QA_FORCE_FALLBACK";
+
+    pub(crate) fn force_fallback_from(value: Option<&str>) -> bool {
+        value.is_some_and(|value| value.trim() == "1")
+    }
+
+    pub(crate) fn force_fallback() -> bool {
+        force_fallback_from(std::env::var(FORCE_FALLBACK_ENV).ok().as_deref())
+    }
 }
 
 /// Probes one daemon lock without creating it. Free locks are released immediately.
@@ -1237,6 +1250,16 @@ mod tests {
             let held = crate::daemon::server::DaemonLockFile::try_lock(file).unwrap();
             publish_owner(&paths, "gen", 9).unwrap();
             (paths, held)
+        }
+
+        #[test]
+        fn force_fallback_needs_exactly_one() {
+            use super::super::qa_probe_fault::force_fallback_from;
+            assert!(force_fallback_from(Some("1")));
+            assert!(force_fallback_from(Some(" 1 ")));
+            assert!(!force_fallback_from(None));
+            assert!(!force_fallback_from(Some("0")));
+            assert!(!force_fallback_from(Some("true")));
         }
 
         #[test]
