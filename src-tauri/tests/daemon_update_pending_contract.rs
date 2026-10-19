@@ -152,6 +152,13 @@ async fn incompatible_old_owner_keeps_its_terminals_and_retires_when_idle() -> T
         std::env::var_os("FERRYX_QA_BUMPED_DAEMON").ok_or("FERRYX_QA_BUMPED_DAEMON is not set")?,
     );
     let root = tempfile::tempdir()?;
+    // The client below stages its own runtime for RequestUpgrade through
+    // daemon_runtime_root(), which honours FERRYX_DATA_DIR. Without this the test process
+    // stages its harness executable into the host's real data dir. This is the only test in
+    // this integration binary (its own process), and the variable is set before any client or
+    // child exists, so no other thread reads the environment concurrently.
+    let client_data = root.path().join("client-data");
+    std::env::set_var("FERRYX_DATA_DIR", &client_data);
     let runtime = root.path().join("runtime");
     std::fs::create_dir_all(&runtime)?;
     let mut old = spawn_old_owner(&binary, root.path(), &runtime)?;
@@ -173,12 +180,23 @@ async fn incompatible_old_owner_keeps_its_terminals_and_retires_when_idle() -> T
     let session_id = spawned["sessionId"].as_str().ok_or("no session id")?.to_string();
 
     // This normal (protocol 5) build connects: pending, never a Shutdown, terminate or spawn. On
-    // Unix the client first asks for a control-channel upgrade; this owner answers
-    // RequestUpgrade with UPGRADE_UNSUPPORTED (until todo 8's daemon side), so it is the refused
-    // path that enters pending. On Windows pending is entered directly.
+    // Unix the client first asks for a control-channel upgrade with a runtime it staged under
+    // its private FERRYX_DATA_DIR; the old owner refuses it (the staged executable is outside
+    // the old owner's own runtime root), so it is the refused path that enters pending. On
+    // Windows nothing is staged and pending is entered directly.
     let client = DaemonClient::new_with_socket(endpoint(&runtime));
     let error = timeout(DEADLINE, client.list_sessions()).await?.unwrap_err();
     assert_eq!(error.code, IpcErrorCode::DaemonUpdatePending, "{error:?}");
+    #[cfg(unix)]
+    {
+        let staged: Vec<_> = std::fs::read_dir(client_data.join("daemon-runtime"))?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        assert_eq!(staged.len(), 1, "exactly one staged generation, under the test's temp dir: {staged:?}");
+        assert!(staged[0].starts_with(root.path()), "staged outside the temp dir: {staged:?}");
+    }
     let details = error.details.clone().ok_or("no details")?;
     assert_eq!(details["liveSessions"], 1, "{details}");
     assert_eq!(details["retireRequested"], true, "RetireWhenIdle was sent on entering pending");
