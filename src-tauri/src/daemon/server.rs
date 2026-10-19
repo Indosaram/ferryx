@@ -2777,7 +2777,8 @@ mod transfer_done_tests {
         let (stream, peer) = std::os::unix::net::UnixStream::pair().unwrap();
         drop(peer);
         let mut failures = Vec::new();
-        let done = send_transfer_done_recorded(&stream, "transfer-1", 3, &mut failures);
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        let done = send_transfer_done_recorded(&stream, &transfer_id, 3, &mut failures);
         assert!(!done, "a closed candidate stream cannot receive TRANSFER_DONE");
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert!(failures[0].starts_with("transfer done not sent"), "{failures:?}");
@@ -2791,7 +2792,8 @@ mod transfer_done_tests {
     fn a_delivered_transfer_done_answers_transfer_sessions_ok() {
         let (stream, peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut failures = Vec::new();
-        assert!(send_transfer_done_recorded(&stream, "transfer-1", 1, &mut failures));
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        assert!(send_transfer_done_recorded(&stream, &transfer_id, 1, &mut failures), "{failures:?}");
         assert!(failures.is_empty(), "{failures:?}");
         assert!(
             crate::daemon::handover_socket::recv_session_with_owner(&peer).unwrap().is_none(),
