@@ -3795,6 +3795,8 @@ impl DaemonServer {
                 // The predecessor's authority descriptors, validated but not yet used. Dropping
                 // them only closes this process's copies: the predecessor keeps serving.
                 let mut received_authority: Option<crate::daemon::handover_socket::TransferredAuthority> = None;
+                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                crate::daemon::qa_producers::note_authority_stage("candidate-admitted", &self.handover_manager).await;
                 let handover_socket_path =
                     crate::daemon::handover_socket::get_handover_socket_path(&transfer_id);
                 let listener = crate::daemon::handover_socket::HandoverSocketListener::bind(
@@ -3864,6 +3866,8 @@ impl DaemonServer {
                             )
                         })?;
                     let accepted = exports.len();
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    crate::daemon::qa_producers::note_authority_stage("sessions-received", &self.handover_manager).await;
                     if let Some(expires) = handover_expires_at {
                         crate::daemon::handover_request::pre_commit_remaining(
                             expires,
@@ -4088,6 +4092,8 @@ impl DaemonServer {
                         })?;
                     }
                     commit_started = true;
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    crate::daemon::qa_producers::note_authority_stage("commit-sent", &self.handover_manager).await;
                     let commit_started_at = tokio::time::Instant::now();
                     let commit_resp = legacy_peer
                         .send_request(&DaemonRequest::CommitHandover {
@@ -4178,6 +4184,8 @@ impl DaemonServer {
                                 if let Some(authority) = received_authority.take() {
                                     inherited_canonical = Some(self.install_adopted_authority(authority)?);
                                 }
+                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                crate::daemon::qa_producers::note_authority_stage("authority-recovered", &self.handover_manager).await;
                                 // The predecessor committed and is retiring with exit 0; take over as
                                 // the unit's main process exactly as the confirmed path does.
                                 crate::daemon::supervisor_linux::notify_main_pid_ready();
@@ -4233,6 +4241,8 @@ impl DaemonServer {
                                 .map_err(crate::ipc::IpcError::internal)).await.map_err(|error| error.to_string())
                         }).await;
                         let rolled_back = rollback.is_ok();
+                        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                        crate::daemon::qa_producers::note_authority_stage("candidate-aborted", &self.handover_manager).await;
                         match rollback {
                             Ok(()) => {
                                 tracing::warn!(
@@ -5617,6 +5627,8 @@ impl DaemonServer {
                             Ok((legacy_path, active_sessions, listener)) => {
                                 let legacy_path_str = legacy_path.to_string_lossy().into_owned();
                                 Arc::clone(&self).spawn_legacy_listener(listener);
+                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                crate::daemon::qa_producers::note_authority_stage("predecessor-prepared", &self.handover_manager).await;
                                 DaemonResponse::PrepareHandoverOk {
                                     legacy_socket_path: legacy_path_str,
                                     active_sessions,
@@ -5780,6 +5792,8 @@ impl DaemonServer {
                         }
                         Ok(()) => {
                             self.release_transferred_locals().await;
+                            #[cfg(all(unix, feature = "local-split-qa", feature = "native-terminal"))]
+                            crate::daemon::qa_producers::note_authority_stage("predecessor-committed", &self.handover_manager).await;
                             DaemonResponse::CommitHandoverOk
                         }
                         Err(e) => handover_failure_response(None, e.to_string()),
@@ -5795,6 +5809,8 @@ impl DaemonServer {
                     }).await {
                         Ok(()) => {
                             self.handover_manager.clear_transferred_locals();
+                            #[cfg(all(unix, feature = "local-split-qa", feature = "native-terminal"))]
+                            crate::daemon::qa_producers::note_authority_stage("predecessor-aborted", &self.handover_manager).await;
                             let resumed = self
                                 .terminal_service
                                 .pty_manager()
