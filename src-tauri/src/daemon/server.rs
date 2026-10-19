@@ -3828,11 +3828,12 @@ impl DaemonServer {
                 });
 
                 let transfer_outcome: Result<(usize, usize, usize, u64), String> = async {
-                    let transfer_request = legacy_peer.send_request(&DaemonRequest::TransferSessions {
+                    let transfer_sessions = DaemonRequest::TransferSessions {
                         handover_socket_path: handover_socket_path
                             .to_string_lossy()
                             .into_owned(),
-                    });
+                    };
+                    let transfer_request = legacy_peer.send_request(&transfer_sessions);
                     // The request's expiry bounds the predecessor's answer as well (todo 8).
                     let transfer_resp = match handover_expires_at {
                         Some(expires) => {
