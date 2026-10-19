@@ -279,10 +279,40 @@ pub(crate) fn unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Identifies the build generation that wrote a record. Provisional: the package version, until
-/// the generation identity of todo 3 lands.
+/// The generation key (todo 3, `<version>-<first 8 hex>`) of this process's build, as owner.json,
+/// starting.json and control Hello carry it. Resolved once per process; blocking on first use
+/// (current_exe, canonicalize, possibly a hash), so async callers resolve it via run_blocking.
 pub(crate) fn current_generation_key() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        let Ok(exe) = std::env::current_exe() else {
+            return env!("CARGO_PKG_VERSION").to_string();
+        };
+        #[cfg(unix)]
+        let exe = crate::daemon::supervisor_linux::daemon_executable(
+            std::env::var_os("APPIMAGE").as_deref(),
+            &exe,
+        );
+        generation_key_for(crate::daemon::server::daemon_runtime_root().as_deref(), &exe)
+    })
+    .clone()
+}
+
+/// The generation key of `exe`: a daemon running a staged copy under `runtime_root` is keyed by
+/// its generation dir; an unstaged build (a GUI, the detached-fallback daemon) by the key staging
+/// it would produce, so starting.json names the generation it starts. Fallback: the package
+/// version, when there is no stage source to hash (a dev build without the macOS helper bundle,
+/// or an unreadable executable); such a daemon is never a staged generation.
+pub(crate) fn generation_key_for(runtime_root: Option<&Path>, exe: &Path) -> String {
+    use crate::daemon::handover_request::generation_key_under;
+    let staged = runtime_root.and_then(|root| {
+        generation_key_under(root, exe).or_else(|| {
+            generation_key_under(&fs::canonicalize(root).ok()?, &fs::canonicalize(exe).ok()?)
+        })
+    });
+    staged
+        .or_else(|| crate::daemon::runtime_stage::source_generation_key(exe).ok())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 }
 
 /// Writes a JSON record atomically: temp file, fsync, rename, then fsync of the directory on
@@ -1201,6 +1231,40 @@ mod tests {
     // ---- runtime helpers, admission lock, admit_and_start ----
 
     use std::cell::Cell;
+
+    #[test]
+    fn generation_key_of_a_staged_executable_is_its_generation_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("daemon-runtime");
+        let exe = root.join("2026.1013.2-0a1b2c3d").join("ferryx");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"staged").unwrap();
+        assert_eq!(generation_key_for(Some(&root), &exe), "2026.1013.2-0a1b2c3d");
+    }
+
+    /// An unstaged single-file build (Linux, Windows, an AppImage) is keyed like the generation it
+    /// stages: <version>-<first 8 hex of its sha256>, so starting.json names the job it starts.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn generation_key_of_an_unstaged_executable_is_the_key_it_stages() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("app").join("ferryx");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"unstaged build").unwrap();
+        let hash: [u8; 32] = Sha256::digest(b"unstaged build").into();
+        let expected = crate::daemon::runtime_stage::generation_key(env!("CARGO_PKG_VERSION"), &hash);
+        assert_eq!(generation_key_for(Some(&dir.path().join("daemon-runtime")), &exe), expected);
+    }
+
+    /// With no stage source to hash (a dev build without the macOS helper bundle, an unreadable
+    /// executable) the key falls back to the package version.
+    #[test]
+    fn generation_key_without_a_stage_source_falls_back_to_the_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone").join("ferryx");
+        assert_eq!(generation_key_for(None, &missing), env!("CARGO_PKG_VERSION"));
+    }
 
     fn paths_in(dir: &Path) -> AdmissionPaths {
         AdmissionPaths {

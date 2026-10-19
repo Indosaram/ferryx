@@ -148,6 +148,13 @@ pub fn stage_runtime(root: &Path, source_exe: &Path) -> Result<StagedRuntime, Ru
     stage_from(root, &platform_source(source_exe)?, env!("CARGO_PKG_VERSION"))
 }
 
+/// The key [`stage_runtime`] gives `source_exe`'s generation, without staging it. Blocking
+/// (hashes the stage source).
+pub fn source_generation_key(source_exe: &Path) -> Result<String, RuntimeStageError> {
+    let source = platform_source(source_exe)?;
+    Ok(generation_key(env!("CARGO_PKG_VERSION"), &sha256_file(source.hashed_executable())?))
+}
+
 /// [`stage_runtime`] on a blocking thread (`crate::ipc::run_blocking`).
 pub async fn stage_runtime_blocking(
     root: PathBuf,

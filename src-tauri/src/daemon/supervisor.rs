@@ -250,8 +250,9 @@ pub(crate) fn migrate_legacy_job(owner: &crate::daemon::owner_admission::OwnerSt
 /// (no bootstrap/load, no `--now`, no `/Run`). Returns whether a definition changed. A user who
 /// turned autostart off, or an unsupported runtime, is a no-op.
 ///
-/// Removing login autostart from older generations and the legacy job needs the per-generation
-/// identity of the later todos; until then the single unit name is rewritten in place.
+/// Each backend registers the current generation's own job (launchd plist, systemd unit,
+/// scheduled task) and removes login autostart from older generations without stopping them;
+/// the legacy single-name job is left to its separate migration.
 pub fn reconcile_login_registration() -> Result<bool> {
     if user_opted_out() || !supported() {
         return Ok(false);

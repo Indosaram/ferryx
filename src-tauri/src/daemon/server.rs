@@ -6407,8 +6407,10 @@ impl DaemonServer {
             OWNER_PUBLISH_RETRY,
         };
         let epoch = self.epoch;
-        let generation_key = current_generation_key();
         tokio::spawn(async move {
+            let generation_key = crate::ipc::run_blocking(|| Ok(current_generation_key()))
+                .await
+                .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
             publish_owner_until_published(
                 || {
                     let paths = paths.clone();

@@ -37,11 +37,10 @@ fn daemon_start_time_ms() -> u64 {
     })
 }
 
-/// This daemon's generation key.
-// TODO(todo 3): return the per-install generation key once todo 3 lands it; until then the
-// Hello answers null and the marker is keyed by pid.
+/// This daemon's generation key: the same value owner.json carries
+/// (owner_admission::current_generation_key).
 fn generation_key() -> Option<String> {
-    None
+    Some(crate::daemon::owner_admission::current_generation_key())
 }
 
 /// What the connection handler must do after its response is written and flushed.
@@ -63,6 +62,10 @@ impl DaemonServer {
             return Ok(());
         }
         daemon_start_time_ms();
+        // Resolve (and cache) the generation key off the workers; Hello reads it synchronously.
+        crate::ipc::run_blocking(|| Ok(crate::daemon::owner_admission::current_generation_key()))
+            .await
+            .map_err(|error| format!("Failed to resolve the generation key: {error}"))?;
         self.spawn_control_retirement_task_in(get_runtime_dir());
 
         #[cfg(unix)]
@@ -191,17 +194,18 @@ impl DaemonServer {
     }
 
     async fn finish_control_retirement(&self, runtime_dir: &Path, reason: &str) {
-        let marker = runtime_dir.join(format!(
-            "retired-{}.json",
-            generation_key().unwrap_or_else(|| std::process::id().to_string())
-        ));
-        let body = serde_json::json!({
-            "pid": std::process::id(),
-            "reason": reason,
-            "generation_key": generation_key(),
-        })
-        .to_string();
+        let runtime_dir = runtime_dir.to_path_buf();
+        let marker_reason = reason.to_string();
         if let Err(error) = crate::ipc::run_blocking(move || {
+            // The watchdog reads retired-<generation_key>.json and checks the pid in its body.
+            let key = crate::daemon::owner_admission::current_generation_key();
+            let marker = runtime_dir.join(format!("retired-{key}.json"));
+            let body = serde_json::json!({
+                "pid": std::process::id(),
+                "reason": marker_reason,
+                "generation_key": key,
+            })
+            .to_string();
             fs::write(&marker, body).map_err(|e| crate::ipc::IpcError::internal(e.to_string()))
         })
         .await

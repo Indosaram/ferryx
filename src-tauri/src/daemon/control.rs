@@ -111,8 +111,9 @@ pub struct HelloReply {
     pub ops: Vec<String>,
 }
 
-/// Inventory reply body, using todo 11's live definition (reader_open for local, connected for
-/// ssh/paired).
+/// Inventory reply body: per-kind live counts from handover::live_session_counts, which applies
+/// todo 11's live definition (reader_open for local, connected for ssh/paired); exited or
+/// disconnected entries are not counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InventoryReply {
     pub live_local: u32,
