@@ -4,7 +4,20 @@ The fixture entry at `tailscale-qa.html` renders the real `RemoteSection` with m
 
 Run `bun run --cwd ui dev --host 127.0.0.1 --port 5189 --strictPort`, then open `/tailscale-qa.html?scenario=ready&theme=dark` in an isolated browser.
 
-Supported scenarios: `ready`, `connecting`, `auth`, `offline`, `provision`, and `discovery-error`. Themes: `light` and `dark`.
+Themes: `light` and `dark`. An unknown or missing `scenario` falls back to `ready`; the rendered scenario is exposed as `data-fixture-scenario` on `<html>`.
+
+Tailnet scenarios (one Tailscale machine in a single state): `ready`, `connecting`, `auth`, `offline`, `provision`, and `discovery-error`.
+
+Remote settings redesign scenarios:
+
+| Scenario | Fixture |
+| --- | --- |
+| `machines` | Five paired machines: online, offline and checking (all machine-scoped, from `paired_host_reachability_list` with `supported: true`), one `needsMachineGrant` mirror credential and one revoked credential. Also a manual SSH machine, a provisioned Tailscale machine, and an unprovisioned Tailscale peer that belongs under Discovered. This machine has the relay gateway on with two authorized devices. |
+| `empty` | No paired, SSH or Tailscale machines, gateway off, no devices. |
+| `account` | `machines` plus a signed-in account. The account client's `fetch` is answered locally for `https://account.invalid` only: two account machines (one is the paired Studio Mac, one is not yet granted), enrollment-code issue, and logout. Other routes answer a typed 404. |
+| `drawer` | `machines`, mounted with `initialContext={{ page: "machines", filter: "all", machine: { kind: "pairedDaemon", hostId, generation } }}` for the online Studio Mac, so the page opens with that machine selected (its details drawer once the drawer ships). |
+
+The harness mounts `RemoteSection` only through its public props (`store`, `inventory`, `initialContext`, `accountOrigin`, `accountSessionToken`, `onOpenProject`, `onOpenSshProject`), and paired hosts reach the page through the real `createPairedHostInventory` and `bootstrapPairedHostReachability` code over mocked IPC. A project action sets `data-fixture-project-opened` and `data-fixture-project-target` on `<html>` instead of opening anything. Nothing polls; reachability is one list call plus the mocked change event.
 
 ## Executed frontend checks
 
