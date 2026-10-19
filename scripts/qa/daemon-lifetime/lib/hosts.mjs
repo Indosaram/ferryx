@@ -80,7 +80,8 @@ export function buildPlan({ host, runDir, worktree, v1Worktree, baselineWorktree
   const tauri = (features, salt, cwd) => ({
     cwd,
     command: 'cargo',
-    args: ['tauri', 'build', '--debug', '--features', features, '--config', config],
+    // Linux and Windows run target/debug/ferryx directly; only macOS uses the .app bundle.
+    args: ['tauri', 'build', '--debug', ...(host.platform === 'mac' ? [] : ['--no-bundle']), '--features', features, '--config', config],
     env: { ...targetEnv, FERRYX_QA_BUILD_SALT: salt },
   });
   return {
