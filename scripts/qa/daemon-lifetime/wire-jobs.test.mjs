@@ -9,6 +9,8 @@ import { macForceTerminateScript, macQuitScript, linuxScopeUnit, windowsLauncher
 import { armFile, LISTENER_STALL, LISTENER_STALL_DEADLINE_MS } from './scenarios/q04-q06.mjs';
 import { counterProgress } from './scenarios/q07-q09.mjs';
 import { remoteWorkspaceId, sshdConfig } from './lib/sshd.mjs';
+import { readFileSync } from 'node:fs';
+import { AUTHORITY_STAGE, HANDOVER_FAULT_REQUEST, HANDOVER_TRANSFER, ROLLBACK_RELINQUISHMENT, CANDIDATE_STAGES, PREDECESSOR_STAGES, PRE_COMMIT_STAGES, LISTENER_ROLES, authorityStages, authorityInvariant, stagePattern } from './lib/receipts.mjs';
 
 const RUN = '20261019t064512z';
 
@@ -75,17 +77,47 @@ test('hook probe marks absent product hooks and gates the scenarios that need th
   assert.ok(!missingHooksFor('Q01', hooks).some((h) => h.id === 'listenerStall'));
 });
 
-test('todo 12 product hooks exist in this checkout; only todo 8/9 hooks may still block', () => {
+test('every product hook exists in this checkout (todos 8, 9, 12 merged); no scenario is hook-blocked', () => {
   const repo = new URL('../../../', import.meta.url).pathname;
   const todo12 = ['listenerStall', 'probeFault', 'buildSalt', 'forceFallback', 'macPlistForwardsIsolationEnv', 'jobForwardsQaBarrier', 'detachGuard', 'writeAckHoldArm'];
   for (const platform of ['mac', 'linux', 'windows']) {
     const hooks = probeHooks(repo, platform);
     for (const id of todo12) assert.equal(hooks[id].present, true, `${platform}: ${id} must be present`);
-    for (const [id, r] of Object.entries(hooks)) {
-      if (!r.present) assert.match(HOOKS.find((h) => h.id === id).owner, /^todo (8|9)\b/, `${platform}: ${id} missing for a non-todo-8/9 reason`);
-    }
-    for (const id of ['Q00', 'Q04', 'Q05', 'Q06', 'Q06w', 'Q07', 'Q11']) assert.deepEqual(missingHooksFor(id, hooks), [], `${platform} ${id}`);
+    for (const [id, r] of Object.entries(hooks)) assert.equal(r.present, true, `${platform}: ${id} missing (${r.owner})`);
+    for (const id of ['Q00', 'Q04', 'Q05', 'Q06', 'Q06w', 'Q07', 'Q08', 'Q08b', 'Q09', 'Q11']) assert.deepEqual(missingHooksFor(id, hooks), [], `${platform} ${id}`);
   }
+});
+
+test('todo 8 receipt names match qa_producers.rs and every server.rs authority stage', () => {
+  const src = (f) => readFileSync(new URL(`../../../src-tauri/src/${f}`, import.meta.url), 'utf8');
+  const producers = src('daemon/qa_producers.rs');
+  const constant = (name) => new RegExp(`pub const ${name}: &str = "([^"]+)"`).exec(producers)?.[1];
+  assert.equal(constant('AUTHORITY_STAGE'), AUTHORITY_STAGE);
+  assert.equal(constant('HANDOVER_FAULT_REQUEST'), HANDOVER_FAULT_REQUEST);
+  assert.equal(constant('HANDOVER_TRANSFER'), HANDOVER_TRANSFER);
+  assert.equal(constant('ROLLBACK_RELINQUISHMENT'), ROLLBACK_RELINQUISHMENT);
+  for (const role of LISTENER_ROLES) assert.match(producers, new RegExp(`"${role}": manager\\.accept_count`));
+  const server = src('daemon/server.rs');
+  const emitted = new Set([...server.matchAll(/note_authority_stage\(\s*"([a-z-]+)"/g)].map((m) => m[1]));
+  assert.deepEqual([...emitted].sort(), [...CANDIDATE_STAGES, ...PREDECESSOR_STAGES].sort());
+  for (const s of PRE_COMMIT_STAGES) assert.ok(CANDIDATE_STAGES.includes(s));
+  const faults = [...producers.matchAll(/Some\("([a-z-]+)"\) => Some\(CommitFault::/g)].map((m) => m[1]);
+  assert.deepEqual([...faults, constant('HANDOVER_FAULT_ABORT_AFTER_ADOPT')], [...HANDOVER_FAULTS]);
+});
+
+test('authority invariant flags pre-commit accepts, a free lock and a missing socket', () => {
+  const line = (pid, stage, extra = {}) => JSON.stringify({ runId: RUN, operationId: 'op', producer: 'ipc-qa-barrier', producerPid: pid, settledAtMs: 1, stage, acceptCounts: { canonical: 0, control: 0, agentState: 0 }, probeFlockRefused: { legacy: true, persistent: true }, publicSocketPresent: true, ...extra });
+  const ok = [line(1, 'predecessor-prepared'), line(2, 'candidate-admitted'), line(2, 'authority-validated'), line(2, 'commit-sent'), line(1, 'predecessor-committed'), line(2, 'authority-adopted', { acceptCounts: { canonical: 3, control: 0, agentState: 0 } })].join('\n');
+  const inv = authorityInvariant(authorityStages(`old\n${ok}`, RUN, 1), 2);
+  assert.deepEqual(inv.candidatePreCommit, ['candidate-admitted', 'authority-validated', 'commit-sent']);
+  assert.deepEqual([inv.acceptedBeforeCommit, inv.lockFreeAt, inv.socketMissingAt], [[], [], []]);
+  const bad = [line(2, 'commit-sent', { acceptCounts: { canonical: 0, control: 1, agentState: 0 } }), line(1, 'predecessor-prepared', { probeFlockRefused: { legacy: false, persistent: null } }), line(2, 'candidate-admitted', { publicSocketPresent: false })].join('\n');
+  const worse = authorityInvariant(authorityStages(bad, RUN), 2);
+  assert.equal(worse.acceptedBeforeCommit.length, 1);
+  assert.equal(worse.lockFreeAt.length, 1);
+  assert.deepEqual(worse.socketMissingAt, ['candidate-admitted']);
+  assert.ok(new RegExp(stagePattern(2, 'commit-sent')).test(line(2, 'commit-sent')));
+  assert.ok(!new RegExp(stagePattern(1, 'commit-sent')).test(line(2, 'commit-sent')));
 });
 
 test('handover fault names are todo 8 FERRYX_QA_HANDOVER_FAULT values', () => {

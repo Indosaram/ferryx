@@ -10,11 +10,25 @@ import {
 } from './common.mjs';
 import { surviveGuiEnd } from './q00-q03.mjs';
 import { startSshd } from '../lib/sshd.mjs';
+import { AUTHORITY_ARM, AUTHORITY_STAGE, HANDOVER_FAULT_REQUEST, receiptFile, authorityStages, authorityInvariant, receiptCount, stagePattern } from '../lib/receipts.mjs';
+
+/** Arms the handover-authority receipts for one upgrade; the daemon acks it on its next stage. */
+async function armAuthority(ctx, tag) {
+  const operationId = `${tag}-${ctx.runId}`;
+  await ctx.agent.call('writeFile', { file: path.join(ctx.layout.barrier, `${AUTHORITY_ARM}.arm.json`), content: JSON.stringify({ name: AUTHORITY_ARM, runId: ctx.runId, operationId }) });
+  const text = await ctx.agent.call('readFile', { file: receiptFile(ctx.layout, AUTHORITY_STAGE) });
+  return { operationId, from: receiptCount(text) };
+}
+
+async function readStages(ctx, from) {
+  return authorityStages(await ctx.agent.call('readFile', { file: receiptFile(ctx.layout, AUTHORITY_STAGE) }), ctx.runId, from);
+}
 
 export async function Q07(ctx, result) {
   // A is the running generation; the on-disk app is replaced by B (same version, other bytes).
   const before = await ctx.state.conn.describe();
   const ownerBefore = await ownerIdentity(ctx);
+  const authorityBefore = receiptCount(await ctx.agent.call('readFile', { file: receiptFile(ctx.layout, AUTHORITY_STAGE) }));
   await ctx.gui.quit(ctx.state.gui);
   const replaced = await ctx.replaceAppOnDisk(ctx.artifacts.A, ctx.artifacts.B);
   await evidence(ctx, result, 'replace.json', replaced);
@@ -29,6 +43,9 @@ export async function Q07(ctx, result) {
   assertion(result, 'A staged runtime dir intact', await ctx.agent.call('exists', { file: path.join(ctx.stagedRoot, ctx.keys.A) }), ctx.keys.A);
   assertInventoryKept(result, before, after, 'B attaches the same sessions');
   await nonceRoundTrip(ctx, conn, ctx.state.localA, result, 'B GUI on A session');
+  // Replacing the app on disk is not a handover: no process wrote an authority stage.
+  const stages = await readStages(ctx, authorityBefore);
+  assertion(result, 'no handover-authority stage after the replacement (no transfer started)', stages.length === 0, stages.map((s) => `${s.producerPid}:${s.stage}`));
   if (ctx.platform !== 'windows') {
     const jobB = await ctx.jobs.inspect(ctx.keys.B);
     assertion(result, 'B generation job registered but not running while A is Alive', jobB.state !== 'Running', jobB.state);
@@ -82,6 +99,7 @@ async function upgradeStep(ctx, result, artifact, pair, tag) {
   const ctl = await controlConn(ctx);
   const hello = await ctl.hello();
   assertion(result, `${tag}: predecessor advertises RequestUpgrade + handover-v1`, helloSupportsHandover(hello), hello.ops);
+  const authority = await armAuthority(ctx, tag);
   const ownerChange = ctx.agent.call('waitOwnerChange', { runtimeDir: ctx.layout.runtime, fromPid: pred.pid, deadlineMs: DAEMON_READY_TIMEOUT_MS * 2 });
   const accepted = await ctl.requestUpgrade(staged.exe, staged.key);
   assertion(result, `${tag}: RequestUpgrade accepted`, accepted?.ok === true && accepted.accepted === true, accepted);
@@ -90,6 +108,17 @@ async function upgradeStep(ctx, result, artifact, pair, tag) {
   await evidence(ctx, result, `${tag}-owners.json`, { pred, succ, seen: changed.seen });
   assertion(result, `${tag}: owner.json moved straight from predecessor to successor`, changed.owner && changed.seen.filter((p) => p !== pred.pid).length === 1, changed.seen);
   assertion(result, `${tag}: successor serves generation ${artifact.name}`, succ.hello?.generation_key === staged.key, succ.hello?.generation_key);
+  // todo 8 receipts: the candidate's own stages through authority-adopted, sampled at each transition.
+  const adopted = await ctx.agent.call('waitLog', { file: receiptFile(ctx.layout, AUTHORITY_STAGE), pattern: stagePattern(succ.pid, 'authority-adopted'), deadlineMs: 30_000 });
+  const stages = await readStages(ctx, authority.from);
+  const inv = authorityInvariant(stages, succ.pid);
+  await evidence(ctx, result, `${tag}-authority.json`, { operationId: authority.operationId, stages, inv });
+  assertion(result, `${tag}: candidate wrote authority-adopted`, Boolean(adopted.matched), adopted);
+  assertion(result, `${tag}: predecessor wrote predecessor-prepared and predecessor-committed`, ['predecessor-prepared', 'predecessor-committed'].every((s) => stages.some((r) => r.producerPid === pred.pid && r.stage === s)), inv.stages);
+  assertion(result, `${tag}: candidate stages before commit were sampled`, ['candidate-admitted', 'authority-validated', 'commit-sent'].every((s) => inv.candidatePreCommit.includes(s)), inv.candidatePreCommit);
+  assertion(result, `${tag}: candidate accepted nothing on any inherited listener before commit`, inv.candidatePreCommit.length > 0 && inv.acceptedBeforeCommit.length === 0, inv.acceptedBeforeCommit);
+  assertion(result, `${tag}: a probe flock on both lock files failed at every stage`, stages.length > 0 && inv.lockFreeAt.length === 0, inv.lockFreeAt);
+  assertion(result, `${tag}: public socket path present at every stage`, stages.length > 0 && inv.socketMissingAt.length === 0, inv.socketMissingAt);
   // successor parent = OS job
   const row = (await ctx.agent.call('table')).find((r) => r.pid === succ.pid);
   const job = await ctx.jobs.inspect(staged.key);
@@ -126,16 +155,35 @@ async function upgradeStep(ctx, result, artifact, pair, tag) {
 async function faultVariant(ctx, result, fault, artifact, pair) {
   const pred = await ownerIdentity(ctx);
   const op = `fault-${fault}-${ctx.runId}`;
-  await ctx.agent.call('writeFile', { file: path.join(ctx.layout.barrier, 'handover-fault.request.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, fault }) });
+  await ctx.agent.call('writeFile', { file: path.join(ctx.layout.barrier, HANDOVER_FAULT_REQUEST), content: JSON.stringify({ runId: ctx.runId, operationId: op, fault }) });
+  const authority = await armAuthority(ctx, `F_${fault}`);
   const staged = await stageGeneration(ctx, artifact);
   const ctl = await controlConn(ctx);
   const resp = await ctl.requestUpgrade(staged.exe, staged.key);
-  const candidateLog = path.join(ctx.layout.barrier, `handover-fault.receipt.jsonl`);
-  const settled = await ctx.agent.call('waitLog', { file: candidateLog, pattern: '"candidateExit":0', deadlineMs: 60_000 });
+  // The candidate is the process that writes candidate-admitted (todo 8). Every variant except a
+  // reply dropped after the decision leaves the predecessor serving and the candidate exits;
+  // after-record, the recorded decision makes the candidate the owner (authority-recovered).
+  const file = receiptFile(ctx.layout, AUTHORITY_STAGE);
+  const admitted = await ctx.agent.call('waitLog', { file, pattern: `"producerPid":(?!${pred.pid},)\\d+,[^\\n]*"stage":"candidate-admitted"`, deadlineMs: 60_000 });
+  const candidatePid = admitted.matched ? Number(/"producerPid":(\d+)/.exec(admitted.matched)[1]) : null;
+  const recovers = fault === 'drop-commit-ok-after-record';
+  const settled = !candidatePid ? { timedOut: true }
+    : recovers ? await ctx.agent.call('waitLog', { file, pattern: stagePattern(candidatePid, 'authority-recovered'), deadlineMs: 60_000 })
+    : await ctx.agent.call('waitExit', { pid: candidatePid, deadlineMs: 60_000 });
   const after = await ownerIdentity(ctx);
-  await evidence(ctx, result, `fault-${fault}.json`, { resp, settled, pred, after });
-  assertion(result, `${fault}: candidate exited 0`, Boolean(settled.matched), settled);
-  assertSameOwner(result, pred, after, `${fault}: predecessor remains owner`);
+  const stages = await readStages(ctx, authority.from);
+  const candidateStages = stages.filter((s) => s.producerPid === candidatePid).map((s) => s.stage);
+  await evidence(ctx, result, `fault-${fault}.json`, { resp, admitted, candidatePid, settled, pred, after, stages });
+  assertion(result, `${fault}: candidate admitted (candidate-admitted receipt)`, Boolean(candidatePid), admitted);
+  if (!recovers) {
+    assertion(result, `${fault}: candidate exited`, Boolean(candidatePid) && !settled.timedOut, settled);
+    assertSameOwner(result, pred, after, `${fault}: predecessor remains owner`);
+    assertion(result, `${fault}: candidate never adopted or recovered authority`, !candidateStages.some((s) => s === 'authority-adopted' || s === 'authority-recovered'), candidateStages);
+    assertion(result, `${fault}: predecessor never committed`, !stages.some((s) => s.producerPid === pred.pid && s.stage === 'predecessor-committed'), stages.map((s) => `${s.producerPid}:${s.stage}`));
+  } else {
+    assertion(result, `${fault}: candidate recovered the committed handover from the recorded decision`, Boolean(settled.matched), settled);
+    assertion(result, `${fault}: the recorded decision made the candidate the owner`, after.pid === candidatePid, { after: after.pid, candidatePid });
+  }
   const conn = await dataConn(ctx);
   for (const sid of [pair.local, pair.ssh]) {
     await conn.call(D.attach(sid, 0));
@@ -143,6 +191,8 @@ async function faultVariant(ctx, result, fault, artifact, pair) {
   }
   await conn.close();
   await ctl.close();
+  // The request selects only this handover: a later upgrade (Q08b) must run fault-free.
+  await ctx.agent.call('remove', { target: path.join(ctx.layout.barrier, HANDOVER_FAULT_REQUEST) });
 }
 
 export async function Q08(ctx, result) {
@@ -152,13 +202,9 @@ export async function Q08(ctx, result) {
   ctx.sshd = ctx.sshd ?? await startSshd(ctx);
   if (ctx.sshd.unavailable) return block(result, 'SSHD_UNAVAILABLE', ctx.sshd.unavailable);
   const pair = await seedPair(ctx, ctx.state.conn, 'Q08');
-  // The candidate never answers on the public socket before commit (todo 8 accept counters).
-  const accepts = path.join(ctx.layout.barrier, 'candidate-accepts.json');
+  // upgradeStep asserts the candidate never accepted on a public listener before commit, from
+  // the accept counters of its handover-authority receipts (todo 8).
   const ab = await upgradeStep(ctx, result, ctx.artifacts.B, pair, 'A_B');
-  if (ctx.hooks.candidateAcceptCounters?.present) {
-    const counters = JSON.parse((await ctx.agent.call('readFile', { file: accepts })) ?? '{}');
-    assertion(result, 'A_B: candidate accepted nothing before commit', counters.beforeCommit === 0, counters);
-  }
   for (const fn of [(g) => ctx.gui.quit(g), (g) => ctx.gui.kill(g), (g) => ctx.gui.forceTerminate(g)]) await surviveGuiEnd(ctx, result, fn, ctx.artifacts.B);
   const bc = await upgradeStep(ctx, result, ctx.artifacts.C, pair, 'B_C');
   for (const fn of [(g) => ctx.gui.quit(g), (g) => ctx.gui.kill(g), (g) => ctx.gui.forceTerminate(g)]) await surviveGuiEnd(ctx, result, fn, ctx.artifacts.C);
