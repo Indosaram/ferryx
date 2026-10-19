@@ -11,7 +11,11 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::path::PathBuf;
 
+#[cfg(not(feature = "qa-protocol-bump"))]
 pub const DAEMON_PROTOCOL_VERSION: u32 = 5;
+/// QA build only (feature qa-protocol-bump): a future protocol, to test the mismatch path.
+#[cfg(feature = "qa-protocol-bump")]
+pub const DAEMON_PROTOCOL_VERSION: u32 = 6;
 pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
 /// Error code a daemon that knows the agent integration requests puts on every failure of them,
 /// so a client can tell such a failure from an older daemon's untyped "malformed request" reply.
