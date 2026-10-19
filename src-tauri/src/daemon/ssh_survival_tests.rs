@@ -807,6 +807,58 @@ async fn ssh_session_stays_with_the_committed_predecessor_and_the_successor_rest
         .unwrap();
     assert_eq!(chunk, b"todo8-ssh-output".to_vec());
 
+    // Chained upgrade B -> C while A's SSH session is open: B owns nothing, commits, retires;
+    // its route is never written and A's route is untouched, so C routes to A directly.
+    let legacy_b = dir.path().join("legacy-b.sock");
+    successor.handover_manager.force_prepared_for_test(legacy_b.clone());
+    let (b_retired_tx, mut b_retired) = tokio::sync::watch::channel(false);
+    successor.handover_manager.set_retirement_action(move || {
+        b_retired_tx.send_replace(true);
+    });
+    {
+        let manager = Arc::clone(&successor.handover_manager);
+        let service = Arc::clone(&successor.terminal_service);
+        tokio::task::spawn_blocking(move || manager.commit_handover_v5(&service))
+            .await
+            .unwrap()
+            .expect("B commits holding nothing of its own");
+    }
+    tokio::time::timeout(Duration::from_secs(10), b_retired.wait_for(|done| *done))
+        .await
+        .expect("B exits after its commit although A still serves a session")
+        .unwrap();
+    let routes_path = dir.path().join("handover_routes.json");
+    let manifest = crate::daemon::manifest::HandoverManifest::load_from_path(&routes_path);
+    assert!(manifest.routes.iter().all(|r| r.legacy_socket_path != legacy_b), "B wrote a route");
+    assert!(manifest.routes.iter().any(|r| r.legacy_socket_path == legacy), "A's route was disturbed");
+    let c = Arc::new(DaemonServer::new_with_paths(
+        Some(dir.path().join("c/config")),
+        Some(dir.path().join("c/auth")),
+    ));
+    c.session_router.adopt_routes_from_manifest_at(routes_path.clone()).await.unwrap();
+    c.restore_remote_sessions_at(durable.clone()).await.unwrap();
+    assert!(c.terminal_service.remote().list().is_empty(), "C created an SSH controller");
+    let peer = c
+        .session_router
+        .find_legacy_peer_for_session("retained-ssh")
+        .expect("C routes A's SSH session");
+    assert_eq!(peer.socket_path(), legacy.as_path(), "C must talk to A directly");
+    let reply = request_response(
+        &c,
+        serde_json::to_value(DaemonRequest::RemoteWrite {
+            session_id: "retained-ssh".into(),
+            generation: details.generation,
+            data: b"todo8-chained\n".to_vec(),
+        })
+        .unwrap(),
+    )
+    .await;
+    assert!(matches!(reply, DaemonResponse::WriteOk), "chained SSH write: {reply:?}");
+    tokio::time::timeout(Duration::from_secs(10), written.wait_for(|all| all.ends_with(b"todo8-chained\n")))
+        .await
+        .expect("chained input never reached the SSH helper")
+        .unwrap();
+
     // The predecessor stays until its retained session closes, then retires.
     assert!(!*retired.borrow(), "the predecessor retired while its SSH session was open");
     predecessor.terminal_service.remote().close("retained-ssh").await.unwrap();
@@ -817,6 +869,8 @@ async fn ssh_session_stays_with_the_committed_predecessor_and_the_successor_rest
         .await
         .expect("the predecessor never retired after its last session closed")
         .unwrap();
+    let manifest = crate::daemon::manifest::HandoverManifest::load_from_path(&routes_path);
+    assert!(manifest.routes.iter().all(|r| r.legacy_socket_path != legacy), "A's route outlived A");
 }
 
 /// A failed durable-snapshot read must abort the checkpoint without overwriting
