@@ -514,21 +514,89 @@ mod tests {
 }
 
 /// Live sessions counted by the control channel, split by kind: local PTYs, ssh (remote)
-/// sessions and paired sessions.
-// TODO(todo-11-merge): apply todo 11's live filter (reader_open for local, connected for
-// ssh/paired) to each count once T11's fields exist on this branch.
+/// sessions and paired sessions, by todo 11's live definition (the same fields
+/// TerminalService::describe_live_sessions reports): a local PTY whose reader is still open, an
+/// ssh or paired session that is connected. Q12: an exited or disconnected entry never counts.
+/// No I/O: the process start time describe_live_sessions also reads is not needed for a count,
+/// so this stays safe for the synchronous decisions taken under the status lock.
 pub(crate) fn live_session_counts(terminals: &Arc<TerminalService>) -> (u32, u32, u32) {
-    (
-        terminals.pty_manager().list_sessions().len() as u32,
-        terminals.remote().list().len() as u32,
-        terminals.paired().list().len() as u32,
-    )
+    use crate::daemon::protocol::{LiveSessionInfo, LiveSessionKind};
+    use crate::terminal::{local_live_info, remote_live_info};
+    let pty = terminals.pty_manager();
+    let mut sessions: Vec<LiveSessionInfo> = pty
+        .list_sessions()
+        .into_iter()
+        .filter_map(|id| {
+            let session = pty.get_session(&id)?;
+            Some(local_live_info(id, session.pid(), None, session.is_reader_finished()))
+        })
+        .collect();
+    sessions.extend(terminals.remote().list().into_iter().filter_map(|id| {
+        let details = terminals.remote().details(&id)?;
+        Some(remote_live_info(id, details.state, details.pid))
+    }));
+    sessions.extend(terminals.paired().list().into_iter().filter_map(|id| {
+        let live = terminals.paired().live_state(&id)?;
+        Some(LiveSessionInfo::remote(
+            LiveSessionKind::Paired,
+            id,
+            live.remote_pid,
+            live.reader_open,
+            live.connected,
+        ))
+    }));
+    count_live(&sessions)
 }
 
 /// Total live sessions of every kind; Shutdown's confirmation and the retirement predicate use it.
 pub(crate) fn live_session_count(terminals: &Arc<TerminalService>) -> u32 {
     let (local, remote, paired) = live_session_counts(terminals);
     local + remote + paired
+}
+
+/// Counts (local, ssh, paired) entries by todo 11's live definition.
+fn count_live(sessions: &[crate::daemon::protocol::LiveSessionInfo]) -> (u32, u32, u32) {
+    use crate::daemon::protocol::LiveSessionKind;
+    let mut counts = (0, 0, 0);
+    for session in sessions {
+        match session.kind {
+            LiveSessionKind::Local if session.reader_open => counts.0 += 1,
+            LiveSessionKind::Ssh if session.connected => counts.1 += 1,
+            LiveSessionKind::Paired if session.connected => counts.2 += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+#[cfg(test)]
+mod live_count_tests {
+    use super::*;
+    use crate::daemon::protocol::{LiveSessionInfo, LiveSessionKind};
+    use crate::ssh::bridge::RemotePid;
+    use crate::terminal::remote::RemoteConnectionState;
+    use crate::terminal::{local_live_info, remote_live_info};
+
+    /// Q12: an exited local PTY (reader finished) and a disconnected or reconnecting ssh/paired
+    /// entry never count as live; open local readers and connected remotes do.
+    #[test]
+    fn exited_and_disconnected_entries_are_not_counted_live() {
+        let sessions = vec![
+            local_live_info("open".into(), Some(1), None, false),
+            local_live_info("exited".into(), Some(2), None, true),
+            remote_live_info("ssh-up".into(), RemoteConnectionState::Connected, Some(RemotePid(3))),
+            remote_live_info("ssh-down".into(), RemoteConnectionState::Disconnected, Some(RemotePid(4))),
+            remote_live_info("ssh-retry".into(), RemoteConnectionState::Reconnecting, None),
+            LiveSessionInfo::remote(LiveSessionKind::Paired, "paired-up".into(), None, true, true),
+            LiveSessionInfo::remote(LiveSessionKind::Paired, "paired-down".into(), None, true, false),
+        ];
+        assert_eq!(count_live(&sessions), (1, 1, 1));
+    }
+
+    #[test]
+    fn an_empty_service_has_no_live_sessions() {
+        assert_eq!(live_session_counts(&Arc::new(TerminalService::default())), (0, 0, 0));
+    }
 }
 
 pub(crate) struct RetirementGuard {
