@@ -5641,6 +5641,10 @@ mod tests {
         let listener = {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             std::fs::write(&path, listener.local_addr().unwrap().port().to_string()).unwrap();
+            // The daemon publishes daemon.token beside its port, and a client bound to this
+            // endpoint presents the token found beside it (read_transport_token_for). This fake
+            // daemon does not check it, but without one the client refuses the pair as stale.
+            std::fs::write(path.with_file_name("daemon.token"), "fixture-transport-token").unwrap();
             listener
         };
         let peer = tokio::spawn(async move {

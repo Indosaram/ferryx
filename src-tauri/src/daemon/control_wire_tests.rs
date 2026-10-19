@@ -5,15 +5,26 @@ use super::*;
 use crate::daemon::control::{ControlFailure, ControlReply, ControlRequest};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+/// One request line as handle_client expects it from this server. On loopback transports
+/// (Windows) the first frame must carry the server's transport token as "token"; Unix
+/// authenticates by socket ownership and sends the bare request.
+fn request_line(server: &DaemonServer, request: &DaemonRequest) -> String {
+    let mut frame = serde_json::to_value(request).unwrap();
+    if let (Some(token), serde_json::Value::Object(map)) = (server.transport_token(), &mut frame) {
+        map.insert("token".into(), token.into());
+    }
+    let mut line = frame.to_string();
+    line.push('\n');
+    line
+}
+
 /// Sends one data-protocol request over handle_client and returns the one-line response.
 async fn data_exchange(server: &Arc<DaemonServer>, request: DaemonRequest) -> DaemonResponse {
     let (client, server_side) = tokio::io::duplex(64 * 1024);
     let handler = Arc::clone(server);
     let serving = tokio::spawn(async move { handler.handle_client(server_side).await });
     let (read_half, mut write_half) = tokio::io::split(client);
-    let mut json = serde_json::to_string(&request).unwrap();
-    json.push('\n');
-    write_half.write_all(json.as_bytes()).await.unwrap();
+    write_half.write_all(request_line(server, &request).as_bytes()).await.unwrap();
     let mut line = String::new();
     BufReader::new(read_half).read_line(&mut line).await.unwrap();
     drop(write_half);
@@ -28,9 +39,8 @@ async fn commit_exchange(server: &Arc<DaemonServer>) -> Option<DaemonResponse> {
     let handler = Arc::clone(server);
     let serving = tokio::spawn(async move { handler.handle_client(server_side).await });
     let (read_half, mut write_half) = tokio::io::split(client);
-    let mut json = serde_json::to_string(&DaemonRequest::CommitHandover { legacy_socket_path: None }).unwrap();
-    json.push('\n');
-    write_half.write_all(json.as_bytes()).await.unwrap();
+    let request = DaemonRequest::CommitHandover { legacy_socket_path: None };
+    write_half.write_all(request_line(server, &request).as_bytes()).await.unwrap();
     let mut line = String::new();
     let read = BufReader::new(read_half).read_line(&mut line).await.unwrap();
     drop(write_half);
@@ -38,6 +48,12 @@ async fn commit_exchange(server: &Arc<DaemonServer>) -> Option<DaemonResponse> {
     (read > 0).then(|| serde_json::from_str(line.trim()).unwrap())
 }
 
+/// v5 ownership transfer exists only on Unix: is_v5_ownership_transfer_enabled is false on
+/// Windows, so commit_handover takes the v4 route path there. That path writes the route
+/// manifest beside the real per-user runtime endpoint and never consults the injected
+/// after-record or decision-write faults. The tests that need commit_handover_v5 are therefore
+/// Unix-only. The before-record fault is checked in handle_client before any commit runs, so
+/// it stays cross-platform.
 fn prepared_v5_predecessor(root: &std::path::Path) -> (Arc<DaemonServer>, std::path::PathBuf) {
     let server = Arc::new(DaemonServer::new_with_paths(
         Some(root.join("config")),
@@ -51,6 +67,7 @@ fn prepared_v5_predecessor(root: &std::path::Path) -> (Arc<DaemonServer>, std::p
 
 /// CommitHandoverOk dropped after the predecessor recorded Retired: the candidate reads the
 /// decision, is the owner, and serves; the predecessor accepts nothing more.
+#[cfg(unix)]
 #[tokio::test]
 async fn commit_ok_dropped_after_record_resolves_to_the_candidate_as_owner() {
     let root = tempfile::tempdir().unwrap();
@@ -94,6 +111,7 @@ async fn commit_ok_dropped_before_record_makes_the_candidate_abort() {
 
 /// Decision write failure over the wire: the commit is answered with an error, the gate
 /// reopens, the predecessor serves new requests, and the candidate's abort is accepted.
+#[cfg(unix)]
 #[tokio::test]
 async fn decision_write_failure_is_answered_and_the_predecessor_keeps_serving() {
     let root = tempfile::tempdir().unwrap();
