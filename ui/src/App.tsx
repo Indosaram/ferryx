@@ -666,6 +666,7 @@ function WorkspaceApp({
     workspaceId: string;
     code: string;
     message: string;
+    details?: Record<string, unknown>;
   } | null>(null);
   const [sshTabOperation, setSshTabOperation] = useState<{
     workspaceId: string;
@@ -1249,6 +1250,7 @@ function WorkspaceApp({
             workspaceId: activeProject.workspaceId,
             code: ipcError.code,
             message: ipcError.message,
+            details: ipcError.details,
           });
           reportRuntimeError(error);
         }
@@ -3560,6 +3562,7 @@ function WorkspaceApp({
             error={{
               code: registrationError.code,
               message: registrationError.message,
+              details: registrationError.details,
             }}
             onRetry={() => {
               setRegistrationError(null);
