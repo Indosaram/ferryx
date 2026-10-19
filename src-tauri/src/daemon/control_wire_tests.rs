@@ -108,6 +108,55 @@ async fn decision_write_failure_is_answered_and_the_predecessor_keeps_serving() 
     assert!(matches!(data_exchange(&server, DaemonRequest::AbortHandover).await, DaemonResponse::AbortHandoverOk));
 }
 
+/// Rejected commit after reader pause (todo 8): a local session is exported (its reader parked)
+/// and the commit is rejected (decision write fails). The predecessor still owns the session:
+/// it is not SESSION_NOT_OWNED, AbortHandover resumes the parked reader, and input written
+/// afterwards is executed by the same child. Waits on the output channel, never on time.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_commit_after_reader_pause_keeps_the_session_on_the_predecessor() {
+    let root = tempfile::tempdir().unwrap();
+    let (server, legacy) = prepared_v5_predecessor(root.path());
+    let manager = server.terminal_service.pty_manager();
+    let (session_id, mut output) = manager
+        .spawn(portable_pty::CommandBuilder::new("/bin/sh"), 80, 24)
+        .expect("spawn a local session");
+    let export = manager.export_session(&session_id).expect("export parks the reader");
+    server.handover_manager.note_transferred_local(&session_id);
+    server
+        .handover_manager
+        .inject_commit_fault(Some(crate::daemon::handover::CommitFault::DecisionWrite));
+
+    let reply = commit_exchange(&server).await.expect("a rejected commit is answered");
+    assert!(!matches!(reply, DaemonResponse::CommitHandoverOk), "{reply:?}");
+    assert_eq!(crate::daemon::handover::HandoverManager::recorded_decision(&legacy).unwrap(), None);
+    assert!(
+        !server.handover_manager.session_not_owned(&session_id),
+        "a rejected commit must leave the session owned by the predecessor"
+    );
+    assert!(matches!(data_exchange(&server, DaemonRequest::AbortHandover).await, DaemonResponse::AbortHandoverOk));
+    assert!(server.handover_manager.transferred_locals().is_empty());
+    drop(export);
+
+    manager
+        .write_input(&session_id, b"printf 'REJECTED_%s\\n' 'COMMIT_RESUMED'\n")
+        .expect("write after the rejected commit");
+    let mut seen = Vec::new();
+    let found = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(chunk) = output.recv().await {
+            seen.extend_from_slice(&chunk);
+            if String::from_utf8_lossy(&seen).contains("REJECTED_COMMIT_RESUMED") {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(found, "the resumed reader must deliver the child's output: {}", String::from_utf8_lossy(&seen));
+    let _ = manager.close_session(&session_id).await;
+}
+
 #[tokio::test]
 async fn control_retiring_spawn_answers_typed_daemon_retiring_code() {
     let server = Arc::new(DaemonServer::new());

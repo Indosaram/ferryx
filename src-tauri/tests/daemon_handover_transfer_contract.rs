@@ -446,18 +446,14 @@ impl PrivateDaemons {
         if legacy.is_some() {
             timeout(DAEMON_READY_BUDGET, async {
                 loop {
-                    let event = events
+                    // A v5 successor adopts the predecessor's listener (todo 8): daemon.sock is
+                    // never recreated, so any runtime event (the decision record, the legacy
+                    // socket's removal) is the cue to try the exact-PID handshake.
+                    let _event = events
                         .recv()
                         .await
                         .expect("watcher ended")
                         .expect("watch error");
-                    if !event
-                        .paths
-                        .iter()
-                        .any(|path| path.file_name() == Some(std::ffi::OsStr::new("daemon.sock")))
-                    {
-                        continue;
-                    }
                     match TestDaemonClient::connect(&self.socket(), self.pid(index)).await {
                         Ok(_) => break,
                         Err(_) => {}
@@ -893,6 +889,102 @@ async fn a_session_exported_to_a_slow_successor_survives_and_returns_on_abort() 
     assert_eq!(before_sorted, after);
     eprintln!("C6_SESSION_IDS case=slow-successor-abort before={before_sorted:?} after={after:?}");
     assert!(process_is_alive(child_pid), "child process must remain alive");
+}
+
+/// True when a fresh open file description cannot take an exclusive flock on path, exactly as
+/// another process would try (todo 8 probe-flock invariant).
+fn lock_held_elsewhere(path: &Path) -> bool {
+    use std::os::fd::AsRawFd;
+    let probe = std::fs::OpenOptions::new()
+        .read(true)
+        .open(path)
+        .unwrap_or_else(|error| panic!("open {}: {error}", path.display()));
+    // SAFETY: probe stays open for the call.
+    let taken = unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+    if taken {
+        // SAFETY: as above; release the probe's lock at once.
+        unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_UN) };
+    }
+    !taken
+}
+
+fn assert_authority_held(daemons: &PrivateDaemons, stage: &str) {
+    let runtime = daemons.root.path().join("runtime");
+    let socket = runtime.join("daemon.sock");
+    assert!(
+        std::fs::symlink_metadata(&socket).is_ok(),
+        "{stage}: the public socket path disappeared"
+    );
+    assert!(
+        lock_held_elsewhere(&runtime.join("daemon.lock")),
+        "{stage}: the legacy daemon lock was free"
+    );
+    let locks = daemons.root.path().join("data/locks");
+    if let Ok(entries) = std::fs::read_dir(&locks) {
+        for entry in entries.flatten() {
+            assert!(
+                lock_held_elsewhere(&entry.path()),
+                "{stage}: the persistent lock {} was free",
+                entry.path().display()
+            );
+        }
+    }
+}
+
+/// todo 8: the v5 successor adopts the predecessor's listeners and locks instead of binding and
+/// locking itself. At every observable stage (prepared, successor serving, predecessor gone) the
+/// public socket path exists and both locks refuse a probe flock; the socket inode the GUI
+/// connects to is the same one the predecessor bound, and the successor answers on it.
+#[tokio::test]
+async fn a_v5_successor_adopts_the_public_socket_and_locks_without_a_gap() {
+    use std::os::unix::fs::MetadataExt;
+    let mut daemons = PrivateDaemons::with_v5_flag(None);
+    let socket_path = daemons.socket();
+    let d1 = daemons.launch(None).await;
+    let pid_d1 = daemons.pid(d1);
+    let inode_before = std::fs::symlink_metadata(&socket_path).unwrap().ino();
+    assert_authority_held(&daemons, "before prepare");
+
+    let mut client1 = TestDaemonClient::connect(&socket_path, pid_d1)
+        .await
+        .expect("connect to D1");
+    let legacy_socket_path = match client1
+        .send_request(&DaemonRequest::PrepareHandover)
+        .await
+        .expect("PrepareHandover")
+    {
+        DaemonResponse::PrepareHandoverOk { legacy_socket_path, .. } => legacy_socket_path,
+        other => panic!("Expected PrepareHandoverOk, got {other:?}"),
+    };
+    assert_authority_held(&daemons, "prepared");
+
+    let d2 = daemons.launch(Some(Path::new(&legacy_socket_path))).await;
+    let pid_d2 = daemons.pid(d2);
+    assert_authority_held(&daemons, "successor serving");
+    assert_eq!(
+        std::fs::symlink_metadata(&socket_path).unwrap().ino(),
+        inode_before,
+        "the successor must serve the inherited socket, not a re-bound one"
+    );
+
+    // Wait on the predecessor's own exit event (waitpid), never a poll.
+    let mut d1_child = daemons.children.remove(d1);
+    let exited = timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || d1_child.wait()),
+    )
+    .await
+    .ok()
+    .and_then(|joined| joined.ok())
+    .and_then(|status| status.ok());
+    assert!(
+        exited.is_some_and(|status| status.success()),
+        "the predecessor must exit 0 after the commit: {exited:?}"
+    );
+    assert_authority_held(&daemons, "predecessor gone");
+    TestDaemonClient::connect(&socket_path, pid_d2)
+        .await
+        .expect("the successor answers on the inherited socket");
 }
 
 #[tokio::test]
