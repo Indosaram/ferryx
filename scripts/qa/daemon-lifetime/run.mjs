@@ -164,7 +164,7 @@ async function main() {
 
   const agentPath = joinFor(host.platform, host.transport.kind === 'local' ? HERE : '', 'lib', 'agent.mjs');
   const remoteHarness = host.transport.kind === 'local' ? HERE : joinFor(host.platform, worktreePaths(host, opts.worktreeSlug ?? 'daemon-lifetime-w5-t12-20261018').worktree, 'scripts', 'qa', 'daemon-lifetime');
-  const agent = await startAgent(host, { agentPath: host.transport.kind === 'local' ? agentPath : joinFor(host.platform, remoteHarness, 'lib', 'agent.mjs'), runId, runDir, allowRoots: [host.cargoTarget] }, { log });
+  const agent = await startAgent(host, { agentPath: host.transport.kind === 'local' ? agentPath : joinFor(host.platform, remoteHarness, 'lib', 'agent.mjs'), runId, runDir, allowRoots: [host.cargoTarget, `${host.cargoTarget}-baseline`] }, { log });
   const uid = host.platform === 'windows' ? null : Number((await agent.call('exec', { command: 'id', args: ['-u'] })).stdout.trim());
   const home = host.transport.kind === 'local' ? os.homedir() : (await agent.call('exec', host.platform === 'windows' ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', '$env:USERPROFILE'] } : { command: 'sh', args: ['-c', 'printf %s "$HOME"'] })).stdout.trim();
   const forbidden = forbiddenRoots({ platform: host.platform, home, uid });
@@ -253,7 +253,7 @@ async function main() {
   summary.artifacts = Object.fromEntries(Object.entries(artifacts).map(([k, v]) => [k, { ...v, key: keys[k] ?? null }]));
   writeSummary();
 
-  const allowedRoots = [runDir, host.cargoTarget];
+  const allowedRoots = [runDir, host.cargoTarget, `${host.cargoTarget}-baseline`];
   for (const art of Object.values(artifacts)) {
     for (const exe of [art.guiExecutable, art.daemonExecutable].filter(Boolean)) assertQaExecutable(exe, { allowedRoots, forbidden, platform: host.platform });
   }
@@ -272,7 +272,7 @@ async function main() {
     platform: host.platform, runId, host, agent, jobs, gui, mahord, layout, uid, artifacts, keys, hooks: summary.hooks,
     revisions: summary.revisions, isolationEnv: env, repoDir, workspaceId: 'qa-daemon-lifetime', workspaceRegistered: false,
     stagedRoot: joinFor(host.platform, layout.data, 'daemon-runtime'),
-    qaRoots: [runDir, host.cargoTarget], guiExecutables: Object.values(artifacts).map((a) => a.guiExecutable).filter(Boolean),
+    qaRoots: [runDir, host.cargoTarget, `${host.cargoTarget}-baseline`], guiExecutables: Object.values(artifacts).map((a) => a.guiExecutable).filter(Boolean),
     hostUser: host.transport.user ?? os.userInfo().username, sshPort: 20000 + (Number(runId.slice(-5, -1)) % 20000),
     evidenceDir: localEvidence.split(path.sep).join('/'), state: {}, carry: [], sshd: null,
     writeEvidence: async (file, content) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, content); },
