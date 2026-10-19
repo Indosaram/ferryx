@@ -39,7 +39,7 @@ it.each(["/srv/repo", "C:\\work\\repo"])(
     expect(onSelectWorktree).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: project.workspaceId, path,
     }));
-    fireEvent.click(header);
+    fireEvent.click(screen.getByRole("button", { name: /^Collapse / }));
     expect(document.querySelector('[data-shortcut-workspace-id="ssh:build"]')).not.toBeInTheDocument();
     expect(header.querySelector('[data-status-state="working"]')).toHaveClass("animate-spin");
   },

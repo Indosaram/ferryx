@@ -147,11 +147,18 @@ describe("Sidebar drag reorder", () => {
     fireEvent.pointerUp(projectButton, { pointerId: 1, button: 0, clientX: 10, clientY: 10 });
     fireEvent.click(projectButton);
     expect(onSelectProject).toHaveBeenCalledExactlyOnceWith(projects[0]);
+    // IS-14: a name click selects but never collapses; collapsing is the chevron's job.
+    expect(screen.getByRole("list", { name: "alpha worktrees" })).toBeInTheDocument();
+
+    const collapse = screen.getByRole("button", { name: "Collapse alpha" });
+    fireEvent.pointerDown(collapse, { pointerId: 2, button: 0, clientX: 10, clientY: 10 });
+    fireEvent.pointerUp(collapse, { pointerId: 2, button: 0, clientX: 10, clientY: 10 });
+    fireEvent.click(collapse);
     expect(screen.queryByRole("list", { name: "alpha worktrees" })).not.toBeInTheDocument();
 
     const toggle = screen.getByRole("button", { name: "Expand alpha" });
-    fireEvent.pointerDown(toggle, { pointerId: 2, button: 0, clientX: 10, clientY: 10 });
-    fireEvent.pointerUp(toggle, { pointerId: 2, button: 0, clientX: 10, clientY: 10 });
+    fireEvent.pointerDown(toggle, { pointerId: 3, button: 0, clientX: 10, clientY: 10 });
+    fireEvent.pointerUp(toggle, { pointerId: 3, button: 0, clientX: 10, clientY: 10 });
     fireEvent.click(toggle);
     expect(screen.getByRole("list", { name: "alpha worktrees" })).toBeInTheDocument();
     expect(onSelectProject).toHaveBeenCalledTimes(1);

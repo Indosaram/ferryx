@@ -21,12 +21,11 @@ import {
   ChevronRight,
   CircleSlash,
   Folder,
-  History,
   Inbox,
+  MoreHorizontal,
   PanelLeftClose,
   Plus,
   Settings2,
-  Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
@@ -532,7 +531,7 @@ export function Sidebar({
                     onToggle={() => toggleProject(group.groupId)}
                     onSelect={() => {
                       onSelectProject(project);
-                      toggleProject(group.groupId);
+                      if (!expanded) toggleProject(group.groupId);
                     }}
                     onCreateWorktree={() => onCreateWorktree(project)}
                     onRemoveProject={onRemoveProject ? () => onRemoveProject(project) : undefined}
@@ -768,10 +767,7 @@ function ProjectHeader({
     };
   }, []);
 
-  const handleContextMenu = (event: React.MouseEvent) => {
-    if (inert) return;
-    event.preventDefault();
-    event.stopPropagation();
+  const openProjectMenu = (position: { x: number; y: number }) => {
     const items: NativeMenuEntry[] = [
       { kind: "item", id: "add-worktree", label: "Add Worktree", enabled: project.gitRoot !== null, icon: "add" },
       { kind: "item", id: "manage-disk", label: "Manage Worktree Disk…", enabled: !remote && project.gitRoot !== null, icon: "disk" },
@@ -787,7 +783,7 @@ function ProjectHeader({
     void openNativePopupMenu(
       "cmd_native_sidebar_context_menu",
       items,
-      { x: event.clientX, y: event.clientY },
+      position,
       (id) => {
         menuUnlistenRef.current?.();
         menuUnlistenRef.current = null;
@@ -811,6 +807,20 @@ function ProjectHeader({
       },
       controller.signal,
     ).catch((error: unknown) => console.warn("Could not open native project menu", error));
+  };
+
+  const handleContextMenu = (event: React.MouseEvent) => {
+    if (inert) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openProjectMenu({ x: event.clientX, y: event.clientY });
+  };
+
+  const handleMoreActions = (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (inert) return;
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    openProjectMenu({ x: rect.left, y: rect.bottom });
   };
 
   return (
@@ -889,31 +899,16 @@ function ProjectHeader({
             <Plus className="size-3.5" />
           </IconButton>
         ) : null}
-        {onOpenHistory ? (
-          <IconButton
-            label="Past conversations"
-            aria-label="Past conversations"
-            size="sm"
-            disabled={inert}
-            className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
-            onClick={onOpenHistory}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <History className="size-3" />
-          </IconButton>
-        ) : null}
-        {onRemoveProject ? (
-          <IconButton
-            label={`Remove project ${projectLabel}`}
-            size="sm"
-            disabled={inert}
-            className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100 hover:text-destructive"
-            onClick={onRemoveProject}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <Trash2 className="size-3" />
-          </IconButton>
-        ) : null}
+        <IconButton
+          label={`More actions for ${projectLabel}`}
+          size="sm"
+          disabled={inert}
+          className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
+          onClick={handleMoreActions}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <MoreHorizontal className="size-3.5" />
+        </IconButton>
       </div>
 
     </>

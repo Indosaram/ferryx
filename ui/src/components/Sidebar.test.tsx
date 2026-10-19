@@ -348,7 +348,7 @@ describe("Sidebar navigation", () => {
     expect(screen.queryByRole("list", { name: "orca-lite worktrees" })).not.toBeInTheDocument();
   });
 
-  it("collapses and expands a project from its name button, not just the chevron", () => {
+  it("keeps the active expanded project open when its name is clicked", () => {
     localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
     const onSelectProject = vi.fn();
     renderSidebar({
@@ -358,16 +358,45 @@ describe("Sidebar navigation", () => {
       onSelectProject,
     });
 
-    expect(screen.getByRole("list", { name: "default worktrees" })).toBeInTheDocument();
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "true");
 
     fireEvent.click(projectRow("default"));
 
-    expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("list", { name: "default worktrees" })).toBeInTheDocument();
     expect(onSelectProject).toHaveBeenCalledTimes(1);
 
     fireEvent.click(projectRow("default"));
 
-    expect(screen.getByRole("list", { name: "default worktrees" })).toBeInTheDocument();
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "true");
+    expect(onSelectProject).toHaveBeenCalledTimes(2);
+  });
+
+  it("selects and expands a collapsed project when its name is clicked", () => {
+    const onSelectProject = vi.fn();
+    renderSidebar({
+      projects: accordionProjects,
+      activeProjectId: "default",
+      worktrees: [defaultWorktree, qaWorktree],
+      onSelectProject,
+    });
+
+    expect(projectToggle("rorca-qa")).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(projectRow("rorca-qa"));
+
+    expect(onSelectProject).toHaveBeenCalledWith(accordionProjects[1]);
+    expect(projectToggle("rorca-qa")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("list", { name: "rorca-qa worktrees" })).toBeInTheDocument();
+  });
+
+  it("still collapses a project from its chevron", () => {
+    renderSidebar({ projects: accordionProjects, activeProjectId: "default", worktrees: [defaultWorktree] });
+
+    fireEvent.click(projectToggle("default"));
+
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
   });
 
   it("does not highlight an inactive project's row when the active path is stale", () => {
@@ -811,18 +840,52 @@ describe("Sidebar navigation", () => {
     expect(onRemoveProject).toHaveBeenCalledWith(testProjects[0]);
   });
 
-  it("triggers onRemoveProject from project row trash icon button", () => {
+  it("triggers onRemoveProject from the project More actions native menu anchored at the button", () => {
     const onRemoveProject = vi.fn();
+    nativeMenu.openNativePopupMenu.mockClear();
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
     const testProjects = [
       { workspaceId: "proj-1", repoRoot: "/repos/proj-1", gitRoot: "/repos/proj-1" },
     ];
     renderSidebar({ projects: testProjects, onRemoveProject });
 
-    const trashBtn = screen.getByRole("button", { name: "Remove project proj-1" });
-    expect(trashBtn).toBeInTheDocument();
+    const moreBtn = screen.getByRole("button", { name: "More actions for proj-1" });
+    moreBtn.getBoundingClientRect = () => ({ left: 120, bottom: 64, top: 44, right: 140, width: 20, height: 20, x: 120, y: 44, toJSON: () => ({}) });
 
-    fireEvent.click(trashBtn);
+    fireEvent.click(moreBtn);
+
+    expect(nativeMenu.openNativePopupMenu).toHaveBeenCalledTimes(1);
+    const [command, , position] = nativeMenu.openNativePopupMenu.mock.calls[0];
+    expect(command).toBe("cmd_native_sidebar_context_menu");
+    expect(position).toEqual({ x: 120, y: 64 });
+    const { items, onAction } = lastSidebarMenuCall();
+    const removeItem = items.find((item) => item.id === "remove");
+    expect(removeItem?.label).toBe("Remove Project");
+    expect(removeItem?.enabled).toBe(true);
+    expect(onRemoveProject).not.toHaveBeenCalled();
+
+    onAction("remove");
     expect(onRemoveProject).toHaveBeenCalledWith(testProjects[0]);
+  });
+
+  it("keeps Past conversations and Remove inside the menu, leaving only + and More actions on the row", () => {
+    const onOpenHistory = vi.fn();
+    nativeMenu.openNativePopupMenu.mockClear();
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
+    const testProjects = [
+      { workspaceId: "proj-1", repoRoot: "/repos/proj-1", gitRoot: "/repos/proj-1" },
+    ];
+    renderSidebar({ projects: testProjects, onOpenHistory, onRemoveProject: vi.fn() });
+
+    expect(screen.queryByRole("button", { name: /past conversations/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /remove project/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add worktree to proj-1" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "More actions for proj-1" }));
+    const { items, onAction } = lastSidebarMenuCall();
+    expect(items.find((item) => item.id === "past-conversations")?.enabled).toBe(true);
+    onAction("past-conversations");
+    expect(onOpenHistory).toHaveBeenCalledWith(testProjects[0]);
   });
 
   it("shows the worktree tree by default and swaps to the inbox only through the inbox icon", () => {
