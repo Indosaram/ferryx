@@ -23,6 +23,7 @@ export const HOOKS = Object.freeze([
   { id: 'jobForwardsQaBarrier', owner: 'todos 4-6 (job daemon receives FERRYX_QA_BARRIER_DIR/FERRYX_QA_RUN_ID under local-split-qa)', files: ['src-tauri/src/daemon/launchd.rs', 'src-tauri/src/daemon/supervisor_linux.rs', 'src-tauri/src/daemon/supervisor_windows.rs'], pattern: /FERRYX_QA_BARRIER_DIR/, scenarios: ['Q04', 'Q11'] },
   { id: 'handoverFaultArm', owner: 'todo 8 (runner arms one transfer fault per handover: <barrier>/handover-fault.request.json { runId, operationId, fault })', files: ['src-tauri/src/daemon/qa_producers.rs', 'src-tauri/src/daemon/server.rs'], pattern: /handover-fault/, scenarios: ['Q08'], platforms: ['mac', 'linux'] },
   { id: 'candidateAcceptCounters', owner: 'todo 8 (candidate accept counters exposed through the QA channel: <barrier>/candidate-accepts.json)', files: ['src-tauri/src/daemon/qa_producers.rs', 'src-tauri/src/daemon/server.rs'], pattern: /candidate-accepts/, scenarios: ['Q08'], platforms: ['mac', 'linux'] },
+  { id: 'forceFallback', owner: 'todo 12 (FERRYX_QA_FORCE_FALLBACK=1 under local-split-qa routes connect_or_spawn to the detached fallback)', files: ['src-tauri/src/daemon/client.rs'], pattern: /FERRYX_QA_FORCE_FALLBACK/, scenarios: ['Q06'] },
 ]);
 
 /** Fault names of todo 8's four transfer failure variants plus the forced commit failure. */
