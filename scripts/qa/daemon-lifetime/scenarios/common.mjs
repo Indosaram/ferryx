@@ -125,3 +125,41 @@ export function assertSameOwner(result, before, after, label) {
 }
 
 export { identityOf, isLive, liveSessions };
+
+/**
+ * Ends the current owner the plan-sanctioned way for QA: quit the GUI, close every QA session,
+ * then control RetireWhenIdle (zero live sessions) and await the owner's exit event.
+ */
+export async function retireOwner(ctx) {
+  if (ctx.state.gui) { await ctx.gui.quit(ctx.state.gui).catch(() => {}); ctx.state.gui = null; }
+  const owner = await ownerIdentity(ctx);
+  if (!owner.pid) return { retired: true, pid: null };
+  if (ctx.state.conn) {
+    const desc = await ctx.state.conn.describe().catch(() => ({ sessions: [] }));
+    for (const s of desc.sessions ?? []) await ctx.state.conn.call({ type: 'close', sessionId: s.backendId }).catch(() => {});
+    await ctx.state.conn.close().catch(() => {});
+    ctx.state.conn = null;
+  }
+  const ctl = await controlConn(ctx);
+  if (!ctl) return { retired: false, pid: owner.pid, reason: 'no control endpoint' };
+  const exit = ctx.agent.call('waitExit', { pid: owner.pid, deadlineMs: 30_000 });
+  const resp = await ctl.retireWhenIdle();
+  const exited = await exit;
+  return { retired: resp?.ok === true && !exited.timedOut, pid: owner.pid, resp, exited };
+}
+
+/** Launches a GUI, waits for a new owner and seeds one local session; records the daemon pid. */
+export async function freshOwner(ctx, artifact, { env = {}, tag = 'QA_A', dataVersion = 5 } = {}) {
+  const before = await ctx.agent.call('readFile', { file: `${ctx.layout.runtime}/owner.json` });
+  const fromPid = before ? JSON.parse(before).pid : null;
+  const gui = await ctx.gui.launch(artifact, { env });
+  ctx.state.gui = gui;
+  const changed = await ctx.agent.call('waitOwnerChange', { runtimeDir: ctx.layout.runtime, fromPid, deadlineMs: DAEMON_READY_TIMEOUT_MS * 2 });
+  if (!changed.owner) throw new Error(`no new owner after launching ${artifact.name}`);
+  const identity = await ownerIdentity(ctx);
+  await ctx.agent.call('record', { pid: identity.pid, role: `daemon-${artifact.name}`, executable: identity.os.executable });
+  ctx.state.daemon = identity;
+  ctx.state.conn = await dataConn(ctx, ctx.layout.runtime, { version: dataVersion });
+  ctx.state.localA = await seedLocalSession(ctx, ctx.state.conn, tag);
+  return identity;
+}

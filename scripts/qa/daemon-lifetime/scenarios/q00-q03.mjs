@@ -68,7 +68,7 @@ export async function Q00(ctx, result) {
 }
 
 /** Shared body of Q01-Q03: end the GUI one way, then prove daemon, children and sessions survived. */
-async function surviveGuiEnd(ctx, result, how) {
+export async function surviveGuiEnd(ctx, result, how, artifact = ctx.artifacts.A) {
   const conn = ctx.state.conn;
   const before = await conn.describe();
   const ownerBefore = await ownerIdentity(ctx);
@@ -78,7 +78,7 @@ async function surviveGuiEnd(ctx, result, how) {
   assertion(result, 'GUI process exited', !ended?.timedOut && !(ended?.exited?.timedOut), ended);
   const ownerMid = await ownerIdentity(ctx);
   assertSameOwner(result, ownerBefore, ownerMid, 'after GUI end');
-  const relaunch = await ctx.gui.launch(ctx.artifacts.A);
+  const relaunch = await ctx.gui.launch(artifact);
   ctx.state.gui = relaunch;
   const conn2 = await dataConn(ctx);
   const after = await conn2.describe();
