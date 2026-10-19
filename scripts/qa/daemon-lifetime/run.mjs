@@ -12,7 +12,8 @@
 // daemon. Teardown kills only pids it recorded (re-checked by executable path and start time),
 // removes only jobs named ferryx-qa-<runId>*, and only its own run dir.
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +25,8 @@ import { generationKey, assertDistinctKeys } from './lib/wire.mjs';
 import { startAgent } from './lib/remote.mjs';
 import { createJobs } from './lib/jobs.mjs';
 import { createGuiDriver, macGuiExecutable } from './lib/gui.mjs';
+import { assembleDaemonHelper } from '../../macos-daemon-helper.mjs';
+import { finalizeMacosBundle } from '../../lib/release-platforms.mjs';
 import { connectMahord } from './lib/mahord.mjs';
 import { run } from './lib/proc.mjs';
 import * as g1 from './scenarios/q00-q03.mjs';
@@ -34,6 +37,20 @@ import * as g4 from './scenarios/q10-q13.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '../../..');
 export const RUNNERS = Object.freeze({ ...g1, ...g2, ...g3, ...g4 });
+
+const syncExec = (cmd, args) => {
+  const r = spawnSync(cmd, args, { encoding: 'utf8' });
+  const out = { status: r.status === null ? -1 : r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+  if (out.status !== 0) throw new Error(`${cmd} ${args.join(' ')} exited ${out.status}: ${out.stderr}`);
+  return out;
+};
+
+/** todo 13 on a QA bundle: nested signed helper, then inside-out ad-hoc re-seal, no notarization. */
+export function signMacQaBundle({ appPath, entitlements, workspaceDir, exec = syncExec }) {
+  const helper = assembleDaemonHelper({ appPath, identity: '-', entitlements, exec });
+  const sealed = finalizeMacosBundle({ appPath, workspaceDir, signingIdentity: '-', approveNotarization: false, entitlements, exec });
+  return { helper, sealed };
+}
 
 export function parseArgs(argv) {
   const out = { platform: null, all: false, only: [], selfCheck: false, evidenceDir: null, runId: null, keepRunDir: false, v1Worktree: null, baselineWorktree: null };
@@ -157,8 +174,9 @@ async function main() {
       : { name, appPath: null, guiExecutable: joinFor(host.platform, destRoot, path.basename(fresh.guiExecutable)), cliExecutable: joinFor(host.platform, destRoot, path.basename(fresh.cliExecutable)) };
     if (host.platform === 'mac') {
       // todo 13: each QA artifact carries its own signed helper and a re-sealed outer signature.
-      const helper = await run('node', ['-e', `import('${path.join(REPO, 'scripts/macos-daemon-helper.mjs')}').then(async (h) => { const r = await import('${path.join(REPO, 'scripts/lib/release-platforms.mjs')}'); const a = h.assembleDaemonHelper({ appPath: process.argv[1], identity: '-', entitlements: process.argv[2] }); r.finalizeMacosBundle({ appPath: process.argv[1], workspaceDir: process.argv[3], signingIdentity: '-', approveNotarization: false, entitlements: process.argv[2] }); console.log(JSON.stringify(a)); })`, art.appPath, joinFor(host.platform, destRoot, 'outer-entitlements.plist'), destRoot], { deadlineMs: 600_000 });
-      writeFileSync(path.join(localEvidence, `helper-${name}.log`), `exit ${helper.status}\n${helper.stdout}\n${helper.stderr}`);
+      // mac artifacts live on this Mac: assemble + ad-hoc re-seal in-process (scripts/build-notarized-local.mjs order).
+      const helper = signMacQaBundle({ appPath: art.appPath, entitlements: joinFor(host.platform, destRoot, 'outer-entitlements.plist'), workspaceDir: destRoot });
+      writeFileSync(path.join(localEvidence, `helper-${name}.log`), `${JSON.stringify(helper, null, 2)}\n`);
       for (const target of [art.appPath, joinFor(host.platform, art.appPath, 'Contents', 'Helpers', 'Ferryx Daemon.app')]) {
         const v = await run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', target]);
         writeFileSync(path.join(localEvidence, `codesign-${name}-${path.basename(target)}.log`), `exit ${v.status}\n${v.stderr}`);
