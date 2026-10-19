@@ -487,28 +487,6 @@ pub fn adopt_validated_authority(
     })
 }
 
-pub fn adopt_authority(
-    authority: TransferredAuthority,
-) -> Result<(Option<tokio::net::UnixListener>, DaemonLockFiles), HandoverSocketError> {
-    let tokio_listener = if let Some(fd) = authority.canonical_listener {
-        let std_listener = StdUnixListener::from(fd);
-        std_listener.set_nonblocking(true)?;
-        let listener = tokio::net::UnixListener::from_std(std_listener)?;
-        Some(listener)
-    } else {
-        None
-    };
-
-    let legacy_file = unsafe { File::from_raw_fd(authority.legacy_lock.into_raw_fd()) };
-    let persistent_file = authority
-        .persistent_lock
-        .map(|fd| unsafe { File::from_raw_fd(fd.into_raw_fd()) });
-
-    let lock_files = DaemonLockFiles::from_locked_files(persistent_file, legacy_file);
-
-    Ok((tokio_listener, lock_files))
-}
-
 /// Candidate side: asks for the predecessor's authority on an accepted handover-socket stream
 /// and receives it. Accepts on none of the received listeners.
 pub fn request_authority(
@@ -689,9 +667,9 @@ mod tests {
             .expect("tokio rt");
 
         rt.block_on(async move {
-            let (tokio_listener, _locks) =
-                adopt_authority(received).expect("adopt authority");
-            let tokio_listener = tokio_listener.expect("listener adopted");
+            let adopted = adopt_validated_authority(received).expect("adopt authority");
+            let tokio_listener = tokio::net::UnixListener::from_std(adopted.canonical_listener)
+                .expect("listener adopted");
 
             let client = StdUnixStream::connect(&listener_path).expect("connect to adopted listener");
             let (server_stream, _) = tokio_listener.accept().await.expect("accept on adopted listener");

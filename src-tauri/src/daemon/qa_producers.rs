@@ -342,25 +342,38 @@ pub async fn note_authority_stage(
     use crate::daemon::handover::AuthorityListenerRole;
     let Some(channel) = channel().await else { return };
     let Some(operation_id) = channel.operation_id() else { return };
-    let legacy = crate::daemon::server::get_lock_path();
-    let persistent = crate::daemon::server::get_persistent_lock_path();
-    let probe = |path: &Path| match crate::daemon::handover_socket::lock_is_held_elsewhere(path) {
-        Ok(held) => json!(held),
-        Err(error) => json!(error.to_string()),
-    };
-    let settlement = json!({
-        "stage": stage,
-        "acceptCounts": {
-            "canonical": manager.accept_count(AuthorityListenerRole::Canonical),
-            "control": manager.accept_count(AuthorityListenerRole::Control),
-            "agentState": manager.accept_count(AuthorityListenerRole::AgentState),
-        },
-        "probeFlockRefused": {
-            "legacy": probe(&legacy),
-            "persistent": persistent.as_deref().map(probe),
-        },
-        "publicSocketPresent": crate::daemon::server::get_socket_path().exists(),
+    let accept_counts = json!({
+        "canonical": manager.accept_count(AuthorityListenerRole::Canonical),
+        "control": manager.accept_count(AuthorityListenerRole::Control),
+        "agentState": manager.accept_count(AuthorityListenerRole::AgentState),
     });
+    let stage = stage.to_string();
+    // The flock probes and the socket stat are filesystem work: keep them off the Tokio workers.
+    let settlement = match tokio::task::spawn_blocking(move || {
+        let legacy = crate::daemon::server::get_lock_path();
+        let persistent = crate::daemon::server::get_persistent_lock_path();
+        let probe = |path: &Path| match crate::daemon::handover_socket::lock_is_held_elsewhere(path) {
+            Ok(held) => json!(held),
+            Err(error) => json!(error.to_string()),
+        };
+        json!({
+            "stage": stage,
+            "acceptCounts": accept_counts,
+            "probeFlockRefused": {
+                "legacy": probe(&legacy),
+                "persistent": persistent.as_deref().map(probe),
+            },
+            "publicSocketPresent": crate::daemon::server::get_socket_path().exists(),
+        })
+    })
+    .await
+    {
+        Ok(settlement) => settlement,
+        Err(error) => {
+            tracing::warn!(%error, "Authority stage probe task failed");
+            return;
+        }
+    };
     qa_barrier::append_receipt_off_runtime(&channel, AUTHORITY_STAGE, &operation_id, settlement).await;
 }
 

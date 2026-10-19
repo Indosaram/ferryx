@@ -2740,6 +2740,27 @@ fn handover_failure_response(context: Option<&str>, message: String) -> DaemonRe
     }
 }
 
+/// Connects once to the candidate's own handover socket so its blocking accept worker returns
+/// after an expiry abort (todo 8). The connect is a socket syscall, so it runs off the workers.
+#[cfg(unix)]
+async fn wake_handover_accept(path: PathBuf) {
+    let _ = tokio::task::spawn_blocking(move || drop(std::os::unix::net::UnixStream::connect(&path))).await;
+}
+
+/// QA gate (local-split-qa): while the file named by FERRYX_QA_OWNER_PUBLISH_HOLD exists, every
+/// owner.json publication attempt fails, so a test controls exactly how long the record stays
+/// unpublished. Blocking (a stat); called only inside run_blocking.
+fn owner_publish_held() -> bool {
+    #[cfg(feature = "local-split-qa")]
+    {
+        std::env::var_os("FERRYX_QA_OWNER_PUBLISH_HOLD").is_some_and(|path| Path::new(&path).exists())
+    }
+    #[cfg(not(feature = "local-split-qa"))]
+    {
+        false
+    }
+}
+
 fn daemon_session_not_found(session_id: &str, source: &'static str) -> DaemonResponse {
     DaemonResponse::Error {
         message: format!("Session '{session_id}' not found"),
@@ -3856,7 +3877,7 @@ impl DaemonServer {
                                 Ok(answer) => answer,
                                 Err(_) => {
                                     expired_before_commit = true;
-                                    drop(std::os::unix::net::UnixStream::connect(&handover_socket_path));
+                                    wake_handover_accept(handover_socket_path.clone()).await;
                                     return Err("handover request expired during TransferSessions".to_string());
                                 }
                             }
@@ -3891,7 +3912,7 @@ impl DaemonServer {
                             expired_before_commit = true;
                             // Wake the blocking accept so its worker returns instead of
                             // keeping this process alive after the clean exit.
-                            drop(std::os::unix::net::UnixStream::connect(&handover_socket_path));
+                            wake_handover_accept(handover_socket_path.clone()).await;
                             return Err("handover request expired mid-transfer".to_string());
                         }
                     };
@@ -6237,6 +6258,11 @@ impl DaemonServer {
                             return Err("Injected owner.json publication failure".to_string());
                         }
                         crate::ipc::run_blocking(move || {
+                            if owner_publish_held() {
+                                return Err(crate::ipc::IpcError::internal(
+                                    "Injected owner.json publication hold",
+                                ));
+                            }
                             publish_owner(&paths, &generation_key, epoch)
                                 .map_err(crate::ipc::IpcError::internal)
                         })

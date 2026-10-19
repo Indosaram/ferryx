@@ -674,15 +674,6 @@ mod spawn_owner_tests {
         );
     }
 
-    #[test]
-    fn commit_resolution_trusts_only_a_confirmed_reply_or_a_retired_record() {
-        use super::super::handover_transaction::HandoverState;
-        assert_eq!(resolve_commit(true, None), CommitResolution::Owner);
-        assert_eq!(resolve_commit(false, Some(HandoverState::Retired)), CommitResolution::Owner);
-        assert_eq!(resolve_commit(false, None), CommitResolution::Abort);
-        assert_eq!(resolve_commit(false, Some(HandoverState::Active)), CommitResolution::Abort);
-    }
-
     fn control_fixture() -> (Arc<HandoverManager>, Arc<TerminalService>) {
         let root = tempfile::tempdir().unwrap();
         let manager = Arc::new(HandoverManager::new(root.path().join("control.sock")));

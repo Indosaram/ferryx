@@ -57,8 +57,6 @@ impl DaemonServer {
     /// Binds the control endpoint on an ordinary start. Called right after the data listener is
     /// bound, i.e. only while this process holds the daemon locks. A HandoverCandidate never calls
     /// this.
-    // TODO(todo 8): a HandoverCandidate inherits the predecessor's control listener fd through
-    // the authority transfer and starts accept_control_connections on it after CommitHandoverOk.
     pub(crate) async fn bind_control_endpoint(self: &Arc<Self>) -> Result<(), String> {
         if control_disabled_for_qa() {
             tracing::warn!("FERRYX_QA_DISABLE_CONTROL=1: control endpoint not bound");
@@ -288,10 +286,6 @@ impl DaemonServer {
                     control::FROZEN_OPS.iter().map(|op| op.to_string()).collect();
                 // The handover wire is frozen as handover-v1 (tests/fixtures/handover-v1.json);
                 // only unix daemons hand over.
-                // TODO(todo 8): the candidate sends Hello over control first and refuses with
-                // CODE_HANDOVER_WIRE_UNSUPPORTED unless these ops list handover-v1; todo 8 owns
-                // that path: "sends the upgrade through the control channel (todo 15) as
-                // RequestUpgrade { staged_executable, generation_key }".
                 if cfg!(unix) {
                     ops.push(control::HANDOVER_V1_OP.to_string());
                 }
@@ -392,30 +386,45 @@ impl DaemonServer {
             return failed(CODE_UPGRADE_UNSUPPORTED);
         };
         let executable = PathBuf::from(&staged_executable);
-        let validated = {
+        // Everything that touches the filesystem or /proc runs off the Tokio workers: staged
+        // executable validation, this daemon's own generation key (current_exe + canonicalize)
+        // and its start time (/proc on Linux).
+        let pid = std::process::id();
+        let checked = {
             let (root, executable, key) = (root.clone(), executable.clone(), key.clone());
             crate::ipc::run_blocking(move || {
                 request_file::validate_staged_executable(&root, &executable, &key)
-                    .map_err(crate::ipc::IpcError::internal)
+                    .map_err(crate::ipc::IpcError::internal)?;
+                Ok((
+                    request_file::own_generation_key(),
+                    crate::daemon::owner_admission::process_start_time(pid),
+                ))
             })
             .await
         };
-        if let Err(error) = validated {
-            tracing::warn!(%error, staged_executable, "RequestUpgrade refused: staged executable rejected");
-            return failed(control::CODE_BAD_REQUEST);
-        }
-        if request_file::own_generation_key().as_deref() == Some(key.as_str()) {
+        let (own_key, start_time) = match checked {
+            Ok(checked) => checked,
+            Err(error) => {
+                tracing::warn!(%error, staged_executable, "RequestUpgrade refused: staged executable rejected");
+                return failed(control::CODE_BAD_REQUEST);
+            }
+        };
+        if own_key.as_deref() == Some(key.as_str()) {
             tracing::info!(generation_key = %key, "RequestUpgrade refused: already running this generation");
             return failed(control::CODE_UPGRADE_REFUSED);
         }
-        let pid = std::process::id();
-        let Some(start_time) = crate::daemon::owner_admission::process_start_time(pid) else {
+        let Some(start_time) = start_time else {
             return failed(control::CODE_UPGRADE_REFUSED);
         };
-        let (legacy_path, _, legacy_listener) = match self
-            .handover_manager
-            .prepare_handover(&self.terminal_service)
-        {
+        // prepare_handover removes, binds and chmods the legacy socket.
+        let prepared = {
+            let (manager, terminals) = (Arc::clone(&self.handover_manager), Arc::clone(&self.terminal_service));
+            crate::ipc::run_blocking(move || {
+                manager.prepare_handover(&terminals).map_err(crate::ipc::IpcError::internal)
+            })
+            .await
+        };
+        let (legacy_path, _, legacy_listener) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 tracing::warn!(%error, "RequestUpgrade refused: handover could not be prepared");

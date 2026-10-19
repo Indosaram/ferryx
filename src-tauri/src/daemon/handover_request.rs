@@ -380,25 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn expiry_passing_mid_transfer_refuses_the_commit() {
-        let dir = tempfile::tempdir().unwrap();
-        let req = request(dir.path(), 4242, 99, 1_000);
-        assert_eq!(
-            pre_commit_remaining(req.expires_at_unix_ms, 1_000).unwrap(),
-            Duration::from_millis(REQUEST_TTL_MS)
-        );
-        assert_eq!(
-            pre_commit_remaining(req.expires_at_unix_ms, req.expires_at_unix_ms - 1).unwrap(),
-            Duration::from_millis(1)
-        );
-        assert!(pre_commit_remaining(req.expires_at_unix_ms, req.expires_at_unix_ms).is_err());
-        assert!(pre_commit_remaining(req.expires_at_unix_ms, u64::MAX).is_err());
-        assert!(candidate_exits_cleanly(true, true));
-        assert!(!candidate_exits_cleanly(true, false));
-        assert!(!candidate_exits_cleanly(false, true));
-    }
-
-    #[test]
     fn expired_request_exits_zero() {
         let dir = tempfile::tempdir().unwrap();
         let req = request(dir.path(), 4242, 99, 1_000);

@@ -1037,6 +1037,21 @@ async fn a_failed_transfer_leaves_every_predecessor_session_readable_and_writabl
         .spawn("req-failed-transfer", ws_id, 80, 24)
         .await
         .expect("spawn");
+    // The post-abort write below must reach a shell that already executes input: input sent
+    // before the shell reads its terminal can be lost, which made this test depend on timing.
+    // Prove readiness with one marker round-trip before the handover starts.
+    let mut ready = TestAttachStream::attach(&socket_path, pid_d1, &session, None)
+        .await
+        .expect("attach before the handover");
+    client
+        .write_input(&session, &output_command("FAILED_TRANSFER_SHELL_READY"))
+        .await
+        .expect("write the readiness marker");
+    ready
+        .await_pattern_in_history_or_stream("FAILED_TRANSFER_SHELL_READY", Duration::from_secs(10))
+        .await
+        .expect("the shell executes input before the handover");
+    drop(ready);
 
     let legacy_socket_path = match client
         .send_request(&DaemonRequest::PrepareHandover)
@@ -1069,6 +1084,10 @@ async fn a_failed_transfer_leaves_every_predecessor_session_readable_and_writabl
                 .unwrap_or(true),
         "no Retired decision may exist after a failed transfer"
     );
+    // AbortHandoverOk is sent after the predecessor resumed every paused reader; the session
+    // must still be running there before input is written to it.
+    let resumed = client.describe_session(&session).await.expect("describe after AbortHandover");
+    assert!(resumed.running, "the predecessor still runs the session after the abort: {resumed:?}");
 
     let mut attach = TestAttachStream::attach(&socket_path, pid_d1, &session, None)
         .await

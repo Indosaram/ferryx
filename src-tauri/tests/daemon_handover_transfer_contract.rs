@@ -360,7 +360,12 @@ impl PrivateDaemons {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ferryx"));
+        self.command_for(Path::new(env!("CARGO_BIN_EXE_ferryx")))
+    }
+
+    /// command() for another copy of the daemon binary (a staged generation executable).
+    fn command_for(&self, program: &Path) -> Command {
+        let mut command = Command::new(program);
         command
             .env_clear()
             .arg("--daemon")
@@ -1080,6 +1085,7 @@ async fn before_commit_hello_names_the_predecessor_and_the_candidate_accepts_not
         .expect("the predecessor keeps serving after the abort");
 }
 
+#[cfg(feature = "local-split-qa")]
 fn owner_record_pid(runtime: &Path) -> Option<u64> {
     let text = std::fs::read_to_string(runtime.join("owner.json")).ok()?;
     serde_json::from_str::<serde_json::Value>(&text).ok()?["pid"].as_u64()
@@ -1094,6 +1100,12 @@ async fn owner_publication_failures_do_not_stop_the_successor_serving() {
     use notify::Watcher;
     let mut daemons = PrivateDaemons::with_v5_flag(None);
     daemons.successor_env.push(("FERRYX_QA_OWNER_PUBLISH_FAILURES", "3"));
+    // Deterministic gate: every publication attempt fails while this file exists, so the
+    // unpublished window below is always exercised, not only when the retry task is slow.
+    let hold = daemons.root.path().join("owner-publish.hold");
+    std::fs::write(&hold, b"").expect("arm the owner publication hold");
+    let hold_env: &'static str = Box::leak(hold.to_string_lossy().into_owned().into_boxed_str());
+    daemons.successor_env.push(("FERRYX_QA_OWNER_PUBLISH_HOLD", hold_env));
     let socket_path = daemons.socket();
     let runtime = daemons.root.path().join("runtime");
     let d1 = daemons.launch(None).await;
@@ -1125,17 +1137,19 @@ async fn owner_publication_failures_do_not_stop_the_successor_serving() {
     let mut attach = TestAttachStream::attach(&socket_path, pid_d2, &session, None)
         .await
         .expect("attach on D2");
-    if owner_record_pid(&runtime) != Some(u64::from(pid_d2)) {
-        // Still unpublished: the transferred PTY is served anyway.
-        client2
-            .write_input(&session, b"printf 'OWNER_%s\\n' 'RETRY_SERVED'\n")
-            .await
-            .expect("input accepted while owner.json is unpublished");
-        attach
-            .await_pattern_in_history_or_stream("OWNER_RETRY_SERVED", Duration::from_secs(10))
-            .await
-            .expect("output continues while owner.json is unpublished");
-    }
+    // The hold is armed, so owner.json cannot name the successor yet.
+    assert_ne!(owner_record_pid(&runtime), Some(u64::from(pid_d2)), "owner.json published through the hold");
+    // Still unpublished: the transferred PTY is served anyway.
+    client2
+        .write_input(&session, b"printf 'OWNER_%s\\n' 'RETRY_SERVED'\n")
+        .await
+        .expect("input accepted while owner.json is unpublished");
+    attach
+        .await_pattern_in_history_or_stream("OWNER_RETRY_SERVED", Duration::from_secs(10))
+        .await
+        .expect("output continues while owner.json is unpublished");
+    assert_ne!(owner_record_pid(&runtime), Some(u64::from(pid_d2)), "owner.json published through the hold");
+    std::fs::remove_file(&hold).expect("release the owner publication hold");
     timeout(Duration::from_secs(30), async {
         while owner_record_pid(&runtime) != Some(u64::from(pid_d2)) {
             let _ = events.recv().await.expect("watcher ended");
@@ -1151,6 +1165,131 @@ async fn owner_publication_failures_do_not_stop_the_successor_serving() {
         .await_pattern_in_history_or_stream("OWNER_PUBLISHED_SERVED", Duration::from_secs(10))
         .await
         .expect("output continues after publication");
+}
+
+/// Start time of a live process in the unit owner_admission::process_start_time uses, so the
+/// test can write a handover request naming itself as the predecessor.
+#[cfg(target_os = "macos")]
+fn own_start_time() -> u64 {
+    // SAFETY: proc_bsdinfo is a plain C struct; the all-zero pattern is valid, and info is a
+    // writable proc_bsdinfo of exactly size bytes.
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let size = std::mem::size_of_val(&info) as i32;
+    let read = unsafe {
+        libc::proc_pidinfo(std::process::id() as i32, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size)
+    };
+    assert_eq!(read, size, "proc_pidinfo");
+    info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
+}
+
+#[cfg(target_os = "linux")]
+fn own_start_time() -> u64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").expect("/proc/self/stat");
+    stat[stat.rfind(')').expect("comm") + 1..].split_whitespace().nth(19).expect("starttime").parse().expect("starttime")
+}
+
+/// todo 8: a HandoverCandidate admitted by a real handover request whose expiry passes
+/// mid-transfer sends AbortHandover, exits 0 and leaves everything with the predecessor. The
+/// predecessor is a fake in this test: it holds the daemon lock and the public socket and never
+/// answers TransferSessions, so the request's own expiry is what ends the transfer.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn a_candidate_whose_request_expires_mid_transfer_aborts_and_exits_zero() {
+    use std::os::fd::AsRawFd;
+    use std::sync::{Arc, Mutex};
+    const KEY: &str = "t8-expiry-0000";
+    // The candidate's lifetime is bounded by the request: long enough for a loaded machine to
+    // start the process before it expires, and the expiry is the behaviour under test.
+    const TTL: Duration = Duration::from_secs(10);
+    let daemons = PrivateDaemons::with_v5_flag(None);
+    let root = daemons.root.path().to_path_buf();
+    let runtime = root.join("runtime");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    // The predecessor's authority: the legacy lock held and the public socket bound.
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(runtime.join("daemon.lock")).unwrap();
+    // SAFETY: lock stays open for the whole test.
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    let public = std::os::unix::net::UnixListener::bind(runtime.join("daemon.sock")).unwrap();
+
+    // The fake predecessor on its legacy socket. TransferSessions is never answered.
+    let legacy = runtime.join("legacy-fake.sock");
+    let listener = tokio::net::UnixListener::bind(&legacy).unwrap();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
+    let abort_tx = Arc::new(Mutex::new(Some(abort_tx)));
+    let fake = {
+        let seen = Arc::clone(&seen);
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                let (seen, abort_tx) = (Arc::clone(&seen), Arc::clone(&abort_tx));
+                held.push(tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut lines = BufReader::new(read).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let request: DaemonRequest = serde_json::from_str(&line).expect("request");
+                        let reply = match request {
+                            DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                                version: DAEMON_PROTOCOL_VERSION, pid: std::process::id(), epoch: 7,
+                                binary_path: None, binary_mtime_ms: None, daemon_version: None,
+                                capabilities: Vec::new(), admission_time_unix_ms: None,
+                            },
+                            DaemonRequest::ListSessions => DaemonResponse::ListSessionsOk { epoch: 7, sessions: Vec::new() },
+                            DaemonRequest::TransferSessions { .. } => {
+                                seen.lock().unwrap().push("transferSessions".into());
+                                // Hold the connection open and never answer.
+                                std::future::pending::<()>().await;
+                                unreachable!()
+                            }
+                            DaemonRequest::AbortHandover => {
+                                seen.lock().unwrap().push("abortHandover".into());
+                                if let Some(tx) = abort_tx.lock().unwrap().take() { let _ = tx.send(()); }
+                                DaemonResponse::AbortHandoverOk
+                            }
+                            other => {
+                                seen.lock().unwrap().push(format!("{other:?}"));
+                                DaemonResponse::Error { message: "unexpected".into(), code: None, details: None }
+                            }
+                        };
+                        let mut json = serde_json::to_string(&reply).unwrap();
+                        json.push('\n');
+                        if write.write_all(json.as_bytes()).await.is_err() { return; }
+                    }
+                }));
+            }
+        })
+    };
+
+    // This build staged as generation KEY, so the candidate's own generation key matches.
+    let staged = root.join("data/daemon-runtime").join(KEY).join("ferryx");
+    std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+    if std::fs::hard_link(env!("CARGO_BIN_EXE_ferryx"), &staged).is_err() {
+        std::fs::copy(env!("CARGO_BIN_EXE_ferryx"), &staged).unwrap();
+    }
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let request = serde_json::json!({
+        "legacy_socket_path": legacy, "predecessor_pid": std::process::id(),
+        "predecessor_start_time": own_start_time(), "predecessor_epoch": 7, "generation_key": KEY,
+        "staged_executable": staged, "nonce": "00".repeat(32),
+        "expires_at_unix_ms": now_ms + TTL.as_millis() as u64,
+    });
+    std::fs::write(runtime.join("handover-request.json"), serde_json::to_vec(&request).unwrap()).unwrap();
+
+    let mut candidate = daemons.command_for(&staged).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn candidate");
+    timeout(TTL + Duration::from_secs(30), abort_rx).await.expect("the candidate never sent AbortHandover").unwrap();
+    let status = tokio::task::spawn_blocking(move || candidate.wait()).await.unwrap().expect("wait");
+    assert_eq!(status.code(), Some(0), "the candidate exits 0 after the expiry abort");
+    fake.abort();
+
+    assert_eq!(*seen.lock().unwrap(), vec!["transferSessions".to_string(), "abortHandover".to_string()], "the candidate never commits");
+    assert!(!runtime.join("handover-request.json").exists(), "the request authorizes one start only");
+    assert!(lock_held_elsewhere(&runtime.join("daemon.lock")), "the predecessor still holds the daemon lock");
+    std::os::unix::net::UnixStream::connect(runtime.join("daemon.sock")).expect("the public socket still reaches the predecessor");
+    drop(public);
 }
 
 #[tokio::test]
