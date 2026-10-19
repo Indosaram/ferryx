@@ -109,6 +109,39 @@ impl ControlFixture {
     }
 }
 
+/// RequestUpgrade with no generation key, or a staged executable outside the daemon runtime
+/// root, is refused before anything is prepared: no handover request, no job start, and the
+/// daemon stays Active (todo 8 check (a)).
+#[cfg(unix)]
+#[tokio::test]
+async fn request_upgrade_rejects_unstaged_executables_and_keeps_serving() {
+    let fixture = ControlFixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    let exe = outside.path().join("2026.1013.2-0a1b2c3d").join("ferryx");
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    std::fs::write(&exe, b"x").unwrap();
+    for generation_key in [None, Some("2026.1013.2-0a1b2c3d".to_string())] {
+        let reply = fixture
+            .control(
+                ControlRequest::RequestUpgrade {
+                    staged_executable: exe.to_string_lossy().into_owned(),
+                    generation_key,
+                },
+                None,
+            )
+            .await;
+        assert_eq!(
+            reply,
+            ControlReply::Failed(ControlFailure::code(control::CODE_BAD_REQUEST))
+        );
+    }
+    assert_eq!(
+        fixture.server.handover_manager.status(),
+        crate::daemon::handover::HandoverStatus::Active,
+        "a rejected upgrade never prepares a handover"
+    );
+}
+
 #[cfg(unix)]
 fn spawn_cat(server: &DaemonServer) -> (String, tokio::sync::mpsc::Receiver<Vec<u8>>) {
     server

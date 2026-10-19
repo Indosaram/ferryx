@@ -3418,11 +3418,45 @@ impl DaemonServer {
 
     pub async fn run_server_with_handover_and_readiness(
         self: Arc<Self>,
-        handover_from: Option<PathBuf>,
+        #[cfg_attr(not(unix), allow(unused_mut))] mut handover_from: Option<PathBuf>,
         ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<(), String> {
         let runtime_dir = get_runtime_dir();
         ensure_runtime_directory(&runtime_dir)?;
+
+        // HandoverCandidate admission (todo 8). A successor generation's OS job runs plain
+        // `--daemon`; before any lock is taken it reads the predecessor's handover-request.json.
+        // A valid request for this generation from a live predecessor makes this start the
+        // existing --handover-from path; an invalid, expired or foreign request is deleted and
+        // this process exits 0 holding no lock; no request means an ordinary start.
+        #[cfg(unix)]
+        if handover_from.is_none() {
+            let dir = runtime_dir.clone();
+            let role = crate::ipc::run_blocking(move || {
+                Ok(crate::daemon::handover_request::take_startup_request(
+                    &dir,
+                    crate::daemon::handover_request::own_generation_key().as_deref(),
+                    crate::daemon::owner_admission::unix_now_ms(),
+                    &crate::daemon::owner_admission::process_start_time,
+                ))
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+            match role {
+                crate::daemon::handover_request::StartupRole::Ordinary => {}
+                crate::daemon::handover_request::StartupRole::Candidate { legacy_socket_path } => {
+                    tracing::info!(
+                        legacy_socket = %legacy_socket_path.display(),
+                        "Starting as HandoverCandidate from the predecessor's handover request"
+                    );
+                    handover_from = Some(legacy_socket_path);
+                }
+                crate::daemon::handover_request::StartupRole::Exit { reason } => {
+                    tracing::warn!(%reason, "Handover request rejected; exiting 0 without taking any lock");
+                    return Ok(());
+                }
+            }
+        }
 
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         crate::daemon::qa_producers::install_and_start(&self).await;
@@ -3938,16 +3972,13 @@ impl DaemonServer {
         tracing::info!("rorca daemon listening on {}", socket_path.display());
 
         // control-v1: bound right after the data listener, only while this process holds the
-        // daemon locks. A HandoverCandidate never binds it (it inherits the fd, todo 8).
-        if handover_from.is_none() {
-            self.bind_control_endpoint().await?;
-        }
+        // daemon locks. A committed HandoverCandidate binds it here too: without it the next GUI
+        // would see a pre-plan daemon and could never upgrade it again.
+        self.bind_control_endpoint().await?;
 
-        #[cfg(unix)]
-        if !crate::daemon::handover::is_v5_ownership_transfer_enabled() {
-            self.session_router.adopt_routes_from_manifest().await?;
-        }
-        #[cfg(not(unix))]
+        // Every start adopts every route in the manifest, handover or not (todo 8): routes are
+        // direct, so a successor talks to each generation that still owns sessions over that
+        // generation's own legacy socket. adopt_routes_from_manifest skips peers already added.
         self.session_router.adopt_routes_from_manifest().await?;
 
         if handover_from.is_none() {
@@ -5141,6 +5172,7 @@ impl DaemonServer {
                 Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
                     #[cfg(unix)]
                     {
+                        crate::daemon::handover_request::note_transfer_started();
                         if let Err(e) = self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
                             daemon_error(format!("Failed to persist remote sessions before handover: {e}"))
                         } else {
@@ -5553,6 +5585,29 @@ impl DaemonServer {
         watcher_handle.abort();
     }
 
+    /// Serves the predecessor's legacy handover socket created by prepare_handover. A
+    /// HandoverCandidate started by its own generation job (todo 8) connects here for
+    /// DescribeSession / TransferSessions / CommitHandover / AbortHandover; after commit only
+    /// sessions this daemon still owns are served on it.
+    #[cfg(unix)]
+    pub(crate) fn serve_legacy_handover_socket(self: Arc<Self>, listener: UnixListener) {
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let s = Arc::clone(&self);
+                        tokio::spawn(async move {
+                            s.handle_client(stream).await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    /// Protocol-5 UpgradeBinary path kept unchanged for pre-plan GUIs: the successor is this
+    /// daemon's own child. GUIs of this plan never take it; they use control-v1 RequestUpgrade.
     #[cfg(unix)]
     pub fn spawn_legacy_handover_daemon(
         self: Arc<Self>,

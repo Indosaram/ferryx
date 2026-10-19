@@ -215,6 +215,16 @@ impl DaemonServer {
                 Err(_) => return,
             };
             let (reply, after) = match control::decode_request(&line) {
+                // RequestUpgrade needs the async handover path (todo 8); every other op is decided
+                // synchronously below.
+                Ok(ControlRequest::RequestUpgrade {
+                    staged_executable,
+                    generation_key,
+                }) => (
+                    self.control_request_upgrade(staged_executable, generation_key)
+                        .await,
+                    AfterFlush::Nothing,
+                ),
                 Ok(request) => self.dispatch_control(request),
                 Err(error) => (error.reply(), AfterFlush::Nothing),
             };
@@ -281,8 +291,8 @@ impl DaemonServer {
                     AfterFlush::Nothing,
                 )
             }
-            // TODO(todo 8): unix routes to the RequestUpgrade handover path; Windows stays
-            // UPGRADE_UNSUPPORTED permanently.
+            // Routed to control_request_upgrade by handle_control_connection; kept as the
+            // Windows-equivalent answer for any other caller.
             ControlRequest::RequestUpgrade { .. } => (
                 ControlReply::Failed(ControlFailure::code(CODE_UPGRADE_UNSUPPORTED)),
                 AfterFlush::Nothing,
@@ -319,5 +329,139 @@ impl DaemonServer {
                 AfterFlush::Nothing,
             ),
         }
+    }
+
+    /// Windows has no handover candidate: the live owner is never replaced by an upgrade.
+    #[cfg(not(unix))]
+    async fn control_request_upgrade(
+        self: &Arc<Self>,
+        _staged_executable: String,
+        _generation_key: Option<String>,
+    ) -> ControlReply {
+        ControlReply::Failed(ControlFailure::code(CODE_UPGRADE_UNSUPPORTED))
+    }
+
+    /// RequestUpgrade { staged_executable, generation_key } (todo 8). (a) the staged executable
+    /// must lie under daemon_runtime_root() inside the generation dir named by generation_key;
+    /// (b) prepare_handover, then handover-request.json (nonce, 30 s expiry, mode 0600);
+    /// (c) supervisor::start_handover_candidate starts the successor generation's own OS job. The
+    /// predecessor keeps serving everything until the candidate commits; any refusal leaves it
+    /// Active. No in-place re-exec and no child process of this daemon is ever used here.
+    #[cfg(unix)]
+    async fn control_request_upgrade(
+        self: &Arc<Self>,
+        staged_executable: String,
+        generation_key: Option<String>,
+    ) -> ControlReply {
+        use crate::daemon::handover_request::{self as request_file, CandidateStart, HandoverRequest};
+        let failed = |code: &str| ControlReply::Failed(ControlFailure::code(code));
+        let Some(key) = generation_key else {
+            tracing::warn!("RequestUpgrade refused: no generation_key");
+            return failed(control::CODE_BAD_REQUEST);
+        };
+        let Some(root) = daemon_runtime_root() else {
+            return failed(CODE_UPGRADE_UNSUPPORTED);
+        };
+        let executable = PathBuf::from(&staged_executable);
+        let validated = {
+            let (root, executable, key) = (root.clone(), executable.clone(), key.clone());
+            crate::ipc::run_blocking(move || {
+                request_file::validate_staged_executable(&root, &executable, &key)
+                    .map_err(crate::ipc::IpcError::internal)
+            })
+            .await
+        };
+        if let Err(error) = validated {
+            tracing::warn!(%error, staged_executable, "RequestUpgrade refused: staged executable rejected");
+            return failed(control::CODE_BAD_REQUEST);
+        }
+        if request_file::own_generation_key().as_deref() == Some(key.as_str()) {
+            tracing::info!(generation_key = %key, "RequestUpgrade refused: already running this generation");
+            return failed(control::CODE_UPGRADE_REFUSED);
+        }
+        let pid = std::process::id();
+        let Some(start_time) = crate::daemon::owner_admission::process_start_time(pid) else {
+            return failed(control::CODE_UPGRADE_REFUSED);
+        };
+        let (legacy_path, _, legacy_listener) = match self
+            .handover_manager
+            .prepare_handover(&self.terminal_service)
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!(%error, "RequestUpgrade refused: handover could not be prepared");
+                return failed(control::CODE_UPGRADE_REFUSED);
+            }
+        };
+        let request = HandoverRequest::new(
+            legacy_path,
+            pid,
+            start_time,
+            self.epoch,
+            key,
+            executable,
+            crate::daemon::owner_admission::unix_now_ms(),
+        );
+        let runtime_dir = get_runtime_dir();
+        let transfers_before = request_file::transfers_started();
+        let outcome = {
+            let (runtime_dir, request) = (runtime_dir.clone(), request.clone());
+            crate::ipc::run_blocking(move || {
+                request_file::write_request(&runtime_dir, &request)
+                    .and_then(|()| crate::daemon::supervisor::start_handover_candidate(&request))
+                    .map_err(crate::ipc::IpcError::internal)
+            })
+            .await
+        };
+        match outcome {
+            Ok(CandidateStart::Started) => {
+                tracing::info!(
+                    generation_key = %request.generation_key,
+                    "RequestUpgrade accepted: successor generation job started as handover candidate"
+                );
+                Arc::clone(self).serve_legacy_handover_socket(legacy_listener);
+                Arc::clone(self).abandon_handover_if_never_claimed(runtime_dir, transfers_before);
+                ControlReply::UpgradeAccepted
+            }
+            refused => {
+                tracing::warn!(?refused, "RequestUpgrade refused: successor job not started; predecessor keeps serving");
+                drop(legacy_listener);
+                self.abandon_prepared_handover(runtime_dir).await;
+                failed(control::CODE_UPGRADE_REFUSED)
+            }
+        }
+    }
+
+    /// Pre-commit rollback for a request no candidate acted on: removes the request, records the
+    /// abort decision and returns to Active. Only valid while still Prepared.
+    #[cfg(unix)]
+    async fn abandon_prepared_handover(&self, runtime_dir: PathBuf) {
+        let manager = Arc::clone(&self.handover_manager);
+        let result = crate::ipc::run_blocking(move || {
+            crate::daemon::handover_request::remove_request(&runtime_dir);
+            manager.abort_handover().map_err(crate::ipc::IpcError::internal)
+        })
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(%error, "Could not abandon the prepared handover");
+        }
+    }
+
+    /// When the request expires and no candidate ever asked for a session transfer, the
+    /// predecessor leaves Prepared on its own (the candidate exits 0 on an expired request).
+    #[cfg(unix)]
+    fn abandon_handover_if_never_claimed(self: Arc<Self>, runtime_dir: PathBuf, transfers_before: u64) {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(
+                crate::daemon::handover_request::REQUEST_TTL_MS,
+            ))
+            .await;
+            if crate::daemon::handover_request::transfers_started() == transfers_before
+                && self.handover_manager.status() == crate::daemon::handover::HandoverStatus::Prepared
+            {
+                tracing::warn!("Handover request expired unclaimed; predecessor stays the owner");
+                self.abandon_prepared_handover(runtime_dir).await;
+            }
+        });
     }
 }
