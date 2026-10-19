@@ -416,6 +416,9 @@ mod backend {
     /// `bootstrap`; RegisteredIdle -> plain `kickstart` (no `-k`); Running or Unverifiable ->
     /// refused, so the predecessor keeps serving. The owner (the caller) is deliberately passed as
     /// Absent to the job-state switch; the successor label is never the predecessor's own.
+    /// `login_autostart` is false: starting the candidate never registers it for login. Login
+    /// registration stays with [`super::reconcile_login_registration`] (newest generation only,
+    /// no launchctl), so a candidate that never commits leaves no `RunAtLoad` plist behind.
     pub fn start_candidate(
         env: Env<'_>,
         key: &str,
@@ -432,6 +435,7 @@ mod backend {
             uid(),
             &job,
             &OwnerState::Absent,
+            false,
         )?;
         tracing::info!(label = %job.label, ?outcome, "Handover candidate job start");
         Ok(match outcome {
