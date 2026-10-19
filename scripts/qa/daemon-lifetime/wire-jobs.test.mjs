@@ -207,3 +207,16 @@ test('host paths join in the host flavour, not the controller flavour', async ()
     assert.ok(!/(?<![.\w])path\.join\(/.test(readFileSync(new URL('./' + f, import.meta.url), 'utf8')), f);
   }
 });
+
+test('Windows GUI launch types only a short path MahoRD can deliver', async () => {
+  const { mahordTypable, windowsShortPath } = await import('./lib/gui.mjs');
+  assert.equal(mahordTypable('C:\\Users\\sook\\FERRYX~1\\qaruns\\202610~1\\launchg1.cmd'), true);
+  assert.equal(mahordTypable('C:\\Users\\sook\\ferryx-wt\\.qa-daemon-lifetime'), false);
+  const agent = (stdout) => ({ call: async () => ({ status: 0, stdout, stderr: '' }) });
+  assert.equal(await windowsShortPath(agent('C:\\Users\\sook\\FERRYX~1\\qaruns\\202610~1\\launchg1.cmd\r\n'), 'x'), 'C:\\Users\\sook\\FERRYX~1\\qaruns\\202610~1\\launchg1.cmd');
+  await assert.rejects(windowsShortPath(agent('C:\\Users\\sook\\FERRYX~1\\QA-DAE~1\\l.cmd'), 'x'), /MahoRD cannot type/);
+  // The long runRoot legitimately contains 'ferryx-wt'; only its 8.3 form is typed, and
+  // windowsShortPath refuses a short path that still carries '-' or '_' at run time.
+  const { HOSTS } = await import('./lib/hosts.mjs');
+  assert.ok(!/[-_]/.test(HOSTS.windows.runRoot.split('\\').pop()), 'the run root leaf itself has no - or _');
+});

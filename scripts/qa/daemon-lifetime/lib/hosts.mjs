@@ -43,7 +43,10 @@ export const HOSTS = Object.freeze({
     cargoTarget: 'C:\\Users\\sook\\ferryx-wt\\.target-w5qa-20261019',
     buildEnv: { ZIG: 'C:\\Users\\sook\\ferryx-wt\\.zig-0.16.0\\zig.exe' },
     evidenceRoot: 'C:\\Users\\sook\\ferryx-wt\\.evidence\\daemon-independent-lifetime-20261017',
-    runRoot: 'C:\\Users\\sook\\ferryx-wt\\.qa-daemon-lifetime',
+    // No '-' or '_' in the 8.3 form: the GUI launch types a short path through MahoRD, which drops
+    // both on maho-win. Measured: C:\Users\sook\ferryx-wt\qaruns\<runId>\l1.cmd ->
+    // C:\Users\sook\FERRYX~1\qaruns\202610~1\l1.cmd. The old .qa-daemon-lifetime was QA-DAE~1.
+    runRoot: 'C:\\Users\\sook\\ferryx-wt\\qaruns',
     node: 'node',
     // The 4F8ADF2E pairing is stale; 9929DC13 is the one that completes a handshake (2026-10-15).
     gui: { kind: 'mahord', host: '100.68.224.49', pairingId: '9929DC13-3841-4182-A399-9E1323F961A2', physical: { width: 3840, height: 1600 } },

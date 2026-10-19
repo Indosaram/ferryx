@@ -27,7 +27,7 @@ import { probeHooks, missingHooksFor } from './lib/hooks.mjs';
 import { generationKey, assertDistinctKeys } from './lib/wire.mjs';
 import { startAgent } from './lib/remote.mjs';
 import { createJobs } from './lib/jobs.mjs';
-import { createGuiDriver, macGuiExecutable } from './lib/gui.mjs';
+import { mahordTypable, createGuiDriver, macGuiExecutable } from './lib/gui.mjs';
 import { assembleDaemonHelper } from '../../macos-daemon-helper.mjs';
 import { finalizeMacosBundle } from '../../lib/release-platforms.mjs';
 import { connectMahord } from './lib/mahord.mjs';
@@ -291,7 +291,14 @@ async function main() {
     typeIntoSession: async (guiProc, sessionId, text) => {
       // macOS: no desktop input on the user's MacBook; the data-protocol write is the GUI-equivalent
       // client write. Remote hosts type through MahoRD into the focused QA window.
-      if (mahord) return mahord.type(text);
+      if (mahord) {
+        // MahoRD drops '-' and '_' on maho-win and types no newline: refuse untypable text instead
+        // of letting a marker arrive mangled, and send Enter as a key.
+        const line = text.replace(/\r?\n$/, '');
+        if (host.platform === 'windows' && !mahordTypable(line)) throw new Error(`MahoRD cannot type '-' or '_' on maho-win: ${line}`);
+        await mahord.type(line);
+        return text.endsWith('\n') ? mahord.key('Enter') : true;
+      }
       const { conn } = { conn: ctx.state.conn };
       return conn.call({ type: 'write', sessionId, data: Buffer.from(text).toString('base64') });
     },

@@ -135,7 +135,8 @@ export async function Q11(ctx, result) {
   // Arm the hold, type the marker through the GUI, wait for write-applied, quit while held.
   const op = `q11-${ctx.runId}`;
   await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barrier, 'write-ack-hold.request.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
-  const marker = nonce('UNCERTAIN');
+  // Typed through MahoRD on remote hosts, which drops '_' on maho-win: letters and digits only.
+  const marker = nonce('UNCERTAIN').replace(/_/g, '');
   await ctx.typeIntoSession(ctx.state.gui, sid, `${marker}\n`);
   const applied = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.barrier, 'write-ack-hold.receipt.jsonl'), pattern: `"write-applied"[^\\n]*"${sid}"`, deadlineMs: 30_000 });
   assertion(result, 'write-applied observed while the ack is held', Boolean(applied.matched), applied);

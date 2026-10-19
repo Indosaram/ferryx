@@ -37,6 +37,21 @@ export function windowsLauncherCommand({ root, exe, envFile, tag, noBreakaway = 
   return `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${root}\\launcher.ps1" -Exe "${exe}" -RunDir "${root}" -EnvFile "${envFile}" -Tag ${tag}${flag}`;
 }
 
+/** Text MahoRD can type on maho-win: remote_type_text drops '-' and '_' there. */
+export function mahordTypable(text) {
+  return !/[-_]/.test(text);
+}
+
+/** The 8.3 short path of an existing file; throws when it still carries an untypable character. */
+export async function windowsShortPath(agent, file) {
+  const r = await agent.call('exec', { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command',
+    `(New-Object -ComObject Scripting.FileSystemObject).GetFile('${file.replace(/'/g, "''")}').ShortPath`] });
+  const short = String(r.stdout ?? '').trim();
+  if (r.status !== 0 || !short) throw new Error(`no 8.3 short path for ${file}: ${r.stderr}`);
+  if (!mahordTypable(short)) throw new Error(`8.3 short path ${short} still has '-' or '_', which MahoRD cannot type`);
+  return short;
+}
+
 export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forbidden, mahord = null, guiEnv = {} }) {
   const platform = host.platform;
   const bundleId = qaBundleIdentifier(runId);
@@ -72,11 +87,18 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     const envFile = `${layout.root}\\gui-${tag}.env.json`;
     await agent.call('writeFile', { file: envFile, content: JSON.stringify(fullEnv) });
     const cmd = windowsLauncherCommand({ root: layout.root, exe, envFile, tag, noBreakaway });
+    // MahoRD remote_type_text drops '-' and '_' on maho-win (RunMRU proof, 2026-10-17), and the
+    // launcher command is full of both. Write it into a .cmd in the run dir and type only that
+    // file's 8.3 short path, which carries neither (runRoot is chosen so its 8.3 form has none).
+    // The file name carries no '-' or '_' either: both are legal 8.3 characters and would survive.
+    const launchCmd = `${layout.root}\\launch${String(tag).replace(/[^A-Za-z0-9]/g, '')}.cmd`;
+    await agent.call('writeFile', { file: launchCmd, content: `@echo off\r\nstart "" ${cmd}\r\n` });
+    const short = await windowsShortPath(agent, launchCmd);
     await mahord.click(3000, 1580); // blank taskbar: focus the shell so Win+R reaches it
     await mahord.hotkey(['Meta', 'r']);
     // The Run dialog pre-fills its last entry and typed text is appended to it: select it first.
     await mahord.hotkey(['Control', 'a']);
-    await mahord.type(cmd);
+    await mahord.type(short);
     await mahord.key('Enter');
     const published = `${layout.root}\\gui-${tag}.json`;
     const ok = await agent.call('waitPath', { file: published, deadlineMs: 60_000 });
