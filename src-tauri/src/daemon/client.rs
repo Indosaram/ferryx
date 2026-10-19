@@ -2385,7 +2385,13 @@ impl DaemonClient {
         // A user who turned autostart off still gets the start through the OS job (never as a GUI
         // child); the opt-out only keeps the job from launching at login. Nothing here ever
         // reloads a job: the owner was Absent under admission.
-        if crate::daemon::supervisor::supported() {
+        // QA builds: FERRYX_QA_FORCE_FALLBACK=1 forces the detached fallback (todo 12 Q06).
+        #[cfg(feature = "local-split-qa")]
+        let supervised = crate::daemon::supervisor::supported()
+            && !owner_admission::qa_probe_fault::force_fallback();
+        #[cfg(not(feature = "local-split-qa"))]
+        let supervised = crate::daemon::supervisor::supported();
+        if supervised {
             let agent = crate::ipc::run_blocking(|| {
                 crate::daemon::supervisor::ensure()
                     .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
@@ -2454,6 +2460,10 @@ impl DaemonClient {
                     .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
             })
             .await?;
+            tracing::warn!(
+                code = "DAEMON_DETACH_UNAVAILABLE",
+                "Detach guard: the launcher's job forbids breakaway; no daemon was started"
+            );
             return Err(IpcError::new(
                 IpcErrorCode::DaemonDetachUnavailable,
                 "Ferryx runs inside a job object that forbids breakaway; a daemon started from \

@@ -24,6 +24,9 @@ pub mod proxy;
 // Pane-liveness QA barrier producers (handover transfer/rollback, held remote RPC).
 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
 pub mod qa_producers;
+// QA-only compile-time salt that makes builds B and C hash to distinct generation keys (todo 12).
+#[cfg(feature = "local-split-qa")]
+pub mod qa_build_salt;
 pub mod resource_usage;
 // Immutable generation-keyed copies of the daemon runtime outside the GUI install; the OS job of
 // each generation runs its own copy, so replacing or moving the app never changes a live daemon.

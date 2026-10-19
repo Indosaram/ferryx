@@ -426,6 +426,117 @@ async fn successful_request_upgrade(root: PathBuf) {
     );
 }
 
+#[cfg(all(unix, feature = "local-split-qa", feature = "native-terminal"))]
+const QA_UPGRADE_CHILD_ROOT: &str = "FERRYX_T12_QA_UPGRADE_CHILD_ROOT";
+#[cfg(all(unix, feature = "local-split-qa", feature = "native-terminal"))]
+const QA_UPGRADE_RUN: &str = "qa-run-t12-upgrade";
+
+/// todo 12 Q08 (gate B1, B2): control RequestUpgrade goes through the shared prepare path, so the
+/// predecessor writes exactly one predecessor-prepared receipt, and the runner's fault request
+/// file is applied: the commit that follows is rejected by the injected decision write failure,
+/// no decision is recorded, and the predecessor keeps serving. Runs in a child process with a
+/// private runtime and QA barrier dir, like the scenario above.
+#[cfg(all(unix, feature = "local-split-qa", feature = "native-terminal"))]
+#[test]
+fn request_upgrade_writes_predecessor_prepared_and_applies_the_runner_fault() {
+    if let Some(root) = std::env::var_os(QA_UPGRADE_CHILD_ROOT) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(qa_request_upgrade_applies_fault(PathBuf::from(root)));
+        return;
+    }
+    let root = tempfile::Builder::new().prefix("fx-t12u-").tempdir_in("/tmp").unwrap();
+    let barrier = root.path().join("barrier");
+    std::fs::create_dir_all(&barrier).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "daemon::server::control_server::control_wire_tests::request_upgrade_writes_predecessor_prepared_and_applies_the_runner_fault",
+            "--exact",
+            "--nocapture",
+        ])
+        .env(QA_UPGRADE_CHILD_ROOT, root.path())
+        .env("FERRYX_RUNTIME_DIR", root.path().join("runtime"))
+        .env("FERRYX_DATA_DIR", root.path().join("data"))
+        .env("FERRYX_QA_BARRIER_DIR", &barrier)
+        .env("FERRYX_QA_RUN_ID", QA_UPGRADE_RUN)
+        .env(crate::ipc::qa_barrier::OPERATION_ID_ENV, "qa-op-t12-upgrade")
+        .env_remove(crate::daemon::qa_producers::HANDOVER_FAULT_ENV)
+        .output()
+        .expect("run the private QA RequestUpgrade scenario");
+    assert!(
+        output.status.success(),
+        "private QA RequestUpgrade scenario failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+#[cfg(all(unix, feature = "local-split-qa", feature = "native-terminal"))]
+async fn qa_request_upgrade_applies_fault(root: PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    const KEY: &str = "2026.1019.1-t12upgrade";
+    let runtime_dir = get_runtime_dir();
+    assert_eq!(runtime_dir, root.join("runtime"));
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let staged = daemon_runtime_root().expect("runtime root").join(KEY).join("ferryx");
+    std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+    std::fs::write(&staged, b"staged").unwrap();
+    let barrier = root.join("barrier");
+    // The runner's request for this handover, written after the daemon started (a job-started
+    // predecessor never sees the runner's env).
+    std::fs::write(
+        barrier.join(crate::daemon::qa_producers::HANDOVER_FAULT_REQUEST),
+        serde_json::json!({ "runId": QA_UPGRADE_RUN, "operationId": "qa-op-t12-upgrade", "fault": "decision-write-failure" })
+            .to_string(),
+    )
+    .unwrap();
+
+    let fixture = ControlFixture::new();
+    let starter = Arc::new(RecordingStarter::default());
+    fixture.server.handover_manager.set_candidate_starter(starter.clone());
+    assert_eq!(fixture.server.handover_manager.commit_fault(), None, "nothing armed before the upgrade");
+    let reply = fixture
+        .control(
+            ControlRequest::RequestUpgrade {
+                staged_executable: staged.to_string_lossy().into_owned(),
+                generation_key: Some(KEY.to_string()),
+            },
+            None,
+        )
+        .await;
+    assert_eq!(reply, ControlReply::UpgradeAccepted);
+
+    // B1: exactly one predecessor-prepared receipt, from this process.
+    let receipts = std::fs::read_to_string(barrier.join(format!(
+        "{}.receipt.jsonl",
+        crate::daemon::qa_producers::AUTHORITY_STAGE
+    )))
+    .expect("handover-authority receipts");
+    let prepared: Vec<serde_json::Value> = receipts
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|line| line["stage"] == "predecessor-prepared")
+        .collect();
+    assert_eq!(prepared.len(), 1, "{receipts}");
+    assert_eq!(prepared[0]["producerPid"], serde_json::json!(std::process::id()));
+
+    // B2: the request file's fault is applied, not only parsed: the commit is rejected.
+    assert_eq!(
+        fixture.server.handover_manager.commit_fault(),
+        Some(crate::daemon::handover::CommitFault::DecisionWrite)
+    );
+    let commit = commit_exchange(&fixture.server).await.expect("a rejected commit is answered");
+    assert!(!matches!(commit, DaemonResponse::CommitHandoverOk), "{commit:?}");
+    let legacy = starter.started.lock().unwrap()[0].legacy_socket_path.clone();
+    assert_eq!(crate::daemon::handover::HandoverManager::recorded_decision(&legacy).unwrap(), None);
+    assert!(matches!(data_exchange(&fixture.server, DaemonRequest::Ping).await, DaemonResponse::Pong));
+}
+
 #[cfg(unix)]
 fn spawn_cat(server: &DaemonServer) -> (String, tokio::sync::mpsc::Receiver<Vec<u8>>) {
     server

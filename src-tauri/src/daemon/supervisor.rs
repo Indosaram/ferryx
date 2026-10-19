@@ -213,6 +213,12 @@ pub(crate) struct ProcessSupervisorOps;
 
 impl crate::daemon::owner_admission::SupervisorOps for ProcessSupervisorOps {
     fn start_absent_owner(&self) -> Result<bool> {
+        // QA: a forced-fallback GUI leaves the start to its client's detached fallback.
+        #[cfg(feature = "local-split-qa")]
+        if crate::daemon::owner_admission::qa_probe_fault::force_fallback() {
+            tracing::info!("FERRYX_QA_FORCE_FALLBACK=1: GUI setup issues no supervised start");
+            return Ok(false);
+        }
         ensure()
     }
 
@@ -389,6 +395,7 @@ mod backend {
             executable: staged.executable.clone(),
             plist_path,
             log_dir,
+            environment: generation::qa_job_environment(env),
         })
     }
 
@@ -978,6 +985,35 @@ mod tests {
         let job = backend::job_for(&qa, &staged).unwrap();
         assert_eq!(job.label, "ferryx-qa-1.2026.1013.2-0a1b2c3d");
         assert_eq!(job.plist_path, agents.join("ferryx-qa-1.2026.1013.2-0a1b2c3d.plist"));
+    }
+
+    /// The barrier env reaches the job daemon only through a QA-named generation plist: job_for
+    /// renders it into EnvironmentVariables, and the user's job (no QA name) carries none.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_qa_job_plist_carries_the_barrier_env_to_its_daemon() {
+        let home = tempfile::tempdir().unwrap();
+        let staged = crate::daemon::runtime_stage::StagedRuntime {
+            key: "2026.1013.2-0a1b2c3d".to_string(),
+            executable: home.path().join("daemon-runtime/2026.1013.2-0a1b2c3d/Ferryx Daemon.app/Contents/MacOS/ferryx"),
+        };
+        let home_str = home.path().to_str().unwrap();
+        let barrier = [("FERRYX_QA_BARRIER_DIR", "/qa/barrier"), ("FERRYX_QA_RUN_ID", "run-1")];
+        let user: Vec<(&str, &str)> = [("HOME", home_str)].into_iter().chain(barrier).collect();
+        let plist = backend::job_for(&env_of(&user), &staged).unwrap().render(true);
+        assert!(!plist.contains("EnvironmentVariables") && !plist.contains("/qa/barrier"));
+
+        let qa: Vec<(&str, &str)> = [("HOME", home_str), (SUPERVISOR_NAME_ENV, "ferryx-qa-run-1"), ("FERRYX_RUNTIME_DIR", "/qa/run")]
+            .into_iter()
+            .chain(barrier)
+            .collect();
+        let plist = backend::job_for(&env_of(&qa), &staged).unwrap().render(true);
+        let forwarded = cfg!(feature = "local-split-qa");
+        for (key, value) in barrier.iter().chain([&("FERRYX_RUNTIME_DIR", "/qa/run")]) {
+            let pair = format!("<key>{key}</key>\n        <string>{value}</string>");
+            let expected = forwarded || !key.starts_with("FERRYX_QA_");
+            assert_eq!(plist.contains(&pair), expected, "{key} in\n{plist}");
+        }
     }
 
     /// The macOS legacy migration covers `com.ferryx.daemon` and the pre-rebrand

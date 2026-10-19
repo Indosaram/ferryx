@@ -35,6 +35,9 @@ use tauri::Manager;
 pub const PRODUCER_ID: &str = "ipc-qa-barrier";
 pub const WRITE_BARRIER: &str = "backend-write";
 pub const PRESENTATION_BARRIER: &str = "presentation";
+/// Daemon-wide listener stall (todo 12 Q04): data connections are accepted but their handshake
+/// is not answered until the runner releases this barrier.
+pub const LISTENER_STALL_BARRIER: &str = "daemon-listener-stall";
 /// Runner contract: the operation nonce is handed to the product through the
 /// private inherited env as well as through every arm file. Scenarios that
 /// pre-arm no barrier (split-cancel, suspension-ownership, stale-binding) have
@@ -86,6 +89,10 @@ pub enum QaFixtureKind {
     ExternallyStopped,
     /// A session adopted through a real retained handover.
     Adopted,
+    /// Not a session: the daemon accepts data connections but does not answer their handshake
+    /// until the runner releases `daemon-listener-stall` (todo 12, Q04). Armed at runtime through
+    /// `<barrier>/daemon-listener-stall.arm.json`; see [`daemon_listener_stall_gate`].
+    DaemonListenerStall,
 }
 
 impl QaFixtureKind {
@@ -96,6 +103,7 @@ impl QaFixtureKind {
             "idle" => Some(Self::Idle),
             "externally-stopped" => Some(Self::ExternallyStopped),
             "adopted" => Some(Self::Adopted),
+            LISTENER_STALL_BARRIER => Some(Self::DaemonListenerStall),
             _ => None,
         }
     }
@@ -107,6 +115,7 @@ impl QaFixtureKind {
             Self::Idle => "idle",
             Self::ExternallyStopped => "externally-stopped",
             Self::Adopted => "adopted",
+            Self::DaemonListenerStall => LISTENER_STALL_BARRIER,
         }
     }
 
@@ -127,6 +136,11 @@ impl QaFixtureKind {
             // predecessor-export/successor-adopt producers over daemon/handover.rs.
             Self::Adopted => FixtureCreation::Unsupported(
                 "needs a real retained handover (predecessor-export/successor-adopt producers in daemon/qa_producers.rs over daemon/handover.rs); out of scope for fixture construction",
+            ),
+            // A daemon-wide fixture, not a session: the runner arms it through the barrier dir
+            // while the daemon runs, and every handshake waits in daemon_listener_stall_gate.
+            Self::DaemonListenerStall => FixtureCreation::Unsupported(
+                "daemon-wide fixture, not a session: arm <barrier>/daemon-listener-stall.arm.json and release it with daemon-listener-stall.release.json",
             ),
         }
     }
@@ -1290,6 +1304,8 @@ fn classify_fixture_session(
         // was not observed, so the honest answer is the observation - never a claim
         // that the session is stopped when the daemon reports otherwise.
         QaFixtureKind::ExternallyStopped => observation,
+        // Never a session kind; a session claimed as it is reported as observed.
+        QaFixtureKind::DaemonListenerStall => observation,
     }
 }
 
@@ -2403,6 +2419,47 @@ pub fn write_ack_hold() -> &'static QaWriteAckHold {
     WRITE_ACK_HOLD.get_or_init(QaWriteAckHold::new)
 }
 
+/// The listener-stall arm for this run that no matching release has ended yet. The runner arms
+/// it while the daemon runs (`<barrier>/daemon-listener-stall.arm.json`), so it is read on every
+/// connection rather than only by the startup scan; an arm from another run is ignored.
+pub(crate) fn pending_listener_stall(dir: &std::path::Path, run_id: &str) -> Option<ArmSpec> {
+    let text = std::fs::read_to_string(dir.join(format!("{LISTENER_STALL_BARRIER}.arm.json"))).ok()?;
+    let spec: ArmSpec = serde_json::from_str(&text).ok()?;
+    if spec.name != LISTENER_STALL_BARRIER || spec.run_id != run_id || spec.operation_id.trim().is_empty() {
+        return None;
+    }
+    let released = std::fs::read_to_string(dir.join(format!("{LISTENER_STALL_BARRIER}.release.json")))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .is_some_and(|control| {
+            control.get("name").and_then(Value::as_str) == Some(LISTENER_STALL_BARRIER)
+                && control.get("runId").and_then(Value::as_str) == Some(run_id)
+                && control.get("operationId").and_then(Value::as_str) == Some(spec.operation_id.as_str())
+        });
+    (!released).then_some(spec)
+}
+
+/// QaFixtureKind::DaemonListenerStall: when armed, parks the caller (a freshly accepted daemon
+/// connection, before it reads the handshake) until the matching release or the arm's deadline.
+/// Returns `None` when nothing is armed, so the connection proceeds at once.
+pub async fn hold_listener_stall(channel: &Arc<QaBarrierChannel>) -> Option<ReleaseOutcome> {
+    let dir = channel.dir.clone();
+    let run_id = channel.run_id.clone();
+    let spec = crate::ipc::run_blocking(move || Ok(pending_listener_stall(&dir, &run_id))).await.ok()??;
+    // Held record and receipt are file writes: keep them off this runtime worker.
+    write_held_off_runtime(channel, &spec, "", "handshake-stalled", json!({ "deadlineMs": spec.deadline_ms })).await;
+    let outcome = channel.wait_for_release(&spec).await;
+    append_receipt_off_runtime(channel, LISTENER_STALL_BARRIER, &spec.operation_id, json!({ "outcome": outcome.as_str() })).await;
+    Some(outcome)
+}
+
+/// Daemon hook: the listener stall of the installed QA channel, if any.
+pub async fn daemon_listener_stall_gate() {
+    if let Some(channel) = active_channel() {
+        hold_listener_stall(&channel).await;
+    }
+}
+
 impl QaBarrierChannel {
     /// Arms QaWriteAckHold for one session through the QA channel.
     pub fn arm_write_ack_hold(&self, session_id: &str) {
@@ -2428,6 +2485,61 @@ impl QaBarrierChannel {
 #[cfg(test)]
 mod write_ack_hold_tests {
     use super::*;
+
+    #[test]
+    fn listener_stall_parses_as_a_daemon_wide_fixture_kind() {
+        let kind = QaFixtureKind::parse(LISTENER_STALL_BARRIER).unwrap();
+        assert_eq!(kind, QaFixtureKind::DaemonListenerStall);
+        assert_eq!(kind.as_str(), LISTENER_STALL_BARRIER);
+        assert!(matches!(kind.creation(), FixtureCreation::Unsupported(hook) if hook.contains("daemon-listener-stall.arm.json")));
+    }
+
+    fn write_control(dir: &std::path::Path, suffix: &str, run_id: &str, operation_id: &str, extra: Value) {
+        let mut value = json!({ "name": LISTENER_STALL_BARRIER, "runId": run_id, "operationId": operation_id });
+        if let (Value::Object(base), Value::Object(add)) = (&mut value, extra) {
+            base.extend(add);
+        }
+        std::fs::write(dir.join(format!("{LISTENER_STALL_BARRIER}.{suffix}")), value.to_string()).unwrap();
+    }
+
+    #[test]
+    fn listener_stall_is_armed_only_by_this_run_and_until_its_release() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        assert!(pending_listener_stall(dir, "run-1").is_none(), "no arm, no stall");
+        write_control(dir, "arm.json", "run-OTHER", "op-1", json!({}));
+        assert!(pending_listener_stall(dir, "run-1").is_none(), "another run's arm is ignored");
+        write_control(dir, "arm.json", "run-1", "op-1", json!({ "deadlineMs": 90_000 }));
+        let spec = pending_listener_stall(dir, "run-1").expect("armed");
+        assert_eq!(spec.deadline_ms, 90_000);
+        write_control(dir, "release.json", "run-1", "op-OTHER", json!({}));
+        assert!(pending_listener_stall(dir, "run-1").is_some(), "a wrong-operation release does not disarm");
+        write_control(dir, "release.json", "run-1", "op-1", json!({}));
+        assert!(pending_listener_stall(dir, "run-1").is_none(), "the matching release ends the stall");
+    }
+
+    #[tokio::test]
+    async fn listener_stall_holds_the_handshake_until_release() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().to_path_buf();
+        write_control(&dir, "arm.json", "run-1", "op-1", json!({ "deadlineMs": 10_000 }));
+        let channel = Arc::new(QaBarrierChannel::new(dir.clone(), "run-1".to_string()));
+        let mut held = channel.subscribe_held();
+        let gate = tokio::spawn({
+            let channel = Arc::clone(&channel);
+            async move { hold_listener_stall(&channel).await }
+        });
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), held.recv()).await.unwrap().unwrap();
+        assert_eq!(event.name, LISTENER_STALL_BARRIER);
+        assert_eq!(event.stage, "handshake-stalled");
+        assert!(dir.join(format!("{LISTENER_STALL_BARRIER}.held.json")).exists());
+        assert!(!gate.is_finished(), "nothing released the stall yet");
+        write_control(&dir, "release.json", "run-1", "op-1", json!({}));
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), gate).await.unwrap().unwrap();
+        assert_eq!(outcome, Some(ReleaseOutcome::Released));
+        // Released: later connections pass straight through.
+        assert_eq!(hold_listener_stall(&channel).await, None);
+    }
 
     #[tokio::test]
     async fn unarmed_write_is_not_held() {
@@ -2999,7 +3111,7 @@ mod tests {
         );
 
         let mut hooks = Vec::new();
-        for kind in [QaFixtureKind::Adopted] {
+        for kind in [QaFixtureKind::Adopted, QaFixtureKind::DaemonListenerStall] {
             match kind.creation() {
                 FixtureCreation::Unsupported(hook) => hooks.push(hook),
                 other => panic!("{} must not be constructible: {other:?}", kind.as_str()),

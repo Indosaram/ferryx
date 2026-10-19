@@ -3930,6 +3930,17 @@ impl DaemonServer {
                         })?,
                         None => std::time::Duration::MAX,
                     };
+                    // QA only: todo 8's request-expiry variant, armed by the runner for this
+                    // handover. The real mid-transfer expiry path below runs, deterministically.
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    if handover_expires_at.is_some() && crate::daemon::qa_producers::request_expiry_requested() {
+                        expired_before_commit = true;
+                        return Err(expiry_abort_reason(
+                            &handover_socket_path,
+                            "handover request expired mid-transfer (QA request-expired-mid-transfer)",
+                        )
+                        .await);
+                    }
                     let received = match tokio::time::timeout(transfer_budget, accept_handle).await {
                         Ok(received) => received,
                         Err(_) => {
@@ -4581,6 +4592,9 @@ impl DaemonServer {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        // QaFixtureKind::DaemonListenerStall (QA builds only): accepted, handshake not answered until released.
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        crate::ipc::qa_barrier::daemon_listener_stall_gate().await;
         let (read_half, mut write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
@@ -5715,12 +5729,10 @@ impl DaemonServer {
                 Ok(DaemonRequest::PrepareHandover) => {
                     #[cfg(unix)]
                     {
-                        match self.handover_manager.prepare_handover(&self.terminal_service) {
+                        match self.prepare_handover_shared().await {
                             Ok((legacy_path, active_sessions, listener)) => {
                                 let legacy_path_str = legacy_path.to_string_lossy().into_owned();
                                 Arc::clone(&self).spawn_legacy_listener(listener);
-                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-                                crate::daemon::qa_producers::note_authority_stage("predecessor-prepared", &self.handover_manager).await;
                                 DaemonResponse::PrepareHandoverOk {
                                     legacy_socket_path: legacy_path_str,
                                     active_sessions,
@@ -5817,7 +5829,35 @@ impl DaemonServer {
                                     // v5 successor) gets nothing.
                                     match self.handover_manager.authority_sources() {
                                         Ok(sources) => {
+                                            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                            let transfer_fault = crate::daemon::qa_producers::armed_transfer_fault();
                                             tokio::task::spawn_blocking(move || {
+                                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                                let mut sources = sources;
+                                                // QA only: todo 8's authority-transfer failure
+                                                // variants, armed by the runner for this handover.
+                                                // The stray listener lives until the send is done.
+                                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                                let stray_path = get_runtime_dir().join(format!("qa-stray-{}.sock", std::process::id()));
+                                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                                let _stray = match transfer_fault {
+                                                    Some(fault) => match crate::daemon::qa_producers::apply_transfer_fault(
+                                                        fault,
+                                                        &mut sources,
+                                                        &get_lock_path(),
+                                                        &stray_path,
+                                                    ) {
+                                                        Ok(stray) => {
+                                                            tracing::warn!(?fault, "QA transfer fault applied to the authority");
+                                                            stray
+                                                        }
+                                                        Err(error) => {
+                                                            tracing::warn!(%error, ?fault, "QA transfer fault could not be applied; authority not served");
+                                                            return;
+                                                        }
+                                                    },
+                                                    None => None,
+                                                };
                                                 // The authority request is read with the request's
                                                 // own TTL as its bound; without one the worker could
                                                 // block forever, so a failure ends this request.
@@ -5833,6 +5873,10 @@ impl DaemonServer {
                                                         crate::daemon::handover_wire::HandoverWireError::Closed,
                                                     )) => {}
                                                     Err(error) => tracing::warn!(%error, "Authority request was not served"),
+                                                }
+                                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                                if _stray.is_some() {
+                                                    let _ = std::fs::remove_file(&stray_path);
                                                 }
                                             });
                                         }
@@ -5996,6 +6040,27 @@ impl DaemonServer {
                 }
             }
         }
+    }
+
+    /// The one prepare path of a predecessor: the PrepareHandover request and control
+    /// RequestUpgrade both call it. Under local-split-qa it first arms the runner's handover faults
+    /// for this handover and, once prepared, writes the predecessor-prepared receipt (todo 12 Q08).
+    /// prepare_handover removes, binds and chmods the legacy socket, so it runs off the workers.
+    #[cfg(unix)]
+    pub(crate) async fn prepare_handover_shared(
+        self: &Arc<Self>,
+    ) -> Result<(PathBuf, Vec<String>, UnixListener), String> {
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        crate::daemon::qa_producers::arm_handover_faults(&self.handover_manager).await;
+        let (manager, terminals) = (Arc::clone(&self.handover_manager), Arc::clone(&self.terminal_service));
+        let prepared = crate::ipc::run_blocking(move || {
+            manager.prepare_handover(&terminals).map_err(crate::ipc::IpcError::internal)
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        crate::daemon::qa_producers::note_authority_stage("predecessor-prepared", &self.handover_manager).await;
+        Ok(prepared)
     }
 
     #[cfg(unix)]

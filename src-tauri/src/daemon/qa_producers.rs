@@ -96,8 +96,99 @@ pub async fn install_and_start(server: &Arc<super::server::DaemonServer>) {
     let Some(channel) = channel().await else {
         return;
     };
+    let _ = BOOT_FAULT_REQUEST.set(requested_handover_fault(&channel).await);
     let server = Arc::clone(server);
+    tokio::spawn(run_write_ack_hold_watcher(Arc::clone(&channel)));
     tokio::spawn(async move { run_held_rpc_watcher(server, channel).await });
+}
+
+/// Runner-facing arm for QaWriteAckHold (todo 11's uncertain-write fixture, todo 12 Q11). The
+/// runner writes `<barrier>/write-ack-hold.request.json` { runId, operationId, sessionId } to arm
+/// the hold for that session, and `write-ack-hold.release.json` with the same three fields to
+/// release it. Every transition and every write-applied event is a line in
+/// `write-ack-hold.receipt.jsonl`. A control from another run is ignored.
+pub const WRITE_ACK_HOLD_ARM: &str = "write-ack-hold";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WriteAckHoldControl {
+    pub operation_id: String,
+    pub session_id: String,
+}
+
+/// The hold this daemon armed from the runner's request, and whether it was released.
+#[derive(Debug, Default)]
+pub(crate) struct WriteAckHoldState {
+    armed: Option<WriteAckHoldControl>,
+    released: bool,
+}
+
+fn read_write_ack_hold_control(dir: &Path, suffix: &str, run_id: &str) -> Option<WriteAckHoldControl> {
+    let text = std::fs::read_to_string(dir.join(format!("{WRITE_ACK_HOLD_ARM}.{suffix}"))).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    if value.get("runId").and_then(Value::as_str) != Some(run_id) {
+        return None;
+    }
+    let field = |key: &str| value.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(str::to_string);
+    Some(WriteAckHoldControl { operation_id: field("operationId")?, session_id: field("sessionId")? })
+}
+
+/// One poll of the runner's controls: arms a new request, releases the armed hold on its
+/// matching release. Returns the transitions it made, in order.
+pub(crate) fn poll_write_ack_hold(
+    dir: &Path,
+    run_id: &str,
+    hold: &qa_barrier::QaWriteAckHold,
+    state: &mut WriteAckHoldState,
+) -> Vec<(&'static str, WriteAckHoldControl)> {
+    let mut changes = Vec::new();
+    if let Some(request) = read_write_ack_hold_control(dir, "request.json", run_id) {
+        if state.armed.as_ref() != Some(&request) {
+            hold.arm(&request.session_id);
+            state.armed = Some(request.clone());
+            state.released = false;
+            changes.push(("armed", request));
+        }
+    }
+    if let Some(armed) = state.armed.clone().filter(|_| !state.released) {
+        if read_write_ack_hold_control(dir, "release.json", run_id).as_ref() == Some(&armed) {
+            hold.release(&armed.session_id);
+            state.released = true;
+            changes.push(("released", armed));
+        }
+    }
+    changes
+}
+
+async fn run_write_ack_hold_watcher(channel: Arc<QaBarrierChannel>) {
+    let hold = qa_barrier::write_ack_hold();
+    let mut applied = hold.subscribe_applied();
+    let mut state = WriteAckHoldState::default();
+    let mut ticker = tokio::time::interval(Duration::from_millis(WATCH_TICK_MS));
+    loop {
+        tokio::select! {
+            event = applied.recv() => {
+                let Ok(event) = event else { continue };
+                let operation_id = state.armed.as_ref().map(|c| c.operation_id.clone()).unwrap_or_default();
+                qa_barrier::append_receipt_off_runtime(&channel, WRITE_ACK_HOLD_ARM, &operation_id,
+                    json!({ "event": "write-applied", "sessionId": event.session_id, "seq": event.seq })).await;
+            }
+            _ = ticker.tick() => {
+                let dir = channel.dir().to_path_buf();
+                let run_id = channel.run_id().to_string();
+                let polled = crate::ipc::run_blocking(move || {
+                    let changes = poll_write_ack_hold(&dir, &run_id, qa_barrier::write_ack_hold(), &mut state);
+                    Ok((state, changes))
+                })
+                .await;
+                let Ok((next, changes)) = polled else { return };
+                state = next;
+                for (event, control) in changes {
+                    qa_barrier::append_receipt_off_runtime(&channel, WRITE_ACK_HOLD_ARM, &control.operation_id,
+                        json!({ "event": event, "sessionId": control.session_id })).await;
+                }
+            }
+        }
+    }
 }
 
 /// A control that does not echo this run's nonces is never honored.
@@ -313,21 +404,150 @@ pub fn injected_handover_fault() -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+/// Runner-armed handover fault (todo 12 Q08). A job-started predecessor or candidate never sees
+/// the runner's env, so the runner writes `<barrier>/handover-fault.request.json`
+/// { runId, operationId, fault } with one FERRYX_QA_HANDOVER_FAULT value. The predecessor reads
+/// it at every PrepareHandover, a candidate once when its QA channel is installed; a request of
+/// another run is ignored, and the env stays the default.
+pub const HANDOVER_FAULT_REQUEST: &str = "handover-fault.request.json";
+
+fn read_handover_fault_request(dir: &Path, run_id: &str) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(HANDOVER_FAULT_REQUEST)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    if value.get("runId").and_then(Value::as_str) != Some(run_id) {
+        return None;
+    }
+    value.get("fault").and_then(Value::as_str).filter(|fault| !fault.trim().is_empty()).map(str::to_string)
+}
+
+async fn requested_handover_fault(channel: &Arc<QaBarrierChannel>) -> Option<String> {
+    let dir = channel.dir().to_path_buf();
+    let run_id = channel.run_id().to_string();
+    crate::ipc::run_blocking(move || Ok(read_handover_fault_request(&dir, &run_id))).await.ok().flatten()
+}
+
+/// The request this process saw when its QA channel was installed (the candidate's view).
+static BOOT_FAULT_REQUEST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
 /// True when this successor was spawned for the runner's partial-adopt abort
 /// variant, so the real rollback path runs instead of a commit.
 pub fn abort_after_adopt_requested() -> bool {
-    injected_handover_fault().as_deref() == Some(HANDOVER_FAULT_ABORT_AFTER_ADOPT)
+    let fault = injected_handover_fault().or_else(|| BOOT_FAULT_REQUEST.get().cloned().flatten());
+    fault.as_deref() == Some(HANDOVER_FAULT_ABORT_AFTER_ADOPT)
 }
 
-/// Predecessor-side commit faults selected by FERRYX_QA_HANDOVER_FAULT (todo 8 variants).
-pub fn commit_fault_from_env() -> Option<crate::daemon::handover::CommitFault> {
+fn commit_fault_named(name: Option<&str>) -> Option<crate::daemon::handover::CommitFault> {
     use crate::daemon::handover::CommitFault;
-    match injected_handover_fault().as_deref() {
+    match name {
         Some("decision-write-failure") => Some(CommitFault::DecisionWrite),
         Some("drop-commit-ok-before-record") => Some(CommitFault::DropReplyBeforeRecord),
         Some("drop-commit-ok-after-record") => Some(CommitFault::DropReplyAfterRecord),
         _ => None,
     }
+}
+
+/// Predecessor-side commit faults selected by FERRYX_QA_HANDOVER_FAULT (todo 8 variants).
+pub fn commit_fault_from_env() -> Option<crate::daemon::handover::CommitFault> {
+    commit_fault_named(injected_handover_fault().as_deref())
+}
+
+/// todo 8's four authority-transfer failure variants (task-8-handover.log), applied by the
+/// predecessor to the authority it sends, except request expiry, which the candidate applies to
+/// its own request deadline. Each one must abort before commit with the predecessor still owner.
+pub const TRANSFER_FAULT_MISSING_FD_KIND: &str = "authority-frame-missing-fd-kind";
+pub const TRANSFER_FAULT_GETSOCKNAME_MISMATCH: &str = "listener-getsockname-mismatch";
+pub const TRANSFER_FAULT_LOCK_NOT_LOCKED: &str = "lock-fd-not-locked";
+pub const TRANSFER_FAULT_REQUEST_EXPIRED: &str = "request-expired-mid-transfer";
+
+/// Predecessor-side authority corruptions (the request-expiry variant is candidate-side).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferFault {
+    /// The frame carries no canonical_listener (handover_socket.rs
+    /// authority_frame_missing_each_fd_kind_is_refused_and_the_predecessor_stays_owner).
+    MissingFdKind,
+    /// canonical_listener is a listener bound to another path
+    /// (listener_bound_to_another_path_is_refused).
+    GetsocknameMismatch,
+    /// legacy_lock is a fresh open of the lock file, not the description holding the lock
+    /// (lock_fd_that_holds_no_lock_is_refused).
+    LockNotLocked,
+}
+
+fn transfer_fault_named(name: Option<&str>) -> Option<TransferFault> {
+    match name {
+        Some("authority-frame-missing-fd-kind") => Some(TransferFault::MissingFdKind),
+        Some("listener-getsockname-mismatch") => Some(TransferFault::GetsocknameMismatch),
+        Some("lock-fd-not-locked") => Some(TransferFault::LockNotLocked),
+        _ => None,
+    }
+}
+
+/// The transfer fault this predecessor armed at its last prepare; cleared by the next prepare.
+static ARMED_TRANSFER_FAULT: std::sync::Mutex<Option<TransferFault>> = std::sync::Mutex::new(None);
+
+pub fn armed_transfer_fault() -> Option<TransferFault> {
+    ARMED_TRANSFER_FAULT.lock().ok().and_then(|armed| *armed)
+}
+
+fn arm_transfer_fault(fault: Option<TransferFault>) {
+    if let Ok(mut armed) = ARMED_TRANSFER_FAULT.lock() {
+        *armed = fault;
+    }
+}
+
+/// Predecessor, at every prepare (the PrepareHandover request and control RequestUpgrade go
+/// through the same DaemonServer::prepare_handover_shared): the runner's request for this
+/// handover selects the commit fault or the authority-transfer fault; without one the env default
+/// applies, so an earlier request never leaks into a later handover.
+pub async fn arm_handover_faults(manager: &crate::daemon::handover::HandoverManager) {
+    let requested = match channel().await {
+        Some(channel) => requested_handover_fault(&channel).await,
+        None => None,
+    };
+    let requested = requested.or_else(injected_handover_fault);
+    manager.inject_commit_fault(commit_fault_named(requested.as_deref()));
+    arm_transfer_fault(transfer_fault_named(requested.as_deref()));
+}
+
+/// Applies an armed transfer fault to the authority about to be sent, exactly as todo 8's unit
+/// seams build it. Sync filesystem and socket work: call it off the Tokio workers. Returns the
+/// stray listener (GetsocknameMismatch), which must outlive the send.
+#[cfg(unix)]
+pub fn apply_transfer_fault(
+    fault: TransferFault,
+    sources: &mut crate::daemon::handover_socket::AuthoritySources,
+    legacy_lock_path: &Path,
+    stray_socket_path: &Path,
+) -> std::io::Result<Option<std::os::unix::net::UnixListener>> {
+    use std::os::fd::{AsRawFd, OwnedFd};
+    match fault {
+        TransferFault::MissingFdKind => {
+            sources.canonical_listener = None;
+            Ok(None)
+        }
+        TransferFault::GetsocknameMismatch => {
+            let _ = std::fs::remove_file(stray_socket_path);
+            let stray = std::os::unix::net::UnixListener::bind(stray_socket_path)?;
+            sources.canonical_listener = Some(
+                crate::daemon::handover_socket::dup_for_authority(stray.as_raw_fd())
+                    .map_err(|error| std::io::Error::other(error.to_string()))?,
+            );
+            Ok(Some(stray))
+        }
+        TransferFault::LockNotLocked => {
+            let unlocked: OwnedFd = std::fs::OpenOptions::new().read(true).open(legacy_lock_path)?.into();
+            sources.legacy_lock = unlocked;
+            Ok(None)
+        }
+    }
+}
+
+/// Candidate: true when the runner asked for todo 8's request-expiry variant. The candidate then
+/// treats its request as expired right after TransferSessions is answered, so the real
+/// mid-transfer expiry path aborts the handover.
+pub fn request_expiry_requested() -> bool {
+    let fault = injected_handover_fault().or_else(|| BOOT_FAULT_REQUEST.get().cloned().flatten());
+    fault.as_deref() == Some(TRANSFER_FAULT_REQUEST_EXPIRED)
 }
 
 /// One QA receipt per handover state transition (todo 8): the candidate's accept counters on
@@ -341,6 +561,11 @@ pub async fn note_authority_stage(
 ) {
     use crate::daemon::handover::AuthorityListenerRole;
     let Some(channel) = channel().await else { return };
+    // A job-started predecessor installed its channel before the runner armed this upgrade;
+    // the runner's handover-authority arm is picked up here, never guessed.
+    if channel.operation_id().is_none() {
+        let _ = qa_barrier::scan_and_ack_arms_off_runtime(&channel).await;
+    }
     let Some(operation_id) = channel.operation_id() else { return };
     let accept_counts = json!({
         "canonical": manager.accept_count(AuthorityListenerRole::Canonical),
@@ -802,6 +1027,125 @@ mod tests {
 
     const TEST_RUN_ID: &str = "qa-run-daemon";
     const TEST_OPERATION_ID: &str = "qa-op-daemon";
+
+    /// todo 8's three predecessor-side transfer failure variants: each armed fault, applied to a
+    /// real authority and sent over a real socketpair, is refused by the candidate's own
+    /// validation, and the predecessor's locks stay held and its public socket stays bound.
+    #[cfg(unix)]
+    #[test]
+    fn armed_transfer_faults_are_refused_by_candidate_validation_and_keep_the_authority() {
+        use crate::daemon::handover_socket::{
+            dup_for_authority, lock_is_held_elsewhere, request_authority, serve_authority_request,
+            validate_authority, AuthoritySources, ExpectedAuthority,
+        };
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name);
+        let canonical = UnixListener::bind(path("daemon.sock")).unwrap();
+        let lock_file = std::fs::OpenOptions::new().read(true).write(true).create(true).open(path("daemon.lock")).unwrap();
+        assert_eq!(unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        let expected = ExpectedAuthority {
+            canonical_socket: path("daemon.sock"),
+            legacy_lock: path("daemon.lock"),
+            persistent_lock: None,
+            control_socket: None,
+            agent_state_socket: None,
+        };
+        for name in [TRANSFER_FAULT_MISSING_FD_KIND, TRANSFER_FAULT_GETSOCKNAME_MISMATCH, TRANSFER_FAULT_LOCK_NOT_LOCKED] {
+            let fault = transfer_fault_named(Some(name)).expect(name);
+            let mut sources = AuthoritySources {
+                canonical_listener: Some(dup_for_authority(canonical.as_raw_fd()).unwrap()),
+                legacy_lock: dup_for_authority(lock_file.as_raw_fd()).unwrap(),
+                persistent_lock: None,
+                control_listener: None,
+                agent_state_listener: None,
+            };
+            let stray = apply_transfer_fault(fault, &mut sources, &path("daemon.lock"), &path("stray.sock")).unwrap();
+            let (candidate, predecessor) = UnixStream::pair().unwrap();
+            let serving = std::thread::spawn(move || serve_authority_request(&predecessor, sources));
+            let refused = request_authority(&candidate, &uuid::Uuid::new_v4().to_string())
+                .and_then(|authority| validate_authority(&authority, &expected));
+            // Closing the candidate end first means a failed request can never strand the server.
+            drop(candidate);
+            serving.join().unwrap().expect("the predecessor answered the authority request");
+            assert!(refused.is_err(), "{name}: the corrupted authority was accepted");
+            drop(stray);
+            assert!(lock_is_held_elsewhere(&path("daemon.lock")).unwrap(), "{name}: the lock was released");
+            assert!(UnixStream::connect(path("daemon.sock")).is_ok(), "{name}: the public socket stopped accepting");
+        }
+        assert_eq!(transfer_fault_named(Some(TRANSFER_FAULT_REQUEST_EXPIRED)), None, "expiry is candidate-side");
+        assert_eq!(commit_fault_named(Some(TRANSFER_FAULT_REQUEST_EXPIRED)), None);
+        for name in [TRANSFER_FAULT_MISSING_FD_KIND, TRANSFER_FAULT_GETSOCKNAME_MISMATCH, TRANSFER_FAULT_LOCK_NOT_LOCKED] {
+            assert_eq!(commit_fault_named(Some(name)), None, "{name} is not a commit fault");
+        }
+    }
+
+    #[test]
+    fn handover_fault_request_is_read_only_for_this_run_and_maps_to_commit_faults() {
+        use crate::daemon::handover::CommitFault;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        assert_eq!(read_handover_fault_request(dir, TEST_RUN_ID), None);
+        let request = |run: &str, fault: &str| {
+            std::fs::write(
+                dir.join(HANDOVER_FAULT_REQUEST),
+                json!({ "runId": run, "operationId": "op-1", "fault": fault }).to_string(),
+            )
+            .unwrap();
+        };
+        request("qa-run-OTHER", "decision-write-failure");
+        assert_eq!(read_handover_fault_request(dir, TEST_RUN_ID), None, "another run's request is ignored");
+        request(TEST_RUN_ID, "");
+        assert_eq!(read_handover_fault_request(dir, TEST_RUN_ID), None);
+        for (name, fault) in [
+            ("decision-write-failure", Some(CommitFault::DecisionWrite)),
+            ("drop-commit-ok-before-record", Some(CommitFault::DropReplyBeforeRecord)),
+            ("drop-commit-ok-after-record", Some(CommitFault::DropReplyAfterRecord)),
+            (HANDOVER_FAULT_ABORT_AFTER_ADOPT, None),
+        ] {
+            request(TEST_RUN_ID, name);
+            let read = read_handover_fault_request(dir, TEST_RUN_ID);
+            assert_eq!(read.as_deref(), Some(name));
+            assert_eq!(commit_fault_named(read.as_deref()), fault, "{name}");
+        }
+    }
+
+    #[test]
+    fn write_ack_hold_is_armed_and_released_only_by_this_runs_controls() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let hold = qa_barrier::QaWriteAckHold::new();
+        let mut state = WriteAckHoldState::default();
+        let control = |suffix: &str, run: &str, op: &str| {
+            std::fs::write(
+                dir.join(format!("{WRITE_ACK_HOLD_ARM}.{suffix}")),
+                json!({ "runId": run, "operationId": op, "sessionId": "ssh-1" }).to_string(),
+            )
+            .unwrap();
+        };
+        assert!(poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state).is_empty());
+        control("request.json", "qa-run-OTHER", "op-1");
+        assert!(poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state).is_empty(), "another run's arm is ignored");
+        assert!(hold.applied("ssh-1").is_none());
+
+        control("request.json", TEST_RUN_ID, "op-1");
+        let changes = poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, "armed");
+        assert_eq!(changes[0].1.session_id, "ssh-1");
+        assert!(poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state).is_empty(), "one request arms once");
+        let parked = hold.applied("ssh-1").expect("armed: the WriteOk parks");
+
+        control("release.json", TEST_RUN_ID, "op-OTHER");
+        assert!(poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state).is_empty(), "a wrong-operation release is ignored");
+        control("release.json", TEST_RUN_ID, "op-1");
+        let changes = poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state);
+        assert_eq!(changes.iter().map(|c| c.0).collect::<Vec<_>>(), ["released"]);
+        assert!(hold.applied("ssh-1").is_none(), "released: disarmed");
+        drop(parked);
+        assert!(poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state).is_empty(), "release applies once");
+    }
 
     fn arm(dir: &Path, name: &str, run_id: &str, operation_id: &str) {
         std::fs::write(

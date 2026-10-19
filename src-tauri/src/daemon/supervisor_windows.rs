@@ -52,6 +52,13 @@ pub const FORWARDED_ENV: [&str; 4] = [
     SUPERVISOR_NAME_ENV,
 ];
 
+/// QA barrier channel of a `local-split-qa` build (todo 12), forwarded beside [`FORWARDED_ENV`]
+/// only into a QA-named task.
+#[cfg(feature = "local-split-qa")]
+pub const QA_FORWARDED_ENV: [&str; 2] = ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"];
+#[cfg(not(feature = "local-split-qa"))]
+pub const QA_FORWARDED_ENV: [&str; 0] = [];
+
 pub const RESPAWN_BACKOFF: Duration = Duration::from_secs(1);
 pub const CRASH_WINDOW: Duration = Duration::from_secs(60);
 pub const MAX_CRASHES_PER_WINDOW: usize = 5;
@@ -102,8 +109,10 @@ fn task_user(env: Env<'_>) -> Result<String> {
     })
 }
 fn forwarded_env(env: Env<'_>) -> Vec<(String, String)> {
+    let qa = if non_empty(env, SUPERVISOR_NAME_ENV).is_some() { &QA_FORWARDED_ENV[..] } else { &[][..] };
     FORWARDED_ENV
         .iter()
+        .chain(qa.iter())
         .filter_map(|key| {
             non_empty(env, key).map(|value| (key.to_string(), value.to_string_lossy().into_owned()))
         })
@@ -751,7 +760,7 @@ pub fn parse_supervisor_args<S: AsRef<str>>(args: &[S]) -> Option<Result<Vec<(St
         let Some((key, value)) = pair.as_ref().split_once('=') else {
             return Some(Err(format!("{ENV_ARG} expects KEY=VALUE")));
         };
-        if !FORWARDED_ENV.contains(&key) {
+        if !FORWARDED_ENV.contains(&key) && !QA_FORWARDED_ENV.contains(&key) {
             return Some(Err(format!(
                 "{key} may not be forwarded to the daemon supervisor"
             )));
@@ -1322,6 +1331,18 @@ mod tests {
             )]))
         );
         assert_eq!(parse_supervisor_args(&["--daemon"]), None);
+        // QA barrier variables are forwarded only for a QA-named task, and accepted by the parser.
+        let plain = env_of(&[("FERRYX_QA_BARRIER_DIR", r"C:\qa\b")]);
+        assert!(forwarded_env(&plain).is_empty());
+        let qa = env_of(&[(SUPERVISOR_NAME_ENV, "DaemonQa"), ("FERRYX_QA_BARRIER_DIR", r"C:\qa\b"), ("FERRYX_QA_RUN_ID", "r1")]);
+        let keys: Vec<String> = forwarded_env(&qa).into_iter().map(|(key, _)| key).collect();
+        if cfg!(feature = "local-split-qa") {
+            assert_eq!(keys, [SUPERVISOR_NAME_ENV, "FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"]);
+            assert!(matches!(parse_supervisor_args(&[SUPERVISOR_ARG, ENV_ARG, "FERRYX_QA_RUN_ID=r1"]), Some(Ok(_))));
+        } else {
+            assert_eq!(keys, [SUPERVISOR_NAME_ENV]);
+            assert!(matches!(parse_supervisor_args(&[SUPERVISOR_ARG, ENV_ARG, "FERRYX_QA_RUN_ID=r1"]), Some(Err(_))));
+        }
         assert!(matches!(
             parse_supervisor_args(&[SUPERVISOR_ARG, ENV_ARG, "PATH=x"]),
             Some(Err(_))
@@ -1545,6 +1566,35 @@ mod tests {
 
         fn definition(&self, staged: &StagedRuntime) -> String {
             generation_definition(&self.env(), staged).unwrap()
+        }
+    }
+
+    /// The task XML is the only channel to the watchdog (a scheduled task has no environment
+    /// block): the barrier env is rendered into its Arguments only for a QA-named task, and the
+    /// watchdog's own parser gives it back so run_daemon_supervisor sets it before spawning the
+    /// daemon, which inherits it.
+    #[test]
+    fn qa_task_arguments_carry_the_barrier_env_to_the_watchdog() {
+        let f = Fixture::new();
+        let staged = f.staged("2026.1013.2-0a1b2c3d");
+        let base = [("LOCALAPPDATA", f.local.to_str().unwrap()), ("USERNAME", "sook"), ("USERDOMAIN", "DESKTOP-1")];
+        let barrier = [("FERRYX_QA_BARRIER_DIR", r"C:\qa\barrier"), ("FERRYX_QA_RUN_ID", "run-1")];
+        let user: Vec<(&str, &str)> = base.into_iter().chain(barrier).collect();
+        assert!(!generation_definition(&env_of(&user), &staged).unwrap().contains("FERRYX_QA_"));
+
+        let qa: Vec<(&str, &str)> = base.into_iter().chain([(SUPERVISOR_NAME_ENV, "DaemonQa")]).chain(barrier).collect();
+        let forwarded = forwarded_env(&env_of(&qa));
+        let xml = generation_definition(&env_of(&qa), &staged).unwrap();
+        assert!(xml.contains(&xml_escape(&task_arguments(&forwarded))), "{xml}");
+        let args: Vec<String> = std::iter::once(SUPERVISOR_ARG.to_string())
+            .chain(forwarded.iter().flat_map(|(k, v)| [ENV_ARG.to_string(), format!("{k}={v}")]))
+            .collect();
+        let parsed = parse_supervisor_args(&args).unwrap().unwrap();
+        let keys: Vec<&str> = parsed.iter().map(|(k, _)| k.as_str()).collect();
+        if cfg!(feature = "local-split-qa") {
+            assert_eq!(keys, [SUPERVISOR_NAME_ENV, "FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"]);
+        } else {
+            assert_eq!(keys, [SUPERVISOR_NAME_ENV]);
         }
     }
 
