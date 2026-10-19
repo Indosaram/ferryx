@@ -888,6 +888,209 @@ pub(crate) fn handover_would_lose_sessions(daemon_version: Option<&str>, live_se
     )
 }
 
+/// How a GUI of this plan may ask a running daemon to upgrade (todo 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UpgradeRoute {
+    /// No control-v1 endpoint: a pre-plan daemon. It is never sent UpgradeBinary or any control
+    /// op; it stays the Alive owner until it exits on its own (todo 14).
+    LegacyDaemon,
+    /// The daemon serves control-v1 but does not list RequestUpgrade and handover-v1 (e.g.
+    /// Windows): nothing is requested.
+    Unsupported,
+    /// The daemon lists RequestUpgrade and handover-v1: stage this build and send RequestUpgrade.
+    RequestUpgrade,
+}
+
+/// Pure route decision from the daemon's control Hello (None: no control endpoint).
+pub(crate) fn upgrade_route(hello: Option<&crate::daemon::control::HelloReply>) -> UpgradeRoute {
+    use crate::daemon::control::{HANDOVER_V1_OP, OP_REQUEST_UPGRADE};
+    let Some(hello) = hello else {
+        return UpgradeRoute::LegacyDaemon;
+    };
+    let lists = |op: &str| hello.ops.iter().any(|listed| listed == op);
+    if lists(OP_REQUEST_UPGRADE) && lists(HANDOVER_V1_OP) {
+        UpgradeRoute::RequestUpgrade
+    } else {
+        UpgradeRoute::Unsupported
+    }
+}
+
+/// Result of [`request_upgrade_via_control`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ControlUpgradeOutcome {
+    /// Pre-plan daemon: nothing was sent to it.
+    LegacyDaemonLeftAlone,
+    /// The daemon does not offer a handover upgrade; only Hello was sent.
+    Unsupported,
+    /// RequestUpgrade accepted: the successor generation job was started as a handover candidate.
+    Accepted,
+    /// RequestUpgrade answered with this failure code; the daemon keeps serving.
+    Refused(String),
+}
+
+/// Sends an upgrade request only through the control channel in `runtime_dir` (todo 8): Hello
+/// first, then, when the daemon lists RequestUpgrade and handover-v1, `stage` this build and send
+/// RequestUpgrade { staged_executable, generation_key }. A daemon without a control endpoint gets
+/// no frame at all, and the data protocol's UpgradeBinary is never used.
+pub(crate) async fn request_upgrade_via_control<F, Fut>(
+    runtime_dir: &Path,
+    stage: F,
+) -> Result<ControlUpgradeOutcome, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<crate::daemon::runtime_stage::StagedRuntime, String>>,
+{
+    use crate::daemon::control::{self, ControlConnection, ControlReply, ControlRequest};
+    let mut client = match control::connect(runtime_dir).await {
+        Ok(ControlConnection::Missing) => return Ok(ControlUpgradeOutcome::LegacyDaemonLeftAlone),
+        Ok(ControlConnection::Connected(client)) => client,
+        Err(error) => return Err(format!("control connect failed: {error}")),
+    };
+    let hello = match client.call(&ControlRequest::Hello).await {
+        Ok(ControlReply::Hello(hello)) => hello,
+        Ok(other) => return Err(format!("unexpected control Hello reply: {other:?}")),
+        Err(error) => return Err(format!("control Hello failed: {error}")),
+    };
+    match upgrade_route(Some(&hello)) {
+        UpgradeRoute::LegacyDaemon => return Ok(ControlUpgradeOutcome::LegacyDaemonLeftAlone),
+        UpgradeRoute::Unsupported => return Ok(ControlUpgradeOutcome::Unsupported),
+        UpgradeRoute::RequestUpgrade => {}
+    }
+    let staged = stage().await?;
+    let request = ControlRequest::RequestUpgrade {
+        staged_executable: staged.executable.to_string_lossy().into_owned(),
+        generation_key: Some(staged.key),
+    };
+    match client.call(&request).await {
+        Ok(ControlReply::UpgradeAccepted) => Ok(ControlUpgradeOutcome::Accepted),
+        Ok(ControlReply::Failed(failure)) => Ok(ControlUpgradeOutcome::Refused(failure.code)),
+        Ok(other) => Err(format!("unexpected RequestUpgrade reply: {other:?}")),
+        Err(error) => Err(format!("RequestUpgrade failed: {error}")),
+    }
+}
+
+/// Stages this GUI's daemon runtime (todo 3) for a RequestUpgrade.
+async fn stage_own_runtime() -> Result<crate::daemon::runtime_stage::StagedRuntime, String> {
+    let root = crate::daemon::server::daemon_runtime_root()
+        .ok_or_else(|| "Cannot determine the daemon runtime directory".to_string())?;
+    let exe = std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
+    #[cfg(unix)]
+    let exe = crate::daemon::supervisor_linux::daemon_executable(
+        std::env::var_os("APPIMAGE").as_deref(),
+        &exe,
+    );
+    crate::daemon::runtime_stage::stage_runtime_blocking(root, exe)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(all(test, unix))]
+mod control_upgrade_route_tests {
+    use super::*;
+    use crate::daemon::control::HelloReply;
+
+    fn hello(ops: &[&str]) -> HelloReply {
+        HelloReply {
+            daemon_version: "2026.1013.2".into(),
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            pid: 1,
+            start_time: 1,
+            generation_key: None,
+            epoch: 1,
+            ops: ops.iter().map(|op| op.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn upgrade_route_requires_request_upgrade_and_handover_v1() {
+        assert_eq!(upgrade_route(None), UpgradeRoute::LegacyDaemon);
+        assert_eq!(
+            upgrade_route(Some(&hello(&["Hello", "RequestUpgrade", "handover-v1"]))),
+            UpgradeRoute::RequestUpgrade
+        );
+        assert_eq!(
+            upgrade_route(Some(&hello(&["Hello", "RequestUpgrade"]))),
+            UpgradeRoute::Unsupported,
+            "a daemon without handover-v1 (Windows) is never asked to hand over"
+        );
+        assert_eq!(upgrade_route(Some(&hello(&["Hello", "handover-v1"]))), UpgradeRoute::Unsupported);
+    }
+
+    /// A pre-plan daemon publishes only its data socket. The new GUI must send it nothing: no
+    /// UpgradeBinary on the data socket and no control op, and it must not even stage a runtime.
+    #[tokio::test]
+    async fn legacy_daemon_without_control_endpoint_is_sent_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = std::os::unix::net::UnixListener::bind(dir.path().join("daemon.sock")).unwrap();
+        data.set_nonblocking(true).unwrap();
+        let staged = std::sync::atomic::AtomicBool::new(false);
+        let staged_flag = &staged;
+        let outcome = request_upgrade_via_control(dir.path(), move || async move {
+            staged_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Err::<crate::daemon::runtime_stage::StagedRuntime, String>("must not stage".into())
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome, ControlUpgradeOutcome::LegacyDaemonLeftAlone);
+        assert!(!staged.load(std::sync::atomic::Ordering::SeqCst), "no runtime is staged for a legacy daemon");
+        match data.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("the legacy daemon's data socket must receive no connection: {other:?}"),
+        }
+    }
+
+    /// A stale same-protocol pre-plan daemon (maybe_trigger_upgrade_if_stale's case) is reached
+    /// through upgrade_binary as well: the client answers UpgradeUnsupported and the data socket
+    /// sees no connection, so UpgradeBinary is never sent.
+    #[tokio::test]
+    async fn upgrade_binary_never_sends_upgrade_binary_to_a_legacy_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let data = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        data.set_nonblocking(true).unwrap();
+        let client = DaemonClient::new_with_socket(socket);
+        let response = client.upgrade_binary().await.unwrap();
+        assert!(matches!(response, DaemonResponse::UpgradeUnsupported), "{response:?}");
+        match data.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("UpgradeBinary must not reach a legacy daemon: {other:?}"),
+        }
+    }
+
+    /// A control daemon that lists no handover op gets Hello only, never RequestUpgrade.
+    #[tokio::test]
+    async fn control_daemon_without_handover_v1_gets_hello_only() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::UnixListener::bind(
+            dir.path().join(crate::daemon::control::CONTROL_SOCKET_FILE),
+        )
+        .unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = tokio::io::BufReader::new(read).lines();
+            let mut ops = Vec::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let request = crate::daemon::control::decode_request(&line).unwrap();
+                ops.push(request.op().to_string());
+                let reply = crate::daemon::control::ControlReply::Hello(hello(&["Hello", "RequestUpgrade"]));
+                let frame = crate::daemon::control::to_line(&crate::daemon::control::encode_reply(&reply));
+                write.write_all(frame.as_bytes()).await.unwrap();
+            }
+            ops
+        });
+        let outcome = request_upgrade_via_control(dir.path(), || async {
+            Err::<crate::daemon::runtime_stage::StagedRuntime, String>("must not stage".into())
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome, ControlUpgradeOutcome::Unsupported);
+        let ops = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        assert_eq!(ops, vec!["Hello".to_string()]);
+    }
+}
+
 /// Orders two CalVer strings (`YYYY.MDD.N`) numerically per dot-separated component.
 /// Returns `None` when either side is not fully numeric, so callers can pick their own fallback.
 fn compare_calver(left: &str, right: &str) -> Option<std::cmp::Ordering> {
@@ -1937,14 +2140,27 @@ impl DaemonClient {
         }
     }
 
+    /// Asks the running daemon to hand over to this build's staged runtime generation through the
+    /// control channel (todo 8). A pre-plan daemon (no control endpoint) is left alone and
+    /// answers UpgradeUnsupported; the protocol-5 UpgradeBinary request is never sent.
     pub async fn upgrade_binary(&self) -> Result<DaemonResponse, IpcError> {
-        let own_binary_path = std::env::current_exe()
-            .ok()
-            .map(|p| p.to_string_lossy().to_string());
-        self.send_request(DaemonRequest::UpgradeBinary {
-            new_binary_path: own_binary_path,
+        let outcome = request_upgrade_via_control(&self.control_runtime_dir(), stage_own_runtime)
+            .await
+            .map_err(IpcError::internal)?;
+        Ok(match outcome {
+            ControlUpgradeOutcome::Accepted => DaemonResponse::UpgradeScheduled,
+            ControlUpgradeOutcome::LegacyDaemonLeftAlone
+            | ControlUpgradeOutcome::Unsupported
+            | ControlUpgradeOutcome::Refused(_) => DaemonResponse::UpgradeUnsupported,
         })
-        .await
+    }
+
+    /// The runtime dir whose control endpoint belongs to this client's data socket.
+    fn control_runtime_dir(&self) -> PathBuf {
+        self.socket_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(crate::daemon::server::get_runtime_dir)
     }
 
     pub fn epoch(&self) -> Option<u64> {
@@ -2486,10 +2702,19 @@ impl DaemonClient {
     }
 
     /// The owner speaks another data protocol (todo 9). Nothing is sent over the data protocol and
-    /// nothing is shut down, terminated, retargeted or spawned: the GUI reads Inventory over the
-    /// control channel, asks the owner once to RetireWhenIdle, and reports DAEMON_UPDATE_PENDING.
+    /// nothing is shut down, terminated, retargeted or spawned. On Unix the GUI first asks for a
+    /// session-preserving upgrade over the control channel (todo 8's RequestUpgrade); only when
+    /// that is unsupported, refused, unavailable or fails, and always on Windows, it reads
+    /// Inventory, asks the owner once to RetireWhenIdle, and reports DAEMON_UPDATE_PENDING.
     async fn enter_update_pending(&self, running_version: Option<String>) -> IpcError {
-        crate::daemon::update_pending::enter(&self.update_pending_runtime_dir(), running_version)
+        let runtime_dir = self.update_pending_runtime_dir();
+        #[cfg(unix)]
+        let upgrade = Some(request_upgrade_via_control(&runtime_dir, stage_own_runtime));
+        #[cfg(not(unix))]
+        let upgrade: Option<std::future::Ready<Result<ControlUpgradeOutcome, String>>> = None;
+        // No cache invalidation here: the caller may hold a connection slot lock, and the mismatched
+        // connection was never stored. The next request reconnects to whichever owner then answers.
+        crate::daemon::update_pending::resolve_mismatch(&runtime_dir, running_version, upgrade)
             .await
             .into_error()
     }

@@ -10,7 +10,7 @@
 //! which the daemon executes only if its exact live count is still n. An unknown count is never
 //! consent, so without a control endpoint or Inventory nothing can be shut down.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -151,6 +151,83 @@ pub async fn restart_terminals(runtime_dir: &Path, confirm_live_sessions: u32) -
         Ok(other) => Err(format!("unexpected Shutdown reply: {other:?}")),
         Err(error) => Err(format!("Shutdown failed: {error}")),
     }
+}
+
+/// How long an accepted RequestUpgrade is trusted to be handing over before a later mismatch asks
+/// again (so a handover that failed never leaves this GUI waiting for the whole run).
+const UPGRADE_HANDOVER_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Runtime dirs whose owner accepted a control-channel RequestUpgrade, with when it accepted.
+fn upgrade_accepted() -> &'static Mutex<HashMap<PathBuf, std::time::Instant>> {
+    static ACCEPTED: OnceLock<Mutex<HashMap<PathBuf, std::time::Instant>>> = OnceLock::new();
+    ACCEPTED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn upgrade_already_accepted(runtime_dir: &Path) -> bool {
+    upgrade_accepted()
+        .lock()
+        .map(|accepted| {
+            accepted
+                .get(runtime_dir)
+                .is_some_and(|at| at.elapsed() < UPGRADE_HANDOVER_WINDOW)
+        })
+        .unwrap_or(false)
+}
+
+/// How a protocol mismatch with the running owner was resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MismatchResolution {
+    /// The owner accepted RequestUpgrade (now or earlier this run) and hands over to the newest
+    /// generation; nothing else is sent, and the owner is not asked to retire.
+    UpgradeAccepted,
+    /// No upgrade: the pending state was entered (Inventory, RetireWhenIdle once).
+    Pending(UpdatePending),
+}
+
+impl MismatchResolution {
+    pub(crate) fn into_error(self) -> IpcError {
+        match self {
+            MismatchResolution::UpgradeAccepted => IpcError::new(
+                IpcErrorCode::DaemonRetiring,
+                "Daemon upgrade in progress; the running daemon hands its terminals over to the update",
+            )
+            .with_details(json!({ "type": "daemonUpgradeAccepted" })),
+            MismatchResolution::Pending(pending) => pending.into_error(),
+        }
+    }
+}
+
+/// Resolves a data-protocol mismatch with the owner in runtime_dir (todo 9). When upgrade is
+/// Some (Unix: todo 8's control-channel RequestUpgrade), it is tried first, and the pending state
+/// is entered only when it is unsupported, refused, the control endpoint is missing, or it
+/// fails. When upgrade is None (Windows), the pending state is entered directly. An accepted
+/// upgrade is remembered for UPGRADE_HANDOVER_WINDOW, so mismatches during the handover neither
+/// request it again nor send RetireWhenIdle. Never sends Shutdown.
+pub(crate) async fn resolve_mismatch<Fut>(
+    runtime_dir: &Path,
+    running_version: Option<String>,
+    upgrade: Option<Fut>,
+) -> MismatchResolution
+where
+    Fut: std::future::Future<Output = Result<crate::daemon::client::ControlUpgradeOutcome, String>>,
+{
+    use crate::daemon::client::ControlUpgradeOutcome;
+    if upgrade_already_accepted(runtime_dir) {
+        return MismatchResolution::UpgradeAccepted;
+    }
+    if let Some(upgrade) = upgrade {
+        match upgrade.await {
+            Ok(ControlUpgradeOutcome::Accepted) => {
+                if let Ok(mut accepted) = upgrade_accepted().lock() {
+                    accepted.insert(runtime_dir.to_path_buf(), std::time::Instant::now());
+                }
+                return MismatchResolution::UpgradeAccepted;
+            }
+            Ok(outcome) => tracing::info!(?outcome, "No control-channel upgrade; entering the pending update state"),
+            Err(error) => tracing::warn!(%error, "Control-channel upgrade failed; entering the pending update state"),
+        }
+    }
+    MismatchResolution::Pending(enter(runtime_dir, running_version).await)
 }
 
 #[cfg(test)]

@@ -274,7 +274,7 @@ async fn protocol_mismatch_reply_with_live_sessions_never_shuts_down_terminates_
     assert_mismatch_only_reports_pending(DaemonResponse::ProtocolMismatch {
         expected_version: DAEMON_PROTOCOL_VERSION + 1,
         received_version: DAEMON_PROTOCOL_VERSION,
-    }, &[control::OP_HELLO, OP_INVENTORY, OP_RETIRE_WHEN_IDLE])
+    }, &[UPGRADE_PROBE, &[control::OP_HELLO, OP_INVENTORY, OP_RETIRE_WHEN_IDLE]].concat())
     .await;
 }
 
@@ -289,8 +289,135 @@ async fn handshake_ok_of_another_version_never_shuts_down_terminates_or_spawns()
         daemon_version: Some("2099.101.1".into()),
         capabilities: vec![control::CONTROL_CAPABILITY.to_string()],
         admission_time_unix_ms: None,
-    }, &[OP_INVENTORY, OP_RETIRE_WHEN_IDLE])
+    }, &[UPGRADE_PROBE, &[OP_INVENTORY, OP_RETIRE_WHEN_IDLE]].concat())
     .await;
+}
+
+/// Control frames the client sends for its upgrade attempt before entering pending: on Unix a
+/// Hello (the fake owner lists no handover-v1, so the route is Unsupported and nothing is staged
+/// or requested); on Windows none, because pending is entered directly.
+#[cfg(unix)]
+const UPGRADE_PROBE: &[&str] = &[control::OP_HELLO];
+#[cfg(not(unix))]
+const UPGRADE_PROBE: &[&str] = &[];
+
+/// A control owner that offers the todo 8 handover and answers RequestUpgrade with reply.
+fn upgrade_answer(
+    live: u32,
+    reply: ControlReply,
+) -> impl Fn(&ControlRequest) -> ControlReply + Send + Sync + 'static {
+    let standard = standard_answer(live);
+    move |request| match request {
+        ControlRequest::Hello => ControlReply::Hello(control::HelloReply {
+            daemon_version: "2099.101.1".into(),
+            protocol_version: DAEMON_PROTOCOL_VERSION + 1,
+            pid: 1,
+            start_time: 1,
+            generation_key: None,
+            epoch: 1,
+            ops: vec![
+                control::OP_HELLO.to_string(),
+                control::OP_REQUEST_UPGRADE.to_string(),
+                control::HANDOVER_V1_OP.to_string(),
+            ],
+        }),
+        ControlRequest::RequestUpgrade { .. } => reply.clone(),
+        other => standard(other),
+    }
+}
+
+async fn fake_stage() -> Result<crate::daemon::runtime_stage::StagedRuntime, String> {
+    Ok(crate::daemon::runtime_stage::StagedRuntime {
+        key: "gen-new".into(),
+        executable: PathBuf::from("/staged/gen-new/ferryx"),
+    })
+}
+
+/// Accepted upgrade: the owner hands over, so no pending state, no Inventory and no
+/// RetireWhenIdle; a second mismatch during the handover sends nothing at all.
+#[tokio::test]
+async fn accepted_control_upgrade_means_no_pending_and_no_retire() {
+    use crate::daemon::client::request_upgrade_via_control;
+    let dir = tempfile::tempdir().unwrap();
+    let ops = serve_control(
+        bind_control(dir.path()).await,
+        upgrade_answer(2, ControlReply::UpgradeAccepted),
+    );
+    let resolution =
+        resolve_mismatch(dir.path(), None, Some(request_upgrade_via_control(dir.path(), fake_stage))).await;
+    assert_eq!(resolution, MismatchResolution::UpgradeAccepted);
+    let error = resolution.into_error();
+    assert_eq!(error.code, IpcErrorCode::DaemonRetiring);
+    assert_eq!(error.details.unwrap()["type"], "daemonUpgradeAccepted");
+    assert_eq!(op_names(&ops), vec![control::OP_HELLO, control::OP_REQUEST_UPGRADE]);
+    match &ops.lock().unwrap()[1] {
+        ControlRequest::RequestUpgrade { staged_executable, generation_key } => {
+            assert_eq!(generation_key.as_deref(), Some("gen-new"));
+            assert!(staged_executable.ends_with("ferryx"), "{staged_executable}");
+        }
+        other => panic!("expected RequestUpgrade, got {other:?}"),
+    }
+
+    let again =
+        resolve_mismatch(dir.path(), None, Some(request_upgrade_via_control(dir.path(), fake_stage))).await;
+    assert_eq!(again, MismatchResolution::UpgradeAccepted);
+    assert_eq!(op_names(&ops).len(), 2, "no second RequestUpgrade, no RetireWhenIdle, no Shutdown");
+}
+
+/// Refused upgrade: the pending state is entered (Inventory, RetireWhenIdle once), never Shutdown.
+#[tokio::test]
+async fn refused_control_upgrade_enters_pending_and_retires_when_idle() {
+    use crate::daemon::client::request_upgrade_via_control;
+    let dir = tempfile::tempdir().unwrap();
+    let ops = serve_control(
+        bind_control(dir.path()).await,
+        upgrade_answer(3, ControlReply::Failed(ControlFailure::code("UPGRADE_REFUSED"))),
+    );
+    let resolution =
+        resolve_mismatch(dir.path(), None, Some(request_upgrade_via_control(dir.path(), fake_stage))).await;
+    let MismatchResolution::Pending(pending) = &resolution else {
+        panic!("a refused upgrade must enter pending: {resolution:?}");
+    };
+    assert_eq!(pending.live_sessions, Some(3));
+    assert!(pending.retire_requested);
+    assert_eq!(pending.running_version.as_deref(), Some("2099.101.1"));
+    assert_eq!(
+        op_names(&ops),
+        vec![
+            control::OP_HELLO,
+            control::OP_REQUEST_UPGRADE,
+            control::OP_HELLO,
+            OP_INVENTORY,
+            OP_RETIRE_WHEN_IDLE
+        ]
+    );
+    assert!(!op_names(&ops).iter().any(|op| op == OP_SHUTDOWN));
+}
+
+/// Unsupported, missing control and a failed request all fall back to pending; no upgrade future
+/// (Windows) enters pending directly without any upgrade frame.
+#[tokio::test]
+async fn unavailable_or_failed_upgrade_and_windows_path_enter_pending() {
+    use crate::daemon::client::ControlUpgradeOutcome;
+    for outcome in [
+        Ok(ControlUpgradeOutcome::Unsupported),
+        Ok(ControlUpgradeOutcome::LegacyDaemonLeftAlone),
+        Ok(ControlUpgradeOutcome::Refused("UPGRADE_UNSUPPORTED".into())),
+        Err("control connect failed".to_string()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = serve_control(bind_control(dir.path()).await, standard_answer(1));
+        let resolution =
+            resolve_mismatch(dir.path(), Some("v".into()), Some(std::future::ready(outcome.clone()))).await;
+        assert!(matches!(resolution, MismatchResolution::Pending(_)), "{outcome:?}: {resolution:?}");
+        assert_eq!(op_names(&ops), vec![OP_INVENTORY, OP_RETIRE_WHEN_IDLE], "{outcome:?}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ops = serve_control(bind_control(dir.path()).await, standard_answer(1));
+    let no_upgrade: Option<std::future::Ready<Result<ControlUpgradeOutcome, String>>> = None;
+    let resolution = resolve_mismatch(dir.path(), Some("v".into()), no_upgrade).await;
+    assert!(matches!(resolution, MismatchResolution::Pending(_)));
+    assert_eq!(op_names(&ops), vec![OP_INVENTORY, OP_RETIRE_WHEN_IDLE]);
 }
 
 /// Probe whose owner record names pid 77; alive toggles whether that process (and its watchdog
