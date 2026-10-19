@@ -152,7 +152,9 @@ pub(crate) enum StartupRole {
     /// No request: an ordinary start.
     Ordinary,
     /// Run the existing `--handover-from` path against the predecessor's legacy socket.
-    Candidate { legacy_socket_path: PathBuf },
+    /// The request's expiry also bounds the transfer: a candidate that has not sent
+    /// CommitHandover by then aborts and exits 0 (todo 8).
+    Candidate { legacy_socket_path: PathBuf, expires_at_unix_ms: u64 },
     /// Invalid, expired or foreign request: exit 0 without taking any lock.
     Exit { reason: String },
 }
@@ -191,7 +193,20 @@ pub(crate) fn startup_role(
     }
     StartupRole::Candidate {
         legacy_socket_path: request.legacy_socket_path,
+        expires_at_unix_ms: request.expires_at_unix_ms,
     }
+}
+
+/// Time left before a candidate's handover request expires. Checked before every pre-commit
+/// step; once it is gone the candidate aborts (AbortHandover) and exits 0 instead of committing,
+/// and the predecessor keeps serving everything.
+pub(crate) fn pre_commit_remaining(expires_at_unix_ms: u64, now_unix_ms: u64) -> Result<Duration, String> {
+    if now_unix_ms >= expires_at_unix_ms {
+        return Err(format!(
+            "handover request expired before commit ({now_unix_ms} >= {expires_at_unix_ms})"
+        ));
+    }
+    Ok(Duration::from_millis(expires_at_unix_ms - now_unix_ms))
 }
 
 /// Reads the request in `runtime_dir`, removes it (it authorizes one start only) and decides the
@@ -348,9 +363,28 @@ mod tests {
         let alive = |pid: u32| (pid == 4242).then_some(99);
         assert_eq!(
             startup_role(Ok(Some(req.clone())), Some(KEY), 2_000, &alive),
-            StartupRole::Candidate { legacy_socket_path: req.legacy_socket_path.clone() }
+            StartupRole::Candidate {
+                legacy_socket_path: req.legacy_socket_path.clone(),
+                expires_at_unix_ms: req.expires_at_unix_ms,
+            }
         );
         assert_eq!(startup_role(Ok(None), Some(KEY), 2_000, &alive), StartupRole::Ordinary);
+    }
+
+    #[test]
+    fn expiry_passing_mid_transfer_refuses_the_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let req = request(dir.path(), 4242, 99, 1_000);
+        assert_eq!(
+            pre_commit_remaining(req.expires_at_unix_ms, 1_000).unwrap(),
+            Duration::from_millis(REQUEST_TTL_MS)
+        );
+        assert_eq!(
+            pre_commit_remaining(req.expires_at_unix_ms, req.expires_at_unix_ms - 1).unwrap(),
+            Duration::from_millis(1)
+        );
+        assert!(pre_commit_remaining(req.expires_at_unix_ms, req.expires_at_unix_ms).is_err());
+        assert!(pre_commit_remaining(req.expires_at_unix_ms, u64::MAX).is_err());
     }
 
     #[test]
