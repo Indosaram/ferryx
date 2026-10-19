@@ -39,11 +39,14 @@ export async function startAgent(host, opts, { log = () => {} } = {}) {
     resolve(code);
   }));
   const info = await withDeadline(readyPromise, 60_000, `agent on ${host.name}`);
-  const call = (method, params = {}, deadlineMs = 300_000) => {
+  // No controller-side deadline by default: the agent applies the bounded deadline of each
+  // receipt wait itself (waitExit, waitLog, ...), and a build or long exec must not be cut short
+  // here. Pass deadlineMs only where a bounded wait on the agent round trip is intended.
+  const call = (method, params = {}, deadlineMs = null) => {
     const id = nextId++;
     const p = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
     child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
-    return withDeadline(p, deadlineMs, `agent ${method}`);
+    return deadlineMs === null ? p : withDeadline(p, deadlineMs, `agent ${method}`);
   };
   return { info, call, stop: async () => { child.stdin.end(); await exited; }, exited };
 }

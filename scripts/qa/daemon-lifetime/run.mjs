@@ -210,7 +210,7 @@ async function main() {
     const step = plan[name];
     if (!step) continue;
     assertQaBuild(step);
-    const built = await agent.call('exec', { command: step.command, args: step.args, cwd: step.cwd, env: step.env, deadlineMs: 3_600_000 });
+    const built = await agent.call('exec', { command: step.command, args: step.args, cwd: step.cwd, env: step.env, deadlineMs: 4 * 3_600_000 });
     writeFileSync(path.join(localEvidence, `build-${name}.log`), `exit ${built.status}\n${built.stdout}\n${built.stderr}`);
     if (built.status !== 0) throw new GuardError('BUILD_FAILED', `${name} exited ${built.status}`);
     if (name === 'baseline') {
