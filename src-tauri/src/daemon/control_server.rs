@@ -62,6 +62,10 @@ impl DaemonServer {
             return Ok(());
         }
         daemon_start_time_ms();
+        // Resolve (and cache) the generation key off the workers; Hello reads it synchronously.
+        crate::ipc::run_blocking(|| Ok(crate::daemon::owner_admission::current_generation_key()))
+            .await
+            .map_err(|error| format!("Failed to resolve the generation key: {error}"))?;
         self.spawn_control_retirement_task_in(get_runtime_dir());
 
         #[cfg(unix)]
