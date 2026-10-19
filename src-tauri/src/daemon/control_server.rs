@@ -13,12 +13,12 @@ mod control_wire_tests;
 
 /// Under local-split-qa only: skip binding the control endpoint (todo 12, Q09).
 #[cfg(feature = "local-split-qa")]
-fn control_disabled_for_qa() -> bool {
+pub(crate) fn control_disabled_for_qa() -> bool {
     std::env::var("FERRYX_QA_DISABLE_CONTROL").as_deref() == Ok("1")
 }
 
 #[cfg(not(feature = "local-split-qa"))]
-fn control_disabled_for_qa() -> bool {
+pub(crate) fn control_disabled_for_qa() -> bool {
     false
 }
 
@@ -57,8 +57,6 @@ impl DaemonServer {
     /// Binds the control endpoint on an ordinary start. Called right after the data listener is
     /// bound, i.e. only while this process holds the daemon locks. A HandoverCandidate never calls
     /// this.
-    // TODO(todo 8): a HandoverCandidate inherits the predecessor's control listener fd through
-    // the authority transfer and starts accept_control_connections on it after CommitHandoverOk.
     pub(crate) async fn bind_control_endpoint(self: &Arc<Self>) -> Result<(), String> {
         if control_disabled_for_qa() {
             tracing::warn!("FERRYX_QA_DISABLE_CONTROL=1: control endpoint not bound");
@@ -70,18 +68,47 @@ impl DaemonServer {
         #[cfg(unix)]
         {
             let path = control_socket_path();
-            remove_stale_socket_after_lock(&path)?;
-            let listener = UnixListener::bind(&path).map_err(|e| {
-                format!("Failed to bind control socket at {}: {e}", path.display())
-            })?;
-            validate_safe_ownership_and_type(&path, RuntimeNodeKind::Socket)?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                .map_err(|error| format!("Failed to secure control socket: {error}"))?;
+            use crate::daemon::handover::AuthorityListenerRole;
+            // A committed HandoverCandidate serves the control listener it inherited from its
+            // predecessor (todo 8) instead of unlinking and re-binding the path.
+            let listener = match self
+                .handover_manager
+                .take_inherited_listener(AuthorityListenerRole::Control)
+            {
+                Some(inherited) => UnixListener::from_std(inherited).map_err(|e| {
+                    format!("Failed to serve the inherited control listener: {e}")
+                })?,
+                None => {
+                    remove_stale_socket_after_lock(&path)?;
+                    let listener = UnixListener::bind(&path).map_err(|e| {
+                        format!("Failed to bind control socket at {}: {e}", path.display())
+                    })?;
+                    validate_safe_ownership_and_type(&path, RuntimeNodeKind::Socket)?;
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                        .map_err(|error| format!("Failed to secure control socket: {error}"))?;
+                    listener
+                }
+            };
+            {
+                use std::os::fd::AsRawFd;
+                self.handover_manager
+                    .register_authority_listener(AuthorityListenerRole::Control, listener.as_raw_fd())?;
+            }
             let server = Arc::clone(self);
             tokio::spawn(async move {
+                let manager = Arc::clone(&server.handover_manager);
                 loop {
-                    match listener.accept().await {
+                    if !manager.accept_gate_open() {
+                        manager.wait_accept_open().await;
+                        continue;
+                    }
+                    let accepted = tokio::select! {
+                        accepted = listener.accept() => accepted,
+                        () = manager.wait_accept_closed() => continue,
+                    };
+                    match accepted {
                         Ok((stream, _)) => {
+                            manager.note_accept(AuthorityListenerRole::Control);
                             let server = Arc::clone(&server);
                             tokio::spawn(async move {
                                 server.handle_control_connection(stream, None).await;
@@ -215,6 +242,16 @@ impl DaemonServer {
                 Err(_) => return,
             };
             let (reply, after) = match control::decode_request(&line) {
+                // RequestUpgrade needs the async handover path (todo 8); every other op is decided
+                // synchronously below.
+                Ok(ControlRequest::RequestUpgrade {
+                    staged_executable,
+                    generation_key,
+                }) => (
+                    self.control_request_upgrade(staged_executable, generation_key)
+                        .await,
+                    AfterFlush::Nothing,
+                ),
                 Ok(request) => self.dispatch_control(request),
                 Err(error) => (error.reply(), AfterFlush::Nothing),
             };
@@ -249,10 +286,6 @@ impl DaemonServer {
                     control::FROZEN_OPS.iter().map(|op| op.to_string()).collect();
                 // The handover wire is frozen as handover-v1 (tests/fixtures/handover-v1.json);
                 // only unix daemons hand over.
-                // TODO(todo 8): the candidate sends Hello over control first and refuses with
-                // CODE_HANDOVER_WIRE_UNSUPPORTED unless these ops list handover-v1; todo 8 owns
-                // that path: "sends the upgrade through the control channel (todo 15) as
-                // RequestUpgrade { staged_executable, generation_key }".
                 if cfg!(unix) {
                     ops.push(control::HANDOVER_V1_OP.to_string());
                 }
@@ -281,8 +314,8 @@ impl DaemonServer {
                     AfterFlush::Nothing,
                 )
             }
-            // TODO(todo 8): unix routes to the RequestUpgrade handover path; Windows stays
-            // UPGRADE_UNSUPPORTED permanently.
+            // Routed to control_request_upgrade by handle_control_connection; kept as the
+            // Windows-equivalent answer for any other caller.
             ControlRequest::RequestUpgrade { .. } => (
                 ControlReply::Failed(ControlFailure::code(CODE_UPGRADE_UNSUPPORTED)),
                 AfterFlush::Nothing,
@@ -319,5 +352,169 @@ impl DaemonServer {
                 AfterFlush::Nothing,
             ),
         }
+    }
+
+    /// Windows has no handover candidate: the live owner is never replaced by an upgrade.
+    #[cfg(not(unix))]
+    async fn control_request_upgrade(
+        self: &Arc<Self>,
+        _staged_executable: String,
+        _generation_key: Option<String>,
+    ) -> ControlReply {
+        ControlReply::Failed(ControlFailure::code(CODE_UPGRADE_UNSUPPORTED))
+    }
+
+    /// RequestUpgrade { staged_executable, generation_key } (todo 8). (a) the staged executable
+    /// must lie under daemon_runtime_root() inside the generation dir named by generation_key;
+    /// (b) prepare_handover, then handover-request.json (nonce, 30 s expiry, mode 0600);
+    /// (c) supervisor::start_handover_candidate starts the successor generation's own OS job. The
+    /// predecessor keeps serving everything until the candidate commits; any refusal leaves it
+    /// Active. No in-place re-exec and no child process of this daemon is ever used here.
+    #[cfg(unix)]
+    async fn control_request_upgrade(
+        self: &Arc<Self>,
+        staged_executable: String,
+        generation_key: Option<String>,
+    ) -> ControlReply {
+        use crate::daemon::handover_request::{self as request_file, CandidateStart, HandoverRequest};
+        let failed = |code: &str| ControlReply::Failed(ControlFailure::code(code));
+        let Some(key) = generation_key else {
+            tracing::warn!("RequestUpgrade refused: no generation_key");
+            return failed(control::CODE_BAD_REQUEST);
+        };
+        let Some(root) = daemon_runtime_root() else {
+            return failed(CODE_UPGRADE_UNSUPPORTED);
+        };
+        let executable = PathBuf::from(&staged_executable);
+        // Everything that touches the filesystem or /proc runs off the Tokio workers: staged
+        // executable validation, this daemon's own generation key (current_exe + canonicalize)
+        // and its start time (/proc on Linux).
+        let pid = std::process::id();
+        let checked = {
+            let (root, executable, key) = (root.clone(), executable.clone(), key.clone());
+            crate::ipc::run_blocking(move || {
+                request_file::validate_staged_executable(&root, &executable, &key)
+                    .map_err(crate::ipc::IpcError::internal)?;
+                Ok((
+                    request_file::own_generation_key(),
+                    crate::daemon::owner_admission::process_start_time(pid),
+                ))
+            })
+            .await
+        };
+        let (own_key, start_time) = match checked {
+            Ok(checked) => checked,
+            Err(error) => {
+                tracing::warn!(%error, staged_executable, "RequestUpgrade refused: staged executable rejected");
+                return failed(control::CODE_BAD_REQUEST);
+            }
+        };
+        if own_key.as_deref() == Some(key.as_str()) {
+            tracing::info!(generation_key = %key, "RequestUpgrade refused: already running this generation");
+            return failed(control::CODE_UPGRADE_REFUSED);
+        }
+        let Some(start_time) = start_time else {
+            return failed(control::CODE_UPGRADE_REFUSED);
+        };
+        // prepare_handover removes, binds and chmods the legacy socket.
+        let prepared = {
+            let (manager, terminals) = (Arc::clone(&self.handover_manager), Arc::clone(&self.terminal_service));
+            crate::ipc::run_blocking(move || {
+                manager.prepare_handover(&terminals).map_err(crate::ipc::IpcError::internal)
+            })
+            .await
+        };
+        let (legacy_path, _, legacy_listener) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!(%error, "RequestUpgrade refused: handover could not be prepared");
+                return failed(control::CODE_UPGRADE_REFUSED);
+            }
+        };
+        let request = HandoverRequest::new(
+            legacy_path,
+            pid,
+            start_time,
+            self.epoch,
+            key,
+            executable,
+            crate::daemon::owner_admission::unix_now_ms(),
+        );
+        let runtime_dir = get_runtime_dir();
+        let transfers_before = request_file::transfers_started();
+        let outcome = {
+            let (runtime_dir, request) = (runtime_dir.clone(), request.clone());
+            #[cfg(test)]
+            let test_starter = self.handover_manager.candidate_starter();
+            crate::ipc::run_blocking(move || {
+                let start = || -> Result<CandidateStart, String> {
+                    request_file::write_request(&runtime_dir, &request)?;
+                    #[cfg(test)]
+                    if let Some(starter) = test_starter {
+                        return request_file::start_handover_candidate_with(
+                            &runtime_dir,
+                            &crate::daemon::owner_admission::AdmissionPaths::for_runtime().admission_lock,
+                            &request,
+                            std::process::id(),
+                            starter.as_ref(),
+                            crate::daemon::owner_admission::ADMISSION_LOCK_DEADLINE,
+                        );
+                    }
+                    crate::daemon::supervisor::start_handover_candidate(&request)
+                };
+                start().map_err(crate::ipc::IpcError::internal)
+            })
+            .await
+        };
+        match outcome {
+            Ok(CandidateStart::Started) => {
+                tracing::info!(
+                    generation_key = %request.generation_key,
+                    "RequestUpgrade accepted: successor generation job started as handover candidate"
+                );
+                Arc::clone(self).serve_legacy_handover_socket(legacy_listener);
+                Arc::clone(self).abandon_handover_if_never_claimed(runtime_dir, transfers_before);
+                ControlReply::UpgradeAccepted
+            }
+            refused => {
+                tracing::warn!(?refused, "RequestUpgrade refused: successor job not started; predecessor keeps serving");
+                drop(legacy_listener);
+                self.abandon_prepared_handover(runtime_dir).await;
+                failed(control::CODE_UPGRADE_REFUSED)
+            }
+        }
+    }
+
+    /// Pre-commit rollback for a request no candidate acted on: removes the request, records the
+    /// abort decision and returns to Active. Only valid while still Prepared.
+    #[cfg(unix)]
+    async fn abandon_prepared_handover(&self, runtime_dir: PathBuf) {
+        let manager = Arc::clone(&self.handover_manager);
+        let result = crate::ipc::run_blocking(move || {
+            crate::daemon::handover_request::remove_request(&runtime_dir);
+            manager.abort_handover().map_err(crate::ipc::IpcError::internal)
+        })
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(%error, "Could not abandon the prepared handover");
+        }
+    }
+
+    /// When the request expires and no candidate ever asked for a session transfer, the
+    /// predecessor leaves Prepared on its own (the candidate exits 0 on an expired request).
+    #[cfg(unix)]
+    fn abandon_handover_if_never_claimed(self: Arc<Self>, runtime_dir: PathBuf, transfers_before: u64) {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(
+                crate::daemon::handover_request::REQUEST_TTL_MS,
+            ))
+            .await;
+            if crate::daemon::handover_request::transfers_started() == transfers_before
+                && self.handover_manager.status() == crate::daemon::handover::HandoverStatus::Prepared
+            {
+                tracing::warn!("Handover request expired unclaimed; predecessor stays the owner");
+                self.abandon_prepared_handover(runtime_dir).await;
+            }
+        });
     }
 }

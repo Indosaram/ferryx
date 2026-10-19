@@ -1012,6 +1012,105 @@ async fn test_rolling_handover_two_daemon_lifecycle() {
 
 #[tokio::test]
 async fn test_rolling_handover_prepare_abort_rollback() {
+    rolling_handover_prepare_abort_rollback().await;
+}
+
+/// todo 8: a transfer that fails (the successor's handover socket is gone) followed by the
+/// candidate's abort leaves every predecessor session readable and writable, on the same pid,
+/// with no decision recorded and the public socket still answering as the predecessor.
+#[tokio::test]
+async fn a_failed_transfer_leaves_every_predecessor_session_readable_and_writable() {
+    let mut daemons = PrivateDaemons::new();
+    let socket_path = daemons.socket();
+    let d1 = daemons.launch(None).await;
+    let pid_d1 = daemons.pid(d1);
+    let canonical_repo = daemons.repo();
+    let mut client = TestDaemonClient::connect(&socket_path, pid_d1)
+        .await
+        .expect("connect to D1");
+    let ws_id = "ws-failed-transfer";
+    client
+        .register_workspace(ws_id, &canonical_repo)
+        .await
+        .expect("register ws");
+    let session = client
+        .spawn("req-failed-transfer", ws_id, 80, 24)
+        .await
+        .expect("spawn");
+    // The post-abort write below must reach a shell that already executes input: input sent
+    // before the shell reads its terminal can be lost, which made this test depend on timing.
+    // Prove readiness with one marker round-trip before the handover starts.
+    let mut ready = TestAttachStream::attach(&socket_path, pid_d1, &session, None)
+        .await
+        .expect("attach before the handover");
+    client
+        .write_input(&session, &output_command("FAILED_TRANSFER_SHELL_READY"))
+        .await
+        .expect("write the readiness marker");
+    ready
+        .await_pattern_in_history_or_stream("FAILED_TRANSFER_SHELL_READY", Duration::from_secs(10))
+        .await
+        .expect("the shell executes input before the handover");
+    drop(ready);
+
+    let legacy_socket_path = match client
+        .send_request(&DaemonRequest::PrepareHandover)
+        .await
+        .expect("PrepareHandover")
+    {
+        DaemonResponse::PrepareHandoverOk { legacy_socket_path, .. } => legacy_socket_path,
+        other => panic!("Expected PrepareHandoverOk, got {other:?}"),
+    };
+    daemons.private_socket(Path::new(&legacy_socket_path));
+    let missing = daemons.root.path().join("runtime/handover-missing.sock");
+    let transfer = client
+        .send_request(&DaemonRequest::TransferSessions {
+            handover_socket_path: missing.to_string_lossy().into_owned(),
+        })
+        .await
+        .expect("TransferSessions answered");
+    assert!(
+        !matches!(transfer, DaemonResponse::TransferSessionsOk { transferred_count, .. } if transferred_count > 0),
+        "a transfer to a missing successor socket must not report a transfer: {transfer:?}"
+    );
+    assert!(matches!(
+        client.send_request(&DaemonRequest::AbortHandover).await.expect("AbortHandover"),
+        DaemonResponse::AbortHandoverOk
+    ));
+    assert!(
+        !Path::new(&legacy_socket_path).with_extension("transaction").exists()
+            || std::fs::read_to_string(Path::new(&legacy_socket_path).with_extension("transaction"))
+                .map(|text| !text.contains("\"Retired\""))
+                .unwrap_or(true),
+        "no Retired decision may exist after a failed transfer"
+    );
+    // AbortHandoverOk is sent only after the predecessor resumed every paused reader, so it is
+    // the resume signal. This describe is not a synchronization point (the session never
+    // stopped); it only guards against an abort that ended the child, which the write below
+    // would otherwise report as a vague output timeout.
+    let resumed = client.describe_session(&session).await.expect("describe after AbortHandover");
+    assert!(resumed.running, "the predecessor still runs the session after the abort: {resumed:?}");
+
+    let mut attach = TestAttachStream::attach(&socket_path, pid_d1, &session, None)
+        .await
+        .expect("the session stays attachable on the predecessor");
+    client
+        .write_input(&session, &output_command("FAILED_TRANSFER_STILL_SERVED"))
+        .await
+        .expect("the session stays writable");
+    attach
+        .await_pattern_in_history_or_stream("FAILED_TRANSFER_STILL_SERVED", Duration::from_secs(10))
+        .await
+        .expect("the predecessor's child executes input after the failed transfer");
+    assert!(client
+        .list_sessions()
+        .await
+        .expect("list")
+        .contains(&session));
+    assert!(daemons.cleanup().is_empty());
+}
+
+async fn rolling_handover_prepare_abort_rollback() {
     let mut daemons = PrivateDaemons::new();
     let socket_path = daemons.socket();
     let d1 = daemons.launch(None).await;

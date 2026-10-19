@@ -2249,7 +2249,7 @@ impl DaemonClient {
 
         let temp_client = self.upgrade_rpc_client();
         let target_client = self.clone();
-        let own_binary_path = own_exe.map(|p| p.to_string_lossy().to_string());
+        let control_dir = self.control_runtime_dir();
 
         tokio::spawn(async move {
             // Handing a busy daemon of a lossy version over to this binary would kill the
@@ -2276,36 +2276,31 @@ impl DaemonClient {
                 }
             }
             tracing::info!(
-                "Daemon binary is stale (running daemon version: {daemon_version:?}, mtime: {daemon_mtime_ms:?}; own GUI version: {own_version}, mtime: {own_mtime:?}). Sending UpgradeBinary request."
+                "Daemon binary is stale (running daemon version: {daemon_version:?}, mtime: {daemon_mtime_ms:?}; own GUI version: {own_version}, mtime: {own_mtime:?}). Requesting an upgrade through the control channel."
             );
-            match temp_client
-                .send_request(DaemonRequest::UpgradeBinary {
-                    new_binary_path: own_binary_path,
-                })
-                .await
-            {
-                Ok(DaemonResponse::UpgradeScheduled) => {
+            // Never UpgradeBinary (todo 8): a daemon without control-v1 is a pre-plan owner that
+            // stays alive until it exits on its own; a control daemon gets RequestUpgrade only
+            // when its Hello lists RequestUpgrade and handover-v1.
+            match request_upgrade_via_control(&control_dir, stage_own_runtime).await {
+                Ok(ControlUpgradeOutcome::Accepted) => {
                     tracing::info!(
-                        "Daemon upgrade scheduled successfully. Invalidating cached connection."
+                        "Daemon upgrade accepted: successor generation started as handover candidate. Invalidating cached connection."
                     );
                     tokio::time::sleep(Duration::from_millis(250)).await;
                     target_client.invalidate_cached_connections().await;
                 }
-                Ok(DaemonResponse::UpgradeNotNeeded) => {
-                    tracing::info!("Daemon reported upgrade not needed.");
-                }
-                Ok(DaemonResponse::UpgradeDeferred) => {
+                Ok(ControlUpgradeOutcome::LegacyDaemonLeftAlone) => {
                     tracing::info!(
-                        "Daemon reported upgrade deferred because active sessions are running."
+                        "Running daemon predates the control channel; it is left running and is replaced only after it exits on its own."
                     );
                 }
-                Ok(DaemonResponse::UpgradeUnsupported) => {
+                Ok(ControlUpgradeOutcome::Unsupported) => {
                     tracing::info!(
-                        "Daemon reported upgrade unsupported on this platform. Suppressing further upgrade requests."
+                        "Running daemon offers no handover upgrade on this platform. Suppressing further upgrade requests."
                     );
                 }
-                Ok(other) => {
-                    tracing::warn!("Unexpected response to daemon upgrade request: {other:?}");
+                Ok(ControlUpgradeOutcome::Refused(code)) => {
+                    tracing::info!(%code, "Daemon refused the upgrade request; it keeps serving every session.");
                 }
                 Err(e) => {
                     tracing::warn!("Failed to send daemon upgrade request: {e}");

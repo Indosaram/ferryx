@@ -1216,6 +1216,17 @@ impl DaemonLockFiles {
             _legacy: DaemonLockFile::from_locked_file(legacy),
         }
     }
+
+    /// Raw descriptors of the held locks (persistent, legacy), for duplication into an
+    /// authority transfer. The returned fds stay owned by self.
+    #[cfg(unix)]
+    pub(crate) fn raw_fds(&self) -> (Option<std::os::fd::RawFd>, std::os::fd::RawFd) {
+        use std::os::fd::AsRawFd;
+        (
+            self._persistent.as_ref().map(|lock| lock._file.as_raw_fd()),
+            self._legacy._file.as_raw_fd(),
+        )
+    }
 }
 
 fn try_lock_file(file: File) -> Result<DaemonLockFile, String> {
@@ -2332,6 +2343,13 @@ mod live_inventory_paired_tests {
         root: &Path,
         host: &MockHost,
     ) -> (Arc<DaemonServer>, PathBuf, crate::terminal::paired_daemon::Descriptor, tokio::task::JoinHandle<()>) {
+        // root stands in for the daemon runtime directory: legacy handover sockets live there,
+        // and LegacyPeer refuses a socket whose directory is not 0700 (validate_runtime_socket_path),
+        // which would make the successor drop the predecessor's route as unreachable.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let data = root.join("data");
         fs::create_dir_all(&data).unwrap();
         let mut daemon = DaemonServer::new_with_paths(Some(data.join("config")), Some(data.join("auth")));
@@ -2406,6 +2424,207 @@ mod live_inventory_paired_tests {
         assert_eq!(after.local_child_start_time, None);
 
         teardown(host, accept, daemon, &id).await;
+    }
+
+    /// Makes daemon a committed predecessor that kept its paired session: prepared on a
+    /// legacy socket inside root, then committed through the real v5 commit.
+    async fn commit_predecessor_keeping_retained(daemon: &Arc<DaemonServer>, root: &Path) -> PathBuf {
+        let legacy = root.join("legacy-a.sock");
+        let listener = tokio::net::UnixListener::bind(&legacy).unwrap();
+        Arc::clone(daemon).serve_legacy_handover_socket(listener);
+        daemon.handover_manager.force_prepared_for_test(legacy.clone());
+        let (retired_tx, _retired_rx) = std::sync::mpsc::channel::<()>();
+        let retired_tx = std::sync::Mutex::new(retired_tx);
+        daemon.handover_manager.set_retirement_action(move || {
+            let _ = retired_tx.lock().unwrap().send(());
+        });
+        let manager = Arc::clone(&daemon.handover_manager);
+        let service = Arc::clone(&daemon.terminal_service);
+        tokio::task::spawn_blocking(move || manager.commit_handover_v5(&service))
+            .await
+            .unwrap()
+            .expect("commit with a retained paired session");
+        legacy
+    }
+
+    /// GAP-10: a successful handover leaves a paired session owned and served by the
+    /// predecessor (Draining); the successor routes to it directly and creates no controller.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn committed_predecessor_keeps_serving_its_paired_session_through_the_successor() {
+        let root = tempfile::tempdir().unwrap();
+        let host = mock_host().await;
+        let (daemon, socket, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
+        let client = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
+        let (id, generation) = client.paired_terminal_reattach(descriptor).await.unwrap();
+        let before = live_entry(&socket, &id).await;
+
+        let durable = root.path().join("remote_sessions.json");
+        daemon.persist_remote_sessions_at(durable.clone()).await.unwrap();
+        let legacy = commit_predecessor_keeping_retained(&daemon, root.path()).await;
+        assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Draining);
+        assert_eq!(
+            crate::daemon::handover::HandoverManager::recorded_decision(&legacy).unwrap(),
+            Some(crate::daemon::handover_transaction::HandoverState::Retired),
+            "the durable decision stays Retired while the process drains"
+        );
+        assert!(!daemon.handover_manager.accept_gate_open(), "public listeners accept nothing after commit");
+        let manifest = crate::daemon::manifest::HandoverManifest::load_from_path(&root.path().join("handover_routes.json"));
+        assert!(manifest.routes.iter().any(|r| r.legacy_socket_path == legacy && r.sessions.contains(&id)));
+
+        // The successor adopts the route and restores nothing for the retained session.
+        let successor = Arc::new(DaemonServer::new_with_paths(
+            Some(root.path().join("succ/config")),
+            Some(root.path().join("succ/auth")),
+        ));
+        successor
+            .session_router
+            .adopt_routes_from_manifest_at(root.path().join("handover_routes.json"))
+            .await
+            .unwrap();
+        // The successor's real restore path, run after the route adoption exactly as the
+        // committed candidate does, creates no controller for the retained session.
+        successor.restore_remote_sessions_at(durable).await.unwrap();
+        assert!(successor.terminal_service.remote().list().is_empty(), "successor created an SSH controller");
+        assert!(successor.terminal_service.paired().list().is_empty(), "successor created a controller");
+        let successor_socket = root.path().join("successor.sock");
+        let successor_listener = tokio::net::UnixListener::bind(&successor_socket).unwrap();
+        let serving = Arc::clone(&successor);
+        let successor_accept = tokio::spawn(async move {
+            while let Ok((stream, _)) = successor_listener.accept().await {
+                let serving = Arc::clone(&serving);
+                tokio::spawn(async move { serving.handle_client(stream).await });
+            }
+        });
+
+        // Input through the successor's socket reaches the predecessor's actor and the host.
+        let mut received = host.received.clone();
+        let baseline = received.borrow().len();
+        let marker = b"todo8-retained\n".to_vec();
+        let through_successor = crate::daemon::client::DaemonClient::new_with_socket(successor_socket.clone());
+        tokio::time::timeout(Duration::from_secs(10), through_successor.write_terminal_at_generation(&id, Some(generation.0), marker.clone()))
+            .await
+            .expect("routed write timed out")
+            .expect("routed write accepted");
+        tokio::time::timeout(Duration::from_secs(10), received.wait_for(|all| all.len() >= baseline + marker.len()))
+            .await
+            .expect("input never reached the host")
+            .unwrap();
+        // Same backend_session_id and remote_pid, still served by the predecessor.
+        let after = live_entry(&socket, &id).await;
+        assert_eq!(after.backend_id, before.backend_id);
+        assert_eq!(after.remote_pid, before.remote_pid);
+        assert!(daemon.terminal_service.paired().contains(&id));
+
+        successor_accept.abort();
+        teardown(host, accept, daemon, &id).await;
+    }
+
+    /// After commit a request for a transferred local session returns SESSION_NOT_OWNED on the
+    /// legacy socket, while the retained paired session keeps being served there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transferred_local_answers_session_not_owned_and_retained_session_is_served() {
+        let root = tempfile::tempdir().unwrap();
+        let host = mock_host().await;
+        let (daemon, socket, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
+        let client = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
+        let (id, _generation) = client.paired_terminal_reattach(descriptor).await.unwrap();
+        daemon.handover_manager.note_transferred_local("local-moved");
+        let legacy = commit_predecessor_keeping_retained(&daemon, root.path()).await;
+
+        let on_legacy = crate::daemon::client::DaemonClient::new_with_socket(legacy.clone());
+        let moved = on_legacy
+            .send_request(DaemonRequest::Write { session_id: "local-moved".into(), data: b"x".to_vec() })
+            .await;
+        match moved {
+            Ok(DaemonResponse::Error { code, .. }) => {
+                assert_eq!(code.as_deref(), Some(crate::daemon::handover::SESSION_NOT_OWNED));
+            }
+            other => panic!("expected SESSION_NOT_OWNED, got {other:?}"),
+        }
+        let retained = live_entry(&legacy, &id).await;
+        assert!(retained.connected, "{retained:?}");
+        teardown(host, accept, daemon, &id).await;
+    }
+
+    /// Chained upgrade A -> B -> C: routes are direct. A keeps its session, B commits holding
+    /// nothing of its own and retires (exit) without waiting for A, C serves A's session through
+    /// A's own route, and A retires only after the session closes and its route is removed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chained_upgrade_routes_directly_to_the_generation_that_owns_the_session() {
+        let root = tempfile::tempdir().unwrap();
+        let host = mock_host().await;
+        let (a, socket_a, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
+        let client = crate::daemon::client::DaemonClient::new_with_socket(socket_a.clone());
+        let (id, generation) = client.paired_terminal_reattach(descriptor).await.unwrap();
+        let remote_pid = live_entry(&socket_a, &id).await.remote_pid;
+        let (a_retired_tx, mut a_retired) = tokio::sync::watch::channel(false);
+        let legacy_a = root.path().join("legacy-a.sock");
+        Arc::clone(&a).serve_legacy_handover_socket(tokio::net::UnixListener::bind(&legacy_a).unwrap());
+        a.handover_manager.force_prepared_for_test(legacy_a.clone());
+        a.handover_manager.set_retirement_action(move || {
+            a_retired_tx.send_replace(true);
+        });
+        {
+            let manager = Arc::clone(&a.handover_manager);
+            let service = Arc::clone(&a.terminal_service);
+            tokio::task::spawn_blocking(move || manager.commit_handover_v5(&service)).await.unwrap().unwrap();
+        }
+        let manifest_path = root.path().join("handover_routes.json");
+
+        // B: adopted A's route, owns nothing itself.
+        let b = Arc::new(DaemonServer::new_with_paths(Some(root.path().join("b/config")), Some(root.path().join("b/auth"))));
+        b.session_router.adopt_routes_from_manifest_at(manifest_path.clone()).await.unwrap();
+        let legacy_b = root.path().join("legacy-b.sock");
+        b.handover_manager.force_prepared_for_test(legacy_b.clone());
+        let (b_retired_tx, b_retired) = std::sync::mpsc::channel::<()>();
+        let b_retired_tx = std::sync::Mutex::new(b_retired_tx);
+        b.handover_manager.set_retirement_action(move || {
+            let _ = b_retired_tx.lock().unwrap().send(());
+        });
+        {
+            let manager = Arc::clone(&b.handover_manager);
+            let service = Arc::clone(&b.terminal_service);
+            tokio::task::spawn_blocking(move || manager.commit_handover_v5(&service)).await.unwrap().unwrap();
+        }
+        // B counts only its own sessions (none): it retires although A still serves one.
+        assert_eq!(b.handover_manager.status(), crate::daemon::handover::HandoverStatus::Retired);
+        tokio::task::spawn_blocking(move || b_retired.recv_timeout(Duration::from_secs(10)))
+            .await
+            .unwrap()
+            .expect("B exits 0 after its commit");
+        let manifest = crate::daemon::manifest::HandoverManifest::load_from_path(&manifest_path);
+        assert!(manifest.routes.iter().all(|r| r.legacy_socket_path != legacy_b), "B wrote a route it does not need");
+        assert!(manifest.routes.iter().any(|r| r.legacy_socket_path == legacy_a), "A's route was disturbed");
+
+        // C: talks to A directly.
+        let c = Arc::new(DaemonServer::new_with_paths(Some(root.path().join("c/config")), Some(root.path().join("c/auth"))));
+        c.session_router.adopt_routes_from_manifest_at(manifest_path.clone()).await.unwrap();
+        let peer = c.session_router.find_legacy_peer_for_session(&id).expect("C routes A's session");
+        assert_eq!(peer.socket_path(), legacy_a.as_path());
+        assert!(c.terminal_service.paired().list().is_empty());
+        let mut received = host.received.clone();
+        let baseline = received.borrow().len();
+        match peer.send_request(&DaemonRequest::RemoteWrite { session_id: id.clone(), generation: generation.0, data: b"chained\n".to_vec() }).await {
+            Ok(DaemonResponse::WriteOk) => {}
+            other => panic!("routed write failed: {other:?}"),
+        }
+        tokio::time::timeout(Duration::from_secs(10), received.wait_for(|all| all.len() >= baseline + 8))
+            .await
+            .expect("chained input never reached the host")
+            .unwrap();
+        assert_eq!(live_entry(&legacy_a, &id).await.remote_pid, remote_pid);
+        assert!(!*a_retired.borrow(), "A must stay while its session is open");
+
+        // Closing A's last session retires A and removes its route.
+        a.terminal_service.paired().detach(&id).await.unwrap();
+        a.handover_manager.check_retirement_if_empty(&a.terminal_service);
+        tokio::time::timeout(Duration::from_secs(10), a_retired.wait_for(|done| *done))
+            .await
+            .expect("A never retired")
+            .unwrap();
+        let manifest = crate::daemon::manifest::HandoverManifest::load_from_path(&manifest_path);
+        assert!(manifest.routes.iter().all(|r| r.legacy_socket_path != legacy_a), "A's route outlived A");
+        teardown(host, accept, a, &id).await;
     }
 
     #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
@@ -2521,6 +2740,48 @@ fn handover_failure_response(context: Option<&str>, message: String) -> DaemonRe
     }
 }
 
+/// Connects once to the candidate's own handover socket so its blocking accept worker returns
+/// after an expiry abort (todo 8). The connect is a socket syscall, so it runs off the workers.
+/// A failed connect or a failed join is returned: the accept worker may then stay parked and
+/// keep this process from exiting, so the caller must report it.
+#[cfg(unix)]
+async fn wake_handover_accept(path: PathBuf) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || std::os::unix::net::UnixStream::connect(&path).map(drop))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+/// Expiry abort: wakes the parked accept worker and returns the abort reason, extended with the
+/// wake failure when the wake did not happen.
+#[cfg(unix)]
+async fn expiry_abort_reason(handover_socket_path: &Path, reason: &str) -> String {
+    match wake_handover_accept(handover_socket_path.to_path_buf()).await {
+        Ok(()) => reason.to_string(),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path = %handover_socket_path.display(),
+                "Could not wake the handover accept worker after the request expired"
+            );
+            format!("{reason}; waking the handover accept worker at {} failed: {error}", handover_socket_path.display())
+        }
+    }
+}
+
+/// QA gate (local-split-qa): while the file named by FERRYX_QA_OWNER_PUBLISH_HOLD exists, every
+/// owner.json publication attempt fails, so a test controls exactly how long the record stays
+/// unpublished. Blocking (a stat); called only inside run_blocking.
+fn owner_publish_held() -> bool {
+    #[cfg(feature = "local-split-qa")]
+    {
+        std::env::var_os("FERRYX_QA_OWNER_PUBLISH_HOLD").is_some_and(|path| Path::new(&path).exists())
+    }
+    #[cfg(not(feature = "local-split-qa"))]
+    {
+        false
+    }
+}
+
 fn daemon_session_not_found(session_id: &str, source: &'static str) -> DaemonResponse {
     DaemonResponse::Error {
         message: format!("Session '{session_id}' not found"),
@@ -2530,6 +2791,25 @@ fn daemon_session_not_found(session_id: &str, source: &'static str) -> DaemonRes
             "kind": "session_not_found",
             "sessionId": session_id,
         })),
+    }
+}
+
+/// The session a per-session request targets, for the SESSION_NOT_OWNED gate of a committed
+/// predecessor.
+fn request_session_id(request: &DaemonRequest) -> Option<&str> {
+    match request {
+        DaemonRequest::Write { session_id, .. }
+        | DaemonRequest::Resize { session_id, .. }
+        | DaemonRequest::Signal { session_id, .. }
+        | DaemonRequest::Close { session_id }
+        | DaemonRequest::Hibernate { session_id }
+        | DaemonRequest::Suspend { session_id, .. }
+        | DaemonRequest::Resume { session_id, .. }
+        | DaemonRequest::DescribeSession { session_id }
+        | DaemonRequest::Attach { session_id, .. }
+        | DaemonRequest::RemoteWrite { session_id, .. }
+        | DaemonRequest::RemoteResize { session_id, .. } => Some(session_id.as_str()),
+        _ => None,
     }
 }
 
@@ -3163,29 +3443,67 @@ impl DaemonServer {
 
     #[cfg(unix)]
     pub fn spawn_agent_state_listener(self: &Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
+        use crate::daemon::handover::AuthorityListenerRole;
         let path = get_agent_state_socket_path();
-        let _ = fs::remove_file(&path);
-        let listener = match UnixListener::bind(&path) {
-            Ok(listener) => listener,
-            Err(error) => {
-                tracing::warn!(%error, "Failed to bind agent state socket");
-                return None;
+        // A committed HandoverCandidate keeps serving the agent-state listener it inherited
+        // (todo 8): the path panes already hold never disappears.
+        let inherited = self
+            .handover_manager
+            .take_inherited_listener(AuthorityListenerRole::AgentState)
+            .and_then(|listener| match UnixListener::from_std(listener) {
+                Ok(listener) => Some(listener),
+                Err(error) => {
+                    tracing::warn!(%error, "Failed to serve the inherited agent state listener");
+                    None
+                }
+            });
+        let listener = match inherited {
+            Some(listener) => listener,
+            None => {
+                let _ = fs::remove_file(&path);
+                let listener = match UnixListener::bind(&path) {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        tracing::warn!(%error, "Failed to bind agent state socket");
+                        return None;
+                    }
+                };
+                if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+                    tracing::warn!(%error, "Failed to secure agent state socket");
+                }
+                listener
             }
         };
-        if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
-            tracing::warn!(%error, "Failed to secure agent state socket");
+        {
+            use std::os::fd::AsRawFd;
+            if let Err(error) = self
+                .handover_manager
+                .register_authority_listener(AuthorityListenerRole::AgentState, listener.as_raw_fd())
+            {
+                tracing::warn!(%error, "Agent state listener cannot be handed to a successor");
+            }
         }
 
         let server = Arc::clone(self);
         let states = Arc::clone(&self.agent_states);
         let sessions = self.session_service.clone();
         let epoch = crate::scoped_contracts::Epoch(self.epoch);
+        let manager = Arc::clone(&self.handover_manager);
         Some(tokio::spawn(async move {
             let mut clients = tokio::task::JoinSet::new();
             loop {
-                let Ok((stream, _)) = listener.accept().await else {
+                if !manager.accept_gate_open() {
+                    manager.wait_accept_open().await;
+                    continue;
+                }
+                let accepted = tokio::select! {
+                    accepted = listener.accept() => accepted,
+                    () = manager.wait_accept_closed() => continue,
+                };
+                let Ok((stream, _)) = accepted else {
                     continue;
                 };
+                manager.note_accept(AuthorityListenerRole::AgentState);
                 let states = Arc::clone(&states);
                 let sessions = sessions.clone();
                 let server = Arc::clone(&server);
@@ -3418,17 +3736,69 @@ impl DaemonServer {
 
     pub async fn run_server_with_handover_and_readiness(
         self: Arc<Self>,
-        handover_from: Option<PathBuf>,
+        #[cfg_attr(not(unix), allow(unused_mut))] mut handover_from: Option<PathBuf>,
         ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<(), String> {
         let runtime_dir = get_runtime_dir();
         ensure_runtime_directory(&runtime_dir)?;
 
+        // HandoverCandidate admission (todo 8). A successor generation's OS job runs plain
+        // `--daemon`; before any lock is taken it reads the predecessor's handover-request.json.
+        // A valid request for this generation from a live predecessor makes this start the
+        // existing --handover-from path; an invalid, expired or foreign request is deleted and
+        // this process exits 0 holding no lock; no request means an ordinary start.
+        #[cfg(unix)]
+        let mut handover_expires_at: Option<u64> = None;
+        #[cfg(unix)]
+        if handover_from.is_none() {
+            let dir = runtime_dir.clone();
+            let role = crate::ipc::run_blocking(move || {
+                Ok(crate::daemon::handover_request::take_startup_request(
+                    &dir,
+                    crate::daemon::handover_request::own_generation_key().as_deref(),
+                    crate::daemon::owner_admission::unix_now_ms(),
+                    &crate::daemon::owner_admission::process_start_time,
+                ))
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+            match role {
+                crate::daemon::handover_request::StartupRole::Ordinary => {}
+                crate::daemon::handover_request::StartupRole::Candidate {
+                    legacy_socket_path,
+                    expires_at_unix_ms,
+                } => {
+                    tracing::info!(
+                        legacy_socket = %legacy_socket_path.display(),
+                        "Starting as HandoverCandidate from the predecessor's handover request"
+                    );
+                    handover_from = Some(legacy_socket_path);
+                    handover_expires_at = Some(expires_at_unix_ms);
+                }
+                crate::daemon::handover_request::StartupRole::Exit { reason } => {
+                    tracing::warn!(%reason, "Handover request rejected; exiting 0 without taking any lock");
+                    // A Type=notify unit that exits before READY=1 counts as failed; report
+                    // ready so this clean exit is not restarted.
+                    crate::daemon::supervisor_linux::notify_ready();
+                    return Ok(());
+                }
+            }
+        }
+
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         crate::daemon::qa_producers::install_and_start(&self).await;
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        self.handover_manager
+            .inject_commit_fault(crate::daemon::qa_producers::commit_fault_from_env());
 
         let socket_path = get_socket_path();
         let lock_path = get_lock_path();
+        // A committed HandoverCandidate serves the predecessor's own public listener and holds
+        // its locks through the descriptors it inherited (todo 8): no bind and no lock
+        // acquisition happen after commit, so the locks are never free and the public socket
+        // path never disappears.
+        #[cfg(unix)]
+        let mut inherited_canonical: Option<std::os::unix::net::UnixListener> = None;
 
         if let Some(ref legacy_path) = handover_from {
             tracing::info!(
@@ -3474,6 +3844,14 @@ impl DaemonServer {
                 let mut adopted_records: Vec<crate::daemon::qa_producers::HandoverSessionRecord> =
                     Vec::new();
                 let mut commit_started = false;
+                // Set when the request's expiry passed before CommitHandover: the candidate then
+                // aborts and exits 0, and the predecessor keeps serving (todo 8).
+                let mut expired_before_commit = false;
+                // The predecessor's authority descriptors, validated but not yet used. Dropping
+                // them only closes this process's copies: the predecessor keeps serving.
+                let mut received_authority: Option<crate::daemon::handover_socket::TransferredAuthority> = None;
+                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                crate::daemon::qa_producers::note_authority_stage("candidate-admitted", &self.handover_manager).await;
                 let handover_socket_path =
                     crate::daemon::handover_socket::get_handover_socket_path(&transfer_id);
                 let listener = crate::daemon::handover_socket::HandoverSocketListener::bind(
@@ -3495,18 +3873,42 @@ impl DaemonServer {
                             Err(error) => return Err((error, exports.len())),
                         }
                     }
-                    Ok::<_, (crate::daemon::handover_socket::HandoverSocketError, usize)>(exports)
+                    Ok::<_, (crate::daemon::handover_socket::HandoverSocketError, usize)>((stream, exports))
                 });
 
                 let transfer_outcome: Result<(usize, usize, usize, u64), String> = async {
-                    let transfer_resp = legacy_peer
-                        .send_request(&DaemonRequest::TransferSessions {
-                            handover_socket_path: handover_socket_path
-                                .to_string_lossy()
-                                .into_owned(),
-                        })
-                        .await
-                        .map_err(|e| format!("TransferSessions request failed: {e}"))?;
+                    let transfer_sessions = DaemonRequest::TransferSessions {
+                        handover_socket_path: handover_socket_path
+                            .to_string_lossy()
+                            .into_owned(),
+                    };
+                    let transfer_request = legacy_peer.send_request(&transfer_sessions);
+                    // The request's expiry bounds the predecessor's answer as well (todo 8).
+                    let transfer_resp = match handover_expires_at {
+                        Some(expires) => {
+                            let budget = crate::daemon::handover_request::pre_commit_remaining(
+                                expires,
+                                crate::daemon::owner_admission::unix_now_ms(),
+                            )
+                            .map_err(|reason| {
+                                expired_before_commit = true;
+                                reason
+                            })?;
+                            match tokio::time::timeout(budget, transfer_request).await {
+                                Ok(answer) => answer,
+                                Err(_) => {
+                                    expired_before_commit = true;
+                                    return Err(expiry_abort_reason(
+                                        &handover_socket_path,
+                                        "handover request expired during TransferSessions",
+                                    )
+                                    .await);
+                                }
+                            }
+                        }
+                        None => transfer_request.await,
+                    }
+                    .map_err(|e| format!("TransferSessions request failed: {e}"))?;
 
                     let (offered, owned) = match transfer_resp {
                         DaemonResponse::TransferSessionsOk {
@@ -3516,8 +3918,32 @@ impl DaemonServer {
                         other => return Err(format!("TransferSessions failed: {other:?}")),
                     };
 
-                    let exports = accept_handle
-                        .await
+                    // A transfer that stalls past the request's expiry is abandoned before commit.
+                    let transfer_budget = match handover_expires_at {
+                        Some(expires) => crate::daemon::handover_request::pre_commit_remaining(
+                            expires,
+                            crate::daemon::owner_admission::unix_now_ms(),
+                        )
+                        .map_err(|reason| {
+                            expired_before_commit = true;
+                            reason
+                        })?,
+                        None => std::time::Duration::MAX,
+                    };
+                    let received = match tokio::time::timeout(transfer_budget, accept_handle).await {
+                        Ok(received) => received,
+                        Err(_) => {
+                            expired_before_commit = true;
+                            // Wake the blocking accept so its worker returns instead of
+                            // keeping this process alive after the clean exit.
+                            return Err(expiry_abort_reason(
+                                &handover_socket_path,
+                                "handover request expired mid-transfer",
+                            )
+                            .await);
+                        }
+                    };
+                    let (handover_stream, exports) = received
                         .map_err(|e| format!("Handover worker panicked: {e}"))?
                         .map_err(|(error, received)| {
                             format!(
@@ -3525,6 +3951,18 @@ impl DaemonServer {
                             )
                         })?;
                     let accepted = exports.len();
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    crate::daemon::qa_producers::note_authority_stage("sessions-received", &self.handover_manager).await;
+                    if let Some(expires) = handover_expires_at {
+                        crate::daemon::handover_request::pre_commit_remaining(
+                            expires,
+                            crate::daemon::owner_admission::unix_now_ms(),
+                        )
+                        .map_err(|reason| {
+                            expired_before_commit = true;
+                            reason
+                        })?;
+                    }
                     let exported: std::collections::HashSet<String> =
                         exports.iter().map(|(export, _owner)| export.session_id.clone()).collect();
                     let durable_path = self.remote_sessions_path.clone();
@@ -3688,7 +4126,59 @@ impl DaemonServer {
                         }
                     }
 
+                    // Authority transfer (todo 8): over the same handover socket, before
+                    // CommitHandover, the candidate receives duplicates of the predecessor's
+                    // public listeners and lock fds and validates every one of them. It accepts on
+                    // none. Any failure here aborts before commit and the predecessor keeps
+                    // serving. A pre-plan predecessor closes the stream without answering; only
+                    // then does this candidate fall back to taking the locks after commit.
+                    let expected = crate::daemon::handover_socket::ExpectedAuthority {
+                        canonical_socket: socket_path.clone(),
+                        legacy_lock: lock_path.clone(),
+                        persistent_lock: get_persistent_lock_path(),
+                        control_socket: (!control_server::control_disabled_for_qa())
+                            .then(control_server::control_socket_path),
+                        agent_state_socket: Some(get_agent_state_socket_path()),
+                    };
+                    let authority_transfer_id = transfer_id.clone();
+                    received_authority = tokio::task::spawn_blocking(move || {
+                        use crate::daemon::handover_socket::{
+                            request_authority, validate_authority, HandoverSocketError,
+                        };
+                        use crate::daemon::handover_wire::HandoverWireError;
+                        match request_authority(&handover_stream, &authority_transfer_id) {
+                            Ok(authority) => {
+                                validate_authority(&authority, &expected)
+                                    .map_err(|error| format!("Predecessor authority rejected: {error}"))?;
+                                Ok(Some(authority))
+                            }
+                            Err(HandoverSocketError::Wire(HandoverWireError::Closed)) => Ok(None),
+                            Err(error) => Err(format!("Predecessor authority transfer failed: {error}")),
+                        }
+                    })
+                    .await
+                    .map_err(|error| format!("Authority worker panicked: {error}"))??;
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    crate::daemon::qa_producers::note_authority_stage(
+                        "authority-validated",
+                        &self.handover_manager,
+                    )
+                    .await;
+
+                    // The last pre-commit check: an expired request never commits.
+                    if let Some(expires) = handover_expires_at {
+                        crate::daemon::handover_request::pre_commit_remaining(
+                            expires,
+                            crate::daemon::owner_admission::unix_now_ms(),
+                        )
+                        .map_err(|reason| {
+                            expired_before_commit = true;
+                            reason
+                        })?;
+                    }
                     commit_started = true;
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    crate::daemon::qa_producers::note_authority_stage("commit-sent", &self.handover_manager).await;
                     let commit_started_at = tokio::time::Instant::now();
                     let commit_resp = legacy_peer
                         .send_request(&DaemonRequest::CommitHandover {
@@ -3714,6 +4204,15 @@ impl DaemonServer {
 
                 match transfer_outcome {
                     Ok((offered, accepted, restorable, commit_latency_ms)) => {
+                        if let Some(authority) = received_authority.take() {
+                            inherited_canonical = Some(self.install_adopted_authority(authority)?);
+                            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                            crate::daemon::qa_producers::note_authority_stage(
+                                "authority-adopted",
+                                &self.handover_manager,
+                            )
+                            .await;
+                        }
                         tracing::info!(
                             accepted,
                             offered,
@@ -3744,6 +4243,12 @@ impl DaemonServer {
                                 .await;
                             }
                         }
+                        // The predecessor wrote a direct route for every SSH/paired session it
+                        // kept (todo 8). Adopting it first makes the restore below skip them, so
+                        // this daemon creates no controller for a session the predecessor serves.
+                        if let Err(error) = self.session_router.adopt_routes_from_manifest().await {
+                            tracing::error!(%error, "Could not adopt the retained-session routes after commit");
+                        }
                         if let Err(error) = self
                             .restore_remote_sessions_at(self.remote_sessions_path.clone())
                             .await
@@ -3757,12 +4262,22 @@ impl DaemonServer {
                             let decision = crate::ipc::run_blocking(move ||
                                 HandoverManager::recorded_decision(&path).map_err(crate::ipc::IpcError::internal))
                                 .await.map_err(|error| error.to_string())?;
-                            if decision == Some(super::handover_transaction::HandoverState::Retired) {
+                            if super::handover::resolve_commit(false, decision)
+                                == super::handover::CommitResolution::Owner
+                            {
                                 tracing::info!("Recovered committed handover from recorded transaction decision");
+                                if let Some(authority) = received_authority.take() {
+                                    inherited_canonical = Some(self.install_adopted_authority(authority)?);
+                                }
+                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                crate::daemon::qa_producers::note_authority_stage("authority-recovered", &self.handover_manager).await;
                                 // The predecessor committed and is retiring with exit 0; take over as
                                 // the unit's main process exactly as the confirmed path does.
                                 crate::daemon::supervisor_linux::notify_main_pid_ready();
                             } else {
+                                // Not Retired: the predecessor never closed its authority. Closing
+                                // these copies releases nothing it holds.
+                                drop(received_authority.take());
                                 release_after_unconfirmed_commit(async {
                                     for session_id in &adopted_sessions {
                                         self.terminal_service.pty_manager().relinquish_transferred_session(session_id)
@@ -3792,9 +4307,17 @@ impl DaemonServer {
                                         .await;
                                     }
                                 }
+                                if handover_expires_at.is_some() {
+                                    // The decision is not Retired: the predecessor kept its
+                                    // authority and resumed; this candidate exits 0.
+                                    tracing::warn!(%reason, ?decision, "Unconfirmed commit aborted; exiting 0");
+                                    crate::daemon::supervisor_linux::notify_ready();
+                                    return Ok(());
+                                }
                                 return Err(format!("{reason}; recorded decision: {decision:?}"));
                             }
                         } else {
+                        drop(received_authority.take());
                         let rollback = rollback_transferred_readers(async {
                             for session_id in &adopted_sessions {
                                 self.terminal_service.pty_manager().relinquish_transferred_session(session_id)
@@ -3809,6 +4332,9 @@ impl DaemonServer {
                             crate::ipc::run_blocking(move || HandoverManager::recorded_decision(&path)
                                 .map_err(crate::ipc::IpcError::internal)).await.map_err(|error| error.to_string())
                         }).await;
+                        let rolled_back = rollback.is_ok();
+                        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                        crate::daemon::qa_producers::note_authority_stage("candidate-aborted", &self.handover_manager).await;
                         match rollback {
                             Ok(()) => {
                                 tracing::warn!(
@@ -3842,6 +4368,14 @@ impl DaemonServer {
                                     "Handover transfer failed ({reason}) and predecessor AbortHandover returned {other:?}; exported sessions stay paused on the predecessor"
                                 );
                             }
+                        }
+                        if crate::daemon::handover_request::candidate_exits_cleanly(
+                            handover_expires_at.is_some(),
+                            rolled_back,
+                        ) {
+                            tracing::warn!(%reason, expired_before_commit, "HandoverCandidate aborted before commit; predecessor resumed, exiting 0");
+                            crate::daemon::supervisor_linux::notify_ready();
+                            return Ok(());
                         }
                         return Err(reason);
                         }
@@ -3881,30 +4415,48 @@ impl DaemonServer {
             }
         }
 
-        let lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
-        self.handover_manager.set_lock_files(lock_files);
+        #[cfg(unix)]
+        let adopted_authority = inherited_canonical.is_some();
+        #[cfg(not(unix))]
+        let adopted_authority = false;
+        // The ordinary acquire/bind path is skipped when authority was adopted: the inherited
+        // lock fds were already installed by install_adopted_authority.
+        if !adopted_authority {
+            let lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
+            self.handover_manager.set_lock_files(lock_files);
+        }
         // Publish who owns the locks so launchers can tell this daemon from a reused pid, and
         // clear the launcher's pending-start marker. A failure only weakens admission to
         // Unknown (never a second start), so it is logged rather than fatal.
         let admission_paths = crate::daemon::owner_admission::AdmissionPaths::for_runtime();
-        if let Err(error) = crate::daemon::owner_admission::publish_owner(
-            &admission_paths,
-            &crate::daemon::owner_admission::current_generation_key(),
-            self.epoch,
-        ) {
-            tracing::warn!(%error, "Could not publish the daemon owner record");
-        }
+        // A failed publication is retried every second on its own task (todo 8); serving does
+        // not wait for it.
+        Arc::clone(&self).spawn_owner_publication(admission_paths);
 
         // Clean up stale socket only after lock acquisition and safe ownership check.
-        remove_stale_socket_after_lock(&socket_path)?;
+        if !adopted_authority {
+            remove_stale_socket_after_lock(&socket_path)?;
+        }
 
         #[cfg(unix)]
-        let listener = UnixListener::bind(&socket_path).map_err(|e| {
-            format!(
-                "Failed to bind UDS socket at {}: {e}",
-                socket_path.display()
-            )
-        })?;
+        let listener = match inherited_canonical.take() {
+            Some(inherited) => UnixListener::from_std(inherited)
+                .map_err(|e| format!("Failed to serve the inherited daemon listener: {e}"))?,
+            None => UnixListener::bind(&socket_path).map_err(|e| {
+                format!(
+                    "Failed to bind UDS socket at {}: {e}",
+                    socket_path.display()
+                )
+            })?,
+        };
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            self.handover_manager.register_authority_listener(
+                crate::daemon::handover::AuthorityListenerRole::Canonical,
+                listener.as_raw_fd(),
+            )?;
+        }
 
         #[cfg(not(unix))]
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -3938,16 +4490,13 @@ impl DaemonServer {
         tracing::info!("rorca daemon listening on {}", socket_path.display());
 
         // control-v1: bound right after the data listener, only while this process holds the
-        // daemon locks. A HandoverCandidate never binds it (it inherits the fd, todo 8).
-        if handover_from.is_none() {
-            self.bind_control_endpoint().await?;
-        }
+        // daemon locks. A committed HandoverCandidate binds it here too: without it the next GUI
+        // would see a pre-plan daemon and could never upgrade it again.
+        self.bind_control_endpoint().await?;
 
-        #[cfg(unix)]
-        if !crate::daemon::handover::is_v5_ownership_transfer_enabled() {
-            self.session_router.adopt_routes_from_manifest().await?;
-        }
-        #[cfg(not(unix))]
+        // Every start adopts every route in the manifest, handover or not (todo 8): routes are
+        // direct, so a successor talks to each generation that still owns sessions over that
+        // generation's own legacy socket. adopt_routes_from_manifest skips peers already added.
         self.session_router.adopt_routes_from_manifest().await?;
 
         if handover_from.is_none() {
@@ -3982,8 +4531,20 @@ impl DaemonServer {
         }
 
         loop {
-            match listener.accept().await {
+            // Public accepts stop while a commit is decided and forever once this daemon has
+            // handed its listener to a successor (todo 8); the legacy socket is not gated.
+            if !self.handover_manager.accept_gate_open() {
+                self.handover_manager.wait_accept_open().await;
+                continue;
+            }
+            let accepted = tokio::select! {
+                accepted = listener.accept() => accepted,
+                () = self.handover_manager.wait_accept_closed() => continue,
+            };
+            match accepted {
                 Ok((stream, _)) => {
+                    self.handover_manager
+                        .note_accept(crate::daemon::handover::AuthorityListenerRole::Canonical);
                     let server = Arc::clone(&self);
                     tokio::spawn(async move {
                         server.handle_client(stream).await;
@@ -4085,16 +4646,51 @@ impl DaemonServer {
                             | Ok(DaemonRequest::MachineMetadataSubscribe { .. })
                             | Ok(DaemonRequest::SubscribeRemoteEvents)
                             | Ok(DaemonRequest::SubscribeDag { .. })
+                            // The handover exchange itself never holds a guard: the commit waits
+                            // for every guarded request to finish, so CommitHandover holding one
+                            // would wait on itself.
+                            | Ok(DaemonRequest::PrepareHandover)
+                            | Ok(DaemonRequest::TransferSessions { .. })
+                            | Ok(DaemonRequest::CommitHandover { .. })
+                            | Ok(DaemonRequest::AbortHandover)
                     );
-                    let retirement_guard = holds_retirement_guard
-                        .then(|| {
-                            self.handover_manager
-                                .retain_request(Arc::clone(&self.terminal_service))
-                                .ok()
-                        })
-                        .flatten();
+                    // While a commit is decided (HandoverStatus::Committing) a new request is not
+                    // admitted: it is answered HANDOVER_BUSY, retryable, and never half-served.
+                    let mut busy_refusal = None;
+                    let retirement_guard = if holds_retirement_guard {
+                        match self
+                            .handover_manager
+                            .retain_request(Arc::clone(&self.terminal_service))
+                        {
+                            Ok(guard) => Some(guard),
+                            Err(refusal) if super::handover::is_spawn_gate_busy(&refusal) => {
+                                busy_refusal = Some(DaemonResponse::Error {
+                                    code: Some(super::handover::HANDOVER_BUSY.into()),
+                                    message: refusal,
+                                    details: None,
+                                });
+                                None
+                            }
+                            Err(_) => None,
+                        }
+                    } else {
+                        None
+                    };
 
                     let resp = match req {
+                _ if busy_refusal.is_some() => busy_refusal.take().expect("checked above"),
+                // A committed predecessor never serves a local session it transferred: the
+                // successor is that session's only owner (todo 8).
+                Ok(ref request) if request_session_id(request)
+                    .is_some_and(|id| self.handover_manager.session_not_owned(id)) =>
+                {
+                    let session_id = request_session_id(request).unwrap_or_default().to_owned();
+                    DaemonResponse::Error {
+                        code: Some(super::handover::SESSION_NOT_OWNED.into()),
+                        message: format!("Session '{session_id}' was transferred to the successor daemon"),
+                        details: Some(serde_json::json!({ "sessionId": session_id })),
+                    }
+                }
                 Ok(DaemonRequest::Handshake { version, .. }) => {
                     if self.handover_manager.status() == super::handover::HandoverStatus::Retired {
                         DaemonResponse::Error {
@@ -4233,7 +4829,7 @@ impl DaemonServer {
                         }
                     }
                 },
-                Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
+                Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) if self.serves_paired_here(&session_id) => {
                     match self.terminal_service.write_input_operation(&session_id, generation, data) {
                         Ok(op) => match op.await {
                             Ok(()) => if qa_hold_write_ack(&session_id, &mut reader).await { DaemonResponse::WriteOk } else { break },
@@ -4242,7 +4838,7 @@ impl DaemonServer {
                         Err(e) => daemon_error(e.to_string()),
                     }
                 }
-                Ok(DaemonRequest::RemoteResize { session_id, generation, cols, rows }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
+                Ok(DaemonRequest::RemoteResize { session_id, generation, cols, rows }) if self.serves_paired_here(&session_id) => {
                     self.record_desktop_geometry(&session_id, cols, rows);
                     match self.terminal_service.resize_operation(&session_id, generation, cols, rows) {
                         Ok(op) => match op.await { Ok(()) => DaemonResponse::ResizeOk, Err(e) => daemon_error(e.to_string()) },
@@ -4518,7 +5114,7 @@ impl DaemonServer {
                         DaemonResponse::ResetAgentStateOk
                     }
                 }
-                Ok(DaemonRequest::Write { session_id, data }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
+                Ok(DaemonRequest::Write { session_id, data }) if self.serves_paired_here(&session_id) => {
                     match self.terminal_service.write_input_operation(&session_id, 0, data) {
                         Ok(pending) => match pending.await {
                             Ok(()) => DaemonResponse::WriteOk,
@@ -4527,7 +5123,7 @@ impl DaemonServer {
                         Err(e) => daemon_error(e.to_string()),
                     }
                 }
-                Ok(DaemonRequest::Resize { session_id, cols, rows }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
+                Ok(DaemonRequest::Resize { session_id, cols, rows }) if self.serves_paired_here(&session_id) => {
                     match self.terminal_service.resize_operation(&session_id, 0, cols, rows) {
                         Ok(pending) => match pending.await {
                             Ok(()) => DaemonResponse::ResizeOk,
@@ -5123,6 +5719,8 @@ impl DaemonServer {
                             Ok((legacy_path, active_sessions, listener)) => {
                                 let legacy_path_str = legacy_path.to_string_lossy().into_owned();
                                 Arc::clone(&self).spawn_legacy_listener(listener);
+                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                crate::daemon::qa_producers::note_authority_stage("predecessor-prepared", &self.handover_manager).await;
                                 DaemonResponse::PrepareHandoverOk {
                                     legacy_socket_path: legacy_path_str,
                                     active_sessions,
@@ -5141,6 +5739,7 @@ impl DaemonServer {
                 Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
                     #[cfg(unix)]
                     {
+                        crate::daemon::handover_request::note_transfer_started();
                         if let Err(e) = self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
                             daemon_error(format!("Failed to persist remote sessions before handover: {e}"))
                         } else {
@@ -5160,6 +5759,7 @@ impl DaemonServer {
                                         // every casualty instead of silently skipping it.
                                         match self.terminal_service.pty_manager().export_session(&session_id) {
                                             Ok(export) => {
+                                                self.handover_manager.note_transferred_local(&session_id);
                                                 // The successor can only take ownership of a session
                                                 // with the record that proves who owns it, so the
                                                 // owner's own record travels with the export. A
@@ -5208,6 +5808,36 @@ impl DaemonServer {
                                         }
                                     }
                                     let _ = crate::daemon::handover_socket::send_transfer_done(&stream, &transfer_id, seq);
+                                    // Authority transfer (todo 8): the candidate keeps this stream
+                                    // open and asks for the public listeners and lock fds once it
+                                    // has adopted the sessions, before it sends CommitHandover. The
+                                    // answer carries duplicates only; this daemon keeps serving on
+                                    // its own copies until its commit decision is written. A
+                                    // candidate that closes the stream without asking (a pre-plan
+                                    // v5 successor) gets nothing.
+                                    match self.handover_manager.authority_sources() {
+                                        Ok(sources) => {
+                                            tokio::task::spawn_blocking(move || {
+                                                // The authority request is read with the request's
+                                                // own TTL as its bound; without one the worker could
+                                                // block forever, so a failure ends this request.
+                                                if let Err(error) = stream.set_read_timeout(Some(Duration::from_millis(
+                                                    crate::daemon::handover_request::REQUEST_TTL_MS,
+                                                ))) {
+                                                    tracing::warn!(%error, "Authority request not served: could not bound its read with a timeout");
+                                                    return;
+                                                }
+                                                match crate::daemon::handover_socket::serve_authority_request(&stream, sources) {
+                                                    Ok(()) => tracing::info!("Sent authority descriptors to the handover candidate"),
+                                                    Err(crate::daemon::handover_socket::HandoverSocketError::Wire(
+                                                        crate::daemon::handover_wire::HandoverWireError::Closed,
+                                                    )) => {}
+                                                    Err(error) => tracing::warn!(%error, "Authority request was not served"),
+                                                }
+                                            });
+                                        }
+                                        Err(error) => tracing::warn!(%error, "No authority descriptors to offer the handover candidate"),
+                                    }
                                     // The gap between what this predecessor was asked for and what it
                                     // could actually export is the shape of a lossy handover.
                                     if !failures.is_empty() {
@@ -5243,10 +5873,27 @@ impl DaemonServer {
                 Ok(DaemonRequest::CommitHandover { .. }) => {
                     let manager = Arc::clone(&self.handover_manager);
                     let service = Arc::clone(&self.terminal_service);
+                    // Injected reply loss (tests / QA): before the decision is recorded the
+                    // predecessor keeps serving; after it, the decision alone settles ownership.
+                    let fault = manager.commit_fault();
+                    if fault == Some(super::handover::CommitFault::DropReplyBeforeRecord) {
+                        tracing::warn!("Injected fault: CommitHandoverOk dropped before the decision");
+                        break;
+                    }
                     match crate::ipc::run_blocking(move || {
                         manager.commit_handover(&service).map_err(crate::ipc::IpcError::internal)
                     }).await {
-                        Ok(()) => DaemonResponse::CommitHandoverOk,
+                        Ok(()) if fault == Some(super::handover::CommitFault::DropReplyAfterRecord) => {
+                            tracing::warn!("Injected fault: CommitHandoverOk dropped after the decision");
+                            self.release_transferred_locals().await;
+                            break;
+                        }
+                        Ok(()) => {
+                            self.release_transferred_locals().await;
+                            #[cfg(all(unix, feature = "local-split-qa", feature = "native-terminal"))]
+                            crate::daemon::qa_producers::note_authority_stage("predecessor-committed", &self.handover_manager).await;
+                            DaemonResponse::CommitHandoverOk
+                        }
                         Err(e) => handover_failure_response(None, e.to_string()),
                     }
                 }
@@ -5259,6 +5906,9 @@ impl DaemonServer {
                         manager.abort_handover().map_err(crate::ipc::IpcError::internal)
                     }).await {
                         Ok(()) => {
+                            self.handover_manager.clear_transferred_locals();
+                            #[cfg(all(unix, feature = "local-split-qa", feature = "native-terminal"))]
+                            crate::daemon::qa_producers::note_authority_stage("predecessor-aborted", &self.handover_manager).await;
                             let resumed = self
                                 .terminal_service
                                 .pty_manager()
@@ -5553,6 +6203,145 @@ impl DaemonServer {
         watcher_handle.abort();
     }
 
+    /// Serves the predecessor's legacy handover socket created by prepare_handover. A
+    /// HandoverCandidate started by its own generation job (todo 8) connects here for
+    /// DescribeSession / TransferSessions / CommitHandover / AbortHandover; after commit only
+    /// sessions this daemon still owns are served on it.
+    #[cfg(unix)]
+    pub(crate) fn serve_legacy_handover_socket(self: Arc<Self>, listener: UnixListener) {
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let s = Arc::clone(&self);
+                        tokio::spawn(async move {
+                            s.handle_client(stream).await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    /// Takes over a validated authority after the predecessor's decision is Retired: installs
+    /// the inherited locks, parks the control and agent-state listeners for their serve paths,
+    /// and returns the canonical data listener. Never binds and never locks.
+    #[cfg(unix)]
+    fn install_adopted_authority(
+        &self,
+        authority: crate::daemon::handover_socket::TransferredAuthority,
+    ) -> Result<std::os::unix::net::UnixListener, String> {
+        let adopted = crate::daemon::handover_socket::adopt_validated_authority(authority)
+            .map_err(|error| format!("Failed to adopt the committed authority: {error}"))?;
+        self.handover_manager.set_lock_files(adopted.lock_files);
+        self.handover_manager
+            .stash_inherited_listeners(adopted.control_listener, adopted.agent_state_listener);
+        tracing::info!("Adopted the predecessor's listeners and locks without a bind or lock gap");
+        Ok(adopted.canonical_listener)
+    }
+
+    /// After a committed decision the transferred local PTYs belong to the successor: drop this
+    /// daemon's registry entries without touching the child (the reader stays parked and is
+    /// released, the master fd copy is closed). Only the retained SSH/paired sessions remain, so
+    /// Draining counts nothing but this daemon's own sessions.
+    async fn release_transferred_locals(&self) {
+        for session_id in self.handover_manager.transferred_locals() {
+            if self.terminal_service.get_session(&session_id).is_none() {
+                continue;
+            }
+            if let Err(error) = self
+                .terminal_service
+                .pty_manager()
+                .relinquish_transferred_session(&session_id)
+                .await
+            {
+                tracing::warn!(%session_id, %error, "Could not drop the transferred session entry");
+            }
+            self.session_service.session_metadata.write().remove(&session_id);
+        }
+    }
+
+    /// A paired session id is handled by this daemon's own paired runtime unless an older
+    /// generation kept it across an upgrade and still serves it (todo 8): then it is routed.
+    fn serves_paired_here(&self, session_id: &str) -> bool {
+        crate::terminal::paired_runtime::Runtime::owns(session_id)
+            && self.session_router.find_legacy_peer_for_session(session_id).is_none()
+    }
+
+    /// Publishes owner.json naming this daemon; failures are retried on a 1 s task.
+    fn spawn_owner_publication(
+        self: Arc<Self>,
+        paths: crate::daemon::owner_admission::AdmissionPaths,
+    ) -> tokio::task::JoinHandle<u32> {
+        use crate::daemon::owner_admission::{
+            current_generation_key, publish_owner, publish_owner_until_published,
+            OWNER_PUBLISH_RETRY,
+        };
+        let epoch = self.epoch;
+        let generation_key = current_generation_key();
+        tokio::spawn(async move {
+            publish_owner_until_published(
+                || {
+                    let paths = paths.clone();
+                    let generation_key = generation_key.clone();
+                    let fault = self.owner_publish_fault();
+                    async move {
+                        if fault {
+                            return Err("Injected owner.json publication failure".to_string());
+                        }
+                        crate::ipc::run_blocking(move || {
+                            if owner_publish_held() {
+                                return Err(crate::ipc::IpcError::internal(
+                                    "Injected owner.json publication hold",
+                                ));
+                            }
+                            publish_owner(&paths, &generation_key, epoch)
+                                .map_err(crate::ipc::IpcError::internal)
+                        })
+                        .await
+                        .map_err(|error| error.to_string())
+                    }
+                },
+                || -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+                    Box::pin(tokio::time::sleep(OWNER_PUBLISH_RETRY))
+                },
+            )
+            .await
+        })
+    }
+
+    /// Consumes one injected owner.json publication failure, if armed (QA:
+    /// FERRYX_QA_OWNER_PUBLISH_FAILURES=n under local-split-qa).
+    fn owner_publish_fault(&self) -> bool {
+        #[cfg(feature = "local-split-qa")]
+        {
+            static REMAINING: std::sync::OnceLock<std::sync::atomic::AtomicU32> =
+                std::sync::OnceLock::new();
+            let remaining = REMAINING.get_or_init(|| {
+                std::sync::atomic::AtomicU32::new(
+                    std::env::var("FERRYX_QA_OWNER_PUBLISH_FAILURES")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0),
+                )
+            });
+            remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok()
+        }
+        #[cfg(not(feature = "local-split-qa"))]
+        {
+            false
+        }
+    }
+
+    /// Protocol-5 UpgradeBinary path kept unchanged for pre-plan GUIs: the successor is this
+    /// daemon's own child. GUIs of this plan never take it; they use control-v1 RequestUpgrade.
     #[cfg(unix)]
     pub fn spawn_legacy_handover_daemon(
         self: Arc<Self>,

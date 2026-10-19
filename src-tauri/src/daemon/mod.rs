@@ -5,6 +5,8 @@ pub mod client;
 pub mod control;
 pub mod dag_service;
 pub mod handover;
+// Predecessor-authored handover request that authorizes one HandoverCandidate start (todo 8).
+pub(crate) mod handover_request;
 #[cfg(unix)]
 pub mod handover_socket;
 pub mod handover_transaction;
