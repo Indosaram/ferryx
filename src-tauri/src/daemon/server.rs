@@ -5818,9 +5818,15 @@ impl DaemonServer {
                                     match self.handover_manager.authority_sources() {
                                         Ok(sources) => {
                                             tokio::task::spawn_blocking(move || {
-                                                let _ = stream.set_read_timeout(Some(Duration::from_millis(
+                                                // The authority request is read with the request's
+                                                // own TTL as its bound; without one the worker could
+                                                // block forever, so a failure ends this request.
+                                                if let Err(error) = stream.set_read_timeout(Some(Duration::from_millis(
                                                     crate::daemon::handover_request::REQUEST_TTL_MS,
-                                                )));
+                                                ))) {
+                                                    tracing::warn!(%error, "Authority request not served: could not bound its read with a timeout");
+                                                    return;
+                                                }
                                                 match crate::daemon::handover_socket::serve_authority_request(&stream, sources) {
                                                     Ok(()) => tracing::info!("Sent authority descriptors to the handover candidate"),
                                                     Err(crate::daemon::handover_socket::HandoverSocketError::Wire(

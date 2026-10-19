@@ -154,7 +154,7 @@ async fn rejected_commit_after_reader_pause_keeps_the_session_on_the_predecessor
     .await
     .unwrap_or(false);
     assert!(found, "the resumed reader must deliver the child's output: {}", String::from_utf8_lossy(&seen));
-    let _ = manager.close_session(&session_id).await;
+    manager.close_session(&session_id).await.expect("close the resumed session");
 }
 
 #[tokio::test]
@@ -383,13 +383,13 @@ async fn successful_request_upgrade(root: PathBuf) {
     .expect("handover-request.json stays for the candidate");
     assert_eq!(&on_disk, request, "the candidate was started from the request on disk");
 
-    // prepare_handover bound the legacy handover socket: mode 0600 in the 0700 runtime dir.
+    // prepare_handover bound the legacy handover socket and set its mode to 0600 (the 0700
+    // runtime dir is the fixture's own setup, so it is not asserted here).
     let legacy = &request.legacy_socket_path;
     assert_eq!(legacy.parent(), Some(runtime_dir.as_path()));
     let meta = std::fs::symlink_metadata(legacy).expect("legacy handover socket exists");
     assert!(std::os::unix::fs::FileTypeExt::is_socket(&meta.file_type()));
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-    assert_eq!(std::fs::metadata(&runtime_dir).unwrap().permissions().mode() & 0o777, 0o700);
     // The socket is served: a candidate can connect and handshake on it.
     let stream = tokio::net::UnixStream::connect(legacy).await.expect("legacy socket accepts");
     let (read_half, mut write_half) = stream.into_split();

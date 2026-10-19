@@ -1316,15 +1316,22 @@ impl HandoverManager {
     }
 
     /// Resolves once public accepts are allowed.
+    ///
+    /// wait_for fails only when the watch sender is dropped. The sender is the accept_gate field
+    /// of this HandoverManager, which &self keeps alive for the whole call, so that cannot happen.
     pub(crate) async fn wait_accept_open(&self) {
         let mut gate = self.accept_gate.subscribe();
-        let _ = gate.wait_for(|open| *open).await;
+        gate.wait_for(|open| *open)
+            .await
+            .expect("accept gate sender lives in HandoverManager");
     }
 
-    /// Resolves once public accepts are stopped.
+    /// Resolves once public accepts are stopped. Cannot fail for the reason given above.
     pub(crate) async fn wait_accept_closed(&self) {
         let mut gate = self.accept_gate.subscribe();
-        let _ = gate.wait_for(|open| !*open).await;
+        gate.wait_for(|open| !*open)
+            .await
+            .expect("accept gate sender lives in HandoverManager");
     }
 
     pub(crate) fn note_accept(&self, role: AuthorityListenerRole) {
