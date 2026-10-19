@@ -124,6 +124,14 @@ ${envXml}
       const unitName = name.endsWith('.service') || name.endsWith('.scope') ? name : `${name}.service`;
       await agent.call('exec', { command: 'systemctl', args: ['--user', 'disable', unitName] });
       await agent.call('exec', { command: 'systemctl', args: ['--user', 'stop', unitName] });
+      // The product writes the generation unit file into the user's real unit dir (Linux keeps the
+      // real HOME, guards.mjs isolationEnv). disable/stop leave that file behind, so list-unit-files
+      // still reports the unit after teardown. Remove the QA-named file itself; it is allowed as a
+      // QA root because its name carries this run id.
+      if (unitName.endsWith('.service')) {
+        if (!unitName.startsWith(`${base}-`) && unitName !== `${base}.service`) throw new Error(`refusing to delete non-QA unit file ${unitName}`);
+        await agent.call('exec', { command: 'sh', args: ['-c', 'rm -f -- "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$1"', 'sh', unitName] });
+      }
       return true;
     }
     await agent.call('exec', { command: 'schtasks', args: ['/End', '/TN', name] });
