@@ -41,6 +41,7 @@ export const HOSTS = Object.freeze({
     canonical: 'C:\\Users\\sook\\ferryx',
     worktreeRoot: 'C:\\Users\\sook\\ferryx-wt',
     cargoTarget: 'C:\\Users\\sook\\ferryx-wt\\.target',
+    buildEnv: { ZIG: 'C:\\Users\\sook\\ferryx-wt\\.zig-0.16.0\\zig.exe' },
     evidenceRoot: 'C:\\Users\\sook\\ferryx-wt\\.evidence\\daemon-independent-lifetime-20261017',
     runRoot: 'C:\\Users\\sook\\ferryx-wt\\.qa-daemon-lifetime',
     node: 'node',
@@ -74,7 +75,7 @@ export function worktreePaths(host, slug) {
  *  baseline pre-plan baseline rev, plain cargo build daemon only, for Q13
  */
 export function buildPlan({ host, runDir, worktree, v1Worktree, baselineWorktree }) {
-  const targetEnv = { CARGO_TARGET_DIR: host.cargoTarget };
+  const targetEnv = { ...(host.buildEnv ?? {}), CARGO_TARGET_DIR: host.cargoTarget };
   const config = host.platform === 'windows' ? `${runDir}\\tauri.qa.json` : `${runDir}/tauri.qa.json`;
   const tauri = (features, salt, cwd) => ({
     cwd,
@@ -89,7 +90,7 @@ export function buildPlan({ host, runDir, worktree, v1Worktree, baselineWorktree
     bump: tauri('local-split-qa,qa-protocol-bump', 'BUMP', worktree),
     v1bump: v1Worktree ? tauri('local-split-qa,qa-protocol-bump', 'V1', v1Worktree) : null,
     baseline: baselineWorktree
-      ? { cwd: baselineWorktree, command: 'cargo', args: ['build', '--manifest-path', 'src-tauri/Cargo.toml'], env: { CARGO_TARGET_DIR: `${host.cargoTarget}-baseline` } }
+      ? { cwd: baselineWorktree, command: 'cargo', args: ['build', '--manifest-path', 'src-tauri/Cargo.toml'], env: { ...(host.buildEnv ?? {}), CARGO_TARGET_DIR: `${host.cargoTarget}-baseline` } }
       : null,
   };
 }
