@@ -4,6 +4,9 @@
 //   node scripts/qa/daemon-lifetime/run.mjs --platform mac|linux|windows --all
 //   node scripts/qa/daemon-lifetime/run.mjs --platform linux --only Q01,Q08
 //   node scripts/qa/daemon-lifetime/run.mjs --platform mac --self-check     (no build, no QA: guards + hooks)
+//   node scripts/qa/daemon-lifetime/run.mjs --platform mac --self-test-reload
+//       (harness failure self-test: builds a throwaway worktree with self-test-reload.patch, which
+//        re-adds supervisor::reload in the client, runs Q00+Q04, and exits 0 only if Q04 FAILS)
 //
 // Runs on this Mac. mac targets this Mac's own QA bundle; linux targets omarchy and windows targets
 // maho-win over SSH, with GUI actions through MahoRD only. It builds only the plan's QA debug
@@ -53,13 +56,14 @@ export function signMacQaBundle({ appPath, entitlements, workspaceDir, exec = sy
 }
 
 export function parseArgs(argv) {
-  const out = { platform: null, all: false, only: [], selfCheck: false, evidenceDir: null, runId: null, keepRunDir: false, v1Worktree: null, baselineWorktree: null };
+  const out = { platform: null, all: false, only: [], selfCheck: false, selfTestReload: false, evidenceDir: null, runId: null, keepRunDir: false, v1Worktree: null, baselineWorktree: null };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--platform') out.platform = argv[++i];
     else if (a === '--all') out.all = true;
     else if (a === '--only') out.only = argv[++i].split(',').map((s) => s.trim()).filter(Boolean);
     else if (a === '--self-check') out.selfCheck = true;
+    else if (a === '--self-test-reload') out.selfTestReload = true;
     else if (a === '--evidence-dir') out.evidenceDir = argv[++i];
     else if (a === '--run-id') out.runId = argv[++i];
     else if (a === '--v1-worktree') out.v1Worktree = argv[++i];
@@ -67,8 +71,47 @@ export function parseArgs(argv) {
     else throw new Error(`unknown argument ${a}`);
   }
   if (!['mac', 'linux', 'windows'].includes(out.platform)) throw new Error('--platform mac|linux|windows is required');
+  if (out.selfTestReload) {
+    if (out.selfCheck || out.all || out.only.length) throw new Error('--self-test-reload runs Q04 only; it takes no --all, --only or --self-check');
+    out.only = ['Q04'];
+    return out;
+  }
   if (!out.selfCheck && !out.all && out.only.length === 0) throw new Error('--all or --only Qxx,... is required');
   return out;
+}
+
+/** The patch that re-adds supervisor::reload in the client (plan todo 12 failure scenario). */
+export const SELF_TEST_PATCH = 'self-test-reload.patch';
+
+/** Exit code of a --self-test-reload run: 0 only when Q04 ran and FAILED against the patched build. */
+export function selfTestExitCode(summary) {
+  const q04 = summary.scenarios.find((s) => s.id === 'Q04');
+  return q04?.status === 'FAIL' ? 0 : 1;
+}
+
+/**
+ * Throwaway worktree for the self-test: `git worktree add` of this checkout's HEAD under the
+ * host's worktree root, then `git apply` of the patch. Returns the worktree path and a remover.
+ */
+async function prepareSelfTestWorktree({ host, agent, runId, source }) {
+  const slug = `selftest-reload-${runId.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
+  const worktree = worktreePaths(host, slug).worktree;
+  const head = (await agent.call('exec', { command: 'git', args: ['-C', source, 'rev-parse', 'HEAD'] })).stdout.trim();
+  const steps = [
+    ['-C', host.canonical, 'worktree', 'add', '--detach', worktree, head],
+    // The ghostty submodule is cloned from the canonical clone's local module dir (file transport).
+    ['-C', worktree, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive'],
+    ['-C', worktree, 'apply', joinFor(host.platform, worktree, 'scripts', 'qa', 'daemon-lifetime', SELF_TEST_PATCH)],
+  ];
+  for (const args of steps) {
+    const r = await agent.call('exec', { command: 'git', args, deadlineMs: 900_000 });
+    if (r.status !== 0) throw new GuardError('SELF_TEST_SETUP_FAILED', `git ${args.join(' ')} exited ${r.status}: ${r.stderr}`);
+  }
+  const remove = async () => {
+    await agent.call('exec', { command: 'git', args: ['-C', host.canonical, 'worktree', 'remove', '--force', worktree] });
+    await agent.call('exec', { command: 'git', args: ['-C', host.canonical, 'worktree', 'prune'] });
+  };
+  return { worktree, head, remove };
 }
 
 /** Every runner must exist for every scenario id, and the summary must list them all. */
@@ -144,11 +187,15 @@ async function main() {
   for (const dir of Object.values(layout)) await agent.call('mkdir', { dir, mode: 0o700 });
   await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'tauri.qa.json'), content: JSON.stringify(tauriQaConfig(runId), null, 2) });
   const worktree = host.transport.kind === 'local' ? REPO : worktreePaths(host, 'daemon-lifetime-w5-t12-20261018').worktree;
-  const plan = buildPlan({ host, runDir, worktree, v1Worktree: opts.v1Worktree, baselineWorktree: opts.baselineWorktree });
+  // --self-test-reload: every QA artifact is built from the patched throwaway worktree.
+  const selfTest = opts.selfTestReload ? await prepareSelfTestWorktree({ host, agent, runId, source: worktree }) : null;
+  if (selfTest) summary.selfTestReload = { worktree: selfTest.worktree, head: selfTest.head, patch: SELF_TEST_PATCH, expect: 'Q04 FAIL' };
+  const buildFrom = selfTest ? selfTest.worktree : worktree;
+  const plan = buildPlan({ host, runDir, worktree: buildFrom, v1Worktree: opts.v1Worktree, baselineWorktree: opts.baselineWorktree });
   const productName = tauriQaConfig(runId).productName;
   const artifacts = {};
   const keys = {};
-  const version = (await agent.call('exec', { command: 'git', args: ['-C', worktree, 'show', 'HEAD:src-tauri/Cargo.toml'] })).stdout.match(/^version = "([^"]+)"/m)?.[1];
+  const version = (await agent.call('exec', { command: 'git', args: ['-C', buildFrom, 'show', 'HEAD:src-tauri/Cargo.toml'] })).stdout.match(/^version = "([^"]+)"/m)?.[1];
   for (const name of ['A', 'B', 'C', 'bump', 'v1bump', 'baseline']) {
     const step = plan[name];
     if (!step) continue;
@@ -285,10 +332,14 @@ async function main() {
   }
   summary.releaseDaemon.after = await prodSnapshot();
   summary.releaseDaemon.unchanged = summary.releaseDaemon.before === summary.releaseDaemon.after;
+  if (selfTest) await selfTest.remove();
   if (mahord) await mahord.close();
   await agent.stop();
   summary.finishedAt = new Date().toISOString();
   summary.exitCode = computeExitCode(summary, selected);
+  // The self-test inverts the verdict: a FAIL of Q04 against the reload build is the pass, as long
+  // as teardown was clean and the release daemon untouched.
+  if (selfTest && summary.teardown.leftovers.length === 0 && summary.releaseDaemon.unchanged) summary.exitCode = selfTestExitCode(summary);
   const problems = validateSummary(summary);
   if (problems.length) { summary.schemaProblems = problems; summary.exitCode = 2; }
   writeSummary();

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SCENARIO_IDS, newSummary, selectScenarios, assertion, settle, block, applyQ00Gate, computeExitCode, validateSummary } from './lib/summary.mjs';
-import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths } from './run.mjs';
+import { readFileSync } from 'node:fs';
+import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths, selfTestExitCode, SELF_TEST_PATCH } from './run.mjs';
 
 const RUN = '20261019t064512z';
 
@@ -84,6 +85,23 @@ test('CLI arguments', () => {
   assert.throws(() => parseArgs(['--platform', 'mac']), /--all or --only/);
   assert.throws(() => parseArgs(['--platform', 'bsd', '--all']), /--platform/);
   assert.throws(() => parseArgs(['--platform', 'mac', '--all', '--release']), /unknown argument/);
+});
+
+test('--self-test-reload runs Q04 against the reload patch and passes only when Q04 fails', () => {
+  const opts = parseArgs(['--platform', 'linux', '--self-test-reload']);
+  assert.equal(opts.selfTestReload, true);
+  assert.deepEqual(opts.only, ['Q04']);
+  assert.throws(() => parseArgs(['--platform', 'mac', '--self-test-reload', '--all']), /takes no --all/);
+  const summary = (status) => ({ scenarios: [{ id: 'Q00', status: 'PASS' }, { id: 'Q04', status }] });
+  assert.equal(selfTestExitCode(summary('FAIL')), 0);
+  for (const status of ['PASS', 'BLOCKED', 'NOT_RUN']) assert.equal(selfTestExitCode(summary(status)), 1, status);
+  // The patch re-adds supervisor::reload in the client's owner-wait path and restores a reload
+  // that restarts the job holding the live daemon (launchctl kickstart -k / systemctl restart).
+  const patch = readFileSync(new URL(`./${SELF_TEST_PATCH}`, import.meta.url), 'utf8');
+  assert.match(patch, /\+\+\+ b\/src-tauri\/src\/daemon\/client\.rs/);
+  assert.match(patch, /^\+\s+crate::daemon::supervisor::reload\(\)/m);
+  assert.match(patch, /^\+.*"kickstart", "-k"/m);
+  assert.match(patch, /^\+.*"--user", "restart"/m);
 });
 
 test('artifact paths per platform layout', () => {
