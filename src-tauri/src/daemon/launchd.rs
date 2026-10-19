@@ -41,6 +41,11 @@ use std::process::Command;
 
 pub const PLIST_LABEL: &str = "com.ferryx.daemon";
 
+/// Label of the pre-rebrand single job. Installs that predate the Ferryx name may still carry
+/// `~/Library/LaunchAgents/com.rorca.daemon.plist`; the legacy migration treats it like
+/// [`PLIST_LABEL`]'s single job.
+pub const RORCA_PLIST_LABEL: &str = "com.rorca.daemon";
+
 /// Overrides the managed plist path so QA/fixture runs never touch the real LaunchAgent.
 pub const PLIST_PATH_ENV: &str = "FERRYX_DAEMON_PLIST_PATH";
 
@@ -210,6 +215,8 @@ pub(crate) mod generation {
     /// The `KeepAlive` dict [`generate_launchd_plist`] renders. launchd.plist(5): `SuccessfulExit`
     /// implies `RunAtLoad`, so a plist keeping it is still launched when launchd loads it at login.
     const KEEP_ALIVE_ABNORMAL_EXIT: &str = "<key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>\n    </dict>";
+    /// The unconditional `KeepAlive` of the pre-rebrand `com.rorca.daemon` plist.
+    const KEEP_ALIVE_TRUE: &str = "<key>KeepAlive</key>\n    <true/>";
     const KEEP_ALIVE_FALSE: &str = "<key>KeepAlive</key>\n    <false/>";
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,6 +528,64 @@ pub(crate) mod generation {
             }
         }
         Ok(changed)
+    }
+
+    /// Migrates one legacy single job (`com.ferryx.daemon`, `com.rorca.daemon`, or the QA
+    /// `<base>`) for the owner that admission classified under its lock.
+    ///
+    /// A legacy job never gets a `launchctl` mutation. Its plist always loses its load-time launch
+    /// by file rewrite, so the next login starts only the newest generation. With an Alive or
+    /// Unknown owner that is all: the job stays loaded and its daemon keeps running. With an
+    /// Absent owner the plist is also deleted, but only when `launchctl print` reports no process
+    /// for the label (not registered, or registered and idle); a running or unverifiable legacy
+    /// job keeps its (disabled) plist. A missing plist is a no-op with no `launchctl` call, so a
+    /// second run after the migration issues nothing. Returns whether any file changed.
+    pub(crate) fn migrate_legacy_job(
+        launchctl: &dyn Launchctl,
+        uid: u32,
+        label: &str,
+        plist_path: &Path,
+        owner: &OwnerState,
+    ) -> Result<bool, String> {
+        match fs::symlink_metadata(plist_path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(format!("Failed to inspect {}: {e}", plist_path.display())),
+        }
+        let mut changed = disable_login_autostart(plist_path)?;
+        changed |= drop_unconditional_keep_alive(plist_path)?;
+        if *owner != OwnerState::Absent {
+            return Ok(changed);
+        }
+        match print_job(launchctl, uid, label) {
+            JobState::NotRegistered | JobState::RegisteredIdle => match fs::remove_file(plist_path) {
+                Ok(()) => changed = true,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("Failed to remove {}: {e}", plist_path.display())),
+            },
+            state @ (JobState::Running { .. } | JobState::Unverifiable { .. }) => {
+                tracing::info!(%label, ?state, "Legacy daemon job still has a process; it keeps running and only lost login autostart");
+            }
+        }
+        Ok(changed)
+    }
+
+    /// The pre-rebrand `com.rorca.daemon` plist kept an unconditional `KeepAlive`, which launchd
+    /// also treats as a load-time launch; it becomes `false` by file rewrite only. Kept out of
+    /// [`disable_login_autostart`] because only legacy plists were ever rendered that way.
+    fn drop_unconditional_keep_alive(plist_path: &Path) -> Result<bool, String> {
+        let content = match fs::read_to_string(plist_path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(format!("Failed to read {}: {e}", plist_path.display())),
+        };
+        let disabled = content.replacen(KEEP_ALIVE_TRUE, KEEP_ALIVE_FALSE, 1);
+        if disabled == content {
+            return Ok(false);
+        }
+        fs::write(plist_path, disabled)
+            .map_err(|e| format!("Failed to rewrite {}: {e}", plist_path.display()))?;
+        Ok(true)
     }
 
     /// First `ProgramArguments` entry of a plist: the executable launchd runs.
@@ -1032,6 +1097,110 @@ mod tests {
             assert_eq!(launch_agents_dir(Some("/qa/agents".as_ref()), Some(home)), Some(PathBuf::from("/qa/agents")));
             assert_eq!(launch_agents_dir(Some("/qa/agents/x.plist".as_ref()), Some(home)), Some(PathBuf::from("/qa/agents")));
             assert_eq!(launch_agents_dir(Some("".as_ref()), Some(home)), None);
+        }
+
+        /// The pre-rebrand `com.rorca.daemon` plist: `RunAtLoad` and an unconditional `KeepAlive`.
+        fn rorca_plist(executable: &str) -> String {
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n    <key>Label</key>\n    <string>com.rorca.daemon</string>\n    <key>ProgramArguments</key>\n    <array>\n        <string>{executable}</string>\n        <string>--daemon</string>\n    </array>\n    <key>RunAtLoad</key>\n    <true/>\n    <key>KeepAlive</key>\n    <true/>\n</dict>\n</plist>\n"
+            )
+        }
+
+        /// Both legacy labels as they were written on disk: the Ferryx single job (rendered by
+        /// the same template, label `com.ferryx.daemon`) and the pre-rebrand rorca job.
+        fn legacy_plists(dir: &Path) -> Vec<(String, PathBuf, String)> {
+            let ferryx = super::super::generate_launchd_plist(
+                super::super::PLIST_LABEL,
+                "/Applications/Ferryx.app/Contents/MacOS/ferryx",
+                &dir.join("logs"),
+                true,
+            );
+            let rorca = rorca_plist("/Applications/Rorca.app/Contents/MacOS/rorca");
+            vec![
+                (BASE.to_string(), dir.join(format!("{BASE}.plist")), ferryx),
+                (
+                    super::super::RORCA_PLIST_LABEL.to_string(),
+                    dir.join(format!("{}.plist", super::super::RORCA_PLIST_LABEL)),
+                    rorca,
+                ),
+            ]
+        }
+
+        /// Todo 14: an Alive or Unknown legacy owner keeps its job loaded and running. The plist
+        /// only loses every load-time launch condition by file rewrite, with zero launchctl calls,
+        /// and a second run changes nothing and calls nothing.
+        #[test]
+        fn legacy_job_with_alive_or_unknown_owner_only_loses_login_autostart() {
+            for owner in [
+                OwnerState::Alive { pid: 7, start_time: 9 },
+                OwnerState::Unknown { reason: "lock held, holder unreadable".into() },
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                for (label, path, content) in legacy_plists(dir.path()) {
+                    fs::write(&path, &content).unwrap();
+                    let launchctl = FakeLaunchctl::default().running(&label, 4242);
+                    assert!(migrate_legacy_job(&launchctl, UID, &label, &path, &owner).unwrap(), "{label}");
+                    assert!(launchctl.calls().is_empty(), "{owner:?} {label}: {:?}", launchctl.calls());
+                    let disabled = fs::read_to_string(&path).expect("the legacy plist stays in place");
+                    assert!(disabled.contains("<key>RunAtLoad</key>\n    <false/>"), "{disabled}");
+                    assert!(disabled.contains("<key>KeepAlive</key>\n    <false/>"), "{disabled}");
+                    assert!(!disabled.contains("<true/>\n    <key>KeepAlive</key>"), "{disabled}");
+                    assert!(!disabled.contains("SuccessfulExit"), "{disabled}");
+                    assert!(!disabled.contains("<key>KeepAlive</key>\n    <true/>"), "{disabled}");
+                    assert_eq!(plist_program(&disabled), plist_program(&content), "{label}");
+
+                    let again = FakeLaunchctl::default();
+                    assert!(!migrate_legacy_job(&again, UID, &label, &path, &owner).unwrap(), "{label}");
+                    assert!(again.calls().is_empty(), "the second run issues nothing: {:?}", again.calls());
+                    assert_eq!(fs::read_to_string(&path).unwrap(), disabled, "{label}");
+                }
+            }
+        }
+
+        /// Todo 14: an Absent legacy owner's job is removed once (only `launchctl print` runs,
+        /// never bootout/unload/kickstart), and the second run issues no call at all.
+        #[test]
+        fn legacy_job_with_absent_owner_is_removed_once() {
+            for idle in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                for (label, path, content) in legacy_plists(dir.path()) {
+                    fs::write(&path, &content).unwrap();
+                    let launchctl = if idle {
+                        FakeLaunchctl::default().idle(&label)
+                    } else {
+                        FakeLaunchctl::default().not_registered(&label)
+                    };
+                    assert!(migrate_legacy_job(&launchctl, UID, &label, &path, &OwnerState::Absent).unwrap());
+                    assert!(!path.exists(), "{label} must be removed");
+                    assert!(launchctl.mutations().is_empty(), "only print may run: {:?}", launchctl.calls());
+                    assert_eq!(launchctl.calls().len(), 1, "{:?}", launchctl.calls());
+
+                    let again = FakeLaunchctl::default();
+                    assert!(!migrate_legacy_job(&again, UID, &label, &path, &OwnerState::Absent).unwrap());
+                    assert!(again.calls().is_empty(), "the second run issues nothing: {:?}", again.calls());
+                }
+            }
+        }
+
+        /// An Absent owner classification with a legacy job that still reports a process (or an
+        /// unreadable state) never removes or stops that job; it only loses login autostart.
+        #[test]
+        fn legacy_job_with_a_process_is_kept_even_for_an_absent_owner() {
+            let dir = tempfile::tempdir().unwrap();
+            for (label, path, content) in legacy_plists(dir.path()) {
+                for running in [true, false] {
+                    fs::write(&path, &content).unwrap();
+                    let launchctl = if running {
+                        FakeLaunchctl::default().running(&label, 77)
+                    } else {
+                        FakeLaunchctl::default().with_print(&label, false, "", "Operation not permitted")
+                    };
+                    assert!(migrate_legacy_job(&launchctl, UID, &label, &path, &OwnerState::Absent).unwrap());
+                    assert!(path.exists(), "{label} with a process keeps its plist");
+                    assert!(launchctl.mutations().is_empty(), "{:?}", launchctl.calls());
+                    assert!(fs::read_to_string(&path).unwrap().contains("<key>RunAtLoad</key>\n    <false/>"));
+                }
+            }
         }
     }
 

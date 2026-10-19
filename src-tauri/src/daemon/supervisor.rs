@@ -216,9 +216,28 @@ impl crate::daemon::owner_admission::SupervisorOps for ProcessSupervisorOps {
         ensure()
     }
 
+    fn migrate_legacy_job(&self, owner: &crate::daemon::owner_admission::OwnerState) -> Result<()> {
+        migrate_legacy_job(owner).map(|_| ())
+    }
+
     fn reconcile_login_registration(&self) -> Result<()> {
         reconcile_login_registration().map(|_| ())
     }
+}
+
+/// Legacy single-job migration (macOS `com.ferryx.daemon` and the pre-rebrand
+/// `com.rorca.daemon`, Linux `ferryx-daemon.service`, Windows `Ferryx\Daemon`), run by
+/// [`ensure_if_absent`] under admission.lock with the owner it classified. An Alive or Unknown
+/// legacy owner keeps its job loaded and running; the job only loses login autostart. An Absent
+/// owner's legacy job is removed. Nothing is ever stopped, booted out, ended or unloaded, and a
+/// second run is a no-op. The newest generation is registered for login by
+/// [`reconcile_login_registration`]. Runs whether or not the user opted out of autostart, since
+/// it only ever removes login autostart. Returns whether anything changed.
+pub fn migrate_legacy_job(owner: &crate::daemon::owner_admission::OwnerState) -> Result<bool> {
+    if !supported() {
+        return Ok(false);
+    }
+    backend::migrate_legacy_job(&process_env, owner)
 }
 
 /// Registers this build for the next login without starting it or touching any running job
@@ -453,11 +472,49 @@ mod backend {
         }
         Ok(())
     }
+
+    /// The legacy single jobs: `<base>` (`com.ferryx.daemon`, or the QA base), and, outside QA,
+    /// the pre-rebrand `com.rorca.daemon`.
+    pub(super) fn legacy_jobs(env: Env<'_>) -> Result<Vec<(String, PathBuf)>> {
+        let dir = agents_dir(env)?;
+        let mut labels = vec![label_base(env)];
+        if non_empty(env, SUPERVISOR_NAME_ENV).is_none() {
+            labels.push(launchd::RORCA_PLIST_LABEL.to_string());
+        }
+        Ok(labels
+            .into_iter()
+            .map(|label| {
+                let path = dir.join(format!("{label}.plist"));
+                (label, path)
+            })
+            .collect())
+    }
+
+    /// Migrates every legacy single job by plist rewrite (Alive/Unknown owner) or removal of a job
+    /// with no process (Absent owner); only `launchctl print` ever runs. Every job is attempted;
+    /// the first error is returned after the rest ran.
+    pub fn migrate_legacy_job(env: Env<'_>, owner: &OwnerState) -> Result<bool> {
+        let mut changed = false;
+        let mut first_error = None;
+        for (label, path) in legacy_jobs(env)? {
+            match generation::migrate_legacy_job(&generation::SystemLaunchctl, uid(), &label, &path, owner) {
+                Ok(job_changed) => changed |= job_changed,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(changed),
+        }
+    }
 }
 
 #[cfg(windows)]
 mod backend {
     use super::{Env, Result};
+    use crate::daemon::owner_admission::OwnerState;
     use crate::daemon::supervisor_windows as task;
     use std::path::Path;
 
@@ -487,6 +544,12 @@ mod backend {
         task::reload(env)
     }
 
+    /// The legacy `Ferryx\Daemon` task: logon trigger removed for an Alive/Unknown owner,
+    /// deleted for an Absent one; never `/End`.
+    pub fn migrate_legacy_job(env: Env<'_>, owner: &OwnerState) -> Result<bool> {
+        task::migrate_legacy_task(env, *owner == OwnerState::Absent)
+    }
+
     pub fn uninstall(env: Env<'_>) -> Result<()> {
         task::uninstall(env)
     }
@@ -506,6 +569,7 @@ mod backend {
 #[cfg(target_os = "linux")]
 mod backend {
     use super::{Env, Result, SUPERVISOR_NAME_ENV};
+    use crate::daemon::owner_admission::OwnerState;
     use crate::daemon::{runtime_stage, supervisor_linux};
     use std::path::{Path, PathBuf};
 
@@ -578,6 +642,13 @@ mod backend {
         Ok(rewritten)
     }
 
+    /// The legacy single unit `<base>.service`: disabled without `--now` for an Alive/Unknown
+    /// owner, removed when idle for an Absent one; never stopped.
+    pub fn migrate_legacy_job(env: Env<'_>, owner: &OwnerState) -> Result<bool> {
+        let (name, path) = unit(env)?;
+        supervisor_linux::migrate_legacy_unit(&name, &path, *owner == OwnerState::Absent)
+    }
+
     pub fn reload(env: Env<'_>) -> Result<()> {
         supervisor_linux::start(&unit(env)?.0)
     }
@@ -611,6 +682,7 @@ mod backend {
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod backend {
     use super::{Env, Result};
+    use crate::daemon::owner_admission::OwnerState;
     use std::path::Path;
 
     pub const TARGET_HAS_BACKEND: bool = false;
@@ -645,6 +717,10 @@ mod backend {
 
     pub fn remove_autostart(_env: Env<'_>) -> Result<()> {
         Ok(())
+    }
+
+    pub fn migrate_legacy_job(_env: Env<'_>, _owner: &OwnerState) -> Result<bool> {
+        Ok(false)
     }
 }
 
@@ -795,5 +871,33 @@ mod tests {
         let job = backend::job_for(&qa, &staged).unwrap();
         assert_eq!(job.label, "ferryx-qa-1.2026.1013.2-0a1b2c3d");
         assert_eq!(job.plist_path, agents.join("ferryx-qa-1.2026.1013.2-0a1b2c3d.plist"));
+    }
+
+    /// The macOS legacy migration covers `com.ferryx.daemon` and the pre-rebrand
+    /// `com.rorca.daemon`; a QA run (name override) migrates only its own QA-named legacy job and
+    /// never the user's real ones.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_legacy_jobs_cover_both_legacy_labels_and_qa_only_its_own() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join("Library/LaunchAgents");
+        let env = env_of(&[("HOME", home.path().to_str().unwrap())]);
+        assert_eq!(
+            backend::legacy_jobs(&env).unwrap(),
+            vec![
+                ("com.ferryx.daemon".to_string(), agents.join("com.ferryx.daemon.plist")),
+                ("com.rorca.daemon".to_string(), agents.join("com.rorca.daemon.plist")),
+            ]
+        );
+        let qa_agents = home.path().join("qa-agents");
+        let qa = env_of(&[
+            ("HOME", home.path().to_str().unwrap()),
+            (SUPERVISOR_NAME_ENV, "ferryx-qa-1"),
+            (crate::daemon::launchd::PLIST_PATH_ENV, qa_agents.to_str().unwrap()),
+        ]);
+        assert_eq!(
+            backend::legacy_jobs(&qa).unwrap(),
+            vec![("ferryx-qa-1".to_string(), qa_agents.join("ferryx-qa-1.plist"))]
+        );
     }
 }
