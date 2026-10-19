@@ -3828,14 +3828,34 @@ impl DaemonServer {
                 });
 
                 let transfer_outcome: Result<(usize, usize, usize, u64), String> = async {
-                    let transfer_resp = legacy_peer
-                        .send_request(&DaemonRequest::TransferSessions {
-                            handover_socket_path: handover_socket_path
-                                .to_string_lossy()
-                                .into_owned(),
-                        })
-                        .await
-                        .map_err(|e| format!("TransferSessions request failed: {e}"))?;
+                    let transfer_request = legacy_peer.send_request(&DaemonRequest::TransferSessions {
+                        handover_socket_path: handover_socket_path
+                            .to_string_lossy()
+                            .into_owned(),
+                    });
+                    // The request's expiry bounds the predecessor's answer as well (todo 8).
+                    let transfer_resp = match handover_expires_at {
+                        Some(expires) => {
+                            let budget = crate::daemon::handover_request::pre_commit_remaining(
+                                expires,
+                                crate::daemon::owner_admission::unix_now_ms(),
+                            )
+                            .map_err(|reason| {
+                                expired_before_commit = true;
+                                reason
+                            })?;
+                            match tokio::time::timeout(budget, transfer_request).await {
+                                Ok(answer) => answer,
+                                Err(_) => {
+                                    expired_before_commit = true;
+                                    drop(std::os::unix::net::UnixStream::connect(&handover_socket_path));
+                                    return Err("handover request expired during TransferSessions".to_string());
+                                }
+                            }
+                        }
+                        None => transfer_request.await,
+                    }
+                    .map_err(|e| format!("TransferSessions request failed: {e}"))?;
 
                     let (offered, owned) = match transfer_resp {
                         DaemonResponse::TransferSessionsOk {
