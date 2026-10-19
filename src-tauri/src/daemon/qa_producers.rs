@@ -96,6 +96,7 @@ pub async fn install_and_start(server: &Arc<super::server::DaemonServer>) {
     let Some(channel) = channel().await else {
         return;
     };
+    let _ = BOOT_FAULT_REQUEST.set(requested_handover_fault(&channel).await);
     let server = Arc::clone(server);
     tokio::spawn(run_write_ack_hold_watcher(Arc::clone(&channel)));
     tokio::spawn(async move { run_held_rpc_watcher(server, channel).await });
@@ -403,21 +404,62 @@ pub fn injected_handover_fault() -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+/// Runner-armed handover fault (todo 12 Q08). A job-started predecessor or candidate never sees
+/// the runner's env, so the runner writes `<barrier>/handover-fault.request.json`
+/// { runId, operationId, fault } with one FERRYX_QA_HANDOVER_FAULT value. The predecessor reads
+/// it at every PrepareHandover, a candidate once when its QA channel is installed; a request of
+/// another run is ignored, and the env stays the default.
+pub const HANDOVER_FAULT_REQUEST: &str = "handover-fault.request.json";
+
+fn read_handover_fault_request(dir: &Path, run_id: &str) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(HANDOVER_FAULT_REQUEST)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    if value.get("runId").and_then(Value::as_str) != Some(run_id) {
+        return None;
+    }
+    value.get("fault").and_then(Value::as_str).filter(|fault| !fault.trim().is_empty()).map(str::to_string)
+}
+
+async fn requested_handover_fault(channel: &Arc<QaBarrierChannel>) -> Option<String> {
+    let dir = channel.dir().to_path_buf();
+    let run_id = channel.run_id().to_string();
+    crate::ipc::run_blocking(move || Ok(read_handover_fault_request(&dir, &run_id))).await.ok().flatten()
+}
+
+/// The request this process saw when its QA channel was installed (the candidate's view).
+static BOOT_FAULT_REQUEST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
 /// True when this successor was spawned for the runner's partial-adopt abort
 /// variant, so the real rollback path runs instead of a commit.
 pub fn abort_after_adopt_requested() -> bool {
-    injected_handover_fault().as_deref() == Some(HANDOVER_FAULT_ABORT_AFTER_ADOPT)
+    let fault = injected_handover_fault().or_else(|| BOOT_FAULT_REQUEST.get().cloned().flatten());
+    fault.as_deref() == Some(HANDOVER_FAULT_ABORT_AFTER_ADOPT)
 }
 
-/// Predecessor-side commit faults selected by FERRYX_QA_HANDOVER_FAULT (todo 8 variants).
-pub fn commit_fault_from_env() -> Option<crate::daemon::handover::CommitFault> {
+fn commit_fault_named(name: Option<&str>) -> Option<crate::daemon::handover::CommitFault> {
     use crate::daemon::handover::CommitFault;
-    match injected_handover_fault().as_deref() {
+    match name {
         Some("decision-write-failure") => Some(CommitFault::DecisionWrite),
         Some("drop-commit-ok-before-record") => Some(CommitFault::DropReplyBeforeRecord),
         Some("drop-commit-ok-after-record") => Some(CommitFault::DropReplyAfterRecord),
         _ => None,
     }
+}
+
+/// Predecessor-side commit faults selected by FERRYX_QA_HANDOVER_FAULT (todo 8 variants).
+pub fn commit_fault_from_env() -> Option<crate::daemon::handover::CommitFault> {
+    commit_fault_named(injected_handover_fault().as_deref())
+}
+
+/// Predecessor, at PrepareHandover: the runner's request for this handover selects the commit
+/// fault; without one the env default applies, so an earlier request never leaks into a later
+/// handover.
+pub async fn arm_commit_fault(manager: &crate::daemon::handover::HandoverManager) {
+    let requested = match channel().await {
+        Some(channel) => requested_handover_fault(&channel).await,
+        None => None,
+    };
+    manager.inject_commit_fault(commit_fault_named(requested.as_deref()).or_else(commit_fault_from_env));
 }
 
 /// One QA receipt per handover state transition (todo 8): the candidate's accept counters on
@@ -431,6 +473,11 @@ pub async fn note_authority_stage(
 ) {
     use crate::daemon::handover::AuthorityListenerRole;
     let Some(channel) = channel().await else { return };
+    // A job-started predecessor installed its channel before the runner armed this upgrade;
+    // the runner's handover-authority arm is picked up here, never guessed.
+    if channel.operation_id().is_none() {
+        let _ = qa_barrier::scan_and_ack_arms_off_runtime(&channel).await;
+    }
     let Some(operation_id) = channel.operation_id() else { return };
     let accept_counts = json!({
         "canonical": manager.accept_count(AuthorityListenerRole::Canonical),
@@ -892,6 +939,36 @@ mod tests {
 
     const TEST_RUN_ID: &str = "qa-run-daemon";
     const TEST_OPERATION_ID: &str = "qa-op-daemon";
+
+    #[test]
+    fn handover_fault_request_is_read_only_for_this_run_and_maps_to_commit_faults() {
+        use crate::daemon::handover::CommitFault;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        assert_eq!(read_handover_fault_request(dir, TEST_RUN_ID), None);
+        let request = |run: &str, fault: &str| {
+            std::fs::write(
+                dir.join(HANDOVER_FAULT_REQUEST),
+                json!({ "runId": run, "operationId": "op-1", "fault": fault }).to_string(),
+            )
+            .unwrap();
+        };
+        request("qa-run-OTHER", "decision-write-failure");
+        assert_eq!(read_handover_fault_request(dir, TEST_RUN_ID), None, "another run's request is ignored");
+        request(TEST_RUN_ID, "");
+        assert_eq!(read_handover_fault_request(dir, TEST_RUN_ID), None);
+        for (name, fault) in [
+            ("decision-write-failure", Some(CommitFault::DecisionWrite)),
+            ("drop-commit-ok-before-record", Some(CommitFault::DropReplyBeforeRecord)),
+            ("drop-commit-ok-after-record", Some(CommitFault::DropReplyAfterRecord)),
+            (HANDOVER_FAULT_ABORT_AFTER_ADOPT, None),
+        ] {
+            request(TEST_RUN_ID, name);
+            let read = read_handover_fault_request(dir, TEST_RUN_ID);
+            assert_eq!(read.as_deref(), Some(name));
+            assert_eq!(commit_fault_named(read.as_deref()), fault, "{name}");
+        }
+    }
 
     #[test]
     fn write_ack_hold_is_armed_and_released_only_by_this_runs_controls() {

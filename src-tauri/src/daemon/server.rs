@@ -5718,6 +5718,8 @@ impl DaemonServer {
                 Ok(DaemonRequest::PrepareHandover) => {
                     #[cfg(unix)]
                     {
+                        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                        crate::daemon::qa_producers::arm_commit_fault(&self.handover_manager).await;
                         match self.handover_manager.prepare_handover(&self.terminal_service) {
                             Ok((legacy_path, active_sessions, listener)) => {
                                 let legacy_path_str = legacy_path.to_string_lossy().into_owned();
