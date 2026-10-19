@@ -142,6 +142,8 @@ export async function retireOwner(ctx) {
   if (ctx.state.gui) { await ctx.gui.quit(ctx.state.gui).catch(() => {}); ctx.state.gui = null; }
   const owner = await ownerIdentity(ctx);
   if (!owner.pid) return { retired: true, pid: null };
+  // owner.json outlives its daemon: a recorded pid that no longer runs is already retired.
+  if (!owner.os) return { retired: true, pid: owner.pid, reason: 'owner pid no longer runs' };
   if (ctx.state.conn) {
     const desc = await ctx.state.conn.describe().catch(() => ({ sessions: [] }));
     for (const s of desc.sessions ?? []) await ctx.state.conn.call({ type: 'close', sessionId: s.backendId }).catch(() => {});
