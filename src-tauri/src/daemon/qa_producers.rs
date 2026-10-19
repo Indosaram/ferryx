@@ -1064,9 +1064,11 @@ mod tests {
             let stray = apply_transfer_fault(fault, &mut sources, &path("daemon.lock"), &path("stray.sock")).unwrap();
             let (candidate, predecessor) = UnixStream::pair().unwrap();
             let serving = std::thread::spawn(move || serve_authority_request(&predecessor, sources));
-            let refused = request_authority(&candidate, "t12-transfer-fault")
+            let refused = request_authority(&candidate, &uuid::Uuid::new_v4().to_string())
                 .and_then(|authority| validate_authority(&authority, &expected));
-            serving.join().unwrap().unwrap();
+            // Closing the candidate end first means a failed request can never strand the server.
+            drop(candidate);
+            serving.join().unwrap().expect("the predecessor answered the authority request");
             assert!(refused.is_err(), "{name}: the corrupted authority was accepted");
             drop(stray);
             assert!(lock_is_held_elsewhere(&path("daemon.lock")).unwrap(), "{name}: the lock was released");
