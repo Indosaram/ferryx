@@ -209,6 +209,7 @@ export async function Q13(ctx, result) {
   const legacyEnv = { FERRYX_DATA_DIR: ctx.layout.data, FERRYX_RUNTIME_DIR: ctx.layout.runtime, FERRYX_SESSION_DIR: ctx.layout.sessions };
   const installed = await ctx.jobs.installLegacy({ executable: ctx.artifacts.baseline.daemonExecutable, env: legacyEnv });
   await evidence(ctx, result, 'legacy-install.json', installed);
+  if (!assertion(result, 'legacy QA job installed and started', installed?.status === 0, installed)) return;
   const ready = await ctx.agent.call('waitPath', { file: ctx.platform === 'windows' ? hjoin(ctx.layout.runtime, 'daemon.port') : hjoin(ctx.layout.runtime, 'daemon.sock'), deadlineMs: DAEMON_READY_TIMEOUT_MS });
   assertion(result, 'legacy daemon published its endpoint', ready, null);
   const conn = await dataConn(ctx);
