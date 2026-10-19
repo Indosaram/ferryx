@@ -223,7 +223,8 @@ export function classifyCommand(command, args, { runId, platform }) {
     if (!SYSTEMCTL_QA_MUTATIONS.has(verb)) return deny(`systemctl ${verb} is not a harness operation`);
     if (list.includes('--now') && verb === 'disable') return deny('disable --now stops a unit');
     if (verb === 'daemon-reload') return { allowed: true, reason: 'reload of unit files only' };
-    const units = rest.slice(1);
+    // Option flags (e.g. --signal=SIGKILL for Q03's scope kill) are not unit names.
+    const units = rest.slice(1).filter((a) => !a.startsWith('-'));
     if (units.length === 0 || !units.every((u) => isQaJobName(u, runId, 'linux'))) return deny(`systemctl ${verb} targets a non-QA unit`);
     return { allowed: true, reason: 'qa unit' };
   }

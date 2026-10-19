@@ -82,6 +82,9 @@ test('OS-job commands: reads allowed, mutations only on QA jobs, kills never', (
   assert.ok(!ok('systemctl', ['--user', 'stop', 'ferryx-daemon.service'], 'linux'));
   assert.ok(!ok('systemctl', ['stop', `${base}-k.service`], 'linux'));
   assert.ok(!ok('systemctl', ['--user', 'disable', '--now', `${base}-k.service`], 'linux'));
+  assert.ok(ok('systemctl', ['--user', 'kill', '--signal=SIGKILL', `${base}-gui-g3.scope`], 'linux'));
+  assert.ok(!ok('systemctl', ['--user', 'kill', '--signal=SIGKILL', 'app-foo.scope'], 'linux'));
+  assert.ok(!ok('systemctl', ['--user', 'kill', '--signal=SIGKILL'], 'linux'));
   assert.ok(ok('schtasks', ['/Query', '/TN', 'Ferryx\\Daemon'], 'windows'));
   assert.ok(ok('schtasks', ['/Run', '/TN', `Ferryx\\${base}-k`], 'windows'));
   assert.ok(!ok('schtasks', ['/End', '/TN', 'Ferryx\\Daemon'], 'windows'));
