@@ -187,16 +187,19 @@ async fn incompatible_old_owner_keeps_its_terminals_and_retires_when_idle() -> T
     let client = DaemonClient::new_with_socket(endpoint(&runtime));
     let error = timeout(DEADLINE, client.list_sessions()).await?.unwrap_err();
     assert_eq!(error.code, IpcErrorCode::DaemonUpdatePending, "{error:?}");
-    #[cfg(unix)]
-    {
-        let staged: Vec<_> = std::fs::read_dir(client_data.join("daemon-runtime"))?
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_dir())
-            .collect();
-        assert_eq!(staged.len(), 1, "exactly one staged generation, under the test's temp dir: {staged:?}");
-        assert!(staged[0].starts_with(root.path()), "staged outside the temp dir: {staged:?}");
-    }
+    // The client stages only under its private data dir. Linux stages the test executable there;
+    // macOS refuses to stage (a test binary has no daemon helper bundle) and Windows never stages,
+    // so neither creates a generation anywhere.
+    let staged_root = ferryx_lib::daemon::server::daemon_runtime_root().ok_or("no runtime root")?;
+    assert_eq!(staged_root, client_data.join("daemon-runtime"), "staging root is the private one");
+    let staged: Vec<_> = match std::fs::read_dir(&staged_root) {
+        Ok(entries) => entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let expected_generations = if cfg!(target_os = "linux") { 1 } else { 0 };
+    assert_eq!(staged.len(), expected_generations, "staged generations: {staged:?}");
+    assert!(staged.iter().all(|path| path.starts_with(root.path())), "staged outside the temp dir: {staged:?}");
     let details = error.details.clone().ok_or("no details")?;
     assert_eq!(details["liveSessions"], 1, "{details}");
     assert_eq!(details["retireRequested"], true, "RetireWhenIdle was sent on entering pending");
