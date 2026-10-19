@@ -209,6 +209,13 @@ pub(crate) fn pre_commit_remaining(expires_at_unix_ms: u64, now_unix_ms: u64) ->
     Ok(Duration::from_millis(expires_at_unix_ms - now_unix_ms))
 }
 
+/// A candidate whose request expired before commit exits 0 once the predecessor confirmed
+/// AbortHandover; any other pre-commit failure, or an abort the predecessor did not confirm,
+/// stays an error exit.
+pub(crate) fn expired_candidate_exits_cleanly(expired_before_commit: bool, rolled_back: bool) -> bool {
+    expired_before_commit && rolled_back
+}
+
 /// Reads the request in `runtime_dir`, removes it (it authorizes one start only) and decides the
 /// startup role. Blocking.
 pub(crate) fn take_startup_request(
@@ -385,6 +392,9 @@ mod tests {
         );
         assert!(pre_commit_remaining(req.expires_at_unix_ms, req.expires_at_unix_ms).is_err());
         assert!(pre_commit_remaining(req.expires_at_unix_ms, u64::MAX).is_err());
+        assert!(expired_candidate_exits_cleanly(true, true));
+        assert!(!expired_candidate_exits_cleanly(true, false));
+        assert!(!expired_candidate_exits_cleanly(false, true));
     }
 
     #[test]

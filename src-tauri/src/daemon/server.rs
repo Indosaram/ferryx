@@ -3693,6 +3693,8 @@ impl DaemonServer {
         // existing --handover-from path; an invalid, expired or foreign request is deleted and
         // this process exits 0 holding no lock; no request means an ordinary start.
         #[cfg(unix)]
+        let mut handover_expires_at: Option<u64> = None;
+        #[cfg(unix)]
         if handover_from.is_none() {
             let dir = runtime_dir.clone();
             let role = crate::ipc::run_blocking(move || {
@@ -3707,12 +3709,16 @@ impl DaemonServer {
             .map_err(|error| error.to_string())?;
             match role {
                 crate::daemon::handover_request::StartupRole::Ordinary => {}
-                crate::daemon::handover_request::StartupRole::Candidate { legacy_socket_path } => {
+                crate::daemon::handover_request::StartupRole::Candidate {
+                    legacy_socket_path,
+                    expires_at_unix_ms,
+                } => {
                     tracing::info!(
                         legacy_socket = %legacy_socket_path.display(),
                         "Starting as HandoverCandidate from the predecessor's handover request"
                     );
                     handover_from = Some(legacy_socket_path);
+                    handover_expires_at = Some(expires_at_unix_ms);
                 }
                 crate::daemon::handover_request::StartupRole::Exit { reason } => {
                     tracing::warn!(%reason, "Handover request rejected; exiting 0 without taking any lock");
@@ -3783,6 +3789,9 @@ impl DaemonServer {
                 let mut adopted_records: Vec<crate::daemon::qa_producers::HandoverSessionRecord> =
                     Vec::new();
                 let mut commit_started = false;
+                // Set when the request's expiry passed before CommitHandover: the candidate then
+                // aborts and exits 0, and the predecessor keeps serving (todo 8).
+                let mut expired_before_commit = false;
                 // The predecessor's authority descriptors, validated but not yet used. Dropping
                 // them only closes this process's copies: the predecessor keeps serving.
                 let mut received_authority: Option<crate::daemon::handover_socket::TransferredAuthority> = None;
@@ -3828,8 +3837,26 @@ impl DaemonServer {
                         other => return Err(format!("TransferSessions failed: {other:?}")),
                     };
 
-                    let (handover_stream, exports) = accept_handle
-                        .await
+                    // A transfer that stalls past the request's expiry is abandoned before commit.
+                    let transfer_budget = match handover_expires_at {
+                        Some(expires) => crate::daemon::handover_request::pre_commit_remaining(
+                            expires,
+                            crate::daemon::owner_admission::unix_now_ms(),
+                        )
+                        .map_err(|reason| {
+                            expired_before_commit = true;
+                            reason
+                        })?,
+                        None => std::time::Duration::MAX,
+                    };
+                    let received = match tokio::time::timeout(transfer_budget, accept_handle).await {
+                        Ok(received) => received,
+                        Err(_) => {
+                            expired_before_commit = true;
+                            return Err("handover request expired mid-transfer".to_string());
+                        }
+                    };
+                    let (handover_stream, exports) = received
                         .map_err(|e| format!("Handover worker panicked: {e}"))?
                         .map_err(|(error, received)| {
                             format!(
@@ -3837,6 +3864,16 @@ impl DaemonServer {
                             )
                         })?;
                     let accepted = exports.len();
+                    if let Some(expires) = handover_expires_at {
+                        crate::daemon::handover_request::pre_commit_remaining(
+                            expires,
+                            crate::daemon::owner_admission::unix_now_ms(),
+                        )
+                        .map_err(|reason| {
+                            expired_before_commit = true;
+                            reason
+                        })?;
+                    }
                     let exported: std::collections::HashSet<String> =
                         exports.iter().map(|(export, _owner)| export.session_id.clone()).collect();
                     let durable_path = self.remote_sessions_path.clone();
@@ -4039,6 +4076,17 @@ impl DaemonServer {
                     )
                     .await;
 
+                    // The last pre-commit check: an expired request never commits.
+                    if let Some(expires) = handover_expires_at {
+                        crate::daemon::handover_request::pre_commit_remaining(
+                            expires,
+                            crate::daemon::owner_admission::unix_now_ms(),
+                        )
+                        .map_err(|reason| {
+                            expired_before_commit = true;
+                            reason
+                        })?;
+                    }
                     commit_started = true;
                     let commit_started_at = tokio::time::Instant::now();
                     let commit_resp = legacy_peer
@@ -4184,6 +4232,7 @@ impl DaemonServer {
                             crate::ipc::run_blocking(move || HandoverManager::recorded_decision(&path)
                                 .map_err(crate::ipc::IpcError::internal)).await.map_err(|error| error.to_string())
                         }).await;
+                        let rolled_back = rollback.is_ok();
                         match rollback {
                             Ok(()) => {
                                 tracing::warn!(
@@ -4217,6 +4266,14 @@ impl DaemonServer {
                                     "Handover transfer failed ({reason}) and predecessor AbortHandover returned {other:?}; exported sessions stay paused on the predecessor"
                                 );
                             }
+                        }
+                        if crate::daemon::handover_request::expired_candidate_exits_cleanly(
+                            expired_before_commit,
+                            rolled_back,
+                        ) {
+                            tracing::warn!(%reason, "Handover request expired before commit; predecessor resumed, exiting 0");
+                            crate::daemon::supervisor_linux::notify_ready();
+                            return Ok(());
                         }
                         return Err(reason);
                         }
