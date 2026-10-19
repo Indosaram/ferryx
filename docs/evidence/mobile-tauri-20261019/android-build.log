@@ -1,0 +1,93 @@
+
+> ferryx-mobile@0.1.0 android:build
+> node scripts/tauri.mjs android build --debug --target aarch64 --apk
+
+        Info Using installed NDK: <home>/android-sdk/ndk/27.2.12479018
+        Info Looking up installed tauri packages to check mismatched versions...
+     Running beforeBuildCommand `npm --prefix ../ui run build:mobile`
+
+> ui@0.1.0 build:mobile
+> tsc && vite build --config vite.mobile.config.ts
+
+vite v6.4.4 building for production...
+transforming...
+✓ 2258 modules transformed.
+rendering chunks...
+computing gzip size...
+dist-mobile/index.html                                   3.39 kB │ gzip:   1.22 kB
+dist-mobile/assets/crush-DHElXcRZ.png                    5.46 kB
+dist-mobile/assets/droid-BhrKLgQ8.svg                    6.30 kB │ gzip:   2.88 kB
+dist-mobile/assets/antigravity-DgAQAdn3.svg              7.63 kB │ gzip:   1.72 kB
+dist-mobile/assets/gjc-CmlXGg4z.png                     22.73 kB
+dist-mobile/assets/geist-variable-CrgPqtmy.woff2        69.44 kB
+dist-mobile/assets/ferryx-icon-OXRkkUvz.png            805.82 kB
+dist-mobile/assets/App-V8Wj_Bb0.css                      0.59 kB │ gzip:   0.31 kB
+dist-mobile/assets/index-ckLza-72.css                  113.95 kB │ gzip:  20.02 kB
+dist-mobile/assets/arrow-down-Ev2p6eA6.js                0.34 kB │ gzip:   0.27 kB
+dist-mobile/assets/nativeShortcutTable-ChDHIVvA.js       0.57 kB │ gzip:   0.35 kB
+dist-mobile/assets/arrow-right-CACxJEnM.js               0.62 kB │ gzip:   0.32 kB
+dist-mobile/assets/clipboard-CCgcnRg2.js                 1.69 kB │ gzip:   0.83 kB
+dist-mobile/assets/shortcutOverrides-CEXeEYvN.js         1.81 kB │ gzip:   0.85 kB
+dist-mobile/assets/tailscaleDiscovery-BtfcwLaD.js        2.56 kB │ gzip:   1.11 kB
+dist-mobile/assets/WhatsNewDialog-BTJXmGhU.js            2.85 kB │ gzip:   1.16 kB
+dist-mobile/assets/sshHosts-CWzxb_af.js                  3.22 kB │ gzip:   1.29 kB
+dist-mobile/assets/SystemResourcesDialog-Dx4piHvl.js     7.05 kB │ gzip:   2.62 kB
+dist-mobile/assets/AccountSignIn-CbolCq8y.js             7.16 kB │ gzip:   2.70 kB
+dist-mobile/assets/pairedHostInventory-DJG7kEq_.js      14.65 kB │ gzip:   5.03 kB
+dist-mobile/assets/browserProtocol-Ck8ZGqNi.js          16.42 kB │ gzip:   4.13 kB
+dist-mobile/assets/MobileChatWorkspace-B3QtzgTW.js      27.90 kB │ gzip:   8.11 kB
+dist-mobile/assets/RemoteTerminal-C8t4Pa3B.js           31.15 kB │ gzip:  10.90 kB
+dist-mobile/assets/WelcomeWizard-EPL6nB2W.js            32.23 kB │ gzip:   9.52 kB
+dist-mobile/assets/RemoteBrowserWorkspace-DC34mb7J.js   47.34 kB │ gzip:  13.44 kB
+dist-mobile/assets/index-8l85aDrS.js                   208.76 kB │ gzip:  66.27 kB
+dist-mobile/assets/SettingsDialog-FwtXOrXs.js          288.21 kB │ gzip:  81.41 kB
+dist-mobile/assets/RemoteApp-D_N4FfT1.js               543.75 kB │ gzip: 164.32 kB
+dist-mobile/assets/App-BYycgCGu.js                     950.58 kB │ gzip: 276.85 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 11.01s
+   Compiling ferryx-mobile v0.1.0 (<checkout>/mobile/src-tauri)
+    Finished `dev` profile [unoptimized] target(s) in 5.47s
+        Info symlinking lib "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so" in jniLibs dir "<checkout>/mobile/src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a"
+        Info "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so" requires shared lib "libandroid.so"
+        Info "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so" requires shared lib "libdl.so"
+        Info "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so" requires shared lib "liblog.so"
+        Info "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so" requires shared lib "libm.so"
+        Info "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so" requires shared lib "libc.so"
+        Info symlink at "<checkout>/mobile/src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/libferryx_mobile_lib.so" points to "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so"
+WARNING: We recommend using a newer Android Gradle plugin to use compileSdk = 36
+
+This Android Gradle plugin (8.7.3) was tested up to compileSdk = 35.
+
+You are strongly encouraged to update your project to use a newer
+Android Gradle plugin that has been tested with compileSdk = 36.
+
+If you are already using the latest version of the Android Gradle plugin,
+you may need to wait until a newer version with support for compileSdk = 36 is available.
+
+For more information refer to the compatibility table:
+https://d.android.com/r/tools/api-level-support
+
+To suppress this warning, add/update
+    android.suppressUnsupportedCompileSdk=36
+to this project's gradle.properties.
+
+> ferryx-mobile@0.1.0 tauri
+> node scripts/tauri.mjs android android-studio-script --target aarch64
+
+        Info connection; remote_addr=127.0.0.1:39994 conn_id=0
+        Info Using installed NDK: <home>/android-sdk/ndk/27.2.12479018
+   Compiling ferryx-mobile v0.1.0 (<checkout>/mobile/src-tauri)
+    Finished `dev` profile [unoptimized] target(s) in 5.26s
+        Info symlinking lib "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so" in jniLibs dir "<checkout>/mobile/src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a"
+        Info "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so" requires shared lib "libandroid.so"
+        Info "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so" requires shared lib "libdl.so"
+        Info "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so" requires shared lib "liblog.so"
+        Info "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so" requires shared lib "libm.so"
+        Info "<checkout>/mobile/src-tauri/target/aarch64-linux-android/debug/libferryx_mobile_lib.so" requires shared lib "libc.so"
+    Finished 1 APK at:
+        <checkout>/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+

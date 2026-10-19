@@ -46,8 +46,10 @@ Frontend-only validation: `npm --prefix ui run build:mobile`.
 
 - Mobile frontend and existing desktop frontend builds pass.
 - ARM64 Android Rust native library cross-compiles successfully.
-- APK packaging not yet verified: Gradle compilation exceeds this environment's
-  bounded build attempts. No APK/device-run claim is made.
+- Android ARM64 debug APK builds with the normal `android:build` command.
+  APK signature v2 verifies, package `com.ferryx.mobile` / version 0.1.0,
+  min SDK 24 / target SDK 35; ARM64 native library is present.
+  This is a debug-signed package, not a store/distribution release.
 - 47 targeted tests pass (account sign-in/session, remote preferences, runtime
   routing, settings). Runtime routing: 100% statements/branches/functions/lines.
   Settings bridge: 100% statements/functions/lines, 83.33% branches. These are
@@ -55,7 +57,7 @@ Frontend-only validation: `npm --prefix ui run build:mobile`.
 - Production mobile bundle, with native internals present: login screen renders
   without desktop IPC or JS errors at 360x800, 390x844 and 844x390, no horizontal
   overflow. Landscape requires normal vertical scrolling.
-- Broader remote test sweep was interrupted by the execution budget; not green.
+- Complete remote UI suite: 1,221 tests pass, 0 fail, 0 skip (JSON reporter).
 - No real phone/emulator, keyboard/IME, safe-area hardware, background/resume,
   authenticated live relay, push notifications or iOS/Xcode QA has been done.
 - Bundle-size warnings remain. This is a draft companion, not store-ready.

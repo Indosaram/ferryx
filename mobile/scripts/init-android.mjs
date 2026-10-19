@@ -7,7 +7,7 @@ const mobile = fileURLToPath(new URL("..", import.meta.url));
 const cli = path.join(mobile, "../node_modules/@tauri-apps/cli/tauri.js");
 execFileSync(process.execPath, [cli, "android", "init", "--ci"], { cwd: mobile, stdio: "inherit" });
 // The CLI's generated templates can drift independently of this source tree.
-// Pin to the available Android 35 toolchain instead of silently requiring preview SDKs.
+// Pin to the available Android 35/36 toolchain instead of silently requiring preview SDKs.
 const gen = path.join(mobile, "src-tauri/gen/android");
 function patch(file, transform) {
   const target = path.join(gen, file);
