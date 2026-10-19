@@ -261,9 +261,12 @@ export async function Q09(ctx, result) {
   const changed = await newOwner;
   await evidence(ctx, result, 'retire-when-idle.json', { aDone, wDone, marker, changed, watchdog });
   assertion(result, 'A exited by RetireWhenIdle when its last terminal closed', !aDone.timedOut && marker, { aDone, marker });
-  assertion(result, 'A watchdog exited without respawning', !wDone.timedOut && !changed.seen.includes(a.pid) || changed.seen.filter((p) => p === a.pid).length <= 1, { wDone, seen: changed.seen });
-  assertion(result, 'exactly one newest-generation owner', changed.owner && changed.seen.filter((p) => p !== a.pid).length === 1, changed.seen);
-  void RESPAWN_BACKOFF_MS;
+  // A respawned A would publish owner.json under A's generation key before the new owner does.
+  const newHello = (await ownerIdentity(ctx)).hello;
+  assertion(result, 'A watchdog exited (Stop on the retirement marker)', !wDone.timedOut, wDone);
+  assertion(result, `no A-generation respawn past 2 x ${RESPAWN_BACKOFF_MS}ms backoff: only one new owner, of the newest generation`,
+    Boolean(changed.owner) && changed.seen.filter((p) => p !== a.pid).length === 1 && newHello?.generation_key === ctx.keys.A,
+    { seen: changed.seen, newKey: newHello?.generation_key });
   // Part 2: confirm with the exact count ends A and starts the newest generation.
   await retireOwner(ctx);
   const a2 = await freshOwner(ctx, ctx.artifacts.bump, { tag: 'Q09C', dataVersion: 6 });
