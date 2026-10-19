@@ -52,18 +52,22 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
     },
     // Spawns a long-lived process this run owns, records it by pid + executable, and streams its
     // exit as an event. stdout lines are appended to logFile (inside the run dir).
-    spawn: async ({ command, args = [], env, cwd, role, executable = command, logFile }) => {
+    // record:false defers identity recording (a launcher that execs the real program); the caller
+    // records the final pid with `record` once it is ready.
+    spawn: async ({ command, args = [], env, cwd, role, executable = command, logFile, record = true }) => {
       inRun(logFile);
       mkdirSync(path.dirname(logFile), { recursive: true });
-      const child = spawn(command, args, { env: { ...process.env, ...(env ?? {}) }, cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: platform !== 'windows', windowsHide: false });
+      const child = spawn(command, args, { env: { ...process.env, ...(env ?? {}) }, cwd, stdio: ['pipe', 'pipe', 'pipe'], detached: platform !== 'windows', windowsHide: false });
       const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal, at: Date.now() })));
       child.stdout.on('data', (d) => appendFileSync(logFile, d));
       child.stderr.on('data', (d) => appendFileSync(logFile, d));
       await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-      const entry = await registry.record(child.pid, { role, executable });
       children.set(child.pid, { child, exited });
-      return entry;
+      if (!record) return { pid: child.pid, role, recorded: false };
+      return registry.record(child.pid, { role, executable });
     },
+    // Writes one line to a spawned child's stdin (launcher control on Windows).
+    stdin: async ({ pid, line }) => { children.get(pid)?.child.stdin?.write(`${line}\n`); return true; },
     // Records a pid this run caused to exist (e.g. the daemon started by the QA job), after
     // checking it runs an executable under the run's roots.
     record: async ({ pid, role, executable }) => {

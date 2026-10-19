@@ -64,7 +64,7 @@ export function isQaJobName(name, runId, platform) {
   const value = String(name ?? '');
   if (platform === 'mac') return value === base || value.startsWith(`${base}.`);
   if (platform === 'linux') {
-    const unit = value.endsWith('.service') ? value.slice(0, -'.service'.length) : value;
+    const unit = value.replace(/\.(service|scope)$/, '');
     return unit === base || unit.startsWith(`${base}-`);
   }
   if (platform === 'windows') {
@@ -187,7 +187,7 @@ export function assertIsolatedEnv(env, { runId, forbidden, platform }) {
 const LAUNCHCTL_READ = new Set(['print', 'list', 'print-disabled', 'blame']);
 const LAUNCHCTL_QA_MUTATIONS = new Set(['bootstrap', 'bootout', 'kickstart', 'enable', 'disable']);
 const SYSTEMCTL_READ = new Set(['show', 'status', 'is-active', 'is-enabled', 'list-units', 'list-unit-files', 'cat']);
-const SYSTEMCTL_QA_MUTATIONS = new Set(['start', 'stop', 'disable', 'enable', 'daemon-reload', 'reset-failed']);
+const SYSTEMCTL_QA_MUTATIONS = new Set(['start', 'stop', 'kill', 'disable', 'enable', 'daemon-reload', 'reset-failed']);
 const SCHTASKS_QA_MUTATIONS = new Set(['/run', '/end', '/delete', '/create', '/change']);
 
 /**
