@@ -112,6 +112,15 @@ fn serve_control(
 
 fn standard_answer(live: u32) -> impl Fn(&ControlRequest) -> ControlReply + Send + Sync + 'static {
     move |request| match request {
+        ControlRequest::Hello => ControlReply::Hello(control::HelloReply {
+            daemon_version: "2099.101.1".into(),
+            protocol_version: DAEMON_PROTOCOL_VERSION + 1,
+            pid: 1,
+            start_time: 1,
+            generation_key: None,
+            epoch: 1,
+            ops: control::FROZEN_OPS.iter().map(|op| op.to_string()).collect(),
+        }),
         ControlRequest::Inventory => ControlReply::Inventory(InventoryReply {
             live_local: live,
             live_remote: 0,
@@ -228,7 +237,7 @@ fn serve_one_data_connection(
     })
 }
 
-async fn assert_mismatch_only_reports_pending(reply: DaemonResponse) {
+async fn assert_mismatch_only_reports_pending(reply: DaemonResponse, expected_ops: &[&str]) {
     let dir = tempfile::tempdir().unwrap();
     let control_ops = serve_control(bind_control(dir.path()).await, standard_answer(4));
     let (data, endpoint) = bind_data(dir.path()).await;
@@ -240,6 +249,7 @@ async fn assert_mismatch_only_reports_pending(reply: DaemonResponse) {
         .unwrap_err();
     assert_eq!(error.code, IpcErrorCode::DaemonUpdatePending, "{error:?}");
     assert_eq!(error.details.as_ref().unwrap()["liveSessions"], 4);
+    assert_eq!(error.details.as_ref().unwrap()["runningVersion"], "2099.101.1");
     drop(client);
     let lines = tokio::time::timeout(Duration::from_secs(5), data_lines)
         .await
@@ -250,8 +260,8 @@ async fn assert_mismatch_only_reports_pending(reply: DaemonResponse) {
     assert!(!lines.iter().any(|line| line.contains("shutdown")), "zero Shutdown");
     assert_eq!(
         op_names(&control_ops),
-        vec![OP_INVENTORY, OP_RETIRE_WHEN_IDLE],
-        "the control channel gets Inventory and one RetireWhenIdle, never Shutdown"
+        expected_ops,
+        "the control channel gets (Hello,) Inventory and one RetireWhenIdle, never Shutdown"
     );
     assert!(endpoint.exists(), "the live owner's endpoint file is never deleted");
     // Zero spawn and zero terminate: no successor process exists to hold the endpoint, and the
@@ -264,7 +274,7 @@ async fn protocol_mismatch_reply_with_live_sessions_never_shuts_down_terminates_
     assert_mismatch_only_reports_pending(DaemonResponse::ProtocolMismatch {
         expected_version: DAEMON_PROTOCOL_VERSION + 1,
         received_version: DAEMON_PROTOCOL_VERSION,
-    })
+    }, &[control::OP_HELLO, OP_INVENTORY, OP_RETIRE_WHEN_IDLE])
     .await;
 }
 
@@ -279,7 +289,7 @@ async fn handshake_ok_of_another_version_never_shuts_down_terminates_or_spawns()
         daemon_version: Some("2099.101.1".into()),
         capabilities: vec![control::CONTROL_CAPABILITY.to_string()],
         admission_time_unix_ms: None,
-    })
+    }, &[OP_INVENTORY, OP_RETIRE_WHEN_IDLE])
     .await;
 }
 
