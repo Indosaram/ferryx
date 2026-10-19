@@ -156,6 +156,49 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
       return { text: text(), count: text().split(marker).length - 1 };
     },
     outputOf: async ({ handle, sessionId }) => handles.get(handle)?.output.get(sessionId) ?? '',
+    // Resolves when the file's content matches pattern (fs.watch on its directory).
+    waitLog: async ({ file, pattern, flags = '', deadlineMs = 30_000 }) => {
+      const re = new RegExp(pattern, flags);
+      const dir = path.dirname(file);
+      mkdirSync(dir, { recursive: true });
+      const read = () => (existsSync(file) ? readFileSync(file, 'utf8') : '');
+      let watcher;
+      const found = new Promise((resolve) => {
+        const test = () => { const m = re.exec(read()); if (m) resolve(m[0]); };
+        watcher = watch(dir, test);
+        test();
+      });
+      try {
+        return { matched: await withDeadline(found, deadlineMs, `log ${pattern}`) };
+      } catch {
+        return { matched: null, timedOut: true };
+      } finally {
+        watcher?.close();
+      }
+    },
+    // Resolves when <runtimeDir>/owner.json names a pid other than fromPid; reports every pid seen.
+    waitOwnerChange: async ({ runtimeDir, fromPid, deadlineMs = 60_000 }) => {
+      const file = path.join(runtimeDir, 'owner.json');
+      const seen = [];
+      const read = () => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } };
+      let watcher;
+      const changed = new Promise((resolve) => {
+        const test = () => {
+          const rec = read();
+          if (rec && !seen.includes(rec.pid)) seen.push(rec.pid);
+          if (rec && rec.pid !== fromPid) resolve(rec);
+        };
+        watcher = watch(runtimeDir, test);
+        test();
+      });
+      try {
+        return { owner: await withDeadline(changed, deadlineMs, 'owner change'), seen };
+      } catch {
+        return { owner: null, timedOut: true, seen };
+      } finally {
+        watcher?.close();
+      }
+    },
     // Resolves when the peer closes the connection (the daemon exited or dropped us).
     waitClosed: async ({ handle, deadlineMs = 60_000 }) => {
       const h = handles.get(handle);
