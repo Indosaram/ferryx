@@ -62,6 +62,8 @@ async function boot() {
     import.meta.hot?.dispose(stopNativeShortcutTablePush);
     const { bootstrapPairedHostInventory } = await import("./lib/pairedHostInventory");
     void bootstrapPairedHostInventory();
+    const { bootstrapPairedHostReachability } = await import("./lib/pairedHostReachability");
+    void bootstrapPairedHostReachability();
     const { startTailscaleDiscovery } = await import("./lib/tailscaleDiscovery");
     const stopDiscovery = startTailscaleDiscovery();
     import.meta.hot?.dispose(stopDiscovery);
