@@ -629,7 +629,7 @@ pub(crate) fn uninstall(name: &str, path: &Path) -> Result<(), String> {
     systemctl(&["daemon-reload"]).map(|_| ())
 }
 
-+/// Migrates the legacy single unit `name` (`ferryx-daemon`, or the QA base) at `path` for the
+/// Migrates the legacy single unit `name` (`ferryx-daemon`, or the QA base) at `path` for the
 /// owner admission classified under its lock (todo 14).
 ///
 /// Enablement is read from the `default.target.wants` link next to the unit file, so a unit that

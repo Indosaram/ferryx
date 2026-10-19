@@ -304,6 +304,9 @@ pub trait TaskScheduler {
     fn run(&mut self, args: &[&str]) -> Result<bool>;
     /// `schtasks /Query /TN <name> /XML`: the registered definition, `Ok(None)` when no such task.
     fn query_xml(&mut self, name: &str) -> Result<Option<String>>;
+    /// The task's `MSFT_ScheduledTask` State enum name (`Ready`, `Running`, `Queued`, `Disabled`, ...),
+    /// which is the same on every display language; `Err` when it cannot be read.
+    fn task_state(&mut self, name: &str) -> Result<String>;
 }
 
 /// Registers one task definition from `content` (`/Create /XML /F`), never `/Run`.
@@ -395,7 +398,9 @@ pub fn register_for_login_with(
 /// Unknown owner the task only loses its logon trigger through a definition re-import
 /// (`/Query /XML`, then `/Create /XML /F`), which applies to future runs only: the running
 /// watchdog and daemon keep going. With an Absent owner the task is deleted (`/Delete /F`, which
-/// unregisters it; there is no daemon for it to own) and its record removed. Never `/End` or
+/// unregisters it) and its record removed, but only when its State reads `Ready` or `Disabled`: a
+/// `Running` or `Queued` task may still host the legacy watchdog, and an unreadable State is not
+/// proof of idleness, so such a task is kept and only loses its logon trigger. Never `/End` or
 /// `/Run`. Returns whether anything changed.
 pub fn migrate_legacy_task_with(
     env: Env<'_>,
@@ -414,6 +419,11 @@ pub fn migrate_legacy_task_with(
     }
     let mut changed = false;
     if scheduler.run(&["/Query", "/TN", &name])? {
+        let state = scheduler.task_state(&name);
+        if !matches!(state.as_deref(), Ok("Ready" | "Disabled")) {
+            tracing::info!(task = %name, ?state, "The legacy daemon task is not idle; it keeps running and only loses its logon trigger");
+            return remove_logon_trigger(env, scheduler, &name);
+        }
         if !scheduler.run(&["/Delete", "/TN", &name, "/F"])? {
             return Err(format!("schtasks /Delete failed for the legacy task {name}"));
         }
@@ -823,6 +833,36 @@ mod platform {
                 return Ok(None);
             }
             Ok(Some(decode_task_xml(&output.stdout)))
+        }
+
+        fn task_state(&mut self, name: &str) -> Result<String> {
+            // schtasks' Status column is localized; the MSFT_ScheduledTask State enum prints the
+            // invariant name on every display language.
+            let (folder, leaf) = name.rsplit_once('\\').unwrap_or(("", name));
+            let task_path = if folder.is_empty() {
+                "\\".to_string()
+            } else {
+                format!("\\{folder}\\")
+            };
+            let quote = |value: &str| value.replace('\'', "''");
+            let output = crate::util::no_window_command("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "(Get-ScheduledTask -TaskPath '{}' -TaskName '{}').State",
+                        quote(&task_path),
+                        quote(leaf)
+                    ),
+                ])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .map_err(|e| format!("Failed to run powershell: {e}"))?;
+            if !output.status.success() {
+                return Err(format!("Get-ScheduledTask failed for task {name}"));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         }
     }
 
@@ -1293,16 +1333,23 @@ mod tests {
     }
 
     /// A fake Task Scheduler: records every call and answers `/Query` from a set of registered
-    /// task names with the definitions it was given.
+    /// task names with the definitions it was given. `state` is the invariant State every task
+    /// reports; `None` makes the State unreadable.
     #[derive(Default)]
     struct FakeScheduler {
         calls: Vec<String>,
         registered: HashMap<String, String>,
+        state: Option<String>,
     }
 
     impl FakeScheduler {
         fn with_task(mut self, name: &str, xml: &str) -> Self {
             self.registered.insert(name.to_string(), xml.to_string());
+            self
+        }
+
+        fn with_state(mut self, state: &str) -> Self {
+            self.state = Some(state.to_string());
             self
         }
 
@@ -1331,6 +1378,13 @@ mod tests {
         fn query_xml(&mut self, name: &str) -> Result<Option<String>> {
             self.calls.push(format!("/Query /TN {name} /XML"));
             Ok(self.registered.get(name).cloned())
+        }
+
+        fn task_state(&mut self, name: &str) -> Result<String> {
+            self.calls.push(format!("/Query /TN {name} State"));
+            self.state
+                .clone()
+                .ok_or_else(|| format!("Get-ScheduledTask failed for task {name}"))
         }
     }
 
@@ -1592,17 +1646,23 @@ mod tests {
         assert!(scheduler.calls.is_empty(), "the second run issues nothing: {:?}", scheduler.calls);
     }
 
-    /// Todo 14: an Absent legacy owner's task is deleted once and its record removed; the second
-    /// run issues no call. A task that is already gone only loses its record.
+    /// Todo 14: an Absent legacy owner's `Ready` task is deleted once and its record removed; the
+    /// second run issues no call. A task that is already gone only loses its record.
     #[test]
     fn legacy_task_with_absent_owner_is_removed_once() {
         let f = Fixture::new();
         let (name, xml) = install_legacy_task(&f);
-        let mut scheduler = FakeScheduler::default().with_task(&name, &xml);
+        let mut scheduler = FakeScheduler::default()
+            .with_task(&name, &xml)
+            .with_state("Ready");
         assert_eq!(migrate_legacy_task_with(&f.env(), &mut scheduler, true), Ok(true));
         assert_eq!(
             scheduler.calls,
-            vec![format!("/Query /TN {name}"), format!("/Delete /TN {name} /F")]
+            vec![
+                format!("/Query /TN {name}"),
+                format!("/Query /TN {name} State"),
+                format!("/Delete /TN {name} /F"),
+            ]
         );
         assert_never_ends(&scheduler.calls);
         assert!(!f.xml_path(&name).exists());
@@ -1616,6 +1676,38 @@ mod tests {
         assert_eq!(migrate_legacy_task_with(&f.env(), &mut gone, true), Ok(true));
         assert_eq!(gone.calls, vec![format!("/Query /TN {name}")]);
         assert!(!f.xml_path(&name).exists());
+    }
+
+    /// Todo 14: an Absent owner's legacy task whose State is not idle (`Running`, so its watchdog may
+    /// still respawn the daemon) or cannot be read is kept: zero `/Delete`, it only loses its logon
+    /// trigger, and its record stays. A second run issues no mutation.
+    #[test]
+    fn legacy_task_with_absent_owner_is_kept_while_running_or_unreadable() {
+        for state in [Some("Running"), None] {
+            let f = Fixture::new();
+            let (name, xml) = install_legacy_task(&f);
+            let mut scheduler = FakeScheduler::default().with_task(&name, &xml);
+            scheduler.state = state.map(str::to_string);
+            assert_eq!(migrate_legacy_task_with(&f.env(), &mut scheduler, true), Ok(true), "{state:?}");
+            assert_eq!(scheduler.calls.len(), 4, "{state:?}: {:?}", scheduler.calls);
+            assert_eq!(scheduler.calls[0], format!("/Query /TN {name}"));
+            assert_eq!(scheduler.calls[1], format!("/Query /TN {name} State"));
+            assert_eq!(scheduler.calls[2], format!("/Query /TN {name} /XML"));
+            assert!(scheduler.calls[3].starts_with(&format!("/Create /TN {name} /XML ")));
+            assert!(
+                !scheduler.calls.iter().any(|call| call.starts_with("/Delete")),
+                "{state:?}: {:?}",
+                scheduler.calls
+            );
+            assert_never_ends(&scheduler.calls);
+            let registered = scheduler.registered.get(&name).unwrap().clone();
+            assert!(!has_logon_trigger(&registered), "{registered}");
+            assert!(f.xml_path(&name).exists(), "the legacy task stays registered");
+
+            scheduler.calls.clear();
+            assert_eq!(migrate_legacy_task_with(&f.env(), &mut scheduler, true), Ok(false));
+            assert!(scheduler.mutations().is_empty(), "{state:?}: {:?}", scheduler.calls);
+        }
     }
 
     #[test]
