@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ferryx Mobile",
+  "version": "0.1.0",
+  "identifier": "com.ferryx.mobile",
+  "build": {
+    "beforeDevCommand": "npm --prefix ../ui run dev:mobile",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm --prefix ../ui run build:mobile",
+    "frontendDist": "../../ui/dist-mobile"
+  },
+  "app": {
+    "windows": [{ "label": "main", "title": "Ferryx", "width": 390, "height": 844 }],
+    "security": {
+      "capabilities": [],
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https: wss:; object-src 'none'; base-uri 'self'; frame-src 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": ["icons/icon.png"],
+    "android": { "minSdkVersion": 24 },
+    "iOS": { "minimumSystemVersion": "14.0" }
+  }
+}

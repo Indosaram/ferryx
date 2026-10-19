@@ -1,3 +1,4 @@
+import { isDesktopShell as selectDesktopShell } from "./clientRuntime";
 import {
   APPEARANCE_SETTINGS_EVENT,
   applyAppearanceSettings,
@@ -22,7 +23,7 @@ export function _resetSettingsRuntimeBridgeForTest() {
 }
 
 function isDesktopShell() {
-  return Boolean((window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+  return selectDesktopShell(Boolean((window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__));
 }
 
 function prefersLightScheme() {

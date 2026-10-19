@@ -1,0 +1,14 @@
+{
+  "name": "ferryx-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "tauri": "node scripts/tauri.mjs",
+    "android:init": "node scripts/init-android.mjs",
+    "android:dev": "node scripts/tauri.mjs android dev",
+    "android:build": "node scripts/tauri.mjs android build",
+    "ios:init": "node scripts/tauri.mjs ios init",
+    "ios:dev": "node scripts/tauri.mjs ios dev",
+    "ios:build": "node scripts/tauri.mjs ios build"
+  }
+}
