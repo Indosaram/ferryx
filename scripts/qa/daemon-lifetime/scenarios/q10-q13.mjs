@@ -166,7 +166,9 @@ export async function Q12(ctx, result) {
   const entry = desc.sessions.find((s) => s.backendId === exited);
   assertion(result, 'exited local PTY reports readerOpen=false (or is gone)', !entry || entry.readerOpen === false, entry);
   assertion(result, 'exited entry is not counted live', !liveSessions(desc).some((s) => s.backendId === exited), null);
-  // disconnected SSH entry: stop the private sshd's connection by killing the recorded sshd pid
+  // Disconnected SSH entry. Stopping the recorded sshd listener does not necessarily drop an
+  // established connection, so the assertion is the predicate itself on whatever state the daemon
+  // reports: an entry is live exactly when connected is true, and its remote pid is never local.
   if (ctx.sshd && !ctx.sshd.unavailable) {
     const ssh = await conn.call(D.spawnSsh({ clientRequestId: `qa-q12s-${nonce('R')}`, workspaceId: ctx.sshd.workspaceId, hostStorePath: ctx.sshd.hostStorePath }), 60_000);
     if (ssh.type === 'spawnOk') {
@@ -174,7 +176,8 @@ export async function Q12(ctx, result) {
       const rows = (await conn.describe()).sessions;
       const s = rows.find((x) => x.backendId === ssh.sessionId);
       await evidence(ctx, result, 'disconnected.json', s ?? null);
-      assertion(result, 'disconnected SSH entry never satisfies the live predicate', !s || !isLive(s) || s.connected === true, s);
+      assertion(result, 'SSH entry is live exactly when connected', !s || isLive(s) === (s.connected === true), s);
+      assertion(result, 'a disconnected SSH entry is excluded from Inventory', !s || s.connected || !liveSessions(await conn.describe()).some((x) => x.backendId === s.backendId), s);
       assertion(result, 'remote_pid never placed in local_child_pid', !s || s.localChildPid == null, s);
       ctx.sshd = null;
     }
