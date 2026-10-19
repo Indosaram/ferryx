@@ -115,7 +115,10 @@ fn record_owner_alive(probe: &dyn OwnerProbe, record: &OwnerRecord) -> bool {
 ///     Unknown: that watchdog may still respawn its daemon, so starting another would race it.
 /// 6. Free + Missing otherwise (no record, dead pid, different start time) -> Absent
 pub(crate) fn classify_owner(probe: &dyn OwnerProbe) -> OwnerState {
-    classify_owner_with(probe, cfg!(windows))
+    let state = classify_owner_with(probe, cfg!(windows));
+    #[cfg(feature = "local-split-qa")]
+    let state = qa_probe_fault::annotate(state);
+    state
 }
 
 /// [classify_owner] with row 5c switched explicitly, so every target can test both forms.
@@ -441,6 +444,98 @@ pub(crate) fn process_start_time(_pid: u32) -> Option<u64> {
     None
 }
 
+/// Deterministic owner-probe faults for QA (todo 12 Q05, feature local-split-qa only).
+/// `FERRYX_QA_PROBE_FAULT=inspect-denied|start-time-mismatch|record-unreadable` is read once per
+/// process, applied by [RuntimeProbe] to the next classification only, and then cleared. The
+/// classification it produced carries the fault name in its Unknown reason, so the GUI's
+/// admission log line names both.
+#[cfg(feature = "local-split-qa")]
+pub(crate) mod qa_probe_fault {
+    use super::OwnerState;
+    use std::cell::Cell;
+    use std::sync::{Mutex, OnceLock};
+
+    pub(crate) const PROBE_FAULT_ENV: &str = "FERRYX_QA_PROBE_FAULT";
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum ProbeFault {
+        /// The lock state cannot be inspected (row 1).
+        InspectDenied,
+        /// The recorded owner pid's start time differs from owner.json.
+        StartTimeMismatch,
+        /// owner.json cannot be read.
+        RecordUnreadable,
+    }
+
+    impl ProbeFault {
+        pub(crate) fn parse(raw: &str) -> Option<Self> {
+            match raw.trim() {
+                "inspect-denied" => Some(Self::InspectDenied),
+                "start-time-mismatch" => Some(Self::StartTimeMismatch),
+                "record-unreadable" => Some(Self::RecordUnreadable),
+                _ => None,
+            }
+        }
+
+        pub(crate) fn as_str(self) -> &'static str {
+            match self {
+                Self::InspectDenied => "inspect-denied",
+                Self::StartTimeMismatch => "start-time-mismatch",
+                Self::RecordUnreadable => "record-unreadable",
+            }
+        }
+    }
+
+    /// The process's one fault, taken by the first classification that reads it.
+    fn pending() -> &'static Mutex<Option<ProbeFault>> {
+        static PENDING: OnceLock<Mutex<Option<ProbeFault>>> = OnceLock::new();
+        PENDING.get_or_init(|| {
+            let raw = std::env::var(PROBE_FAULT_ENV).ok();
+            let fault = raw.as_deref().and_then(ProbeFault::parse);
+            if let (Some(raw), None) = (raw.as_deref(), fault) {
+                tracing::warn!("{PROBE_FAULT_ENV}={raw} is not a known probe fault; ignored");
+            }
+            Mutex::new(fault)
+        })
+    }
+
+    thread_local! {
+        /// The fault applied to the classification running on this thread.
+        static ACTIVE: Cell<Option<ProbeFault>> = const { Cell::new(None) };
+    }
+
+    /// Called at the start of a classification (the lock read): takes the pending fault, once.
+    pub(crate) fn begin_classification() -> Option<ProbeFault> {
+        if let Some(fault) = pending().lock().ok().and_then(|mut pending| pending.take()) {
+            ACTIVE.with(|active| active.set(Some(fault)));
+        }
+        active()
+    }
+
+    pub(crate) fn active() -> Option<ProbeFault> {
+        ACTIVE.with(Cell::get)
+    }
+
+    /// Ends the classification: clears the fault and names it in the Unknown it produced.
+    pub(crate) fn annotate(state: OwnerState) -> OwnerState {
+        let Some(fault) = ACTIVE.with(|active| active.replace(None)) else {
+            return state;
+        };
+        match state {
+            OwnerState::Unknown { reason } => OwnerState::Unknown {
+                reason: format!("{reason} ({PROBE_FAULT_ENV}={})", fault.as_str()),
+            },
+            other => other,
+        }
+    }
+
+    /// Test seam: applies `fault` to the next classification on this thread without the env.
+    #[cfg(test)]
+    pub(crate) fn arm_on_this_thread(fault: ProbeFault) {
+        ACTIVE.with(|active| active.set(Some(fault)));
+    }
+}
+
 /// Probes one daemon lock without creating it. Free locks are released immediately.
 fn probe_lock(path: &Path) -> Result<bool, String> {
     let file = match OpenOptions::new().read(true).write(true).open(path) {
@@ -459,6 +554,12 @@ pub(crate) struct RuntimeProbe<'a> {
 
 impl OwnerProbe for RuntimeProbe<'_> {
     fn lock_state(&self) -> LockState {
+        // Every classification reads the lock first, so this is where the one-shot QA fault
+        // (if any) is taken for the classification that follows.
+        #[cfg(feature = "local-split-qa")]
+        if qa_probe_fault::begin_classification() == Some(qa_probe_fault::ProbeFault::InspectDenied) {
+            return LockState::Error;
+        }
         let persistent = match &self.paths.persistent_lock {
             Some(path) => probe_lock(path),
             None => Ok(false),
@@ -472,11 +573,20 @@ impl OwnerProbe for RuntimeProbe<'_> {
     }
 
     fn read_record(&self) -> Result<Option<OwnerRecord>, String> {
+        #[cfg(feature = "local-split-qa")]
+        if qa_probe_fault::active() == Some(qa_probe_fault::ProbeFault::RecordUnreadable) {
+            return Err(format!("{}=record-unreadable", qa_probe_fault::PROBE_FAULT_ENV));
+        }
         read_record(&self.paths.owner)
     }
 
     fn process_start_time(&self, pid: u32) -> Option<u64> {
-        process_start_time(pid)
+        let start_time = process_start_time(pid);
+        #[cfg(feature = "local-split-qa")]
+        if qa_probe_fault::active() == Some(qa_probe_fault::ProbeFault::StartTimeMismatch) {
+            return start_time.map(|start| start.wrapping_add(1));
+        }
+        start_time
     }
 
     fn endpoint(&self) -> Result<Endpoint, String> {
@@ -1114,6 +1224,59 @@ mod tests {
         let pid = std::process::id();
         let first = process_start_time(pid).expect("own start time");
         assert_eq!(process_start_time(pid), Some(first));
+    }
+
+    #[cfg(feature = "local-split-qa")]
+    mod qa_probe_fault_tests {
+        use super::super::qa_probe_fault::{arm_on_this_thread, ProbeFault, PROBE_FAULT_ENV};
+        use super::*;
+
+        fn held_alive_owner(dir: &Path) -> (AdmissionPaths, crate::daemon::server::DaemonLockFile) {
+            let paths = paths_in(dir);
+            let file = crate::daemon::server::open_secure_lock_file(&paths.legacy_lock).unwrap();
+            let held = crate::daemon::server::DaemonLockFile::try_lock(file).unwrap();
+            publish_owner(&paths, "gen", 9).unwrap();
+            (paths, held)
+        }
+
+        #[test]
+        fn probe_fault_names_parse_and_round_trip() {
+            for name in ["inspect-denied", "start-time-mismatch", "record-unreadable"] {
+                assert_eq!(ProbeFault::parse(name).unwrap().as_str(), name);
+            }
+            assert_eq!(ProbeFault::parse("bogus"), None);
+        }
+
+        /// Each fault turns an Alive owner into a typed Unknown naming the fault, and only for
+        /// the one classification it was applied to.
+        #[test]
+        fn each_fault_yields_unknown_once_then_clears() {
+            for fault in [ProbeFault::InspectDenied, ProbeFault::StartTimeMismatch, ProbeFault::RecordUnreadable] {
+                let dir = tempfile::tempdir().unwrap();
+                let (paths, _held) = held_alive_owner(dir.path());
+                let probe = RuntimeProbe { paths: &paths };
+                arm_on_this_thread(fault);
+                match classify_owner(&probe) {
+                    OwnerState::Unknown { reason } => {
+                        let tag = format!("{PROBE_FAULT_ENV}={}", fault.as_str());
+                        assert!(reason.contains(&tag), "{reason}");
+                        assert!(format!("{:?}", OwnerState::Unknown { reason: reason.clone() }).contains(fault.as_str()));
+                    }
+                    other => panic!("{fault:?} must classify Unknown, got {other:?}"),
+                }
+                assert!(
+                    matches!(classify_owner(&probe), OwnerState::Alive { pid, .. } if pid == std::process::id()),
+                    "{fault:?} must apply to one classification only"
+                );
+            }
+        }
+
+        #[test]
+        fn no_fault_leaves_classification_unchanged() {
+            let dir = tempfile::tempdir().unwrap();
+            let (paths, _held) = held_alive_owner(dir.path());
+            assert!(matches!(classify_owner(&RuntimeProbe { paths: &paths }), OwnerState::Alive { .. }));
+        }
     }
 
     #[test]
