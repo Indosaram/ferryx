@@ -77,14 +77,14 @@ test('hook probe marks absent product hooks and gates the scenarios that need th
 
 test('todo 12 product hooks exist in this checkout; only todo 8/9 hooks may still block', () => {
   const repo = new URL('../../../', import.meta.url).pathname;
-  const todo12 = ['listenerStall', 'probeFault', 'buildSalt', 'forceFallback', 'macPlistForwardsIsolationEnv', 'jobForwardsQaBarrier', 'detachGuard'];
+  const todo12 = ['listenerStall', 'probeFault', 'buildSalt', 'forceFallback', 'macPlistForwardsIsolationEnv', 'jobForwardsQaBarrier', 'detachGuard', 'writeAckHoldArm'];
   for (const platform of ['mac', 'linux', 'windows']) {
     const hooks = probeHooks(repo, platform);
     for (const id of todo12) assert.equal(hooks[id].present, true, `${platform}: ${id} must be present`);
     for (const [id, r] of Object.entries(hooks)) {
-      if (!r.present) assert.match(HOOKS.find((h) => h.id === id).owner, /^todo (8|9|11\/12)\b/, `${platform}: ${id} missing for a non-todo-8/9 reason`);
+      if (!r.present) assert.match(HOOKS.find((h) => h.id === id).owner, /^todo (8|9)\b/, `${platform}: ${id} missing for a non-todo-8/9 reason`);
     }
-    for (const id of ['Q00', 'Q04', 'Q05', 'Q06', 'Q06w', 'Q07']) assert.deepEqual(missingHooksFor(id, hooks), [], `${platform} ${id}`);
+    for (const id of ['Q00', 'Q04', 'Q05', 'Q06', 'Q06w', 'Q07', 'Q11']) assert.deepEqual(missingHooksFor(id, hooks), [], `${platform} ${id}`);
   }
 });
 

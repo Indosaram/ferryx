@@ -134,6 +134,11 @@ export async function Q11(ctx, result) {
   const applied = await ctx.agent.call('waitLog', { file: path.join(ctx.layout.barrier, 'write-ack-hold.receipt.jsonl'), pattern: `"write-applied"[^\\n]*"${sid}"`, deadlineMs: 30_000 });
   assertion(result, 'write-applied observed while the ack is held', Boolean(applied.matched), applied);
   const quit = await ctx.gui.quit(ctx.state.gui);
+  // The held WriteOk went down with the quit GUI's connection; release the arm so later writes
+  // to this session (the interrupt below) are acknowledged normally.
+  await ctx.agent.call('writeFile', { file: path.join(ctx.layout.barrier, 'write-ack-hold.release.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
+  const released = await ctx.agent.call('waitLog', { file: path.join(ctx.layout.barrier, 'write-ack-hold.receipt.jsonl'), pattern: `"released"[^\\n]*"${sid}"`, deadlineMs: 10_000 });
+  assertion(result, 'write-ack hold released after the GUI quit', Boolean(released.matched), released);
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A);
   const conn2 = await dataConn(ctx);
   const after = await conn2.describe();

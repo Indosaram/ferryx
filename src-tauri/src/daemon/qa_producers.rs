@@ -95,7 +95,96 @@ pub async fn install_and_start(server: &Arc<super::server::DaemonServer>) {
         return;
     };
     let server = Arc::clone(server);
+    tokio::spawn(run_write_ack_hold_watcher(Arc::clone(&channel)));
     tokio::spawn(async move { run_held_rpc_watcher(server, channel).await });
+}
++/// Runner-facing arm for QaWriteAckHold (todo 11's uncertain-write fixture, todo 12 Q11). The
+/// runner writes `<barrier>/write-ack-hold.request.json` { runId, operationId, sessionId } to arm
+/// the hold for that session, and `write-ack-hold.release.json` with the same three fields to
+/// release it. Every transition and every write-applied event is a line in
+/// `write-ack-hold.receipt.jsonl`. A control from another run is ignored.
+pub const WRITE_ACK_HOLD_ARM: &str = "write-ack-hold";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WriteAckHoldControl {
+    pub operation_id: String,
+    pub session_id: String,
+}
+
+/// The hold this daemon armed from the runner's request, and whether it was released.
+#[derive(Debug, Default)]
+pub(crate) struct WriteAckHoldState {
+    armed: Option<WriteAckHoldControl>,
+    released: bool,
+}
+
+fn read_write_ack_hold_control(dir: &Path, suffix: &str, run_id: &str) -> Option<WriteAckHoldControl> {
+    let text = std::fs::read_to_string(dir.join(format!("{WRITE_ACK_HOLD_ARM}.{suffix}"))).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    if value.get("runId").and_then(Value::as_str) != Some(run_id) {
+        return None;
+    }
+    let field = |key: &str| value.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(str::to_string);
+    Some(WriteAckHoldControl { operation_id: field("operationId")?, session_id: field("sessionId")? })
+}
+
+/// One poll of the runner's controls: arms a new request, releases the armed hold on its
+/// matching release. Returns the transitions it made, in order.
+pub(crate) fn poll_write_ack_hold(
+    dir: &Path,
+    run_id: &str,
+    hold: &qa_barrier::QaWriteAckHold,
+    state: &mut WriteAckHoldState,
+) -> Vec<(&'static str, WriteAckHoldControl)> {
+    let mut changes = Vec::new();
+    if let Some(request) = read_write_ack_hold_control(dir, "request.json", run_id) {
+        if state.armed.as_ref() != Some(&request) {
+            hold.arm(&request.session_id);
+            state.armed = Some(request.clone());
+            state.released = false;
+            changes.push(("armed", request));
+        }
+    }
+    if let Some(armed) = state.armed.clone().filter(|_| !state.released) {
+        if read_write_ack_hold_control(dir, "release.json", run_id).as_ref() == Some(&armed) {
+            hold.release(&armed.session_id);
+            state.released = true;
+            changes.push(("released", armed));
+        }
+    }
+    changes
+}
+
+async fn run_write_ack_hold_watcher(channel: Arc<QaBarrierChannel>) {
+    let hold = qa_barrier::write_ack_hold();
+    let mut applied = hold.subscribe_applied();
+    let mut state = WriteAckHoldState::default();
+    let mut ticker = tokio::time::interval(Duration::from_millis(WATCH_TICK_MS));
+    loop {
+        tokio::select! {
+            event = applied.recv() => {
+                let Ok(event) = event else { continue };
+                let operation_id = state.armed.as_ref().map(|c| c.operation_id.clone()).unwrap_or_default();
+                qa_barrier::append_receipt_off_runtime(&channel, WRITE_ACK_HOLD_ARM, &operation_id,
+                    json!({ "event": "write-applied", "sessionId": event.session_id, "seq": event.seq })).await;
+            }
+            _ = ticker.tick() => {
+                let dir = channel.dir().to_path_buf();
+                let run_id = channel.run_id().to_string();
+                let polled = crate::ipc::run_blocking(move || {
+                    let changes = poll_write_ack_hold(&dir, &run_id, qa_barrier::write_ack_hold(), &mut state);
+                    Ok((state, changes))
+                })
+                .await;
+                let Ok((next, changes)) = polled else { return };
+                state = next;
+                for (event, control) in changes {
+                    qa_barrier::append_receipt_off_runtime(&channel, WRITE_ACK_HOLD_ARM, &control.operation_id,
+                        json!({ "event": event, "sessionId": control.session_id })).await;
+                }
+            }
+        }
+    }
 }
 
 /// A control that does not echo this run's nonces is never honored.
@@ -742,6 +831,42 @@ mod tests {
 
     const TEST_RUN_ID: &str = "qa-run-daemon";
     const TEST_OPERATION_ID: &str = "qa-op-daemon";
++
+    #[test]
+    fn write_ack_hold_is_armed_and_released_only_by_this_runs_controls() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let hold = qa_barrier::QaWriteAckHold::new();
+        let mut state = WriteAckHoldState::default();
+        let control = |suffix: &str, run: &str, op: &str| {
+            std::fs::write(
+                dir.join(format!("{WRITE_ACK_HOLD_ARM}.{suffix}")),
+                json!({ "runId": run, "operationId": op, "sessionId": "ssh-1" }).to_string(),
+            )
+            .unwrap();
+        };
+        assert!(poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state).is_empty());
+        control("request.json", "qa-run-OTHER", "op-1");
+        assert!(poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state).is_empty(), "another run's arm is ignored");
+        assert!(hold.applied("ssh-1").is_none());
+
+        control("request.json", TEST_RUN_ID, "op-1");
+        let changes = poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, "armed");
+        assert_eq!(changes[0].1.session_id, "ssh-1");
+        assert!(poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state).is_empty(), "one request arms once");
+        let parked = hold.applied("ssh-1").expect("armed: the WriteOk parks");
+
+        control("release.json", TEST_RUN_ID, "op-OTHER");
+        assert!(poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state).is_empty(), "a wrong-operation release is ignored");
+        control("release.json", TEST_RUN_ID, "op-1");
+        let changes = poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state);
+        assert_eq!(changes.iter().map(|c| c.0).collect::<Vec<_>>(), ["released"]);
+        assert!(hold.applied("ssh-1").is_none(), "released: disarmed");
+        drop(parked);
+        assert!(poll_write_ack_hold(dir, TEST_RUN_ID, &hold, &mut state).is_empty(), "release applies once");
+    }
 
     fn arm(dir: &Path, name: &str, run_id: &str, operation_id: &str) {
         std::fs::write(
