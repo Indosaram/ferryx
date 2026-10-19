@@ -4264,13 +4264,9 @@ impl DaemonServer {
         // clear the launcher's pending-start marker. A failure only weakens admission to
         // Unknown (never a second start), so it is logged rather than fatal.
         let admission_paths = crate::daemon::owner_admission::AdmissionPaths::for_runtime();
-        if let Err(error) = crate::daemon::owner_admission::publish_owner(
-            &admission_paths,
-            &crate::daemon::owner_admission::current_generation_key(),
-            self.epoch,
-        ) {
-            tracing::warn!(%error, "Could not publish the daemon owner record");
-        }
+        // A failed publication is retried every second on its own task (todo 8); serving does
+        // not wait for it.
+        Arc::clone(&self).spawn_owner_publication(admission_paths);
 
         // Clean up stale socket only after lock acquisition and safe ownership check.
         if !adopted_authority {
@@ -6094,6 +6090,70 @@ impl DaemonServer {
     fn serves_paired_here(&self, session_id: &str) -> bool {
         crate::terminal::paired_runtime::Runtime::owns(session_id)
             && self.session_router.find_legacy_peer_for_session(session_id).is_none()
+    }
+
+    /// Publishes owner.json naming this daemon; failures are retried on a 1 s task.
+    fn spawn_owner_publication(
+        self: Arc<Self>,
+        paths: crate::daemon::owner_admission::AdmissionPaths,
+    ) -> tokio::task::JoinHandle<u32> {
+        use crate::daemon::owner_admission::{
+            current_generation_key, publish_owner, publish_owner_until_published,
+            OWNER_PUBLISH_RETRY,
+        };
+        let epoch = self.epoch;
+        let generation_key = current_generation_key();
+        tokio::spawn(async move {
+            publish_owner_until_published(
+                || {
+                    let paths = paths.clone();
+                    let generation_key = generation_key.clone();
+                    let fault = self.owner_publish_fault();
+                    async move {
+                        if fault {
+                            return Err("Injected owner.json publication failure".to_string());
+                        }
+                        crate::ipc::run_blocking(move || {
+                            publish_owner(&paths, &generation_key, epoch)
+                                .map_err(crate::ipc::IpcError::internal)
+                        })
+                        .await
+                        .map_err(|error| error.to_string())
+                    }
+                },
+                || Box::pin(tokio::time::sleep(OWNER_PUBLISH_RETRY)),
+            )
+            .await
+        })
+    }
+
+    /// Consumes one injected owner.json publication failure, if armed (QA:
+    /// FERRYX_QA_OWNER_PUBLISH_FAILURES=n under local-split-qa).
+    fn owner_publish_fault(&self) -> bool {
+        #[cfg(feature = "local-split-qa")]
+        {
+            static REMAINING: std::sync::OnceLock<std::sync::atomic::AtomicU32> =
+                std::sync::OnceLock::new();
+            let remaining = REMAINING.get_or_init(|| {
+                std::sync::atomic::AtomicU32::new(
+                    std::env::var("FERRYX_QA_OWNER_PUBLISH_FAILURES")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0),
+                )
+            });
+            remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok()
+        }
+        #[cfg(not(feature = "local-split-qa"))]
+        {
+            false
+        }
     }
 
     /// Protocol-5 UpgradeBinary path kept unchanged for pre-plan GUIs: the successor is this
