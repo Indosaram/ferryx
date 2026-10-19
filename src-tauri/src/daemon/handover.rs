@@ -1,4 +1,4 @@
-use crate::daemon::manifest::{get_manifest_path, HandoverManifest, HandoverRoute};
+use crate::daemon::manifest::{HandoverManifest, HandoverRoute};
 use crate::daemon::server::{get_runtime_dir, DaemonLockFiles};
 use crate::terminal::TerminalService;
 use parking_lot::{Mutex, RwLock};
@@ -73,6 +73,10 @@ pub(crate) fn upgrade_action(live_sessions: usize, session_transfer_supported: b
 /// Every refusal also names the guard identity (the handover status, or the in-flight
 /// spawn count), so a blocked handover is observable instead of a bare token.
 pub(crate) const HANDOVER_BUSY: &str = "HANDOVER_BUSY";
+
+/// Answer of a committed predecessor to a request for a local session it transferred to its
+/// successor (todo 8): the successor is that session's only owner.
+pub(crate) const SESSION_NOT_OWNED: &str = "SESSION_NOT_OWNED";
 
 /// True when `message` is the retryable spawn-gate refusal. Only this module produces the
 /// token, so the check cannot misclassify another handover failure.
@@ -958,6 +962,9 @@ pub struct HandoverManager {
     /// Signalled whenever in_flight returns to zero; the Committing gate waits on it.
     in_flight_zero: parking_lot::Condvar,
     commit_fault: Mutex<Option<CommitFault>>,
+    /// Local sessions this daemon exported to a candidate. After commit they belong to the
+    /// successor and every request for one is answered SESSION_NOT_OWNED here.
+    transferred_locals: Mutex<std::collections::HashSet<String>>,
     #[cfg(test)]
     committing_hook: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     retirement_action: RwLock<Arc<dyn Fn() + Send + Sync>>,
@@ -1074,6 +1081,7 @@ impl HandoverManager {
             in_flight: Mutex::new(0),
             in_flight_zero: parking_lot::Condvar::new(),
             commit_fault: Mutex::new(None),
+            transferred_locals: Mutex::new(std::collections::HashSet::new()),
             #[cfg(test)]
             committing_hook: Mutex::new(None),
             retirement_action: RwLock::new(Arc::new(|| std::process::exit(0))),
@@ -1203,6 +1211,32 @@ impl HandoverManager {
 
     pub(crate) fn commit_fault(&self) -> Option<CommitFault> {
         *self.commit_fault.lock()
+    }
+
+    /// Records a local session exported over the handover socket.
+    pub(crate) fn note_transferred_local(&self, session_id: &str) {
+        self.transferred_locals.lock().insert(session_id.to_owned());
+    }
+
+    /// Forgets the exported set after an abort: the sessions are this daemon's again.
+    pub(crate) fn clear_transferred_locals(&self) {
+        self.transferred_locals.lock().clear();
+    }
+
+    pub(crate) fn transferred_locals(&self) -> Vec<String> {
+        self.transferred_locals.lock().iter().cloned().collect()
+    }
+
+    /// True once a committed decision handed session_id to the successor.
+    pub(crate) fn session_not_owned(&self, session_id: &str) -> bool {
+        matches!(self.status(), HandoverStatus::Draining | HandoverStatus::Retired)
+            && self.transferred_locals.lock().contains(session_id)
+    }
+
+    /// The route manifest beside this generation's legacy socket (the runtime directory in
+    /// production, where get_manifest_path also points).
+    fn manifest_path_for(legacy: &std::path::Path) -> PathBuf {
+        legacy.with_file_name("handover_routes.json")
     }
 
     /// Test fixture: a manager that has prepared a handover on legacy.
@@ -1512,6 +1546,36 @@ impl HandoverManager {
             self.reopen_commit_gate();
             return Err(format!("Commit gate was left in state {observed:?}"));
         }
+        // SSH and paired sessions are never moved (GAP-10): they stay with this daemon, which
+        // keeps serving them on its legacy socket. Their direct route is written before the
+        // decision, with the gate closed, so the successor adopts it at startup and restores no
+        // controller for them. Routes of older generations are left untouched.
+        let retained: Vec<String> = _terminal_service
+            .remote()
+            .list()
+            .into_iter()
+            .chain(_terminal_service.paired().list())
+            .collect();
+        if !retained.is_empty() {
+            let legacy = self.legacy_socket_path.read().clone();
+            let route = legacy
+                .ok_or_else(|| "Retained sessions need a legacy socket".to_string())
+                .and_then(|legacy_socket_path| {
+                    HandoverManifest::update_at_path(&Self::manifest_path_for(&legacy_socket_path), |manifest| {
+                        manifest.add_or_update_route(HandoverRoute {
+                            legacy_socket_path,
+                            sessions: retained.clone(),
+                        });
+                    })
+                    .map(|_| ())
+                    .map_err(|error| format!("Failed to persist the retained-session route: {error}"))
+                });
+            if let Err(error) = route {
+                drop(status_guard);
+                self.reopen_commit_gate();
+                return Err(error);
+            }
+        }
         let decision = if self.commit_fault() == Some(CommitFault::DecisionWrite) {
             Err("Injected decision write failure".to_string())
         } else {
@@ -1538,6 +1602,18 @@ impl HandoverManager {
 
         if let Some(tx) = self.commit_notify_tx.lock().take() {
             let _ = tx.send(());
+        }
+
+        if !retained.is_empty() {
+            // The durable decision stays Retired; the process keeps serving only its retained
+            // sessions and exits through check_retirement_if_empty once the last one closes.
+            *status_guard = HandoverStatus::Draining;
+            self.is_draining.store(true, Ordering::SeqCst);
+            tracing::info!(
+                retained = retained.len(),
+                "Committed handover; draining the retained SSH/paired sessions on the legacy socket"
+            );
+            return Ok(());
         }
 
         *status_guard = HandoverStatus::Retired;
@@ -1641,6 +1717,7 @@ impl HandoverManager {
     pub fn retire(&self) {
         *self.status.write() = HandoverStatus::Retired;
         self.is_draining.store(false, Ordering::SeqCst);
+        self.set_accept_gate(false);
         let legacy_path = self.legacy_socket_path.write().take();
         let retirement_action = self.retirement_action.read().clone();
         tokio::spawn(async move {
@@ -1651,7 +1728,7 @@ impl HandoverManager {
                             "Legacy socket cleanup failed: {error}"
                         ))
                     })?;
-                    HandoverManifest::update_at_path(&get_manifest_path(), |manifest| {
+                    HandoverManifest::update_at_path(&Self::manifest_path_for(&path), |manifest| {
                         manifest.remove_route(&path);
                     })
                     .map_err(|error| {

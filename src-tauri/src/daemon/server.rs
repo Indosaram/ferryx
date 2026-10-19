@@ -2419,6 +2419,201 @@ mod live_inventory_paired_tests {
         teardown(host, accept, daemon, &id).await;
     }
 
+    /// Makes daemon a committed predecessor that kept its paired session: prepared on a
+    /// legacy socket inside root, then committed through the real v5 commit.
+    async fn commit_predecessor_keeping_retained(daemon: &Arc<DaemonServer>, root: &Path) -> PathBuf {
+        let legacy = root.join("legacy-a.sock");
+        let listener = tokio::net::UnixListener::bind(&legacy).unwrap();
+        Arc::clone(daemon).serve_legacy_handover_socket(listener);
+        daemon.handover_manager.force_prepared_for_test(legacy.clone());
+        let (retired_tx, _retired_rx) = std::sync::mpsc::channel::<()>();
+        let retired_tx = std::sync::Mutex::new(retired_tx);
+        daemon.handover_manager.set_retirement_action(move || {
+            let _ = retired_tx.lock().unwrap().send(());
+        });
+        let manager = Arc::clone(&daemon.handover_manager);
+        let service = Arc::clone(&daemon.terminal_service);
+        tokio::task::spawn_blocking(move || manager.commit_handover_v5(&service))
+            .await
+            .unwrap()
+            .expect("commit with a retained paired session");
+        legacy
+    }
+
+    /// GAP-10: a successful handover leaves a paired session owned and served by the
+    /// predecessor (Draining); the successor routes to it directly and creates no controller.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn committed_predecessor_keeps_serving_its_paired_session_through_the_successor() {
+        let root = tempfile::tempdir().unwrap();
+        let host = mock_host().await;
+        let (daemon, socket, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
+        let client = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
+        let (id, generation) = client.paired_terminal_reattach(descriptor).await.unwrap();
+        let before = live_entry(&socket, &id).await;
+
+        let legacy = commit_predecessor_keeping_retained(&daemon, root.path()).await;
+        assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Draining);
+        assert_eq!(
+            crate::daemon::handover::HandoverManager::recorded_decision(&legacy).unwrap(),
+            Some(crate::daemon::handover_transaction::HandoverState::Retired),
+            "the durable decision stays Retired while the process drains"
+        );
+        assert!(!daemon.handover_manager.accept_gate_open(), "public listeners accept nothing after commit");
+        let manifest = crate::daemon::manifest::HandoverManifest::load_from_path(&root.path().join("handover_routes.json"));
+        assert!(manifest.routes.iter().any(|r| r.legacy_socket_path == legacy && r.sessions.contains(&id)));
+
+        // The successor adopts the route and restores nothing for the retained session.
+        let successor = Arc::new(DaemonServer::new_with_paths(
+            Some(root.path().join("succ/config")),
+            Some(root.path().join("succ/auth")),
+        ));
+        successor
+            .session_router
+            .adopt_routes_from_manifest_at(root.path().join("handover_routes.json"))
+            .await
+            .unwrap();
+        assert!(successor.terminal_service.paired().list().is_empty(), "successor created a controller");
+        let successor_socket = root.path().join("successor.sock");
+        let successor_listener = tokio::net::UnixListener::bind(&successor_socket).unwrap();
+        let serving = Arc::clone(&successor);
+        let successor_accept = tokio::spawn(async move {
+            while let Ok((stream, _)) = successor_listener.accept().await {
+                let serving = Arc::clone(&serving);
+                tokio::spawn(async move { serving.handle_client(stream).await });
+            }
+        });
+
+        // Input through the successor's socket reaches the predecessor's actor and the host.
+        let mut received = host.received.clone();
+        let baseline = received.borrow().len();
+        let marker = b"todo8-retained\n".to_vec();
+        let through_successor = crate::daemon::client::DaemonClient::new_with_socket(successor_socket.clone());
+        tokio::time::timeout(Duration::from_secs(10), through_successor.write_terminal_at_generation(&id, Some(generation.0), marker.clone()))
+            .await
+            .expect("routed write timed out")
+            .expect("routed write accepted");
+        tokio::time::timeout(Duration::from_secs(10), received.wait_for(|all| all.len() >= baseline + marker.len()))
+            .await
+            .expect("input never reached the host")
+            .unwrap();
+        // Same backend_session_id and remote_pid, still served by the predecessor.
+        let after = live_entry(&socket, &id).await;
+        assert_eq!(after.backend_id, before.backend_id);
+        assert_eq!(after.remote_pid, before.remote_pid);
+        assert!(daemon.terminal_service.paired().contains(&id));
+
+        successor_accept.abort();
+        teardown(host, accept, daemon, &id).await;
+    }
+
+    /// After commit a request for a transferred local session returns SESSION_NOT_OWNED on the
+    /// legacy socket, while the retained paired session keeps being served there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transferred_local_answers_session_not_owned_and_retained_session_is_served() {
+        let root = tempfile::tempdir().unwrap();
+        let host = mock_host().await;
+        let (daemon, socket, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
+        let client = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
+        let (id, _generation) = client.paired_terminal_reattach(descriptor).await.unwrap();
+        daemon.handover_manager.note_transferred_local("local-moved");
+        let legacy = commit_predecessor_keeping_retained(&daemon, root.path()).await;
+
+        let on_legacy = crate::daemon::client::DaemonClient::new_with_socket(legacy.clone());
+        let moved = on_legacy
+            .send_request(DaemonRequest::Write { session_id: "local-moved".into(), data: b"x".to_vec() })
+            .await;
+        match moved {
+            Ok(DaemonResponse::Error { code, .. }) => {
+                assert_eq!(code.as_deref(), Some(crate::daemon::handover::SESSION_NOT_OWNED));
+            }
+            other => panic!("expected SESSION_NOT_OWNED, got {other:?}"),
+        }
+        let retained = live_entry(&legacy, &id).await;
+        assert!(retained.connected, "{retained:?}");
+        teardown(host, accept, daemon, &id).await;
+    }
+
+    /// Chained upgrade A -> B -> C: routes are direct. A keeps its session, B commits holding
+    /// nothing of its own and retires (exit) without waiting for A, C serves A's session through
+    /// A's own route, and A retires only after the session closes and its route is removed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chained_upgrade_routes_directly_to_the_generation_that_owns_the_session() {
+        let root = tempfile::tempdir().unwrap();
+        let host = mock_host().await;
+        let (a, socket_a, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
+        let client = crate::daemon::client::DaemonClient::new_with_socket(socket_a.clone());
+        let (id, generation) = client.paired_terminal_reattach(descriptor).await.unwrap();
+        let remote_pid = live_entry(&socket_a, &id).await.remote_pid;
+        let (a_retired_tx, mut a_retired) = tokio::sync::watch::channel(false);
+        let legacy_a = root.path().join("legacy-a.sock");
+        Arc::clone(&a).serve_legacy_handover_socket(tokio::net::UnixListener::bind(&legacy_a).unwrap());
+        a.handover_manager.force_prepared_for_test(legacy_a.clone());
+        a.handover_manager.set_retirement_action(move || {
+            a_retired_tx.send_replace(true);
+        });
+        {
+            let manager = Arc::clone(&a.handover_manager);
+            let service = Arc::clone(&a.terminal_service);
+            tokio::task::spawn_blocking(move || manager.commit_handover_v5(&service)).await.unwrap().unwrap();
+        }
+        let manifest_path = root.path().join("handover_routes.json");
+
+        // B: adopted A's route, owns nothing itself.
+        let b = Arc::new(DaemonServer::new_with_paths(Some(root.path().join("b/config")), Some(root.path().join("b/auth"))));
+        b.session_router.adopt_routes_from_manifest_at(manifest_path.clone()).await.unwrap();
+        let legacy_b = root.path().join("legacy-b.sock");
+        b.handover_manager.force_prepared_for_test(legacy_b.clone());
+        let (b_retired_tx, b_retired) = std::sync::mpsc::channel::<()>();
+        let b_retired_tx = std::sync::Mutex::new(b_retired_tx);
+        b.handover_manager.set_retirement_action(move || {
+            let _ = b_retired_tx.lock().unwrap().send(());
+        });
+        {
+            let manager = Arc::clone(&b.handover_manager);
+            let service = Arc::clone(&b.terminal_service);
+            tokio::task::spawn_blocking(move || manager.commit_handover_v5(&service)).await.unwrap().unwrap();
+        }
+        // B counts only its own sessions (none): it retires although A still serves one.
+        assert_eq!(b.handover_manager.status(), crate::daemon::handover::HandoverStatus::Retired);
+        tokio::task::spawn_blocking(move || b_retired.recv_timeout(Duration::from_secs(10)))
+            .await
+            .unwrap()
+            .expect("B exits 0 after its commit");
+        let manifest = crate::daemon::manifest::HandoverManifest::load_from_path(&manifest_path);
+        assert!(manifest.routes.iter().all(|r| r.legacy_socket_path != legacy_b), "B wrote a route it does not need");
+        assert!(manifest.routes.iter().any(|r| r.legacy_socket_path == legacy_a), "A's route was disturbed");
+
+        // C: talks to A directly.
+        let c = Arc::new(DaemonServer::new_with_paths(Some(root.path().join("c/config")), Some(root.path().join("c/auth"))));
+        c.session_router.adopt_routes_from_manifest_at(manifest_path.clone()).await.unwrap();
+        let peer = c.session_router.find_legacy_peer_for_session(&id).expect("C routes A's session");
+        assert_eq!(peer.socket_path(), legacy_a.as_path());
+        assert!(c.terminal_service.paired().list().is_empty());
+        let mut received = host.received.clone();
+        let baseline = received.borrow().len();
+        match peer.send_request(&DaemonRequest::RemoteWrite { session_id: id.clone(), generation: generation.0, data: b"chained\n".to_vec() }).await {
+            Ok(DaemonResponse::WriteOk) => {}
+            other => panic!("routed write failed: {other:?}"),
+        }
+        tokio::time::timeout(Duration::from_secs(10), received.wait_for(|all| all.len() >= baseline + 8))
+            .await
+            .expect("chained input never reached the host")
+            .unwrap();
+        assert_eq!(live_entry(&legacy_a, &id).await.remote_pid, remote_pid);
+        assert!(!*a_retired.borrow(), "A must stay while its session is open");
+
+        // Closing A's last session retires A and removes its route.
+        a.terminal_service.paired().detach(&id).await.unwrap();
+        a.handover_manager.check_retirement_if_empty(&a.terminal_service);
+        tokio::time::timeout(Duration::from_secs(10), a_retired.wait_for(|done| *done))
+            .await
+            .expect("A never retired")
+            .unwrap();
+        let manifest = crate::daemon::manifest::HandoverManifest::load_from_path(&manifest_path);
+        assert!(manifest.routes.iter().all(|r| r.legacy_socket_path != legacy_a), "A's route outlived A");
+        teardown(host, accept, a, &id).await;
+    }
+
     #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn held_write_ack_applies_marker_exactly_once_without_resend() {
@@ -2541,6 +2736,25 @@ fn daemon_session_not_found(session_id: &str, source: &'static str) -> DaemonRes
             "kind": "session_not_found",
             "sessionId": session_id,
         })),
+    }
+}
+
+/// The session a per-session request targets, for the SESSION_NOT_OWNED gate of a committed
+/// predecessor.
+fn request_session_id(request: &DaemonRequest) -> Option<&str> {
+    match request {
+        DaemonRequest::Write { session_id, .. }
+        | DaemonRequest::Resize { session_id, .. }
+        | DaemonRequest::Signal { session_id, .. }
+        | DaemonRequest::Close { session_id }
+        | DaemonRequest::Hibernate { session_id }
+        | DaemonRequest::Suspend { session_id, .. }
+        | DaemonRequest::Resume { session_id, .. }
+        | DaemonRequest::DescribeSession { session_id }
+        | DaemonRequest::Attach { session_id, .. }
+        | DaemonRequest::RemoteWrite { session_id, .. }
+        | DaemonRequest::RemoteResize { session_id, .. } => Some(session_id.as_str()),
+        _ => None,
     }
 }
 
@@ -3884,6 +4098,12 @@ impl DaemonServer {
                                 .await;
                             }
                         }
+                        // The predecessor wrote a direct route for every SSH/paired session it
+                        // kept (todo 8). Adopting it first makes the restore below skip them, so
+                        // this daemon creates no controller for a session the predecessor serves.
+                        if let Err(error) = self.session_router.adopt_routes_from_manifest().await {
+                            tracing::error!(%error, "Could not adopt the retained-session routes after commit");
+                        }
                         if let Err(error) = self
                             .restore_remote_sessions_at(self.remote_sessions_path.clone())
                             .await
@@ -4298,6 +4518,18 @@ impl DaemonServer {
 
                     let resp = match req {
                 _ if busy_refusal.is_some() => busy_refusal.take().expect("checked above"),
+                // A committed predecessor never serves a local session it transferred: the
+                // successor is that session's only owner (todo 8).
+                Ok(ref request) if request_session_id(request)
+                    .is_some_and(|id| self.handover_manager.session_not_owned(id)) =>
+                {
+                    let session_id = request_session_id(request).unwrap_or_default().to_owned();
+                    DaemonResponse::Error {
+                        code: Some(super::handover::SESSION_NOT_OWNED.into()),
+                        message: format!("Session '{session_id}' was transferred to the successor daemon"),
+                        details: Some(serde_json::json!({ "sessionId": session_id })),
+                    }
+                }
                 Ok(DaemonRequest::Handshake { version, .. }) => {
                     if self.handover_manager.status() == super::handover::HandoverStatus::Retired {
                         DaemonResponse::Error {
@@ -4436,7 +4668,7 @@ impl DaemonServer {
                         }
                     }
                 },
-                Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
+                Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) if self.serves_paired_here(&session_id) => {
                     match self.terminal_service.write_input_operation(&session_id, generation, data) {
                         Ok(op) => match op.await {
                             Ok(()) => if qa_hold_write_ack(&session_id, &mut reader).await { DaemonResponse::WriteOk } else { break },
@@ -4445,7 +4677,7 @@ impl DaemonServer {
                         Err(e) => daemon_error(e.to_string()),
                     }
                 }
-                Ok(DaemonRequest::RemoteResize { session_id, generation, cols, rows }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
+                Ok(DaemonRequest::RemoteResize { session_id, generation, cols, rows }) if self.serves_paired_here(&session_id) => {
                     self.record_desktop_geometry(&session_id, cols, rows);
                     match self.terminal_service.resize_operation(&session_id, generation, cols, rows) {
                         Ok(op) => match op.await { Ok(()) => DaemonResponse::ResizeOk, Err(e) => daemon_error(e.to_string()) },
@@ -4721,7 +4953,7 @@ impl DaemonServer {
                         DaemonResponse::ResetAgentStateOk
                     }
                 }
-                Ok(DaemonRequest::Write { session_id, data }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
+                Ok(DaemonRequest::Write { session_id, data }) if self.serves_paired_here(&session_id) => {
                     match self.terminal_service.write_input_operation(&session_id, 0, data) {
                         Ok(pending) => match pending.await {
                             Ok(()) => DaemonResponse::WriteOk,
@@ -4730,7 +4962,7 @@ impl DaemonServer {
                         Err(e) => daemon_error(e.to_string()),
                     }
                 }
-                Ok(DaemonRequest::Resize { session_id, cols, rows }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
+                Ok(DaemonRequest::Resize { session_id, cols, rows }) if self.serves_paired_here(&session_id) => {
                     match self.terminal_service.resize_operation(&session_id, 0, cols, rows) {
                         Ok(pending) => match pending.await {
                             Ok(()) => DaemonResponse::ResizeOk,
@@ -5364,6 +5596,7 @@ impl DaemonServer {
                                         // every casualty instead of silently skipping it.
                                         match self.terminal_service.pty_manager().export_session(&session_id) {
                                             Ok(export) => {
+                                                self.handover_manager.note_transferred_local(&session_id);
                                                 // The successor can only take ownership of a session
                                                 // with the record that proves who owns it, so the
                                                 // owner's own record travels with the export. A
@@ -5483,9 +5716,13 @@ impl DaemonServer {
                     }).await {
                         Ok(()) if fault == Some(super::handover::CommitFault::DropReplyAfterRecord) => {
                             tracing::warn!("Injected fault: CommitHandoverOk dropped after the decision");
+                            self.release_transferred_locals().await;
                             break;
                         }
-                        Ok(()) => DaemonResponse::CommitHandoverOk,
+                        Ok(()) => {
+                            self.release_transferred_locals().await;
+                            DaemonResponse::CommitHandoverOk
+                        }
                         Err(e) => handover_failure_response(None, e.to_string()),
                     }
                 }
@@ -5498,6 +5735,7 @@ impl DaemonServer {
                         manager.abort_handover().map_err(crate::ipc::IpcError::internal)
                     }).await {
                         Ok(()) => {
+                            self.handover_manager.clear_transferred_locals();
                             let resumed = self
                                 .terminal_service
                                 .pty_manager()
@@ -5828,6 +6066,34 @@ impl DaemonServer {
             .stash_inherited_listeners(adopted.control_listener, adopted.agent_state_listener);
         tracing::info!("Adopted the predecessor's listeners and locks without a bind or lock gap");
         Ok(adopted.canonical_listener)
+    }
+
+    /// After a committed decision the transferred local PTYs belong to the successor: drop this
+    /// daemon's registry entries without touching the child (the reader stays parked and is
+    /// released, the master fd copy is closed). Only the retained SSH/paired sessions remain, so
+    /// Draining counts nothing but this daemon's own sessions.
+    async fn release_transferred_locals(&self) {
+        for session_id in self.handover_manager.transferred_locals() {
+            if self.terminal_service.get_session(&session_id).is_none() {
+                continue;
+            }
+            if let Err(error) = self
+                .terminal_service
+                .pty_manager()
+                .relinquish_transferred_session(&session_id)
+                .await
+            {
+                tracing::warn!(%session_id, %error, "Could not drop the transferred session entry");
+            }
+            self.session_metadata.write().remove(&session_id);
+        }
+    }
+
+    /// A paired session id is handled by this daemon's own paired runtime unless an older
+    /// generation kept it across an upgrade and still serves it (todo 8): then it is routed.
+    fn serves_paired_here(&self, session_id: &str) -> bool {
+        crate::terminal::paired_runtime::Runtime::owns(session_id)
+            && self.session_router.find_legacy_peer_for_session(session_id).is_none()
     }
 
     /// Protocol-5 UpgradeBinary path kept unchanged for pre-plan GUIs: the successor is this
