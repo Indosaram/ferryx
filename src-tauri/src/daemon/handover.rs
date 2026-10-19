@@ -90,6 +90,10 @@ pub enum HandoverStatus {
     /// (refused with DAEMON_RETIRING) and the daemon exits once nothing is live, spawning or in
     /// flight. Left only by exit, or by Shutdown's COUNT_CHANGED restoring the prior status.
     Retiring,
+    /// Reversible serving gate of a commit (todo 8): no spawn and no new request is admitted
+    /// (HANDOVER_BUSY) and public accepts are stopped while in-flight requests drain. Left for
+    /// Retired/Draining once the decision is written, or back to Prepared on any failure.
+    Committing,
 }
 
 impl HandoverStatus {
@@ -97,12 +101,50 @@ impl HandoverStatus {
         use crate::daemon::control::OwnerStatus;
         match self {
             HandoverStatus::Active => OwnerStatus::Active,
-            HandoverStatus::Prepared => OwnerStatus::Prepared,
+            HandoverStatus::Prepared | HandoverStatus::Committing => OwnerStatus::Prepared,
             HandoverStatus::Draining => OwnerStatus::Draining,
             HandoverStatus::Retired => OwnerStatus::Retired,
             HandoverStatus::Retiring => OwnerStatus::Retiring,
         }
     }
+}
+
+/// Bounded wait for in-flight requests to finish before a commit decision is written.
+pub(crate) const COMMIT_DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How a candidate resolves its CommitHandover exchange: a confirmed reply, or (when the reply
+/// was lost or failed) the predecessor's durable decision record, is the only proof of
+/// ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitResolution {
+    /// The predecessor's decision is Retired: this candidate is the owner and serves.
+    Owner,
+    /// Anything else: relinquish, AbortHandover, close the received fds, exit 0.
+    Abort,
+}
+
+pub(crate) fn resolve_commit(
+    reply_confirmed: bool,
+    recorded: Option<super::handover_transaction::HandoverState>,
+) -> CommitResolution {
+    if reply_confirmed
+        || recorded == Some(super::handover_transaction::HandoverState::Retired)
+    {
+        CommitResolution::Owner
+    } else {
+        CommitResolution::Abort
+    }
+}
+
+/// Faults a test or the QA channel can inject into the predecessor's commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitFault {
+    /// The durable decision write fails.
+    DecisionWrite,
+    /// The CommitHandoverOk reply is dropped before the decision is recorded.
+    DropReplyBeforeRecord,
+    /// The CommitHandoverOk reply is dropped after the decision is recorded.
+    DropReplyAfterRecord,
 }
 
 #[cfg(test)]
@@ -528,6 +570,7 @@ impl Drop for RetirementGuard {
         let mut requests = self.manager.in_flight.lock();
         *requests -= 1;
         if *requests == 0 {
+            self.manager.in_flight_zero.notify_all();
             self.manager.check_retirement_locked(&self.terminals);
         }
     }
@@ -557,6 +600,84 @@ impl Drop for SpawnOwnerGuard {
 #[cfg(test)]
 mod spawn_owner_tests {
     use super::*;
+
+    fn committing_fixture() -> (tempfile::TempDir, Arc<HandoverManager>, Arc<TerminalService>, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let manager = Arc::new(HandoverManager::new(root.path().join("daemon.sock")));
+        let legacy = root.path().join("legacy.sock");
+        manager.force_prepared_for_test(legacy.clone());
+        manager.set_retirement_action(|| {});
+        (root, manager, Arc::new(TerminalService::default()), legacy)
+    }
+
+    /// A request admitted just before the commit and parked inside its handler keeps the
+    /// decision unwritten until it finishes; new requests are refused HANDOVER_BUSY meanwhile.
+    #[test]
+    fn commit_waits_for_a_barrier_parked_request_before_writing_the_decision() {
+        let (_root, manager, terminals, legacy) = committing_fixture();
+        let transaction = legacy.with_extension("transaction");
+        let parked = Arc::new(std::sync::Barrier::new(2));
+        let request = {
+            let guard = manager.retain_request(terminals.clone()).expect("admitted before commit");
+            let parked = parked.clone();
+            std::thread::spawn(move || {
+                parked.wait(); // handler is running
+                parked.wait(); // released by the test
+                drop(guard);
+            })
+        };
+        parked.wait();
+        let (committing_tx, committing) = std::sync::mpsc::channel();
+        manager.notify_when_committing(committing_tx);
+        let commit = {
+            let manager = manager.clone();
+            let terminals = terminals.clone();
+            std::thread::spawn(move || manager.commit_handover_v5(&terminals))
+        };
+        committing.recv().expect("gate closed");
+        assert_eq!(manager.status(), HandoverStatus::Committing);
+        assert!(!manager.accept_gate_open(), "public accepts must stop while committing");
+        assert!(!transaction.exists(), "decision written while a request was parked");
+        let refusal = manager.retain_request(terminals.clone()).err().expect("new request refused");
+        assert!(is_spawn_gate_busy(&refusal), "{refusal}");
+        assert!(manager.retain_spawn_owner().is_err());
+
+        parked.wait();
+        request.join().unwrap();
+        commit.join().unwrap().expect("commit after the parked request finished");
+        assert!(transaction.exists(), "decision missing after the parked request finished");
+        assert_eq!(manager.status(), HandoverStatus::Retired);
+        assert!(!manager.accept_gate_open());
+    }
+
+    #[test]
+    fn decision_write_failure_reopens_the_gate_and_keeps_serving() {
+        let (_root, manager, terminals, legacy) = committing_fixture();
+        manager.inject_commit_fault(Some(CommitFault::DecisionWrite));
+        let error = manager.commit_handover_v5(&terminals).unwrap_err();
+        assert!(error.contains("decision write failed"), "{error}");
+        assert_eq!(manager.status(), HandoverStatus::Prepared);
+        assert!(manager.accept_gate_open(), "accepts must resume after a failed commit");
+        assert!(!legacy.with_extension("transaction").exists());
+        // The predecessor serves new requests again and the candidate can still abort cleanly.
+        drop(manager.retain_request(terminals.clone()).expect("serves new requests"));
+        manager.abort_handover().expect("candidate abort accepted");
+        assert_eq!(manager.status(), HandoverStatus::Active);
+        assert_eq!(
+            HandoverManager::recorded_decision(&legacy).unwrap(),
+            Some(super::super::handover_transaction::HandoverState::Active),
+            "the only durable decision is the abort, never Retired"
+        );
+    }
+
+    #[test]
+    fn commit_resolution_trusts_only_a_confirmed_reply_or_a_retired_record() {
+        use super::super::handover_transaction::HandoverState;
+        assert_eq!(resolve_commit(true, None), CommitResolution::Owner);
+        assert_eq!(resolve_commit(false, Some(HandoverState::Retired)), CommitResolution::Owner);
+        assert_eq!(resolve_commit(false, None), CommitResolution::Abort);
+        assert_eq!(resolve_commit(false, Some(HandoverState::Active)), CommitResolution::Abort);
+    }
 
     fn control_fixture() -> (Arc<HandoverManager>, Arc<TerminalService>) {
         let root = tempfile::tempdir().unwrap();
@@ -834,6 +955,11 @@ pub struct HandoverManager {
     canonical_socket_path: PathBuf,
     is_draining: Arc<AtomicBool>,
     in_flight: Mutex<usize>,
+    /// Signalled whenever in_flight returns to zero; the Committing gate waits on it.
+    in_flight_zero: parking_lot::Condvar,
+    commit_fault: Mutex<Option<CommitFault>>,
+    #[cfg(test)]
+    committing_hook: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     retirement_action: RwLock<Arc<dyn Fn() + Send + Sync>>,
     /// Terminal service recorded when the control channel entered Retiring, so a dropping
     /// SpawnOwnerGuard can re-check the exit predicate.
@@ -946,6 +1072,10 @@ impl HandoverManager {
             canonical_socket_path,
             is_draining: Arc::new(AtomicBool::new(false)),
             in_flight: Mutex::new(0),
+            in_flight_zero: parking_lot::Condvar::new(),
+            commit_fault: Mutex::new(None),
+            #[cfg(test)]
+            committing_hook: Mutex::new(None),
             retirement_action: RwLock::new(Arc::new(|| std::process::exit(0))),
             retiring_terminals: Mutex::new(None),
             retiring_ready: Arc::new(tokio::sync::Notify::new()),
@@ -1064,6 +1194,70 @@ impl HandoverManager {
 
     pub fn is_draining(&self) -> bool {
         self.is_draining.load(Ordering::SeqCst)
+    }
+
+    /// Arms one commit fault (tests, and the QA channel under local-split-qa).
+    pub(crate) fn inject_commit_fault(&self, fault: Option<CommitFault>) {
+        *self.commit_fault.lock() = fault;
+    }
+
+    pub(crate) fn commit_fault(&self) -> Option<CommitFault> {
+        *self.commit_fault.lock()
+    }
+
+    /// Test fixture: a manager that has prepared a handover on legacy.
+    #[cfg(test)]
+    pub(crate) fn force_prepared_for_test(&self, legacy: PathBuf) {
+        *self.legacy_socket_path.write() = Some(legacy);
+        *self.status.write() = HandoverStatus::Prepared;
+    }
+
+    /// Test hook: signalled once the Committing gate is closed.
+    #[cfg(test)]
+    pub(crate) fn notify_when_committing(&self, hook: std::sync::mpsc::Sender<()>) {
+        *self.committing_hook.lock() = Some(hook);
+    }
+
+    /// Waits until no request holds a RetirementGuard, up to deadline. True when drained.
+    fn wait_in_flight_drained(&self, deadline: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + deadline;
+        let mut requests = self.in_flight.lock();
+        while *requests != 0 {
+            if self.in_flight_zero.wait_until(&mut requests, until).timed_out() {
+                return *requests == 0;
+            }
+        }
+        true
+    }
+
+    /// Closes the reversible serving gate: Committing, accepts stopped. Returns the prior status.
+    fn close_commit_gate(&self) -> Result<HandoverStatus, String> {
+        let mut status = self.status.write();
+        if let Some(refusal) = self.spawn_gate_refusal() {
+            return Err(refusal);
+        }
+        let prior = *status;
+        if prior != HandoverStatus::Prepared && prior != HandoverStatus::Active {
+            return Err(format!("Cannot commit v5 handover in state {prior:?}"));
+        }
+        *status = HandoverStatus::Committing;
+        drop(status);
+        self.set_accept_gate(false);
+        #[cfg(test)]
+        if let Some(hook) = self.committing_hook.lock().take() {
+            let _ = hook.send(());
+        }
+        Ok(prior)
+    }
+
+    /// Reopens the gate after a failed commit: status back to Prepared, accepts resume.
+    fn reopen_commit_gate(&self) {
+        let mut status = self.status.write();
+        if *status == HandoverStatus::Committing {
+            *status = HandoverStatus::Prepared;
+        }
+        drop(status);
+        self.set_accept_gate(true);
     }
 
     fn set_accept_gate(&self, open: bool) {
@@ -1301,18 +1495,33 @@ impl HandoverManager {
     }
 
     pub fn commit_handover_v5(&self, _terminal_service: &Arc<TerminalService>) -> Result<(), String> {
-        let mut status_guard = self.status.write();
-        if let Some(refusal) = self.spawn_gate_refusal() {
-            return Err(refusal);
-        }
-        if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
+        // The commit point is the durable decision record. It is written only with the serving
+        // gate closed and every in-flight request finished; any failure before it reopens the
+        // gate, so the predecessor keeps serving and the candidate aborts.
+        self.close_commit_gate()?;
+        if !self.wait_in_flight_drained(COMMIT_DRAIN_DEADLINE) {
+            self.reopen_commit_gate();
             return Err(format!(
-                "Cannot commit v5 handover in state {:?}",
-                *status_guard
+                "{HANDOVER_BUSY}: in-flight requests did not finish within {COMMIT_DRAIN_DEADLINE:?}"
             ));
         }
-
-        self.record_decision(true)?;
+        let mut status_guard = self.status.write();
+        if *status_guard != HandoverStatus::Committing {
+            let observed = *status_guard;
+            drop(status_guard);
+            self.reopen_commit_gate();
+            return Err(format!("Commit gate was left in state {observed:?}"));
+        }
+        let decision = if self.commit_fault() == Some(CommitFault::DecisionWrite) {
+            Err("Injected decision write failure".to_string())
+        } else {
+            self.record_decision(true)
+        };
+        if let Err(error) = decision {
+            drop(status_guard);
+            self.reopen_commit_gate();
+            return Err(format!("Handover decision write failed: {error}"));
+        }
         if let Some(locks) = self.canonical_lock_files.lock().take() {
             let _ = locks.detach_without_unlock();
         }
@@ -1379,8 +1588,12 @@ impl HandoverManager {
         terminals: Arc<TerminalService>,
     ) -> Result<RetirementGuard, String> {
         let mut requests = self.in_flight.lock();
-        if self.status() == HandoverStatus::Retired {
-            return Err("HOST_UNAVAILABLE".into());
+        match self.status() {
+            HandoverStatus::Retired => return Err("HOST_UNAVAILABLE".into()),
+            HandoverStatus::Committing => {
+                return Err(format!("{HANDOVER_BUSY}: handover is committing"));
+            }
+            _ => {}
         }
         *requests = requests.checked_add(1).ok_or("CAPACITY_EXCEEDED")?;
         Ok(RetirementGuard {

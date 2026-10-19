@@ -21,6 +21,93 @@ async fn data_exchange(server: &Arc<DaemonServer>, request: DaemonRequest) -> Da
     serde_json::from_str(line.trim()).unwrap()
 }
 
+/// Sends CommitHandover and returns None when the predecessor closed the connection without a
+/// reply (the injected reply-loss faults).
+async fn commit_exchange(server: &Arc<DaemonServer>) -> Option<DaemonResponse> {
+    let (client, server_side) = tokio::io::duplex(64 * 1024);
+    let handler = Arc::clone(server);
+    let serving = tokio::spawn(async move { handler.handle_client(server_side).await });
+    let (read_half, mut write_half) = tokio::io::split(client);
+    let mut json = serde_json::to_string(&DaemonRequest::CommitHandover { legacy_socket_path: None }).unwrap();
+    json.push('\n');
+    write_half.write_all(json.as_bytes()).await.unwrap();
+    let mut line = String::new();
+    let read = BufReader::new(read_half).read_line(&mut line).await.unwrap();
+    drop(write_half);
+    serving.await.unwrap();
+    (read > 0).then(|| serde_json::from_str(line.trim()).unwrap())
+}
+
+fn prepared_v5_predecessor(root: &std::path::Path) -> (Arc<DaemonServer>, std::path::PathBuf) {
+    let server = Arc::new(DaemonServer::new_with_paths(
+        Some(root.join("config")),
+        Some(root.join("auth")),
+    ));
+    let legacy = root.join("legacy.sock");
+    server.handover_manager.force_prepared_for_test(legacy.clone());
+    server.handover_manager.set_retirement_action(|| {});
+    (server, legacy)
+}
+
+/// CommitHandoverOk dropped after the predecessor recorded Retired: the candidate reads the
+/// decision, is the owner, and serves; the predecessor accepts nothing more.
+#[tokio::test]
+async fn commit_ok_dropped_after_record_resolves_to_the_candidate_as_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let (server, legacy) = prepared_v5_predecessor(root.path());
+    server
+        .handover_manager
+        .inject_commit_fault(Some(crate::daemon::handover::CommitFault::DropReplyAfterRecord));
+    assert!(commit_exchange(&server).await.is_none(), "the reply must be lost");
+    let decision = crate::daemon::handover::HandoverManager::recorded_decision(&legacy).unwrap();
+    assert_eq!(decision, Some(crate::daemon::handover_transaction::HandoverState::Retired));
+    assert_eq!(
+        crate::daemon::handover::resolve_commit(false, decision),
+        crate::daemon::handover::CommitResolution::Owner
+    );
+    assert_eq!(server.handover_manager.status(), crate::daemon::handover::HandoverStatus::Retired);
+    assert!(!server.handover_manager.accept_gate_open());
+}
+
+/// CommitHandoverOk dropped before the predecessor recorded anything: no decision exists, the
+/// candidate aborts, and the predecessor keeps serving.
+#[tokio::test]
+async fn commit_ok_dropped_before_record_makes_the_candidate_abort() {
+    let root = tempfile::tempdir().unwrap();
+    let (server, legacy) = prepared_v5_predecessor(root.path());
+    server
+        .handover_manager
+        .inject_commit_fault(Some(crate::daemon::handover::CommitFault::DropReplyBeforeRecord));
+    assert!(commit_exchange(&server).await.is_none(), "the reply must be lost");
+    let decision = crate::daemon::handover::HandoverManager::recorded_decision(&legacy).unwrap();
+    assert_eq!(decision, None);
+    assert_eq!(
+        crate::daemon::handover::resolve_commit(false, decision),
+        crate::daemon::handover::CommitResolution::Abort
+    );
+    server.handover_manager.inject_commit_fault(None);
+    assert!(matches!(data_exchange(&server, DaemonRequest::AbortHandover).await, DaemonResponse::AbortHandoverOk));
+    assert_eq!(server.handover_manager.status(), crate::daemon::handover::HandoverStatus::Active);
+    assert!(server.handover_manager.accept_gate_open());
+    assert!(matches!(data_exchange(&server, DaemonRequest::Ping).await, DaemonResponse::Pong));
+}
+
+/// Decision write failure over the wire: the commit is answered with an error, the gate
+/// reopens, the predecessor serves new requests, and the candidate's abort is accepted.
+#[tokio::test]
+async fn decision_write_failure_is_answered_and_the_predecessor_keeps_serving() {
+    let root = tempfile::tempdir().unwrap();
+    let (server, legacy) = prepared_v5_predecessor(root.path());
+    server
+        .handover_manager
+        .inject_commit_fault(Some(crate::daemon::handover::CommitFault::DecisionWrite));
+    let reply = commit_exchange(&server).await.expect("an answer");
+    assert!(!matches!(reply, DaemonResponse::CommitHandoverOk), "{reply:?}");
+    assert_eq!(crate::daemon::handover::HandoverManager::recorded_decision(&legacy).unwrap(), None);
+    assert!(matches!(data_exchange(&server, DaemonRequest::Ping).await, DaemonResponse::Pong));
+    assert!(matches!(data_exchange(&server, DaemonRequest::AbortHandover).await, DaemonResponse::AbortHandoverOk));
+}
+
 #[tokio::test]
 async fn control_retiring_spawn_answers_typed_daemon_retiring_code() {
     let server = Arc::new(DaemonServer::new());

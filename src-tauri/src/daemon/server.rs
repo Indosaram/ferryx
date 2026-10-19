@@ -3512,6 +3512,9 @@ impl DaemonServer {
 
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         crate::daemon::qa_producers::install_and_start(&self).await;
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        self.handover_manager
+            .inject_commit_fault(crate::daemon::qa_producers::commit_fault_from_env());
 
         let socket_path = get_socket_path();
         let lock_path = get_lock_path();
@@ -3894,7 +3897,9 @@ impl DaemonServer {
                             let decision = crate::ipc::run_blocking(move ||
                                 HandoverManager::recorded_decision(&path).map_err(crate::ipc::IpcError::internal))
                                 .await.map_err(|error| error.to_string())?;
-                            if decision == Some(super::handover_transaction::HandoverState::Retired) {
+                            if super::handover::resolve_commit(false, decision)
+                                == super::handover::CommitResolution::Owner
+                            {
                                 tracing::info!("Recovered committed handover from recorded transaction decision");
                                 if let Some(authority) = received_authority.take() {
                                     inherited_canonical = Some(self.install_adopted_authority(authority)?);
@@ -4260,16 +4265,39 @@ impl DaemonServer {
                             | Ok(DaemonRequest::MachineMetadataSubscribe { .. })
                             | Ok(DaemonRequest::SubscribeRemoteEvents)
                             | Ok(DaemonRequest::SubscribeDag { .. })
+                            // The handover exchange itself never holds a guard: the commit waits
+                            // for every guarded request to finish, so CommitHandover holding one
+                            // would wait on itself.
+                            | Ok(DaemonRequest::PrepareHandover)
+                            | Ok(DaemonRequest::TransferSessions { .. })
+                            | Ok(DaemonRequest::CommitHandover { .. })
+                            | Ok(DaemonRequest::AbortHandover)
                     );
-                    let retirement_guard = holds_retirement_guard
-                        .then(|| {
-                            self.handover_manager
-                                .retain_request(Arc::clone(&self.terminal_service))
-                                .ok()
-                        })
-                        .flatten();
+                    // While a commit is decided (HandoverStatus::Committing) a new request is not
+                    // admitted: it is answered HANDOVER_BUSY, retryable, and never half-served.
+                    let mut busy_refusal = None;
+                    let retirement_guard = if holds_retirement_guard {
+                        match self
+                            .handover_manager
+                            .retain_request(Arc::clone(&self.terminal_service))
+                        {
+                            Ok(guard) => Some(guard),
+                            Err(refusal) if super::handover::is_spawn_gate_busy(&refusal) => {
+                                busy_refusal = Some(DaemonResponse::Error {
+                                    code: Some(super::handover::HANDOVER_BUSY.into()),
+                                    message: refusal,
+                                    details: None,
+                                });
+                                None
+                            }
+                            Err(_) => None,
+                        }
+                    } else {
+                        None
+                    };
 
                     let resp = match req {
+                _ if busy_refusal.is_some() => busy_refusal.take().expect("checked above"),
                 Ok(DaemonRequest::Handshake { version, .. }) => {
                     if self.handover_manager.status() == super::handover::HandoverStatus::Retired {
                         DaemonResponse::Error {
@@ -5443,9 +5471,20 @@ impl DaemonServer {
                 Ok(DaemonRequest::CommitHandover { .. }) => {
                     let manager = Arc::clone(&self.handover_manager);
                     let service = Arc::clone(&self.terminal_service);
+                    // Injected reply loss (tests / QA): before the decision is recorded the
+                    // predecessor keeps serving; after it, the decision alone settles ownership.
+                    let fault = manager.commit_fault();
+                    if fault == Some(super::handover::CommitFault::DropReplyBeforeRecord) {
+                        tracing::warn!("Injected fault: CommitHandoverOk dropped before the decision");
+                        break;
+                    }
                     match crate::ipc::run_blocking(move || {
                         manager.commit_handover(&service).map_err(crate::ipc::IpcError::internal)
                     }).await {
+                        Ok(()) if fault == Some(super::handover::CommitFault::DropReplyAfterRecord) => {
+                            tracing::warn!("Injected fault: CommitHandoverOk dropped after the decision");
+                            break;
+                        }
                         Ok(()) => DaemonResponse::CommitHandoverOk,
                         Err(e) => handover_failure_response(None, e.to_string()),
                     }

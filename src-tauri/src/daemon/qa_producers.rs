@@ -319,6 +319,17 @@ pub fn abort_after_adopt_requested() -> bool {
     injected_handover_fault().as_deref() == Some(HANDOVER_FAULT_ABORT_AFTER_ADOPT)
 }
 
+/// Predecessor-side commit faults selected by FERRYX_QA_HANDOVER_FAULT (todo 8 variants).
+pub fn commit_fault_from_env() -> Option<crate::daemon::handover::CommitFault> {
+    use crate::daemon::handover::CommitFault;
+    match injected_handover_fault().as_deref() {
+        Some("decision-write-failure") => Some(CommitFault::DecisionWrite),
+        Some("drop-commit-ok-before-record") => Some(CommitFault::DropReplyBeforeRecord),
+        Some("drop-commit-ok-after-record") => Some(CommitFault::DropReplyAfterRecord),
+        _ => None,
+    }
+}
+
 /// One QA receipt per handover state transition (todo 8): the candidate's accept counters on
 /// every inherited listener, and a probe flock on both lock files taken from a fresh open file
 /// description, exactly as another process would try. Sampled at the transition itself, never
