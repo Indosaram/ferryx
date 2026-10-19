@@ -27,6 +27,7 @@ export const HOSTS = Object.freeze({
     canonical: '/home/indo/code/ferryx',
     worktreeRoot: '/home/indo/code/ferryx-wt',
     cargoTarget: '/home/indo/code/ferryx-wt/.target-daemon-lifetime-qa',
+    guiEnv: { WAYLAND_DISPLAY: 'wayland-1', DISPLAY: ':0', XDG_RUNTIME_DIR: '/run/user/1000' },
     evidenceRoot: '/home/indo/code/ferryx-wt/.evidence/daemon-independent-lifetime-20261017',
     runRoot: '/tmp/ferryx-qa-daemon-lifetime',
     node: 'node',

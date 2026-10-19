@@ -250,7 +250,7 @@ async function main() {
   }
   const mahord = host.gui.kind === 'mahord' ? await connectMahord(host.gui, { log }) : null;
   const jobs = createJobs({ host, agent, runId, layout, uid });
-  const gui = createGuiDriver({ host, agent, runId, layout, allowedRoots, forbidden, mahord, guiEnv: env });
+  const gui = createGuiDriver({ host, agent, runId, layout, allowedRoots, forbidden, mahord, guiEnv: { ...(host.guiEnv ?? {}), ...env } });
   if (host.platform === 'windows') {
     const launcher = await import('node:fs').then((fs) => fs.readFileSync(path.join(HERE, 'fixtures', 'windows-gui-launcher.ps1'), 'utf8'));
     await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'launcher.ps1'), content: launcher });
