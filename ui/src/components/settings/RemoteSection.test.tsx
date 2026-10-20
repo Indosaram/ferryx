@@ -232,6 +232,22 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(within(machines).getByText("Linux Build Box")).toBeInTheDocument();
   });
 
+  it("keeps a disabled Tailscale host under My machines so its menu can enable it again", async () => {
+    const tailnet: SshHost = { ...mockSshHost, id: "tailscale:off", label: "Disabled Peer", hostname: "100.64.0.10", source: "tailscale", disabled: true };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_sync_tailscale") return { hosts: [tailnet], targets: [] };
+      if (command === "cmd_ssh_list_hosts") return [mockSshHost, tailnet];
+      return undefined;
+    });
+    await syncTailscaleMachines();
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+    await act(async () => { render(<RemoteSection store={store} inventory={inventory} onOpenSshProject={vi.fn()} />); });
+
+    expect(within(screen.getByRole("list", { name: "Remote machines" })).getByText("Disabled Peer")).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Discovered machines" }) && within(screen.getByRole("list", { name: "Discovered machines" })).queryByText("Disabled Peer")).toBeFalsy();
+  });
+
   it("shows OFFLINE and CHECKING from paired-host reachability, with a visible reason on the disabled primary", async () => {
     const offlineId = remoteHostKey(DEFAULT_RELAY_ORIGIN, "offline-box");
     const checkingId = remoteHostKey(DEFAULT_RELAY_ORIGIN, "checking-box");

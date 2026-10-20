@@ -406,7 +406,10 @@ export function RemoteSection({
   const isEnrolled = (host: HostEndpoint) => accountMachines.some((m) => m.machineId === host.machineId);
   const tailscaleTargetFor = (host: SshHost) => tailscaleTargets.get(host.id);
   // A Tailscale peer whose helper is not installed is not usable yet; it waits under Discovered.
+  // A disabled host stays under My machines: sync skips disabled hosts, so Discovered could never
+  // recover it, and only its row menu offers Enable, Edit and Delete.
   const isDiscovered = (host: SshHost) => {
+    if (host.disabled) return false;
     const target = tailscaleTargetFor(host);
     return (host.source === "tailscale" || Boolean(target)) && !isTailscaleProvisioned(target);
   };
