@@ -29,8 +29,11 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
->(({ className, children, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
+    /** Disables the built-in Close button, e.g. while a request the dialog owns is in flight. */
+    closeDisabled?: boolean;
+  }
+>(({ className, children, closeDisabled, ...props }, ref) => (
   <DialogPortal>
     <DialogOverlay />
     <DialogPrimitive.Content
@@ -44,7 +47,8 @@ const DialogContent = React.forwardRef<
       {children}
       <DialogPrimitive.Close
         aria-label="Close"
-        className="absolute right-4 top-4 inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+        disabled={closeDisabled}
+        className="absolute right-4 top-4 inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
       >
         <X className="size-4" aria-hidden="true" />
       </DialogPrimitive.Close>

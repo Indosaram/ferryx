@@ -26,6 +26,12 @@ function pressEscape() {
   fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
 }
 
+/** Add Machine wizard step 1: pick a method by its option name, then continue to its step. */
+function chooseAddMachineMethod(name: string) {
+  fireEvent.click(screen.getByRole("radio", { name }));
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+}
+
 vi.mock("../../remote/accountAttach", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../remote/accountAttach")>()),
   getOrCreateAttachKey: grantMocks.attachKey,
@@ -276,7 +282,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     await inventory.refresh();
     await act(async () => { render(<RemoteSection store={store} inventory={inventory} />); });
     fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Connect with SSH" }));
+    chooseAddMachineMethod("Connect with SSH");
     fireEvent.change(screen.getByLabelText("Authentication method"), { target: { value: "password" } });
     fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Password server" } });
     fireEvent.change(screen.getByLabelText("Hostname"), { target: { value: "password.example" } });
@@ -423,13 +429,15 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
 
     expect(screen.queryByLabelText(/Machine PIN/i)).toBeNull();
     expect(screen.queryByRole("tab", { name: /Pair with PIN/i })).toBeNull();
+    expect(screen.queryByRole("radio", { name: /Pair with PIN/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /Pair Machine/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
-    expect(screen.getByRole("tab", { name: "Connect with SSH" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Import SSH Config" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Enrollment code" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Connect with SSH" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Import SSH Config" })).toBeInTheDocument();
   });
 
-  it("asserts Generate QR is absent and the SSH tab is present in Add Machine", async () => {
+  it("asserts Generate QR is absent and the SSH method is offered in Add Machine", async () => {
     const { store, inventory } = createTestInventory();
     await inventory.refresh();
 
@@ -441,10 +449,11 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
     expect(screen.queryByText(/PIN:/i)).toBeNull();
 
-    // SSH tab is present in Add Machine dialog
+    // SSH methods are offered in the Add Machine wizard's method step
     fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
-    expect(screen.getByRole("tab", { name: "Connect with SSH" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Import SSH Config" })).toBeInTheDocument();
+    expect(screen.getByRole("radiogroup", { name: "Connection methods" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Connect with SSH" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Import SSH Config" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
   });
 
@@ -554,7 +563,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     }
   });
 
-  it("issues an enrollment code and displays the exact CLI command", async () => {
+  it("issues an enrollment code from the account bar into the Add Machine wizard and displays the exact CLI command", async () => {
     const { store, inventory } = createTestInventory([]);
     await inventory.refresh();
 
@@ -594,7 +603,9 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
         fireEvent.click(issueBtn);
       });
 
-      expect(screen.getByText("enr_code_xyz")).toBeInTheDocument();
+      // The account bar opens the wizard directly on its enrollment-code step.
+      expect(screen.getByRole("dialog", { name: "Add Machine" })).toBeInTheDocument();
+      expect(await screen.findByText("enr_code_xyz")).toBeInTheDocument();
       const expectedCommand = `ferryx-cli account enroll --code enr_code_xyz --origin ${DEFAULT_RELAY_ORIGIN}`;
       expect(screen.getByText(expectedCommand)).toBeInTheDocument();
     } finally {
@@ -646,7 +657,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Import SSH Config" }));
+    chooseAddMachineMethod("Import SSH Config");
 
     // Switch to paste configuration
     fireEvent.click(screen.getByRole("button", { name: "Paste Configuration" }));
@@ -677,7 +688,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Import SSH Config" }));
+    chooseAddMachineMethod("Import SSH Config");
 
     // System config detected and card displayed
     expect(await screen.findByText("System SSH Config")).toBeInTheDocument();
@@ -896,7 +907,8 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
     expect(screen.getByRole("dialog", { name: "Add Machine" })).toBeInTheDocument();
 
-    // 3. Connect via SSH and submit
+    // 3. Choose SSH, then connect and submit
+    chooseAddMachineMethod("Connect with SSH");
     fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Reopened Box" } });
     fireEvent.change(screen.getByLabelText("Hostname"), { target: { value: "192.168.1.100" } });
     await act(async () => {
@@ -968,7 +980,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
           }),
         }),
       );
-      expect(screen.getByTestId("issued-enrollment-card")).toBeInTheDocument();
+      expect(await screen.findByTestId("issued-enrollment-card")).toBeInTheDocument();
       expect(screen.getByTestId("enrollment-command")).toHaveTextContent(
         `ferryx-cli account enroll --code ENROLL-123456 --origin ${customOrigin}`,
       );

@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, cleanup, fireEvent, act } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { AddMachineModal, getModalErrorMessage } from "./AddMachineModal";
-import { createRemoteHostStore } from "../../state/remoteHostStore";
 import { parsePairingInvite, type PairedHostError } from "../../lib/pairedHostInventory";
 
 afterEach(() => {
@@ -20,20 +19,29 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
 }));
 
+/** Step 1 of the wizard: pick a connection method, then continue to its step. */
+function chooseMethod(name: string) {
+  fireEvent.click(screen.getByRole("radio", { name }));
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+}
+
 describe("AddMachineModal - P05 structured per-status error UX", () => {
-  it("asserts PIN is not reachable at all (no PIN tab, no Machine PIN field, regardless of initialTab)", () => {
-    const store = createRemoteHostStore();
+  it("asserts PIN is not reachable at all (no PIN option, no Machine PIN field, regardless of initialMethod)", () => {
     render(
       <AddMachineModal
         isOpen={true}
         onClose={() => {}}
-        store={store}
         onSuccess={() => {}}
-        initialTab={"pin" as any}
+        initialMethod={"pin" as any}
       />,
     );
-    expect(screen.getByRole("tab", { name: "Connect with SSH" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Import SSH Config" })).toBeInTheDocument();
+    // An unknown method falls back to step 1, "Choose a method".
+    expect(screen.getByRole("radiogroup", { name: "Connection methods" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Enrollment code" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Connect with SSH" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Import SSH Config" })).toBeInTheDocument();
+    expect(screen.getAllByRole("radio")).toHaveLength(3);
+    expect(screen.queryByRole("radio", { name: /Pair with PIN/i })).toBeNull();
     expect(screen.queryByRole("tab", { name: /Pair with PIN/i })).toBeNull();
     expect(screen.queryByLabelText(/Machine PIN/i)).toBeNull();
     expect(screen.queryByPlaceholderText(/Enter 6-digit PIN/i)).toBeNull();
@@ -101,7 +109,7 @@ describe("AddMachineModal - P04 custom relay origin support", () => {
 
 describe("AddMachineModal - SSH connection and import", () => {
   function openPasteImport(onClose: () => void) {
-    render(<AddMachineModal isOpen={true} onClose={onClose} onSuccess={() => {}} initialTab="import" />);
+    render(<AddMachineModal isOpen={true} onClose={onClose} onSuccess={() => {}} initialMethod="import" />);
     fireEvent.change(screen.getByLabelText("SSH Configuration"), { target: { value: "Host a\n  HostName a.example" } });
   }
 
@@ -136,25 +144,69 @@ describe("AddMachineModal - SSH connection and import", () => {
     openPasteImport(() => {});
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Import Configuration" })); });
     const dialog = screen.getByRole("dialog", { name: "Add Machine" });
-    const container = dialog.firstElementChild as HTMLElement;
+    // The Dialog primitive's content element is the dialog container itself.
+    const container = dialog;
     expect(container).toHaveAttribute("tabindex", "-1");
     fireEvent.keyDown(document.activeElement ?? container, { key: "Tab" });
     expect(document.activeElement).toBe(container);
     await act(async () => { release([]); });
   });
 
-  it("renders SSH connection form by default and allows SSH connection test", () => {
-    const store = createRemoteHostStore();
+  it("renders the SSH connection form after choosing Connect with SSH", () => {
     render(
       <AddMachineModal
         isOpen={true}
         onClose={() => {}}
-        store={store}
         onSuccess={() => {}}
       />,
     );
+    expect(screen.getByRole("radio", { name: "Enrollment code" })).toHaveAttribute("aria-checked", "true");
+    chooseMethod("Connect with SSH");
     expect(screen.getByLabelText(/Label/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/Hostname/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Connect SSH Machine/i })).toBeInTheDocument();
+  });
+
+  it("returns to step 1 from a method step with Back", () => {
+    render(<AddMachineModal isOpen={true} onClose={() => {}} onSuccess={() => {}} />);
+    chooseMethod("Import SSH Config");
+    expect(screen.getByRole("button", { name: "Paste Configuration" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByRole("radio", { name: "Import SSH Config" })).toHaveAttribute("aria-checked", "true");
+  });
+});
+
+describe("AddMachineModal - enrollment code step", () => {
+  it("signed in: choosing Enrollment code renders the exact enroll command", async () => {
+    const origin = "https://relay.example";
+    const issue = vi.fn().mockResolvedValue("ABCD-1234");
+    render(
+      <AddMachineModal
+        isOpen={true}
+        onClose={() => {}}
+        onSuccess={() => {}}
+        accountOrigin={origin}
+        onIssueEnrollmentCode={issue}
+      />,
+    );
+    chooseMethod("Enrollment code");
+
+    expect(await screen.findByTestId("issued-enrollment-card")).toBeInTheDocument();
+    expect(screen.getByTestId("enrollment-command").textContent).toBe(
+      "ferryx-cli account enroll --code ABCD-1234 --origin https://relay.example",
+    );
+    expect(issue).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Dismiss enrollment code" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
+    expect(screen.queryByText(/Sign in to issue an enrollment code/i)).toBeNull();
+  });
+
+  it("signed out: choosing Enrollment code shows the sign-in reason and issues nothing", () => {
+    render(<AddMachineModal isOpen={true} onClose={() => {}} onSuccess={() => {}} accountOrigin="https://relay.example" />);
+    chooseMethod("Enrollment code");
+
+    expect(screen.getByText(/Sign in to issue an enrollment code/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("issued-enrollment-card")).toBeNull();
+    expect(screen.queryByTestId("enrollment-command")).toBeNull();
   });
 });

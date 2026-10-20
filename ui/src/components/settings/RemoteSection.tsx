@@ -24,10 +24,9 @@ import {
 } from "../../remote/accountSession";
 import { getOrCreateAttachKey } from "../../remote/accountAttach";
 import { getAgentIntegration, toIpcError } from "../../lib/tauri";
-import { copyTextToClipboard } from "../../lib/clipboard";
 import { AccountSignIn } from "./AccountSignIn";
-import { AddMachineModal } from "./AddMachineModal";
-import { AccountBar, enrollmentCommand } from "./remote/AccountBar";
+import { AddMachineModal, type AddMachineMethod } from "./AddMachineModal";
+import { AccountBar } from "./remote/AccountBar";
 import { AdvancedSection } from "./remote/AdvancedSection";
 import { DiscoveredList } from "./remote/DiscoveredList";
 import { MachineDrawer, RemoveSshIntegrationDialog, type MachineDrawerContent } from "./remote/MachineDrawer";
@@ -96,27 +95,6 @@ export function RemoteSection({
 
   const [accountMachines, setAccountMachines] = useState<AccountMachineView[]>([]);
   const [accountMachinesLoading, setAccountMachinesLoading] = useState(false);
-  const [issuedCode, setIssuedCode] = useState<string | null>(null);
-  const [isIssuingCode, setIsIssuingCode] = useState(false);
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
-  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const mountedRef = useRef(true);
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      clearTimeout(copyResetTimerRef.current);
-    };
-  }, []);
-  const handleCopyEnrollCommand = () => {
-    if (!issuedCode) return;
-    void copyTextToClipboard(enrollmentCommand(issuedCode, accountOrigin)).then((copied) => {
-      if (!mountedRef.current) return;
-      setCopyState(copied ? "copied" : "failed");
-      clearTimeout(copyResetTimerRef.current);
-      copyResetTimerRef.current = setTimeout(() => setCopyState("idle"), 2000);
-    });
-  };
   // Monotonic id of the newest account-machine list request. A response is applied only while
   // it is still the newest, so a sign-out or origin switch mid-request cannot repopulate the list.
   const machinesRequestRef = useRef(0);
@@ -175,17 +153,15 @@ export function RemoteSection({
     }
   };
 
-  const handleIssueEnrollmentCode = async () => {
-    if (!accountToken || isIssuingCode) return;
-    setIsIssuingCode(true);
-    setActionError(null);
+  // The Add Machine wizard owns the issued code, its command and the copy state; it shows the
+  // failure itself, so this only translates the error into a readable message.
+  const handleIssueEnrollmentCode = async (): Promise<string> => {
+    if (!accountToken) throw new Error("Sign in to issue an enrollment code");
     try {
       const res = await issueEnrollmentCode(accountOrigin, accountToken);
-      setIssuedCode(res.code);
+      return res.code;
     } catch (err: unknown) {
-      setActionError(accountErrorMessage(err) ?? "Failed to issue enrollment code");
-    } finally {
-      setIsIssuingCode(false);
+      throw new Error(accountErrorMessage(err) ?? "Failed to issue enrollment code");
     }
   };
 
@@ -197,7 +173,6 @@ export function RemoteSection({
     clearStoredAccountSessionToken();
     setAccountToken(null);
     setAccountMachines([]);
-    setIssuedCode(null);
   };
   const handleUseAccountOrigin = () => {
     let next: URL;
@@ -219,7 +194,6 @@ export function RemoteSection({
     clearStoredAccountSessionToken();
     setAccountToken(null);
     setAccountMachines([]);
-    setIssuedCode(null);
     setActionError(null);
     setConfiguredOrigin(origin);
   };
@@ -228,6 +202,12 @@ export function RemoteSection({
   );
   const [searchQuery, setSearchQuery] = useState("");
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  // undefined opens the wizard on "Choose a method"; a method opens it on that method's step.
+  const [addMachineMethod, setAddMachineMethod] = useState<AddMachineMethod | undefined>(undefined);
+  const openAddMachine = (method?: AddMachineMethod) => {
+    setAddMachineMethod(method);
+    setIsAddModalOpen(true);
+  };
 
   // Namespaced selected machine key (e.g. "paired:xyz" or "ssh:xyz")
   const [selectedKey, setSelectedKey] = useState<string | undefined>(() => {
@@ -541,13 +521,8 @@ export function RemoteSection({
       ) : (
         <AccountBar
           accountOrigin={accountOrigin}
-          isIssuingCode={isIssuingCode}
-          issuedCode={issuedCode}
-          copyState={copyState}
           showNoMachinesHint={accountMachines.length === 0 && !accountMachinesLoading}
-          onIssueCode={handleIssueEnrollmentCode}
-          onCopyCommand={handleCopyEnrollCommand}
-          onDismissCode={() => setIssuedCode(null)}
+          onIssueCode={() => openAddMachine("enrollment")}
           onSignOut={handleSignOut}
         />
       )}
@@ -558,7 +533,7 @@ export function RemoteSection({
         searchQuery={searchQuery}
         actionError={drawerContent ? null : actionError}
         onSearchChange={setSearchQuery}
-        onAddMachine={() => setIsAddModalOpen(true)}
+        onAddMachine={() => openAddMachine()}
         onRefresh={handleRefreshAll}
       >
         {filteredItems.map((item) => {
@@ -627,14 +602,14 @@ export function RemoteSection({
         returnFocusTo={() => (lastDrawerKeyRef.current ? detailsRefs.current.get(lastDrawerKeyRef.current) : null)}
       />
 
-      {/* ONE Add Machine opens real unified modal with SSH and Config Import */}
+      {/* ONE Add Machine opens the method-first wizard: enrollment code, SSH, or config import */}
       <AddMachineModal
         isOpen={isAddModalOpen}
         onClose={() => setIsAddModalOpen(false)}
         inventory={inventory}
-        store={store}
-        negotiate={negotiate}
-        initialRelayOrigin={accountOrigin}
+        initialMethod={addMachineMethod}
+        accountOrigin={accountOrigin}
+        onIssueEnrollmentCode={accountToken ? handleIssueEnrollmentCode : undefined}
         onSuccess={result => {
           if (result.kind === "pairedDaemon") {
             // Propagate verified generation-bound state

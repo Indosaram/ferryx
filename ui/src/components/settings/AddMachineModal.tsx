@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -7,9 +7,11 @@ import {
   ChevronDown,
   ChevronRight,
   FileCode,
+  KeyRound,
   Terminal,
-  X,
+  type LucideIcon,
 } from "lucide-react";
+import { cn } from "../../lib/cn";
 import type { MachineProjectTarget } from "../../lib/machineNavigation";
 import {
   DEFAULT_RELAY_ORIGIN,
@@ -17,11 +19,6 @@ import {
   type PairedHostError,
 } from "../../lib/pairedHostInventory";
 import { isStructuredIpcError } from "../../lib/tauri";
-import {
-  createPairedDaemonProjectAdapter,
-  type PairedHostContext,
-} from "../../lib/pairedDaemonProject";
-import { remoteHostStore, type RemoteHostStore } from "../../state/remoteHostStore";
 import {
   extractIpcErrorMessage,
   getSshConfigPathOverride,
@@ -39,8 +36,10 @@ import {
 import { safeRandomUUID } from "../../lib/uuid";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { EnrollmentStep } from "./remote/EnrollmentStep";
 
 export interface HostFormData {
   label: string;
@@ -107,13 +106,6 @@ export function getModalErrorMessage(error: PairedHostError | string): string {
   }
 }
 
-async function defaultNegotiate(context: PairedHostContext) {
-  const result = await createPairedDaemonProjectAdapter(context).capabilities();
-  if (!["directoryBrowseV1", "machineWorkspaceV1"].every(capability => result.capabilities.includes(capability))) {
-    throw new Error("UNSUPPORTED_CAPABILITY");
-  }
-}
-
 export type VerifiedMachineResult =
   | {
       kind: "pairedDaemon";
@@ -128,34 +120,162 @@ export type VerifiedMachineResult =
       summary: { reachable: boolean; environment?: SshRemoteEnvironment | null };
     };
 
+export type AddMachineMethod = "enrollment" | "ssh" | "import";
+
+const METHODS: ReadonlyArray<{ value: AddMachineMethod; title: string; description: string; Icon: LucideIcon }> = [
+  {
+    value: "enrollment",
+    title: "Enrollment code",
+    description: "For a headless machine signed in to your Ferryx account. Works through the relay, no open ports.",
+    Icon: KeyRound,
+  },
+  {
+    value: "ssh",
+    title: "Connect with SSH",
+    description: "Host, user and key. Ferryx tests the connection before saving it.",
+    Icon: Terminal,
+  },
+  {
+    value: "import",
+    title: "Import SSH Config",
+    description: "Pick hosts from ~/.ssh/config or paste a config block.",
+    Icon: FileCode,
+  },
+];
+
+const METHOD_STEP_DESCRIPTION: Record<AddMachineMethod, string> = {
+  enrollment: "Run the command on the machine you want to add.",
+  ssh: "Enter the connection details for the machine.",
+  import: "Import hosts from an SSH configuration.",
+};
+
+function isAddMachineMethod(value: unknown): value is AddMachineMethod {
+  return value === "enrollment" || value === "ssh" || value === "import";
+}
+
+const FOCUSABLE =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export interface AddMachineModalProps {
   isOpen: boolean;
   onClose: () => void;
   inventory?: typeof pairedHostInventory;
-  store?: RemoteHostStore;
-  negotiate?: (context: PairedHostContext) => Promise<unknown>;
   onSuccess: (result: VerifiedMachineResult) => void;
   onOfferProject?: (target: MachineProjectTarget) => void;
   onImportDone?: (selectedHostId: string) => void;
-  initialRelayOrigin?: string;
-  initialTab?: "ssh" | "import";
+  /** Opens directly on step 2 of this method; otherwise the wizard starts at "Choose a method". */
+  initialMethod?: AddMachineMethod;
+  /** Account server origin the enrollment command points at. */
+  accountOrigin?: string;
+  /** Issues an enrollment code for the signed-in account; absent while signed out. */
+  onIssueEnrollmentCode?: () => Promise<string>;
 }
 
-export function AddMachineModal({
-  isOpen,
+/** Add Machine wizard: step 1 chooses a method, step 2 runs it. Built on the Dialog primitive. */
+export function AddMachineModal(props: AddMachineModalProps) {
+  const { isOpen, onClose } = props;
+  const [busy, setBusy] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLElement | null>(null);
+  const openRef = useRef(isOpen);
+  openRef.current = isOpen;
+  // A new wizard session (fresh state) per open. Captured during render, before the dialog's
+  // focus scope moves focus inside, so the trigger that opened it gets focus back on close.
+  const renderOpenRef = useRef(false);
+  const sessionRef = useRef(0);
+  if (isOpen && !renderOpenRef.current) {
+    sessionRef.current += 1;
+    triggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
+  renderOpenRef.current = isOpen;
+
+  const prevOpenRef = useRef(isOpen);
+  useEffect(() => {
+    if (prevOpenRef.current && !isOpen) {
+      setBusy(false);
+      triggerRef.current?.focus();
+    }
+    prevOpenRef.current = isOpen;
+  }, [isOpen]);
+
+  // Disabling the focused control while busy would strand focus on <body>, outside the
+  // focus scope; park it on the dialog container instead.
+  useEffect(() => {
+    if (isOpen && busy && !contentRef.current?.contains(document.activeElement)) {
+      contentRef.current?.focus();
+    }
+  }, [isOpen, busy]);
+
+  const handleClose = () => {
+    if (busy) return;
+    onClose();
+  };
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Escape") {
+      // Keep the Escape inside the wizard so the surrounding SettingsDialog stays open.
+      e.stopPropagation();
+      e.preventDefault();
+      handleClose();
+      return;
+    }
+    if (e.key === "Tab" && contentRef.current) {
+      if (contentRef.current.querySelectorAll(FOCUSABLE).length === 0) {
+        // Nothing is tabbable (every control disabled): keep focus on the dialog container.
+        e.preventDefault();
+        contentRef.current.focus();
+      }
+    }
+  };
+
+  return (
+    <Dialog open={isOpen} onOpenChange={(next) => { if (!next) handleClose(); }}>
+      <DialogContent
+        ref={contentRef}
+        closeDisabled={busy}
+        onKeyDown={handleKeyDown}
+        // Escape is handled in onKeyDown so it can stop propagation; outside clicks never
+        // discard a half-filled form; focus return is handled above, synchronously.
+        onEscapeKeyDown={(e) => e.preventDefault()}
+        onInteractOutside={(e) => e.preventDefault()}
+        onCloseAutoFocus={(e) => e.preventDefault()}
+        className="max-h-[90vh] max-w-[520px] gap-4 overflow-y-auto p-5 max-sm:bottom-0 max-sm:left-0 max-sm:top-auto max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none"
+      >
+        <AddMachineWizard
+          key={sessionRef.current}
+          {...props}
+          busy={busy}
+          setBusy={setBusy}
+          onClose={handleClose}
+          isActive={() => openRef.current}
+        />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+interface AddMachineWizardProps extends AddMachineModalProps {
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
+  isActive: () => boolean;
+}
+
+function AddMachineWizard({
   onClose,
   inventory = pairedHostInventory,
-  store: _store = remoteHostStore,
-  negotiate: _negotiate = defaultNegotiate,
   onSuccess,
   onOfferProject,
   onImportDone,
-  initialRelayOrigin: _initialRelayOrigin,
-  initialTab,
-}: AddMachineModalProps) {
-  const [activeTab, setActiveTab] = useState<"ssh" | "import">(
-    initialTab === "import" ? "import" : "ssh",
-  );
+  initialMethod,
+  accountOrigin = DEFAULT_RELAY_ORIGIN,
+  onIssueEnrollmentCode,
+  busy,
+  setBusy,
+  isActive,
+}: AddMachineWizardProps) {
+  const idPrefix = useId();
+  const [step, setStep] = useState<"choose" | "details">(isAddMachineMethod(initialMethod) ? "details" : "choose");
+  const [method, setMethod] = useState<AddMachineMethod>(isAddMachineMethod(initialMethod) ? initialMethod : "enrollment");
 
   const [sshForm, setSshForm] = useState<HostFormData>(DEFAULT_SSH_FORM);
   const [sshPassword, setSshPasswordInput] = useState("");
@@ -170,71 +290,51 @@ export function AddMachineModal({
   );
 
   // Status state
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [structuredError, setStructuredError] = useState<PairedHostError | null>(null);
   const [systemConfigError, setSystemConfigError] = useState<string | null>(null);
   const [successTarget, setSuccessTarget] = useState<{ target: MachineProjectTarget; name: string } | null>(null);
   const [importResult, setImportResult] = useState<{ count: number; hosts: SshHost[] } | null>(null);
 
-  // Focus trap & lifecycle refs
-  const modalRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLElement | null>(null);
-  const wasOpenRef = useRef(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const radioRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const isMountedRef = useRef(true);
-  const isDismissedRef = useRef(false);
+  const stepMountedRef = useRef(false);
 
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
-      isDismissedRef.current = true;
     };
   }, []);
+  // A result that lands after the wizard was dismissed is discarded.
+  const alive = () => isMountedRef.current && isActive();
 
-  // Capture trigger once per open, reset dismissed on open, focus via effect without sleep, and restore trigger focus on close
+  // Move focus into the new step; the dialog's own open autofocus covers the first step.
   useEffect(() => {
-    if (isOpen) {
-      isDismissedRef.current = false;
-      if (!wasOpenRef.current) {
-        wasOpenRef.current = true;
-        triggerRef.current = document.activeElement as HTMLElement | null;
-      }
-      const input = modalRef.current?.querySelector<HTMLElement>(
-        'input:not([disabled]), textarea:not([disabled]), [role="tab"][aria-selected="true"]',
-      );
-      input?.focus();
-    } else {
-      if (wasOpenRef.current) {
-        wasOpenRef.current = false;
-        triggerRef.current?.focus();
-      }
+    if (!stepMountedRef.current) {
+      stepMountedRef.current = true;
+      return;
     }
-  }, [isOpen]);
+    bodyRef.current
+      ?.querySelector<HTMLElement>('input:not([disabled]), textarea:not([disabled]), [role="radio"][aria-checked="true"], button:not([disabled])')
+      ?.focus();
+  }, [step, method]);
 
   useEffect(() => {
-    if (isOpen && (successTarget || importResult)) {
-      modalRef.current?.querySelector<HTMLElement>("[data-result-action]")?.focus();
+    if (successTarget || importResult) {
+      bodyRef.current?.querySelector<HTMLElement>("[data-result-action]")?.focus();
     }
-  }, [isOpen, successTarget, importResult]);
-
-  // Disabling the focused control while busy would strand focus on <body>, outside the
-  // key-trap; park it on the dialog container instead.
-  useEffect(() => {
-    if (isOpen && busy && !modalRef.current?.contains(document.activeElement)) {
-      modalRef.current?.focus();
-    }
-  }, [isOpen, busy]);
+  }, [successTarget, importResult]);
 
   useEffect(() => {
-    if (!isOpen) return;
     // A newer request (path override change, close/reopen) supersedes this one, so a
     // slow earlier read can never overwrite the config the user is now looking at.
     let stale = false;
     setSystemConfigError(null);
     void readSystemSshConfig(configPathOverride)
       .then(cfg => {
-        if (!stale && isMountedRef.current && !isDismissedRef.current) {
+        if (!stale && alive()) {
           setSystemConfig(cfg);
           if (cfg && cfg.hosts.length > 0) {
             setImportSubMode("system");
@@ -242,7 +342,7 @@ export function AddMachineModal({
         }
       })
       .catch(err => {
-        if (!stale && isMountedRef.current && !isDismissedRef.current) {
+        if (!stale && alive()) {
           setSystemConfig(null);
           setSystemConfigError(extractIpcErrorMessage(err, "Could not read the system SSH configuration."));
         }
@@ -250,13 +350,17 @@ export function AddMachineModal({
     return () => {
       stale = true;
     };
-  }, [isOpen, configPathOverride]);
-
-  if (!isOpen) return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configPathOverride]);
 
   const showError = (message: string, structured: PairedHostError | null = null) => {
     setError(message);
     setStructuredError(structured);
+  };
+
+  const clearError = () => {
+    setError(null);
+    setStructuredError(null);
   };
 
   // Structured IPC errors carry a stable `code`; keep it so the code-specific
@@ -270,48 +374,22 @@ export function AddMachineModal({
     showError(extractIpcErrorMessage(err, fallback));
   };
 
-  const handleClose = () => {
+  const goBack = () => {
     if (busy) return;
-    isDismissedRef.current = true;
-    setError(null);
-    setStructuredError(null);
-    setSuccessTarget(null);
-    setImportResult(null);
-    setSshForm(DEFAULT_SSH_FORM);
-    setSshPasswordInput("");
-    setConfigText("");
-    onClose();
+    clearError();
+    setStep("choose");
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      e.preventDefault();
-      if (!busy) handleClose();
-      return;
-    }
-
-    if (e.key === "Tab") {
-      const focusable = modalRef.current?.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      );
-      if (!focusable || focusable.length === 0) {
-        // Nothing is tabbable (every control disabled): keep focus on the dialog container.
-        e.preventDefault();
-        modalRef.current?.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-
-      if (e.shiftKey && (document.activeElement === first || document.activeElement === modalRef.current)) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    }
+  const handleMethodKeyDown = (e: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let next: number | null = null;
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") next = (index + 1) % METHODS.length;
+    else if (e.key === "ArrowUp" || e.key === "ArrowLeft") next = (index - 1 + METHODS.length) % METHODS.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = METHODS.length - 1;
+    if (next === null) return;
+    e.preventDefault();
+    setMethod(METHODS[next].value);
+    radioRefs.current[next]?.focus();
   };
 
   const handleSshSubmit = async (e: FormEvent) => {
@@ -353,16 +431,15 @@ export function AddMachineModal({
         await setSshPassword(candidateHost, sshPassword);
       }
       const summary = await testSshConnection(candidateHost);
-      if (isDismissedRef.current || !isMountedRef.current) return;
+      if (!alive()) return;
 
       if (!summary.reachable) {
         showError(summary.lastError || "SSH connection test failed. Check host, credentials, and network reachability.");
-        setBusy(false);
         return;
       }
 
       await updateSshHost(candidateHost);
-      if (isDismissedRef.current || !isMountedRef.current) return;
+      if (!alive()) return;
 
       const target: MachineProjectTarget = { kind: "ssh", hostId: candidateHost.id };
       setSshPasswordInput("");
@@ -374,12 +451,10 @@ export function AddMachineModal({
         summary: { reachable: true, environment: summary.environment },
       });
     } catch (err) {
-      if (isDismissedRef.current || !isMountedRef.current) return;
+      if (!alive()) return;
       reportError(err, "SSH connection test failed.");
     } finally {
-      if (isMountedRef.current) {
-        setBusy(false);
-      }
+      setBusy(false);
     }
   };
 
@@ -392,7 +467,7 @@ export function AddMachineModal({
 
     try {
       const importedHosts = await importSshConfig(configText);
-      if (isDismissedRef.current || !isMountedRef.current) return;
+      if (!alive()) return;
 
       if (Array.isArray(importedHosts) && importedHosts.length > 0) {
         // Imported entries remain UNCHECKED until actual check.
@@ -403,13 +478,11 @@ export function AddMachineModal({
         showError("No hosts were found in that SSH configuration. Check the text and try again.");
       }
     } catch (err) {
-      if (isDismissedRef.current || !isMountedRef.current) return;
+      if (!alive()) return;
       reportError(err, "Failed to import SSH configuration.");
       // Retains configText on failure!
     } finally {
-      if (isMountedRef.current) {
-        setBusy(false);
-      }
+      setBusy(false);
     }
   };
 
@@ -420,7 +493,7 @@ export function AddMachineModal({
 
     try {
       const importedHosts = await importSshConfig(systemConfig.rawText);
-      if (isDismissedRef.current || !isMountedRef.current) return;
+      if (!alive()) return;
 
       if (Array.isArray(importedHosts) && importedHosts.length > 0) {
         setImportResult({ count: importedHosts.length, hosts: importedHosts });
@@ -429,12 +502,10 @@ export function AddMachineModal({
         showError("No hosts were found in the system SSH configuration.");
       }
     } catch (err) {
-      if (isDismissedRef.current || !isMountedRef.current) return;
+      if (!alive()) return;
       reportError(err, "Failed to import system SSH configuration.");
     } finally {
-      if (isMountedRef.current) {
-        setBusy(false);
-      }
+      setBusy(false);
     }
   };
 
@@ -455,38 +526,26 @@ export function AddMachineModal({
     }
   };
 
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Add Machine"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onKeyDown={handleKeyDown}
-    >
-      <div
-        ref={modalRef}
-        tabIndex={-1}
-        className="relative w-full max-w-lg rounded-lg border border-border bg-card p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto"
-      >
-        <div className="flex items-center justify-between border-b border-border pb-3">
-          <h2 className="text-base font-semibold">Add Machine</h2>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            aria-label="Close"
-            disabled={busy}
-            className="size-7 p-0"
-            onClick={handleClose}
-          >
-            <X className="size-4" />
-          </Button>
-        </div>
+  const methodTitle = METHODS.find((m) => m.value === method)?.title ?? "";
+  const showingResult = Boolean(successTarget || importResult);
 
+  return (
+    <>
+      <div className="space-y-1 pr-8">
+        <p className="text-[11px] font-medium text-muted-foreground">
+          {step === "choose" ? "Step 1 of 2" : `Step 2 of 2 · ${methodTitle}`}
+        </p>
+        <DialogTitle className="text-[14px]">Add Machine</DialogTitle>
+        <DialogDescription>
+          {step === "choose" ? "Choose a method. How do you want to connect?" : METHOD_STEP_DESCRIPTION[method]}
+        </DialogDescription>
+      </div>
+
+      <div ref={bodyRef} className="space-y-4">
         {error ? (
-          <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-xs text-destructive">
-            <AlertCircle className="size-4 shrink-0 mt-0.5" />
-            <div className="flex flex-col gap-1 w-full">
+          <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-[12px] text-destructive">
+            <AlertCircle className="mt-0.5 size-4 shrink-0" />
+            <div className="flex w-full flex-col gap-1">
               <span className="break-words">{error}</span>
               {structuredError?.code === "PIN_EXPIRED" || structuredError?.code === "EXPIRED_PIN" ? (
                 <span className="text-[11px] font-medium text-destructive/90">
@@ -512,8 +571,7 @@ export function AddMachineModal({
                     className="h-6 px-2 text-[11px]"
                     onClick={() => {
                       void inventory.refresh();
-                      setError(null);
-                      setStructuredError(null);
+                      clearError();
                     }}
                   >
                     Refresh inventory
@@ -524,16 +582,16 @@ export function AddMachineModal({
           </div>
         ) : null}
 
-        {/* Success View for verified machines (PIN or SSH) */}
+        {/* Success View for verified SSH machines */}
         {successTarget ? (
           <div className="space-y-4 py-4 text-center">
             <div className="flex justify-center">
               <CheckCircle2 className="size-10 text-status-success" />
             </div>
-            <p className="text-sm font-medium text-foreground">
+            <p className="text-[13px] font-medium text-foreground">
               Machine &ldquo;{successTarget.name}&rdquo; connected and verified successfully!
             </p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-[12px] text-muted-foreground">
               The machine has been added to your inventory and capabilities have been verified.
             </p>
             <div className="flex justify-center gap-3 pt-2">
@@ -542,12 +600,12 @@ export function AddMachineModal({
                 data-result-action
                 onClick={() => {
                   onOfferProject?.(successTarget.target);
-                  handleClose();
+                  onClose();
                 }}
               >
                 Add Project
               </Button>
-              <Button type="button" variant="outline" onClick={handleClose}>
+              <Button type="button" variant="outline" onClick={onClose}>
                 Done
               </Button>
             </div>
@@ -558,300 +616,360 @@ export function AddMachineModal({
             <div className="flex justify-center">
               <FileCode className="size-10 text-primary" />
             </div>
-            <p className="text-sm font-medium text-foreground">
+            <p className="text-[13px] font-medium text-foreground">
               Imported {importResult.count} machine{importResult.count === 1 ? "" : "s"} into inventory
             </p>
-            <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+            <p className="mx-auto max-w-sm text-[12px] text-muted-foreground">
               Imported machines are recorded as unchecked. Test the connection from machine details before adding remote projects.
             </p>
             <div className="flex justify-center gap-3 pt-2">
-              <Button type="button" data-result-action onClick={handleClose}>
+              <Button type="button" data-result-action onClick={onClose}>
                 Done
               </Button>
             </div>
           </div>
-        ) : (
+        ) : null}
+
+        {!showingResult && step === "choose" ? (
           <>
-            {/* Method tabs wrap cleanly on narrow screens */}
-            <div
-              role="tablist"
-              aria-label="Connection methods"
-              className="flex flex-wrap gap-1 border-b border-border pb-1 text-xs"
-            >
+            <div role="radiogroup" aria-label="Connection methods" className="flex flex-col gap-1.5">
+              {METHODS.map(({ value, title, description, Icon }, index) => {
+                const selected = value === method;
+                const titleId = `${idPrefix}-${value}-title`;
+                const descriptionId = `${idPrefix}-${value}-description`;
+                return (
+                  <button
+                    key={value}
+                    ref={(element) => { radioRefs.current[index] = element; }}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    aria-labelledby={titleId}
+                    aria-describedby={descriptionId}
+                    tabIndex={selected ? 0 : -1}
+                    onClick={() => setMethod(value)}
+                    onKeyDown={(e) => handleMethodKeyDown(e, index)}
+                    className={cn(
+                      "flex w-full items-center gap-3 rounded-lg border border-border px-3 py-2.5 text-left transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                      selected && "bg-muted",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground",
+                        selected && "bg-accent text-foreground",
+                      )}
+                    >
+                      <Icon className="size-3.5" aria-hidden="true" />
+                    </span>
+                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span id={titleId} className="text-[12px] font-medium text-foreground">{title}</span>
+                      <span id={descriptionId} className="text-[11px] text-muted-foreground">{description}</span>
+                    </span>
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "size-3.5 shrink-0 rounded-full",
+                        selected ? "border-4 border-primary" : "border border-input",
+                      )}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border pt-3">
+              <Button type="button" variant="ghost" size="sm" className="text-[12px]" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className="text-[12px]"
+                onClick={() => {
+                  clearError();
+                  setStep("details");
+                }}
+              >
+                Continue
+              </Button>
+            </div>
+          </>
+        ) : null}
+
+        {!showingResult && step === "details" && method === "enrollment" ? (
+          <EnrollmentStep
+            accountOrigin={accountOrigin}
+            onIssueEnrollmentCode={onIssueEnrollmentCode}
+            onBack={goBack}
+            onDone={onClose}
+          />
+        ) : null}
+
+        {!showingResult && step === "details" && method === "ssh" ? (
+          <form className="space-y-3" onSubmit={handleSshSubmit}>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <Label htmlFor="ssh-label" className="text-[11px] font-medium">Label</Label>
+                <Input
+                  id="ssh-label"
+                  aria-label="Label"
+                  disabled={busy}
+                  required
+                  value={sshForm.label}
+                  placeholder="e.g., dev-server"
+                  onChange={e => setSshForm(f => ({ ...f, label: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="ssh-hostname" className="text-[11px] font-medium">Hostname</Label>
+                <Input
+                  id="ssh-hostname"
+                  aria-label="Hostname"
+                  disabled={busy}
+                  required
+                  value={sshForm.hostname}
+                  placeholder="IP or hostname"
+                  onChange={e => setSshForm(f => ({ ...f, hostname: e.target.value }))}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <Label htmlFor="ssh-username" className="text-[11px] font-medium">Username</Label>
+                <Input
+                  id="ssh-username"
+                  aria-label="Username"
+                  disabled={busy}
+                  value={sshForm.username}
+                  placeholder="ubuntu"
+                  onChange={e => setSshForm(f => ({ ...f, username: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="ssh-port" className="text-[11px] font-medium">Port</Label>
+                <Input
+                  id="ssh-port"
+                  aria-label="Port"
+                  disabled={busy}
+                  value={sshForm.port}
+                  placeholder="22"
+                  onChange={e => setSshForm(f => ({ ...f, port: e.target.value }))}
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="ssh-auth-method" className="text-[11px] font-medium">Authentication method</Label>
+              <select id="ssh-auth-method" aria-label="Authentication method" disabled={busy}
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-[12px]"
+                value={sshForm.authMethod}
+                onChange={e => { setSshForm(f => ({ ...f, authMethod: e.target.value as SshAuthMethod })); setSshPasswordInput(""); }}>
+                <option value="agent">SSH Agent</option>
+                <option value="key">Key File</option>
+                <option value="password">Password</option>
+              </select>
+            </div>
+            {sshForm.authMethod === "password" ? <div className="space-y-1">
+              <Label htmlFor="ssh-password" className="text-[11px] font-medium">SSH password</Label>
+              <Input id="ssh-password" type="password" autoComplete="off" required disabled={busy}
+                value={sshPassword} onChange={e => setSshPasswordInput(e.target.value)} />
+              <p className="text-[11px] text-muted-foreground">Kept in memory for connections, not saved in machine settings.</p>
+            </div> : null}
+
+            {/* Advanced SSH fields collapsed per approved proposal */}
+            <div className="pt-1">
               <button
                 type="button"
-                role="tab"
-                aria-selected={activeTab === "ssh"}
                 disabled={busy}
-                className={`flex items-center gap-1.5 px-3 py-2 font-medium border-b-2 transition-colors disabled:opacity-50 ${
-                  activeTab === "ssh"
-                    ? "border-primary text-foreground"
-                    : "border-transparent text-muted-foreground hover:text-foreground"
-                }`}
-                onClick={() => { setActiveTab("ssh"); setError(null); }}
+                className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                onClick={() => setShowAdvancedSsh(v => !v)}
               >
-                <Terminal className="size-3.5" />
-                Connect with SSH
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTab === "import"}
-                disabled={busy}
-                className={`flex items-center gap-1.5 px-3 py-2 font-medium border-b-2 transition-colors disabled:opacity-50 ${
-                  activeTab === "import"
-                    ? "border-primary text-foreground"
-                    : "border-transparent text-muted-foreground hover:text-foreground"
-                }`}
-                onClick={() => { setActiveTab("import"); setError(null); }}
-              >
-                <FileCode className="size-3.5" />
-                Import SSH Config
+                {showAdvancedSsh ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+                {showAdvancedSsh ? "Hide Advanced Options" : "Show Advanced Options (Key, Agent, Jump Host)"}
               </button>
             </div>
 
-            {activeTab === "ssh" ? (
-              <form className="space-y-3 pt-2" onSubmit={handleSshSubmit}>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {showAdvancedSsh ? (
+              <div className="space-y-3 border-t border-border/50 pt-2">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div className="space-y-1">
-                    <Label htmlFor="ssh-label" className="text-xs font-medium">Label</Label>
+                    <Label htmlFor="ssh-identity" className="text-[11px] font-medium">Identity File</Label>
                     <Input
-                      id="ssh-label"
-                      aria-label="Label"
+                      id="ssh-identity"
+                      aria-label="Identity file"
                       disabled={busy}
-                      required
-                      value={sshForm.label}
-                      placeholder="e.g., dev-server"
-                      onChange={e => setSshForm(f => ({ ...f, label: e.target.value }))}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label htmlFor="ssh-hostname" className="text-xs font-medium">Hostname</Label>
-                    <Input
-                      id="ssh-hostname"
-                      aria-label="Hostname"
-                      disabled={busy}
-                      required
-                      value={sshForm.hostname}
-                      placeholder="IP or hostname"
-                      onChange={e => setSshForm(f => ({ ...f, hostname: e.target.value }))}
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="space-y-1">
-                    <Label htmlFor="ssh-username" className="text-xs font-medium">Username</Label>
-                    <Input
-                      id="ssh-username"
-                      aria-label="Username"
-                      disabled={busy}
-                      value={sshForm.username}
-                      placeholder="ubuntu"
-                      onChange={e => setSshForm(f => ({ ...f, username: e.target.value }))}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label htmlFor="ssh-port" className="text-xs font-medium">Port</Label>
-                    <Input
-                      id="ssh-port"
-                      aria-label="Port"
-                      disabled={busy}
-                      value={sshForm.port}
-                      placeholder="22"
-                      onChange={e => setSshForm(f => ({ ...f, port: e.target.value }))}
+                      value={sshForm.identityFile}
+                      placeholder="~/.ssh/id_ed25519"
+                      onChange={e => setSshForm(f => ({ ...f, identityFile: e.target.value }))}
                     />
                   </div>
                 </div>
 
                 <div className="space-y-1">
-                  <Label htmlFor="ssh-auth-method" className="text-xs font-medium">Authentication method</Label>
-                  <select id="ssh-auth-method" aria-label="Authentication method" disabled={busy}
-                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-                    value={sshForm.authMethod}
-                    onChange={e => { setSshForm(f => ({ ...f, authMethod: e.target.value as SshAuthMethod })); setSshPasswordInput(""); }}>
-                    <option value="agent">SSH Agent</option>
-                    <option value="key">Key File</option>
-                    <option value="password">Password</option>
-                  </select>
-                </div>
-                {sshForm.authMethod === "password" ? <div className="space-y-1">
-                  <Label htmlFor="ssh-password" className="text-xs font-medium">SSH password</Label>
-                  <Input id="ssh-password" type="password" autoComplete="off" required disabled={busy}
-                    value={sshPassword} onChange={e => setSshPasswordInput(e.target.value)} />
-                  <p className="text-xs text-muted-foreground">Kept in memory for connections, not saved in machine settings.</p>
-                </div> : null}
-
-                {/* Advanced SSH fields collapsed per approved proposal */}
-                <div className="pt-1">
-                  <button
-                    type="button"
+                  <Label htmlFor="ssh-jump-host" className="text-[11px] font-medium">Jump Host</Label>
+                  <Input
+                    id="ssh-jump-host"
+                    aria-label="Jump host"
                     disabled={busy}
-                    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground font-medium"
-                    onClick={() => setShowAdvancedSsh(v => !v)}
-                  >
-                    {showAdvancedSsh ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-                    {showAdvancedSsh ? "Hide Advanced Options" : "Show Advanced Options (Key, Agent, Jump Host)"}
-                  </button>
+                    value={sshForm.jumpHost}
+                    placeholder="bastion.corp.net"
+                    onChange={e => setSshForm(f => ({ ...f, jumpHost: e.target.value }))}
+                  />
                 </div>
+              </div>
+            ) : null}
 
-                {showAdvancedSsh ? (
-                  <div className="space-y-3 pt-2 border-t border-border/50">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div className="space-y-1">
-                        <Label htmlFor="ssh-identity" className="text-xs font-medium">Identity File</Label>
-                        <Input
-                          id="ssh-identity"
-                          aria-label="Identity file"
-                          disabled={busy}
-                          value={sshForm.identityFile}
-                          placeholder="~/.ssh/id_ed25519"
-                          onChange={e => setSshForm(f => ({ ...f, identityFile: e.target.value }))}
-                        />
-                      </div>
-                    </div>
+            <div className="flex items-center gap-2 border-t border-border pt-3">
+              <Button type="button" variant="ghost" size="sm" className="text-[12px]" disabled={busy} onClick={goBack}>
+                Back
+              </Button>
+              <span className="flex-1" />
+              <Button type="button" variant="outline" size="sm" className="text-[12px]" disabled={busy} onClick={onClose}>
+                Cancel
+              </Button>
+              <Button type="submit" size="sm" className="text-[12px]" disabled={busy}>
+                {busy ? "Testing & Connecting…" : "Connect SSH Machine"}
+              </Button>
+            </div>
+          </form>
+        ) : null}
 
-                    <div className="space-y-1">
-                      <Label htmlFor="ssh-jump-host" className="text-xs font-medium">Jump Host</Label>
-                      <Input
-                        id="ssh-jump-host"
-                        aria-label="Jump host"
-                        disabled={busy}
-                        value={sshForm.jumpHost}
-                        placeholder="bastion.corp.net"
-                        onChange={e => setSshForm(f => ({ ...f, jumpHost: e.target.value }))}
-                      />
+        {!showingResult && step === "details" && method === "import" ? (
+          <div className="space-y-4">
+            {systemConfigError ? (
+              <p role="alert" className="text-[11px] text-destructive">
+                Could not read the system SSH configuration: {systemConfigError}
+              </p>
+            ) : null}
+            <div className="flex gap-2 border-b border-border/60 pb-2">
+              {systemConfig?.exists ? (
+                <Button
+                  type="button"
+                  variant={importSubMode === "system" ? "default" : "outline"}
+                  size="sm"
+                  className="text-[12px]"
+                  disabled={busy}
+                  onClick={() => setImportSubMode("system")}
+                >
+                  System Config ({systemConfig.hosts.length})
+                </Button>
+              ) : null}
+              <Button
+                type="button"
+                variant={importSubMode === "paste" ? "default" : "outline"}
+                size="sm"
+                className="text-[12px]"
+                disabled={busy}
+                onClick={() => setImportSubMode("paste")}
+              >
+                Paste Configuration
+              </Button>
+            </div>
+
+            {importSubMode === "system" && systemConfig ? (
+              <>
+                <Card className="space-y-3 border-border bg-muted/20 p-3.5">
+                  <div className="space-y-1 text-[12px]">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-foreground">
+                        {configPathOverride ? "Custom SSH Config" : "System SSH Config"}
+                      </span>
+                      <span className="font-mono text-[11px] text-muted-foreground">
+                        {systemConfig.hosts.length} hosts found
+                      </span>
                     </div>
+                    <p className="break-all text-[11px] text-muted-foreground">
+                      {systemConfig.path || "~/.ssh/config"}
+                    </p>
                   </div>
-                ) : null}
 
-                <div className="flex justify-end gap-2 pt-2">
-                  <Button type="button" variant="outline" disabled={busy} onClick={handleClose}>
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="text-[12px]"
+                      disabled={busy || systemConfig.hosts.length === 0}
+                      aria-label="Import all system hosts"
+                      onClick={handleImportSystemAll}
+                    >
+                      {busy ? "Importing…" : `Import All (${systemConfig.hosts.length} hosts)`}
+                    </Button>
+                    {isTauri() ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="text-[12px]"
+                        disabled={busy}
+                        aria-label="Choose custom SSH config file"
+                        onClick={handleChooseConfigFile}
+                      >
+                        Choose file…
+                      </Button>
+                    ) : null}
+                    {configPathOverride ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="text-[12px]"
+                        disabled={busy}
+                        onClick={() => {
+                          setConfigPathOverrideState(null);
+                          setSshConfigPathOverride(null);
+                        }}
+                      >
+                        Use default
+                      </Button>
+                    ) : null}
+                  </div>
+                </Card>
+                <div className="flex items-center gap-2 border-t border-border pt-3">
+                  <Button type="button" variant="ghost" size="sm" className="text-[12px]" disabled={busy} onClick={goBack}>
+                    Back
+                  </Button>
+                  <span className="flex-1" />
+                  <Button type="button" variant="outline" size="sm" className="text-[12px]" disabled={busy} onClick={onClose}>
                     Cancel
                   </Button>
-                  <Button type="submit" disabled={busy}>
-                    {busy ? "Testing & Connecting…" : "Connect SSH Machine"}
+                </div>
+              </>
+            ) : (
+              <form className="space-y-3" onSubmit={handleImportTextSubmit}>
+                <div className="space-y-1">
+                  <Label htmlFor="ssh-config-text" className="text-[11px] font-medium">
+                    SSH Configuration
+                  </Label>
+                  <textarea
+                    id="ssh-config-text"
+                    aria-label="SSH Configuration"
+                    disabled={busy}
+                    rows={6}
+                    className="w-full rounded-md border border-input bg-transparent p-2 font-mono text-[11px] shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    placeholder={"Host dev-box\n  HostName 10.0.0.1\n  User ubuntu\n  Port 22"}
+                    value={configText}
+                    onChange={e => setConfigText(e.target.value)}
+                  />
+                </div>
+
+                <div className="flex items-center gap-2 border-t border-border pt-3">
+                  <Button type="button" variant="ghost" size="sm" className="text-[12px]" disabled={busy} onClick={goBack}>
+                    Back
+                  </Button>
+                  <span className="flex-1" />
+                  <Button type="button" variant="outline" size="sm" className="text-[12px]" disabled={busy} onClick={onClose}>
+                    Cancel
+                  </Button>
+                  <Button type="submit" size="sm" className="text-[12px]" disabled={busy || !configText.trim()}>
+                    {busy ? "Importing…" : "Import Configuration"}
                   </Button>
                 </div>
               </form>
-            ) : (
-              /* Config Import Method */
-              <div className="space-y-4 pt-2">
-                {systemConfigError ? (
-                  <p role="alert" className="text-[11px] text-destructive">
-                    Could not read the system SSH configuration: {systemConfigError}
-                  </p>
-                ) : null}
-                <div className="flex gap-2 border-b border-border/60 pb-2">
-                  {systemConfig?.exists ? (
-                    <Button
-                      type="button"
-                      variant={importSubMode === "system" ? "default" : "outline"}
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => setImportSubMode("system")}
-                    >
-                      System Config ({systemConfig.hosts.length})
-                    </Button>
-                  ) : null}
-                  <Button
-                    type="button"
-                    variant={importSubMode === "paste" ? "default" : "outline"}
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => setImportSubMode("paste")}
-                  >
-                    Paste Configuration
-                  </Button>
-                </div>
-
-                {importSubMode === "system" && systemConfig ? (
-                  <Card className="p-3.5 space-y-3 bg-muted/20 border-border">
-                    <div className="text-xs space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="font-medium text-foreground">
-                          {configPathOverride ? "Custom SSH Config" : "System SSH Config"}
-                        </span>
-                        <span className="text-muted-foreground font-mono text-[11px]">
-                          {systemConfig.hosts.length} hosts found
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-muted-foreground break-all">
-                        {systemConfig.path || "~/.ssh/config"}
-                      </p>
-                    </div>
-
-                    <div className="flex flex-wrap gap-2 pt-1">
-                      <Button
-                        type="button"
-                        size="sm"
-                        disabled={busy || systemConfig.hosts.length === 0}
-                        aria-label="Import all system hosts"
-                        onClick={handleImportSystemAll}
-                      >
-                        {busy ? "Importing…" : `Import All (${systemConfig.hosts.length} hosts)`}
-                      </Button>
-                      {isTauri() ? (
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          disabled={busy}
-                          aria-label="Choose custom SSH config file"
-                          onClick={handleChooseConfigFile}
-                        >
-                          Choose file…
-                        </Button>
-                      ) : null}
-                      {configPathOverride ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          disabled={busy}
-                          onClick={() => {
-                            setConfigPathOverrideState(null);
-                            setSshConfigPathOverride(null);
-                          }}
-                        >
-                          Use default
-                        </Button>
-                      ) : null}
-                    </div>
-                  </Card>
-                ) : (
-                  <form className="space-y-3" onSubmit={handleImportTextSubmit}>
-                    <div className="space-y-1">
-                      <Label htmlFor="ssh-config-text" className="text-xs font-medium">
-                        SSH Configuration
-                      </Label>
-                      <textarea
-                        id="ssh-config-text"
-                        aria-label="SSH Configuration"
-                        disabled={busy}
-                        rows={6}
-                        className="w-full rounded-md border border-input bg-transparent p-2 font-mono text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                        placeholder={"Host dev-box\n  HostName 10.0.0.1\n  User ubuntu\n  Port 22"}
-                        value={configText}
-                        onChange={e => setConfigText(e.target.value)}
-                      />
-                    </div>
-
-                    <div className="flex justify-end gap-2 pt-2">
-                      <Button type="button" variant="outline" disabled={busy} onClick={handleClose}>
-                        Cancel
-                      </Button>
-                      <Button type="submit" disabled={busy || !configText.trim()}>
-                        {busy ? "Importing…" : "Import Configuration"}
-                      </Button>
-                    </div>
-                  </form>
-                )}
-              </div>
             )}
-          </>
-        )}
+          </div>
+        ) : null}
       </div>
-    </div>
+    </>
   );
 }

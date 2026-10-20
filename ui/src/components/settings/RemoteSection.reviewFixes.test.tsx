@@ -171,7 +171,8 @@ describe("RemoteSection review fixes", () => {
       render(<RemoteSection store={store} inventory={inventory} accountOrigin={DEFAULT_RELAY_ORIGIN} accountSessionToken="tok" />);
     });
     await act(async () => { fireEvent.click(await screen.findByRole("button", { name: /Issue Enrollment Code/i })); });
-    expect(screen.getByRole("button", { name: "Dismiss enrollment code" })).toBeInTheDocument();
+    // The enrollment card now lives in the Add Machine wizard, which issues the code on open.
+    expect(await screen.findByRole("button", { name: "Dismiss enrollment code" })).toBeInTheDocument();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: /Copy/ })); });
 
     expect(screen.getByRole("button", { name: /Copy failed/ })).toBeInTheDocument();
