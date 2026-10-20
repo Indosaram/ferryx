@@ -139,6 +139,18 @@ const markFixture = (key: string) => (value?: { path?: string; workspaceId?: str
 };
 
 const { Sidebar } = await import("../components/Sidebar");
+const attention = {
+  rows: [1, 2, 3].map((n) => ({
+    id: `qa-row-${n}`, revision: 1, workspaceId: LOCAL_ID, sessionId: `qa-sess-${n}`, state: "needs-you" as const,
+    who: "omo", location: `ferryx / row ${n}`, text: "Needs input", at: 0,
+  })),
+  onOpen: () => markFixture("fixtureAttentionOpen")(),
+  onDismiss: () => markFixture("fixtureAttentionDismiss")(),
+  onDismissAll: () => markFixture("fixtureAttentionDismissAll")(),
+  openSessionCount: 0,
+  inboxOpen: params.get("inbox") === "1",
+  onInboxOpenChange: () => markFixture("fixtureInboxToggle")(),
+};
 const root = document.getElementById("root");
 if (root) {
   ReactDOM.createRoot(root).render(
@@ -162,6 +174,7 @@ if (root) {
         onSelectWorktree={markFixture("fixtureSelectedWorktree")}
         onCreateWorktree={markFixture("fixtureCreateWorktree")}
         onOpenSettings={() => markFixture("fixtureOpenSettings")()}
+        attention={attention}
       />
     </div>,
   );
