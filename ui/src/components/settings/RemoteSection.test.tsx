@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, createEvent, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteSection } from "./RemoteSection";
 import { createRemoteHostStore, remoteHostKey } from "../../state/remoteHostStore";
@@ -12,6 +12,19 @@ const grantMocks = vi.hoisted(() => ({
   attachKey: vi.fn(),
   requestGrant: vi.fn(),
 }));
+
+// Reachability defaults to an older backend without the list command, so rows use the legacy
+// online flag; individual tests opt into reported states.
+const reachabilityMock = vi.hoisted(() => vi.fn((_hostId: string) => ({ supported: false, entry: null as unknown })));
+vi.mock("../../lib/pairedHostReachability", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/pairedHostReachability")>()),
+  usePairedHostReachability: (hostId: string) => reachabilityMock(hostId),
+}));
+
+/** Closes the open details drawer the way a keyboard user does. */
+function pressEscape() {
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+}
 
 vi.mock("../../remote/accountAttach", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../remote/accountAttach")>()),
@@ -103,6 +116,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     resetTailscaleDiscoveryForTests();
     localStorage.clear();
     isTauriMock.mockReturnValue(true);
+    reachabilityMock.mockImplementation(() => ({ supported: false, entry: null }));
 
     invokeMock.mockImplementation(async (command: string, args?: any) => {
       if (command === "cmd_ssh_list_hosts") return [mockSshHost];
@@ -162,7 +176,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(openProject).toHaveBeenCalledWith(tailnet.id);
   });
 
-  it("keeps a reachable Tailnet machine unavailable when helper provisioning fails", async () => {
+  it("keeps a reachable Tailnet machine unavailable (under Discovered) when helper provisioning fails", async () => {
     const tailnet: SshHost = { ...mockSshHost, id: "tailscale:failed", source: "tailscale" };
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "cmd_ssh_sync_tailscale") return { hosts: [tailnet], targets: [{ host: tailnet, reachable: true, helper: "unknown", checkedAt: 1, diagnostic: { code: "CLI_EXECUTABLE_NOT_FOUND", message: "Fixture helper unavailable", details: { stage: "provisioning" } } }] };
@@ -173,8 +187,88 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     const { store, inventory } = createTestInventory([]);
     await act(async () => { render(<RemoteSection store={store} inventory={inventory} onOpenSshProject={vi.fn()} />); });
     expect(screen.getByTestId("machine-status")).toHaveAttribute("data-code", "CLI_EXECUTABLE_NOT_FOUND");
-    expect(screen.getByRole("button", { name: `Add Project on ${tailnet.label}` })).toBeDisabled();
+    // Not usable yet: it is listed under Discovered, which offers setup but no Add Project.
+    expect(screen.queryByRole("button", { name: `Add Project on ${tailnet.label}` })).toBeNull();
+    expect(within(screen.getByRole("list", { name: "Discovered machines" })).getByText(tailnet.label)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry Tailscale" })).toBeEnabled();
+  });
+
+  it("orders the sections My machines, Discovered, This machine, Advanced", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+    await act(async () => { render(<RemoteSection store={store} inventory={inventory} />); });
+    const order = [
+      screen.getByRole("heading", { name: "My machines" }),
+      screen.getByRole("heading", { name: "Discovered" }),
+      screen.getByRole("heading", { name: "This machine" }),
+      screen.getByText("Advanced", { selector: "summary" }),
+    ];
+    for (let i = 1; i < order.length; i += 1) {
+      expect(order[i - 1].compareDocumentPosition(order[i]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+  });
+
+  it("lists an unprovisioned Tailscale host under Discovered and not in Remote machines", async () => {
+    const tailnet: SshHost = { ...mockSshHost, id: "tailscale:new", label: "Tailnet Peer", hostname: "100.64.0.9", source: "tailscale" };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_sync_tailscale") return { hosts: [tailnet], targets: [{ host: tailnet, reachable: true, helper: "missing", checkedAt: 1 }] };
+      if (command === "cmd_ssh_list_hosts") return [mockSshHost, tailnet];
+      return undefined;
+    });
+    await syncTailscaleMachines();
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+    await act(async () => { render(<RemoteSection store={store} inventory={inventory} onOpenSshProject={vi.fn()} />); });
+
+    expect(within(screen.getByRole("list", { name: "Discovered machines" })).getByText("Tailnet Peer")).toBeInTheDocument();
+    const machines = screen.getByRole("list", { name: "Remote machines" });
+    expect(within(machines).queryByText("Tailnet Peer")).toBeNull();
+    expect(within(machines).getByText("Linux Build Box")).toBeInTheDocument();
+  });
+
+  it("shows OFFLINE and CHECKING from paired-host reachability, with a visible reason on the disabled primary", async () => {
+    const offlineId = remoteHostKey(DEFAULT_RELAY_ORIGIN, "offline-box");
+    const checkingId = remoteHostKey(DEFAULT_RELAY_ORIGIN, "checking-box");
+    reachabilityMock.mockImplementation((hostId: string) => ({
+      supported: true,
+      entry: hostId === offlineId
+        ? { hostId, generation: "1", state: "offline", checkedAtMs: 1, lastError: "relay has no route" }
+        : hostId === checkingId
+        ? { hostId, generation: "1", state: "checking", checkedAtMs: 1, lastError: null }
+        : null,
+    }));
+    const { store, inventory } = createTestInventory([
+      { ...mockPairedHostView, hostId: offlineId, machineId: "offline-box", displayLabel: "Offline Box" },
+      { ...mockPairedHostView, hostId: checkingId, machineId: "checking-box", displayLabel: "Checking Box" },
+    ]);
+    await inventory.refresh();
+    await act(async () => { render(<RemoteSection store={store} inventory={inventory} onOpenProject={vi.fn()} />); });
+
+    const offlineRow = screen.getByText("Offline Box").closest("[data-machine-id]") as HTMLElement;
+    expect(within(offlineRow).getByTestId("machine-status")).toHaveAttribute("data-code", "OFFLINE");
+    expect(within(offlineRow).getByRole("button", { name: "Add Project on Offline Box" })).toBeDisabled();
+    expect(within(offlineRow).getByTestId("machine-disabled-reason")).toHaveTextContent("relay has no route");
+
+    const checkingRow = screen.getByText("Checking Box").closest("[data-machine-id]") as HTMLElement;
+    expect(within(checkingRow).getByTestId("machine-status")).toHaveAttribute("data-code", "CHECKING");
+    expect(within(checkingRow).getByTestId("machine-disabled-reason").textContent).not.toBe("");
+  });
+
+  it("opens the details drawer, closes it with Escape, and returns focus to its Details button", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+    await act(async () => { render(<RemoteSection store={store} inventory={inventory} />); });
+
+    const details = screen.getByRole("button", { name: "Details for Linux Build Box" });
+    details.focus();
+    fireEvent.click(details);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check capabilities for Linux Build Box" })).toBeInTheDocument();
+
+    pressEscape();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // Radix restores focus on its close-auto-focus event, dispatched after unmount.
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Details for Linux Build Box" })));
   });
 
   it("authenticates SSH with a separate password before probing and never saves it in the host", async () => {
@@ -452,8 +546,9 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       );
 
       expect(await screen.findByText("Enrolled Box")).toBeInTheDocument();
-      const disabledAddBtn = screen.getByRole("button", { name: "Add Project on Enrolled Box" });
-      expect(disabledAddBtn).toBeDisabled();
+      // Mirror scope cannot open projects: the row's single primary is Connect, never Add Project.
+      expect(screen.queryByRole("button", { name: "Add Project on Enrolled Box" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Connect Enrolled Box" })).toBeInTheDocument();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -607,7 +702,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       render(<RemoteSection store={store} inventory={inventory} />);
     });
 
-    // Expand SSH details and start Edit
+    // Open the SSH details drawer and start Edit
     fireEvent.click(screen.getByRole("button", { name: "Details for Dev Server" }));
     fireEvent.click(screen.getByRole("button", { name: "Edit Dev Server" }));
 
@@ -693,6 +788,8 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Check capabilities for Linux Build Box" }));
     });
+    // Close the drawer to get back to the rows.
+    pressEscape();
 
     // Paired Add Project MUST BE DISABLED because onOpenProject is undefined!
     const pairedAddBtn = screen.getByRole("button", { name: "Add Project on Linux Build Box" });
@@ -890,6 +987,8 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     }));
     try {
       const view = render(<RemoteSection store={store} inventory={inventory} accountSessionToken="old-account-token" />);
+      // The account server card lives in the collapsed Advanced section.
+      fireEvent.click(screen.getByText("Advanced", { selector: "summary" }));
       const field = await screen.findByRole("textbox", { name: "Account server URL" });
       fireEvent.change(field, { target: { value: "https://account.selfhost.example" } });
       fireEvent.click(screen.getByRole("button", { name: "Use account server" }));
@@ -899,6 +998,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       expect(screen.queryByText("Account Active")).toBeNull();
       view.unmount();
       render(<RemoteSection store={store} inventory={inventory} />);
+      fireEvent.click(screen.getByText("Advanced", { selector: "summary" }));
       expect(screen.getByRole("textbox", { name: "Account server URL" })).toHaveValue("https://account.selfhost.example");
       expect(screen.queryByText("Account Active")).toBeNull();
     } finally {
@@ -979,10 +1079,10 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       expect(absentRow).toBeInTheDocument();
       const absentStatus = absentRow!.querySelector('[data-testid="machine-status"]');
       expect(absentStatus).toHaveAttribute("data-code", "MACHINE_GRANT_REQUIRED");
-      expect(absentStatus).toHaveTextContent("Needs Grant");
+      expect(absentStatus).toHaveTextContent("Needs access");
 
-      const absentAddBtn = screen.getByRole("button", { name: "Add Project on Ungranted Account Box" });
-      expect(absentAddBtn).toBeDisabled();
+      // Projects cannot be added without the grant: the row offers Connect instead of Add Project.
+      expect(screen.queryByRole("button", { name: "Add Project on Ungranted Account Box" })).toBeNull();
 
       // An enrolled machine whose grant was never redeemed on this desktop used to be a dead end:
       // every action disabled, with no way to obtain the grant from here. Offer the way forward.
@@ -997,12 +1097,12 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       expect(grantedRow).toBeInTheDocument();
       const grantedStatus = grantedRow!.querySelector('[data-testid="machine-status"]');
       expect(grantedStatus).toHaveAttribute("data-code", "READY");
-      expect(grantedStatus).toHaveTextContent("Ready");
+      expect(grantedStatus).toHaveTextContent("Connected");
 
       const grantedAddBtn = screen.getByRole("button", { name: "Add Project on Granted Account Box" });
       expect(grantedAddBtn).not.toBeDisabled();
 
-      // Expand details on ungranted machine and verify metadata shows unknown grant and needsMachineGrant authStatus
+      // Open the details drawer on the ungranted machine: metadata shows unknown grant and needsMachineGrant authStatus
       fireEvent.click(screen.getByRole("button", { name: "Details for Ungranted Account Box" }));
       expect(screen.getByText("unknown")).toBeInTheDocument();
       expect(screen.getByText("needsMachineGrant")).toBeInTheDocument();

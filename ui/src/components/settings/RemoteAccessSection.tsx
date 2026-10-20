@@ -174,11 +174,14 @@ export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boo
           />
         </SettingRow>
 
-        <SettingRow
-          label="Relay / Signaling Server URL"
-          description="Use an HTTPS URL for your own relay. Apply it to this machine; sign in to the same account origin separately to find its machines."
-        >
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-col gap-2 border-b border-border/40 py-3 last:border-0 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+          <div className="max-w-[480px] space-y-0.5">
+            <div className="text-[13px] font-medium text-foreground">Relay / Signaling Server URL</div>
+            <p className="text-[11px] text-muted-foreground">
+              Use an HTTPS URL for your own relay. Apply it to this machine; sign in to the same account origin separately to find its machines.
+            </p>
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-2 sm:shrink-0">
             <Input
               type="url"
               aria-label="Relay / Signaling Server URL"
@@ -197,7 +200,7 @@ export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boo
               Apply relay URL
             </Button>
           </div>
-        </SettingRow>
+        </div>
       </div>
 
       <div className="mt-8 space-y-3">

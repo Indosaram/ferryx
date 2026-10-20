@@ -14,6 +14,14 @@ const SECTION_FILES = [
   "TerminalSection.tsx",
   "AgentsSection.tsx",
   "primitives.tsx",
+  "RemoteSection.tsx",
+  "remote/AccountBar.tsx",
+  "remote/AdvancedSection.tsx",
+  "remote/DiscoveredList.tsx",
+  "remote/MachineDrawer.tsx",
+  "remote/MachineList.tsx",
+  "remote/MachineRow.tsx",
+  "remote/ThisMachineSection.tsx",
 ];
 
 describe("settings design tokens and primitives", () => {
