@@ -8,12 +8,15 @@ import { toast } from "sonner";
 import { cn } from "../lib/cn";
 import { matchesAttachTuple } from "../lib/localSplitContract";
 import { persistNativeBinding } from "../lib/localSplitLifecycle";
+import { appendNativeRecoveryEvent, recordNativeBindingPersisted, writeNativeRecoverySnapshot, type NativeRecoverySnapshot } from "../lib/nativeQaReceipts";
 import type { PaneAttachTuple, PanePresentationReceipt } from "../lib/types";
+import type { LocalRecoveryAdmissionResult } from "../state/workspaceStore";
 import type { TerminalActivity } from "../lib/activity";
 import {
   attachNativeTerminalLifecycle,
   detachNativeTerminalLifecycle,
   emitNativeTerminalPresentation,
+  settleNativeTerminalExit,
   presentNativeTerminalLifecycle,
   reattachNativeTerminalLifecycle,
   getDurableNativeBinding,
@@ -24,13 +27,6 @@ import {
 import { switchDebug } from "../lib/switchDebug";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import { isWindowsHost } from "../lib/platform";
-import {
-  TERMINAL_COPY_MODE_EVENT,
-  TerminalCopyModeBadge,
-  useTerminalCopyMode,
-  type CopyModeGridSize,
-  type TerminalCopyModeEventDetail,
-} from "./TerminalCopyMode";
 import { openTerminalToken, resolveTokenAtCol } from "../lib/linkRouting";
 import { loadFileLinkEditor } from "../lib/fileLinkSettings";
 import {
@@ -109,7 +105,7 @@ export interface NativeTerminalPaneProps {
   activity?: TerminalActivity;
   needsAttention?: boolean;
   active?: boolean;
-  onRefreshSessionIdentity?: (sessionId: string) => Promise<TerminalSession | null | void> | void;
+  onRefreshSessionIdentity?: (sessionId: string, onResult: (result: LocalRecoveryAdmissionResult) => void) => () => void;
   onBackendSessionUnavailable?: (backendSessionId: string, reason: string, bindingKey?: string | null) => void;
 }
 
@@ -140,9 +136,6 @@ interface NativeTerminalReceipt {
   readonly cellWidthPx: number;
   readonly cellHeightPx: number;
   readonly effectiveScaleFactor?: number | null;
-  /** Grid size; present on bounds receipts (NativeTerminalBoundsReceipt.cols/rows). */
-  readonly cols?: number;
-  readonly rows?: number;
 }
 
 interface ImeAnchor {
@@ -515,7 +508,6 @@ const NATIVE_TERMINAL_SCROLLBAR_MIN_THUMB_PX = 20;
 const UNPRESENTED_FRAME_RETRIES = 5;
 const UNPRESENTED_MAX_RETRIES = 10;
 const COMPOSITION_TAIL_WINDOW_MS = 100;
-const STREAM_RECOVERY_WINDOW_MS = 60_000;
 
 export function nativeScrollbarThumb(metrics: ScrollbarMetrics | null): {
   visible: boolean;
@@ -538,6 +530,22 @@ export function nativeScrollbarThumb(metrics: ScrollbarMetrics | null): {
 const sessionInputRecoveries = new Map<string, Promise<void>>();
 const mountedNativeTerminalSessionCounts = new Map<string, number>();
 let lastFocusedNativeTerminalSessionId: string | null = null;
+const lastFocusedNativeTerminalPoints = new Map<string, { readonly x: number; readonly y: number }>();
+let previousNativeFocus: { readonly paneIdentity: string; readonly point: { readonly x: number; readonly y: number } } | null = null;
+
+function recordPreviousNativeFocus(paneIdentity: string, point: { readonly x: number; readonly y: number }): void {
+  lastFocusedNativeTerminalPoints.set(paneIdentity, point);
+  previousNativeFocus = { paneIdentity, point };
+}
+
+export function previousNativeFocusForSnapshot(
+  previous: { readonly paneIdentity: string; readonly point: { readonly x: number; readonly y: number } } | null,
+  targetPaneIdentity: string | undefined,
+): { readonly x: number; readonly y: number } | null {
+  return previous && previous.paneIdentity !== targetPaneIdentity
+    ? previous.point
+    : null;
+}
 
 function estimateInputBytes(input: NativeTerminalInput): number {
   if ("text" in input && typeof input.text === "string") {
@@ -550,19 +558,12 @@ function estimateInputBytes(input: NativeTerminalInput): number {
   return 32;
 }
 
-// Text with no C0 control or DEL bytes: the backend writes text input verbatim
-// (NativeTerminalInput::Text -> text.as_bytes()), so appending it to a queued text write
-// produces exactly the bytes of two separate writes. Control text such as Ctrl+V's \u0016
-// is excluded so it keeps its own write.
-function isCoalescablePrintableText(input: NativeTerminalInput): input is { readonly text: string } {
-  return "text" in input && typeof input.text === "string" && input.text.length > 0 &&
-    !/[\u0000-\u001f\u007f]/.test(input.text);
-}
-
 export function resetNativeTerminalPaneForTest(): void {
   sessionInputRecoveries.clear();
   mountedNativeTerminalSessionCounts.clear();
   lastFocusedNativeTerminalSessionId = null;
+  lastFocusedNativeTerminalPoints.clear();
+  previousNativeFocus = null;
   terminalInputQueue.resetForTest();
   resetTerminalInputDropCountsForTest();
 }
@@ -618,6 +619,7 @@ export function NativeTerminalPane({
   const retryBoundsRef = useRef<(() => void) | null>(null);
   const retryAttachRef = useRef<(() => void) | null>(null);
   const ensureStreamListenerRef = useRef<() => Promise<unknown>>(async () => undefined);
+  const emitNativeObservationRef = useRef<(kind: string, payload?: Record<string, unknown>) => void>(() => {});
 
   const retryAttach = useCallback(() => {
     (retryBoundsRef.current ?? retryAttachRef.current)?.();
@@ -656,21 +658,6 @@ export function NativeTerminalPane({
       ? (session.backendSessionId ?? null)
       : (sessionId ?? null);
   const paneIdentity = session?.id ?? sessionId;
-  const copyModeGridRef = useRef<CopyModeGridSize>({ cols: 80, rows: 24 });
-  const copyMode = useTerminalCopyMode(targetSessionId, copyModeGridRef);
-  const copyModeActiveRef = copyMode.activeRef;
-  const toggleCopyMode = copyMode.toggle;
-  const copyModeOnOutput = copyMode.onOutput;
-  const copyModeHandleKey = copyMode.handleKey;
-  useEffect(() => {
-    const onToggle = (event: Event) => {
-      const detail = (event as CustomEvent<TerminalCopyModeEventDetail>).detail;
-      if (!detail || !paneIdentity || detail.sessionId !== paneIdentity) return;
-      toggleCopyMode();
-    };
-    window.addEventListener(TERMINAL_COPY_MODE_EVENT, onToggle);
-    return () => window.removeEventListener(TERMINAL_COPY_MODE_EVENT, onToggle);
-  }, [paneIdentity, toggleCopyMode]);
   useEffect(() => {
     switchDebug("terminal.surface.input.gate.state", {
       paneIdentity,
@@ -769,6 +756,7 @@ export function NativeTerminalPane({
           : { paneIdentity: tuple.paneIdentity, backendSessionId: tuple.backendSessionId, bindingKey: tuple.bindingKey },
       );
       emitNativeTerminalPresentation(tuple);
+      emitNativeObservationRef.current("presentation", { presented: true, producerComponent: "native-frontend-presentation" });
       presentNativeTerminalLifecycle(targetSessionId);
     }).then((stop) => {
       if (disposed) stop();
@@ -901,9 +889,6 @@ export function NativeTerminalPane({
       width: receipt.cellWidthPx,
       height: receipt.cellHeightPx,
     };
-    if (typeof receipt.cols === "number" && typeof receipt.rows === "number" && receipt.cols > 0 && receipt.rows > 0) {
-      copyModeGridRef.current = { cols: receipt.cols, rows: receipt.rows };
-    }
     setImeAnchor({
       left: (receipt.cursorCol * receipt.cellWidthPx) / scaleFactor,
       top: (receipt.cursorRow * receipt.cellHeightPx) / scaleFactor,
@@ -1205,7 +1190,10 @@ export function NativeTerminalPane({
       sessionId: targetSessionId,
       focused,
     })
-      .then(updateImeAnchor)
+      .then((receipt) => {
+        updateImeAnchor(receipt);
+        emitNativeObservationRef.current("focus", { focused, producerComponent: "native-frontend-focus" });
+      })
       .catch((error: unknown) => {
         reportNativeTerminalIpcFailure("cmd_native_terminal_set_focus", error);
       });
@@ -1250,7 +1238,7 @@ export function NativeTerminalPane({
         window.removeEventListener("ferryx:window-focused", handleWindowFocus);
       };
     } else {
-      if (isTauri()) {
+      if (isTauri() && previousOwner.active && previousOwner.targetSessionId === targetSessionId) {
         sendFocus(false);
       }
     }
@@ -1282,7 +1270,46 @@ export function NativeTerminalPane({
     return { bounds, scaleFactor };
   }, []);
 
-  const performAttach = useCallback((targetId: string, force = false, onAttach?: (tuple: PaneAttachTuple) => void): Promise<void> => {
+  const emitNativeObservation = useCallback((kind: string, payload?: Record<string, unknown>, producerComponent = "native-frontend-lifecycle") => {
+    const backendSessionId = sessionRef.current?.backendSessionId;
+    const tuple = backendSessionId ? getDurableNativeBinding(backendSessionId) : undefined;
+    const owner = attachmentOwnerRef.current;
+    if (!tuple || !owner?.live || owner.sessionId !== backendSessionId) return;
+    void appendNativeRecoveryEvent({ kind, attachTuple: tuple, producerComponent, payload }).catch(() => {});
+  }, []);
+  emitNativeObservationRef.current = emitNativeObservation;
+
+  const writeCurrentNativeSnapshot = useCallback((): NativeRecoverySnapshot | null => {
+    const container = containerRef.current;
+    const viewport = viewportRef.current;
+    const backendSessionId = sessionRef.current?.backendSessionId;
+    const tuple = backendSessionId ? getDurableNativeBinding(backendSessionId) : undefined;
+    const owner = attachmentOwnerRef.current;
+    if (!container || !viewport || !tuple || !owner?.live || owner.sessionId !== backendSessionId) return null;
+    const rect = viewport.getBoundingClientRect();
+    const measured = measureGeometry();
+    if (!measured || rect.width <= 0 || rect.height <= 0) return null;
+    const input = inputRef.current;
+    const focused = input !== null && document.activeElement === input;
+    const activeBounds = input?.getBoundingClientRect();
+    const inputPoint = activeBounds && activeBounds.width > 0 && activeBounds.height > 0
+      ? { x: activeBounds.left + activeBounds.width / 2, y: activeBounds.top + activeBounds.height / 2 } : null;
+    const focusedInputPoint = previousNativeFocusForSnapshot(previousNativeFocus, paneIdentity);
+    if (!inputPoint || !focusedInputPoint) return null;
+    const pane = container.getBoundingClientRect();
+    return {
+      producerComponent: "native-frontend-snapshot",
+      attachTuple: tuple,
+      target: { inputPoint },
+      focus: { focused, ...(focused ? { inputPoint } : {}) },
+      paneBounds: { x: pane.x, y: pane.y, width: pane.width, height: pane.height, scaleFactor: measured.scaleFactor,
+        inputPoint, focusedInputPoint },
+    };
+  }, [measureGeometry]);
+
+  const performAttach = useCallback((targetId: string, force = false, onAttach?: (tuple: PaneAttachTuple) => void,
+    run: <T>(operation: Promise<T>) => Promise<T> = operation => operation,
+    signal?: AbortSignal): Promise<void> => {
     const owner = attachmentOwnerRef.current;
     if (!owner?.live || owner.sessionId !== targetId) return Promise.resolve();
     if (quarantinedBindingRef.current?.sessionId === targetId) return Promise.resolve();
@@ -1299,10 +1326,13 @@ export function NativeTerminalPane({
       force,
     });
     // The lifecycle queue deduplicates by backend ID, not daemon identity.
-    const bindingChanged = lastAttachBindingRef.current?.sessionId === targetId && lastAttachBindingRef.current.bindingKey !== owner.bindingKey;
-    lastAttachBindingRef.current = { sessionId: targetId, bindingKey: owner.bindingKey };
+    const previousBinding = lastAttachBindingRef.current;
+    const bindingChanged = previousBinding?.sessionId === targetId && previousBinding.bindingKey !== owner.bindingKey;
+    const currentAttemptBinding = { sessionId: targetId, bindingKey: owner.bindingKey };
+    lastAttachBindingRef.current = currentAttemptBinding;
     const attachOp = force || bindingChanged || splitAttemptRef.current ? reattachNativeTerminalLifecycle : attachNativeTerminalLifecycle;
     return attachOp(targetId, async () => {
+      if (signal?.aborted || attachmentOwnerRef.current !== owner) return false;
       const session = sessionRef.current;
       const completedSpawn = !session?.spawnIntent ||
         (session.spawnIntent.ready && !session.spawnIntent.cancelRequested);
@@ -1318,9 +1348,11 @@ export function NativeTerminalPane({
           ? { ...currentTuple, attemptGeneration: currentTuple.attemptGeneration + 1 }
           : currentTuple;
         const started = performance.now();
-        await persistNativeBinding({ ...session, attachTuple });
-        if (attachmentOwnerRef.current !== owner) return false;
+        await run(persistNativeBinding({ ...session, attachTuple }));
+        if (signal?.aborted || attachmentOwnerRef.current !== owner) return false;
         if (!registerDurableNativeBinding(attachTuple, started)) throw new Error("Stale native binding");
+        await run(recordNativeBindingPersisted(attachTuple));
+        await run(appendNativeRecoveryEvent({ kind: "binding-persisted", attachTuple, producerComponent: "native-frontend-persistence", payload: { source: "persistNativeBinding" } }));
       }
       const previousTuple = getDurableNativeBinding(targetId);
       const identityChanged = previousTuple && session && (
@@ -1333,19 +1365,24 @@ export function NativeTerminalPane({
           daemonEpoch: session.daemonEpoch ?? "", bindingKey: owner.bindingKey ?? "",
           attemptGeneration: previousTuple.attemptGeneration + 1 };
         const started = performance.now();
-        await persistNativeBinding({ ...session, attachTuple });
-        if (attachmentOwnerRef.current?.sessionId !== owner.sessionId ||
-          attachmentOwnerRef.current.bindingKey !== owner.bindingKey) return false;
+        await run(persistNativeBinding({ ...session, attachTuple }));
+        if (signal?.aborted || attachmentOwnerRef.current !== owner) return false;
         if (!registerDurableNativeBinding(attachTuple, started, previousTuple)) throw new Error("Stale native binding");
+        await run(recordNativeBindingPersisted(attachTuple));
+        await run(appendNativeRecoveryEvent({ kind: "binding-persisted", attachTuple, producerComponent: "native-frontend-persistence", payload: { source: "persistNativeBinding" } }));
       }
-      await ensureStreamListenerRef.current();
-      if (attachmentOwnerRef.current?.sessionId !== owner.sessionId
-        || attachmentOwnerRef.current.bindingKey !== owner.bindingKey) return false;
+      await run(ensureStreamListenerRef.current());
+      if (signal?.aborted || attachmentOwnerRef.current !== owner) return false;
       if (quarantinedBindingRef.current?.sessionId === targetId) return false;
       const attachTuple = getDurableNativeBinding(targetId);
       if (!attachTuple) throw new Error("Durable native binding is unavailable");
+      emitNativeObservation("listener-registered", { sessionId: targetId }, "native-frontend-terminal-event-listener");
+      await run(appendNativeRecoveryEvent({ kind: "listener-registered", attachTuple,
+        producerComponent: "native-frontend-terminal-event-listener", payload: { sessionId: targetId } }));
+      const snapshot = writeCurrentNativeSnapshot();
+      if (snapshot) await run(writeNativeRecoverySnapshot(snapshot));
       onAttach?.(attachTuple);
-      await invoke("cmd_native_terminal_attach", {
+      await run(invoke("cmd_native_terminal_attach", {
         sessionId: targetId,
         attachTuple,
         remainingMs: Math.floor(nativeBindingRemainingMs(targetId, 4_000)),
@@ -1355,9 +1392,11 @@ export function NativeTerminalPane({
               scaleFactor: initialGeometry.scaleFactor,
             }
           : {}),
-      });
+      }));
+      if (signal?.aborted || attachmentOwnerRef.current !== owner || !owner.live) return false;
+      await run(appendNativeRecoveryEvent({ kind: "attach-complete", attachTuple, producerComponent: "native-frontend-attach", payload: { sessionId: targetId } }));
     });
-  }, [measureGeometry, sessionId]);
+  }, [emitNativeObservation, measureGeometry, sessionId, writeCurrentNativeSnapshot]);
 
   const restoreFocusIfLost = useCallback(() => {
     if (!visible || active === false) return;
@@ -1416,11 +1455,6 @@ export function NativeTerminalPane({
   }, [remoteConnectionState, remoteGeneration, session?.remoteConnectionState, session?.remoteGeneration, session?.workspaceId, targetSessionId, visible]);
 
   const sendInput = useCallback((input: NativeTerminalInput) => {
-    // Copy mode owns the keyboard: nothing (keys, IME commits, AltGr text) reaches the PTY.
-    if (copyModeActiveRef.current) {
-      switchDebug("terminal.surface.input.copyMode", { backendSessionId: targetSessionId });
-      return;
-    }
     if (!visible || !isTauri() || !targetSessionId) {
       recordTerminalInputDrop("dropped");
       switchDebug("terminal.surface.input.dropped", {
@@ -1458,6 +1492,7 @@ export function NativeTerminalPane({
     }
 
     const currentSessionId = targetSessionId;
+    const capturedInputTuple = getDurableNativeBinding(currentSessionId);
     const owner = surfaceOwnerRef.current;
     const isCurrentOwner = () => owner !== null && owner.sessionId === currentSessionId && surfaceOwnerRef.current === owner;
     const generation = isRemote ? session?.remoteGeneration ?? null : null;
@@ -1514,13 +1549,6 @@ export function NativeTerminalPane({
         // The command resolves as soon as the PTY write lands; the receipt that positions the IME
         // candidate window now arrives on `native_terminal_input_receipt`. Waiting for it here used
         // to hold this session's queue slot for the whole round trip, delaying the next keystroke.
-        const sendText = (text: string, requestId: string) =>
-          invoke<void>("cmd_native_terminal_send_input", {
-            sessionId: currentSessionId,
-            input: { text },
-            ...(generation != null ? { generation } : {}),
-            requestId,
-          });
         await terminalInputQueue.enqueue(
           currentSessionId,
           generation,
@@ -1536,14 +1564,12 @@ export function NativeTerminalPane({
           undefined,
           "input",
           undefined,
-          {
-            recover: recoverInput,
-            ...(isCoalescablePrintableText(input)
-              ? { coalesceText: { text: input.text, send: sendText } }
-              : {}),
-          },
+          { recover: recoverInput },
         );
         if (!isCurrentOwner()) return;
+        emitNativeObservationRef.current("input-delivered", {
+          producerComponent: "native-frontend-input-delivery",
+        });
         if (consecutiveDropsRef.current > 0) {
           switchDebug("terminal.surface.input.dropped.summary", {
             backendSessionId: currentSessionId,
@@ -1622,8 +1648,22 @@ export function NativeTerminalPane({
         }
         if (recovery.failure !== null) {
           const recoveryError = recovery.failure.error;
-          const classification = classifyNativeTerminalAttachError(recoveryError, currentSessionId);
+          const classification = classifyNativeTerminalAttachError(
+            recoveryError,
+            currentSessionId,
+            capturedInputTuple?.incarnation ?? null,
+            capturedInputTuple?.daemonEpoch ?? null,
+          );
           if (classification.status === "confirmed-missing") {
+            const currentTuple = getDurableNativeBinding(currentSessionId);
+            if (
+              !capturedInputTuple ||
+              !currentTuple ||
+              !matchesAttachTuple(currentTuple, capturedInputTuple) ||
+              !settleNativeTerminalExit(sessionId ?? "", capturedInputTuple)
+            ) {
+              return;
+            }
             if (bindingKey) {
               quarantinedBindingRef.current = { sessionId: currentSessionId, bindingKey };
             }
@@ -1695,7 +1735,7 @@ export function NativeTerminalPane({
 
   const sendPaste = useCallback(
     (text: string) => {
-      if (copyModeActiveRef.current || !visible || !isTauri() || !targetSessionId) {
+      if (!visible || !isTauri() || !targetSessionId) {
         return;
       }
       if (paneIdentity) {
@@ -1851,7 +1891,7 @@ export function NativeTerminalPane({
     button: "Left" | "Right" | null,
   ) => {
     const viewport = viewportRef.current;
-    if (copyModeActiveRef.current || !visible || !isTauri() || !targetSessionId || !viewport) return;
+    if (!visible || !isTauri() || !targetSessionId || !viewport) return;
     const rect = viewport.getBoundingClientRect();
     const timestampNs = Math.round(
       (typeof event.timeStamp === "number" && event.timeStamp > 0
@@ -1975,10 +2015,7 @@ export function NativeTerminalPane({
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void onNativeTerminalScrollbar((metrics) => {
-      if (metrics.sessionId !== targetSessionId) return;
-      updateScrollbar(metrics);
-      // Output while copy mode is active: re-read pruning; the viewport stays frozen.
-      copyModeOnOutput();
+      if (metrics.sessionId === targetSessionId) updateScrollbar(metrics);
     }).then((listener) => {
       if (disposed) listener();
       else unlisten = listener;
@@ -1988,7 +2025,7 @@ export function NativeTerminalPane({
       disposed = true;
       unlisten?.();
     };
-  }, [copyModeOnOutput, targetSessionId, updateScrollbar, visible]);
+  }, [targetSessionId, updateScrollbar, visible]);
 
   useEffect(() => {
     let plainDown: { clientX: number; clientY: number } | null = null;
@@ -2238,16 +2275,6 @@ export function NativeTerminalPane({
         }
         return;
       }
-      // Copy mode gate (after the IME/AltGr gate): keys become motions, never PTY input. A chord
-      // an app shortcut already claimed (the copy-mode toggle itself) is left alone, and the
-      // platform copy chord keeps its usual meaning.
-      if (copyModeActiveRef.current) {
-        if (event.defaultPrevented || !canClaimInput || isCopyShortcut(event)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        copyModeHandleKey(event);
-        return;
-      }
 
       if (
         targetEl !== inputRef.current &&
@@ -2399,7 +2426,7 @@ export function NativeTerminalPane({
       window.removeEventListener("blur", clearPasteSuppression);
       clearPasteSuppression();
     };
-  }, [active, copyModeActiveRef, copyModeHandleKey, copySelectionOrInterrupt, pasteClipboardImage, performNativePasteFallback, sendCtrlC, sendImagePasteShortcut, sendInput, sendPaste, session?.workspaceId, targetSessionId, visible]);
+  }, [active, copySelectionOrInterrupt, pasteClipboardImage, performNativePasteFallback, sendCtrlC, sendImagePasteShortcut, sendInput, sendPaste, session?.workspaceId, targetSessionId, visible]);
 
   useEffect(() => {
     if (!visible || !targetSessionId || !isTauri()) return;
@@ -2802,6 +2829,12 @@ export function NativeTerminalPane({
             setError(null);
             retryBoundsRef.current = null;
             updateImeAnchor(receipt);
+            if (receipt?.presented === true) {
+              emitNativeObservationRef.current("status", {
+                cursorCol: receipt.cursorCol, cursorRow: receipt.cursorRow,
+                cellWidthPx: receipt.cellWidthPx, cellHeightPx: receipt.cellHeightPx,
+              });
+            }
             if (receipt?.presented) {
               const currentIdentity = presentationIdentityRef.current;
               const identityMatches =
@@ -2830,6 +2863,15 @@ export function NativeTerminalPane({
                 // the acceptance gate is the exact `presented === true`.
                 if (receipt.presented === true) {
                   emitNativeTerminalPresentation(presentationReceipt);
+                  emitNativeObservationRef.current("status", {
+                    cursorCol: receipt.cursorCol, cursorRow: receipt.cursorRow,
+                    cellWidthPx: receipt.cellWidthPx, cellHeightPx: receipt.cellHeightPx,
+                    producerComponent: "native-frontend-status",
+                  });
+                  emitNativeObservationRef.current("bounds-presented", {
+                    bounds: nextGeometry.bounds, scaleFactor: nextGeometry.scaleFactor,
+                    producerComponent: "native-frontend-bounds",
+                  });
                 }
               } else {
                 // Stale receipt: the pane re-bound, exited, retained its surface
@@ -2922,6 +2964,14 @@ export function NativeTerminalPane({
 
     const reportBounds = () => {
       if (!isSubscribed) return;
+      const currentOwner = attachmentOwnerRef.current;
+      const currentTuple = getDurableNativeBinding(targetSessionId);
+      if (currentOwner?.live && currentOwner.sessionId === targetSessionId && currentTuple) {
+        const snapshot = writeCurrentNativeSnapshot();
+        if (snapshot && matchesAttachTuple(snapshot.attachTuple, currentTuple)) {
+          void writeNativeRecoverySnapshot(snapshot).catch(() => {});
+        }
+      }
       const currentGeometry = measureGeometry();
 
       if (!currentGeometry) {
@@ -2964,16 +3014,91 @@ export function NativeTerminalPane({
     };
     rearmBoundsRef.current = rearmBoundsForAttempt;
 
-    const maxRetries = 5;
     // A transient attach failure normally self-heals inside the first two fast retries
     // (250ms + 500ms). Painting the banner on the first failure makes a successful self-heal
     // flash an alarming error, so hold it until the failure has survived those fast retries
-    // (~750ms) or every retry is exhausted.
+    // (~750ms).
     const bannerRetryThreshold = 2;
     let inFlightAttempt: Promise<void> | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let notifiedMissing = false;
     let refreshedIdentityAfterDetach = false;
+    let refreshPending: Promise<boolean> | null = null;
+    let refreshBlocked = false;
+    const recoveryController = new AbortController();
+    let attemptDeadline = 0;
+    const bounded = async <T,>(operation: Promise<T>): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cancel = () => {};
+      try {
+        return await Promise.race([operation, new Promise<never>((_, reject) => {
+          cancel = () => reject(new Error("Native recovery cancelled"));
+          recoveryController.signal.addEventListener("abort", cancel, { once: true });
+          if (recoveryController.signal.aborted) cancel();
+          timer = setTimeout(() => reject(new Error("Native recovery deadline exceeded")),
+            Math.max(0, attemptDeadline - performance.now()));
+        })]);
+      } finally {
+        clearTimeout(timer);
+        recoveryController.signal.removeEventListener("abort", cancel);
+      }
+    };
+    const refreshIdentity = (): Promise<boolean> => {
+      if (refreshPending) return refreshPending;
+      if (!onRefreshSessionIdentity || !paneIdentity) return Promise.resolve(true);
+      const owner = attachmentOwnerRef.current;
+      refreshPending = (async () => {
+        try {
+          const result = await new Promise<LocalRecoveryAdmissionResult>((resolve) => {
+            let unsubscribe = () => {};
+            let settled = false;
+            const cancel = () => { unsubscribe(); resolve({ kind: "cancelled" }); };
+            recoveryController.signal.addEventListener("abort", cancel, { once: true });
+            const returned = onRefreshSessionIdentity(paneIdentity, result => {
+              if (result.kind === "pending" || settled) return;
+              settled = true;
+              recoveryController.signal.removeEventListener("abort", cancel);
+              unsubscribe(); resolve(result);
+            });
+            unsubscribe = returned;
+            if (settled) unsubscribe();
+            if (recoveryController.signal.aborted) cancel();
+          });
+          if (!isSubscribed || attachmentOwnerRef.current !== owner || !owner?.live) return false;
+          if (result.kind !== "ready") {
+            refreshBlocked = true;
+            if (result.kind === "blocked") setError("Native terminal identity conflict");
+            return false;
+          }
+          const refreshed = result.session;
+          const retained = sessionRef.current;
+          if (!refreshed || !retained || refreshed.id !== retained.id ||
+            refreshed.backendSessionId !== targetSessionId || refreshed.lifecycle === "starting" || refreshed.lifecycle === "exited" ||
+            refreshed.lifecycle === "failed" || refreshed.spawnIntent?.cancelRequested ||
+            (refreshed.spawnIntent && !refreshed.spawnIntent.ready) || refreshed.remoteConnectionState === "disconnected" ||
+            refreshed.remoteConnectionState === "reconnecting" || refreshed.remoteConnectionState === "expired") return false;
+          if (retained.incarnation != null && refreshed.incarnation !== retained.incarnation) {
+            refreshBlocked = true;
+            setError("Native terminal identity conflict");
+            return false;
+          }
+          sessionRef.current = { ...retained, daemonEpoch: refreshed.daemonEpoch ?? retained.daemonEpoch,
+            incarnation: refreshed.incarnation ?? retained.incarnation,
+            attachTuple: refreshed.attachTuple, recoveryKey: refreshed.recoveryKey, recoveryToken: refreshed.recoveryToken };
+          attachmentOwnerRef.current = { ...owner,
+            bindingKey: `${targetSessionId}:${sessionRef.current.daemonEpoch ?? ""}:${retained.remoteGeneration ?? 0}:${retained.remoteConnectionState ?? ""}` };
+          return true;
+        } catch {
+          return false;
+        } finally {
+          refreshPending = null;
+        }
+      })();
+      return refreshPending;
+    };
+
+    const capturedAttachTuple = getDurableNativeBinding(targetSessionId);
+    const capturedAttachIncarnation = capturedAttachTuple?.incarnation ?? null;
 
     const cancelRetry = () => {
       if (retryTimer) {
@@ -2983,21 +3108,35 @@ export function NativeTerminalPane({
     };
 
     const attemptAttach = async (retryCount = 0, force = false): Promise<void> => {
-      const currentOwner = attachmentOwnerRef.current;
-      if (!currentOwner?.live || currentOwner.sessionId !== targetSessionId) return;
+      let currentOwner = attachmentOwnerRef.current;
+      if (!isSubscribed || refreshBlocked || !currentOwner?.live || currentOwner.sessionId !== targetSessionId) return;
       if (quarantinedBindingRef.current?.sessionId === targetSessionId) return;
 
       if (inFlightAttempt) {
-        if (!force) return inFlightAttempt;
-        cancelRetry();
+        return inFlightAttempt;
       }
 
       let attemptPromise: Promise<void> | null = null;
+      let attemptedIncarnation: string | null = capturedAttachIncarnation;
+      attemptDeadline = performance.now() + 4000;
       attemptPromise = (async () => {
         try {
+          const needsAdmission = force || retryCount > 0 || sessionRef.current?.remoteConnectionState === "reconnecting";
+          if (needsAdmission && !await refreshIdentity()) {
+            if (!isSubscribed || refreshBlocked) return;
+            throw new Error("Native identity refresh is not ready");
+          }
+          currentOwner = attachmentOwnerRef.current;
+          if (!isSubscribed || !currentOwner?.live) return;
+          attemptDeadline = performance.now() + 4000;
           await performAttach(targetSessionId, force || retryCount > 0, (tuple) => {
+            if (capturedAttachTuple && matchesAttachTuple(tuple, capturedAttachTuple)) {
+              attemptedIncarnation = capturedAttachTuple.incarnation ?? null;
+            } else {
+              attemptedIncarnation = null;
+            }
             teardownTuple = tuple;
-          });
+          }, bounded, recoveryController.signal);
           if (!isSubscribed) return;
           teardownTuple = getDurableNativeBinding(targetSessionId);
           // Compare against the owner this attempt started under: identity recovery may
@@ -3025,9 +3164,16 @@ export function NativeTerminalPane({
           if (surfaceOwnerRef.current?.sessionId === targetSessionId) {
             // A rebind (suspend/resume, reconnect) of a background pane must not take keyboard
             // focus from the pane the user is typing in.
-            if (isBackendRebind && activeRef.current !== false) {
-              inputRef.current?.focus();
-            } else {
+            if (isBackendRebind) {
+              const hadPriorTerminalFocus = lastFocusedNativeTerminalSessionId === targetSessionId;
+              const currentFocus = typeof document !== "undefined" ? document.activeElement : null;
+              const canRestoreRebindFocus =
+                hadPriorTerminalFocus &&
+                (!currentFocus || currentFocus === document.body || currentFocus === inputRef.current);
+              if (canRestoreRebindFocus && !needsAdmission && retryCount === 0 && !force) {
+                restoreFocusIfLost();
+              }
+            } else if (!needsAdmission && retryCount === 0 && !force) {
               restoreFocusIfLost();
             }
           }
@@ -3035,6 +3181,7 @@ export function NativeTerminalPane({
           if (!isSubscribed) return;
           isAttached = false;
           if (
+            !currentOwner ||
             attachmentOwnerRef.current !== currentOwner ||
             !attachmentOwnerRef.current?.live ||
             attachmentOwnerRef.current.sessionId !== targetSessionId ||
@@ -3043,8 +3190,37 @@ export function NativeTerminalPane({
             return;
           }
 
-          const classification = classifyNativeTerminalAttachError(error, targetSessionId);
+          const classification = classifyNativeTerminalAttachError(
+            error,
+            targetSessionId,
+            attemptedIncarnation,
+            capturedAttachTuple?.daemonEpoch ?? null,
+          );
+          switchDebug("terminal.surface.attach.failure_context", {
+            localSessionId: sessionId,
+            backendSessionId: targetSessionId,
+            paneIdentity,
+            bindingKey,
+            attemptedIncarnation,
+            attemptedDaemonEpoch: capturedAttachTuple?.daemonEpoch ?? null,
+            attemptGeneration: capturedAttachTuple?.attemptGeneration ?? null,
+            classification: classification.status,
+            reason: classification.status === "operational-error" ? null : classification.reason,
+            errorCode: isStructuredIpcError(error) ? error.code : null,
+            errorSource: isStructuredIpcError(error) ? error.details?.source ?? null : null,
+            reportedSessionId: isStructuredIpcError(error) ? error.details?.sessionId ?? null : null,
+            reportedDaemonEpoch: isStructuredIpcError(error) ? error.details?.daemonEpoch ?? null : null,
+            reportedIncarnation: isStructuredIpcError(error) ? error.details?.incarnation ?? null : null,
+            retryCount,
+            bannerRetryThreshold,
+            refreshedIdentityAfterDetach,
+          });
           if (classification.status === "confirmed-missing") {
+            const currentTuple = getDurableNativeBinding(targetSessionId);
+            if (!capturedAttachTuple || !currentTuple || !matchesAttachTuple(currentTuple, capturedAttachTuple) ||
+                !settleNativeTerminalExit(sessionId ?? "", capturedAttachTuple)) return;
+            cancelRetry();
+            retryCount = bannerRetryThreshold;
             if (bindingKey) {
               quarantinedBindingRef.current = { sessionId: targetSessionId, bindingKey };
             }
@@ -3073,8 +3249,6 @@ export function NativeTerminalPane({
               localSessionId: sessionId,
               backendSessionId: targetSessionId,
             });
-            retryAttachRef.current?.();
-            return;
           }
 
           switchDebug("terminal.surface.attach.error", {
@@ -3084,11 +3258,10 @@ export function NativeTerminalPane({
             retryCount,
           });
           reportNativeTerminalIpcFailure("cmd_native_terminal_attach", error);
-          const willRetry = retryCount < maxRetries;
-          if (!willRetry || retryCount >= bannerRetryThreshold) {
+          if (retryCount >= bannerRetryThreshold) {
             setError("Failed to attach native terminal");
           }
-          if (willRetry) {
+          if (!refreshBlocked) {
             cancelRetry();
             const delay = Math.min(4000, 250 * Math.pow(2, retryCount));
             retryTimer = setTimeout(() => {
@@ -3113,36 +3286,7 @@ export function NativeTerminalPane({
       if (!isSubscribed) return;
       cancelRetry();
       lastGeometry = null;
-      // An explicit user retry restores the stream-recovery budget.
-      streamRecoveryTimes = [];
-      void (async () => {
-        if (onRefreshSessionIdentity && paneIdentity) {
-          try {
-            const refreshed = await onRefreshSessionIdentity(paneIdentity);
-            if (!isSubscribed || !attachmentOwnerRef.current?.live || sessionRef.current?.backendSessionId !== targetSessionId) return;
-            if (refreshed && sessionRef.current) {
-              const updatedEpoch = refreshed.daemonEpoch ?? sessionRef.current.daemonEpoch ?? "";
-              const updatedIncarnation = refreshed.incarnation ?? sessionRef.current.incarnation ?? null;
-              sessionRef.current = {
-                ...sessionRef.current,
-                daemonEpoch: updatedEpoch,
-                ...(updatedIncarnation != null ? { incarnation: updatedIncarnation } : {}),
-              };
-              if (targetSessionId) {
-                const refreshedBindingKey = `${targetSessionId}:${updatedEpoch}:${sessionRef.current.remoteGeneration ?? 0}:${sessionRef.current.remoteConnectionState ?? ""}`;
-                attachmentOwnerRef.current = {
-                  sessionId: targetSessionId,
-                  bindingKey: refreshedBindingKey,
-                  live: true,
-                };
-              }
-            }
-          } catch {
-          }
-        }
-        if (!isSubscribed) return;
-        await attemptAttach(0, true);
-      })();
+      void attemptAttach(0, true);
     };
 
     if (typeof ResizeObserver !== "undefined" && !observer) {
@@ -3171,9 +3315,6 @@ export function NativeTerminalPane({
     let unlistenStreamEnded: (() => void) | undefined;
     let streamRecoveryPending = false;
     let streamRecoveryRequested = false;
-    // Recoveries are bounded per rolling window rather than per pane lifetime: a storm of
-    // stream ends still stops at maxRetries, but a pane that recovered long ago can recover again.
-    let streamRecoveryTimes: number[] = [];
     let streamRegistration: Promise<void> | null = null;
     ensureStreamListenerRef.current = () => {
       if (streamRegistration) return streamRegistration;
@@ -3189,40 +3330,10 @@ export function NativeTerminalPane({
           while (streamRecoveryRequested) {
             if (!isSubscribed || attachmentOwnerRef.current?.sessionId !== streamOwner?.sessionId) return;
             streamRecoveryRequested = false;
-            const now = Date.now();
-            streamRecoveryTimes = streamRecoveryTimes.filter((at) => now - at < STREAM_RECOVERY_WINDOW_MS);
-            if (streamRecoveryTimes.length >= maxRetries) {
-              setError("Terminal output disconnected. Click to reconnect.");
-              return;
-            }
-            streamRecoveryTimes.push(now);
             isAttached = false;
-            if (onRefreshSessionIdentity && paneIdentity) {
-              try {
-                const refreshed = await onRefreshSessionIdentity(paneIdentity);
-                if (!isSubscribed || attachmentOwnerRef.current !== streamOwner || !streamOwner?.live || sessionRef.current?.backendSessionId !== targetSessionId) return;
-                if (refreshed && sessionRef.current) {
-                  const updatedEpoch = refreshed.daemonEpoch ?? sessionRef.current.daemonEpoch ?? "";
-                  const updatedIncarnation = refreshed.incarnation ?? sessionRef.current.incarnation ?? null;
-                  sessionRef.current = {
-                    ...sessionRef.current,
-                    daemonEpoch: updatedEpoch,
-                    ...(updatedIncarnation != null ? { incarnation: updatedIncarnation } : {}),
-                  };
-                  if (targetSessionId) {
-                    const refreshedBindingKey = `${targetSessionId}:${updatedEpoch}:${sessionRef.current.remoteGeneration ?? 0}:${sessionRef.current.remoteConnectionState ?? ""}`;
-                    attachmentOwnerRef.current = {
-                      sessionId: targetSessionId,
-                      bindingKey: refreshedBindingKey,
-                      live: true,
-                    };
-                  }
-                }
-              } catch {
-              }
-            }
             if (!isSubscribed || attachmentOwnerRef.current?.sessionId !== streamOwner?.sessionId || !attachmentOwnerRef.current?.live) return;
-            await attemptAttach(streamRecoveryTimes.length, true);
+            cancelRetry();
+            await attemptAttach(1, true);
           }
         } finally {
           streamRecoveryPending = false;
@@ -3241,6 +3352,7 @@ export function NativeTerminalPane({
     void attemptAttach(0);
 
     return () => {
+      recoveryController.abort();
       unlistenStreamEnded?.();
       retryAttachRef.current = null;
       retryBoundsRef.current = null;
@@ -3424,8 +3536,6 @@ export function NativeTerminalPane({
       }}
       onWheel={(event) => {
         if (!visible || event.deltaY === 0 || !Number.isFinite(event.deltaY)) return;
-        // A wheel under mouse tracking / alternate scroll writes to the PTY; copy mode forbids it.
-        if (copyModeActiveRef.current) return;
         triggerScrollbarReveal();
         if (!isTauri() || !targetSessionId) return;
         let deltaRows: number;
@@ -3522,12 +3632,27 @@ export function NativeTerminalPane({
           }}
           onFocus={() => {
             lastFocusedNativeTerminalSessionId = targetSessionId;
+            const bounds = inputRef.current?.getBoundingClientRect();
+            if (bounds && bounds.width > 0 && bounds.height > 0 && paneIdentity) {
+              recordPreviousNativeFocus(paneIdentity, { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 });
+            }
+            const focusSnapshot = writeCurrentNativeSnapshot();
+            if (focusSnapshot) void writeNativeRecoverySnapshot(focusSnapshot).catch(() => {});
             switchDebug("terminal.surface.focus.sink", {
               backendSessionId: targetSessionId,
             });
+            const snapshot = writeCurrentNativeSnapshot();
+            if (snapshot) void writeNativeRecoverySnapshot(snapshot).catch(() => {});
             sendFocus(true);
           }}
           onBlur={(event) => {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            if (bounds.width > 0 && bounds.height > 0 && paneIdentity) {
+              const point = { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+              recordPreviousNativeFocus(paneIdentity, point);
+            }
+            const blurSnapshot = writeCurrentNativeSnapshot();
+            if (blurSnapshot) void writeNativeRecoverySnapshot(blurSnapshot).catch(() => {});
             switchDebug("terminal.surface.focus.blur", {
               backendSessionId: targetSessionId,
               composing: isComposingRef.current,
@@ -3536,6 +3661,8 @@ export function NativeTerminalPane({
             compositionTailCharRef.current = null;
             setPreedit(null);
             event.currentTarget.value = "";
+            const snapshot = writeCurrentNativeSnapshot();
+            if (snapshot) void writeNativeRecoverySnapshot(snapshot).catch(() => {});
             sendFocus(false);
           }}
           onPaste={(event) => {
@@ -3569,17 +3696,6 @@ export function NativeTerminalPane({
               return;
             }
             if (isAltGraphTextInput(forwardable)) {
-              return;
-            }
-
-            if (copyModeActiveRef.current) {
-              if (isCopyShortcut(event)) {
-                event.preventDefault();
-                copySelectionOrInterrupt();
-                return;
-              }
-              event.preventDefault();
-              copyModeHandleKey(event);
               return;
             }
 
@@ -3793,7 +3909,6 @@ export function NativeTerminalPane({
           />
         ) : null}
       </div>
-      {copyMode.active ? <TerminalCopyModeBadge /> : null}
       {error ? (
         <button
           type="button"

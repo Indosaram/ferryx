@@ -1,7 +1,5 @@
 #[path = "machine_owner_socket.rs"]
 mod machine_owner_socket;
-#[path = "agent_control_service.rs"]
-pub(crate) mod agent_control_service;
 use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
 use crate::remote::browser_admission::AdmissionController;

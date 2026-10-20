@@ -8,7 +8,7 @@ describe("classifyNativeTerminalAttachError", () => {
   const requestedSessionId = "backend-a";
 
   describe("SESSION_NOT_FOUND with typed daemon_attach details", () => {
-    it("should return confirmed-missing when code=SESSION_NOT_FOUND + typed details match exactly", () => {
+    it("should return unverified-missing when code=SESSION_NOT_FOUND + typed details match without affirmative proof (INV-1)", () => {
       const error: StructuredIpcError = {
         code: "SESSION_NOT_FOUND",
         message: "Session 'backend-a' not found",
@@ -21,14 +21,13 @@ describe("classifyNativeTerminalAttachError", () => {
 
       const result = classifyNativeTerminalAttachError(error, requestedSessionId);
 
-      expect(result.status).toBe("confirmed-missing");
-      if (result.status === "confirmed-missing") {
-        expect(result.sessionId).toBe("backend-a");
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
         expect(result.reason).toBe("daemon-attach-not-found");
       }
     });
 
-    it("should return confirmed-missing for different requested ID when details match exactly", () => {
+    it("should return unverified-missing for different requested ID when details match without affirmative proof (INV-1)", () => {
       const requestId = "backend-xyz";
       const error: StructuredIpcError = {
         code: "SESSION_NOT_FOUND",
@@ -42,9 +41,86 @@ describe("classifyNativeTerminalAttachError", () => {
 
       const result = classifyNativeTerminalAttachError(error, requestId);
 
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
+        expect(result.reason).toBe("daemon-attach-not-found");
+      }
+    });
+
+    it("should return unverified-missing when expected incarnation context is omitted even with affirmative proof (fail-closed INV-1)", () => {
+      const error: StructuredIpcError = {
+        code: "SESSION_NOT_FOUND",
+        message: "Session 'backend-a' exited",
+        details: {
+          source: "daemon_attach",
+          kind: "session_not_found",
+          sessionId: "backend-a",
+          affirmativeExit: true,
+          incarnation: "inc-1",
+        },
+      };
+
+      // Omitted expectedIncarnation: must fail-closed to unverified-missing
+      const result = classifyNativeTerminalAttachError(error, requestedSessionId);
+
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
+        expect(result.reason).toBe("daemon-attach-not-found");
+      }
+    });
+
+    it("should return unverified-missing when expected incarnation context mismatches (INV-3)", () => {
+      const error: StructuredIpcError = {
+        code: "SESSION_NOT_FOUND",
+        message: "Session 'backend-a' exited",
+        details: {
+          source: "daemon_attach",
+          kind: "session_not_found",
+          sessionId: "backend-a",
+          affirmativeExit: true,
+          incarnation: "inc-observed-other",
+        },
+      };
+
+      const result = classifyNativeTerminalAttachError(error, requestedSessionId, "inc-expected-1");
+
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
+        expect(result.reason).toBe("daemon-attach-not-found");
+      }
+    });
+
+    it("confirms affirmative exit only for the captured matching incarnation", () => {
+      const error: StructuredIpcError = {
+        code: "SESSION_NOT_FOUND",
+        message: "Session 'backend-a' not found",
+        details: { source: "daemon_attach", kind: "session_not_found", sessionId: "backend-a",
+          affirmativeExit: true, incarnation: "life-2" },
+      };
+      expect(classifyNativeTerminalAttachError(error, requestedSessionId, "life-2").status).toBe("confirmed-missing");
+      expect(classifyNativeTerminalAttachError(error, requestedSessionId, "life-1").status).toBe("unverified-missing");
+      expect(classifyNativeTerminalAttachError(error, requestedSessionId, null).status).toBe("unverified-missing");
+    });
+
+    it("should return confirmed-missing when typed details include affirmative exit AND matching incarnation context (INV-2)", () => {
+      const error: StructuredIpcError = {
+        code: "SESSION_NOT_FOUND",
+        message: "Session 'backend-a' exited",
+        details: {
+          source: "daemon_attach",
+          kind: "session_not_found",
+          sessionId: "backend-a",
+          affirmativeExit: true,
+          incarnation: "inc-exact-match",
+        },
+      };
+
+      const result = classifyNativeTerminalAttachError(error, requestedSessionId, "inc-exact-match");
+
       expect(result.status).toBe("confirmed-missing");
       if (result.status === "confirmed-missing") {
-        expect(result.sessionId).toBe("backend-xyz");
+        expect(result.sessionId).toBe("backend-a");
+        expect(result.reason).toBe("daemon-attach-affirmative-exit");
       }
     });
 
@@ -237,7 +313,7 @@ describe("classifyNativeTerminalAttachError", () => {
   });
 
   describe("INTERNAL_ERROR with legacy daemon format", () => {
-    it("should return confirmed-missing for legacy INTERNAL_ERROR with exact message match", () => {
+    it("should return unverified-missing for legacy INTERNAL_ERROR with exact message match under INV-1", () => {
       const error: StructuredIpcError = {
         code: "INTERNAL_ERROR",
         message: `Session '${requestedSessionId}' not found`,
@@ -246,13 +322,13 @@ describe("classifyNativeTerminalAttachError", () => {
 
       const result = classifyNativeTerminalAttachError(error, requestedSessionId);
 
-      expect(result.status).toBe("confirmed-missing");
-      if (result.status === "confirmed-missing") {
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
         expect(result.reason).toBe("legacy-internal-error");
       }
     });
 
-    it("should return confirmed-missing for legacy INTERNAL_ERROR without details key", () => {
+    it("should return unverified-missing for legacy INTERNAL_ERROR without details key under INV-1", () => {
       const error: StructuredIpcError = {
         code: "INTERNAL_ERROR",
         message: `Session '${requestedSessionId}' not found`,
@@ -261,7 +337,10 @@ describe("classifyNativeTerminalAttachError", () => {
 
       const result = classifyNativeTerminalAttachError(error, requestedSessionId);
 
-      expect(result.status).toBe("confirmed-missing");
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
+        expect(result.reason).toBe("legacy-internal-error");
+      }
     });
 
     it("should return operational-error for INTERNAL_ERROR with different message", () => {
@@ -435,10 +514,12 @@ describe("classifyNativeTerminalAttachError", () => {
           source: "daemon_attach",
           kind: "session_not_found",
           sessionId: specialId,
+          affirmativeExit: true,
+          incarnation: "inc-special",
         },
       };
 
-      const result = classifyNativeTerminalAttachError(error, specialId);
+      const result = classifyNativeTerminalAttachError(error, specialId, "inc-special");
 
       expect(result.status).toBe("confirmed-missing");
     });
@@ -452,10 +533,12 @@ describe("classifyNativeTerminalAttachError", () => {
           source: "daemon_attach",
           kind: "session_not_found",
           sessionId: idWithQuote,
+          affirmativeExit: true,
+          incarnation: "inc-quote",
         },
       };
 
-      const result = classifyNativeTerminalAttachError(error, idWithQuote);
+      const result = classifyNativeTerminalAttachError(error, idWithQuote, "inc-quote");
 
       expect(result.status).toBe("confirmed-missing");
     });
@@ -469,10 +552,12 @@ describe("classifyNativeTerminalAttachError", () => {
           source: "daemon_attach",
           kind: "session_not_found",
           sessionId: longId,
+          affirmativeExit: true,
+          incarnation: "inc-long",
         },
       };
 
-      const result = classifyNativeTerminalAttachError(error, longId);
+      const result = classifyNativeTerminalAttachError(error, longId, "inc-long");
 
       expect(result.status).toBe("confirmed-missing");
     });
@@ -628,10 +713,12 @@ describe("classifyNativeTerminalAttachError", () => {
           source: "daemon_attach",
           kind: "session_not_found",
           sessionId: requestedSessionId,
+          affirmativeExit: true,
+          incarnation: "inc-typed",
         },
       };
 
-      const result = classifyNativeTerminalAttachError(error, requestedSessionId);
+      const result = classifyNativeTerminalAttachError(error, requestedSessionId, "inc-typed");
 
       expect(result.status).toBe("confirmed-missing");
     });
@@ -662,6 +749,8 @@ describe("classifyNativeTerminalAttachError", () => {
           source: "daemon_attach",
           kind: "session_not_found",
           sessionId: requestedSessionId,
+          affirmativeExit: true,
+          incarnation: "inc-reason",
         },
       };
 
@@ -671,17 +760,16 @@ describe("classifyNativeTerminalAttachError", () => {
         details: {},
       };
 
-      const result1 = classifyNativeTerminalAttachError(typedDetailsError, requestedSessionId);
+      const result1 = classifyNativeTerminalAttachError(typedDetailsError, requestedSessionId, "inc-reason");
       const result3 = classifyNativeTerminalAttachError(legacyInternalError, requestedSessionId);
 
       expect(result1).toEqual({
         status: "confirmed-missing",
         sessionId: requestedSessionId,
-        reason: "daemon-attach-not-found",
+        reason: "daemon-attach-affirmative-exit",
       });
       expect(result3).toEqual({
-        status: "confirmed-missing",
-        sessionId: requestedSessionId,
+        status: "unverified-missing",
         reason: "legacy-internal-error",
       });
     });
@@ -804,6 +892,85 @@ describe("classifyNativeTerminalAttachError", () => {
         status: "operational-error",
         error,
       });
+    });
+  });
+
+  describe("Recovery continuation epoch and transient authority source contracts", () => {
+    it("confirms affirmative exit when expectedEpoch and expectedIncarnation both match", () => {
+      const error: StructuredIpcError = {
+        code: "SESSION_NOT_FOUND",
+        message: "Session 'backend-a' exited",
+        details: {
+          source: "daemon_attach",
+          kind: "session_not_found",
+          sessionId: "backend-a",
+          affirmativeExit: true,
+          incarnation: "inc-1",
+          daemonEpoch: "epoch-1",
+        },
+      };
+
+      const result = classifyNativeTerminalAttachError(error, requestedSessionId, "inc-1", "epoch-1");
+      expect(result.status).toBe("confirmed-missing");
+      if (result.status === "confirmed-missing") {
+        expect(result.sessionId).toBe("backend-a");
+        expect(result.reason).toBe("daemon-attach-affirmative-exit");
+      }
+    });
+
+    it("does not confirm exit when daemon epoch conflicts despite matching incarnation (prevents false quarantine)", () => {
+      const error: StructuredIpcError = {
+        code: "SESSION_NOT_FOUND",
+        message: "Session 'backend-a' exited",
+        details: {
+          source: "daemon_attach",
+          kind: "session_not_found",
+          sessionId: "backend-a",
+          affirmativeExit: true,
+          incarnation: "inc-1",
+          daemonEpoch: "epoch-2",
+        },
+      };
+
+      const result = classifyNativeTerminalAttachError(error, requestedSessionId, "inc-1", "epoch-1");
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
+        expect(result.reason).toBe("daemon-attach-not-found");
+      }
+    });
+
+    it("classifies transient non-attach authority sources as unverified-missing for recovery", () => {
+      const error: StructuredIpcError = {
+        code: "SESSION_NOT_FOUND",
+        message: "Session 'backend-a' not found",
+        details: {
+          source: "surface_host",
+          kind: "session_not_found",
+          sessionId: "backend-a",
+        },
+      };
+
+      const result = classifyNativeTerminalAttachError(error, requestedSessionId, "inc-1", "epoch-1");
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
+        expect(result.reason).toBe("authority-session-not-found");
+      }
+    });
+
+    it("preserves deterministic presentation errors as operational-error", () => {
+      const error: StructuredIpcError = {
+        code: "SESSION_NOT_FOUND",
+        message: "Session 'backend-a' not found",
+        details: {
+          source: "daemon_attach",
+          kind: "session_not_found",
+          stage: "presentation",
+          sessionId: "backend-a",
+        },
+      };
+
+      const result = classifyNativeTerminalAttachError(error, requestedSessionId, "inc-1", "epoch-1");
+      expect(result.status).toBe("operational-error");
     });
   });
 });

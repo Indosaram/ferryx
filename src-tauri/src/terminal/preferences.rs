@@ -427,24 +427,11 @@ pub fn parse_ghostty_config(input: &str) -> Result<GhosttyTerminalConfig, Ghostt
     })
 }
 
-/// Resolved app appearance the terminal theme follows.
+/// Selects the theme name that applies to the terminal surface.
 ///
-/// Dark is the default so a process that never received an appearance keeps the historical
-/// dark-variant behavior.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TerminalAppearance {
-    Light,
-    #[default]
-    Dark,
-}
-
-/// Selects the theme name that applies to the terminal surface for `appearance`.
-///
-/// Ghostty supports `light:<name>,dark:<name>`: the side matching the resolved app appearance
-/// wins. When only one side is declared that side applies to both appearances (no light palette
-/// is invented), and a plain theme name is returned unchanged.
-fn theme_name_for_appearance(raw: &str, appearance: TerminalAppearance) -> Option<String> {
+/// Ghostty supports `light:<name>,dark:<name>`; Ferryx composites the terminal on a dark
+/// surface, so the dark variant is authoritative when both are declared.
+fn theme_name_for_appearance(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -460,13 +447,13 @@ fn theme_name_for_appearance(raw: &str, appearance: TerminalAppearance) -> Optio
             light = Some(rest.trim().to_string());
         }
     }
-    let (preferred, fallback) = match appearance {
-        TerminalAppearance::Light => (light, dark),
-        TerminalAppearance::Dark => (dark, light),
-    };
-    preferred
-        .or(fallback)
-        .or_else(|| Some(trimmed.to_string()))
+    if let Some(dark) = dark {
+        return Some(dark);
+    }
+    if let Some(light) = light {
+        return Some(light);
+    }
+    Some(trimmed.to_string())
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -578,8 +565,8 @@ fn theme_candidates_from_roots(roots: &GhosttyEnvRoots, name: &str) -> Vec<PathB
 /// An empty list is an explicit "nothing to inspect" outcome: the theme name is unusable, or the
 /// process exposes no config root and no shipped theme directory was found. Callers then leave the
 /// config's own colors in place rather than falling back to a guessed path.
-fn theme_config_candidates(name: &str, appearance: TerminalAppearance) -> Vec<PathBuf> {
-    let Some(name) = theme_name_for_appearance(name, appearance) else {
+fn theme_config_candidates(name: &str) -> Vec<PathBuf> {
+    let Some(name) = theme_name_for_appearance(name) else {
         return Vec::new();
     };
     let path = Path::new(&name);
@@ -622,8 +609,8 @@ fn theme_config_candidates(name: &str, appearance: TerminalAppearance) -> Vec<Pa
     candidates
 }
 
-fn load_theme_config(name: &str, appearance: TerminalAppearance) -> Option<GhosttyTerminalConfig> {
-    for candidate in theme_config_candidates(name, appearance) {
+fn load_theme_config(name: &str) -> Option<GhosttyTerminalConfig> {
+    for candidate in theme_config_candidates(name) {
         let Ok(contents) = fs::read_to_string(&candidate) else {
             continue;
         };
@@ -661,19 +648,16 @@ pub(crate) fn merge_theme_defaults(
     }
 }
 
-fn resolve_theme(
-    mut config: GhosttyTerminalConfig,
-    appearance: TerminalAppearance,
-) -> GhosttyTerminalConfig {
+fn resolve_theme(mut config: GhosttyTerminalConfig) -> GhosttyTerminalConfig {
     if let Some(name) = config.theme_name.clone() {
-        if let Some(theme) = load_theme_config(&name, appearance) {
+        if let Some(theme) = load_theme_config(&name) {
             merge_theme_defaults(&mut config, theme);
         }
     }
     config
 }
 
-fn try_load_from_ghostty_cli(appearance: TerminalAppearance) -> Option<GhosttyTerminalConfig> {
+fn try_load_from_ghostty_cli() -> Option<GhosttyTerminalConfig> {
     let mut cmd = crate::util::no_window_command("ghostty");
     cmd.arg("+show-config");
 
@@ -683,26 +667,13 @@ fn try_load_from_ghostty_cli(appearance: TerminalAppearance) -> Option<GhosttyTe
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
-    parse_ghostty_config(&text)
-        .ok()
-        .map(|config| resolve_theme(config, appearance))
+    parse_ghostty_config(&text).ok().map(resolve_theme)
 }
 
 pub fn load_terminal_preferences_from_path(path: &Path) -> TerminalPreferences {
-    load_terminal_preferences_from_path_for(path, TerminalAppearance::default())
-}
-
-/// Loads a Ghostty config file, resolving a `light:`/`dark:` theme for `appearance`.
-pub fn load_terminal_preferences_from_path_for(
-    path: &Path,
-    appearance: TerminalAppearance,
-) -> TerminalPreferences {
     match fs::read_to_string(path) {
         Ok(contents) => match parse_ghostty_config(&contents) {
-            Ok(config) => TerminalPreferences::imported(
-                resolve_theme(config, appearance),
-                path.to_path_buf(),
-            ),
+            Ok(config) => TerminalPreferences::imported(resolve_theme(config), path.to_path_buf()),
             Err(_) => TerminalPreferences::defaults(
                 TerminalPreferencesStatus::Malformed,
                 Some(path.to_path_buf()),
@@ -751,12 +722,7 @@ fn ghostty_config_candidates() -> Vec<PathBuf> {
 }
 
 pub fn load_terminal_preferences() -> TerminalPreferences {
-    load_terminal_preferences_for(TerminalAppearance::default())
-}
-
-/// Imports the Ghostty configuration, resolving a `light:`/`dark:` theme for `appearance`.
-pub fn load_terminal_preferences_for(appearance: TerminalAppearance) -> TerminalPreferences {
-    if let Some(cli_config) = try_load_from_ghostty_cli(appearance) {
+    if let Some(cli_config) = try_load_from_ghostty_cli() {
         return TerminalPreferences::imported(cli_config, PathBuf::from("ghostty"));
     }
 
@@ -765,7 +731,7 @@ pub fn load_terminal_preferences_for(appearance: TerminalAppearance) -> Terminal
     // expected location even when the file does not exist yet.
     let candidates = ghostty_config_candidates();
     if let Some(path) = candidates.iter().find(|path| path.is_file()) {
-        return load_terminal_preferences_from_path_for(path, appearance);
+        return load_terminal_preferences_from_path(path);
     }
 
     TerminalPreferences::defaults(
@@ -787,7 +753,6 @@ pub struct TerminalPreferenceOverrides {
 struct PreferenceCache {
     imported: Arc<TerminalPreferences>,
     overrides: TerminalPreferenceOverrides,
-    appearance: TerminalAppearance,
     effective: Arc<TerminalPreferences>,
 }
 
@@ -835,13 +800,11 @@ pub fn apply_terminal_preference_overrides(
 fn rebuild_cache(
     imported: Arc<TerminalPreferences>,
     overrides: TerminalPreferenceOverrides,
-    appearance: TerminalAppearance,
 ) -> PreferenceCache {
     let effective = Arc::new(apply_terminal_preference_overrides(&imported, &overrides));
     PreferenceCache {
         imported,
         overrides,
-        appearance,
         effective,
     }
 }
@@ -862,7 +825,6 @@ pub fn cached_terminal_preferences() -> Arc<TerminalPreferences> {
         rebuild_cache(
             Arc::new(load_terminal_preferences()),
             TerminalPreferenceOverrides::default(),
-            TerminalAppearance::default(),
         )
     });
     Arc::clone(&cache.effective)
@@ -875,24 +837,22 @@ pub fn cached_imported_terminal_preferences() -> Arc<TerminalPreferences> {
         rebuild_cache(
             Arc::new(load_terminal_preferences()),
             TerminalPreferenceOverrides::default(),
-            TerminalAppearance::default(),
         )
     });
     Arc::clone(&cache.imported)
 }
 
-/// Re-reads the Ghostty configuration, preserving the active local overrides and appearance.
+/// Re-reads the Ghostty configuration, preserving the active local overrides.
 ///
 /// Returns the freshly imported preferences so callers can surface the on-disk state.
 pub fn reload_terminal_preferences() -> Arc<TerminalPreferences> {
-    let appearance = terminal_appearance();
-    let imported = Arc::new(load_terminal_preferences_for(appearance));
+    let imported = Arc::new(load_terminal_preferences());
     let mut guard = cache_guard();
-    let (overrides, appearance) = guard
+    let overrides = guard
         .as_ref()
-        .map(|cache| (cache.overrides.clone(), cache.appearance))
-        .unwrap_or((TerminalPreferenceOverrides::default(), appearance));
-    let cache = guard.insert(rebuild_cache(imported, overrides, appearance));
+        .map(|cache| cache.overrides.clone())
+        .unwrap_or_default();
+    let cache = guard.insert(rebuild_cache(imported, overrides));
     Arc::clone(&cache.imported)
 }
 
@@ -901,49 +861,12 @@ pub fn set_terminal_preference_overrides(
     overrides: TerminalPreferenceOverrides,
 ) -> Arc<TerminalPreferences> {
     let mut guard = cache_guard();
-    let (imported, appearance) = match guard.take() {
-        Some(cache) => (cache.imported, cache.appearance),
-        None => (
-            Arc::new(load_terminal_preferences()),
-            TerminalAppearance::default(),
-        ),
+    let imported = match guard.take() {
+        Some(cache) => cache.imported,
+        None => Arc::new(load_terminal_preferences()),
     };
-    let cache = guard.insert(rebuild_cache(imported, overrides, appearance));
+    let cache = guard.insert(rebuild_cache(imported, overrides));
     Arc::clone(&cache.effective)
-}
-
-/// Appearance the cached terminal theme currently resolves for (Dark until one is pushed).
-pub fn terminal_appearance() -> TerminalAppearance {
-    cache_guard()
-        .as_ref()
-        .map(|cache| cache.appearance)
-        .unwrap_or_default()
-}
-
-/// Records the resolved app appearance and re-imports the theme for it.
-///
-/// Returns true only when the effective appearance changed; an unchanged appearance leaves the
-/// cache untouched. Reads the Ghostty config from disk on change, so callers on async runtimes
-/// must run it through `crate::ipc::run_blocking`.
-pub fn set_terminal_appearance(appearance: TerminalAppearance) -> bool {
-    if terminal_appearance() == appearance {
-        return false;
-    }
-    let imported = Arc::new(load_terminal_preferences_for(appearance));
-    let mut guard = cache_guard();
-    let current = guard
-        .as_ref()
-        .map(|cache| cache.appearance)
-        .unwrap_or_default();
-    if current == appearance {
-        return false;
-    }
-    let overrides = guard
-        .as_ref()
-        .map(|cache| cache.overrides.clone())
-        .unwrap_or_default();
-    *guard = Some(rebuild_cache(imported, overrides, appearance));
-    true
 }
 
 pub fn terminal_preference_overrides() -> TerminalPreferenceOverrides {
@@ -953,87 +876,9 @@ pub fn terminal_preference_overrides() -> TerminalPreferenceOverrides {
         .unwrap_or_default()
 }
 
-/// Serializes tests, across modules, that mutate the process-wide preference cache.
-#[cfg(test)]
-pub(crate) fn preference_cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
-    CACHE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        preference_cache_test_lock()
-    }
-
-    #[test]
-    fn light_dark_pair_resolves_per_appearance() {
-        for raw in ["light:Bright Day,dark:Deep Night", "dark:Deep Night,light:Bright Day"] {
-            assert_eq!(
-                theme_name_for_appearance(raw, TerminalAppearance::Light).as_deref(),
-                Some("Bright Day"),
-                "light appearance of {raw:?}"
-            );
-            assert_eq!(
-                theme_name_for_appearance(raw, TerminalAppearance::Dark).as_deref(),
-                Some("Deep Night"),
-                "dark appearance of {raw:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn single_sided_pair_uses_the_declared_side() {
-        for appearance in [TerminalAppearance::Light, TerminalAppearance::Dark] {
-            assert_eq!(
-                theme_name_for_appearance("dark:Deep Night", appearance).as_deref(),
-                Some("Deep Night")
-            );
-            assert_eq!(
-                theme_name_for_appearance("light:Bright Day", appearance).as_deref(),
-                Some("Bright Day")
-            );
-        }
-    }
-
-    #[test]
-    fn plain_theme_name_is_unchanged_for_both_appearances() {
-        for appearance in [TerminalAppearance::Light, TerminalAppearance::Dark] {
-            assert_eq!(
-                theme_name_for_appearance("  tokyonight  ", appearance).as_deref(),
-                Some("tokyonight")
-            );
-            assert_eq!(theme_name_for_appearance("   ", appearance), None);
-        }
-        assert_eq!(TerminalAppearance::default(), TerminalAppearance::Dark);
-    }
-
-    #[test]
-    fn set_terminal_appearance_reports_only_real_changes() {
-        let _lock = cache_test_lock();
-        set_terminal_appearance(TerminalAppearance::Dark);
-        assert!(!set_terminal_appearance(TerminalAppearance::Dark));
-        assert!(set_terminal_appearance(TerminalAppearance::Light));
-        assert!(!set_terminal_appearance(TerminalAppearance::Light));
-        assert_eq!(terminal_appearance(), TerminalAppearance::Light);
-        assert!(set_terminal_appearance(TerminalAppearance::Dark));
-        assert_eq!(terminal_appearance(), TerminalAppearance::Dark);
-    }
-
-    #[test]
-    fn reload_keeps_the_pushed_appearance() {
-        let _lock = cache_test_lock();
-        set_terminal_appearance(TerminalAppearance::Light);
-        reload_terminal_preferences();
-        assert_eq!(terminal_appearance(), TerminalAppearance::Light);
-        set_terminal_preference_overrides(TerminalPreferenceOverrides::default());
-        assert_eq!(terminal_appearance(), TerminalAppearance::Light);
-        assert!(set_terminal_appearance(TerminalAppearance::Dark));
-    }
 
     #[test]
     fn test_empty_font_family_resets_list() {
@@ -1115,7 +960,7 @@ mod tests {
         let found = find_ghostty_binary_on_path();
         assert_eq!(found, Some(ghostty_bin.clone()));
 
-        let candidates = theme_config_candidates("tokyonight", TerminalAppearance::Dark);
+        let candidates = theme_config_candidates("tokyonight");
         let expected_bundle = bin_dir
             .join("..")
             .join("ghostty")

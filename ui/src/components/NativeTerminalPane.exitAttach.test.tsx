@@ -97,8 +97,12 @@ describe("NativeTerminalPane abnormal exit attach handling", () => {
     vi.unstubAllGlobals();
   });
 
-  it("suppresses error badge and cancels retry when cmd_native_terminal_attach returns SESSION_NOT_FOUND with typed details", async () => {
-    const session = createSession("pane-1", "dead-backend-session");
+  it("suppresses error badge and cancels retry when cmd_native_terminal_attach returns SESSION_NOT_FOUND with affirmative exit proof", async () => {
+    const session = {
+      ...createSession("pane-1", "dead-backend-session"),
+      daemonEpoch: "epoch-1",
+      incarnation: "inc-1",
+    };
     const onUnavailable = vi.fn();
 
     tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
@@ -110,6 +114,9 @@ describe("NativeTerminalPane abnormal exit attach handling", () => {
             source: "daemon_attach",
             kind: "session_not_found",
             sessionId: "dead-backend-session",
+            affirmativeExit: true,
+            daemonEpoch: "epoch-1",
+            incarnation: "inc-1",
           },
         };
       }
@@ -133,9 +140,47 @@ describe("NativeTerminalPane abnormal exit attach handling", () => {
     expect(alert).toBeNull();
     expect(onUnavailable).toHaveBeenCalledWith(
       "dead-backend-session",
-      "daemon-attach-not-found",
-      "dead-backend-session::0:",
+      "daemon-attach-affirmative-exit",
+      "dead-backend-session:epoch-1:0:",
     );
+  });
+
+  it("retains visible error badge and does not affirmative exit when cmd_native_terminal_attach returns SESSION_NOT_FOUND without affirmative proof (INV-1)", async () => {
+    const session = createSession("pane-unproven", "unproven-dead-session");
+    const onUnavailable = vi.fn();
+
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_attach") {
+        throw {
+          code: "SESSION_NOT_FOUND",
+          message: "Session 'unproven-dead-session' not found",
+          details: {
+            source: "daemon_attach",
+            kind: "session_not_found",
+            sessionId: "unproven-dead-session",
+          },
+        };
+      }
+      if (cmd === "cmd_native_terminal_set_bounds") return PRESENTED;
+      return undefined;
+    });
+
+    const { queryByRole } = render(
+      <NativeTerminalPane
+        sessionId="pane-unproven"
+        session={session}
+        onBackendSessionUnavailable={onUnavailable}
+      />,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    const alert = queryByRole("alert");
+    expect(alert).not.toBeNull();
+    expect(alert).toHaveTextContent("Failed to attach native terminal");
+    expect(onUnavailable).not.toHaveBeenCalled();
   });
 
   it("ignores late attach rejection without surfacing alert badge when session exits during in-flight attach", async () => {
@@ -178,7 +223,7 @@ describe("NativeTerminalPane abnormal exit attach handling", () => {
     expect(queryByRole("alert")).toBeNull();
   });
 
-  it("suppresses error badge for legacy INTERNAL_ERROR with exact Session not found message", async () => {
+  it("retains visible error badge and does not affirmative exit for legacy INTERNAL_ERROR without proof (INV-1)", async () => {
     const session = createSession("pane-legacy", "legacy-dead-session");
     const onUnavailable = vi.fn();
 
@@ -205,12 +250,10 @@ describe("NativeTerminalPane abnormal exit attach handling", () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
 
-    expect(queryByRole("alert")).toBeNull();
-    expect(onUnavailable).toHaveBeenCalledWith(
-      "legacy-dead-session",
-      "legacy-internal-error",
-      "legacy-dead-session::0:",
-    );
+    const alert = queryByRole("alert");
+    expect(alert).not.toBeNull();
+    expect(alert).toHaveTextContent("Failed to attach native terminal");
+    expect(onUnavailable).not.toHaveBeenCalled();
   });
 
   it("preserves visible error badge for genuine operational errors like IO_ERROR or GPU surface failure", async () => {

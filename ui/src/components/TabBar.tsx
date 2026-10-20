@@ -18,7 +18,6 @@ import {
   useSleepingSessionIds,
 } from "../lib/sessionLifecycle";
 import { formatBindingLabel, isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
-import { useShortcutOverrides } from "../lib/shortcutOverrides";
 import { getSystemPermissionsStatus } from "../lib/tauri";
 import { isTerminalTab, type FileTab, type WorkspaceTab } from "../lib/types";
 import type { TerminalTabDisplay } from "../state/tabDisplay";
@@ -118,8 +117,6 @@ export function TabBar({
   const menuUnlistenRef = useRef<(() => void) | null>(null);
   const [hostPlatform, setHostPlatform] = useState<string | null>(null);
   const isMac = isMacShortcutPlatform();
-  const { overrides: shortcutOverrides } = useShortcutOverrides();
-  const newTerminalChord = shortcutLabel("tab.newTerminal", isMac, shortcutOverrides);
   // The shell profile menu follows the HOST platform reported by the backend, never
   // the browser OS: the remote web client can drive a host of a different platform.
   const isWindows = hostPlatform === "windows";
@@ -183,7 +180,7 @@ export function TabBar({
         kind: "item",
         id: "new-terminal",
         label: "New Terminal",
-        shortcut: shortcutLabel("tab.newTerminal", isMac, shortcutOverrides),
+        shortcut: shortcutLabel("tab.newTerminal", isMac),
       },
     ];
     if (isWindows) {
@@ -201,7 +198,7 @@ export function TabBar({
       kind: "item",
       id: "new-browser",
       label: "New Browser Tab",
-      shortcut: shortcutLabel("tab.newBrowser", isMac, shortcutOverrides),
+      shortcut: shortcutLabel("tab.newBrowser", isMac),
     });
     if (onAddMarkdown) {
       items.push({
@@ -511,7 +508,6 @@ export function TabBar({
           <div ref={addButtonRef} className="no-drag relative flex shrink-0 items-center">
             <IconButton
               label="New tab"
-              title={newTerminalChord ? `New tab (${newTerminalChord})` : "New tab"}
               data-shortcut={onAddBrowser ? "tab.newTerminal tab.newBrowser" : "tab.newTerminal"}
               size="sm"
               className="no-drag my-auto ml-1"

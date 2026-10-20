@@ -1123,7 +1123,7 @@ async fn run(
                         }
                     }
                 }
-                return Err(BridgeError::TargetNotFound);
+                return Err(BridgeError::RemoteTargetExpired);
             }
             if !client.supports_agent_state() {
                 tracing::info!(

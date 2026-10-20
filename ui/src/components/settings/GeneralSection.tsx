@@ -7,7 +7,6 @@ import {
   RotateCcw,
   RotateCw,
   TerminalSquare,
-  X,
 } from "lucide-react";
 
 import {
@@ -16,7 +15,6 @@ import {
   useGeneralSettings,
 } from "../../lib/generalSettings";
 import {
-  cancelUpdateDownload,
   checkForUpdate,
   downloadAndInstallUpdate,
   getCurrentVersion,
@@ -28,9 +26,7 @@ import {
 } from "../../lib/updater";
 import {
   getCliLauncherStatus,
-  getDaemonSupervisor,
   installCliLauncher,
-  setDaemonSupervisor,
 } from "../../lib/tauri";
 import { classifyNavigatorPlatform } from "../../lib/platform";
 import type { CliLauncherStatus } from "../../lib/types";
@@ -49,16 +45,8 @@ function updateStatusMessage(status: UpdateStatus): string {
     case "checking":
       return "Checking for updates…";
     case "available":
-      if (status.lastFailure === "stalled") {
-        return `Download of version ${status.version} stalled. Nothing was installed; retry when ready.`;
-      }
-      if (status.lastFailure === "cancelled") {
-        return `Download of version ${status.version} was cancelled. Nothing was installed.`;
-      }
       return `Version ${status.version} is available.`;
     case "downloading":
-      if (status.installing) return `Installing version ${status.version}…`;
-      if (status.cancelRequested) return "Cancelling download…";
       return `Downloading version ${status.version}…`;
     case "downloaded":
       return `Version ${status.version} is ready to install.`;
@@ -125,13 +113,11 @@ export function SoftwareUpdateCard() {
   const isAvailable = status.state === "available";
   const isDownloaded = status.state === "downloaded";
   const isActionable = isAvailable || isDownloaded;
-  // Installation is not cancellable, so Cancel exists only while bytes are still downloading.
-  const isCancellable = status.state === "downloading" && !status.installing;
   const percent = Math.round((status.downloadProgress ?? 0) * 100);
 
   let statusClassName = "text-foreground";
   if (isDownloaded) statusClassName = "flex items-center gap-1.5 font-medium text-status-success";
-  if (status.state === "error" || status.lastFailure === "stalled") statusClassName = "text-destructive";
+  if (status.state === "error") statusClassName = "text-destructive";
 
   const handleInstallAndRelaunch = () => {
     if (isAvailable) {
@@ -197,21 +183,8 @@ export function SoftwareUpdateCard() {
           }`}
         >
           <RotateCcw className="size-3" />
-          {isAvailable && status.lastFailure ? "Retry Install and Relaunch" : "Install and Relaunch"}
+          Install and Relaunch
         </Button>
-        {isCancellable ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => void cancelUpdateDownload()}
-            disabled={status.cancelRequested === true}
-            className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
-          >
-            <X className="size-3" />
-            Cancel
-          </Button>
-        ) : null}
       </div>
     </Card>
   );
@@ -330,47 +303,16 @@ export function GeneralSection() {
   const { settings, updateSettings } = useGeneralSettings();
   const [managedExternally, setManagedExternally] = useState<boolean>(false);
   const [sidebarOpenStartup, setSidebarOpenStartup] = useState<boolean>(() => loadSidebarOpenStartup());
-  const [supervisor, setSupervisor] = useState<{ supported: boolean; enabled: boolean } | null>(null);
-  const [supervisorBusy, setSupervisorBusy] = useState(false);
-  const [supervisorError, setSupervisorError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     void updatesManagedExternally().then((managed) => {
       if (active) setManagedExternally(managed);
     });
-    getDaemonSupervisor()
-      .then((state) => {
-        if (active) setSupervisor(state);
-      })
-      .catch(() => {
-        // Hosts or daemons that cannot report a supervisor do not offer the switch.
-        if (active) setSupervisor(null);
-      });
     return () => {
       active = false;
     };
   }, []);
-
-  const toggleSupervisor = async (enabled: boolean) => {
-    const previous = supervisor;
-    if (!previous) return;
-    setSupervisor({ ...previous, enabled });
-    setSupervisorBusy(true);
-    setSupervisorError(null);
-    try {
-      await setDaemonSupervisor(enabled);
-    } catch (err) {
-      setSupervisor(previous);
-      const message =
-        typeof err === "object" && err !== null && "message" in err && typeof err.message === "string"
-          ? err.message
-          : "Failed to update background service setting";
-      setSupervisorError(message);
-    } finally {
-      setSupervisorBusy(false);
-    }
-  };
 
   return (
     <section aria-labelledby="settings-general-heading" aria-label="General">
@@ -429,30 +371,6 @@ export function GeneralSection() {
               </SelectContent>
             </Select>
           </SettingRow>
-          {supervisor?.supported ? (
-            <SettingRow
-              label="Restart background service automatically"
-              description={
-                <>
-                  Let the operating system restart the Ferryx background service if it stops, so
-                  terminal sessions come back without opening the app.
-                  {supervisorError ? (
-                    <span role="alert" className="mt-1 block text-destructive">
-                      {supervisorError}
-                    </span>
-                  ) : null}
-                </>
-              }
-            >
-              <Switch
-                id="general-daemon-supervisor"
-                aria-label="Restart background service automatically"
-                checked={supervisor.enabled}
-                disabled={supervisorBusy}
-                onCheckedChange={(checked) => void toggleSupervisor(checked)}
-              />
-            </SettingRow>
-          ) : null}
         </div>
         <CliLauncherCard />
         <SoftwareUpdateCard />

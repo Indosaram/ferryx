@@ -394,7 +394,6 @@ async fn ssh_bridge_target_mismatch_on_describe_or_read_is_rejected() {
             args: None,
             env: None,
             client_request_id: Some("req-mismatch-test".into()),
-            agent_integration: None,
         })
         .await
         .expect("pty_spawn");
@@ -443,7 +442,6 @@ async fn ssh_bridge_independent_read_does_not_block_control() {
             args: Some(vec![]),
             env: None,
             client_request_id: Some("req-stream-test".into()),
-            agent_integration: None,
         })
         .await
         .expect("pty_spawn");
@@ -569,7 +567,6 @@ async fn ssh_bridge_spawn_retry_requires_matching_client_request_id() {
         args: None,
         env: None,
         client_request_id: Some("req-stable-123".into()),
-        agent_integration: None,
     };
 
     let first = client.pty_spawn(&params).await.expect("first spawn");
@@ -647,7 +644,6 @@ async fn ssh_bridge_lifecycle_poison_on_timeout_cancel_and_eof_reaping() {
             args: Some(vec![]),
             env: None,
             client_request_id: Some("req-life-test".into()),
-            agent_integration: None,
         })
         .await
         .expect("pty_spawn");
@@ -1108,7 +1104,6 @@ async fn exercise_live_loopback_bridge(root: &Path) {
             args: None,
             env: None,
             client_request_id: Some("req-ssh-live".into()),
-            agent_integration: None,
         })
         .await
         .expect("pty_spawn over SSH");
@@ -1337,7 +1332,6 @@ async fn ssh_bridge_dag_subscription_drop_releases_helper_and_keeps_pty_alive() 
             args: None,
             env: None,
             client_request_id: Some("req-dag-drop".into()),
-            agent_integration: None,
         })
         .await
         .expect("pty_spawn");
@@ -1596,7 +1590,6 @@ async fn ssh_bridge_real_pty_large_session_writes_do_not_block_other_session() {
                 args: Some(vec![]),
                 env: None,
                 client_request_id: Some(rid.into()),
-                agent_integration: None,
             })
             .await
             .expect("pty_spawn")

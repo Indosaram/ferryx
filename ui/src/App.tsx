@@ -11,7 +11,6 @@ import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./comp
 import { Sidebar, type SidebarAttention } from "./components/Sidebar";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
-import { TERMINAL_COPY_MODE_EVENT, type TerminalCopyModeEventDetail } from "./components/TerminalCopyMode";
 import { RemoteHostConnection } from "./remote/RemoteApp";
 import { RemoteBrowserSharingIndicator } from "./components/RemoteBrowserSharingIndicator";
 import { remoteHostStore, selectActiveHost } from "./state/remoteHostStore";
@@ -43,8 +42,7 @@ import { notificationEntryId } from "./lib/notificationCenter/types";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
-import { isMacShortcutPlatform, resolvedShortcuts, useShortcuts } from "./lib/shortcuts";
-import { useShortcutOverrides } from "./lib/shortcutOverrides";
+import { isMacShortcutPlatform, SHORTCUTS, useShortcuts } from "./lib/shortcuts";
 import { initUpdateToasts } from "./lib/updateToast";
 // Wave 3a cross-platform onboarding, release notes, and getting started checklist
 import {
@@ -117,6 +115,7 @@ import {
   setBadgeCount,
   spawnTerminal,
   spawnTerminalDetailed,
+  onTerminalRemoteStatus,
   retryTerminalRemoteSession,
   listTerminalSessions,
   toIpcError,
@@ -166,6 +165,7 @@ import {
 import { registerWindowCloseGuard, startUpdatePolling } from "./lib/updater";
 import { maybeShowWindowsStoreMigrationNotice } from "./lib/windowsStoreMigration";
 import { collectLeafIds, type PaneDirection } from "./state/paneTree";
+import { findDirectionalLeafId, type PaneFocusDirection } from "./state/paneGeometry";
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspaceState";
@@ -1527,77 +1527,124 @@ function WorkspaceApp({
     [dispatchWorkspaceAction, persistSessionStrict],
   );
 
-  const reconnectingSshRef = useRef<Map<string, Promise<void>>>(new Map());
+  const reconnectingSshRef = useRef<Map<string, {
+    promise: Promise<import("./lib/types").TerminalRemoteStatus>;
+    voidPromise?: Promise<void>;
+    cancel: () => void;
+  }>>(new Map());
+  const getOrCreateSshOwnerRetryOperation = useCallback((sessionId: string): {
+    promise: Promise<import("./lib/types").TerminalRemoteStatus>;
+    voidPromise?: Promise<void>;
+    cancel: () => void;
+  } | null => {
+    const session = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+    if (!session?.backendSessionId) return null;
+    const project = activeProjectRef.current;
+    const captured = {
+      workspaceId: project?.workspaceId ?? session.workspaceId,
+      backendSessionId: session.backendSessionId,
+      daemonEpoch: session.daemonEpoch,
+      incarnation: session.incarnation,
+      recoveryKey: session.recoveryKey,
+      recoveryToken: session.recoveryToken,
+    };
+    const key = JSON.stringify([captured.workspaceId, sessionId, captured.backendSessionId, captured.daemonEpoch,
+      captured.incarnation, captured.recoveryKey, captured.recoveryToken]);
+    const existing = reconnectingSshRef.current.get(key);
+    if (existing) return existing;
+    let unsubscribe: (() => void) | undefined;
+    let connectedStatus: import("./lib/types").TerminalRemoteStatus | undefined;
+    let retryAdmitted = false;
+    let settled = false;
+    let cancelled = false;
+    let resolveConnected!: (status: import("./lib/types").TerminalRemoteStatus) => void;
+    let rejectConnected!: (error: unknown) => void;
+    const connected = new Promise<import("./lib/types").TerminalRemoteStatus>((resolve, reject) => {
+      resolveConnected = resolve;
+      rejectConnected = reject;
+    });
+    const cancel = () => {
+      cancelled = true;
+      if (!settled) {
+        settled = true;
+        unsubscribe?.();
+        rejectConnected({ code: "RECOVERY_CANCELLED", message: "SSH recovery was cancelled" });
+      }
+    };
+    const settleIfConnected = () => {
+      if (cancelled || settled || !retryAdmitted || !connectedStatus) return;
+      const currentProject = activeProjectRef.current;
+      const current = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+      if (currentProject?.workspaceId !== captured.workspaceId || !current || current.backendSessionId !== captured.backendSessionId ||
+          current.daemonEpoch !== captured.daemonEpoch || current.incarnation !== captured.incarnation ||
+          current.recoveryKey !== captured.recoveryKey || current.recoveryToken !== captured.recoveryToken) {
+        settled = true;
+        unsubscribe?.();
+        rejectConnected({ code: "RECOVERY_OWNER_CHANGED", message: "SSH recovery owner changed before reconnect completed" });
+        return;
+      }
+      settled = true;
+      unsubscribe?.();
+      resolveConnected(connectedStatus);
+    };
+    const subscriptionReady = onTerminalRemoteStatus((status) => {
+      if (status.sessionId !== captured.backendSessionId || status.state !== "connected") return;
+      connectedStatus = status;
+      settleIfConnected();
+    }).then((stop) => {
+      unsubscribe = stop;
+      if (settled) stop();
+    });
+    void subscriptionReady.then(async () => {
+      if (cancelled || settled) return;
+      const res = await retryTerminalRemoteSession(captured.backendSessionId);
+      if (cancelled || settled) return;
+      if (res.type !== "retryRemoteSessionOk") throw { code: "INVALID_RESPONSE", message: "SSH retry was not admitted" };
+      retryAdmitted = true;
+      settleIfConnected();
+    }).catch((error) => {
+      if (!cancelled && !settled) {
+        settled = true;
+        unsubscribe?.();
+        rejectConnected(error);
+      }
+      reportRuntimeError(error);
+    });
+    const task = connected;
+    const operation: {
+      promise: Promise<import("./lib/types").TerminalRemoteStatus>;
+      voidPromise?: Promise<void>;
+      cancel: () => void;
+    } = { promise: task, cancel };
+    reconnectingSshRef.current.set(key, operation);
+    void task.finally(() => {
+      if (reconnectingSshRef.current.get(key) === operation) reconnectingSshRef.current.delete(key);
+    }).catch(() => undefined);
+    return operation;
+  }, [reportRuntimeError]);
+
+  const handleSshOwnerRetry = useCallback((sessionId: string) => {
+    const op = getOrCreateSshOwnerRetryOperation(sessionId);
+    if (!op) return Promise.reject({ code: "SESSION_NOT_FOUND", message: "Retained SSH backend is unavailable" });
+    return op.promise;
+  }, [getOrCreateSshOwnerRetryOperation]);
+
+  const cancelSshOwnerRetry = useCallback((sessionId: string, workspaceId: string) => {
+    const session = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+    if (!session) return;
+    const key = JSON.stringify([workspaceId, sessionId, session.backendSessionId, session.daemonEpoch,
+      session.incarnation, session.recoveryKey, session.recoveryToken]);
+    reconnectingSshRef.current.get(key)?.cancel();
+  }, []);
+
   const handleReconnectSshSession = useCallback(
     (sessionId: string) => {
-      const existing = reconnectingSshRef.current.get(sessionId);
-      if (existing) return existing;
-      const task = (async () => {
-        const current = stateRef.current.sessions;
-        const session = current[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
-        if (!session) return;
-        const targetWorkspaceId = session.workspaceId;
-        if (session.backendSessionId) {
-          try {
-            const res = await retryTerminalRemoteSession(session.backendSessionId);
-            if (res.type === "retryRemoteSessionOk") {
-              return;
-            }
-          } catch {
-            // Retry failed or backend session no longer valid on daemon; fall through to respawn
-          }
-        }
-        if (stateRef.current.workspaceId !== targetWorkspaceId || !stateRef.current.sessions[sessionId]) return;
-        let spawned: Awaited<ReturnType<typeof spawnTerminalDetailed>> | null = null;
-        let adopted = false;
-        try {
-          spawned = await spawnTerminalDetailed({
-            workspaceId: session.workspaceId,
-            worktree: session.worktree,
-            cwd: session.cwd,
-            clientRequestId: `ssh-reconnect-${safeRandomUUID()}`,
-            startup: null,
-          });
-          const latest = stateRef.current;
-          if (latest.workspaceId !== targetWorkspaceId || !latest.sessions[sessionId]) {
-            if (spawned) await closeTerminal(spawned.sessionId).catch(() => undefined);
-            return;
-          }
-          const nextState = workspaceReducer(stateRef.current, {
-            type: "REBIND_SESSION_BACKEND",
-            sessionId,
-            backendSessionId: spawned.sessionId,
-            cwd: spawned.session.cwd ?? session.cwd,
-            daemonEpoch: spawned.daemonEpoch,
-          });
-          dispatchWorkspaceAction({
-            type: "REBIND_SESSION_BACKEND",
-            sessionId,
-            backendSessionId: spawned.sessionId,
-            cwd: spawned.session.cwd ?? session.cwd,
-            daemonEpoch: spawned.daemonEpoch,
-          });
-          adopted = true;
-          try {
-            await persistSessionStrict(targetWorkspaceId, activeProject.repoRoot, nextState);
-          } catch (persistError) {
-            reportRuntimeError(persistError);
-          }
-        } catch (error) {
-          if (spawned && !adopted) await closeTerminal(spawned.sessionId).catch(() => undefined);
-          reportRuntimeError(error);
-          throw error;
-        }
-      })();
-      reconnectingSshRef.current.set(sessionId, task);
-      void task
-        .catch(() => undefined)
-        .then(() => {
-          if (reconnectingSshRef.current.get(sessionId) === task) reconnectingSshRef.current.delete(sessionId);
-        });
-      return task;
+      const op = getOrCreateSshOwnerRetryOperation(sessionId);
+      if (!op) return Promise.reject({ code: "SESSION_NOT_FOUND", message: "Retained SSH backend is unavailable" });
+      op.voidPromise ??= op.promise.then(() => undefined);
+      return op.voidPromise;
     },
-    [activeProject.repoRoot, dispatchWorkspaceAction, persistSessionStrict, reportRuntimeError],
+    [getOrCreateSshOwnerRetryOperation],
   );
 
   const activeAutoResumeCancelRef = useRef<(() => void) | null>(null);
@@ -2540,6 +2587,21 @@ function WorkspaceApp({
     [focusPane],
   );
 
+  const handleDirectionalPaneFocus = useCallback(
+    (direction: PaneFocusDirection) => {
+      if (activeRemoteHostRef.current) return;
+      const currentState = stateRef.current;
+      const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
+      if (!activeTab || activeTab.kind === "browser") return;
+      const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
+      if (!activeLayout || activeLayout.root.type === "leaf") return;
+      const activeLeafId = activeLayout.activeLeafId ?? collectLeafIds(activeLayout.root)[0];
+      const targetLeafId = findDirectionalLeafId(activeLayout.root, activeLeafId, direction);
+      if (targetLeafId) focusPane(activeTab.id, targetLeafId);
+    },
+    [focusPane],
+  );
+
   const handleOpenTerminalSearch = useCallback(() => {
     if (activeRemoteHostRef.current) return;
     const currentState = stateRef.current;
@@ -2548,19 +2610,6 @@ function WorkspaceApp({
     const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
     const leafId = activeLayout?.activeLeafId ?? (activeLayout?.root ? collectLeafIds(activeLayout.root)[0] : "leaf-default");
     setSearchLeafId(leafId);
-  }, []);
-
-  // Desktop only: the remote web client has no native surface to select on.
-  const handleToggleTerminalCopyMode = useCallback(() => {
-    if (activeRemoteHostRef.current) return;
-    const currentState = stateRef.current;
-    const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
-    if (!activeTab || !isTerminalTab(activeTab)) return;
-    const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
-    const leafId = activeLayout?.activeLeafId ?? (activeLayout?.root ? collectLeafIds(activeLayout.root)[0] : null);
-    const sessionId = (leafId && activeLayout?.sessionIdsByLeafId?.[leafId]) || activeTab.sessionId;
-    if (!sessionId) return;
-    window.dispatchEvent(new CustomEvent<TerminalCopyModeEventDetail>(TERMINAL_COPY_MODE_EVENT, { detail: { sessionId } }));
   }, []);
 
   const handleSelectWorktreeByIndex = useCallback(
@@ -3401,8 +3450,11 @@ function WorkspaceApp({
         "terminal.unsplit": handleUnsplitActive,
         "terminal.focusNext": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(1),
         "terminal.focusPrevious": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(-1),
+        "terminal.focusLeft": browserShortcutsActive ? undefined : () => handleDirectionalPaneFocus("left"),
+        "terminal.focusRight": browserShortcutsActive ? undefined : () => handleDirectionalPaneFocus("right"),
+        "terminal.focusUp": browserShortcutsActive ? undefined : () => handleDirectionalPaneFocus("up"),
+        "terminal.focusDown": browserShortcutsActive ? undefined : () => handleDirectionalPaneFocus("down"),
         "terminal.search": browserShortcutsActive ? undefined : handleOpenTerminalSearch,
-        "terminal.copyMode": browserShortcutsActive ? undefined : handleToggleTerminalCopyMode,
         "sidebar.left.toggle": toggleSidebar,
         "project.add": handleOpenAddProject,
         "commandPalette.open": handleOpenCommandPalette,
@@ -3419,13 +3471,13 @@ function WorkspaceApp({
       handleAddTerminalTab,
       handleCloseActiveSurface,
       handleCyclePaneFocus,
+      handleDirectionalPaneFocus,
       browserShortcutsActive,
       shortcutBrowserId,
       handleCycleTab,
       handleOpenAddProject,
       handleOpenCommandPalette,
       handleOpenTerminalSearch,
-      handleToggleTerminalCopyMode,
       handleSelectTerminalTabByIndex,
       handleSelectWorktreeByIndex,
       handleSplitActive,
@@ -3441,8 +3493,7 @@ function WorkspaceApp({
       toggleSidebar,
     ],
   );
-  const { overrides: shortcutOverrides } = useShortcutOverrides();
-  useShortcuts(shortcutHandlers, { overrides: shortcutOverrides });
+  useShortcuts(shortcutHandlers);
 
   const sshHostId = activeProject.target?.kind === "ssh" ? activeProject.target.hostId : null;
   const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId
@@ -3468,7 +3519,7 @@ function WorkspaceApp({
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
       <ShortcutHints
-        enabledActions={resolvedShortcuts(shortcutOverrides).filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
+        enabledActions={SHORTCUTS.filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
         getContext={() => {
           const current = stateRef.current;
           const group = current.layout.focusedGroupId ? current.layout.tabGroups?.[current.layout.focusedGroupId] : undefined;

@@ -662,17 +662,6 @@ impl DaemonSessionService {
         }
     }
 
-    /// The agent extension's last report for this PTY, for the agent-control surface.
-    pub fn agent_control_report(&self, session_id: &str) -> Option<crate::agent_control::ProviderReport> {
-        let current = self.agent_states.current(session_id)?;
-        Some(crate::agent_control::ProviderReport {
-            agent: current.agent,
-            state: current.state,
-            self_reported: current.origin.is_self_reported(),
-            detail: current.detail,
-        })
-    }
-
     /// The agent's own session identity, when its extension reported one. A transcript file is
     /// named after that id, so preferring it resolves a session to its own conversation instead of
     /// to whichever transcript in the same cwd happened to be written last.
@@ -1857,10 +1846,6 @@ impl DaemonSessionService {
                 crate::ssh::bridge::SpawnParams {
                     cols: Some(cols),
                     rows: Some(rows),
-                    // The user's opt-out must stop forwarding on real remote panes too.
-                    agent_integration: Some(
-                        self.terminal_service.pty_manager().agent_integration_enabled(),
-                    ),
                     ..Default::default()
                 },
                 request.into(),

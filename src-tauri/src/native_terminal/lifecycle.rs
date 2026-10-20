@@ -5,15 +5,15 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64};
 
 use super::bell::{
-    terminal_bell_callback, terminal_color_scheme_callback, terminal_size_callback,
-    terminal_title_changed_callback, terminal_write_pty_callback, TerminalContext,
+    terminal_bell_callback, terminal_size_callback, terminal_title_changed_callback,
+    terminal_write_pty_callback, TerminalContext,
 };
 use super::error::NativeTerminalError;
 use super::sys::constants::{
-    GHOSTTY_TERMINAL_OPT_BELL, GHOSTTY_TERMINAL_OPT_COLOR_SCHEME,
-    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
-    GHOSTTY_TERMINAL_OPT_SIZE, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
-    GHOSTTY_TERMINAL_OPT_USERDATA, GHOSTTY_TERMINAL_OPT_WRITE_PTY,
+    GHOSTTY_TERMINAL_OPT_BELL, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, GHOSTTY_TERMINAL_OPT_SIZE,
+    GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, GHOSTTY_TERMINAL_OPT_USERDATA,
+    GHOSTTY_TERMINAL_OPT_WRITE_PTY,
 };
 use super::sys::ffi::{ghostty_terminal_free, ghostty_terminal_new, ghostty_terminal_set};
 use super::sys::types::{GhosttyTerminal, GhosttyTerminalImpl};
@@ -121,20 +121,6 @@ pub fn create_native_terminal(
         return Err(e);
     }
 
-    let reg_color_scheme = unsafe {
-        ghostty_terminal_set(
-            non_null.as_ptr(),
-            GHOSTTY_TERMINAL_OPT_COLOR_SCHEME,
-            terminal_color_scheme_callback as *const c_void,
-        )
-    };
-    if let Err(e) =
-        NativeTerminalError::from_c_result(reg_color_scheme, "set(OPT_COLOR_SCHEME)")
-    {
-        unsafe { ghostty_terminal_free(non_null.as_ptr()) };
-        return Err(e);
-    }
-
     let reg_size = unsafe {
         ghostty_terminal_set(
             non_null.as_ptr(),
@@ -191,11 +177,6 @@ pub fn teardown_native_terminal(handle: NonNull<GhosttyTerminalImpl>) {
             null_ptr,
         );
         let _ = ghostty_terminal_set(handle.as_ptr(), GHOSTTY_TERMINAL_OPT_WRITE_PTY, null_ptr);
-        let _ = ghostty_terminal_set(
-            handle.as_ptr(),
-            GHOSTTY_TERMINAL_OPT_COLOR_SCHEME,
-            null_ptr,
-        );
         let _ = ghostty_terminal_set(handle.as_ptr(), GHOSTTY_TERMINAL_OPT_SIZE, null_ptr);
         let _ = ghostty_terminal_set(handle.as_ptr(), GHOSTTY_TERMINAL_OPT_USERDATA, null_ptr);
         ghostty_terminal_free(handle.as_ptr());

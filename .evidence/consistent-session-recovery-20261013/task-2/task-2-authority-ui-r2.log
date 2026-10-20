@@ -1,0 +1,278 @@
+$ vitest run --maxWorkers=1 src/lib/nativeTerminalAttachPolicy.test.ts src/lib/sessionPersistence.test.ts src/state/workspaceStore.terminalExit.test.ts src/state/workspaceStore.sshReattach.test.ts src/lib/sessionAuthority.independent.test.ts
+
+ RUN  v3.2.7 /Volumes/T9-Mac/project/ferryx-wt/consistent-session-recovery-20261013/ui
+
+ ❯ src/lib/sessionPersistence.test.ts (49 tests | 3 failed) 89ms
+   ✓ sessionPersistence v3 serialization and migration > round trips all seven durable native binding fields 54ms
+   ✓ sessionPersistence v3 serialization and migration > accepts a handover epoch only with the same authoritative incarnation 1ms
+   ✓ sessionPersistence v3 serialization and migration > keeps unknown predecessor identity recoverable rather than dead 2ms
+   ✓ sessionPersistence v3 serialization and migration > stale restoration cannot overwrite the current backend binding 1ms
+   ✓ sessionPersistence v3 serialization and migration > restores a successfully presented split through normal live-session restoration 1ms
+   ✓ sessionPersistence v3 serialization and migration > round trips hidden prepared intent with cancellation false and save key 2ms
+   ✓ sessionPersistence v3 serialization and migration > round trips hidden prepared intent with cancellation true and save key 1ms
+   ✓ sessionPersistence v3 serialization and migration > persists and restores incarnation across save and deserialize 0ms
+   ✓ sessionPersistence v3 serialization and migration > persists recent scrollback captured for hibernated sessions across restore/resave 1ms
+   ✓ sessionPersistence v3 serialization and migration > preserves paired ownership and proxy identity despite local inventory absence 1ms
+   ✓ sessionPersistence v3 serialization and migration > projects paired targets without embedding credential fields 0ms
+   ✓ sessionPersistence v3 serialization and migration > does not trust incomplete inventory as proof of local process death 0ms
+   ✓ sessionPersistence v3 serialization and migration > a persisted session missing from a non-authoritative live map keeps its backendSessionId and does NOT become 'exited' 0ms
+   ✓ sessionPersistence v3 serialization and migration > quarantines an invalid paired workspace without affecting another row 0ms
+   ✓ sessionPersistence v3 serialization and migration > retains Git grouping metadata in session snapshots and subsequent saves 0ms
+   ✓ sessionPersistence v3 serialization and migration > serializes typed terminal tabs, pane ownership, pinned/expanded state, and separate local/backend identities 0ms
+   ✓ sessionPersistence v3 serialization and migration > does not serialize terminal sessions that no tab or pane references 1ms
+   ✓ sessionPersistence v3 serialization and migration > round-trips Orca-style split tab groups without changing either tab's pane ownership 2ms
+   × sessionPersistence v3 serialization and migration > matches live native PTYs by backendSessionId instead of the frontend-local session id 5ms
+     → expected 'backend-2' to be null
+   ✓ sessionPersistence v3 serialization and migration > drops persisted terminal sessions that no restored tab or pane references 1ms
+   ✓ sessionPersistence v3 serialization and migration > round-trips explicit browser metadata rather than guessing browser kind from a pane tree 1ms
+   ✓ sessionPersistence v3 serialization and migration > migrates v1 worktree identity and legacy session identifiers 0ms
+   ✓ sessionPersistence v3 serialization and migration > maps a v1 pane tree with no per-leaf mapping by leafId rather than tab id 0ms
+   ✓ sessionPersistence v3 serialization and migration > round-trips multi-worktree workspace state with active and parked worktree layouts without session leakage 1ms
+   ✓ sessionPersistence v3 serialization and migration > deserializes existing v2 terminal sessionIdsByLeafId into terminal PaneContent for every leaf 1ms
+   ✓ sessionPersistence v3 serialization and migration > round-trips mixed terminal/browser content preserving tree, browser metadata, and terminal session ownership with runtime browserId policy 1ms
+   ✓ sessionPersistence v3 serialization and migration > persists decimal-string daemonEpoch and lastOutputSequence separately from local/backend IDs 0ms
+   ✓ sessionPersistence v3 serialization and migration > reconciles only when both daemon epoch and backendSessionId match current daemon ListSessions result 0ms
+   ✓ sessionPersistence v3 serialization and migration > marks sessions exited/lost on daemon epoch change without auto-respawn 0ms
+   ✓ sessionPersistence v3 serialization and migration > persists and restores activityBySessionId for active referenced tabs and drops orphan session activity 1ms
+   ✓ sessionPersistence v3 serialization and migration > preserves live working and waiting claims for surviving daemon sessions, but drops working claim for dead sessions 0ms
+   ✓ sessionPersistence v3 serialization and migration > marks session exited and settles working activity to done when daemon reports running: false 0ms
+   ✓ sessionPersistence v3 serialization and migration > preserves backend identity and working activity when session is missing from partial inventory under INV-1 0ms
+   ✓ sessionPersistence v3 serialization and migration > does not adopt or kill conflicting incarnation and retains identity for recovery under INV-3 0ms
+   ✓ sessionPersistence v3 serialization and migration > preserves paired proxy identity and activity regardless of local inventory under INV-4 0ms
+   ✓ sessionPersistence v3 serialization and migration > restores activities with seen: true so startup does not trigger attention frames on any pane 0ms
+   ✓ sessionPersistence v3 serialization and migration > persists and restores agentType and agentSessionId across serialization and deserialization 0ms
+   ✓ sessionPersistence v3 serialization and migration > preserves agentType and agentSessionId when daemon epoch mismatch marks session exited and nulls backendSessionId 0ms
+   ✓ sessionPersistence v3 serialization and migration > loads legacy save files without agent fields without throwing and sets agentType/agentSessionId to null 0ms
+   × sessionPersistence v3 serialization and migration > keeps live backend identity, pane leaf ownership, agent metadata, CWD, and output sequence across warm disk restore 1ms
+     → expected 'backend-2' to be null
+   × sessionPersistence v3 serialization and migration > persists providerSession and never serializes transient reconnect locks or in-flight state 1ms
+     → expected 'working' to be 'exited' // Object.is equality
+   ✓ sessionPersistence v3 serialization and migration > falls back to activityBySessionId agentType during serialization and deserialization when session.agentType is unset 0ms
+   ✓ sessionPersistence v3 serialization and migration > migrateLegacyAgentType > migrates legacy gemini agent type to antigravity and preserves other inputs 0ms
+   ✓ sessionPersistence v3 serialization and migration > migrates legacy gemini agentType to antigravity and generates providerSession during restore 0ms
+   ✓ sessionPersistence v3 serialization and migration > migrates restored activityBySessionId agentType from gemini to antigravity while leaving non-legacy untouched 0ms
+   ✓ future session versions > treats a session version newer than this build as unreadable and refuses to overwrite it 0ms
+   ✓ sessionPersistenceKey > changes when an agent rotates its conversation id inside the same pane 0ms
+   ✓ sessionPersistenceKey > is stable while nothing persistable changed 0ms
+   ✓ sessionPersistenceKey > still changes on backend rebinding and lifecycle transitions 1ms
+ ❯ src/lib/nativeTerminalAttachPolicy.test.ts (54 tests | 1 failed) 24ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with typed daemon_attach details > should return unverified-missing when code=SESSION_NOT_FOUND + typed details match without affirmative proof (INV-1) 2ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with typed daemon_attach details > should return unverified-missing for different requested ID when details match without affirmative proof (INV-1) 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with typed daemon_attach details > should return unverified-missing when expected incarnation context is omitted even with affirmative proof (fail-closed INV-1) 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with typed daemon_attach details > should return unverified-missing when expected incarnation context mismatches (INV-3) 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with typed daemon_attach details > should return confirmed-missing when typed details include affirmative exit AND matching incarnation context (INV-2) 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with typed daemon_attach details > should return operational-error when details.sessionId conflicts with requested ID 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with typed daemon_attach details > should return operational-error when source is daemon_attach but kind is wrong 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with typed daemon_attach details > should return operational-error when source is not daemon_attach 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with legacy message match > p07_regression_should_drop_literal_string_fallback_when_code_is_present_without_typed_details 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with legacy message match > should return unverified-missing for exact legacy message without details 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with legacy message match > should return unverified-missing for exact legacy message with undefined details 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with legacy message match > should return unverified-missing when message matches and details lacks source/kind 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with legacy message match > should return operational-error when message matches but details.sessionId conflicts 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with legacy message match > should return unverified-missing when message does not match exact pattern 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with legacy message match > should return unverified-missing for short message without clear session ID 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with no matching details or message > should return unverified-missing when SESSION_NOT_FOUND has vague message 0ms
+   ✓ classifyNativeTerminalAttachError > SESSION_NOT_FOUND with no matching details or message > should return unverified-missing when message is empty 0ms
+   ✓ classifyNativeTerminalAttachError > INTERNAL_ERROR with legacy daemon format > should return unverified-missing for legacy INTERNAL_ERROR with exact message match under INV-1 0ms
+   ✓ classifyNativeTerminalAttachError > INTERNAL_ERROR with legacy daemon format > should return unverified-missing for legacy INTERNAL_ERROR without details key under INV-1 0ms
+   ✓ classifyNativeTerminalAttachError > INTERNAL_ERROR with legacy daemon format > should return operational-error for INTERNAL_ERROR with different message 0ms
+   ✓ classifyNativeTerminalAttachError > INTERNAL_ERROR with legacy daemon format > should return operational-error for INTERNAL_ERROR with message for different session 0ms
+   ✓ classifyNativeTerminalAttachError > Other error codes > should return operational-error for IO_ERROR 0ms
+   ✓ classifyNativeTerminalAttachError > Other error codes > should return operational-error for DAEMON_PROTOCOL_MISMATCH 0ms
+   ✓ classifyNativeTerminalAttachError > Other error codes > should return operational-error for GPU error 0ms
+   ✓ classifyNativeTerminalAttachError > Other error codes > should return operational-error for arbitrary error code 0ms
+   ✓ classifyNativeTerminalAttachError > Non-structured errors > should return operational-error for Error object 0ms
+   ✓ classifyNativeTerminalAttachError > Non-structured errors > should return unverified-missing for raw string with exact match 0ms
+   ✓ classifyNativeTerminalAttachError > Non-structured errors > should return operational-error for raw string without exact match 0ms
+   ✓ classifyNativeTerminalAttachError > Non-structured errors > should return operational-error for raw string with wrong ID 0ms
+   ✓ classifyNativeTerminalAttachError > Non-structured errors > should return operational-error for null 0ms
+   ✓ classifyNativeTerminalAttachError > Non-structured errors > should return operational-error for undefined 0ms
+   ✓ classifyNativeTerminalAttachError > Non-structured errors > should return operational-error for plain object without code/message 0ms
+   ✓ classifyNativeTerminalAttachError > Non-structured errors > should return operational-error for number 0ms
+   ✓ classifyNativeTerminalAttachError > Non-structured errors > should return operational-error for boolean 0ms
+   ✓ classifyNativeTerminalAttachError > Edge cases and special IDs > should handle session ID with special characters 0ms
+   ✓ classifyNativeTerminalAttachError > Edge cases and special IDs > should handle session ID with quotes (escaped) 0ms
+   ✓ classifyNativeTerminalAttachError > Edge cases and special IDs > should handle very long session ID 0ms
+   ✓ classifyNativeTerminalAttachError > Edge cases and special IDs > should reject mismatched IDs in legacy format 0ms
+   ✓ classifyNativeTerminalAttachError > Type consistency and immutability > should return readonly classification result for confirmed-missing 0ms
+   ✓ classifyNativeTerminalAttachError > Type consistency and immutability > should return operational-error with error preserved 1ms
+   ✓ classifyNativeTerminalAttachError > Type consistency and immutability > should narrow type correctly after status check 0ms
+   ✓ classifyNativeTerminalAttachError > Deterministic pure function > should return same result for same inputs 0ms
+   ✓ classifyNativeTerminalAttachError > Deterministic pure function > should not modify input error 0ms
+   ✓ classifyNativeTerminalAttachError > Deterministic pure function > should not have side effects 0ms
+   ✓ classifyNativeTerminalAttachError > Contract compliance > should prefer typed details over message when both present 0ms
+   ✓ classifyNativeTerminalAttachError > Contract compliance > should return unverified-missing when typed details incomplete 0ms
+   × classifyNativeTerminalAttachError > Contract compliance > should report reason for each confirmed-missing path 11ms
+     → expected { status: 'unverified-missing', …(1) } to deeply equal { status: 'unverified-missing', …(1) }
+   ✓ classifyNativeTerminalAttachError > Contract compliance > should never auto-correct mismatched session IDs 0ms
+   ✓ classifyNativeTerminalAttachError > Contradictory metadata handling > should reject SESSION_NOT_FOUND when details has wrong source only 0ms
+   ✓ classifyNativeTerminalAttachError > Contradictory metadata handling > should reject SESSION_NOT_FOUND when details has wrong kind only 0ms
+   ✓ classifyNativeTerminalAttachError > Contradictory metadata handling > should reject SESSION_NOT_FOUND when message matches but details.sessionId conflicts 0ms
+   ✓ classifyNativeTerminalAttachError > Contradictory metadata handling > should reject INTERNAL_ERROR when message matches but details.sessionId conflicts 0ms
+   ✓ classifyNativeTerminalAttachError > Contradictory metadata handling > should reject INTERNAL_ERROR when message matches but details has wrong source 0ms
+   ✓ classifyNativeTerminalAttachError > Contradictory metadata handling > should reject INTERNAL_ERROR when message matches but details has wrong kind 0ms
+ ❯ src/lib/sessionAuthority.independent.test.ts (18 tests | 1 failed) 64ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 1: missing/structured scoped-not-found remains unverified > classifies structured daemon_attach session_not_found as unverified-missing when affirmative exit proof is absent 2ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 1: missing/structured scoped-not-found remains unverified > classifies structured SESSION_NOT_FOUND with unclear origin as safe operational refusal 0ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 1: missing/structured scoped-not-found remains unverified > classifies contradictory metadata as operational-error rather than process death 0ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 2: persistence uncertainty preserves working/awaiting activity and retained ID > preserves backendSessionId, processState, and 'working' activity on live inventory absence 2ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 2: persistence uncertainty preserves working/awaiting activity and retained ID > preserves backendSessionId, processState, and 'waiting' activity on live inventory absence 0ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 2: persistence uncertainty preserves working/awaiting activity and retained ID > retains persisted working lifecycle when live session map excludes the backend ID 0ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 3: differing incarnation blocked/no adoption > flags identity conflict and blocks recovery without adopting different incarnation 1ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 4: legacy missing metadata unconfirmed > classifies legacy INTERNAL_ERROR string messages as unverified-missing rather than death 0ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 4: legacy missing metadata unconfirmed > does not adopt live session under changed daemon epoch when incarnation metadata is missing 1ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 5: reducer missing/stale key/token cannot settle/rebind > refuses to settle pane on SESSION_LIFECYCLE exited event when incarnation context is absent or mismatched 1ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 5: reducer missing/stale key/token cannot settle/rebind > rejects SESSION_AFFIRMATIVE_EXIT when recoveryToken or daemonEpoch is stale, mismatched, or absent 0ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 5: reducer missing/stale key/token cannot settle/rebind > rejects SESSION_BACKEND_UNAVAILABLE attempt outcome when attemptKey or attemptToken is stale, mismatched, or absent 1ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 6: matching affirmative exit settles once > treats bare affirmativeExit as unverified when expected incarnation context is absent, omitted, or mismatched 0ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 6: matching affirmative exit settles once > confirms missing on structured error bearing affirmativeExit proof with exact matching expected incarnation 0ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 6: matching affirmative exit settles once > rejects SESSION_AFFIRMATIVE_EXIT when token matches but owner target, daemonEpoch, or incarnation differs 0ms
+   × sessionAuthority - independent adversarial verification (Task 2) > Area 6: matching affirmative exit settles once > settles pane once on matching affirmative exit with complete current owner context and remains idempotent 52ms
+     → expected 'working' to be 'exited' // Object.is equality
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 6: matching affirmative exit settles once > returns uncertain and does not dispatch exit when describe returns running=false with matching incarnation but status='unconfirmed' 1ms
+   ✓ sessionAuthority - independent adversarial verification (Task 2) > Area 6: matching affirmative exit settles once > does not report exited when describe returns affirmative_exit with matching epoch and incarnation but no captured owner token 0ms
+ ✓ src/state/workspaceStore.sshReattach.test.ts (3 tests) 26ms
+ ❯ src/state/workspaceStore.terminalExit.test.ts (12 tests | 1 failed) 84ms
+   ✓ workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > preserves backendSessionId and activity under INV-1 when owner is unavailable 4ms
+   ✓ workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > is a no-op when backendSessionId has already re-bound to a different ID 1ms
+   ✓ workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > marks remote workspace session disconnected with a failure 1ms
+   ✓ workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > preserves active activity on unavailable owner (INV-1) and settles once on affirmative exit (INV-2) 1ms
+   ✓ workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > is a no-op when bindingKey does not match the current session binding epoch 0ms
+   ✓ workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > fences unavailable dispatch by matching key and token under INV-7 20ms
+   ✓ workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > safely discards stale lifecycle and exit receipts for differing incarnation under INV-5 1ms
+   × workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > reconcileSessionFromDescribe authoritative describe-to-exit consumer > dispatches SESSION_AFFIRMATIVE_EXIT when describe returns complete matching owner proof (INV-2) 52ms
+     → expected { …(9) } to deeply equal { …(8) }
+   ✓ workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > reconcileSessionFromDescribe authoritative describe-to-exit consumer > returns uncertain for non-running standby session without affirmative exit status 1ms
+   ✓ workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > reconcileSessionFromDescribe authoritative describe-to-exit consumer > returns uncertain when current owner context (epoch or token) is missing or mismatched 1ms
+   ✓ workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > reconcileSessionFromDescribe authoritative describe-to-exit consumer > returns uncertain and does not dispatch exit for paired proxy actor running=false (INV-4) 1ms
+   ✓ workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > reconcileSessionFromDescribe authoritative describe-to-exit consumer > returns conflict and does not dispatch exit on mismatched incarnation (INV-3) 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 6 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/state/workspaceStore.terminalExit.test.ts > workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer > reconcileSessionFromDescribe authoritative describe-to-exit consumer > dispatches SESSION_AFFIRMATIVE_EXIT when describe returns complete matching owner proof (INV-2)
+AssertionError: expected { …(9) } to deeply equal { …(8) }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[2m    "backendSessionId": "backend-1",[22m
+[2m    "daemonEpoch": "epoch-1",[22m
+[2m    "exitCode": 0,[22m
+[2m    "incarnation": "inc-1",[22m
+[31m+   "key": null,[39m
+[2m    "reason": null,[22m
+[2m    "sessionId": "term-1",[22m
+[2m    "token": 1,[22m
+[2m    "type": "SESSION_AFFIRMATIVE_EXIT",[22m
+[2m  }[22m
+
+ ❯ src/state/workspaceStore.terminalExit.test.ts:291:29
+    289|       expect(outcome).toBe("exited");
+    290|       expect(dispatched).toHaveLength(1);
+    291|       expect(dispatched[0]).toEqual({
+       |                             ^
+    292|         type: "SESSION_AFFIRMATIVE_EXIT",
+    293|         sessionId: "term-1",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+ FAIL  src/lib/nativeTerminalAttachPolicy.test.ts > classifyNativeTerminalAttachError > Contract compliance > should report reason for each confirmed-missing path
+AssertionError: expected { status: 'unverified-missing', …(1) } to deeply equal { status: 'unverified-missing', …(1) }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "reason": "daemon-attach-not-found",[39m
+[31m+   "reason": "legacy-internal-error",[39m
+[2m    "status": "unverified-missing",[22m
+[2m  }[22m
+
+ ❯ src/lib/nativeTerminalAttachPolicy.test.ts:759:23
+    757|         reason: "daemon-attach-affirmative-exit",
+    758|       });
+    759|       expect(result3).toEqual({
+       |                       ^
+    760|         status: "unverified-missing",
+    761|         reason: "daemon-attach-not-found",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/6]⎯
+
+ FAIL  src/lib/sessionAuthority.independent.test.ts > sessionAuthority - independent adversarial verification (Task 2) > Area 6: matching affirmative exit settles once > settles pane once on matching affirmative exit with complete current owner context and remains idempotent
+AssertionError: expected 'working' to be 'exited' // Object.is equality
+
+Expected: [32m"exited"[39m
+Received: [31m"working"[39m
+
+ ❯ src/lib/sessionAuthority.independent.test.ts:656:57
+    654|       const settledState = workspaceReducer(state, exitAction);
+    655| 
+    656|       expect(settledState.sessions["term-6"].lifecycle).toBe("exited");
+       |                                                         ^
+    657|       expect(settledState.sessions["term-6"].backendSessionId).toBeNul…
+    658|       expect(settledState.sessions["term-6"].reconnectLifecycle).toBe(…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/6]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > matches live native PTYs by backendSessionId instead of the frontend-local session id
+AssertionError: expected 'backend-2' to be null
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+"backend-2"
+
+ ❯ src/lib/sessionPersistence.test.ts:366:59
+    364|     expect(restored).not.toBeNull();
+    365|     expect(restored!.sessions["sess-1"].backendSessionId).toBe("backen…
+    366|     expect(restored!.sessions["sess-2"].backendSessionId).toBeNull();
+       |                                                           ^
+    367|     expect(restored!.sessions["sess-3"].backendSessionId).toBe("backen…
+    368|     expect(restored!.sessions["sess-1"].cwd).toBe("/workspace/main/pac…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/6]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > keeps live backend identity, pane leaf ownership, agent metadata, CWD, and output sequence across warm disk restore
+AssertionError: expected 'backend-2' to be null
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+"backend-2"
+
+ ❯ src/lib/sessionPersistence.test.ts:1556:58
+    1554| 
+    1555|     // sess-2 was not in liveSessions, so its backendSessionId is null…
+    1556|     expect(restored.sessions["sess-2"].backendSessionId).toBeNull();
+       |                                                          ^
+    1557|     expect(restored.sessions["sess-2"].lifecycle).toBe("exited");
+    1558| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/6]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > persists providerSession and never serializes transient reconnect locks or in-flight state
+AssertionError: expected 'working' to be 'exited' // Object.is equality
+
+Expected: [32m"exited"[39m
+Received: [31m"working"[39m
+
+ ❯ src/lib/sessionPersistence.test.ts:1605:40
+    1603|     expect(restoredSession?.reconnectError).toBeNull();
+    1604|     expect(restoredSession?.reconnectRequestId).toBeNull();
+    1605|     expect(restoredSession?.lifecycle).toBe("exited");
+       |                                        ^
+    1606|     expect(restoredSession?.backendSessionId).toBeNull();
+    1607|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/6]⎯
+
+
+ Test Files  4 failed | 1 passed (5)
+      Tests  6 failed | 130 passed (136)
+   Start at  23:45:16
+   Duration  12.38s (transform 1.15s, setup 1.76s, collect 2.68s, tests 287ms, environment 4.09s, prepare 482ms)
+
+error: script "test" exited with code 1

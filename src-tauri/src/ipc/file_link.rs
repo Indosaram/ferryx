@@ -199,12 +199,6 @@ pub fn is_absolute_token(token: &str) -> bool {
 
 /// Expands `~`, keeps absolute paths verbatim, and joins relative paths onto
 /// the terminal's working directory.
-///
-/// When the cwd join does not exist, a relative token is looked up near the cwd
-/// (see [`find_relative_near_cwd`]): agents and tools often print paths relative
-/// to a different project root than the shell's directory. A unique hit wins;
-/// otherwise the plain cwd join is returned so callers report it as missing.
-/// Touches the filesystem, so callers must run it off the async runtime.
 pub fn resolve_file_link(token: &str, cwd: Option<&str>, home: Option<PathBuf>) -> PathBuf {
     if token == "~" {
         return home.unwrap_or_else(|| PathBuf::from(token));
@@ -231,95 +225,16 @@ pub fn resolve_file_link(token: &str, cwd: Option<&str>, home: Option<PathBuf>) 
     }
     match cwd {
         Some(cwd) if !cwd.trim().is_empty() => {
-            let joined = join_relative(Path::new(cwd), token);
-            if joined.exists() {
-                return joined;
+            let mut path = PathBuf::from(cwd);
+            for component in token.split(['/', '\\']) {
+                if !component.is_empty() {
+                    path.push(component);
+                }
             }
-            find_relative_near_cwd(Path::new(cwd), token, home.as_deref()).unwrap_or(joined)
+            path
         }
         _ => PathBuf::from(token),
     }
-}
-
-/// Ancestors of the cwd searched for a relative token, nearest first. The cwd
-/// itself is level 0.
-const RELATIVE_SEARCH_ANCESTORS: usize = 2;
-/// Upper bound on directory entries scanned per ancestor.
-const RELATIVE_SEARCH_MAX_ENTRIES: usize = 512;
-
-fn join_relative(base: &Path, token: &str) -> PathBuf {
-    let mut path = base.to_path_buf();
-    for component in token.split(['/', '\\']) {
-        if !component.is_empty() {
-            path.push(component);
-        }
-    }
-    path
-}
-
-/// Finds a relative token that does not exist under the cwd, nearest level first:
-/// for the cwd and up to [`RELATIVE_SEARCH_ANCESTORS`] ancestors, the token joined
-/// onto the directory itself, then onto each of its non-hidden child directories.
-/// Returns a path only when exactly one candidate exists at the nearest level that
-/// has any, so an ambiguous token never opens an arbitrary file.
-///
-/// Shallow directories (the filesystem root, `/Users`, `/Volumes`, a drive root)
-/// and anything above the home directory are never searched.
-pub fn find_relative_near_cwd(cwd: &Path, token: &str, home: Option<&Path>) -> Option<PathBuf> {
-    let segments: Vec<&str> = token.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
-    if segments.is_empty() || segments.iter().any(|s| *s == "." || *s == "..") {
-        return None;
-    }
-    for (level, dir) in cwd.ancestors().take(RELATIVE_SEARCH_ANCESTORS + 1).enumerate() {
-        if !is_searchable_dir(dir, home) {
-            break;
-        }
-        if level > 0 {
-            let direct = join_relative(dir, token);
-            if direct.exists() {
-                return Some(direct);
-            }
-        }
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        let mut hits = Vec::new();
-        for entry in entries.flatten().take(RELATIVE_SEARCH_MAX_ENTRIES) {
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with('.') {
-                continue;
-            }
-            if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let candidate = join_relative(&entry.path(), token);
-            if candidate.exists() {
-                hits.push(candidate);
-                if hits.len() > 1 {
-                    break;
-                }
-            }
-        }
-        match hits.len() {
-            0 => continue,
-            1 => return hits.pop(),
-            _ => return None,
-        }
-    }
-    None
-}
-
-/// A directory deep enough to scan: at least two normal components (so never
-/// `/`, `/Users`, `/Volumes` or `C:\\`), and not a strict ancestor of home.
-fn is_searchable_dir(dir: &Path, home: Option<&Path>) -> bool {
-    let normal = dir
-        .components()
-        .filter(|c| matches!(c, std::path::Component::Normal(_)))
-        .count();
-    if normal < 2 {
-        return false;
-    }
-    !matches!(home, Some(home) if home != dir && home.starts_with(dir))
 }
 
 /// Validates the optional 1-based line/column pair.
@@ -578,7 +493,7 @@ pub fn execute(plan: LaunchPlan) -> Result<(), IpcError> {
         }
         LaunchPlan::Cli { program, args } => {
             // argv only: no shell, so metacharacters in the path are literal.
-            crate::util::no_window_command(&program)
+            std::process::Command::new(&program)
                 .args(&args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())

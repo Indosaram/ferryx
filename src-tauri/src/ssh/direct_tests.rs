@@ -483,6 +483,33 @@ fn shell_plan_with_session_forwards_agent_state_socket_and_exports_env() {
     assert!(remote_cmd.contains("cd '/srv/repo'"));
 }
 
+#[cfg(unix)]
+#[test]
+fn install_remote_extension_script_creates_and_populates_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let omo_dir = home.join(".omo");
+    std::fs::create_dir_all(&omo_dir).unwrap();
+
+    let script = install_remote_extension_script();
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", &script])
+        .env("HOME", home)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "script stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let installed_file = home.join(".omo/agent/extensions/ferryx-agent-state.ts");
+    assert!(installed_file.is_file(), "extension file must be installed");
+    let content = std::fs::read_to_string(&installed_file).unwrap();
+    assert_eq!(content, crate::daemon::agent_extension::EXTENSION_SOURCE);
+}
+
 #[test]
 fn ssh_bridge_plan_options_disable_tty_and_enforce_strict_host_keys() {
     let env = crate::ssh::runtime::RemoteEnvironment {

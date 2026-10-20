@@ -162,10 +162,32 @@ pub fn should_persist_entry(debug_enabled: bool, event: &str) -> bool {
         || event.starts_with("project.register.")
         || event.starts_with("terminal.surface.attach.")
         || event == "terminal.surface.bounds.error"
+        || is_release_persisted_navigation_event(event)
 }
 
-fn switch_debug_path(root: &std::path::Path) -> std::path::PathBuf {
-    root.join("ferryx-switch-debug.jsonl")
+/// Worktree selection, workspace swaps and restores are rare, user-driven transitions. Without
+/// them a release build cannot explain a row that opens another project's tabs or a "New
+/// Terminal" that produces nothing. `workspace.render` fires on every render and stays debug-only.
+pub fn is_release_persisted_navigation_event(event: &str) -> bool {
+    event.starts_with("worktree.")
+        || (event.starts_with("workspace.") && event != "workspace.render")
+}
+
+const SWITCH_DEBUG_FILE: &str = "ferryx-switch-debug.jsonl";
+/// Per-chunk render receipts get their own file so their volume cannot rotate the rare
+/// lifecycle events out of the main log within minutes.
+const SWITCH_DEBUG_RENDER_FILE: &str = "ferryx-switch-debug-render.jsonl";
+
+fn switch_debug_file_for_event(event: &str) -> &'static str {
+    if event == "terminal.render.vt_consumed" {
+        SWITCH_DEBUG_RENDER_FILE
+    } else {
+        SWITCH_DEBUG_FILE
+    }
+}
+
+fn switch_debug_path(root: &std::path::Path, file_name: &str) -> std::path::PathBuf {
+    root.join(file_name)
 }
 
 pub fn is_allowlisted_detail_key(k: &str) -> bool {
@@ -174,6 +196,17 @@ pub fn is_allowlisted_detail_key(k: &str) -> bool {
         "nested"
             | "operationId"
             | "backendSessionId"
+            | "localSessionId"
+            | "attemptedIncarnation"
+            | "attemptedDaemonEpoch"
+            | "classification"
+            | "errorSource"
+            | "reportedSessionId"
+            | "reportedDaemonEpoch"
+            | "reportedIncarnation"
+            | "retryCount"
+            | "bannerRetryThreshold"
+            | "refreshedIdentityAfterDetach"
             | "sessionId"
             | "paneIdentity"
             | "bindingKey"
@@ -224,6 +257,55 @@ pub fn is_allowlisted_detail_key(k: &str) -> bool {
             | "inputLength"
             | "preeditLength"
             | "keyEventPresent"
+            // Workspace / worktree navigation identity, so a release log can say which project
+            // and which worktree a selection, swap, registration or terminal open concerned.
+            | "workspaceId"
+            | "workspaceIds"
+            | "persistedWorkspaceIds"
+            | "currentWorkspaceId"
+            | "ownerWorkspaceId"
+            | "requestedWorkspaceId"
+            | "registeredWorkspaceId"
+            | "mountedWorkspaceId"
+            | "fromWorkspaceId"
+            | "toWorkspaceId"
+            | "incomingStateWorkspaceId"
+            | "repoRoot"
+            | "worktreePath"
+            | "requestedPath"
+            | "preferredPath"
+            | "activeWorktreePath"
+            | "incomingActiveWorktreePath"
+            | "listedPaths"
+            | "tabId"
+            | "activeTabId"
+            | "parkedActiveTabId"
+            | "tabCount"
+            | "activeTabCount"
+            | "parkedTabCount"
+            | "sessionCount"
+            | "worktreeCount"
+            | "listedCount"
+            | "liveCount"
+            | "initialWorktreeCount"
+            | "incomingWorktreeCount"
+            | "incomingTabCount"
+            | "incomingSessionCount"
+            | "outgoingTabCount"
+            | "outgoingSessionCount"
+            | "allowCreate"
+            | "pendingCrossProject"
+            | "adopted"
+            | "cancelled"
+            | "current"
+            | "stage"
+            | "source"
+            | "status"
+            | "outcome"
+            | "code"
+            | "registrationAttempt"
+            | "recoveredFromHmr"
+            | "backendOverride"
     )
 }
 
@@ -343,7 +425,8 @@ pub(crate) fn log_native_switch_debug(entry: Value) {
 
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = _guard;
-        if let Err(error) = append_switch_debug_entry(&std::env::temp_dir(), &full_entry) {
+        let file_name = switch_debug_file_for_event(&full_entry.event);
+        if let Err(error) = append_switch_debug_entry(&std::env::temp_dir(), file_name, &full_entry) {
             tracing::warn!(?error, "Could not persist native switch debug entry");
         }
     });
@@ -351,6 +434,7 @@ pub(crate) fn log_native_switch_debug(entry: Value) {
 
 fn append_switch_debug_entry(
     root: &std::path::Path,
+    file_name: &str,
     entry: &impl Serialize,
 ) -> Result<(), IpcError> {
     use std::fs::OpenOptions;
@@ -370,12 +454,12 @@ fn append_switch_debug_entry(
         ));
     }
 
-    let path = switch_debug_path(root);
+    let path = switch_debug_path(root, file_name);
     let _rotation_guard = SINK_ROTATION_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     if let Ok(metadata) = std::fs::metadata(&path) {
         if metadata.len() >= MAX_LOG_FILE_BYTES {
-            let rotated_path = root.join("ferryx-switch-debug.jsonl.1");
+            let rotated_path = root.join(format!("{file_name}.1"));
             let _ = std::fs::rename(&path, &rotated_path);
         }
     }
@@ -415,7 +499,8 @@ pub async fn cmd_switch_debug_log(mut entry: SwitchDebugEntry) -> Result<(), Ipc
     }
     run_blocking(move || {
         let _guard = guard;
-        append_switch_debug_entry(&std::env::temp_dir(), &entry)
+        let file_name = switch_debug_file_for_event(&entry.event);
+        append_switch_debug_entry(&std::env::temp_dir(), file_name, &entry)
     })
     .await
 }
@@ -609,15 +694,15 @@ mod tests {
     #[test]
     fn parsed_entries_append_to_injected_portable_root() {
         let root = tempfile::tempdir().expect("owned sink root");
-        let path = switch_debug_path(root.path());
+        let path = switch_debug_path(root.path(), SWITCH_DEBUG_FILE);
         assert_eq!(path.parent(), Some(root.path()));
         let wire = serde_json::json!({
             "runId": "p02-owned", "sequence": 7, "event": "wheel.receipt",
             "wallTimeMs": 123.0, "details": {"cell": [2, 3], "ctrl": true}
         });
         let entry: SwitchDebugEntry = serde_json::from_value(wire.clone()).expect("parsed event");
-        append_switch_debug_entry(root.path(), &entry).expect("first append");
-        append_switch_debug_entry(root.path(), &entry).expect("second append");
+        append_switch_debug_entry(root.path(), SWITCH_DEBUG_FILE, &entry).expect("first append");
+        append_switch_debug_entry(root.path(), SWITCH_DEBUG_FILE, &entry).expect("second append");
         let text = std::fs::read_to_string(path).expect("read actual sink");
         let entries: Vec<Value> = text
             .lines()
@@ -632,12 +717,13 @@ mod tests {
         let root = tempfile::tempdir().expect("owned sink root");
         let invalid = root.path().join("file-not-directory");
         assert_eq!(
-            switch_debug_path(&invalid).parent(),
+            switch_debug_path(&invalid, SWITCH_DEBUG_FILE).parent(),
             Some(invalid.as_path())
         );
         std::fs::write(&invalid, b"sentinel").expect("create non-directory");
         assert!(
-            append_switch_debug_entry(&invalid, &serde_json::json!({"event": "test"})).is_err()
+            append_switch_debug_entry(&invalid, SWITCH_DEBUG_FILE, &serde_json::json!({"event": "test"}))
+                .is_err()
         );
         assert_eq!(std::fs::read(&invalid).expect("read sentinel"), b"sentinel");
         root.close().expect("remove owned sink");
@@ -700,6 +786,71 @@ mod tests {
         assert!(should_persist_entry(false, "terminal.surface.attach.error"));
         assert!(should_persist_entry(false, "terminal.surface.bounds.error"));
         assert!(!should_persist_entry(false, "terminal.surface.bounds.start"));
+    }
+
+    #[test]
+    fn release_builds_persist_worktree_and_workspace_navigation() {
+        assert!(should_persist_entry(false, "worktree.select.requested"));
+        assert!(should_persist_entry(false, "worktree.ensure.restore-parked"));
+        assert!(should_persist_entry(false, "worktree.refresh.listed"));
+        assert!(should_persist_entry(false, "workspace.store.swap"));
+        assert!(should_persist_entry(false, "workspace.restore.complete"));
+        assert!(!should_persist_entry(false, "workspace.render"));
+    }
+
+    #[test]
+    fn navigation_identity_details_survive_sanitization() {
+        let raw = serde_json::json!({
+            "currentWorkspaceId": "lectures",
+            "ownerWorkspaceId": "mahoquot",
+            "worktreePath": "/repo/mahoquot",
+            "listedPaths": ["/repo/lectures"],
+            "tabCount": 2,
+            "message": "free-form error text",
+        });
+        let sanitized = sanitize_switch_debug_details("worktree.select.requested", &raw);
+        assert_eq!(sanitized.get("currentWorkspaceId").and_then(Value::as_str), Some("lectures"));
+        assert_eq!(sanitized.get("ownerWorkspaceId").and_then(Value::as_str), Some("mahoquot"));
+        assert_eq!(sanitized.get("worktreePath").and_then(Value::as_str), Some("/repo/mahoquot"));
+        assert_eq!(sanitized.get("listedPaths"), Some(&serde_json::json!(["/repo/lectures"])));
+        assert_eq!(sanitized.get("tabCount").and_then(Value::as_u64), Some(2));
+        assert_eq!(sanitized.get("message"), None);
+    }
+
+    #[test]
+    fn render_receipts_rotate_in_their_own_file() {
+        let root = tempfile::tempdir().expect("owned sink root");
+        let render = SwitchDebugEntry {
+            run_id: "r".into(),
+            sequence: 1,
+            event: "terminal.render.vt_consumed".into(),
+            wall_time_ms: 1.0,
+            details: serde_json::json!({"consumedSequence": 1}),
+        };
+        let lifecycle = SwitchDebugEntry {
+            event: "worktree.select.requested".into(),
+            ..render.clone()
+        };
+        for entry in [&render, &lifecycle] {
+            append_switch_debug_entry(root.path(), switch_debug_file_for_event(&entry.event), entry)
+                .expect("append");
+        }
+        let main = std::fs::read_to_string(root.path().join(SWITCH_DEBUG_FILE)).expect("main log");
+        let render_log =
+            std::fs::read_to_string(root.path().join(SWITCH_DEBUG_RENDER_FILE)).expect("render log");
+        assert!(main.contains("worktree.select.requested") && !main.contains("vt_consumed"));
+        assert!(render_log.contains("vt_consumed") && !render_log.contains("worktree.select"));
+
+        std::fs::write(
+            root.path().join(SWITCH_DEBUG_RENDER_FILE),
+            vec![b'x'; MAX_LOG_FILE_BYTES as usize],
+        )
+        .expect("fill render log");
+        append_switch_debug_entry(root.path(), SWITCH_DEBUG_RENDER_FILE, &render).expect("rotate");
+        assert!(root.path().join(format!("{SWITCH_DEBUG_RENDER_FILE}.1")).exists());
+        let main_after = std::fs::read_to_string(root.path().join(SWITCH_DEBUG_FILE)).expect("main log");
+        assert_eq!(main_after, main, "render rotation must not touch the lifecycle log");
+        root.close().expect("remove owned sink");
     }
 
     #[test]
@@ -771,7 +922,7 @@ mod pane_liveness_diagnostics_tests {
             wall_time_ms: 1000.0,
             details: serde_json::json!({"operationId": "req-1"}),
         };
-        append_switch_debug_entry(root.path(), &valid_entry).expect("append within bound");
+        append_switch_debug_entry(root.path(), SWITCH_DEBUG_FILE, &valid_entry).expect("append within bound");
 
         let oversized_text = "x".repeat(MAX_ENTRY_BYTES + 100);
         let oversized_entry = SwitchDebugEntry {
@@ -781,7 +932,7 @@ mod pane_liveness_diagnostics_tests {
             wall_time_ms: 1001.0,
             details: serde_json::json!({"operationId": oversized_text}),
         };
-        let err = append_switch_debug_entry(root.path(), &oversized_entry);
+        let err = append_switch_debug_entry(root.path(), SWITCH_DEBUG_FILE, &oversized_entry);
         assert!(err.is_err());
         assert_eq!(debug_sink_drop_count(), 1);
         root.close().expect("remove owned sink");

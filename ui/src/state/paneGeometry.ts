@@ -95,6 +95,48 @@ export function computeLeafRects(
   return map;
 }
 
+export type PaneFocusDirection = "left" | "right" | "up" | "down";
+
+/**
+ * Returns the leaf that sits next to `leafId` in `direction`, or `null` when the pane
+ * already touches that edge. Candidates must share part of the perpendicular span; the
+ * nearest edge wins, then the widest shared span, then the closest center.
+ */
+export function findDirectionalLeafId(
+  root: PaneNode,
+  leafId: string,
+  direction: PaneFocusDirection,
+): string | null {
+  const rects = computeLeafRects(root);
+  const origin = rects.get(leafId);
+  if (!origin) return null;
+  const horizontal = direction === "left" || direction === "right";
+  let best: { id: string; gap: number; overlap: number; centerDelta: number } | null = null;
+  for (const [id, rect] of rects) {
+    if (id === leafId) continue;
+    let gap: number;
+    if (direction === "left") gap = origin.x - (rect.x + rect.w);
+    else if (direction === "right") gap = rect.x - (origin.x + origin.w);
+    else if (direction === "up") gap = origin.y - (rect.y + rect.h);
+    else gap = rect.y - (origin.y + origin.h);
+    if (gap < -COLLINEAR_EPSILON) continue;
+    const [aStart, aEnd, bStart, bEnd] = horizontal
+      ? [origin.y, origin.y + origin.h, rect.y, rect.y + rect.h]
+      : [origin.x, origin.x + origin.w, rect.x, rect.x + rect.w];
+    const overlap = Math.min(aEnd, bEnd) - Math.max(aStart, bStart);
+    if (overlap <= COLLINEAR_EPSILON) continue;
+    const centerDelta = Math.abs((aStart + aEnd) / 2 - (bStart + bEnd) / 2);
+    const better =
+      !best ||
+      gap < best.gap - COLLINEAR_EPSILON ||
+      (Math.abs(gap - best.gap) <= COLLINEAR_EPSILON &&
+        (overlap > best.overlap + COLLINEAR_EPSILON ||
+          (Math.abs(overlap - best.overlap) <= COLLINEAR_EPSILON && centerDelta < best.centerDelta)));
+    if (better) best = { id, gap, overlap, centerDelta };
+  }
+  return best?.id ?? null;
+}
+
 export function areSplitsCollinearAdjacent(
   a: SplitGeometry,
   b: SplitGeometry,

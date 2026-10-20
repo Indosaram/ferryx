@@ -106,6 +106,15 @@ describe("RemoteTerminal - P19 Phone Account Attach", () => {
 
     act(() => {
       ws.onopen?.();
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: "grid",
+          cols: 80,
+          rows: 20,
+          cursor: { x: 0, y: 0, visible: true, blinking: false, wideTail: false, visualStyle: "block" },
+          lines: [],
+        }),
+      } as MessageEvent);
     });
 
     await vi.waitFor(() => {

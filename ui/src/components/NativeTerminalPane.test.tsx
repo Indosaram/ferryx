@@ -1989,49 +1989,6 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(getByRole("alert")).toHaveTextContent("Input dropped");
   });
 
-  it("delivers every key of a printable burst typed faster than the input IPC round trip", async () => {
-    // One sendInput per printable key; the queue admits at most 17 entries per session (the
-    // daemon's pending-operation bound), so a longer burst must not lose its tail while the
-    // head IPC is still pending.
-    const session = createSession("term-session-burst");
-    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-burst" session={session} />);
-    const textarea = getByTestId("native-terminal-focus-sink");
-    await act(async () => {});
-
-    let releaseHead!: () => void;
-    const headPending = new Promise<void>((resolve) => {
-      releaseHead = resolve;
-    });
-    const sentTexts: string[] = [];
-    tauriCoreMocks.invoke.mockClear();
-    tauriCoreMocks.invoke.mockImplementation(async (cmd, args) => {
-      if (cmd === "cmd_native_terminal_send_input") {
-        const text = (args?.input as { text?: string } | undefined)?.text;
-        if (typeof text === "string") sentTexts.push(text);
-        if (sentTexts.length === 1) await headPending;
-      }
-      return undefined;
-    });
-
-    const burst = "abcdefghijklmnopqrstuvwxyz0123";
-    expect(burst.length).toBeGreaterThan(17);
-    act(() => {
-      for (const key of burst) {
-        textarea.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
-      }
-    });
-    expect(sentTexts).toEqual(["a"]);
-
-    await act(async () => {
-      releaseHead();
-    });
-
-    await waitFor(() => {
-      expect(sentTexts.join("")).toBe(burst);
-    });
-    expect(getTerminalInputDropCount("overflow")).toBe(0);
-  });
-
   it("encodes and forwards non-printable control keys on keydown without duplicating printable input", async () => {
     const session = createSession("term-session-1");
     const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
@@ -5965,7 +5922,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     // 2. Native focus must NOT be sent when backendSessionId is null
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     act(() => {
-      textarea.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      textarea.focus();
     });
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_set_focus", expect.anything());
 
@@ -6000,6 +5957,10 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       }),
     );
 
+    act(() => {
+      textarea.focus();
+    });
+
     await waitFor(() => {
       expect(document.activeElement).toBe(textarea);
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_focus", {
@@ -6031,6 +5992,17 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     rightInput.focus();
     tauriCoreMocks.invoke.mockClear();
 
+    let resolveAttach: () => void = () => {};
+    const attachDeferred = new Promise<void>((resolve) => {
+      resolveAttach = resolve;
+    });
+    tauriCoreMocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "cmd_native_terminal_attach" && args?.sessionId === "backend-resumed-left") {
+        await attachDeferred;
+      }
+      return undefined;
+    });
+
     rerender(
       <div>
         <NativeTerminalPane
@@ -6041,7 +6013,19 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       </div>,
     );
 
-    await waitFor(() => expect(document.activeElement).toBe(leftInput));
+    // Release deferred attach and wait for exact attach completion (signaled by set_bounds)
+    await act(async () => {
+      resolveAttach();
+    });
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+        "cmd_native_terminal_set_bounds",
+        expect.objectContaining({ sessionId: "backend-resumed-left" }),
+      );
+    });
+
+    // Rebind must not steal focus from the user's currently focused element
+    expect(document.activeElement).toBe(rightInput);
     expect(tauriCoreMocks.invoke.mock.calls.filter(
       ([command, args]) => command === "cmd_native_terminal_attach" && args?.sessionId === "backend-resumed-left",
     )).toHaveLength(1);
@@ -6050,7 +6034,9 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       sessionId: "backend-right",
     });
 
+    leftInput.focus();
     tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockImplementation(async () => undefined);
     act(() => {
       leftInput.value = "left only";
       leftInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -6064,6 +6050,61 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       "cmd_native_terminal_send_input",
       expect.objectContaining({ sessionId: "backend-right" }),
     );
+  });
+
+  it("preserves non-terminal button focus when a background pane receives a reconnect binding", async () => {
+    const leftCold = createSession("frontend-left-btn", null);
+    const rightLive = createSession("frontend-right-btn", "backend-right-btn");
+
+    const toolbarButton = document.createElement("button");
+    document.body.appendChild(toolbarButton);
+    toolbarButton.focus();
+    expect(document.activeElement).toBe(toolbarButton);
+
+    const { rerender } = await renderNative(<div>
+        <NativeTerminalPane sessionId={leftCold.id} session={leftCold} />
+        <NativeTerminalPane sessionId={rightLive.id} session={rightLive} />
+      </div>);
+
+    toolbarButton.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    let resolveAttach: () => void = () => {};
+    const attachDeferred = new Promise<void>((resolve) => {
+      resolveAttach = resolve;
+    });
+    tauriCoreMocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "cmd_native_terminal_attach" && args?.sessionId === "backend-resumed-left-btn") {
+        await attachDeferred;
+      }
+      return undefined;
+    });
+
+    rerender(
+      <div>
+        <NativeTerminalPane
+          sessionId={leftCold.id}
+          session={{ ...leftCold, backendSessionId: "backend-resumed-left-btn" }}
+        />
+        <NativeTerminalPane sessionId={rightLive.id} session={rightLive} />
+      </div>,
+    );
+
+    // Release deferred attach and wait for exact attach completion (signaled by set_bounds)
+    await act(async () => {
+      resolveAttach();
+    });
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+        "cmd_native_terminal_set_bounds",
+        expect.objectContaining({ sessionId: "backend-resumed-left-btn" }),
+      );
+    });
+
+    // Toolbar button stays in the DOM through attach completion and its focus is preserved
+    expect(document.activeElement).toBe(toolbarButton);
+    toolbarButton.remove();
+    tauriCoreMocks.invoke.mockImplementation(async () => undefined);
   });
 
   it("resets daemon replay before a reconnect result is bound", async () => {
@@ -7645,7 +7686,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     view2.unmount();
 
     // Scenario 3: quarantined (input failure; the recovery reattach finds the session missing)
-    const quarantineSession = createSession("term-session-drop-quarantine");
+    const quarantineSession = {
+      ...createSession("term-session-drop-quarantine"),
+      daemonEpoch: "epoch-quarantine",
+      incarnation: "inc-quarantine",
+    };
     let quarantineAttachCalls = 0;
     tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
       if (cmd === "cmd_native_terminal_send_input") {
@@ -7669,6 +7714,9 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
             sessionId: "term-session-drop-quarantine",
             source: "daemon_attach",
             kind: "session_not_found",
+            affirmativeExit: true,
+            daemonEpoch: "epoch-quarantine",
+            incarnation: "inc-quarantine",
           },
         });
         throw err;
@@ -8523,82 +8571,3 @@ describe("terminal link UX (U1-U3)", () => {
     });
   });
 });
-
-
-describe("NativeTerminalPane keyboard copy mode", () => {
-  let restorePaneRect: () => void;
-  beforeEach(() => {
-    resetNativeTerminalPaneForTest();
-    resetNativeTerminalLifecycleForTest();
-    restorePaneRect = stubPaneRect();
-    tauriCoreMocks.invoke.mockReset();
-    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
-      if (cmd === "cmd_native_terminal_cursor") {
-        return { col: 0, row: 3, screenRow: 3, viewportTopRow: 0, scrollbackPrunedRows: 0 };
-      }
-      return undefined;
-    });
-    tauriCoreMocks.isTauri.mockReset();
-    tauriCoreMocks.isTauri.mockReturnValue(true);
-    tauriWindowMocks.reset();
-    vi.stubGlobal("ResizeObserver", MockResizeObserver);
-  });
-
-  afterEach(() => {
-    restorePaneRect();
-    cleanup();
-    resetNativeTerminalPaneForTest();
-    resetNativeTerminalLifecycleForTest();
-    vi.unstubAllGlobals();
-  });
-
-  const commandCalls = (cmd: string) => tauriCoreMocks.invoke.mock.calls.filter(([name]) => name === cmd);
-
-  async function renderInCopyMode(id: string) {
-    const session = createSession(id);
-    const view = await renderNative(<NativeTerminalPane sessionId={id} session={session} />);
-    const sink = view.getByTestId("native-terminal-focus-sink");
-    sink.focus();
-    act(() => {
-      window.dispatchEvent(new CustomEvent("ferryx:terminal-copy-mode", { detail: { sessionId: id } }));
-    });
-    await waitFor(() => expect(commandCalls("cmd_native_terminal_select")).toHaveLength(1));
-    expect(view.getByTestId("terminal-copy-mode-badge").textContent).toBe("COPY");
-    tauriCoreMocks.invoke.mockClear();
-    return { ...view, sink };
-  }
-
-  it("entering copy mode stops PTY forwarding", async () => {
-    const { sink } = await renderInCopyMode("term-session-copy-mode-forwarding");
-
-    act(() => {
-      fireEvent.keyDown(sink, { key: "j" });
-      fireEvent.keyDown(sink, { key: "Enter" });
-      fireEvent.keyDown(sink, { key: "c", ctrlKey: true });
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "x", bubbles: true, cancelable: true }));
-      fireEvent.input(sink, { target: { value: "z" } });
-    });
-
-    // "j" is a motion: it moves the selection instead of reaching the PTY.
-    await waitFor(() => expect(commandCalls("cmd_native_terminal_select").length).toBeGreaterThanOrEqual(1));
-    expect(commandCalls("cmd_native_terminal_send_input")).toEqual([]);
-  });
-
-  it("IME composition keys never act as motions", async () => {
-    const { sink } = await renderInCopyMode("term-session-copy-mode-ime");
-
-    act(() => {
-      fireEvent.compositionStart(sink);
-      fireEvent.keyDown(sink, { key: "j", isComposing: true });
-      fireEvent.keyDown(sink, { key: "k", keyCode: 229 });
-      fireEvent.compositionEnd(sink, { data: "ㅓ" });
-    });
-    await act(async () => undefined);
-
-    expect(commandCalls("cmd_native_terminal_cursor")).toEqual([]);
-    expect(commandCalls("cmd_native_terminal_select")).toEqual([]);
-    // The committed text is not PTY input either while copy mode owns the keyboard.
-    expect(commandCalls("cmd_native_terminal_send_input")).toEqual([]);
-  });
-});
-

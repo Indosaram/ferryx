@@ -92,6 +92,8 @@ describe("TerminalPane exit attach integration", () => {
       worktree: { wsId: "ws-local", slug: "main" },
       backendSessionId: "backend-dead-pty",
       lifecycle: "working",
+      daemonEpoch: "epoch-1",
+      incarnation: "inc-1",
     };
 
     tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
@@ -103,6 +105,9 @@ describe("TerminalPane exit attach integration", () => {
             source: "daemon_attach",
             kind: "session_not_found",
             sessionId: "backend-dead-pty",
+            affirmativeExit: true,
+            daemonEpoch: "epoch-1",
+            incarnation: "inc-1",
           },
         };
       }
@@ -157,8 +162,8 @@ describe("TerminalPane exit attach integration", () => {
     expect(handleUnavailable).toHaveBeenCalledWith(
       "term-pane-1",
       "backend-dead-pty",
-      "daemon-attach-not-found",
-      "backend-dead-pty::0:",
+      "daemon-attach-affirmative-exit",
+      "backend-dead-pty:epoch-1:0:",
     );
     expect(currentSession.lifecycle).toBe("exited");
     expect(currentSession.backendSessionId).toBeNull();

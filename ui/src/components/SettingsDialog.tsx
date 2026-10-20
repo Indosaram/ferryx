@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 
 import { isMacShortcutPlatform } from "../lib/shortcuts";
-import { useShortcutOverrides } from "../lib/shortcutOverrides";
 import { DEFAULT_TERMINAL_SETTINGS, useTerminalSettings } from "../lib/terminalSettings";
 import { getConfiguredAccountOrigin, getStoredAccountSessionToken } from "../remote/accountSession";
 import { AgentsSection } from "./settings/AgentsSection";
@@ -97,7 +96,6 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
     resolveInitialSection(initialSection, planAuth.token !== null),
   );
   const isMac = isMacShortcutPlatform();
-  const { overrides: shortcutOverrides, setOverride: setShortcutOverride, resetOverrides: resetShortcutOverrides } = useShortcutOverrides();
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const handleAccountSessionChange = useCallback((token: string | null, origin: string) => {
@@ -229,14 +227,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
               }}
             />
           ) : null}
-          {section === "shortcuts" ? (
-            <ShortcutsSection
-              isMac={isMac}
-              overrides={shortcutOverrides}
-              onChangeOverride={setShortcutOverride}
-              onResetAll={resetShortcutOverrides}
-            />
-          ) : null}
+          {section === "shortcuts" ? <ShortcutsSection isMac={isMac} /> : null}
           {section === "agents" ? <AgentsSection /> : null}
           {section === "browser" ? <BrowserSection /> : null}
           {section === "notifications" ? <NotificationsSection /> : null}

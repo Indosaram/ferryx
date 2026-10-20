@@ -270,8 +270,6 @@ pub struct PtyManager {
     cwd_probe_permits: Arc<parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
     pty_system: Arc<Mutex<Box<dyn PtySystem + Send>>>,
     output_hub: Arc<RwLock<Option<Arc<TerminalOutputHub>>>>,
-    /// Whether new panes get the agent-state endpoint in their environment.
-    agent_integration: Arc<crate::daemon::agent_extension::AgentIntegration>,
     #[cfg(unix)]
     transfer_owners: Arc<Mutex<HashMap<String, PtySessionSnapshot>>>,
     #[cfg(test)]
@@ -291,9 +289,6 @@ impl PtyManager {
             cwd_probe_permits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pty_system: Arc::new(Mutex::new(native_pty_system())),
             output_hub: Arc::new(RwLock::new(None)),
-            agent_integration: Arc::new(crate::daemon::agent_extension::AgentIntegration::in_memory(
-                true,
-            )),
             #[cfg(unix)]
             transfer_owners: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
@@ -304,20 +299,6 @@ impl PtyManager {
     pub fn with_output_hub(self, hub: Arc<TerminalOutputHub>) -> Self {
         *self.output_hub.write() = Some(hub);
         self
-    }
-
-    /// Shares the daemon-held agent integration setting with every pane this manager spawns.
-    pub fn with_agent_integration(
-        mut self,
-        setting: Arc<crate::daemon::agent_extension::AgentIntegration>,
-    ) -> Self {
-        self.agent_integration = setting;
-        self
-    }
-
-    /// Whether the daemon-held agent integration setting is currently on.
-    pub fn agent_integration_enabled(&self) -> bool {
-        self.agent_integration.enabled()
     }
 
     pub fn set_output_hub(&self, hub: Arc<TerminalOutputHub>) {
@@ -475,25 +456,13 @@ impl PtyManager {
         }
         // Unix panes report agent state over the daemon's unix socket; every other platform has
         // no such socket and reaches the daemon's loopback TCP ingress instead.
-        // With the integration turned off a pane gets no endpoint at all, including one the
-        // daemon may have inherited from its own environment.
-        if self.agent_integration.enabled() {
-            #[cfg(unix)]
-            cmd.env(
-                "FERRYX_AGENT_STATE_SOCKET",
-                crate::daemon::agent_state_socket_path(),
-            );
-            #[cfg(not(unix))]
-            apply_agent_state_tcp_env(&mut cmd);
-        } else {
-            for key in [
-                "FERRYX_AGENT_STATE_SOCKET",
-                "FERRYX_AGENT_STATE_PORT",
-                "FERRYX_AGENT_STATE_TOKEN",
-            ] {
-                cmd.env_remove(key);
-            }
-        }
+        #[cfg(unix)]
+        cmd.env(
+            "FERRYX_AGENT_STATE_SOCKET",
+            crate::daemon::agent_state_socket_path(),
+        );
+        #[cfg(not(unix))]
+        apply_agent_state_tcp_env(&mut cmd);
 
         // A GUI-launched daemon inherits TERM=dumb, which agent TUIs read as a non-interactive
         // terminal: they drop to plain mode and stop reporting activity. A PTY is a real

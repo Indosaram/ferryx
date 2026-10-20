@@ -285,7 +285,6 @@ describe("getAgentReconnectAffordance", () => {
       });
       const exited = next.sessions[initial.id];
 
-      // Then: the dead binding is released, but the conversation remains reconnectable.
       expect(exited.backendSessionId).toBeNull();
       expect(exited.providerSession).toEqual(initial.providerSession);
       expect(getAgentReconnectAffordance(exited, next.sessions)).toMatchObject({

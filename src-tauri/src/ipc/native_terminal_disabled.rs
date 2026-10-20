@@ -82,11 +82,6 @@ pub async fn cmd_native_terminal_copy_selection() -> Result<(), IpcError> {
     Err(IpcError::native_terminal_unsupported())
 }
 
-#[tauri::command]
-pub async fn cmd_native_terminal_cursor() -> Result<(), IpcError> {
-    Err(IpcError::native_terminal_unsupported())
-}
-
 /// Without the native terminal there is no native clipboard writer; the frontend falls back to
 /// the WebView clipboard API on this error.
 #[tauri::command]
@@ -152,7 +147,6 @@ mod tests {
             cmd_native_terminal_set_dom_overlay_input().await,
             cmd_native_terminal_set_attention_frame().await,
             cmd_native_terminal_select().await,
-            cmd_native_terminal_cursor().await,
             cmd_native_terminal_copy_selection().await,
             cmd_native_terminal_paste().await,
             cmd_native_terminal_mouse().await,

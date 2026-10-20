@@ -96,13 +96,6 @@ function resolvedTheme(theme: AppearanceTheme): Exclude<AppearanceTheme, "system
   return "dark";
 }
 
-/** Maps the app theme preference onto the light/dark side the native terminal theme follows. */
-export function resolveTerminalAppearance(theme: AppearanceTheme, prefersLight: boolean): "light" | "dark" {
-  if (theme === "light") return "light";
-  if (theme === "system") return prefersLight ? "light" : "dark";
-  return "dark";
-}
-
 export function applyAppearanceSettings(
   settings: AppearanceSettingsState,
   root: HTMLElement | null = typeof document !== "undefined" ? document.documentElement : null,

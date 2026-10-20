@@ -41,7 +41,6 @@ pub const GHOSTTY_TERMINAL_OPT_WRITE_PTY: c_int = 1;
 pub const GHOSTTY_TERMINAL_OPT_BELL: c_int = 2;
 pub const GHOSTTY_TERMINAL_OPT_TITLE_CHANGED: c_int = 5;
 pub const GHOSTTY_TERMINAL_OPT_SIZE: c_int = 6;
-pub const GHOSTTY_TERMINAL_OPT_COLOR_SCHEME: c_int = 7;
 pub const GHOSTTY_TERMINAL_OPT_TITLE: c_int = 9;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND: c_int = 11;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND: c_int = 12;
@@ -75,12 +74,6 @@ pub const GHOSTTY_FORMATTER_FORMAT_VT: c_int = 1;
 // Packed DEC private mode 2004 matching `GHOSTTY_MODE_BRACKETED_PASTE`.
 pub const GHOSTTY_MODE_BRACKETED_PASTE: u16 = 2004;
 pub const GHOSTTY_MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
-// Packed DEC private mode 2031 matching `GHOSTTY_MODE_COLOR_SCHEME_REPORT` in `ghostty/vt/modes.h`.
-pub const GHOSTTY_MODE_COLOR_SCHEME_REPORT: u16 = 2031;
-
-// GhosttyColorScheme matching `ghostty/vt/device.h`.
-pub const GHOSTTY_COLOR_SCHEME_LIGHT: c_int = 0;
-pub const GHOSTTY_COLOR_SCHEME_DARK: c_int = 1;
 
 // GhosttyRenderStateData C integer constants matching `ghostty/vt/render.h`.
 pub const GHOSTTY_RENDER_STATE_DATA_COLS: c_int = 1;

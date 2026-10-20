@@ -8,6 +8,11 @@ const native = vi.hoisted(() => ({
   spawnTerminalDetailed: vi.fn(), spawnTerminal: vi.fn(), watchDagProject: vi.fn(),
   loadSession: vi.fn(), saveSession: vi.fn(), isTauriRuntime: vi.fn(),
   getTerminalRemoteStatus: vi.fn<typeof import("./lib/tauri").getTerminalRemoteStatus>(),
+  retryTerminalRemoteSession: vi.fn(),
+  onTerminalRemoteStatus: vi.fn(),
+  remoteStatusHandler: null as null | ((status: import("./lib/types").TerminalRemoteStatus) => void),
+  reconnect: null as null | ((sessionId: string) => Promise<void>),
+  refresh: null as null | ((sessionId: string, onResult: (result: import("./state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void),
   remoteSelection: null as null | ((payload: import("./lib/tauri").RemoteSelectionRequestedPayload) => void),
   closeGuard: null as null | (() => Promise<void>),
 }));
@@ -21,6 +26,7 @@ vi.mock("./lib/tauri", async (importOriginal) => ({
   onWorktreeChanged: async () => () => undefined,
   onTerminalLifecycle: async () => () => undefined,
   onTerminalOutput: async () => () => undefined,
+  onTerminalRemoteStatus: (...args: any[]) => native.onTerminalRemoteStatus(...args),
   onNewTerminalTabMenu: async () => () => undefined,
   onCloseTabMenu: async () => () => undefined,
   onSelectWorktreeMenu: async () => () => undefined,
@@ -61,17 +67,30 @@ vi.mock("./lib/updater", async (importOriginal) => ({
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => undefined }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ isFocused: async () => true, onFocusChanged: async () => () => undefined }) }));
 vi.mock("./lib/updateToast", () => ({ initUpdateToasts: () => () => undefined }));
+let appRebindHandler: ((sessionId: string, backendSessionId: string, cwd?: string, daemonEpoch?: string | null, incarnation?: string | null) => Promise<void>) | null = null;
+vi.mock("./lib/sessionLifecycle", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./lib/sessionLifecycle")>();
+  return {
+    ...actual,
+    setSessionRebindHandler: (handler: any) => {
+      appRebindHandler = handler;
+      actual.setSessionRebindHandler(handler);
+    },
+  };
+});
 const toastMocks = vi.hoisted(() => ({ warning: vi.fn() }));
 vi.mock("./components/ui/sonner", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./components/ui/sonner")>();
   return { ...actual, toast: Object.assign(actual.toast, { warning: toastMocks.warning }) };
 });
 vi.mock("./components/SettingsDialog", () => ({ SettingsDialog: ({ initialSection }: { initialSection?: string }) => <div data-testid="settings-section">{initialSection}</div> }));
-vi.mock("./components/TerminalSplitView", () => ({ TerminalSplitView: ({ onAddTab, onSplitPane, layout }: {
+vi.mock("./components/TerminalSplitView", () => ({ TerminalSplitView: ({ onAddTab, onSplitPane, layout, onReconnectSshSession, onRefreshSessionIdentity }: {
   onAddTab: () => void;
   onSplitPane: (tabId: string, leafId: string, direction: "horizontal") => void;
   layout: import("./lib/types").LayoutState;
-}) => <div>
+  onReconnectSshSession: (sessionId: string) => Promise<void>;
+  onRefreshSessionIdentity: (sessionId: string, onResult: (result: import("./state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
+}) => { native.reconnect = onReconnectSshSession; native.refresh = onRefreshSessionIdentity; return <div>
   <output data-testid="active-tab">{layout.activeTabId}</output>
   <button onClick={() => onAddTab()}>New remote tab</button>
   <button onClick={() => {
@@ -79,7 +98,7 @@ vi.mock("./components/TerminalSplitView", () => ({ TerminalSplitView: ({ onAddTa
     const leaf = layout.layoutsByTabId![tab.id].activeLeafId!;
     onSplitPane(tab.id, leaf, "horizontal");
   }}>Split remote pane</button>
-</div> }));
+</div>; } }));
 
 import { App } from "./App";
 import { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY } from "./lib/storageKeys";
@@ -102,17 +121,169 @@ async function mount() { await act(async () => { render(<App />); }); }
 beforeEach(() => {
   localStorage.clear(); resetWorkspaceRestore(); vi.clearAllMocks(); hosts.current = [];
   native.isTauriRuntime.mockReturnValue(false);
+  native.onTerminalRemoteStatus.mockImplementation(async (handler: (status: import("./lib/types").TerminalRemoteStatus) => void) => {
+    native.remoteStatusHandler = handler;
+    return () => { if (native.remoteStatusHandler === handler) native.remoteStatusHandler = null; };
+  });
   native.registerProject.mockImplementation(async (request: { workspaceId: string; repoPath: string }) => ({ workspaceId: request.workspaceId, repoRoot: request.repoPath, gitRoot: null }));
   native.registerRemoteProject.mockResolvedValue(registered);
   native.listWorktrees.mockResolvedValue([]);
   native.loadSession.mockResolvedValue(null); native.saveSession.mockResolvedValue(undefined);
   native.watchDagProject.mockImplementation(async (projectPath: string) => ({ projectPath, runs: [] }));
   native.spawnTerminal.mockResolvedValue("backend-new");
-  native.spawnTerminalDetailed.mockImplementation(async (request: { cwd?: string }) => ({ sessionId: `backend-${native.spawnTerminalDetailed.mock.calls.length}`, daemonEpoch: "epoch", session: { cwd: request.cwd ?? remote.repoRoot } }));
+  native.spawnTerminalDetailed.mockImplementation(async (request: { cwd?: string }) => {
+    const id = `backend-${native.spawnTerminalDetailed.mock.calls.length}`;
+    return {
+      sessionId: id,
+      daemonEpoch: "epoch",
+      session: { sessionId: id, incarnation: `life:${id}`, cwd: request.cwd ?? remote.repoRoot, cols: 80, rows: 24, running: true },
+    };
+  });
 });
 afterEach(cleanup);
 
 describe("App SSH project lifecycle", () => {
+  it.each(["rejected", "unexpected"])("retains the SSH backend when retry is %s without spawning a shell", async mode => {
+    seed([remote]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const snapshot = (await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!;
+    const retained = Object.values(snapshot.sessions)[0];
+    const spawned = native.spawnTerminalDetailed.mock.calls.length;
+    const retry = deferred<{ type: string }>();
+    native.retryTerminalRemoteSession.mockReturnValue(retry.promise);
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    await act(async () => {
+      first = native.reconnect!(retained.id); second = native.reconnect!(retained.id);
+      const failure = first.catch(error => error);
+      const secondFailure = second.catch(error => error);
+      if (mode === "rejected") retry.reject({ code: "SSH_CONNECT_FAILED", message: "offline" });
+      else retry.resolve({ type: "unexpected" });
+      expect(await failure).toMatchObject({ code: mode === "rejected" ? "SSH_CONNECT_FAILED" : "INVALID_RESPONSE" });
+      expect(await secondFailure).toMatchObject({ code: mode === "rejected" ? "SSH_CONNECT_FAILED" : "INVALID_RESPONSE" });
+    });
+    expect(second).toBe(first);
+    expect(native.retryTerminalRemoteSession).toHaveBeenCalledWith(retained.backendSessionId);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(spawned);
+    expect((await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!.sessions[retained.id].backendSessionId).toBe(retained.backendSessionId);
+  });
+  it("routes SSH identity Retry through the coalesced remote owner and fences the result", async () => {
+    seed([remote]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const snapshot = (await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!;
+    const retained = Object.values(snapshot.sessions)[0];
+    const retry = deferred<{ type: string }>();
+    native.retryTerminalRemoteSession.mockReturnValue(retry.promise);
+    const results: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
+    await act(async () => {
+      native.refresh!(retained.id, result => results.push(result));
+    });
+    expect(results).toEqual([{ kind: "pending" }]);
+    expect(native.retryTerminalRemoteSession).toHaveBeenCalledWith(retained.backendSessionId);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+    await act(async () => { retry.resolve({ type: "retryRemoteSessionOk" }); await retry.promise; });
+    expect(results).toEqual([{ kind: "pending" }]);
+    await act(async () => { native.remoteStatusHandler!({ sessionId: retained.backendSessionId!, state: "connected", generation: 4, failure: null, replayGap: null }); });
+    expect(results.at(-1)).toMatchObject({ kind: "ready", session: {
+      id: retained.id, backendSessionId: retained.backendSessionId,
+      daemonEpoch: retained.daemonEpoch, incarnation: retained.incarnation,
+      remoteConnectionState: "connected", remoteGeneration: 4,
+    } });
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+  });
+  it("suppresses a cancelled SSH Retry callback and cancels when its owner tuple changes", async () => {
+    seed([remote]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const snapshot = (await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!;
+    const retained = Object.values(snapshot.sessions)[0];
+    const retry = deferred<{ type: string }>();
+    native.retryTerminalRemoteSession.mockReturnValue(retry.promise);
+    const cancelledResults: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
+    let cancel!: () => void;
+    await act(async () => { cancel = native.refresh!(retained.id, result => cancelledResults.push(result)); });
+    cancel();
+    await act(async () => { retry.resolve({ type: "retryRemoteSessionOk" }); await retry.promise; });
+    await act(async () => { if (native.remoteStatusHandler) native.remoteStatusHandler({ sessionId: retained.backendSessionId!, state: "connected", generation: 5, failure: null, replayGap: null }); });
+    expect(cancelledResults).toEqual([{ kind: "pending" }]);
+
+    const reboundRetry = deferred<{ type: string }>();
+    native.retryTerminalRemoteSession.mockReturnValue(reboundRetry.promise);
+    const reboundResults: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
+    native.refresh!(retained.id, result => reboundResults.push(result));
+    const changed = { ...retained, daemonEpoch: "new-epoch" };
+    (await import("./state/workspaceSnapshotCache")).setWorkspaceSnapshot(remote.workspaceId, {
+      ...snapshot, sessions: { ...snapshot.sessions, [retained.id]: changed },
+    });
+    await act(async () => { reboundRetry.resolve({ type: "retryRemoteSessionOk" }); await reboundRetry.promise; });
+    await act(async () => { native.remoteStatusHandler!({ sessionId: retained.backendSessionId!, state: "connected", generation: 6, failure: null, replayGap: null }); });
+    expect(reboundResults).toEqual([{ kind: "pending" }, { kind: "cancelled" }]);
+    expect(native.remoteStatusHandler).toBeNull();
+  });
+  it("creates a new request when owner tuple changes and rejects old operation with RECOVERY_OWNER_CHANGED", async () => {
+    seed([remote]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const snapshot = (await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!;
+    const retained = Object.values(snapshot.sessions)[0];
+    const retry = deferred<{ type: string }>();
+    native.retryTerminalRemoteSession.mockReturnValue(retry.promise);
+
+    let first!: Promise<void>;
+    act(() => { first = native.reconnect!(retained.id); });
+    const firstError = first.catch(err => err);
+
+    await act(async () => {
+      await appRebindHandler!(retained.id, retained.backendSessionId!, retained.cwd, "epoch-mutated");
+    });
+
+    let second!: Promise<void>;
+    act(() => { second = native.reconnect!(retained.id); });
+    expect(second).not.toBe(first);
+    const secondOutcome = second.then(() => "ok", err => err);
+
+    await act(async () => { retry.resolve({ type: "retryRemoteSessionOk" }); await retry.promise; });
+    await act(async () => {
+      if (native.remoteStatusHandler) {
+        native.remoteStatusHandler({ sessionId: retained.backendSessionId!, state: "connected", generation: 10, failure: null, replayGap: null });
+      }
+    });
+
+    expect(await firstError).toMatchObject({ code: "RECOVERY_OWNER_CHANGED" });
+    expect(await secondOutcome).toBe("ok");
+  });
+  it("aborts before retryTerminalRemoteSession when cancelled during listener registration", async () => {
+    seed([remote]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const snapshot = (await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!;
+    const retained = Object.values(snapshot.sessions)[0];
+
+    const registration = deferred<() => void>();
+    native.onTerminalRemoteStatus.mockReturnValueOnce(registration.promise);
+    native.retryTerminalRemoteSession.mockClear();
+
+    const results: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
+    let cancel!: () => void;
+    await act(async () => {
+      cancel = native.refresh!(retained.id, res => results.push(res));
+    });
+    expect(results).toEqual([{ kind: "pending" }]);
+    expect(native.retryTerminalRemoteSession).not.toHaveBeenCalled();
+
+    cancel();
+
+    const stopFn = vi.fn();
+    await act(async () => {
+      registration.resolve(stopFn);
+      await registration.promise;
+    });
+
+    expect(native.retryTerminalRemoteSession).not.toHaveBeenCalled();
+    expect(stopFn).toHaveBeenCalled();
+  });
   it("shows progress throughout registration, restore, and first SSH tab creation", async () => {
     // Given an inactive remote root and independently controlled connection stages.
     seed([{ workspaceId: "local", repoRoot: remote.repoRoot, gitRoot: null }, remote]);

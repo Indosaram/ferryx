@@ -111,7 +111,7 @@ impl TailscaleDiscoveryProvider {
     }
 
     pub fn discover_ssh_peers(&self) -> Result<Vec<TailscaleSshPeer>, String> {
-        let output = crate::util::no_window_command(tailscale_executable())
+        let output = std::process::Command::new(tailscale_executable())
             .args(["status", "--json"])
             .output()
             .map_err(|e| format!("failed to run tailscale status: {e}"))?;
@@ -125,7 +125,7 @@ impl TailscaleDiscoveryProvider {
         let executable = crate::ipc::run_blocking(|| Ok(tailscale_executable())).await
             .map_err(|error| TailscaleDiscoveryError::Command(error.to_string()))?;
         let result = tokio::time::timeout(std::time::Duration::from_secs(6), async move {
-            let output = crate::util::no_window_tokio_command(executable)
+            let output = tokio::process::Command::new(executable)
                 .args(["status", "--json"])
                 .kill_on_drop(true)
                 .output().await.map_err(|e| TailscaleDiscoveryError::Command(format!("failed to run tailscale status: {e}")))?;

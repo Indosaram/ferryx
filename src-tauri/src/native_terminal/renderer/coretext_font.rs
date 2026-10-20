@@ -30,6 +30,7 @@ pub mod macos {
         pub fn CTFontGetAscent(font: &CTFont) -> CGFloat;
         pub fn CTFontGetDescent(font: &CTFont) -> CGFloat;
         pub fn CTFontGetLeading(font: &CTFont) -> CGFloat;
+        pub fn CTFontGetSize(font: &CTFont) -> CGFloat;
         pub fn CTFontGetUnitsPerEm(font: &CTFont) -> u32;
         pub fn CTFontGetGlyphsForCharacters(
             font: &CTFont,
@@ -388,6 +389,14 @@ pub mod macos {
         result
     }
 
+    /// Returns `font` at exactly `point_size`, copying it only when the size differs.
+    fn with_point_size(font: &CTFont, point_size: f64) -> CFRetained<CTFont> {
+        if (unsafe { CTFontGetSize(font) } - point_size).abs() < 1e-3 {
+            return unsafe { CFRetained::retain(font.into()) };
+        }
+        unsafe { CTFontCreateCopyWithAttributes(font, point_size, ptr::null(), ptr::null()) }
+    }
+
     /// Creates a styled `CTFont` with symbolic traits and variable font weight applied.
     pub fn create_styled_font(
         family_name: &str,
@@ -620,6 +629,12 @@ pub mod macos {
 
             match result {
                 Ok(opt) => {
+                    // Every tier must hand the rasterizer a face at the cell's point size. The
+                    // CoreText cascade inherits the 1x size of the primary it was asked from, and
+                    // apply_traits / apply_variable_weight return their input unchanged when there
+                    // is no trait or no wght axis, so without this the cascade face draws at
+                    // font_size while the cell is sized for font_size * scale.
+                    let opt = opt.map(|font| with_point_size(&font, effective_size));
                     if (scale_factor - 1.0).abs() < 1e-4 {
                         self.glyph_font_cache.insert(key, opt.clone());
                     }
@@ -747,6 +762,28 @@ pub mod macos {
                 .resolve_font_for_char('한', false, false, 1.0)
                 .expect("CoreText cascade must supply a Hangul face");
             assert!(font_has_glyph(&font, '한'));
+        }
+
+        #[test]
+        fn every_resolution_tier_returns_the_effective_point_size() {
+            // 'A' comes from the primary face, '这' (simplified-only) from the CoreText cascade.
+            // Every combination must come back at font_size * scale; a 1x cascade face at 2x
+            // draws CJK glyphs at half size inside the cell.
+            let mut system = CoreTextFontSystem::new("Menlo", 13.0);
+            for scale in [1.0_f32, 2.0] {
+                for ch in ['A', '这', '한'] {
+                    for (bold, italic) in [(false, false), (true, false), (false, true)] {
+                        let font = system
+                            .resolve_font_for_char(ch, bold, italic, scale)
+                            .unwrap_or_else(|| panic!("no face for {ch:?}"));
+                        let size = unsafe { CTFontGetSize(&font) };
+                        assert!(
+                            (size - 13.0 * scale as f64).abs() < 1e-3,
+                            "{ch:?} bold={bold} italic={italic} scale={scale}: got {size}pt"
+                        );
+                    }
+                }
+            }
         }
     }
 }

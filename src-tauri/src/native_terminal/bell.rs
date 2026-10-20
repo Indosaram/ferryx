@@ -1,18 +1,10 @@
 //! Safe bell, title, and pty write event observation and callback management.
 
 use parking_lot::Mutex;
-use std::ffi::{c_int, c_void};
+use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-use super::error::NativeTerminalError;
-use super::sys::constants::{GHOSTTY_COLOR_SCHEME_DARK, GHOSTTY_COLOR_SCHEME_LIGHT};
-use super::sys::ffi::ghostty_color_scheme_report_encode;
 use super::sys::types::GhosttyTerminal;
-use crate::terminal::TerminalAppearance;
-
-#[cfg(test)]
-#[path = "color_scheme_tests.rs"]
-mod color_scheme_tests;
 
 /// A pending or in-flight PTY write record holding its observed generation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,26 +110,19 @@ pub unsafe extern "C" fn terminal_write_pty_callback(
     // SAFETY: FFI pointer dereference invariant.
     // userdata is guaranteed by NativeTerminal to point to a valid pinned heap TerminalContext.
     let ctx = unsafe { &*(userdata as *const TerminalContext) };
-    let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
-    queue_pty_write(ctx, bytes);
-}
-
-/// Queues bytes for the PTY on the path VT query replies use, tagged with the remote generation.
-///
-/// Returns false when nothing was queued: writes are suppressed (history replay, Lagged
-/// recovery) or the bounded fallback buffer is full or contended.
-pub(crate) fn queue_pty_write(ctx: &TerminalContext, bytes: Vec<u8>) -> bool {
     if ctx.pty_writes_suppressed.load(Ordering::Acquire) {
-        return false;
+        return;
     }
     let generation = *ctx.remote_generation.lock();
+    let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
     let record = PtyWriteRecord {
         generation,
         data: bytes,
     };
     if let Some(guard) = ctx.pty_write_tx.try_lock() {
         if let Some(tx) = guard.as_ref() {
-            return tx.send(record).is_ok();
+            let _ = tx.send(record);
+            return;
         }
     }
     if let Some(mut guard) = ctx.write_pty_buffer.try_lock() {
@@ -148,53 +133,6 @@ pub(crate) fn queue_pty_write(ctx: &TerminalContext, bytes: Vec<u8>) -> bool {
         let current_bytes: usize = guard.iter().map(|r| r.data.len()).sum();
         if current_bytes + record.data.len() <= MAX_WRITE_PTY_BUFFER {
             guard.push(record);
-            return true;
         }
     }
-    false
-}
-
-/// Maps the app appearance onto libghostty-vt's `GhosttyColorScheme`.
-pub(crate) fn color_scheme_for(appearance: TerminalAppearance) -> c_int {
-    match appearance {
-        TerminalAppearance::Light => GHOSTTY_COLOR_SCHEME_LIGHT,
-        TerminalAppearance::Dark => GHOSTTY_COLOR_SCHEME_DARK,
-    }
-}
-
-/// Safe C callback answering color scheme queries (CSI ? 996 n) with the live app appearance.
-///
-/// Prevents unwinding across the foreign ABI and makes no re-entrant terminal calls.
-pub unsafe extern "C" fn terminal_color_scheme_callback(
-    _terminal: GhosttyTerminal,
-    _userdata: *mut c_void,
-    out_scheme: *mut c_int,
-) -> bool {
-    if out_scheme.is_null() {
-        return false;
-    }
-    let scheme = color_scheme_for(crate::terminal::terminal_appearance());
-    // SAFETY: libghostty-vt passes a valid, writable GhosttyColorScheme (C enum, int-sized).
-    unsafe { *out_scheme = scheme };
-    true
-}
-
-/// Encodes the DEC 2031 color scheme report (`ESC [ ? 997 ; 1|2 n`) with libghostty-vt.
-pub(crate) fn encode_color_scheme_report(
-    appearance: TerminalAppearance,
-) -> Result<Vec<u8>, NativeTerminalError> {
-    let mut buf = [0u8; 16];
-    let mut written = 0usize;
-    // SAFETY: buf is writable for buf.len() bytes and written points to a stack usize; the
-    // library writes at most buf_len bytes and reports the count through out_written.
-    let result = unsafe {
-        ghostty_color_scheme_report_encode(
-            color_scheme_for(appearance),
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-            &mut written,
-        )
-    };
-    NativeTerminalError::from_c_result(result, "ghostty_color_scheme_report_encode")?;
-    Ok(buf[..written.min(buf.len())].to_vec())
 }

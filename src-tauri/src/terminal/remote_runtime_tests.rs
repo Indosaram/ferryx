@@ -1610,7 +1610,7 @@ async fn ssh_reconnect_to_exited_target_publishes_its_final_output() {
     tx.send(Ok(output(7, false))).unwrap();
     dialer.clock.add_permits(1);
     let gone = state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
-    assert_eq!(gone.failure.unwrap().kind, RemoteFailureKind::Missing);
+    assert_eq!(gone.failure.unwrap().kind, RemoteFailureKind::Expired);
     let published = tokio::time::timeout(Duration::from_secs(3), hub_output.recv())
         .await
         .expect("final output published before expiry")

@@ -263,16 +263,6 @@ export async function prepareSshIntegration(host: SshHost): Promise<void> {
   return invoke<void>("cmd_ssh_prepare_integration", { host: cleanHostForIpc(host) });
 }
 
-export interface RemoteRemovalReport {
-  removed: string[];
-  keptModified: string[];
-  absent: string[];
-}
-
-export async function removeSshIntegration(hostId: string): Promise<RemoteRemovalReport> {
-  return invoke<RemoteRemovalReport>("cmd_ssh_remove_integration", { hostId });
-}
-
 export interface UseSshHostsResult {
   hosts: SshHost[];
   loading: boolean;

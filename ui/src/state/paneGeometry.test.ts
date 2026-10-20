@@ -5,6 +5,7 @@ import {
   computeSplitsGeometry,
   findAlignedSplitRatio,
   findCollinearSeam,
+  findDirectionalLeafId,
   resolveSeam,
   setCollinearRatioAtPath,
 } from "./paneGeometry";
@@ -22,6 +23,35 @@ function split(
 ): PaneNode {
   return { type: "split", direction, first, second, ratio };
 }
+
+describe("findDirectionalLeafId", () => {
+  // +------+------+
+  // |      |  tr  |
+  // |  l   +--+---+
+  // |      |ba|bb |
+  // +------+--+---+
+  const tree = split(
+    "horizontal",
+    leaf("l"),
+    split("vertical", leaf("tr"), split("horizontal", leaf("ba"), leaf("bb"))),
+  );
+
+  it("moves to the spatial neighbour in each direction", () => {
+    expect(findDirectionalLeafId(tree, "l", "right")).toBe("tr");
+    expect(findDirectionalLeafId(tree, "tr", "left")).toBe("l");
+    expect(findDirectionalLeafId(tree, "tr", "down")).toBe("ba");
+    expect(findDirectionalLeafId(tree, "bb", "up")).toBe("tr");
+    expect(findDirectionalLeafId(tree, "bb", "left")).toBe("ba");
+    expect(findDirectionalLeafId(tree, "ba", "left")).toBe("l");
+  });
+
+  it("returns null at the layout edge or for an unknown leaf", () => {
+    expect(findDirectionalLeafId(tree, "l", "left")).toBeNull();
+    expect(findDirectionalLeafId(tree, "l", "up")).toBeNull();
+    expect(findDirectionalLeafId(tree, "bb", "right")).toBeNull();
+    expect(findDirectionalLeafId(tree, "missing", "right")).toBeNull();
+  });
+});
 
 describe("computeSplitsGeometry", () => {
   it("returns empty array for a leaf node", () => {

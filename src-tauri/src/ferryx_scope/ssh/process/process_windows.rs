@@ -1,11 +1,7 @@
 use super::*;
 use base64::Engine as _;
-use std::os::windows::process::CommandExt as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-
-/// Also compiled into the standalone helper, which has no `crate::util`.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub(super) fn start(root: &Path, host: &str) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -79,7 +75,6 @@ pub(super) fn start(root: &Path, host: &str) -> Result<(), String> {
 
 fn run(script: &str) -> Result<Vec<u8>, String> {
     let mut child = Command::new("powershell.exe")
-        .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-NoLogo",
             "-NoProfile",

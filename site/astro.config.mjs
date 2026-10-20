@@ -74,7 +74,6 @@ export default defineConfig({
           label: 'Reference',
           items: [
             { label: 'Keyboard Shortcuts', slug: 'docs/shortcuts' },
-            { label: 'Settings and background behavior', slug: 'docs/settings-and-behavior' },
             { label: 'Product facts', slug: 'docs/facts' },
           ],
         },

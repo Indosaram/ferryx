@@ -3064,27 +3064,6 @@ impl NativeTerminalSurfaceHostState {
         }
     }
 
-    /// Notifies every live session whose program enabled DEC mode 2031 that the color scheme
-    /// changed to `appearance`. Sessions without 2031, or replaying history, get nothing.
-    ///
-    /// Holding the sessions lock serializes this with history replay, which runs under the same
-    /// lock with PTY writes suppressed.
-    pub fn report_color_scheme_to_sessions(&self, appearance: crate::terminal::TerminalAppearance) {
-        let sessions = self.sessions.lock();
-        for (session_id, session) in sessions.iter() {
-            if session.output_stream_ended {
-                continue;
-            }
-            if let Err(error) = session.terminal.report_color_scheme_change(appearance) {
-                tracing::warn!(
-                    session_id = %session_id,
-                    ?error,
-                    "color scheme report (DEC 2031) failed"
-                );
-            }
-        }
-    }
-
     /// Rejects geometry work for a session with no mounted compositor surface.
     ///
     /// Returns [`NativeTerminalError::SessionDetached`] for both a closed session and one that is
