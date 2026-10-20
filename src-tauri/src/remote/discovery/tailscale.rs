@@ -1,11 +1,9 @@
 //! Tailscale-based peer discovery.
 //!
 //! Discovers Ferryx hosts reachable over the Tailnet by inspecting the
-//! output of `tailscale status --json`. Each online peer's `100.x.y.z`
-//! Tailscale IP is combined with the default Ferryx port to produce a
-//! [`HostEndpoint`].
+//! output of `tailscale status --json`. Each peer with a `100.x.y.z`
+//! Tailscale IPv4 address becomes a [`TailscaleSshPeer`].
 
-use super::{HostAuthStatus, HostEndpoint, TransportType};
 use serde::Deserialize;
 use std::net::Ipv4Addr;
 use std::collections::HashMap;
@@ -71,24 +69,6 @@ pub struct TailscaleDiscoveryProvider;
 impl TailscaleDiscoveryProvider {
     pub fn new() -> Self {
         Self
-    }
-
-    /// Runs `tailscale status --json` and parses the resulting peers into
-    /// [`HostEndpoint`] records.
-    pub fn discover(&self) -> Result<Vec<HostEndpoint>, String> {
-        Ok(self.discover_ssh_peers()?.into_iter().map(|peer| {
-            let name = peer.dns_name.clone().unwrap_or_else(|| peer.hostname.clone());
-            HostEndpoint { host_id: peer.node_id, name, address: format!("{}:{DEFAULT_FERRYX_PORT}", peer.ipv4), transport: TransportType::Tailscale, latency_ms: None, auth_status: HostAuthStatus::Unknown, online: peer.online }
-        }).collect())
-    }
-
-    /// Parses `tailscale status --json` output into [`HostEndpoint`]
-    /// records, one per peer that has a Tailscale IPv4 address.
-    pub fn parse_status_json(json_str: &str) -> Result<Vec<HostEndpoint>, String> {
-        Ok(Self::parse_ssh_peers(json_str)?.into_iter().map(|peer| {
-            let name = peer.dns_name.clone().unwrap_or_else(|| peer.hostname.clone());
-            HostEndpoint { host_id: peer.node_id, name, address: format!("{}:{DEFAULT_FERRYX_PORT}", peer.ipv4), transport: TransportType::Tailscale, latency_ms: None, auth_status: HostAuthStatus::Unknown, online: peer.online }
-        }).collect())
     }
 
     pub fn parse_ssh_peers(json_str: &str) -> Result<Vec<TailscaleSshPeer>, String> {
@@ -187,40 +167,39 @@ mod tests {
 
     #[test]
     fn test_tailscale_peer_discovery() {
-        let endpoints = TailscaleDiscoveryProvider::parse_status_json(SAMPLE_STATUS_JSON)
+        let peers = TailscaleDiscoveryProvider::parse_ssh_peers(SAMPLE_STATUS_JSON)
             .expect("should parse sample tailscale status json");
 
-        assert_eq!(endpoints.len(), 2);
+        assert_eq!(peers.len(), 2);
 
-        for endpoint in &endpoints {
-            assert_eq!(endpoint.transport, TransportType::Tailscale);
-        }
-
-        let mac_mini = endpoints
+        let mac_mini = peers
             .iter()
-            .find(|e| e.host_id == "peer-1")
+            .find(|p| p.node_id == "peer-1")
             .expect("mac-mini peer present");
-        assert_eq!(mac_mini.name, "mac-mini.tailnet-1234.ts.net");
-        assert_eq!(mac_mini.address, "100.64.0.2:43821");
+        assert_eq!(mac_mini.hostname, "mac-mini");
+        assert_eq!(mac_mini.dns_name.as_deref(), Some("mac-mini.tailnet-1234.ts.net"));
+        assert_eq!(mac_mini.ipv4, "100.64.0.2");
         assert!(mac_mini.online);
 
-        let workstation = endpoints
+        let workstation = peers
             .iter()
-            .find(|e| e.host_id == "peer-2")
+            .find(|p| p.node_id == "peer-2")
             .expect("workstation peer present");
-        assert_eq!(workstation.name, "workstation.tailnet-1234.ts.net");
-        assert_eq!(workstation.address, "100.64.0.3:43821");
+        assert_eq!(workstation.hostname, "workstation");
+        assert_eq!(workstation.dns_name.as_deref(), Some("workstation.tailnet-1234.ts.net"));
+        assert_eq!(workstation.ipv4, "100.64.0.3");
         assert!(!workstation.online);
     }
 
     #[test]
-    fn test_parse_status_json_invalid_input_errors() {
-        let result = TailscaleDiscoveryProvider::parse_status_json("not json");
-        assert!(result.is_err());
+    fn test_parse_ssh_peers_invalid_input_errors() {
+        let error = TailscaleDiscoveryProvider::parse_ssh_peers("not json")
+            .expect_err("invalid json must be rejected");
+        assert!(error.contains("invalid tailscale status json"));
     }
 
     #[test]
-    fn test_parse_status_json_skips_peers_without_ipv4() {
+    fn test_parse_ssh_peers_skips_peers_without_ipv4() {
         let json = r#"
         {
             "Peer": {
@@ -233,9 +212,9 @@ mod tests {
             }
         }
         "#;
-        let endpoints =
-            TailscaleDiscoveryProvider::parse_status_json(json).expect("should parse json");
-        assert!(endpoints.is_empty());
+        let peers =
+            TailscaleDiscoveryProvider::parse_ssh_peers(json).expect("should parse json");
+        assert!(peers.is_empty());
     }
 
     #[test]
