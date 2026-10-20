@@ -3343,6 +3343,25 @@ export function NativeTerminalPane({
             attemptedIncarnation,
             capturedAttachTuple?.daemonEpoch ?? null,
           );
+          switchDebug("terminal.surface.attach.failure_context", {
+            localSessionId: sessionId,
+            backendSessionId: targetSessionId,
+            paneIdentity,
+            bindingKey,
+            attemptedIncarnation,
+            attemptedDaemonEpoch: capturedAttachTuple?.daemonEpoch ?? null,
+            attemptGeneration: capturedAttachTuple?.attemptGeneration ?? null,
+            classification: classification.status,
+            reason: classification.status === "operational-error" ? null : classification.reason,
+            errorCode: isStructuredIpcError(error) ? error.code : null,
+            errorSource: isStructuredIpcError(error) ? error.details?.source ?? null : null,
+            reportedSessionId: isStructuredIpcError(error) ? error.details?.sessionId ?? null : null,
+            reportedDaemonEpoch: isStructuredIpcError(error) ? error.details?.daemonEpoch ?? null : null,
+            reportedIncarnation: isStructuredIpcError(error) ? error.details?.incarnation ?? null : null,
+            retryCount,
+            bannerRetryThreshold,
+            refreshedIdentityAfterDetach,
+          });
           if (classification.status === "confirmed-missing") {
             const currentTuple = getDurableNativeBinding(targetSessionId);
             if (!capturedAttachTuple || !currentTuple || !matchesAttachTuple(currentTuple, capturedAttachTuple) ||
