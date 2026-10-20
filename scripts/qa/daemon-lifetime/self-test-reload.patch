@@ -1,27 +1,38 @@
 # Harness self-test (plan todo 12, failure scenario): re-adds supervisor::reload in the client.
 # Applied only by run.mjs --self-test-reload inside a throwaway worktree; never committed to product code.
+# The client.rs hunk targets classify_silent_handshake (e4bc115f), the path Q04's stalled but
+# connectable owner takes; `git apply` fails loudly on a tree without it.
 diff --git a/src-tauri/src/daemon/client.rs b/src-tauri/src/daemon/client.rs
-index 8012d32f..701d47bc 100644
 --- a/src-tauri/src/daemon/client.rs
 +++ b/src-tauri/src/daemon/client.rs
-@@ -2551,6 +2551,17 @@ impl DaemonClient {
-         &self,
-         state: &owner_admission::OwnerState,
-     ) -> Result<DaemonStream, IpcError> {
-+        // HARNESS SELF-TEST ONLY (scripts/qa/daemon-lifetime/self-test-reload.patch): re-adds the
-+        // pre-plan supervisor::reload after a short wait, so Q04 must FAIL against this build.
-+        if let Ok(stream) = self.wait_for_supervised_daemon(Duration::from_secs(5)).await {
-+            return Ok(stream);
+@@ -188,12 +188,22 @@ async fn classify_silent_handshake(socket_path: &Path) -> IpcError {
+     match state {
+         Ok(owner_admission::OwnerState::Absent) => {
+             IpcError::new(IpcErrorCode::IoError, "Handshake timed out")
+         }
+-        Ok(state) => daemon_busy(
+-            format!("A daemon owner exists but did not answer the handshake in time ({state:?})"),
+-            "handshakeSilent",
+-            &state,
+-        ),
++        Ok(state) => {
++            // HARNESS SELF-TEST ONLY (scripts/qa/daemon-lifetime/self-test-reload.patch): re-adds the
++            // pre-plan supervisor::reload on the silent-handshake path, so Q04 must FAIL against this build.
++            let reload = crate::ipc::run_blocking(|| {
++                crate::daemon::supervisor::reload()
++                    .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
++            })
++            .await;
++            tracing::warn!(?reload, "self-test: reloaded the supervisor for an owner that did not answer");
++            daemon_busy(
++                format!("A daemon owner exists but did not answer the handshake in time ({state:?})"),
++                "handshakeSilent",
++                &state,
++            )
 +        }
-+        let reload = crate::ipc::run_blocking(|| {
-+            crate::daemon::supervisor::reload()
-+                .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
-+        })
-+        .await;
-+        tracing::warn!(?reload, "self-test: reloaded the supervisor for an owner that did not answer");
-         self.wait_for_supervised_daemon(DAEMON_READY_TIMEOUT)
-             .await
-             .map_err(|_| {
+         Err(error) => error,
+     }
+ }
 diff --git a/src-tauri/src/daemon/supervisor.rs b/src-tauri/src/daemon/supervisor.rs
 index acfde386..88b3e731 100644
 --- a/src-tauri/src/daemon/supervisor.rs

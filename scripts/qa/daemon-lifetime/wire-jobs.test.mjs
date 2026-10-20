@@ -6,11 +6,12 @@ import { HOOKS, HANDOVER_FAULTS, HANDOVER_FAULT_ENV, TRANSFER_FAULTS, FORCED_COM
 import { hostFor, buildPlan, assertQaBuild } from './lib/hosts.mjs';
 import { agentCommand } from './lib/remote.mjs';
 import { macForceTerminateScript, macQuitScript, linuxScopeUnit, windowsLauncherCommand } from './lib/gui.mjs';
-import { armFile, LISTENER_STALL, LISTENER_STALL_DEADLINE_MS } from './scenarios/q04-q06.mjs';
+import { armFile, LISTENER_STALL, LISTENER_STALL_DEADLINE_MS, Q04, stripAnsi } from './scenarios/q04-q06.mjs';
 import { counterProgress } from './scenarios/q07-q09.mjs';
 import { remoteWorkspaceId, sshdConfig } from './lib/sshd.mjs';
 import { readFileSync } from 'node:fs';
-import { AUTHORITY_STAGE, HANDOVER_FAULT_REQUEST, HANDOVER_TRANSFER, ROLLBACK_RELINQUISHMENT, CANDIDATE_STAGES, PREDECESSOR_STAGES, PRE_COMMIT_STAGES, LISTENER_ROLES, authorityStages, authorityInvariant, stagePattern } from './lib/receipts.mjs';
+import { AUTHORITY_STAGE, HANDOVER_FAULT_REQUEST, HANDOVER_TRANSFER, ROLLBACK_RELINQUISHMENT, CANDIDATE_STAGES, PREDECESSOR_STAGES, PRE_COMMIT_STAGES, LISTENER_ROLES, authorityStages, authorityInvariant, stagePattern, DAEMON_CLIENT_BUSY, busyReceiptPattern, busyVerdict, aliveOwnerPid } from './lib/receipts.mjs';
+import { newSummary, settle } from './lib/summary.mjs';
 
 const RUN = '20261019t064512z';
 
@@ -145,6 +146,103 @@ test('Q04 stall arm outlasts the GUI wait and Windows launcher forbids breakaway
   const cmd = windowsLauncherCommand({ root: 'C:\\r', exe: 'C:\\r\\ferryx.exe', envFile: 'C:\\r\\e.json', tag: 'q06w', noBreakaway: true });
   assert.ok(cmd.endsWith('-Tag q06w -NoBreakaway'), cmd);
   assert.ok(!windowsLauncherCommand({ root: 'C:\\r', exe: 'x', envFile: 'e', tag: 't' }).includes('NoBreakaway'));
+});
+
+// One daemon-client-busy line exactly as qa_barrier.rs append_receipt + client.rs daemon_busy_settlement write it.
+const busyLine = ({ runId = RUN, operationId = `q04-${RUN}`, code = 'DAEMON_BUSY', cause = 'handshakeSilent', ownerState = 'Alive { pid: 4242, start_time: 99 }' } = {}) =>
+  JSON.stringify({ runId, operationId, producer: 'ipc-qa-barrier', producerPid: 7, settledAtMs: 1, name: DAEMON_CLIENT_BUSY, code, details: { type: 'daemonOwnerBusy', cause, ownerState } });
+
+test('Q04 busy receipt: correlated to runId and q04-<runId>, handshakeSilent from the pre-stall Alive pid', () => {
+  const op = `q04-${RUN}`;
+  const re = new RegExp(busyReceiptPattern(RUN, op));
+  assert.ok(re.test(busyLine()));
+  assert.ok(!re.test(busyLine({ runId: 'other' })));
+  assert.ok(!re.test(busyLine({ operationId: 'q04-other' })));
+  assert.ok(!re.test(busyLine({ code: 'IO_ERROR' })));
+  assert.equal(aliveOwnerPid('Alive { pid: 4242, start_time: 99 }'), 4242);
+  assert.equal(aliveOwnerPid('Unknown { reason: "silent" }'), null);
+  const ok = busyVerdict(busyLine(), { runId: RUN, operationId: op, pidBefore: 4242 });
+  assert.equal(ok.correlated, 1);
+  assert.ok(ok.match);
+  // Correlated DAEMON_BUSY that is not the pre-stall Alive owner's silent handshake does not count.
+  for (const bad of [busyLine({ ownerState: 'Alive { pid: 4243, start_time: 99 }' }), busyLine({ ownerState: 'Unknown { reason: "silent" }' }), busyLine({ cause: 'ownerUnresponsive' })]) {
+    const v = busyVerdict(bad, { runId: RUN, operationId: op, pidBefore: 4242 });
+    assert.equal(v.correlated, 1);
+    assert.equal(v.match, null, bad);
+  }
+  assert.equal(busyVerdict(busyLine(), { runId: RUN, operationId: op, pidBefore: null }).match, null);
+  assert.equal(busyVerdict(busyLine({ operationId: 'q04-older' }), { runId: RUN, operationId: op, pidBefore: 4242 }).correlated, 0);
+  // Measured GUI log shape (full-r2/Q04-gui-during-stall.log): ANSI between a field name and '='.
+  assert.equal(stripAnsi('\x1b[3mstate\x1b[0m\x1b[2m=\x1b[0mAlive'), 'state=Alive');
+});
+
+/** Q04 against an in-memory host: the stall is entered, and the barrier holds whatever busy receipt text is given. */
+function q04Harness({ busyText, guiLog = '', pidDuring = 4242 }) {
+  const files = new Map();
+  const pids = [4242, pidDuring];
+  const call = async (op, a = {}) => {
+    switch (op) {
+      case 'writeFile': files.set(a.file, a.content); return {};
+      case 'dataOpen': return { handle: 1 };
+      case 'controlOpen': return { handle: null };
+      case 'waitPath': return true;
+      case 'readFile':
+        if (a.file.endsWith(`${DAEMON_CLIENT_BUSY}.receipt.jsonl`)) return busyText;
+        if (a.file.endsWith('owner.json')) return JSON.stringify({ pid: 4242 });
+        if (a.file.includes('/logs/gui-')) return guiLog;
+        return files.get(a.file) ?? null;
+      case 'waitLog': {
+        const text = a.file.endsWith(`${DAEMON_CLIENT_BUSY}.receipt.jsonl`) ? busyText : '';
+        const m = new RegExp(a.pattern, a.flags ?? '').exec(text);
+        return m ? { matched: m[0] } : { matched: null, timedOut: true };
+      }
+      case 'probe': return { startTime: 99 };
+      case 'call':
+        if (a.frame.type === 'attach') return { type: 'attachOk' };
+        if (a.frame.type === 'describeLiveSessions') return { type: 'describeLiveSessionsOk', sessions: [] };
+        return { type: 'writeOk' };
+      case 'waitOutput': return { count: 1 };
+      default: return {};
+    }
+  };
+  const conn = { close: async () => {} };
+  const ctx = {
+    runId: RUN, platform: 'linux', keys: { A: 'a' }, artifacts: { A: {} }, evidenceDir: '/e',
+    layout: { barrier: '/r/barrier', runtime: '/r/runtime', logs: '/r/logs' },
+    agent: { call }, writeEvidence: async () => {},
+    jobs: { inspect: async () => ({ pid: pids.shift() }) },
+    gui: { quit: async () => ({}), launch: async () => ({ tag: 'q04' }) },
+    state: { gui: { tag: 'q00' }, conn, localA: 's1' },
+  };
+  const result = newSummary({ runId: RUN, platform: 'linux', host: 'h' }).scenarios.find((s) => s.id === 'Q04');
+  return { ctx, result, files };
+}
+
+test('Q04 passes only on the correlated busy receipt and keeps every no-start/recovery check', async () => {
+  const failing = (r) => r.assertions.filter((a) => !a.ok).map((a) => a.name);
+  const good = q04Harness({ busyText: busyLine() });
+  await Q04(good.ctx, good.result);
+  assert.equal(settle(good.result).status, 'PASS', JSON.stringify(failing(good.result)));
+  assert.ok(good.files.has('/r/barrier/daemon-listener-stall.release.json'), 'the stall is released after the busy checks');
+  for (const name of ['job pid unchanged during the stall', 'zero supervisor mutations in the GUI log', 'after release: daemon pid and start time unchanged', 'original session after release: nonce']) {
+    assert.ok(good.result.assertions.some((a) => a.name.startsWith(name)), name);
+  }
+  // Prose in the GUI log is no longer the verdict: without a receipt Q04 fails even when the log says DAEMON_BUSY.
+  const prose = q04Harness({ busyText: null, guiLog: 'WARN code="DAEMON_BUSY" cause="handshakeSilent"' });
+  await Q04(prose.ctx, prose.result);
+  assert.equal(settle(prose.result).status, 'FAIL');
+  assert.ok(failing(prose.result).some((n) => n.startsWith('client received DAEMON_BUSY for this stall')));
+  // Another run's or another operation's receipt, or an owner other than the pre-stall pid, is not this stall's outcome.
+  for (const busyText of [busyLine({ runId: 'other' }), busyLine({ operationId: 'q04-older' }), busyLine({ ownerState: 'Alive { pid: 5555, start_time: 1 }' })]) {
+    const h = q04Harness({ busyText });
+    await Q04(h.ctx, h.result);
+    assert.equal(settle(h.result).status, 'FAIL', busyText);
+  }
+  // The self-test reload build: the job pid changes and the GUI log carries a styled restart line.
+  const reload = q04Harness({ busyText: busyLine(), pidDuring: 5555, guiLog: '\x1b[33mWARN\x1b[0m self-test: systemctl --user restart ferryx-qa-x.service' });
+  await Q04(reload.ctx, reload.result);
+  assert.equal(settle(reload.result).status, 'FAIL');
+  assert.deepEqual(failing(reload.result).sort(), ['job pid unchanged during the stall', 'zero supervisor mutations in the GUI log']);
 });
 
 test('builds: only debug QA bundles with a private target dir', () => {

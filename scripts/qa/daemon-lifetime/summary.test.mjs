@@ -100,13 +100,20 @@ test('--self-test-reload runs Q04 against the reload patch and passes only when 
   const summary = (status) => ({ scenarios: [{ id: 'Q00', status: 'PASS' }, { id: 'Q04', status }] });
   assert.equal(selfTestExitCode(summary('FAIL')), 0);
   for (const status of ['PASS', 'BLOCKED', 'NOT_RUN']) assert.equal(selfTestExitCode(summary(status)), 1, status);
-  // The patch re-adds supervisor::reload in the client's owner-wait path and restores a reload
-  // that restarts the job holding the live daemon (launchctl kickstart -k / systemctl restart).
+  // The patch re-adds supervisor::reload on the silent-handshake path Q04's stalled but connectable
+  // owner takes (client.rs classify_silent_handshake, Alive/Unknown arm), not the owner-wait path
+  // the fast-path connect never reaches, and restores a reload that restarts the job holding the
+  // live daemon (launchctl kickstart -k / systemctl restart).
   const patch = readFileSync(new URL(`./${SELF_TEST_PATCH}`, import.meta.url), 'utf8');
   assert.match(patch, /\+\+\+ b\/src-tauri\/src\/daemon\/client\.rs/);
   assert.match(patch, /^\+\s+crate::daemon::supervisor::reload\(\)/m);
   assert.match(patch, /^\+.*"kickstart", "-k"/m);
   assert.match(patch, /^\+.*"--user", "restart"/m);
+  const clientHunk = patch.split(/^diff --git /m).find((d) => d.startsWith('a/src-tauri/src/daemon/client.rs'));
+  assert.match(clientHunk, /^@@ [^\n]*@@ async fn classify_silent_handshake\(/m);
+  assert.match(clientHunk, /^-\s+"handshakeSilent",$/m);
+  assert.match(clientHunk, /^ \s+Ok\(owner_admission::OwnerState::Absent\) => \{$/m);
+  assert.doesNotMatch(clientHunk, /wait_for_owner_endpoint|wait_for_supervised_daemon/);
 });
 
 test('teardown runs every step after a pre-scenario failure and never reports a failed step as clean', async () => {
