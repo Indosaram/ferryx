@@ -14,10 +14,13 @@ export interface DiscoveredListProps {
   refreshing: boolean;
   onSetUp: () => void;
   onRetryDiscovery: () => void;
+  /** Opens the machine drawer for a saved host, so a host stuck in setup can still be edited, disabled or deleted. */
+  onDetails: (hostId: string) => void;
+  detailsRef: (hostId: string) => (node: HTMLButtonElement | null) => void;
 }
 
 /** Tailscale peers that are not provisioned yet. They become "My machines" once setup finishes. */
-export function DiscoveredList({ hosts, banner, refreshing, onSetUp, onRetryDiscovery }: DiscoveredListProps) {
+export function DiscoveredList({ hosts, banner, refreshing, onSetUp, onRetryDiscovery, onDetails, detailsRef }: DiscoveredListProps) {
   return (
     <section aria-labelledby="remote-discovered" className="space-y-3">
       <header className="flex flex-col gap-1 border-b border-border pb-2 sm:flex-row sm:items-end sm:justify-between">
@@ -52,10 +55,15 @@ export function DiscoveredList({ hosts, banner, refreshing, onSetUp, onRetryDisc
                   <p className="text-[12px] text-muted-foreground">{target.lastError || "Offline"}</p>
                 ) : null}
               </div>
-              {/* The accessible name stays "Retry Tailscale": it runs the same Tailscale sync. */}
-              <Button type="button" size="sm" variant="outline" aria-label="Retry Tailscale" disabled={refreshing} onClick={onSetUp}>
-                Set up
-              </Button>
+              {/* Every row here is a saved SSH host, so each one also gets Details for Edit, Disable and Delete. */}
+              <div className="flex shrink-0 items-center gap-2">
+                <Button type="button" size="sm" variant="outline" aria-label={`Set up ${host.label}`} disabled={refreshing} onClick={onSetUp}>
+                  Set up
+                </Button>
+                <Button type="button" size="sm" variant="outline" ref={detailsRef(host.id)} aria-label={`Details for ${host.label}`} aria-haspopup="dialog" onClick={() => onDetails(host.id)}>
+                  Details
+                </Button>
+              </div>
             </li>
           ))}
         </ul>

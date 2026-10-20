@@ -457,13 +457,19 @@ export function RemoteSection({
     row.focus({ preventScroll: true });
   });
 
-  const drawerItem = drawerKey ? mixedItems.find((item) => `${item.kind}:${item.id}` === drawerKey) : undefined;
+  // Discovered rows are saved SSH hosts too; their Details opens the same SSH drawer as My machines.
+  const drawerCandidates: MixedItem[] = [
+    ...mixedItems,
+    ...discovered.map(({ host }) => ({ kind: "ssh" as const, id: host.id, name: host.label || host.hostname, host })),
+  ];
+  const drawerItem = drawerKey ? drawerCandidates.find((item) => `${item.kind}:${item.id}` === drawerKey) : undefined;
   let drawerContent: MachineDrawerContent | null = null;
   if (drawerItem?.kind === "paired") {
     const host = drawerItem.host;
     const enrolled = isEnrolled(host);
     drawerContent = {
       kind: "paired", host, nativeReady, accountEnrolled: enrolled, check: checks[host.hostId], canOpenProject: Boolean(onOpenProject), busy,
+      signedIn: Boolean(accountToken),
       repairRequested: repairHostId === host.hostId,
       confirmingForget: confirmForget?.hostId === host.hostId,
       onCheck: () => void handleCheckPaired(host),
@@ -535,6 +541,7 @@ export function RemoteSection({
         shown={filteredItems.length}
         searchQuery={searchQuery}
         actionError={drawerContent ? null : actionError}
+        signedIn={Boolean(accountToken)}
         onSearchChange={setSearchQuery}
         onAddMachine={() => openAddMachine()}
         onRefresh={handleRefreshAll}
@@ -582,6 +589,8 @@ export function RemoteSection({
         refreshing={tailscaleState.refreshing}
         onSetUp={retryTailscale}
         onRetryDiscovery={retryTailscale}
+        onDetails={(hostId) => openDrawer(`ssh:${hostId}`)}
+        detailsRef={(hostId) => bindDetails(`ssh:${hostId}`)}
       />
 
       <ThisMachineSection />

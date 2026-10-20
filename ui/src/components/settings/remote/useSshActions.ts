@@ -32,7 +32,7 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError }: {
 
   const [confirmDeleteSshId, setConfirmDeleteSshId] = useState<string | null>(null);
 
-  // Restore sameConnection invalidation from SshSection
+  // A connection change invalidates any in-flight test or prepare result for that host.
   useEffect(() => {
     const stale = hostsRef.current.filter(prev => !sshHosts.some(cur => sameConnection(prev, cur)));
     hostsRef.current = sshHosts;

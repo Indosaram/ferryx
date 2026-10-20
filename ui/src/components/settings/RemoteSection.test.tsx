@@ -196,7 +196,37 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     // Not usable yet: it is listed under Discovered, which offers setup but no Add Project.
     expect(screen.queryByRole("button", { name: `Add Project on ${tailnet.label}` })).toBeNull();
     expect(within(screen.getByRole("list", { name: "Discovered machines" })).getByText(tailnet.label)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Retry Tailscale" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: `Set up ${tailnet.label}` })).toBeEnabled();
+    // Section-level retry is a different control and keeps its own name.
+    expect(screen.queryByRole("button", { name: "Retry Tailscale" })).toBeNull();
+  });
+
+  it("opens the machine drawer from a saved Discovered host so it can be edited, disabled or deleted", async () => {
+    const tailnet: SshHost = { ...mockSshHost, id: "tailscale:stuck", source: "tailscale" };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_sync_tailscale") return { hosts: [tailnet], targets: [{ host: tailnet, reachable: true, helper: "unknown", checkedAt: 1, diagnostic: { code: "CLI_EXECUTABLE_NOT_FOUND", message: "Fixture helper unavailable", details: { stage: "provisioning" } } }] };
+      if (command === "cmd_ssh_list_hosts") return [tailnet];
+      if (command === "cmd_agent_integration_get") return { enabled: true };
+      return undefined;
+    });
+    await syncTailscaleMachines();
+    const { store, inventory } = createTestInventory([]);
+    await act(async () => { render(<RemoteSection store={store} inventory={inventory} onOpenSshProject={vi.fn()} />); });
+
+    const discovered = screen.getByRole("list", { name: "Discovered machines" });
+    expect(within(discovered).getByRole("button", { name: `Set up ${tailnet.label}` })).toBeInTheDocument();
+    const details = within(discovered).getByRole("button", { name: `Details for ${tailnet.label}` });
+    details.focus();
+    fireEvent.click(details);
+
+    const drawer = screen.getByRole("dialog");
+    expect(within(drawer).getByRole("button", { name: `Edit ${tailnet.label}` })).toBeEnabled();
+    expect(within(drawer).getByRole("button", { name: `Toggle disable ${tailnet.label}` })).toHaveTextContent("Disable");
+    expect(within(drawer).getByRole("button", { name: `Delete ${tailnet.label}` })).toBeEnabled();
+
+    pressEscape();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: `Details for ${tailnet.label}` })));
   });
 
   it("orders the sections My machines, Discovered, This machine, Advanced", async () => {
