@@ -8,13 +8,15 @@ export interface MachineListProps {
   shown: number;
   searchQuery: string;
   actionError: string | null;
+  /** Enrollment codes are issued from the account bar, which exists only while signed in. */
+  signedIn: boolean;
   onSearchChange: (value: string) => void;
   onAddMachine: () => void;
   onRefresh: () => void;
   children: ReactNode;
 }
 
-export function MachineList({ total, shown, searchQuery, actionError, onSearchChange, onAddMachine, onRefresh, children }: MachineListProps) {
+export function MachineList({ total, shown, searchQuery, actionError, signedIn, onSearchChange, onAddMachine, onRefresh, children }: MachineListProps) {
   return (
     <section aria-labelledby="remote-my-machines" className="space-y-3">
       <header className="flex flex-col gap-1 border-b border-border pb-2 sm:flex-row sm:items-end sm:justify-between">
@@ -52,7 +54,9 @@ export function MachineList({ total, shown, searchQuery, actionError, onSearchCh
           <p className="text-[13px] font-medium text-foreground">{total === 0 ? "No remote machines configured" : "No matching machines found"}</p>
           <p className="mt-1 text-[12px] text-muted-foreground">
             {total === 0
-              ? "The other machine has to enroll first. Issue an enrollment code above to enroll a machine, or use Add Machine to connect via SSH."
+              ? signedIn
+                ? "The other machine has to enroll first. Issue an enrollment code above to enroll a machine, or use Add Machine to connect via SSH."
+                : "The other machine has to enroll first. Sign in above to issue an enrollment code, or use Add Machine to connect via SSH."
               : "Try clearing your search query to see all machines."}
           </p>
         </div>

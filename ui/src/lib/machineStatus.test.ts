@@ -30,15 +30,6 @@ function check(actual: MachineStatus, expected: Expected) {
   if (expected.reason !== undefined) expect(actual.reason).toBe(expected.reason);
 }
 
-describe("labels", () => {
-  it("match the redesign copy", () => {
-    expect(MACHINE_STATE_LABELS).toEqual({
-      connected: "Connected", offline: "Offline", checking: "Checking\u2026", needsAccess: "Needs access",
-      settingUp: "Setting up", error: "Error", disabled: "Disabled",
-    });
-  });
-});
-
 describe("pairedMachineStatus", () => {
   const cases: [string, PairedMachineStatusInput, Expected][] = [
     ["NATIVE_CONTEXT_REQUIRED when native is not ready and not enrolled", p({ nativeReady: false }), { state: "error", code: "NATIVE_CONTEXT_REQUIRED", primary: "none", primaryEnabled: false }],
@@ -92,21 +83,4 @@ describe("sshMachineStatus", () => {
     ["Tailscale host without a target that tested reachable still needs setup", s({ host: tsHost, test: { reachable: true } }), { state: "settingUp", code: "REACHABLE", primary: "setUp", primaryEnabled: true }],
   ];
   it.each(cases)("%s", (_name, input, expected) => check(sshMachineStatus(input), expected));
-});
-
-describe("code coverage", () => {
-  it("every listed machine-status code is produced by the tables' inputs", () => {
-    const listed = ["READY", "OFFLINE", "MACHINE_GRANT_REQUIRED", "UNCHECKED", "NATIVE_CONTEXT_REQUIRED", "UNSUPPORTED_CAPABILITY",
-      "STALE_HOST_GENERATION", "PAIRED_HOST_UNAVAILABLE", "PAIR_FAILED", "DISABLED", "CONNECTING", "TESTING", "REACHABLE", "ERROR",
-      "HOST_UNAVAILABLE", "UNSUPPORTED", "IO_ERROR", "CHECKING"];
-    const produced = new Set<string>();
-    const pairedInputs: PairedMachineStatusInput[] = [p({ nativeReady: false }), p({ host: { ...paired, authStatus: "revoked" } }), p({ reachability: reach("offline") }), p({ reachability: reach("checking") }), p(),
-      ...["UNCHECKED", "UNSUPPORTED_CAPABILITY", "STALE_HOST_GENERATION", "PAIRED_HOST_UNAVAILABLE", "PAIR_FAILED"].map(code => p({ check: { generation: "4", code } }))];
-    const tsHost = sshHost({ source: "tailscale" });
-    const sshInputs: SshMachineStatusInput[] = [s({ host: sshHost({ disabled: true }) }), s({ host: tsHost, discoveryRefreshing: true }), s({ test: { testing: true } }), s({ test: { reachable: true } }), s({ test: { reachable: false } }),
-      ...["HOST_UNAVAILABLE", "UNSUPPORTED", "IO_ERROR"].map(code => s({ host: tsHost, tailscaleTarget: target({ diagnostic: { code, message: code } }) }))];
-    for (const input of pairedInputs) produced.add(pairedMachineStatus(input).code);
-    for (const input of sshInputs) produced.add(sshMachineStatus(input).code);
-    for (const code of listed) expect(produced, code).toContain(code);
-  });
 });

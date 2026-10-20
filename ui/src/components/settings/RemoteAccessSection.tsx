@@ -28,7 +28,10 @@ type PairingGatewayStatus = RemoteGatewayStatus & {
   controlChannelConnected?: boolean;
 };
 
-export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boolean } = {}) {
+const ACCESS_DESCRIPTION = "Controls incoming device access only. Outbound machines and workspace sessions are unaffected. Device access is not a machine-project grant.";
+
+/** hideTitle: the embedding container already shows the "Access to This Machine" title. */
+export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: { detailsOnly?: boolean; hideTitle?: boolean } = {}) {
   const [status, setStatus] = useState<PairingGatewayStatus | null>(null);
   const statusRef = useRef<PairingGatewayStatus | null>(null);
   statusRef.current = status;
@@ -135,11 +138,11 @@ export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boo
 
   return (
     <section aria-labelledby="settings-remote-heading" aria-label="Access to This Machine">
-      <SettingsHeading
-        icon={<Radio />}
-        title="Access to This Machine"
-        description="Controls incoming device access only. Outbound machines and workspace sessions are unaffected. Device access is not a machine-project grant."
-      />
+      {hideTitle ? (
+        <p className="mb-4 mt-2 text-[12px] text-muted-foreground">{ACCESS_DESCRIPTION}</p>
+      ) : (
+        <SettingsHeading icon={<Radio />} title="Access to This Machine" description={ACCESS_DESCRIPTION} />
+      )}
       <h2 id="settings-remote-heading" className="sr-only">
         Remote Access
       </h2>

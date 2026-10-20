@@ -44,6 +44,8 @@ function ConfirmGroup({ label, message, confirmLabel, confirmAria, cancelAria, b
 
 export interface PairedDetailsProps extends PairedStatusInput {
   busy: boolean;
+  /** Re-pairing goes through the Ferryx account, so it needs a signed-in session. */
+  signedIn: boolean;
   repairRequested: boolean;
   confirmingForget: boolean;
   onCheck: () => void;
@@ -76,13 +78,26 @@ function PairedDetails(props: PairedDetailsProps) {
         <Button type="button" variant="outline" size="sm" aria-label={`Check capabilities for ${name}`} disabled={busy || !host.generation || !nativeReady} onClick={props.onCheck}>
           Check capabilities
         </Button>
-        <Button type="button" variant="outline" size="sm" aria-label={`Re-pair ${name}`} disabled={busy} onClick={props.onRepair}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          aria-label={`Re-pair ${name}`}
+          disabled={busy || !props.signedIn}
+          aria-describedby={props.signedIn ? undefined : "machine-drawer-repair-reason"}
+          onClick={props.onRepair}
+        >
           Re-pair
         </Button>
         <Button type="button" variant="outline" size="sm" aria-label={`Forget ${name}`} disabled={busy || !host.generation} onClick={props.onForget}>
           Forget credentials
         </Button>
       </div>
+      {!props.signedIn ? (
+        <p id="machine-drawer-repair-reason" data-testid="machine-drawer-repair-reason" className="text-[12px] text-muted-foreground">
+          Sign in to re-pair.
+        </p>
+      ) : null}
       {props.repairRequested ? (
         <p role="status" data-code="REPAIR_REQUIRES_ENROLLMENT" className="text-[12px] text-muted-foreground">
           Re-pairing goes through your Ferryx account. Sign in above, issue an enrollment code, and run{" "}

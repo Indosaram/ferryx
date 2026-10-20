@@ -139,7 +139,9 @@ export function MachineRow({ rowKey, name, actionName, kindLabel, pathChip, stat
           <Button type="button" variant="outline" size="sm" ref={detailsRef} aria-label={`Details for ${actionName}`} aria-haspopup="dialog" onClick={onDetails}>
             Details
           </Button>
-          <DropdownMenu>
+          {/* Non-modal: "Details" opens a Radix Dialog (the drawer) straight from a menu item, and a
+              modal menu closing while that Dialog mounts can leave body pointer-events:none. */}
+          <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
               <Button type="button" variant="ghost" size="sm" className="size-8 p-0" aria-label={`More actions for ${actionName}`}>
                 <MoreHorizontal className="size-4" aria-hidden="true" />

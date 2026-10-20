@@ -10,7 +10,7 @@ export function ThisMachineSection() {
       </header>
       <details open className="rounded-lg border border-border p-4">
         <summary className="cursor-pointer text-[13px] font-medium">Access to This Machine</summary>
-        <RemoteAccessSection />
+        <RemoteAccessSection hideTitle />
       </details>
     </section>
   );
