@@ -73,7 +73,7 @@ export function newSummary({ runId, platform, host, revisions = {}, startedAt = 
     revisions: { head: null, handoverV1Rev: null, baselineRev: null, ...revisions },
     hooks: {},
     artifacts: {},
-    releaseDaemon: { before: null, after: null, unchanged: null },
+    releaseDaemon: { path: null, before: null, after: null, unchanged: null, state: null },
     scenarios: SCENARIO_IDS.map((id) => newScenarioResult(id, platform)),
     carryover: [],
     teardown: { killed: [], refused: [], jobsRemoved: [], dirsRemoved: [], leftovers: [] },

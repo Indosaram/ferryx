@@ -97,29 +97,36 @@ export function selfTestExitCode(summary) {
 /**
  * Throwaway worktree for the self-test: `git worktree add` of this checkout's HEAD under the
  * host's worktree root, then `git apply` of the patch. Returns the worktree path and a remover.
+ * The handle goes to `register` as soon as the worktree exists, so a later setup failure (submodule,
+ * apply, bun install) still leaves the caller's teardown a worktree to remove.
  */
-async function prepareSelfTestWorktree({ host, agent, runId, source }) {
+export async function prepareSelfTestWorktree({ host, agent, runId, source, register }) {
   const slug = `selftest-reload-${runId.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
   const worktree = worktreePaths(host, slug).worktree;
   const head = (await agent.call('exec', { command: 'git', args: ['-C', source, 'rev-parse', 'HEAD'] })).stdout.trim();
-  const steps = [
-    ['-C', host.canonical, 'worktree', 'add', '--detach', worktree, head],
-    // The ghostty submodule is cloned from the canonical clone's local module dir (file transport).
-    ['-C', worktree, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive'],
-    ['-C', worktree, 'apply', joinFor(host.platform, worktree, 'scripts', 'qa', 'daemon-lifetime', SELF_TEST_PATCH)],
-  ];
-  for (const args of steps) {
+  const git = async (args) => {
     const r = await agent.call('exec', { command: 'git', args, deadlineMs: 900_000 });
     if (r.status !== 0) throw new GuardError('SELF_TEST_SETUP_FAILED', `git ${args.join(' ')} exited ${r.status}: ${r.stderr}`);
-  }
+  };
+  await git(['-C', host.canonical, 'worktree', 'add', '--detach', worktree, head]);
+  const handle = {
+    worktree,
+    head,
+    remove: async () => {
+      for (const args of [['-C', host.canonical, 'worktree', 'remove', '--force', worktree], ['-C', host.canonical, 'worktree', 'prune']]) {
+        const r = await agent.call('exec', { command: 'git', args, deadlineMs: 900_000 });
+        if (r.status !== 0) throw new Error(`git ${args.join(' ')} exited ${r.status}: ${r.stderr}`);
+      }
+    },
+  };
+  register(handle);
+  // The ghostty submodule is cloned from the canonical clone's local module dir (file transport).
+  await git(['-C', worktree, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive']);
+  await git(['-C', worktree, 'apply', joinFor(host.platform, worktree, 'scripts', 'qa', 'daemon-lifetime', SELF_TEST_PATCH)]);
   // A fresh worktree has no ui/node_modules; tauri's beforeBuildCommand (bun run --cwd ui build) needs them.
   const deps = await agent.call('exec', { command: 'bun', args: ['install', '--cwd', joinFor(host.platform, worktree, 'ui'), '--frozen-lockfile'], deadlineMs: 900_000 });
   if (deps.status !== 0) throw new GuardError('SELF_TEST_SETUP_FAILED', `bun install exited ${deps.status}: ${deps.stderr}`);
-  const remove = async () => {
-    await agent.call('exec', { command: 'git', args: ['-C', host.canonical, 'worktree', 'remove', '--force', worktree] });
-    await agent.call('exec', { command: 'git', args: ['-C', host.canonical, 'worktree', 'prune'] });
-  };
-  return { worktree, head, remove };
+  return handle;
 }
 
 /** Every runner must exist for every scenario id, and the summary must list them all. */
@@ -143,6 +150,69 @@ export function artifactPaths({ platform, targetDir, productName, name }) {
   const exe = platform === 'windows' ? 'ferryx.exe' : 'ferryx';
   const cli = platform === 'windows' ? 'ferryx-cli.exe' : 'ferryx-cli';
   return { name, appPath: null, guiExecutable: joinFor(platform, dbg, exe), cliExecutable: joinFor(platform, dbg, cli), daemonSource: joinFor(platform, dbg, exe) };
+}
+
+/**
+ * The owner record a release daemon writes: server.rs get_runtime_dir() of a release build
+ * (/tmp/rorca-<uid>, or %LOCALAPPDATA%\Ferryx\runtime with the product's TEMP fallback) + owner.json.
+ */
+export function releaseOwnerFile(platform, { uid, localAppData }) {
+  if (platform !== 'windows') return `/tmp/rorca-${uid}/owner.json`;
+  if (!localAppData) throw new GuardError('RELEASE_OWNER_PATH', 'the host reported no LOCALAPPDATA/TEMP directory');
+  return path.win32.join(localAppData, 'Ferryx', 'runtime', 'owner.json');
+}
+
+/**
+ * Release receipt from the owner record read before and after the run: absent (no release owner
+ * either time; nothing to compare), continuous (the same record), or changed.
+ */
+export function releaseContinuity(before, after) {
+  if (before === null && after === null) return { state: 'absent', unchanged: true };
+  if (before === after) return { state: 'continuous', unchanged: true };
+  return { state: 'changed', unchanged: false };
+}
+
+/** Teardown steps for the run's optional resources, read when teardown runs (they may appear mid-setup). */
+export function teardownExtras(live, summary) {
+  return [
+    ['self-test-worktree', async () => {
+      if (!live.selfTest) return;
+      await live.selfTest.remove();
+      if (summary.selfTestReload) summary.selfTestReload.removed = true;
+    }],
+    ['mahord', async () => { if (live.mahord) await live.mahord.close(); }],
+  ];
+}
+
+/**
+ * Runs `work`, then `teardown` and `stop` on every exit path. A work failure is kept in
+ * summary.error and rethrown after teardown with exit code 2; a failing teardown or stop is recorded
+ * beside it and never replaces it.
+ */
+export async function runWithTeardown({ summary, work, teardown, stop, writeSummary, log = () => {} }) {
+  let runError = null;
+  try {
+    await work();
+  } catch (error) {
+    runError = error;
+    summary.error = String(error?.stack ?? error);
+    writeSummary();
+    log({ runError: String(error?.message ?? error) });
+  }
+  for (const [key, fn] of [['teardownError', teardown], ['stopError', stop]]) {
+    try {
+      await fn();
+    } catch (error) {
+      if (!runError) throw error;
+      summary[key] = String(error?.stack ?? error);
+    }
+  }
+  if (runError) {
+    summary.finishedAt = new Date().toISOString();
+    summary.exitCode = 2;
+    writeSummary();
+    throw runError;
+  }
 }
 
 /**
@@ -192,9 +262,11 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
       }
     });
   }
+  summary.releaseDaemon.state = 'unverified';
+  summary.releaseDaemon.unchanged = null;
   await step('release-daemon-snapshot', async () => {
     summary.releaseDaemon.after = await prodSnapshot();
-    summary.releaseDaemon.unchanged = summary.releaseDaemon.before === summary.releaseDaemon.after;
+    Object.assign(summary.releaseDaemon, releaseContinuity(summary.releaseDaemon.before, summary.releaseDaemon.after));
   });
   for (const [name, fn] of extra) await step(name, fn);
   summary.teardown.errors = errors;
@@ -236,12 +308,11 @@ async function main() {
   const env = isolationEnv({ runId, layout, platform: host.platform });
   assertIsolatedEnv(env, { runId, forbidden, platform: host.platform });
 
-  // Production daemon snapshot: recorded, compared at the end, never touched.
-  const prodRuntime = host.platform === 'windows' ? null : `/tmp/rorca-${uid}`;
-  const prodSnapshot = async () => {
-    if (!prodRuntime) return (await agent.call('exec', { command: 'powershell.exe', args: ['-NoProfile', '-Command', "Get-Content -Raw (Join-Path $env:LOCALAPPDATA 'Ferryx\\owner.json') -ErrorAction SilentlyContinue"] })).stdout.trim() || null;
-    return agent.call('readFile', { file: `${prodRuntime}/owner.json` });
-  };
+  // Release daemon owner record: recorded, compared at the end, never touched. readFile returns
+  // null only for an absent file; an unreadable one throws instead of passing for absent.
+  const localAppData = host.platform === 'windows' ? (await agent.call('exec', { command: 'powershell.exe', args: ['-NoProfile', '-Command', "if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } elseif ($env:TEMP) { $env:TEMP } else { 'C:\\ProgramData' }"] })).stdout.trim() : null;
+  summary.releaseDaemon.path = releaseOwnerFile(host.platform, { uid, localAppData });
+  const prodSnapshot = () => agent.call('readFile', { file: summary.releaseDaemon.path });
   summary.releaseDaemon.before = await prodSnapshot();
 
   if (opts.selfCheck) {
@@ -259,10 +330,8 @@ async function main() {
   // original error is kept in summary.error and rethrown after teardown (exit 2), never masked.
   const qaRoots = [...runDirs, host.cargoTarget, `${host.cargoTarget}-baseline`];
   const jobs = createJobs({ host, agent, runId, layout, uid });
-  let selfTest = null;
-  let mahord = null;
-  let runError = null;
-  try {
+  const live = { selfTest: null, mahord: null };
+  const work = async () => {
     for (const dir of Object.values(layout)) await agent.call('mkdir', { dir, mode: 0o700 });
     await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'tauri.qa.json'), content: JSON.stringify(tauriQaConfig(runId), null, 2) });
     const worktree = host.transport.kind === 'local' ? REPO : worktreePaths(host, opts.worktreeSlug).worktree;
@@ -272,8 +341,10 @@ async function main() {
     if (opts.baselineWorktree) summary.revisions.baselineRev = await remoteGit(opts.baselineWorktree);
     writeSummary();
     // --self-test-reload: every QA artifact is built from the patched throwaway worktree.
-    selfTest = opts.selfTestReload ? await prepareSelfTestWorktree({ host, agent, runId, source: worktree }) : null;
-    if (selfTest) summary.selfTestReload = { worktree: selfTest.worktree, head: selfTest.head, patch: SELF_TEST_PATCH, expect: 'Q04 FAIL' };
+    const selfTest = opts.selfTestReload ? await prepareSelfTestWorktree({ host, agent, runId, source: worktree, register: (h) => {
+      live.selfTest = h;
+      summary.selfTestReload = { worktree: h.worktree, head: h.head, patch: SELF_TEST_PATCH, expect: 'Q04 FAIL', removed: false };
+    } }) : null;
     const buildFrom = selfTest ? selfTest.worktree : worktree;
     const plan = buildPlan({ host, runDir, worktree: buildFrom, v1Worktree: opts.v1Worktree, baselineWorktree: opts.baselineWorktree });
     const productName = tauriQaConfig(runId).productName;
@@ -331,7 +402,7 @@ async function main() {
     for (const art of Object.values(artifacts)) {
       for (const exe of [art.guiExecutable, art.daemonExecutable].filter(Boolean)) assertQaExecutable(exe, { allowedRoots, forbidden, platform: host.platform });
     }
-    mahord = host.gui.kind === 'mahord' ? await connectMahord(host.gui, { log }) : null;
+    const mahord = live.mahord = host.gui.kind === 'mahord' ? await connectMahord(host.gui, { log }) : null;
     const gui = createGuiDriver({ host, agent, runId, layout, allowedRoots, forbidden, mahord, guiEnv: { ...(host.guiEnv ?? {}), ...env } });
     if (host.platform === 'windows') {
       const launcher = await import('node:fs').then((fs) => fs.readFileSync(path.join(HERE, 'fixtures', 'windows-gui-launcher.ps1'), 'utf8'));
@@ -403,30 +474,17 @@ async function main() {
       if (result.id === 'Q00') applyQ00Gate(summary);
     }
     summary.carryover = ctx.carry;
+  };
 
-  } catch (error) {
-    runError = error;
-    summary.error = String(error?.stack ?? error);
-    writeSummary();
-    log({ runError: String(error?.message ?? error) });
-  }
-
-  await teardownRun({
-    summary, agent, jobs, host, layout, runDirs, qaRoots, localEvidence, prodSnapshot,
-    extra: [['self-test-worktree', async () => { if (selfTest) await selfTest.remove(); }], ['mahord', async () => { if (mahord) await mahord.close(); }]],
+  await runWithTeardown({
+    summary, work, writeSummary, log, stop: () => agent.stop(),
+    teardown: () => teardownRun({ summary, agent, jobs, host, layout, runDirs, qaRoots, localEvidence, prodSnapshot, extra: teardownExtras(live, summary) }),
   });
-  await agent.stop();
-  if (runError) {
-    summary.finishedAt = new Date().toISOString();
-    summary.exitCode = 2;
-    writeSummary();
-    throw runError;
-  }
   summary.finishedAt = new Date().toISOString();
   summary.exitCode = computeExitCode(summary, selected);
   // The self-test inverts the verdict: a FAIL of Q04 against the reload build is the pass, as long
   // as teardown was clean and the release daemon untouched.
-  if (selfTest && summary.teardown.leftovers.length === 0 && summary.releaseDaemon.unchanged) summary.exitCode = selfTestExitCode(summary);
+  if (live.selfTest && summary.teardown.leftovers.length === 0 && summary.releaseDaemon.unchanged) summary.exitCode = selfTestExitCode(summary);
   const problems = validateSummary(summary);
   if (problems.length) { summary.schemaProblems = problems; summary.exitCode = 2; }
   writeSummary();
