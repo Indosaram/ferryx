@@ -172,6 +172,84 @@ fn admission_error(error: owner_admission::AdmissionError) -> IpcError {
     }
 }
 
+/// QA receipt (`<barrier>/daemon-client-busy.receipt.jsonl`) written by the client when it
+/// reports DAEMON_BUSY, so a runner observes the typed outcome instead of log prose.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+pub(crate) const DAEMON_CLIENT_BUSY_RECEIPT: &str = "daemon-client-busy";
+
+/// Classifies the owner after an accepted connection answered no handshake frame in time. An
+/// Alive or Unknown owner is busy, never replaced; only an Absent owner keeps the I/O error.
+async fn classify_silent_handshake(socket_path: &Path) -> IpcError {
+    let paths = owner_admission::AdmissionPaths::for_endpoint(socket_path);
+    let state = crate::ipc::run_blocking(move || {
+        Ok(owner_admission::classify_owner(&owner_admission::RuntimeProbe { paths: &paths }))
+    })
+    .await;
+    match state {
+        Ok(owner_admission::OwnerState::Absent) => {
+            IpcError::new(IpcErrorCode::IoError, "Handshake timed out")
+        }
+        Ok(state) => daemon_busy(
+            format!("A daemon owner exists but did not answer the handshake in time ({state:?})"),
+            "handshakeSilent",
+            &state,
+        ),
+        Err(error) => error,
+    }
+}
+
+/// The one DAEMON_BUSY shape for a live or unidentifiable owner that did not answer.
+fn daemon_busy(message: String, cause: &str, state: &owner_admission::OwnerState) -> IpcError {
+    tracing::warn!(code = "DAEMON_BUSY", cause, ?state, "{message}");
+    IpcError::new(IpcErrorCode::DaemonBusy, message).with_details(json!({
+        "type": "daemonOwnerBusy",
+        "cause": cause,
+        "ownerState": format!("{state:?}"),
+    }))
+}
+
+/// The receipt line for one DAEMON_BUSY outcome: the code the caller receives and its details.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+fn daemon_busy_settlement(error: &IpcError) -> serde_json::Value {
+    json!({
+        "name": DAEMON_CLIENT_BUSY_RECEIPT,
+        "code": error.code.to_string(),
+        "details": error.details,
+    })
+}
+
+/// Appends the receipt through `channel`, correlated to the armed listener stall when there is one.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+fn record_daemon_busy(channel: &crate::ipc::qa_barrier::QaBarrierChannel, error: &IpcError) {
+    let operation_id = crate::ipc::qa_barrier::pending_listener_stall(channel.dir(), channel.run_id())
+        .map(|spec| spec.operation_id)
+        .or_else(|| channel.operation_id())
+        .unwrap_or_default();
+    channel.append_receipt(DAEMON_CLIENT_BUSY_RECEIPT, &operation_id, daemon_busy_settlement(error));
+}
+
+/// QA builds: records a DAEMON_BUSY outcome for the runner; every other error and build is a no-op.
+async fn report_daemon_busy(error: &IpcError) {
+    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+    if error.code == IpcErrorCode::DaemonBusy {
+        let error = error.clone();
+        let _ = crate::ipc::run_blocking(move || {
+            match crate::ipc::qa_barrier::active_channel() {
+                Some(channel) => record_daemon_busy(&channel, &error),
+                None => {
+                    if let Ok(channel) = crate::ipc::qa_barrier::QaBarrierChannel::from_env() {
+                        record_daemon_busy(&channel, &error);
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await;
+    }
+    #[cfg(not(all(feature = "local-split-qa", feature = "native-terminal")))]
+    let _ = error;
+}
+
 async fn wait_for_daemon_ready<R>(reader: R, timeout: Duration) -> Result<(), IpcError>
 where
     R: AsyncBufRead + Unpin,
@@ -2555,9 +2633,10 @@ impl DaemonClient {
         self.wait_for_supervised_daemon(DAEMON_READY_TIMEOUT)
             .await
             .map_err(|_| {
-                IpcError::new(
-                    IpcErrorCode::DaemonBusy,
+                daemon_busy(
                     format!("A daemon owner exists but did not answer in time ({state:?})"),
+                    "endpointUnavailable",
+                    state,
                 )
             })
     }
@@ -2599,6 +2678,14 @@ impl DaemonClient {
     /// One attempt: the credential is read before the port is, so the token presented can never be
     /// newer than the port it is presented to.
     async fn connect_and_handshake_once(&self) -> Result<ActiveConnection, IpcError> {
+        let result = self.connect_and_handshake_attempt().await;
+        if let Err(error) = &result {
+            report_daemon_busy(error).await;
+        }
+        result
+    }
+
+    async fn connect_and_handshake_attempt(&self) -> Result<ActiveConnection, IpcError> {
         let credential = read_transport_token_for(&self.socket_path);
         let stream = self.connect_or_spawn().await?;
         // A port was published but the credential that authenticates it was not on disk when it
@@ -2638,12 +2725,15 @@ impl DaemonClient {
         })?;
 
         let mut line = String::new();
-        let bytes_read = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
-            .await
-            .map_err(|_| IpcError::new(IpcErrorCode::IoError, "Handshake timed out"))?
-            .map_err(|e| {
-                IpcError::new(IpcErrorCode::IoError, format!("Handshake read failed: {e}"))
-            })?;
+        // The endpoint accepted but sent no frame within the handshake wait: the owner is
+        // classified, and a live or unidentifiable one is reported busy rather than as an I/O
+        // failure. Nothing is started, reloaded or killed on this path.
+        let read = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await;
+        let Ok(read) = read else {
+            return Err(classify_silent_handshake(&self.socket_path).await);
+        };
+        let bytes_read = read
+            .map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Handshake read failed: {e}")))?;
         if bytes_read == 0 || line.trim().is_empty() {
             return Err(IpcError::new(
                 IpcErrorCode::IoError,
@@ -5610,12 +5700,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_client_handshake_read_times_out() {
+        // The endpoint vanished after accepting: the owner is Absent, so the timeout stays an
+        // I/O error rather than a busy owner.
         let dir = tempdir().unwrap();
-        let socket_path = dir.path().join("test_handshake_timeout.sock");
+        let (error, _) = silent_handshake_outcome(dir.path(), true).await;
+        assert_eq!(error.code, IpcErrorCode::IoError);
+        assert_eq!(error.message, "Handshake timed out");
+    }
+
+    /// Runs one Ping against an endpoint that accepts and reads the handshake but never answers,
+    /// and returns the client's error plus the files the client left beside the endpoint.
+    /// `unlink_after_accept` removes the socket once the handshake arrived (an Absent owner).
+    async fn silent_handshake_outcome(dir: &Path, unlink_after_accept: bool) -> (IpcError, Vec<String>) {
+        let socket_path = dir.join("daemon.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
         let (handshake_seen_tx, handshake_seen_rx) = oneshot::channel();
         let (release_server_tx, release_server_rx) = oneshot::channel::<()>();
 
+        let unlink_path = socket_path.clone();
         let server_task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (read_half, _write_half) = stream.into_split();
@@ -5626,7 +5728,12 @@ mod tests {
                 serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
                 DaemonRequest::Handshake { .. }
             ));
+            if unlink_after_accept {
+                drop(listener);
+                std::fs::remove_file(&unlink_path).unwrap();
+            }
             let _ = handshake_seen_tx.send(());
+            // Held open, silently, until the test has the client's outcome.
             let _ = release_server_rx.await;
         });
 
@@ -5639,16 +5746,107 @@ mod tests {
             .expect("server must receive the handshake")
             .expect("server must signal handshake receipt");
 
-        let result = tokio::time::timeout(Duration::from_secs(6), request_task)
+        // Five-second handshake wait plus one bounded owner classification.
+        let result = tokio::time::timeout(Duration::from_secs(10), request_task)
             .await
             .expect("client must stop waiting after the five-second handshake timeout")
             .expect("client request task must not panic");
         let error = result.expect_err("silent daemon must fail the handshake");
-        assert_eq!(error.code, IpcErrorCode::IoError);
-        assert_eq!(error.message, "Handshake timed out");
 
         let _ = release_server_tx.send(());
         server_task.await.unwrap();
+        let mut files: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        (error, files)
+    }
+
+    /// Todo 2 (a): an accepted connection that answers no handshake while its owner cannot be
+    /// identified (lock free, endpoint silent: row 4) is DAEMON_BUSY, and the client starts
+    /// nothing - no admission lock, no pending-start marker, no owner record.
+    #[tokio::test]
+    async fn a_silent_handshake_with_an_unknown_owner_is_daemon_busy_and_starts_nothing() {
+        let dir = tempdir().unwrap();
+        let (error, files) = silent_handshake_outcome(dir.path(), false).await;
+        assert_eq!(error.code, IpcErrorCode::DaemonBusy, "{}", error.message);
+        let details = error.details.expect("busy details");
+        assert_eq!(details["type"], "daemonOwnerBusy");
+        assert_eq!(details["cause"], "handshakeSilent");
+        assert!(details["ownerState"].as_str().unwrap().starts_with("Unknown"), "{details}");
+        assert_eq!(files, vec!["daemon.sock".to_string()], "the client must create no admission or start file");
+    }
+
+    /// Todo 2 (a) with a live owner: the daemon lock is held and owner.json names a live process
+    /// (this test process, with its real start time), so the silent owner is Alive and busy.
+    #[tokio::test]
+    async fn a_silent_handshake_with_an_alive_owner_is_daemon_busy() {
+        let dir = tempdir().unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(dir.path().join("daemon.lock"))
+            .unwrap();
+        let _held = crate::daemon::server::DaemonLockFile::try_lock(lock).expect("take the daemon lock");
+        let pid = std::process::id();
+        let start_time = owner_admission::process_start_time(pid).expect("own start time");
+        owner_admission::write_record_atomic(
+            &dir.path().join(owner_admission::OWNER_FILE),
+            &owner_admission::OwnerRecord {
+                pid,
+                start_time,
+                generation_key: "gen-test".to_string(),
+                epoch: 1,
+                supervisor_pid: None,
+                supervisor_start_time: None,
+            },
+        )
+        .unwrap();
+
+        let (error, files) = silent_handshake_outcome(dir.path(), false).await;
+        assert_eq!(error.code, IpcErrorCode::DaemonBusy, "{}", error.message);
+        let details = error.details.expect("busy details");
+        assert_eq!(details["cause"], "handshakeSilent");
+        assert_eq!(details["ownerState"], format!("{:?}", owner_admission::OwnerState::Alive { pid, start_time }));
+        assert_eq!(
+            files,
+            vec!["daemon.lock".to_string(), "daemon.sock".to_string(), owner_admission::OWNER_FILE.to_string()],
+            "the client must create no admission or start file"
+        );
+    }
+
+    /// The QA receipt carries the typed outcome, correlated to the armed listener stall.
+    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+    #[test]
+    fn a_daemon_busy_outcome_is_recorded_as_a_qa_receipt_for_the_armed_stall() {
+        use crate::ipc::qa_barrier::{QaBarrierChannel, LISTENER_STALL_BARRIER};
+        let root = tempdir().unwrap();
+        std::fs::write(
+            root.path().join(format!("{LISTENER_STALL_BARRIER}.arm.json")),
+            json!({ "name": LISTENER_STALL_BARRIER, "runId": "run-q04", "operationId": "q04-run-q04" }).to_string(),
+        )
+        .unwrap();
+        let channel = QaBarrierChannel::new(root.path().to_path_buf(), "run-q04".to_string());
+        let mut receipts = channel.subscribe_receipts();
+        let busy = daemon_busy(
+            "busy".to_string(),
+            "handshakeSilent",
+            &owner_admission::OwnerState::Unknown { reason: "silent".to_string() },
+        );
+
+        record_daemon_busy(&channel, &busy);
+
+        let event = receipts.try_recv().expect("the receipt event is published once the line is written");
+        assert_eq!(event.name, DAEMON_CLIENT_BUSY_RECEIPT);
+        assert_eq!(event.payload["code"], "DAEMON_BUSY");
+        assert_eq!(event.payload["runId"], "run-q04");
+        assert_eq!(event.payload["operationId"], "q04-run-q04");
+        assert_eq!(event.payload["details"]["cause"], "handshakeSilent");
+        let text = std::fs::read_to_string(root.path().join(format!("{DAEMON_CLIENT_BUSY_RECEIPT}.receipt.jsonl"))).unwrap();
+        let line: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(line, event.payload);
     }
 
     fn init_test_git_repo() -> tempfile::TempDir {
