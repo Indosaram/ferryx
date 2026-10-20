@@ -145,6 +145,63 @@ export function artifactPaths({ platform, targetDir, productName, name }) {
   return { name, appPath: null, guiExecutable: joinFor(platform, dbg, exe), cliExecutable: joinFor(platform, dbg, cli), daemonSource: joinFor(platform, dbg, exe) };
 }
 
+/**
+ * Teardown for every exit path of a run, including a build or setup failure before any scenario.
+ * Recorded pids only, QA-named jobs only, the run's own dirs only. A failing step is recorded in
+ * teardown.errors (and as a leftover, so the run is never clean) and does not stop later steps;
+ * the run dirs are removed only when nothing is left behind and no step failed.
+ */
+export async function teardownRun({ summary, agent, jobs, host, layout, runDirs, qaRoots, localEvidence, prodSnapshot, extra = [] }) {
+  const errors = [];
+  const step = async (name, fn) => {
+    try { await fn(); } catch (error) { errors.push({ step: name, error: String(error?.message ?? error) }); }
+  };
+  // The run dir (and its logs/) is removed below: copy every log into the evidence first, so a
+  // FAIL keeps the GUI and daemon logs that explain it (r3 Q00 lost gui-g1.log this way).
+  await step('copy-logs', async () => {
+    const listed = await agent.call('exec', { command: 'node', args: ['-e', 'try{console.log(JSON.stringify(require("fs").readdirSync(process.argv[1])))}catch{console.log("[]")}', layout.logs] });
+    for (const name of JSON.parse(listed.stdout || '[]')) {
+      const text = await agent.call('readFile', { file: joinFor(host.platform, layout.logs, name) });
+      if (text !== null) writeFileSync(path.join(localEvidence, `runlog-${name}`), text);
+    }
+  });
+  await step('kill-recorded', async () => {
+    const t = await agent.call('teardownRecorded');
+    summary.teardown.killed = t.killed.map((e) => ({ pid: e.pid, role: e.role }));
+    summary.teardown.refused = t.refused;
+  });
+  await step('remove-jobs', async () => {
+    for (const name of await jobs.listQaJobs()) {
+      await jobs.remove(name);
+      summary.teardown.jobsRemoved.push(name);
+    }
+    if (host.platform === 'linux') await agent.call('exec', { command: 'systemctl', args: ['--user', 'daemon-reload'] });
+  });
+  await step('leftovers', async () => {
+    summary.teardown.leftovers = [
+      ...(await jobs.listQaJobs()).map((j) => ({ kind: 'job', name: j })),
+      ...(await agent.call('table')).filter((r) => r.executable && qaRoots.some((root) => r.executable.toLowerCase().startsWith(root.toLowerCase()))).map((r) => ({ kind: 'process', pid: r.pid, executable: r.executable })),
+    ];
+  });
+  if (summary.teardown.leftovers.length === 0 && errors.length === 0) {
+    await step('remove-run-dirs', async () => {
+      for (const dir of runDirs) {
+        await agent.call('remove', { target: dir });
+        summary.teardown.dirsRemoved.push(dir);
+        if (await agent.call('exists', { file: dir })) summary.teardown.leftovers.push({ kind: 'dir', path: dir });
+      }
+    });
+  }
+  await step('release-daemon-snapshot', async () => {
+    summary.releaseDaemon.after = await prodSnapshot();
+    summary.releaseDaemon.unchanged = summary.releaseDaemon.before === summary.releaseDaemon.after;
+  });
+  for (const [name, fn] of extra) await step(name, fn);
+  summary.teardown.errors = errors;
+  summary.teardown.leftovers.push(...errors.map((e) => ({ kind: 'teardown-error', ...e })));
+  return summary.teardown;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const host = hostFor(opts.platform);
@@ -197,180 +254,174 @@ async function main() {
     return 0;
   }
 
-  for (const dir of Object.values(layout)) await agent.call('mkdir', { dir, mode: 0o700 });
-  await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'tauri.qa.json'), content: JSON.stringify(tauriQaConfig(runId), null, 2) });
-  const worktree = host.transport.kind === 'local' ? REPO : worktreePaths(host, opts.worktreeSlug).worktree;
-  const remoteGit = async (dir) => ({ dir, head: (await agent.call('exec', { command: 'git', args: ['-C', dir, 'rev-parse', 'HEAD'] })).stdout.trim(), dirty: (await agent.call('exec', { command: 'git', args: ['-C', dir, 'status', '--porcelain', '--untracked-files=no'] })).stdout.trim().split('\n').filter(Boolean) });
-  summary.revisions.buildTree = await remoteGit(worktree);
-  if (opts.v1Worktree) summary.revisions.handoverV1Rev = await remoteGit(opts.v1Worktree);
-  if (opts.baselineWorktree) summary.revisions.baselineRev = await remoteGit(opts.baselineWorktree);
-  writeSummary();
-  // --self-test-reload: every QA artifact is built from the patched throwaway worktree.
-  const selfTest = opts.selfTestReload ? await prepareSelfTestWorktree({ host, agent, runId, source: worktree }) : null;
-  if (selfTest) summary.selfTestReload = { worktree: selfTest.worktree, head: selfTest.head, patch: SELF_TEST_PATCH, expect: 'Q04 FAIL' };
-  const buildFrom = selfTest ? selfTest.worktree : worktree;
-  const plan = buildPlan({ host, runDir, worktree: buildFrom, v1Worktree: opts.v1Worktree, baselineWorktree: opts.baselineWorktree });
-  const productName = tauriQaConfig(runId).productName;
-  const artifacts = {};
-  const keys = {};
-  const version = (await agent.call('exec', { command: 'git', args: ['-C', buildFrom, 'show', 'HEAD:src-tauri/Cargo.toml'] })).stdout.match(/^version = "([^"]+)"/m)?.[1];
-  for (const name of ['A', 'B', 'C', 'bump', 'v1bump', 'baseline']) {
-    const step = plan[name];
-    if (!step) continue;
-    assertQaBuild(step);
-    const built = await agent.call('exec', { command: step.command, args: step.args, cwd: step.cwd, env: step.env, deadlineMs: 4 * 3_600_000 });
-    writeFileSync(path.join(localEvidence, `build-${name}.log`), `exit ${built.status}\n${built.stdout}\n${built.stderr}`);
-    if (built.status !== 0) throw new GuardError('BUILD_FAILED', `${name} exited ${built.status}`);
-    if (name === 'baseline') {
-      artifacts.baseline = { name, daemonExecutable: joinFor(host.platform, step.env.CARGO_TARGET_DIR, 'debug', host.platform === 'windows' ? 'ferryx.exe' : 'ferryx') };
-      continue;
-    }
-    // Each build overwrites the same bundle path: move it to a per-artifact dir under the run dir.
-    const fresh = artifactPaths({ platform: host.platform, targetDir: host.cargoTarget, productName, name });
-    const destRoot = joinFor(host.platform, runDir, 'artifacts', name);
-    await agent.call('mkdir', { dir: destRoot });
-    // Host paths are parsed with the host's path flavour: posix basename/dirname do not split C:\ paths.
-    const hostPath = host.platform === 'windows' ? path.win32 : path.posix;
-    const src = fresh.appPath ?? hostPath.dirname(fresh.guiExecutable);
-    if (host.platform === 'mac') await agent.call('exec', { command: 'ditto', args: [src, joinFor(host.platform, destRoot, path.basename(src))] });
-    else await agent.call('exec', host.platform === 'windows'
-      ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', `Copy-Item -LiteralPath '${fresh.guiExecutable}','${fresh.cliExecutable}' -Destination '${destRoot}'`] }
-      : { command: 'cp', args: [fresh.guiExecutable, fresh.cliExecutable, destRoot] });
-    const art = host.platform === 'mac'
-      ? { name, appPath: joinFor(host.platform, destRoot, path.basename(src)), guiExecutable: macGuiExecutable(joinFor(host.platform, destRoot, path.basename(src))), cliExecutable: fresh.cliExecutable }
-      : { name, appPath: null, guiExecutable: joinFor(host.platform, destRoot, hostPath.basename(fresh.guiExecutable)), cliExecutable: joinFor(host.platform, destRoot, hostPath.basename(fresh.cliExecutable)) };
-    if (host.platform === 'mac') {
-      // todo 13: each QA artifact carries its own signed helper and a re-sealed outer signature.
-      // mac artifacts live on this Mac: assemble + ad-hoc re-seal in-process (scripts/build-notarized-local.mjs order).
-      const helper = signMacQaBundle({ appPath: art.appPath, entitlements: joinFor(host.platform, destRoot, 'outer-entitlements.plist'), workspaceDir: destRoot });
-      writeFileSync(path.join(localEvidence, `helper-${name}.log`), `${JSON.stringify(helper, null, 2)}\n`);
-      for (const target of [art.appPath, joinFor(host.platform, art.appPath, 'Contents', 'Helpers', 'Ferryx Daemon.app')]) {
-        const v = await run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', target]);
-        writeFileSync(path.join(localEvidence, `codesign-${name}-${path.basename(target)}.log`), `exit ${v.status}\n${v.stderr}`);
-        if (v.status !== 0) throw new GuardError('CODESIGN_FAILED', target);
-      }
-      art.daemonSource = joinFor(host.platform, art.appPath, 'Contents', 'Helpers', 'Ferryx Daemon.app', 'Contents', 'MacOS', 'ferryx');
-    } else {
-      art.daemonSource = art.guiExecutable;
-    }
-    art.sha256 = await agent.call('sha256', { file: art.daemonSource });
-    keys[name] = generationKey(version, art.sha256);
-    artifacts[name] = art;
-  }
-  assertDistinctKeys({ A: keys.A, B: keys.B, C: keys.C });
-  summary.artifacts = Object.fromEntries(Object.entries(artifacts).map(([k, v]) => [k, { ...v, key: keys[k] ?? null }]));
-  writeSummary();
-
-  const allowedRoots = [runDir, host.cargoTarget, `${host.cargoTarget}-baseline`];
-  for (const art of Object.values(artifacts)) {
-    for (const exe of [art.guiExecutable, art.daemonExecutable].filter(Boolean)) assertQaExecutable(exe, { allowedRoots, forbidden, platform: host.platform });
-  }
-  const mahord = host.gui.kind === 'mahord' ? await connectMahord(host.gui, { log }) : null;
+  // Everything from here on can leave QA processes, jobs or dirs behind, so every exit path - a
+  // build or setup failure before any scenario included - runs the same teardown below. The
+  // original error is kept in summary.error and rethrown after teardown (exit 2), never masked.
+  const qaRoots = [...runDirs, host.cargoTarget, `${host.cargoTarget}-baseline`];
   const jobs = createJobs({ host, agent, runId, layout, uid });
-  const gui = createGuiDriver({ host, agent, runId, layout, allowedRoots, forbidden, mahord, guiEnv: { ...(host.guiEnv ?? {}), ...env } });
-  if (host.platform === 'windows') {
-    const launcher = await import('node:fs').then((fs) => fs.readFileSync(path.join(HERE, 'fixtures', 'windows-gui-launcher.ps1'), 'utf8'));
-    await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'launcher.ps1'), content: launcher });
-  }
-  const repoDir = joinFor(host.platform, runDir, 'repo');
-  await agent.call('mkdir', { dir: repoDir });
-  await agent.call('exec', { command: 'git', args: ['init', '-q', repoDir] });
-
-  const ctx = {
-    platform: host.platform, runId, host, agent, jobs, gui, mahord, layout, uid, artifacts, keys, hooks: summary.hooks,
-    revisions: summary.revisions, isolationEnv: env, repoDir, workspaceId: 'qa-daemon-lifetime', workspaceRegistered: false,
-    stagedRoot: joinFor(host.platform, layout.data, 'daemon-runtime'),
-    qaRoots: [...runDirs, host.cargoTarget, `${host.cargoTarget}-baseline`], guiExecutables: Object.values(artifacts).map((a) => a.guiExecutable).filter(Boolean),
-    hostUser: host.transport.user ?? os.userInfo().username, sshPort: 20000 + (Number(runId.slice(-5, -1)) % 20000),
-    evidenceDir: localEvidence.split(path.sep).join('/'), state: {}, carry: [], sshd: null,
-    writeEvidence: async (file, content) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, content); },
-    replaceAppOnDisk: async (from, to) => {
-      // The on-disk app at A's path is replaced by B's bytes (same version, different build).
-      if (host.platform === 'mac') {
-        await agent.call('exec', { command: 'rm', args: ['-rf', from.appPath] });
-        await agent.call('exec', { command: 'ditto', args: [to.appPath, from.appPath] });
-      } else {
-        await agent.call('exec', host.platform === 'windows'
-          ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', `Copy-Item -Force '${to.guiExecutable}' '${from.guiExecutable}'`] }
-          : { command: 'cp', args: ['-f', to.guiExecutable, from.guiExecutable] });
-      }
-      return { artifact: { ...from, name: to.name, sha256: await agent.call('sha256', { file: from.guiExecutable }) } };
-    },
-    typeIntoSession: async (guiProc, sessionId, text) => {
-      // macOS: no desktop input on the user's MacBook; the data-protocol write is the GUI-equivalent
-      // client write. Remote hosts type through MahoRD into the focused QA window.
-      if (mahord) {
-        // MahoRD drops '-' and '_' on maho-win and types no newline: refuse untypable text instead
-        // of letting a marker arrive mangled, and send Enter as a key.
-        const line = text.replace(/\r?\n$/, '');
-        if (host.platform === 'windows' && !mahordTypable(line)) throw new Error(`MahoRD cannot type '-' or '_' on maho-win: ${line}`);
-        await mahord.type(line);
-        return text.endsWith('\n') ? mahord.key('Enter') : true;
-      }
-      const { conn } = { conn: ctx.state.conn };
-      return conn.call({ type: 'write', sessionId, data: Buffer.from(text).toString('base64') });
-    },
-  };
-
-  const ordered = summary.scenarios.filter((s) => selected.includes(s.id));
-  for (const result of ordered) {
-    if (!result.applicable) continue;
-    if (result.id !== 'Q00' && applyQ00Gate(summary)) break;
-    const missing = missingHooksFor(result.id, summary.hooks);
-    if (missing.length) {
-      block(result, 'HOOK_MISSING', missing.map((m) => `${m.id}: ${m.owner}`).join('; '));
-      writeSummary();
-      continue;
-    }
-    result.startedAt = new Date().toISOString();
-    const t0 = Date.now();
-    log({ scenario: result.id, title: scenarioById(result.id).title });
-    try {
-      await RUNNERS[result.id](ctx, result);
-    } catch (error) {
-      result.assertions.push({ name: 'scenario completed without an exception', ok: false, detail: String(error?.stack ?? error) });
-      writeFileSync(path.join(localEvidence, `${result.id}-exception.log`), String(error?.stack ?? error));
-      result.evidence.push(path.join(localEvidence, `${result.id}-exception.log`));
-    }
-    result.durationMs = Date.now() - t0;
-    settle(result);
+  let selfTest = null;
+  let mahord = null;
+  let runError = null;
+  try {
+    for (const dir of Object.values(layout)) await agent.call('mkdir', { dir, mode: 0o700 });
+    await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'tauri.qa.json'), content: JSON.stringify(tauriQaConfig(runId), null, 2) });
+    const worktree = host.transport.kind === 'local' ? REPO : worktreePaths(host, opts.worktreeSlug).worktree;
+    const remoteGit = async (dir) => ({ dir, head: (await agent.call('exec', { command: 'git', args: ['-C', dir, 'rev-parse', 'HEAD'] })).stdout.trim(), dirty: (await agent.call('exec', { command: 'git', args: ['-C', dir, 'status', '--porcelain', '--untracked-files=no'] })).stdout.trim().split('\n').filter(Boolean) });
+    summary.revisions.buildTree = await remoteGit(worktree);
+    if (opts.v1Worktree) summary.revisions.handoverV1Rev = await remoteGit(opts.v1Worktree);
+    if (opts.baselineWorktree) summary.revisions.baselineRev = await remoteGit(opts.baselineWorktree);
     writeSummary();
-    if (result.id === 'Q00') applyQ00Gate(summary);
-  }
-  summary.carryover = ctx.carry;
-
-  // ---- teardown: recorded pids only, QA-named jobs only, own run dir only ----
-  // The run dir (and its logs/) is removed below: copy every log into the evidence first, so a
-  // FAIL keeps the GUI and daemon logs that explain it (r3 Q00 lost gui-g1.log this way).
-  const listed = await agent.call('exec', { command: 'node', args: ['-e', 'try{console.log(JSON.stringify(require("fs").readdirSync(process.argv[1])))}catch{console.log("[]")}', layout.logs] });
-  for (const name of JSON.parse(listed.stdout || '[]')) {
-    const text = await agent.call('readFile', { file: joinFor(host.platform, layout.logs, name) });
-    if (text !== null) writeFileSync(path.join(localEvidence, `runlog-${name}`), text);
-  }
-  const t = await agent.call('teardownRecorded');
-  summary.teardown.killed = t.killed.map((e) => ({ pid: e.pid, role: e.role }));
-  summary.teardown.refused = t.refused;
-  for (const name of await jobs.listQaJobs()) {
-    await jobs.remove(name);
-    summary.teardown.jobsRemoved.push(name);
-  }
-  if (host.platform === 'linux') await agent.call('exec', { command: 'systemctl', args: ['--user', 'daemon-reload'] });
-  summary.teardown.leftovers = [
-    ...(await jobs.listQaJobs()).map((j) => ({ kind: 'job', name: j })),
-    ...(await agent.call('table')).filter((r) => r.executable && ctx.qaRoots.some((root) => r.executable.toLowerCase().startsWith(root.toLowerCase()))).map((r) => ({ kind: 'process', pid: r.pid, executable: r.executable })),
-  ];
-  if (summary.teardown.leftovers.length === 0) {
-    for (const dir of runDirs) {
-      await agent.call('remove', { target: dir });
-      summary.teardown.dirsRemoved.push(dir);
-      if (await agent.call('exists', { file: dir })) summary.teardown.leftovers.push({ kind: 'dir', path: dir });
+    // --self-test-reload: every QA artifact is built from the patched throwaway worktree.
+    selfTest = opts.selfTestReload ? await prepareSelfTestWorktree({ host, agent, runId, source: worktree }) : null;
+    if (selfTest) summary.selfTestReload = { worktree: selfTest.worktree, head: selfTest.head, patch: SELF_TEST_PATCH, expect: 'Q04 FAIL' };
+    const buildFrom = selfTest ? selfTest.worktree : worktree;
+    const plan = buildPlan({ host, runDir, worktree: buildFrom, v1Worktree: opts.v1Worktree, baselineWorktree: opts.baselineWorktree });
+    const productName = tauriQaConfig(runId).productName;
+    const artifacts = {};
+    const keys = {};
+    const version = (await agent.call('exec', { command: 'git', args: ['-C', buildFrom, 'show', 'HEAD:src-tauri/Cargo.toml'] })).stdout.match(/^version = "([^"]+)"/m)?.[1];
+    for (const name of ['A', 'B', 'C', 'bump', 'v1bump', 'baseline']) {
+      const step = plan[name];
+      if (!step) continue;
+      assertQaBuild(step);
+      const built = await agent.call('exec', { command: step.command, args: step.args, cwd: step.cwd, env: step.env, deadlineMs: 4 * 3_600_000 });
+      writeFileSync(path.join(localEvidence, `build-${name}.log`), `exit ${built.status}\n${built.stdout}\n${built.stderr}`);
+      if (built.status !== 0) throw new GuardError('BUILD_FAILED', `${name} exited ${built.status}`);
+      if (name === 'baseline') {
+        artifacts.baseline = { name, daemonExecutable: joinFor(host.platform, step.env.CARGO_TARGET_DIR, 'debug', host.platform === 'windows' ? 'ferryx.exe' : 'ferryx') };
+        continue;
+      }
+      // Each build overwrites the same bundle path: move it to a per-artifact dir under the run dir.
+      const fresh = artifactPaths({ platform: host.platform, targetDir: host.cargoTarget, productName, name });
+      const destRoot = joinFor(host.platform, runDir, 'artifacts', name);
+      await agent.call('mkdir', { dir: destRoot });
+      // Host paths are parsed with the host's path flavour: posix basename/dirname do not split C:\ paths.
+      const hostPath = host.platform === 'windows' ? path.win32 : path.posix;
+      const src = fresh.appPath ?? hostPath.dirname(fresh.guiExecutable);
+      if (host.platform === 'mac') await agent.call('exec', { command: 'ditto', args: [src, joinFor(host.platform, destRoot, path.basename(src))] });
+      else await agent.call('exec', host.platform === 'windows'
+        ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', `Copy-Item -LiteralPath '${fresh.guiExecutable}','${fresh.cliExecutable}' -Destination '${destRoot}'`] }
+        : { command: 'cp', args: [fresh.guiExecutable, fresh.cliExecutable, destRoot] });
+      const art = host.platform === 'mac'
+        ? { name, appPath: joinFor(host.platform, destRoot, path.basename(src)), guiExecutable: macGuiExecutable(joinFor(host.platform, destRoot, path.basename(src))), cliExecutable: fresh.cliExecutable }
+        : { name, appPath: null, guiExecutable: joinFor(host.platform, destRoot, hostPath.basename(fresh.guiExecutable)), cliExecutable: joinFor(host.platform, destRoot, hostPath.basename(fresh.cliExecutable)) };
+      if (host.platform === 'mac') {
+        // todo 13: each QA artifact carries its own signed helper and a re-sealed outer signature.
+        // mac artifacts live on this Mac: assemble + ad-hoc re-seal in-process (scripts/build-notarized-local.mjs order).
+        const helper = signMacQaBundle({ appPath: art.appPath, entitlements: joinFor(host.platform, destRoot, 'outer-entitlements.plist'), workspaceDir: destRoot });
+        writeFileSync(path.join(localEvidence, `helper-${name}.log`), `${JSON.stringify(helper, null, 2)}\n`);
+        for (const target of [art.appPath, joinFor(host.platform, art.appPath, 'Contents', 'Helpers', 'Ferryx Daemon.app')]) {
+          const v = await run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', target]);
+          writeFileSync(path.join(localEvidence, `codesign-${name}-${path.basename(target)}.log`), `exit ${v.status}\n${v.stderr}`);
+          if (v.status !== 0) throw new GuardError('CODESIGN_FAILED', target);
+        }
+        art.daemonSource = joinFor(host.platform, art.appPath, 'Contents', 'Helpers', 'Ferryx Daemon.app', 'Contents', 'MacOS', 'ferryx');
+      } else {
+        art.daemonSource = art.guiExecutable;
+      }
+      art.sha256 = await agent.call('sha256', { file: art.daemonSource });
+      keys[name] = generationKey(version, art.sha256);
+      artifacts[name] = art;
     }
+    assertDistinctKeys({ A: keys.A, B: keys.B, C: keys.C });
+    summary.artifacts = Object.fromEntries(Object.entries(artifacts).map(([k, v]) => [k, { ...v, key: keys[k] ?? null }]));
+    writeSummary();
+
+    const allowedRoots = [runDir, host.cargoTarget, `${host.cargoTarget}-baseline`];
+    for (const art of Object.values(artifacts)) {
+      for (const exe of [art.guiExecutable, art.daemonExecutable].filter(Boolean)) assertQaExecutable(exe, { allowedRoots, forbidden, platform: host.platform });
+    }
+    mahord = host.gui.kind === 'mahord' ? await connectMahord(host.gui, { log }) : null;
+    const gui = createGuiDriver({ host, agent, runId, layout, allowedRoots, forbidden, mahord, guiEnv: { ...(host.guiEnv ?? {}), ...env } });
+    if (host.platform === 'windows') {
+      const launcher = await import('node:fs').then((fs) => fs.readFileSync(path.join(HERE, 'fixtures', 'windows-gui-launcher.ps1'), 'utf8'));
+      await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'launcher.ps1'), content: launcher });
+    }
+    const repoDir = joinFor(host.platform, runDir, 'repo');
+    await agent.call('mkdir', { dir: repoDir });
+    await agent.call('exec', { command: 'git', args: ['init', '-q', repoDir] });
+
+    const ctx = {
+      platform: host.platform, runId, host, agent, jobs, gui, mahord, layout, uid, artifacts, keys, hooks: summary.hooks,
+      revisions: summary.revisions, isolationEnv: env, repoDir, workspaceId: 'qa-daemon-lifetime', workspaceRegistered: false,
+      stagedRoot: joinFor(host.platform, layout.data, 'daemon-runtime'),
+      qaRoots, guiExecutables: Object.values(artifacts).map((a) => a.guiExecutable).filter(Boolean),
+      hostUser: host.transport.user ?? os.userInfo().username, sshPort: 20000 + (Number(runId.slice(-5, -1)) % 20000),
+      evidenceDir: localEvidence.split(path.sep).join('/'), state: {}, carry: [], sshd: null,
+      writeEvidence: async (file, content) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, content); },
+      replaceAppOnDisk: async (from, to) => {
+        // The on-disk app at A's path is replaced by B's bytes (same version, different build).
+        if (host.platform === 'mac') {
+          await agent.call('exec', { command: 'rm', args: ['-rf', from.appPath] });
+          await agent.call('exec', { command: 'ditto', args: [to.appPath, from.appPath] });
+        } else {
+          await agent.call('exec', host.platform === 'windows'
+            ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', `Copy-Item -Force '${to.guiExecutable}' '${from.guiExecutable}'`] }
+            : { command: 'cp', args: ['-f', to.guiExecutable, from.guiExecutable] });
+        }
+        return { artifact: { ...from, name: to.name, sha256: await agent.call('sha256', { file: from.guiExecutable }) } };
+      },
+      typeIntoSession: async (guiProc, sessionId, text) => {
+        // macOS: no desktop input on the user's MacBook; the data-protocol write is the GUI-equivalent
+        // client write. Remote hosts type through MahoRD into the focused QA window.
+        if (mahord) {
+          // MahoRD drops '-' and '_' on maho-win and types no newline: refuse untypable text instead
+          // of letting a marker arrive mangled, and send Enter as a key.
+          const line = text.replace(/\r?\n$/, '');
+          if (host.platform === 'windows' && !mahordTypable(line)) throw new Error(`MahoRD cannot type '-' or '_' on maho-win: ${line}`);
+          await mahord.type(line);
+          return text.endsWith('\n') ? mahord.key('Enter') : true;
+        }
+        const { conn } = { conn: ctx.state.conn };
+        return conn.call({ type: 'write', sessionId, data: Buffer.from(text).toString('base64') });
+      },
+    };
+
+    const ordered = summary.scenarios.filter((s) => selected.includes(s.id));
+    for (const result of ordered) {
+      if (!result.applicable) continue;
+      if (result.id !== 'Q00' && applyQ00Gate(summary)) break;
+      const missing = missingHooksFor(result.id, summary.hooks);
+      if (missing.length) {
+        block(result, 'HOOK_MISSING', missing.map((m) => `${m.id}: ${m.owner}`).join('; '));
+        writeSummary();
+        continue;
+      }
+      result.startedAt = new Date().toISOString();
+      const t0 = Date.now();
+      log({ scenario: result.id, title: scenarioById(result.id).title });
+      try {
+        await RUNNERS[result.id](ctx, result);
+      } catch (error) {
+        result.assertions.push({ name: 'scenario completed without an exception', ok: false, detail: String(error?.stack ?? error) });
+        writeFileSync(path.join(localEvidence, `${result.id}-exception.log`), String(error?.stack ?? error));
+        result.evidence.push(path.join(localEvidence, `${result.id}-exception.log`));
+      }
+      result.durationMs = Date.now() - t0;
+      settle(result);
+      writeSummary();
+      if (result.id === 'Q00') applyQ00Gate(summary);
+    }
+    summary.carryover = ctx.carry;
+
+  } catch (error) {
+    runError = error;
+    summary.error = String(error?.stack ?? error);
+    writeSummary();
+    log({ runError: String(error?.message ?? error) });
   }
-  summary.releaseDaemon.after = await prodSnapshot();
-  summary.releaseDaemon.unchanged = summary.releaseDaemon.before === summary.releaseDaemon.after;
-  if (selfTest) await selfTest.remove();
-  if (mahord) await mahord.close();
+
+  await teardownRun({
+    summary, agent, jobs, host, layout, runDirs, qaRoots, localEvidence, prodSnapshot,
+    extra: [['self-test-worktree', async () => { if (selfTest) await selfTest.remove(); }], ['mahord', async () => { if (mahord) await mahord.close(); }]],
+  });
   await agent.stop();
+  if (runError) {
+    summary.finishedAt = new Date().toISOString();
+    summary.exitCode = 2;
+    writeSummary();
+    throw runError;
+  }
   summary.finishedAt = new Date().toISOString();
   summary.exitCode = computeExitCode(summary, selected);
   // The self-test inverts the verdict: a FAIL of Q04 against the reload build is the pass, as long

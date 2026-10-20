@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SCENARIO_IDS, newSummary, selectScenarios, assertion, settle, block, applyQ00Gate, computeExitCode, validateSummary } from './lib/summary.mjs';
 import { readFileSync } from 'node:fs';
-import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths, selfTestExitCode, SELF_TEST_PATCH } from './run.mjs';
+import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths, selfTestExitCode, SELF_TEST_PATCH, teardownRun } from './run.mjs';
 
 const RUN = '20261019t064512z';
 
@@ -107,6 +107,53 @@ test('--self-test-reload runs Q04 against the reload patch and passes only when 
   assert.match(patch, /^\+\s+crate::daemon::supervisor::reload\(\)/m);
   assert.match(patch, /^\+.*"kickstart", "-k"/m);
   assert.match(patch, /^\+.*"--user", "restart"/m);
+});
+
+test('teardown runs every step after a pre-scenario failure and never reports a failed step as clean', async () => {
+  const fakeAgent = ({ failTable = false } = {}) => {
+    const calls = [];
+    return { calls, call: async (method, params) => {
+      calls.push([method, params]);
+      if (method === 'exec') return { status: 0, stdout: '[]', stderr: '' };
+      if (method === 'teardownRecorded') return { killed: [{ pid: 7, role: 'gui-g1' }], refused: [] };
+      if (method === 'table') { if (failTable) throw new Error('table failed'); return []; }
+      if (method === 'remove') return true;
+      if (method === 'exists') return false;
+      return null;
+    } };
+  };
+  const jobs = { removed: [], listQaJobs: async () => (jobs.removed.length ? [] : ['ferryx-qa-x.service']), remove: async (n) => jobs.removed.push(n) };
+  const base = { host: { platform: 'linux' }, layout: { logs: '/s/r/logs' }, runDirs: ['/s/r', '/t/r'], qaRoots: ['/s/r'], localEvidence: '/nonexistent-evidence', prodSnapshot: async () => 'owner' };
+  const ok = newSummary({ runId: RUN, platform: 'linux', host: 'h' });
+  ok.releaseDaemon.before = 'owner';
+  const order = [];
+  const agent = fakeAgent();
+  await teardownRun({ ...base, summary: ok, agent, jobs, extra: [['mahord', async () => order.push('mahord')]] });
+  assert.deepEqual(ok.teardown.killed, [{ pid: 7, role: 'gui-g1' }]);
+  assert.deepEqual(ok.teardown.jobsRemoved, ['ferryx-qa-x.service']);
+  assert.deepEqual(ok.teardown.dirsRemoved, ['/s/r', '/t/r']);
+  assert.deepEqual([ok.teardown.leftovers, ok.teardown.errors, ok.releaseDaemon.unchanged, order], [[], [], true, ['mahord']]);
+  // A failing step is recorded, later steps still run, and the run dirs stay for inspection.
+  jobs.removed = [];
+  const bad = newSummary({ runId: RUN, platform: 'linux', host: 'h' });
+  bad.releaseDaemon.before = 'owner';
+  const badAgent = fakeAgent({ failTable: true });
+  await teardownRun({ ...base, summary: bad, agent: badAgent, jobs });
+  assert.deepEqual(bad.teardown.errors, [{ step: 'leftovers', error: 'table failed' }]);
+  assert.deepEqual(bad.teardown.dirsRemoved, []);
+  assert.ok(!badAgent.calls.some(([m]) => m === 'remove'));
+  assert.equal(bad.releaseDaemon.unchanged, true);
+  assert.equal(computeExitCode(bad, ['Q00']), 1);
+});
+
+test('a build or setup error goes through teardown and is rethrown, not swallowed', () => {
+  const src = readFileSync(new URL('./run.mjs', import.meta.url), 'utf8');
+  const main = src.slice(src.indexOf('async function main()'));
+  const tryAt = main.indexOf('  try {\n');
+  const buildAt = main.indexOf("throw new GuardError('BUILD_FAILED'");
+  const teardownAt = main.indexOf('await teardownRun(');
+  assert.ok(tryAt > 0 && tryAt < buildAt && buildAt < teardownAt, 'builds run inside the try that precedes teardown');
+  assert.match(main.slice(teardownAt), /if \(runError\) \{[^}]*throw runError;/s);
 });
 
 test('artifact paths per platform layout', () => {
