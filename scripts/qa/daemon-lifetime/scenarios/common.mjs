@@ -9,6 +9,18 @@ import { assertion } from '../lib/summary.mjs';
 export const SUPERVISED_START_WAIT_MS = 5_000; // client.rs SUPERVISED_START_WAIT
 export const DAEMON_READY_TIMEOUT_MS = 30_000; // client.rs DAEMON_READY_TIMEOUT
 export const RESPAWN_BACKOFF_MS = 1_000; // supervisor_windows.rs RESPAWN_BACKOFF
+/** owner_admission.rs starting_window_ms(): a younger starting.json is a pending start (row 5b). */
+export const STARTING_WINDOW_MS = DAEMON_READY_TIMEOUT_MS * 2;
+
+/** A QA owner the harness cannot adopt; code is OWNER_GONE, OWNER_UNCONFIRMED or OWNER_STATE_UNRECOVERABLE. */
+export class OwnerStateError extends Error {
+  constructor(code, detail) {
+    super(`${code}: ${JSON.stringify(detail)}`);
+    this.name = 'OwnerStateError';
+    this.code = code;
+    this.detail = detail;
+  }
+}
 
 export function nonce(prefix = 'QA') {
   return `${prefix}_${randomBytes(6).toString('hex').toUpperCase()}`;
@@ -73,9 +85,110 @@ export async function ownerIdentity(ctx, runtimeDir = ctx.layout.runtime) {
   if (ctl) await ctl.close();
   const ownerJson = await ctx.agent.call('readFile', { file: hjoin(runtimeDir, 'owner.json') });
   const owner = ownerJson ? JSON.parse(ownerJson) : null;
+  // The raw serialized field: a Windows FILETIME exceeds 2^53, so JSON.parse would round it.
+  const ownerStartTime = ownerJson ? (/"startTime"\s*:\s*(\d+)/.exec(ownerJson)?.[1] ?? null) : null;
   const pid = hello?.pid ?? owner?.pid ?? null;
   const os = pid ? await ctx.agent.call('probe', { pid }) : null;
-  return { pid, hello, owner, os };
+  return { pid, hello, owner, ownerStartTime, os, platform: ctx.platform };
+}
+
+const LSTART_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * Whether owner.json's startTime (owner_admission.rs process_start_time, decimal string) and the
+ * agent's probe (proc.mjs probeIdentity) name the same process start. Units per platform:
+ *   linux   - both /proc/<pid>/stat starttime clock ticks: exact.
+ *   windows - both CreationTime FILETIME (100ns since 1601; Get-Process StartTime.ToFileTimeUtc): exact.
+ *   mac     - record is microseconds since the Unix epoch (pbi_start_tvsec*1e6+usec); the probe is
+ *             `ps -o lstart` in host-local time at 1s resolution (the mac agent runs on this host),
+ *             so the record's whole seconds must equal the parsed lstart.
+ * Returns false for a missing or unparseable value: an unverifiable start time is no proof.
+ */
+export function ownerStartMatches(platform, recorded, probed) {
+  if (recorded === null || recorded === undefined || !/^\d+$/.test(String(recorded))) return false;
+  if (probed === null || probed === undefined) return false;
+  if (platform === 'linux' || platform === 'windows') return /^\d+$/.test(String(probed)) && BigInt(recorded) === BigInt(probed);
+  if (platform === 'mac') {
+    const m = /^\w{3} (\w{3})\s+(\d+) (\d+):(\d+):(\d+) (\d{4})$/.exec(String(probed).trim());
+    const month = m ? LSTART_MONTHS.indexOf(m[1]) : -1;
+    if (month < 0) return false;
+    const seconds = new Date(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])).getTime() / 1000;
+    return BigInt(recorded) / 1_000_000n === BigInt(seconds);
+  }
+  return false;
+}
+
+/**
+ * An owner is adoptable only when its recorded pid runs (OS probe). owner.json outlives its
+ * daemon, so the record alone never proves liveness. A control Hello is not required: the daemon
+ * spawns owner.json publication (server.rs spawn_owner_publication) before it binds control
+ * (server.rs bind_control_endpoint), so a fresh owner may not answer Hello yet. A Hello that does
+ * answer must name the same pid. When owner.json names that pid, its recorded startTime must match
+ * the probed start time (ownerStartMatches): a reused pid running another process is not the owner.
+ */
+export function confirmOwner(identity) {
+  if (!identity?.pid) return { ok: false, code: 'OWNER_GONE', detail: { pid: null, reason: 'no owner record and no control Hello' } };
+  if (!identity.os) return { ok: false, code: 'OWNER_GONE', detail: { pid: identity.pid, hello: Boolean(identity.hello), reason: 'owner pid has no live process' } };
+  if (identity.hello && identity.hello.pid !== identity.pid) return { ok: false, code: 'OWNER_UNCONFIRMED', detail: { pid: identity.pid, helloPid: identity.hello.pid ?? null, reason: 'control Hello answered for another pid' } };
+  if (identity.owner?.pid === identity.pid && !ownerStartMatches(identity.platform, identity.ownerStartTime, identity.os.startTime)) {
+    return { ok: false, code: 'OWNER_UNCONFIRMED', detail: { pid: identity.pid, platform: identity.platform ?? null, recordedStartTime: identity.ownerStartTime ?? null, probedStartTime: identity.os.startTime ?? null, reason: 'owner.json startTime does not match the live process (pid reuse)' } };
+  }
+  return { ok: true, code: null, detail: { pid: identity.pid } };
+}
+
+/** owner_admission.rs StartingRecord (camelCase); unreadable is its own state, as in row 1. */
+export function parseStarting(text) {
+  if (text === null || text === undefined) return { state: 'none' };
+  try {
+    const record = JSON.parse(text);
+    if (!Number.isInteger(record?.launcherPid) || !Number.isInteger(record?.startedAtUnixMs)) throw new Error('launcherPid/startedAtUnixMs missing');
+    return { state: 'present', record, key: `${record.launcherPid}:${record.startedAtUnixMs}` };
+  } catch (error) {
+    return { state: 'unreadable', error: String(error?.message ?? error) };
+  }
+}
+
+async function readStarting(ctx, runtimeDir) {
+  return parseStarting(await ctx.agent.call('readFile', { file: hjoin(runtimeDir, 'starting.json') }));
+}
+
+/**
+ * owner.json names no live owner. Decides Absent vs a pending start the way admission does
+ * (owner_admission.rs classify_owner rows 5b/6) without comparing host and controller clocks:
+ * a present starting.json is pending until the owner record changes or STARTING_WINDOW_MS has
+ * passed since this observation; the same record still present after that window is older than
+ * the window, so admission ignores it too. Expired keys are kept in ctx.state.expiredStarts so a
+ * later call does not wait on the same record again.
+ *   absent  - no pending start (none, withdrawn or expired)
+ *   owner   - the pending start published owner pid
+ *   unknown - unreadable record or a different start replaced it; never treated as retired
+ */
+export async function awaitPendingStart(ctx, fromPid, runtimeDir = ctx.layout.runtime) {
+  const first = await readStarting(ctx, runtimeDir);
+  if (first.state === 'none') return { state: 'absent' };
+  if (first.state === 'unreadable') return { state: 'unknown', reason: `starting record unreadable: ${first.error}` };
+  const expired = (ctx.state.expiredStarts ??= new Set());
+  if (expired.has(first.key)) return { state: 'absent', expired: first.key };
+  const changed = await ctx.agent.call('waitOwnerChange', { runtimeDir, fromPid, deadlineMs: STARTING_WINDOW_MS });
+  if (changed.owner) return { state: 'owner', pid: changed.owner.pid, starting: first.record, seen: changed.seen };
+  const again = await readStarting(ctx, runtimeDir);
+  if (again.state === 'none') return { state: 'absent', withdrawn: first.key };
+  if (again.state === 'present' && again.key === first.key) {
+    expired.add(first.key);
+    return { state: 'absent', expired: first.key };
+  }
+  if (again.state === 'unreadable') return { state: 'unknown', reason: `starting record unreadable: ${again.error}` };
+  return { state: 'unknown', reason: `a start by launcher pid ${again.record.launcherPid} replaced the pending one`, starting: again.record };
+}
+
+/** Drops the scenario's owner state after its owner retired: that connection is dead. */
+export async function invalidateOwnerState(ctx) {
+  const conn = ctx.state.conn;
+  ctx.state.conn = null;
+  ctx.state.daemon = null;
+  ctx.state.localA = null;
+  // The daemon behind this handle exited; closing only releases the agent-side handle.
+  if (conn) await conn.close().catch(() => {});
 }
 
 /** Registers the QA workspace once and spawns a local session running a counter. */
@@ -137,13 +250,21 @@ export { identityOf, isLive, liveSessions };
 /**
  * Ends the current owner the plan-sanctioned way for QA: quit the GUI, close every QA session,
  * then control RetireWhenIdle (zero live sessions) and await the owner's exit event.
+ * A recorded owner without a live process is retired only when no start is pending
+ * (awaitPendingStart); a pending start that publishes an owner is retired in turn, once.
  */
-export async function retireOwner(ctx) {
+export async function retireOwner(ctx, { depth = 0 } = {}) {
   if (ctx.state.gui) { await ctx.gui.quit(ctx.state.gui).catch(() => {}); ctx.state.gui = null; }
   const owner = await ownerIdentity(ctx);
-  if (!owner.pid) return { retired: true, pid: null };
-  // owner.json outlives its daemon: a recorded pid that no longer runs is already retired.
-  if (!owner.os) return { retired: true, pid: owner.pid, reason: 'owner pid no longer runs' };
+  // owner.json outlives its daemon: a recorded pid that no longer runs is retired only when no
+  // start is pending, because a pending start publishes the next owner (row 5b).
+  if (!owner.pid || !owner.os) {
+    const pending = await awaitPendingStart(ctx, owner.pid);
+    if (pending.state === 'absent') return { retired: true, pid: owner.pid, reason: owner.pid ? 'owner pid no longer runs' : 'no owner record', pending };
+    if (pending.state === 'unknown') return { retired: false, pid: owner.pid, reason: pending.reason, pending };
+    if (depth > 0) return { retired: false, pid: pending.pid, reason: 'another pending start published an owner while retiring', pending };
+    return { ...(await retireOwner(ctx, { depth: depth + 1 })), pending };
+  }
   if (ctx.state.conn) {
     const desc = await ctx.state.conn.describe().catch(() => ({ sessions: [] }));
     for (const s of desc.sessions ?? []) await ctx.state.conn.call({ type: 'close', sessionId: s.backendId }).catch(() => {});
@@ -167,6 +288,9 @@ export async function freshOwner(ctx, artifact, { env = {}, tag = 'QA_A', dataVe
   const changed = await ctx.agent.call('waitOwnerChange', { runtimeDir: ctx.layout.runtime, fromPid, deadlineMs: DAEMON_READY_TIMEOUT_MS * 2 });
   if (!changed.owner) throw new Error(`no new owner after launching ${artifact.name}`);
   const identity = await ownerIdentity(ctx);
+  // Seed only a confirmed owner; a published record whose pid already died is OWNER_GONE.
+  const confirmed = confirmOwner(identity);
+  if (!confirmed.ok) throw new OwnerStateError(confirmed.code, { ...confirmed.detail, artifact: artifact.name, seen: changed.seen });
   await ctx.agent.call('record', { pid: identity.pid, role: `daemon-${artifact.name}`, executable: identity.os.executable });
   ctx.state.daemon = identity;
   ctx.state.conn = await dataConn(ctx, ctx.layout.runtime, { version: dataVersion });
