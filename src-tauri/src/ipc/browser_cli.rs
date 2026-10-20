@@ -1567,6 +1567,40 @@ pub fn browser_cli_socket_path() -> PathBuf {
     crate::daemon::server::get_runtime_dir().join("browser.port")
 }
 
+/// Outcome of starting the browser CLI endpoint. Several GUIs share one runtime directory, so
+/// at most one of them serves `browser.sock` (`browser.port` on Windows) and its token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserCliServerStart {
+    /// This process holds the endpoint lock and serves the endpoint until its listener ends.
+    Serving,
+    /// A live instance already holds the endpoint lock. This process left the endpoint and its
+    /// token untouched and serves no browser CLI endpoint of its own.
+    ServedByPeer,
+}
+
+/// Lock file guarding one browser CLI endpoint (`browser.sock.lock` / `browser.port.lock`).
+fn endpoint_lock_path(endpoint_path: &Path) -> PathBuf {
+    endpoint_path.with_file_name(match endpoint_path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => format!("{name}.lock"),
+        None => "browser.lock".to_string(),
+    })
+}
+
+/// Claims the endpoint for this process. Only the holder of this lock may unlink, bind or
+/// rewrite the endpoint and its token, and it keeps the lock for the listener's lifetime, so a
+/// concurrent start can never delete a live peer's socket or replace its token. The lock is
+/// released by the OS when the holder exits, which lets the next start replace a stale endpoint.
+/// `Ok(None)` means a live peer holds it.
+fn claim_browser_cli_endpoint(
+    endpoint_path: &Path,
+) -> Result<Option<crate::daemon::server::DaemonLockFile>, BrowserError> {
+    let lock_path = endpoint_lock_path(endpoint_path);
+    let file = crate::daemon::server::open_secure_lock_file(&lock_path).map_err(|error| {
+        BrowserError::Internal(format!("Failed to open browser CLI endpoint lock: {error}"))
+    })?;
+    Ok(crate::daemon::server::DaemonLockFile::try_lock(file).ok())
+}
+
 pub fn write_port_file(path: &Path, port: u16) -> Result<(), BrowserError> {
     if let Some(parent) = path.parent() {
         let file_stem = path
@@ -1644,7 +1678,7 @@ pub fn read_port_from_file(path: &Path) -> Result<u16, BrowserError> {
 pub fn start_browser_cli_server<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: Arc<BrowserManager>,
-) -> Result<(), BrowserError> {
+) -> Result<BrowserCliServerStart, BrowserError> {
     start_browser_cli_server_at_path(app, manager, &browser_cli_socket_path())
 }
 
@@ -1653,7 +1687,7 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: Arc<BrowserManager>,
     socket_path: &Path,
-) -> Result<(), BrowserError> {
+) -> Result<BrowserCliServerStart, BrowserError> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
 
@@ -1663,6 +1697,13 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     fs::create_dir_all(&runtime_dir).map_err(|error| BrowserError::Internal(error.to_string()))?;
     fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700))
         .map_err(|error| BrowserError::Internal(error.to_string()))?;
+    let Some(endpoint_lock) = claim_browser_cli_endpoint(socket_path)? else {
+        tracing::info!(
+            path = %socket_path.display(),
+            "Another Ferryx instance serves the browser CLI socket; leaving it untouched"
+        );
+        return Ok(BrowserCliServerStart::ServedByPeer);
+    };
     match fs::symlink_metadata(socket_path) {
         Ok(metadata) if metadata.file_type().is_socket() => fs::remove_file(socket_path)
             .map_err(|error| BrowserError::Internal(error.to_string()))?,
@@ -1685,6 +1726,9 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     write_token_file(&token_path_for(socket_path), token.as_str())?;
 
     tauri::async_runtime::spawn(async move {
+        // Held for as long as this listener serves: releasing it is what allows a later
+        // start to replace the endpoint.
+        let _endpoint_lock = endpoint_lock;
         let listener = match tokio::net::UnixListener::from_std(listener) {
             Ok(listener) => listener,
             Err(error) => {
@@ -1704,14 +1748,14 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
             });
         }
     });
-    Ok(())
+    Ok(BrowserCliServerStart::Serving)
 }
 
 #[cfg(not(unix))]
 pub fn start_browser_cli_server<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: Arc<BrowserManager>,
-) -> Result<(), BrowserError> {
+) -> Result<BrowserCliServerStart, BrowserError> {
     start_browser_cli_server_at_path(app, manager, &browser_cli_socket_path())
 }
 
@@ -1720,13 +1764,20 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: Arc<BrowserManager>,
     port_path: &Path,
-) -> Result<(), BrowserError> {
+) -> Result<BrowserCliServerStart, BrowserError> {
     use std::net::TcpListener;
 
     let runtime_dir = port_path
         .parent()
         .ok_or_else(|| BrowserError::Internal("browser CLI socket path has no parent".into()))?;
     fs::create_dir_all(&runtime_dir).map_err(|error| BrowserError::Internal(error.to_string()))?;
+    let Some(endpoint_lock) = claim_browser_cli_endpoint(port_path)? else {
+        tracing::info!(
+            path = %port_path.display(),
+            "Another Ferryx instance serves the browser CLI port; leaving it untouched"
+        );
+        return Ok(BrowserCliServerStart::ServedByPeer);
+    };
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|error| BrowserError::Internal(format!("Failed to bind TCP listener: {error}")))?;
@@ -1744,6 +1795,9 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     write_token_file(&token_path_for(port_path), token.as_str())?;
 
     tauri::async_runtime::spawn(async move {
+        // Held for as long as this listener serves: releasing it is what allows a later
+        // start to replace the endpoint.
+        let _endpoint_lock = endpoint_lock;
         let listener = match tokio::net::TcpListener::from_std(listener) {
             Ok(listener) => listener,
             Err(error) => {
@@ -1763,7 +1817,7 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
             });
         }
     });
-    Ok(())
+    Ok(BrowserCliServerStart::Serving)
 }
 
 /// Upper bound for a single CLI request line (1 MiB). A connection whose line
@@ -3547,6 +3601,249 @@ mod tests {
             BrowserCliResponse::List {
                 sessions: Vec::new()
             },
+        );
+    }
+
+    fn manager_with_session(workspace_id: &str) -> Arc<BrowserManager> {
+        let manager = Arc::new(BrowserManager::new());
+        manager
+            .register_session(CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: Some(workspace_id.to_string()),
+                worktree_path: None,
+                url: "https://ferryx.dev".to_string(),
+                profile: Some(BrowserProfileId::Default),
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register session");
+        manager
+    }
+
+    /// Workspace ids of the listed sessions. They identify which instance's manager answered.
+    fn listed_workspaces(response: BrowserCliResponse) -> Vec<Option<String>> {
+        match response {
+            BrowserCliResponse::List { sessions } => sessions
+                .into_iter()
+                .map(|session| session.workspace_id)
+                .collect(),
+            other => panic!("expected a list response, got {other:?}"),
+        }
+    }
+
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn browser_cli_second_start_leaves_the_live_endpoint_and_token_untouched() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp_dir.path().join("browser.sock");
+        let token_path = token_path_for(&socket_path);
+
+        let first_app = mock_app();
+        assert_eq!(
+            start_browser_cli_server_at_path(
+                first_app.handle().clone(),
+                manager_with_session("workspace-first"),
+                &socket_path,
+            )
+            .expect("first start"),
+            BrowserCliServerStart::Serving,
+        );
+        let socket_inode = fs::symlink_metadata(&socket_path)
+            .expect("socket metadata")
+            .ino();
+        let token = fs::read(&token_path).expect("read first token");
+
+        let second_app = mock_app();
+        assert_eq!(
+            start_browser_cli_server_at_path(
+                second_app.handle().clone(),
+                manager_with_session("workspace-second"),
+                &socket_path,
+            )
+            .expect("second start"),
+            BrowserCliServerStart::ServedByPeer,
+        );
+
+        assert_eq!(
+            fs::symlink_metadata(&socket_path)
+                .expect("socket metadata after second start")
+                .ino(),
+            socket_inode,
+        );
+        assert_eq!(
+            fs::read(&token_path).expect("read token after second start"),
+            token
+        );
+        let response = send_browser_cli_request_at_path(BrowserCliRequest::List, &socket_path)
+            .await
+            .expect("first instance still answers with its token");
+        assert_eq!(
+            listed_workspaces(response),
+            vec![Some("workspace-first".to_string())]
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn browser_cli_second_start_leaves_the_live_endpoint_and_token_untouched() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let port_path = temp_dir.path().join("browser.port");
+        let token_path = token_path_for(&port_path);
+
+        let first_app = mock_app();
+        assert_eq!(
+            start_browser_cli_server_at_path(
+                first_app.handle().clone(),
+                manager_with_session("workspace-first"),
+                &port_path,
+            )
+            .expect("first start"),
+            BrowserCliServerStart::Serving,
+        );
+        let port_file = fs::read(&port_path).expect("read first port file");
+        let token = fs::read(&token_path).expect("read first token");
+
+        let second_app = mock_app();
+        assert_eq!(
+            start_browser_cli_server_at_path(
+                second_app.handle().clone(),
+                manager_with_session("workspace-second"),
+                &port_path,
+            )
+            .expect("second start"),
+            BrowserCliServerStart::ServedByPeer,
+        );
+
+        assert_eq!(
+            fs::read(&port_path).expect("read port file after second start"),
+            port_file
+        );
+        assert_eq!(
+            fs::read(&token_path).expect("read token after second start"),
+            token
+        );
+        let response = send_browser_cli_request_at_path(BrowserCliRequest::List, &port_path)
+            .await
+            .expect("first instance still answers on its port with its token");
+        assert_eq!(
+            listed_workspaces(response),
+            vec![Some("workspace-first".to_string())]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn browser_cli_start_reclaims_the_endpoint_only_after_the_lock_is_released() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp_dir.path().join("browser.sock");
+        let token_path = token_path_for(&socket_path);
+        // An exited holder leaves its socket node behind.
+        drop(std::os::unix::net::UnixListener::bind(&socket_path).expect("bind stale socket"));
+        let stale_inode = fs::symlink_metadata(&socket_path)
+            .expect("stale socket metadata")
+            .ino();
+
+        let held = crate::daemon::server::DaemonLockFile::try_lock(
+            crate::daemon::server::open_secure_lock_file(&endpoint_lock_path(&socket_path))
+                .expect("open endpoint lock"),
+        )
+        .expect("hold endpoint lock");
+        let app = mock_app();
+        assert_eq!(
+            start_browser_cli_server_at_path(
+                app.handle().clone(),
+                manager_with_session("workspace-blocked"),
+                &socket_path,
+            )
+            .expect("start while the lock is held"),
+            BrowserCliServerStart::ServedByPeer,
+        );
+        assert_eq!(
+            fs::symlink_metadata(&socket_path)
+                .expect("socket metadata while held")
+                .ino(),
+            stale_inode,
+        );
+        assert!(!token_path.exists());
+
+        drop(held);
+        assert_eq!(
+            start_browser_cli_server_at_path(
+                app.handle().clone(),
+                manager_with_session("workspace-reclaimed"),
+                &socket_path,
+            )
+            .expect("start after the lock is released"),
+            BrowserCliServerStart::Serving,
+        );
+        // The stale socket refuses connections, so a successful list proves it was replaced.
+        let response = send_browser_cli_request_at_path(BrowserCliRequest::List, &socket_path)
+            .await
+            .expect("reclaimed endpoint answers");
+        assert_eq!(
+            listed_workspaces(response),
+            vec![Some("workspace-reclaimed".to_string())]
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn browser_cli_start_reclaims_the_endpoint_only_after_the_lock_is_released() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let port_path = temp_dir.path().join("browser.port");
+        let token_path = token_path_for(&port_path);
+        // An exited holder leaves its port and token files behind.
+        fs::write(&port_path, "1").expect("write stale port file");
+        fs::write(&token_path, "stale-token").expect("write stale token");
+
+        let held = crate::daemon::server::DaemonLockFile::try_lock(
+            crate::daemon::server::open_secure_lock_file(&endpoint_lock_path(&port_path))
+                .expect("open endpoint lock"),
+        )
+        .expect("hold endpoint lock");
+        let app = mock_app();
+        assert_eq!(
+            start_browser_cli_server_at_path(
+                app.handle().clone(),
+                manager_with_session("workspace-blocked"),
+                &port_path,
+            )
+            .expect("start while the lock is held"),
+            BrowserCliServerStart::ServedByPeer,
+        );
+        assert_eq!(fs::read_to_string(&port_path).expect("read port file"), "1");
+        assert_eq!(
+            fs::read_to_string(&token_path).expect("read token"),
+            "stale-token"
+        );
+
+        drop(held);
+        assert_eq!(
+            start_browser_cli_server_at_path(
+                app.handle().clone(),
+                manager_with_session("workspace-reclaimed"),
+                &port_path,
+            )
+            .expect("start after the lock is released"),
+            BrowserCliServerStart::Serving,
+        );
+        let response = send_browser_cli_request_at_path(BrowserCliRequest::List, &port_path)
+            .await
+            .expect("reclaimed endpoint answers");
+        assert_eq!(
+            listed_workspaces(response),
+            vec![Some("workspace-reclaimed".to_string())]
         );
     }
 
