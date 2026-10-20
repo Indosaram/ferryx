@@ -337,6 +337,13 @@ async function main() {
   summary.carryover = ctx.carry;
 
   // ---- teardown: recorded pids only, QA-named jobs only, own run dir only ----
+  // The run dir (and its logs/) is removed below: copy every log into the evidence first, so a
+  // FAIL keeps the GUI and daemon logs that explain it (r3 Q00 lost gui-g1.log this way).
+  const listed = await agent.call('exec', { command: 'node', args: ['-e', 'try{console.log(JSON.stringify(require("fs").readdirSync(process.argv[1])))}catch{console.log("[]")}', layout.logs] });
+  for (const name of JSON.parse(listed.stdout || '[]')) {
+    const text = await agent.call('readFile', { file: joinFor(host.platform, layout.logs, name) });
+    if (text !== null) writeFileSync(path.join(localEvidence, `runlog-${name}`), text);
+  }
   const t = await agent.call('teardownRecorded');
   summary.teardown.killed = t.killed.map((e) => ({ pid: e.pid, role: e.role }));
   summary.teardown.refused = t.refused;
