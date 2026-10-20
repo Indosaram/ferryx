@@ -85,6 +85,11 @@ test('CLI arguments', () => {
   assert.throws(() => parseArgs(['--platform', 'mac']), /--all or --only/);
   assert.throws(() => parseArgs(['--platform', 'bsd', '--all']), /--platform/);
   assert.throws(() => parseArgs(['--platform', 'mac', '--all', '--release']), /unknown argument/);
+  assert.equal(parseArgs(['--platform', 'linux', '--all']).worktreeSlug, 'daemon-lifetime-w5-t12-20261018');
+  assert.equal(parseArgs(['--platform', 'windows', '--all', '--worktree-slug', 'w5qa-r3-20261020']).worktreeSlug, 'w5qa-r3-20261020');
+  assert.throws(() => parseArgs(['--platform', 'windows', '--all', '--worktree-slug', '../x']), /--worktree-slug/);
+  const run = readFileSync(new URL('./run.mjs', import.meta.url), 'utf8');
+  assert.ok(!/worktreePaths\(host, '/.test(run), 'every remote worktree path honors --worktree-slug');
 });
 
 test('--self-test-reload runs Q04 against the reload patch and passes only when Q04 fails', () => {

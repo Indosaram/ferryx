@@ -55,8 +55,11 @@ export function signMacQaBundle({ appPath, entitlements, workspaceDir, exec = sy
   return { helper, sealed };
 }
 
+/** QA worktree under the host's worktree root (AGENTS.md); --worktree-slug picks another one. */
+export const DEFAULT_WORKTREE_SLUG = 'daemon-lifetime-w5-t12-20261018';
+
 export function parseArgs(argv) {
-  const out = { platform: null, all: false, only: [], selfCheck: false, selfTestReload: false, evidenceDir: null, runId: null, keepRunDir: false, v1Worktree: null, baselineWorktree: null };
+  const out = { platform: null, all: false, only: [], selfCheck: false, selfTestReload: false, evidenceDir: null, runId: null, keepRunDir: false, v1Worktree: null, baselineWorktree: null, worktreeSlug: DEFAULT_WORKTREE_SLUG };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--platform') out.platform = argv[++i];
@@ -68,9 +71,11 @@ export function parseArgs(argv) {
     else if (a === '--run-id') out.runId = argv[++i];
     else if (a === '--v1-worktree') out.v1Worktree = argv[++i];
     else if (a === '--baseline-worktree') out.baselineWorktree = argv[++i];
+    else if (a === '--worktree-slug') out.worktreeSlug = argv[++i];
     else throw new Error(`unknown argument ${a}`);
   }
   if (!['mac', 'linux', 'windows'].includes(out.platform)) throw new Error('--platform mac|linux|windows is required');
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(out.worktreeSlug ?? '')) throw new Error('--worktree-slug must be lowercase letters, digits and -');
   if (out.selfTestReload) {
     if (out.selfCheck || out.all || out.only.length) throw new Error('--self-test-reload runs Q04 only; it takes no --all, --only or --self-check');
     out.only = ['Q04'];
@@ -163,7 +168,7 @@ async function main() {
   writeSummary();
 
   const agentPath = joinFor(host.platform, host.transport.kind === 'local' ? HERE : '', 'lib', 'agent.mjs');
-  const remoteHarness = host.transport.kind === 'local' ? HERE : joinFor(host.platform, worktreePaths(host, opts.worktreeSlug ?? 'daemon-lifetime-w5-t12-20261018').worktree, 'scripts', 'qa', 'daemon-lifetime');
+  const remoteHarness = host.transport.kind === 'local' ? HERE : joinFor(host.platform, worktreePaths(host, opts.worktreeSlug).worktree, 'scripts', 'qa', 'daemon-lifetime');
   const agent = await startAgent(host, { agentPath: host.transport.kind === 'local' ? agentPath : joinFor(host.platform, remoteHarness, 'lib', 'agent.mjs'), runId, runDir, allowRoots: [host.cargoTarget, `${host.cargoTarget}-baseline`] }, { log });
   const uid = host.platform === 'windows' ? null : Number((await agent.call('exec', { command: 'id', args: ['-u'] })).stdout.trim());
   const home = host.transport.kind === 'local' ? os.homedir() : (await agent.call('exec', host.platform === 'windows' ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', '$env:USERPROFILE'] } : { command: 'sh', args: ['-c', 'printf %s "$HOME"'] })).stdout.trim();
@@ -191,7 +196,7 @@ async function main() {
 
   for (const dir of Object.values(layout)) await agent.call('mkdir', { dir, mode: 0o700 });
   await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'tauri.qa.json'), content: JSON.stringify(tauriQaConfig(runId), null, 2) });
-  const worktree = host.transport.kind === 'local' ? REPO : worktreePaths(host, 'daemon-lifetime-w5-t12-20261018').worktree;
+  const worktree = host.transport.kind === 'local' ? REPO : worktreePaths(host, opts.worktreeSlug).worktree;
   const remoteGit = async (dir) => ({ dir, head: (await agent.call('exec', { command: 'git', args: ['-C', dir, 'rev-parse', 'HEAD'] })).stdout.trim(), dirty: (await agent.call('exec', { command: 'git', args: ['-C', dir, 'status', '--porcelain', '--untracked-files=no'] })).stdout.trim().split('\n').filter(Boolean) });
   summary.revisions.buildTree = await remoteGit(worktree);
   if (opts.v1Worktree) summary.revisions.handoverV1Rev = await remoteGit(opts.v1Worktree);
