@@ -61,6 +61,7 @@ import {
   REFERENCE_PROMPT_STALE_MESSAGE,
 } from "./chat/referencePromptAnswer";
 import {
+  REFERENCE_OUTCOME_UNKNOWN_CODE,
   REFERENCE_SUBMIT_MAX_CHARS,
   referenceAnswerIsSingleChoice,
   referenceChatRoute,
@@ -841,6 +842,19 @@ type ChatMutationOutcome =
   | { readonly ok: true; readonly data: Record<string, unknown> }
   | { readonly ok: false; readonly code: string; readonly message: string; readonly retryable: boolean };
 
+function submittedFileKey(target: ReferenceTargetRef, id: string): string {
+  return `${referenceTargetKey(target)}\u0000${id}`;
+}
+
+/** Validated receipts are owned by every durable held row still naming their mention. */
+function heldChatFileIsReferenced(target: ReferenceTargetRef, file: ReferenceFileReceipt): boolean {
+  referenceQueues.refresh(target);
+  const path = referenceMentionPathOf(file.mentionText);
+  return path !== null && referenceQueues.read(target).some(
+    (row) => row.text.includes(referenceMentionFor(path).trimEnd()),
+  );
+}
+
 /**
  * One mutation, as the frozen envelope carries it. The route answers the frozen ScopeResult, and
  * a refusal before the mutation answers the machine error envelope; both are read here.
@@ -864,9 +878,9 @@ async function postChatMutation(
   } catch (error) {
     return {
       ok: false,
-      code: "NETWORK_ERROR",
+      code: REFERENCE_OUTCOME_UNKNOWN_CODE,
       message: error instanceof Error ? error.message : String(error),
-      retryable: true,
+      retryable: false,
     };
   }
   let parsed: unknown = null;
@@ -886,7 +900,7 @@ async function postChatMutation(
   }
   return {
     ok: false,
-    code: chatStatusErrorCode(response.status),
+    code: REFERENCE_OUTCOME_UNKNOWN_CODE,
     message: `The reference-chat request failed with status ${response.status}.`,
     retryable: false,
   };
@@ -1170,6 +1184,8 @@ export const RemoteHostConnection: React.FC<{
   const chatOlderGenerationRef = useRef(0);
   const [chatPrompt, setChatPrompt] = useState<ReferencePrompt | null>(null);
   const chatPromptIdRef = useRef<string | null>(null);
+  const chatPromptRevisionRef = useRef<string | null>(null);
+  const chatPromptGenerationRef = useRef(0);
   const chatComposerRef = useRef<MobileChatComposerHandle | null>(null);
   const [chatScreenRevision, setChatScreenRevision] = useState<string | null>(null);
   const [chatTypedAnswer, setChatTypedAnswer] = useState<ReferencePromptAnswer | null>(null);
@@ -1179,6 +1195,8 @@ export const RemoteHostConnection: React.FC<{
   const [chatGatewayAnswer, setChatGatewayAnswer] = useState<{ scope: string; identity: ChatGatewayIdentity } | null>(null);
   /** The provider session id the host published for THIS pane; null means unknown, never guessed. */
   const [chatProviderSession, setChatProviderSession] = useState<string | null>(null);
+  /** Bumped when a history read is refused TARGET_EXPIRED, so the pane's session rows are re-read. */
+  const [chatSessionRowsTick, setChatSessionRowsTick] = useState(0);
   const [chatComposerNotice, setChatComposerNotice] = useState<string | null>(null);
   // The fence the newest read was issued under: a response for another one is dropped.
   const chatFenceRef = useRef<ReferenceHistoryFence | null>(null);
@@ -1203,6 +1221,9 @@ export const RemoteHostConnection: React.FC<{
   const selectionEventReceivedRef = useRef(false);
   const confirmationInFlightRef = useRef(false);
   const confirmationRequeuedRef = useRef(false);
+  /* A timed-out account selection whose machine answer is still in flight. It may land late
+     only while no newer selection, back-out or connection change has replaced it. */
+  const lateSelectionRef = useRef<RemoteContextOption | null>(null);
   const workspaceRefreshVersionRef = useRef(0);
   const confirmationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -1263,6 +1284,7 @@ export const RemoteHostConnection: React.FC<{
     optimisticSocketSessionIdRef.current = null;
     optimisticSocketClosedRef.current = false;
     pendingSelectionRef.current = null;
+    lateSelectionRef.current = null;
     selectionRequestAcceptedRef.current = false;
     selectionEventReceivedRef.current = false;
     confirmationInFlightRef.current = false;
@@ -1555,7 +1577,8 @@ export const RemoteHostConnection: React.FC<{
           ...modelRef.current,
           context: {
             ...modelRef.current.context,
-            activeTabId: state.context.activeTabId ?? modelRef.current.context.activeTabId,
+            // The tab strip is keyed by session id, not by the desktop's own pane id.
+            activeTabId: activeSessionId,
             activeTerminal: active,
             daemonEpoch: state.context.daemonEpoch ?? modelRef.current.context.daemonEpoch,
           },
@@ -1565,13 +1588,13 @@ export const RemoteHostConnection: React.FC<{
           if (prev.context.worktreeSlug !== chosenWorktree) return prev;
           if (
             prev.context.activeTerminal?.sessionId === activeSessionId &&
-            prev.context.activeTabId === state.context.activeTabId
+            prev.context.activeTabId === activeSessionId
           ) return prev;
           return {
             ...prev,
             context: {
               ...prev.context,
-              activeTabId: state.context.activeTabId ?? prev.context.activeTabId,
+              activeTabId: activeSessionId,
               activeTerminal: active,
               daemonEpoch: state.context.daemonEpoch ?? prev.context.daemonEpoch,
             },
@@ -1675,9 +1698,16 @@ export const RemoteHostConnection: React.FC<{
           return null;
         }
 
-        const projsData = projRes.status >= 200 && projRes.status < 300
+        let projsData = projRes.status >= 200 && projRes.status < 300
           ? JSON.parse(new TextDecoder().decode(projRes.body))
           : null;
+        if (projsData?.desktopLocalSnapshotExists === true) {
+          const scoped = await activeTunnelConnection.transport.fetchLike("/api/v1/workspace/projects?scope=desktopLocal", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (scoped.status < 200 || scoped.status >= 300) return null;
+          projsData = JSON.parse(new TextDecoder().decode(scoped.body));
+        }
         const sessData = sessRes.status >= 200 && sessRes.status < 300
           ? JSON.parse(new TextDecoder().decode(sessRes.body))
           : null;
@@ -1719,10 +1749,17 @@ export const RemoteHostConnection: React.FC<{
         // If an initial account target or selected model exists, retain or focus that machine context
         const currentTarget = initialAccountTargetRef.current;
         const currentModel = modelRef.current;
-        const currentWs = currentTarget?.workspaceId ?? currentModel.context.workspaceId ?? projectsList[0]?.workspaceId ?? null;
-        const currentSlug = currentTarget?.worktreeSlug ?? currentModel.context.worktreeSlug ?? null;
-        const currentLabel = currentTarget?.worktreeLabel ?? currentModel.context.worktreeLabel ?? currentSlug ?? "main";
-        const requestedSessionId = currentModel.context.activeTerminal?.sessionId ?? null;
+        const requestedWs = currentTarget?.workspaceId ?? currentModel.context.workspaceId;
+        // A refresh never moves an existing selection to another project: the user's
+        // terminal and input stay on the workspace they chose even when it is offline.
+        // Only the very first pick falls back to a ready desktop member.
+        const currentWs = requestedWs ?? (projsData?.desktopLocalSnapshotExists === true
+          ? projectsList.find((project: { availability: string }) => project.availability === "ready")?.workspaceId ?? null
+          : projectsList[0]?.workspaceId ?? null);
+        const retainedWorkspace = currentWs === requestedWs;
+        const currentSlug = retainedWorkspace ? currentTarget?.worktreeSlug ?? currentModel.context.worktreeSlug ?? null : null;
+        const currentLabel = retainedWorkspace ? currentTarget?.worktreeLabel ?? currentModel.context.worktreeLabel ?? currentSlug ?? "main" : "main";
+        const requestedSessionId = retainedWorkspace ? currentModel.context.activeTerminal?.sessionId ?? null : null;
 
         // The pending target's exact session outranks any remembered preference: a
         // background refresh must never resolve a chosen session to the worktree's first
@@ -1730,7 +1767,7 @@ export const RemoteHostConnection: React.FC<{
         const preferredSid = currentWs
           ? getAccountPreferredSessionId(relayUrl, machineId, currentWs, currentSlug)
           : null;
-        const pendingSid = currentTarget?.sessionId ?? null;
+        const pendingSid = retainedWorkspace ? currentTarget?.sessionId ?? null : null;
         const candidateSid = pendingSid ?? preferredSid ?? requestedSessionId;
         const candidateEpoch = pendingSid
           ? currentTarget?.daemonEpoch ?? sessionEpochsRef.current.get(pendingSid) ?? null
@@ -1924,6 +1961,7 @@ export const RemoteHostConnection: React.FC<{
     }
     creationSessionsRef.current = null;
     pendingSelectionRef.current = null;
+    lateSelectionRef.current = null;
     selectionRequestAcceptedRef.current = false;
     selectionEventReceivedRef.current = false;
     confirmationInFlightRef.current = false;
@@ -2154,6 +2192,8 @@ export const RemoteHostConnection: React.FC<{
         setCreationError("Desktop did not confirm the selected worktree. Please retry or go back.");
       }
       clearPendingSelection();
+      // The picker is released, but the attempt's own bounded request may still answer.
+      lateSelectionRef.current = option;
     }, CONFIRMATION_TIMEOUT_MS);
   }, [clearPendingSelection]);
 
@@ -2164,6 +2204,8 @@ export const RemoteHostConnection: React.FC<{
     if (!token || pendingSelectionRef.current) return false;
     // A picker can reuse an option object; each attempt needs its own identity.
     const option = { ...requestedOption };
+    lateSelectionRef.current = null;
+    const attemptIsCurrent = () => pendingSelectionRef.current === option || lateSelectionRef.current === option;
     setCreationError(null);
     creationSessionsRef.current = createTerminal ? new Set([
       ...(model.context.terminalTabs?.flatMap((tab) => tab.sessionId ? [tab.sessionId] : []) ?? []),
@@ -2199,6 +2241,7 @@ export const RemoteHostConnection: React.FC<{
         const sessListRes = await activeTunnelConnection.transport.fetchLike("/api/v1/sessions", {
           headers: { Authorization: `Bearer ${token}` },
         });
+        if (!attemptIsCurrent()) return false;
 
         if (sessListRes.status < 200 || sessListRes.status >= 300) {
           throw new Error(`Machine sessions query failed (${sessListRes.status})`);
@@ -2308,6 +2351,7 @@ export const RemoteHostConnection: React.FC<{
             },
             body: JSON.stringify(createPayload),
           });
+          if (!attemptIsCurrent()) return false;
 
           if (createRes.status >= 200 && createRes.status < 300) {
             targetSession = JSON.parse(new TextDecoder().decode(createRes.body));
@@ -2373,6 +2417,8 @@ export const RemoteHostConnection: React.FC<{
           }));
 
           setInitialAccountTarget(null);
+          // A late answer that lands supersedes its own timeout banner.
+          setCreationError(null);
           clearPendingSelection(true);
           return true;
         }
@@ -2395,7 +2441,7 @@ export const RemoteHostConnection: React.FC<{
       if (initialAccountTargetRef.current || selectionEventReceivedRef.current) void confirmSelection(option);
       return true;
     } catch (error) {
-      if (pendingSelectionRef.current !== option) return false;
+      if (!attemptIsCurrent()) return false;
       const message = error instanceof Error ? error.message : "Selection request failed";
       setCreationError(message);
       clearPendingSelection();
@@ -2499,6 +2545,8 @@ export const RemoteHostConnection: React.FC<{
           (current.worktreeSlug ?? null) === worktreeSlug &&
           current.activeTerminal?.sessionId === sessionId;
         lastFollowedRef.current = { connection, key };
+        // A newer desktop focus supersedes any timed-out attempt still waiting on its answer.
+        lateSelectionRef.current = null;
         if (alreadyShown) return;
         const applied = await selectContextRef.current({
           machineId,
@@ -2575,10 +2623,58 @@ export const RemoteHostConnection: React.FC<{
      The chat never opens a raw terminal socket: the explicit terminal mode owns that, and the
      chat would otherwise be a second writer into the same pane with no ordering between them.
      ------------------------------------------------------------------------- */
-  const chatAgentType =
-    model.context.terminalTabs?.find((tab) => tab.id === model.context.activeTabId)?.agentType ?? null;
-  const chatActivity =
-    model.context.terminalTabs?.find((tab) => tab.id === model.context.activeTabId)?.activityState ?? null;
+  /* Declared above the auth early return so the hook count is identical on the
+     login screen and after pairing; a hook below the guard changes the order. */
+  const isAccountMode = Boolean(accountSessionToken);
+  const activeMachineInventory = activeTunnelConnection
+    ? accountDiscovery.sessionInventories[activeTunnelConnection.machine.machineId] ?? null
+    : null;
+  inventoryRef.current = activeMachineInventory;
+
+  /* Pane rows render from the model's tab strip, which is a snapshot taken when the model
+     was built. Observations arrive afterwards, so the live inventory wins over the snapshot
+     for the matching epoch: a pane must not be frozen on the state it was built with.
+     An observation whose epoch contradicts the pane is never applied. */
+  const paneTabsWithObservedActivity = (tabs: RemoteTerminalTabInfo[] | undefined) => {
+    if (!tabs || tabs.length === 0) return tabs;
+    const entries = activeMachineInventory?.entries ?? [];
+    if (entries.length === 0) return tabs;
+    return tabs.map((tab) => {
+      const sessionId = tab.sessionId;
+      if (!sessionId) return tab;
+      const entry = entries.find((row) => row.sessionId === sessionId);
+      if (!entry) return tab;
+      const paneEpoch = tab.daemonEpoch === null || tab.daemonEpoch === undefined ? null : String(tab.daemonEpoch);
+      const entryEpoch = entry.daemonEpoch ?? null;
+      if (paneEpoch && entryEpoch && paneEpoch !== entryEpoch) return tab;
+      const observed = entry.activityState ?? null;
+      const snapshot = tab.activityState ?? null;
+      if (!observed && !snapshot) return tab;
+      if (!observed && snapshot) return tab;
+      if (observed === snapshot && (!entry.agentType || entry.agentType === tab.agentType)) return tab;
+      return {
+        ...tab,
+        ...(observed ? { activityState: observed } : {}),
+        ...(entry.agentType ? { agentType: entry.agentType } : {}),
+        ...(entryEpoch ? { daemonEpoch: entryEpoch } : {}),
+      };
+    });
+  };
+
+  const effectiveModel: RemoteWorkspaceModel = isAccountMode && accountDiscovery.accountOptions.length > 0
+    ? {
+        ...model,
+        options: accountDiscovery.accountOptions,
+        context: {
+          ...model.context,
+          terminalTabs: paneTabsWithObservedActivity(model.context.terminalTabs),
+        },
+      }
+    : model;
+
+  const activeObservedTab = effectiveModel.context.terminalTabs?.find((tab) => tab.id === model.context.activeTabId);
+  const chatAgentType = activeObservedTab?.agentType ?? null;
+  const chatActivity = activeObservedTab?.activityState ?? null;
   // The gateway's own capabilities answer is the exact value the route compares a target
   // against, so it wins; the session row is the fallback for a host that publishes it there.
   const chatDaemonEpoch =
@@ -2630,6 +2726,13 @@ export const RemoteHostConnection: React.FC<{
   chatAgentTypeRef.current = chatAgentType;
   const chatStagedFilesRef = useRef<readonly ReferenceFileReceipt[]>([]);
   chatStagedFilesRef.current = chatStagedFiles;
+  // A dispatched mention may already be in the PTY before its HTTP acknowledgement arrives.
+  // Keep its bytes out of every cleanup path until all sends definitely refused it.
+  const chatSubmittedFilesRef = useRef(new Map<string, {
+    file: ReferenceFileReceipt;
+    pending: number;
+    retained: boolean;
+  }>());
   /** The target the lane was last reset to: the owner of whatever the lane still holds. */
   const chatLaneTargetRef = useRef<ReferenceTargetRef | null>(null);
   /**
@@ -2767,11 +2870,14 @@ export const RemoteHostConnection: React.FC<{
   // session the host published for it. Absence is unknown; a disagreement between rows is
   // ambiguous, and both stay unknown rather than being guessed.
   useEffect(() => {
+    setChatProviderSession(null);
+  }, [activeTunnelConnection, effectiveSessionId, token, transportBaseUrl]);
+  // A refresh tick re-reads the same pane's rows without first forgetting its provider session, so
+  // a rotated session (e.g. after /new) replaces the old one in place.
+  useEffect(() => {
     if (!effectiveSessionId || !token) {
-      setChatProviderSession(null);
       return;
     }
-    setChatProviderSession(null);
     let cancelled = false;
     const controller = new AbortController();
     void fetchChatSessionRows({
@@ -2798,7 +2904,7 @@ export const RemoteHostConnection: React.FC<{
       cancelled = true;
       controller.abort();
     };
-  }, [activeTunnelConnection, effectiveSessionId, token, transportBaseUrl]);
+  }, [activeTunnelConnection, chatSessionRowsTick, effectiveSessionId, token, transportBaseUrl]);
 
   /**
    * Release files staged for a target and never sent, on the host `route` reaches. The route is
@@ -2817,6 +2923,9 @@ export const RemoteHostConnection: React.FC<{
       const answers = await Promise.all(
         files.map(async (file) => {
           const id = file.receipt.attachmentId;
+          // Both departure and a late definite submit refusal reach this path. Read the owning
+          // target's live queue, not the displayed rows (which a pane switch already cleared).
+          if (heldChatFileIsReferenced(target, file)) return null;
           try {
             const response = await fetch(
               remoteApiUrl(
@@ -2851,8 +2960,10 @@ export const RemoteHostConnection: React.FC<{
     chatNewestStartRef.current = null;
     chatNewestTurnsRef.current = [];
     chatOlderGenerationRef.current += 1;
+    chatPromptGenerationRef.current += 1;
     setChatPrompt(null);
     chatPromptIdRef.current = null;
+    chatPromptRevisionRef.current = null;
     setChatScreenRevision(null);
     setChatTypedAnswer(null);
     setChatPromptError(null);
@@ -2866,7 +2977,9 @@ export const RemoteHostConnection: React.FC<{
     chatLaneAbortRef.current = new AbortController();
     const previous = chatLaneTargetRef.current;
     if (previous !== null) {
-      const released = chatStagedFilesRef.current;
+      const released = chatStagedFilesRef.current.filter(
+        (file) => !chatSubmittedFilesRef.current.has(submittedFileKey(previous, file.receipt.attachmentId)),
+      );
       // A released file no longer exists on the host: its mention leaves the pane's saved draft
       // with it, as removing the chip does, so returning to the pane never sends a dead mention.
       // A file the host did not confirm releasing is still staged there, and keeps its mention.
@@ -2939,7 +3052,10 @@ export const RemoteHostConnection: React.FC<{
         const listed = parseReferenceStagedFileList(raw, rehydrateTarget);
         if (listed.length === 0) return;
         const known = new Set(chatStagedFilesRef.current.map((file) => file.receipt.attachmentId));
-        const fresh = listed.filter((file) => !known.has(file.receipt.attachmentId));
+        const fresh = listed.filter((file) =>
+          !known.has(file.receipt.attachmentId) &&
+          !chatSubmittedFilesRef.current.has(submittedFileKey(rehydrateTarget, file.receipt.attachmentId)),
+        );
         if (fresh.length === 0) return;
         chatStagedFilesRef.current = [...chatStagedFilesRef.current, ...fresh];
         setChatStagedFiles((prev) => [
@@ -3096,6 +3212,9 @@ export const RemoteHostConnection: React.FC<{
             await refreshChatIdentity();
             // the user may have moved to another pane while the identity was being re-read
             if (cancelled) return;
+            // The pane's provider session may have rotated (e.g. /new): re-read its session rows
+            // once per refusal; the poll cadence bounds how often that can happen.
+            if (error.code === "TARGET_EXPIRED") setChatSessionRowsTick((tick) => tick + 1);
           }
           // Only what the pane's transcript said is withdrawn: the draft, held rows and staged
           // files are the user's own and stay. A changed target resets those through its key.
@@ -3133,6 +3252,9 @@ export const RemoteHostConnection: React.FC<{
     const sessionId = effectiveSessionId;
     if (!target || !sessionId || !token) return;
     if (!chatAgentType || !chatAgentIsNative) {
+      chatPromptGenerationRef.current += 1;
+      chatPromptIdRef.current = null;
+      chatPromptRevisionRef.current = null;
       setChatPrompt(null);
       setChatScreenRevision(null);
       return;
@@ -3164,14 +3286,17 @@ export const RemoteHostConnection: React.FC<{
         const body: unknown = await response.json();
         const prompt = parseChatPrompt(body);
         const promptId = prompt?.id ?? null;
-        // A different prompt (or none) starts clean: a typed answer or an error was for the last one.
-        if (promptId !== chatPromptIdRef.current) {
+        const revision = prompt === null ? null : parseChatScreenRevision(body);
+        // Each occurrence owns its typed answer and error, even if the provider reuses an id.
+        if (promptId !== chatPromptIdRef.current || revision !== chatPromptRevisionRef.current) {
+          chatPromptGenerationRef.current += 1;
           setChatTypedAnswer(null);
           setChatPromptError(null);
         }
         chatPromptIdRef.current = promptId;
+        chatPromptRevisionRef.current = revision;
         setChatPrompt(prompt);
-        setChatScreenRevision(prompt === null ? null : parseChatScreenRevision(body));
+        setChatScreenRevision(revision);
         setChatWarnings((prev) => prev.filter((warning) => warning !== CHAT_HELD_WARNING));
       } catch {
         /* a transient prompt read keeps the card the user is looking at */
@@ -3311,25 +3436,67 @@ export const RemoteHostConnection: React.FC<{
         return [...prev, pending];
       });
       const payload: ReferenceSubmitPayload = { text, attachmentIds: [], origin: "chat" };
+      const route: ChatLaneRoute = { baseUrl: chatBaseUrlRef.current, token: bearer };
+      const mentioned = (entry: ReferenceFileReceipt): boolean => {
+        const path = referenceMentionPathOf(entry.mentionText);
+        return path !== null && text.includes(referenceMentionFor(path).trimEnd());
+      };
+      const submitted = new Map<string, ReferenceFileReceipt>();
+      for (const file of chatStagedFilesRef.current) {
+        if (mentioned(file)) submitted.set(submittedFileKey(target, file.receipt.attachmentId), file);
+      }
+      for (const [key, entry] of chatSubmittedFilesRef.current) {
+        if (key === submittedFileKey(target, entry.file.receipt.attachmentId) && mentioned(entry.file)) {
+          submitted.set(key, entry.file);
+        }
+      }
+      for (const [key, file] of submitted) {
+        const entry = chatSubmittedFilesRef.current.get(key) ?? { file, pending: 0, retained: false };
+        entry.pending += 1;
+        chatSubmittedFilesRef.current.set(key, entry);
+      }
       const outcome = await postChatMutation(
-        chatBaseUrlRef.current,
+        route.baseUrl,
         sessionId,
         bearer,
         "submit",
         chatMutationBody(target, payload),
       );
       const stillCurrent = chatTargetIsCurrent(target);
+      const unsent: ReferenceFileReceipt[] = [];
+      for (const [key] of submitted) {
+        const entry = chatSubmittedFilesRef.current.get(key);
+        if (!entry) continue;
+        entry.pending -= 1;
+        entry.retained ||= outcome.ok || referenceIsOutcomeUnknown(outcome.code);
+        if (entry.pending === 0 && !entry.retained) {
+          chatSubmittedFilesRef.current.delete(key);
+          unsent.push(entry.file);
+        }
+      }
+      if (!stillCurrent) void releaseStagedChatFiles(target, unsent, route).then((confirmed) => {
+        let draft = referenceDrafts.read(target).text;
+        for (const file of unsent) {
+          if (!confirmed.has(file.receipt.attachmentId)) continue;
+          const path = referenceMentionPathOf(file.mentionText);
+          if (path !== null) draft = draft.split(referenceMentionFor(path)).join("");
+        }
+        referenceDrafts.set(target, draft);
+        if (chatTargetIsCurrent(target)) setChatDraftText(draft);
+      });
+      else if (unsent.length > 0) {
+        const known = new Set(chatStagedFilesRef.current.map((file) => file.receipt.attachmentId));
+        const restored = unsent.filter((file) => !known.has(file.receipt.attachmentId));
+        chatStagedFilesRef.current = [...chatStagedFilesRef.current, ...restored];
+        setChatStagedFiles((prev) => [...prev, ...restored]);
+      }
       if (outcome.ok) {
         if (stillCurrent) {
           // The mentions this text carried were delivered: those files are the agent's now, not
           // staged ones the user may still remove or that count against the next turn.
-          const delivered = (entry: ReferenceFileReceipt): boolean => {
-            const path = referenceMentionPathOf(entry.mentionText);
-            return path !== null && text.includes(referenceMentionFor(path).trimEnd());
-          };
-          const remaining = chatStagedFilesRef.current.filter((entry) => !delivered(entry));
+          const remaining = chatStagedFilesRef.current.filter((entry) => !mentioned(entry));
           chatStagedFilesRef.current = remaining;
-          setChatStagedFiles((prev) => prev.filter((entry) => !delivered(entry)));
+          setChatStagedFiles((prev) => prev.filter((entry) => !mentioned(entry)));
           setChatWarnings((prev) =>
             prev.filter(
               (warning) => warning !== CHAT_SEND_FAILED_WARNING && warning !== CHAT_OUTCOME_UNKNOWN_WARNING,
@@ -3361,7 +3528,7 @@ export const RemoteHostConnection: React.FC<{
         }
         return false;
       }
-      // Nothing was written: the echo stops claiming it was sent, and the text comes back.
+      // A refusal or an uncertain outcome removes the unconfirmed echo and restores the draft.
       setChatComposerNotice(
         referenceIsOutcomeUnknown(outcome.code)
           ? CHAT_OUTCOME_UNKNOWN_WARNING
@@ -3386,7 +3553,7 @@ export const RemoteHostConnection: React.FC<{
       );
       return false;
     },
-    [chatMutationBody, chatTargetIsCurrent],
+    [chatMutationBody, chatTargetIsCurrent, releaseStagedChatFiles],
   );
 
   /**
@@ -3443,6 +3610,7 @@ export const RemoteHostConnection: React.FC<{
       if (!target || !sessionId || !bearer) {
         throw new ReferencePromptRefused("UNAUTHORIZED", CHAT_NO_SESSION_WARNING);
       }
+      const promptGeneration = chatPromptGenerationRef.current;
       const outcome = await postChatMutation(
         chatBaseUrlRef.current,
         sessionId,
@@ -3450,9 +3618,14 @@ export const RemoteHostConnection: React.FC<{
         "answer",
         chatMutationBody(target, payload),
       );
-      // The pane may have changed while the answer was on its way: its outcome belongs to the pane
-      // it answered, never to the prompt, typed answer or error of the pane now on screen.
-      if (!chatTargetIsCurrent(target)) {
+      // A later prompt in the same pane also owns its own input and errors. Settle the old
+      // request truthfully without touching the current occurrence or interrupting its poll.
+      if (
+        !chatTargetIsCurrent(target) ||
+        chatPromptGenerationRef.current !== promptGeneration ||
+        chatPromptIdRef.current !== payload.promptId ||
+        chatPromptRevisionRef.current !== payload.screenRevision
+      ) {
         if (!outcome.ok) throw new ReferencePromptRefused(outcome.code, outcome.message);
         return true;
       }
@@ -3462,7 +3635,10 @@ export const RemoteHostConnection: React.FC<{
       }
       setChatTypedAnswer(null);
       setChatPromptError(null);
+      chatPromptGenerationRef.current += 1;
       setChatPrompt(null);
+      chatPromptIdRef.current = null;
+      chatPromptRevisionRef.current = null;
       setChatScreenRevision(null);
       setChatPromptRefresh((generation) => generation + 1);
       return true;
@@ -3605,8 +3781,13 @@ export const RemoteHostConnection: React.FC<{
     async (attachmentId: string) => {
       const target = chatTargetRef.current;
       if (!target) return;
+      if (chatSubmittedFilesRef.current.has(submittedFileKey(target, attachmentId))) return;
       const entry = chatStagedFiles.find((file) => file.receipt.attachmentId === attachmentId);
       if (!entry) return;
+      if (heldChatFileIsReferenced(target, entry)) {
+        setChatAttachError("Edit or remove the held messages referencing this file before removing it.");
+        return;
+      }
       const cleaned = await cancelReferenceChatFile({ transport: chatFileTransport }, target, entry);
       const stillCurrent = chatTargetIsCurrent(target);
       if (!cleaned.cleaned) {
@@ -3668,6 +3849,11 @@ export const RemoteHostConnection: React.FC<{
           // into a key press, and never silently dropped. `false` keeps it in the message box.
           holdChatMessage(text);
           setChatWarnings((prev) => withChatWarning(prev, CHAT_HELD_WARNING));
+          return false;
+        }
+        // An answer with no live session would be refused before it is sent: keep the text.
+        if (!chatTargetRef.current || !chatSessionIdRef.current || !chatTokenRef.current) {
+          setChatWarnings((prev) => withChatWarning(prev, CHAT_NO_SESSION_WARNING));
           return false;
         }
         if (referencePromptNeedsConfirmation(chatPrompt, typed)) {
@@ -3756,8 +3942,8 @@ export const RemoteHostConnection: React.FC<{
     if (chatPrompt === null || chatScreenRevision === null) return null;
     return (
       <ReferencePromptCard
-        // One card per prompt: picks, text and errors never carry over to the next prompt.
-        key={chatPrompt.id}
+        // Returning to identical content after a clear or transition is still a new card.
+        key={chatPromptGenerationRef.current}
         prompt={chatPrompt}
         screenRevision={chatScreenRevision}
         typedAnswer={chatTypedAnswer}
@@ -3795,55 +3981,6 @@ export const RemoteHostConnection: React.FC<{
   /** What the message box says while a prompt waits, so the user knows what typing does. */
   const chatComposerPlaceholder =
     chatPrompt !== null ? referenceAnswerHint(chatPrompt) : undefined;
-
-  /* Declared above the auth early return so the hook count is identical on the
-     login screen and after pairing; a hook below the guard changes the order. */
-  const isAccountMode = Boolean(accountSessionToken);
-  const activeMachineInventory = activeTunnelConnection
-    ? accountDiscovery.sessionInventories[activeTunnelConnection.machine.machineId] ?? null
-    : null;
-  inventoryRef.current = activeMachineInventory;
-
-  /* Pane rows render from the model's tab strip, which is a snapshot taken when the model
-     was built. Observations arrive afterwards, so the live inventory wins over the snapshot
-     for the matching epoch: a pane must not be frozen on the state it was built with.
-     An observation whose epoch contradicts the pane is never applied. */
-  const paneTabsWithObservedActivity = (tabs: RemoteTerminalTabInfo[] | undefined) => {
-    if (!tabs || tabs.length === 0) return tabs;
-    const entries = activeMachineInventory?.entries ?? [];
-    if (entries.length === 0) return tabs;
-    return tabs.map((tab) => {
-      const sessionId = tab.sessionId;
-      if (!sessionId) return tab;
-      const entry = entries.find((row) => row.sessionId === sessionId);
-      if (!entry) return tab;
-      const paneEpoch = tab.daemonEpoch === null || tab.daemonEpoch === undefined ? null : String(tab.daemonEpoch);
-      const entryEpoch = entry.daemonEpoch ?? null;
-      if (paneEpoch && entryEpoch && paneEpoch !== entryEpoch) return tab;
-      const observed = entry.activityState ?? null;
-      const snapshot = tab.activityState ?? null;
-      if (!observed && !snapshot) return tab;
-      if (!observed && snapshot) return tab;
-      if (observed === snapshot && (!entry.agentType || entry.agentType === tab.agentType)) return tab;
-      return {
-        ...tab,
-        ...(observed ? { activityState: observed } : {}),
-        ...(entry.agentType ? { agentType: entry.agentType } : {}),
-        ...(entryEpoch ? { daemonEpoch: entryEpoch } : {}),
-      };
-    });
-  };
-
-  const effectiveModel: RemoteWorkspaceModel = isAccountMode && accountDiscovery.accountOptions.length > 0
-    ? {
-        ...model,
-        options: accountDiscovery.accountOptions,
-        context: {
-          ...model.context,
-          terminalTabs: paneTabsWithObservedActivity(model.context.terminalTabs),
-        },
-      }
-    : model;
 
   const createWorktree = useCallback(async () => {
     const workspaceId = model.context.workspaceId;
@@ -3959,6 +4096,8 @@ export const RemoteHostConnection: React.FC<{
 
   const selectAccountOption = async (accountOpt: AccountWorktreeOption): Promise<boolean> => {
     if (accountAcquireInFlightRef.current || pendingSelectionRef.current) return false;
+    // A new pick supersedes a timed-out attempt before the effect issues the new selection.
+    lateSelectionRef.current = null;
     accountSelectionGenerationRef.current += 1;
     const currentSelectionGen = accountSelectionGenerationRef.current;
     const expectedToken = accountSessionToken;
@@ -3984,7 +4123,9 @@ export const RemoteHostConnection: React.FC<{
     };
     setCreationError(null);
 
-    if (activeTunnelConnection && token && activeMachineId === accountOpt.machineId) {
+    // A relay drops an idle tunnel (about 2 minutes without traffic); a closed connection must be
+    // reacquired, never reused, or every request on it fails with STREAM_CLOSED.
+    if (activeTunnelConnection && !activeTunnelConnection.isClosed && token && activeMachineId === accountOpt.machineId) {
       // Same machine: keep the connection, gate the body until the exact target confirms.
       initialAccountSelectionAttemptedRef.current = false;
       setInitialAccountTarget(selectionTarget);

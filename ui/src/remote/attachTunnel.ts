@@ -41,6 +41,8 @@ export interface TunnelByteStream {
   write(bytes: Uint8Array): Promise<void>;
   read(): Promise<Uint8Array>;
   close(): void;
+  /** True once the underlying socket is gone; a closed stream never reopens. */
+  readonly isClosed?: boolean;
 }
 
 export interface TunnelResponse {
@@ -98,6 +100,8 @@ export interface TunnelTransport {
     headers?: Record<string, string>,
   ): Promise<TunnelWebSocket>;
   close(): void;
+  /** True once the transport or its stream has closed; callers must reacquire, not reuse. */
+  readonly isClosed?: boolean;
 }
 
 export interface OpenAccountTunnelOpts {
@@ -675,6 +679,9 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
       isClosed = true;
       stream.close();
     },
+    get isClosed(): boolean {
+      return isClosed || stream.isClosed === true;
+    },
   };
 }
 
@@ -1211,6 +1218,9 @@ export async function openAccountTunnel(
   });
 
   const tunnelByteStream: TunnelByteStream = {
+    get isClosed(): boolean {
+      return isClosed;
+    },
     async write(plaintext: Uint8Array): Promise<void> {
       if (isClosed) {
         throw new Error("STREAM_CLOSED: cannot write to closed stream");

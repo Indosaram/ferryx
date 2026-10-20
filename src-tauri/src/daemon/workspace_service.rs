@@ -130,7 +130,8 @@ impl DaemonWorkspaceService {
             .try_lock_until(deadline)
             .ok_or("TIMEOUT")?;
         let mut catalog = self.catalog()?;
-        if !catalog.workspaces.contains_key(workspace) {
+        if !catalog.workspaces.contains_key(workspace) && !catalog.desktop_local_projects.iter().flatten()
+            .any(|member| member.workspace_id == workspace) {
             return Err("PROJECT_NOT_FOUND".into());
         }
         if catalog.worktree_observations.get(workspace) != Some(&digest) {
@@ -201,10 +202,15 @@ impl DaemonWorkspaceService {
     ) -> Result<WorktreeManager, String> {
         WorkspaceRegistry::validate_workspace_id(workspace).map_err(|_| "INVALID_REQUEST")?;
         let catalog = self.catalog()?;
-        let row = catalog
-            .workspaces
-            .get(workspace)
-            .ok_or("PROJECT_NOT_FOUND")?;
+        let saved;
+        let row = if let Some(row) = catalog.workspaces.get(workspace) { row } else {
+            if mirror { return Err("PROJECT_NOT_FOUND".into()); }
+            let member = catalog.desktop_local_projects.iter().flatten()
+                .find(|member| member.workspace_id == workspace).ok_or("PROJECT_NOT_FOUND")?;
+            saved = CatalogRow { repo_root: member.repo_root.clone(), mirror_exposed: false,
+                availability: Availability::Invalid };
+            &saved
+        };
         if mirror && !row.mirror_exposed {
             return Err("MACHINE_ACCESS_REQUIRED".into());
         }
@@ -271,6 +277,7 @@ impl DaemonWorkspaceService {
                 availability: Availability::Ready,
             },
         );
+        candidate.ownership.entry(workspace_id.into()).or_default().desktop = true;
         candidate.revision.0 = candidate
             .revision
             .0
@@ -296,6 +303,63 @@ impl DaemonWorkspaceService {
         Ok(())
     }
 
+    pub fn sync_desktop_local_projects(
+        &self,
+        projects: Vec<workspace_catalog::DesktopLocalProject>,
+    ) -> Result<(), String> {
+        let _gate = self.mutation_gate.lock();
+        let mut candidate = self.catalog()?;
+        let mut ids = std::collections::BTreeSet::new();
+        let mut members = Vec::with_capacity(projects.len());
+        for mut project in projects {
+            let validated = WorkspaceRegistry::validate_workspace_id(&project.workspace_id)
+                .map_err(|_| "INVALID_REQUEST")?;
+            if validated != project.workspace_id || validated == "default" {
+                return Err("INVALID_REQUEST".into());
+            }
+            if !ids.insert(project.workspace_id.clone()) || !project.repo_root.is_absolute()
+                || project.repo_root.parent().is_none() {
+                return Err("INVALID_REQUEST".into());
+            }
+            // Membership is the desktop's list; validation only decides which root is
+            // recorded. A member that cannot be validated now (offline volume, a Git
+            // parent appearing above a folder, an I/O error) stays a member under its
+            // last trusted root and is reported unavailable by the inventory probe, so
+            // one bad project can never freeze the whole list.
+            let validated_root = fs::canonicalize(&project.repo_root).ok().filter(|root| {
+                WorktreeManager::try_new(root).is_ok_and(|manager| manager.repo_root() == root)
+                    && candidate.workspaces.get(&project.workspace_id)
+                        .is_none_or(|row| &row.repo_root == root)
+            });
+            if let Some(root) = validated_root {
+                project.repo_root = root;
+            } else if let Some(row) = candidate.workspaces.get(&project.workspace_id) {
+                project.repo_root = row.repo_root.clone();
+            } else if let Some(previous) = candidate.desktop_local_projects.iter().flatten()
+                .find(|member| member.workspace_id == project.workspace_id) {
+                project.repo_root = previous.repo_root.clone();
+            }
+            members.push(project);
+        }
+        if candidate.desktop_local_projects.as_ref() == Some(&members) { return Ok(()); }
+        for owner in candidate.ownership.values_mut() { owner.desktop = false; }
+        for member in &members {
+            candidate.ownership.entry(member.workspace_id.clone()).or_default().desktop = true;
+        }
+        candidate.desktop_local_projects = Some(members);
+        candidate.revision.0 = candidate.revision.0.checked_add(1).ok_or("CAPACITY_EXCEEDED")?;
+        if let Err(error) = workspace_catalog::persist(&self.catalog_path, &candidate) {
+            *self.catalog.lock() = Err("MACHINE_SERVICE_UNAVAILABLE".into());
+            return Err(error);
+        }
+        let revision = candidate.revision.0;
+        *self.catalog.lock() = Ok(candidate);
+        self.registry.bump_revision();
+        self.machine_events.publish_revision(revision, "inventoryInvalidated", None, None,
+            serde_json::json!({"desktopLocalSnapshotExists": true}));
+        Ok(())
+    }
+
     pub fn catalog(&self) -> Result<Catalog, String> {
         self.catalog.lock().clone()
     }
@@ -316,7 +380,16 @@ impl DaemonWorkspaceService {
             .iter()
             .find(|(_, row)| row.repo_root == manager.repo_root())
         {
-            return Ok(id.clone());
+            let id = id.clone();
+            if !candidate.ownership.get(&id).is_some_and(|owner| owner.machine) {
+                candidate.ownership.entry(id.clone()).or_default().machine = true;
+                if let Err(error) = workspace_catalog::persist(&self.catalog_path, &candidate) {
+                    *state = Err("MACHINE_SERVICE_UNAVAILABLE".into());
+                    return Err(error);
+                }
+                *state = Ok(candidate);
+            }
+            return Ok(id);
         }
         let id = format!("project-{}", uuid::Uuid::new_v4().simple());
         let mut project =
@@ -329,6 +402,7 @@ impl DaemonWorkspaceService {
                 availability: Availability::Ready,
             },
         );
+        candidate.ownership.entry(id.clone()).or_default().machine = true;
         candidate.revision.0 = candidate
             .revision
             .0
@@ -392,6 +466,82 @@ impl DaemonWorkspaceService {
 #[cfg(test)]
 mod catalog_tests {
     use super::*;
+    #[tokio::test]
+    async fn r28_rust_one_unvalidatable_member_does_not_freeze_desktop_membership() {
+        crate::ipc::run_blocking(|| {
+            let root = tempfile::tempdir().unwrap();
+            let home = fs::canonicalize(root.path()).unwrap();
+            let scratch = home.join("scratch");
+            let added = home.join("added");
+            fs::create_dir(&scratch).unwrap();
+            fs::create_dir(&added).unwrap();
+            let service = DaemonWorkspaceService::new(WorkspaceRegistry::new(), home.join("data/catalog"));
+            let member = |id: &str, path: &std::path::Path| workspace_catalog::DesktopLocalProject {
+                workspace_id: id.into(), repo_root: path.to_path_buf(),
+            };
+            service.sync_desktop_local_projects(vec![member("scratch", &scratch)]).unwrap();
+            // A Git repository appears above the plain folder, so it no longer validates.
+            let status = std::process::Command::new("git").arg("init").arg("-q").arg(&home).status().unwrap();
+            assert!(status.success());
+            service.sync_desktop_local_projects(vec![member("scratch", &scratch), member("added", &added)]).unwrap();
+            let members = service.catalog().unwrap().desktop_local_projects.unwrap();
+            assert_eq!(members.iter().map(|m| m.workspace_id.as_str()).collect::<Vec<_>>(), vec!["scratch", "added"]);
+            assert_eq!(members[0].repo_root, scratch);
+            drop(service);
+            root.close().unwrap();
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn desktop_snapshot_is_idempotent_retains_rows_and_persists_empty() {
+        crate::ipc::run_blocking(|| {
+            let root = tempfile::tempdir().unwrap();
+            let plain = root.path().join("plain");
+            fs::create_dir(&plain).unwrap();
+            let path = root.path().join("data/catalog");
+            let service = DaemonWorkspaceService::new(WorkspaceRegistry::new(), path.clone());
+            service.register("legacy", plain.to_str().unwrap()).unwrap();
+            let members = vec![workspace_catalog::DesktopLocalProject {
+                workspace_id: "offline".into(), repo_root: root.path().join("absent/repo"),
+            }];
+            service.sync_desktop_local_projects(members.clone()).unwrap();
+            let revision = service.catalog().unwrap().revision;
+            service.sync_desktop_local_projects(members).unwrap();
+            assert_eq!(service.catalog().unwrap().revision, revision);
+            service.sync_desktop_local_projects(vec![]).unwrap();
+            drop(service);
+            let restarted = DaemonWorkspaceService::new(WorkspaceRegistry::new(), path);
+            let catalog = restarted.catalog().unwrap();
+            assert_eq!(catalog.desktop_local_projects, Some(vec![]));
+            assert!(catalog.workspaces.contains_key("legacy"));
+            assert!(plain.is_dir());
+            drop(restarted);
+            root.close().unwrap();
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn desktop_snapshot_rejects_remote_duplicate_and_placeholder_without_mutation() {
+        crate::ipc::run_blocking(|| {
+            let root = tempfile::tempdir().unwrap();
+            let service = DaemonWorkspaceService::new(WorkspaceRegistry::new(), root.path().join("data/catalog"));
+            for id in ["ssh:remote", "daemon:remote", "default"] {
+                assert!(service.sync_desktop_local_projects(vec![workspace_catalog::DesktopLocalProject {
+                    workspace_id: id.into(), repo_root: root.path().join("missing"),
+                }]).is_err());
+            }
+            let member = workspace_catalog::DesktopLocalProject { workspace_id: "a".into(), repo_root: root.path().join("missing") };
+            assert!(service.sync_desktop_local_projects(vec![member.clone(), member]).is_err());
+            assert!(service.catalog().unwrap().desktop_local_projects.is_none());
+            assert_eq!(service.catalog().unwrap().revision.0, 0);
+            drop(service);
+            root.close().unwrap();
+            Ok(())
+        }).await.unwrap();
+    }
+
     #[tokio::test]
     async fn unrelated_workspace_registration_progresses_while_workspace_fenced() {
         let (root, service) = crate::ipc::run_blocking(|| {

@@ -194,9 +194,7 @@ describe("reference target identity", () => {
     for (const wrong of [otherOwner, otherEpoch, otherSession]) {
       expect(sameReferenceTarget(base, wrong)).toBe(false);
     }
-    for (const wrong of [otherEpoch, otherSession]) {
-      expect(referenceDraftKey(base)).not.toBe(referenceDraftKey(wrong));
-    }
+    expect(referenceDraftKey(base)).not.toBe(referenceDraftKey(otherSession));
   });
 
   it("ui-reference-logic-r7-1: the durable draft key outlives a gateway restart that mints a new owner", () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
 import { clearStoredAccountSessionToken, storeAccountSessionToken } from "./accountSession";
 import * as accountSessionModule from "./accountSession";
@@ -21,6 +21,8 @@ const OTHER_MACHINE_ID = "mach-other-9";
 const EPOCH = "101";
 const SID_FIRST = "s-1a-alpha";
 const SID_SECOND = "s-1b-beta";
+/** When set, the machine advertises a desktop-local snapshot and answers the scoped query with it. */
+let desktopScopedProjects: Array<{ workspaceId: string; availability: string }> | null = null;
 
 type SessionRow = {
   workspaceId: string;
@@ -29,6 +31,7 @@ type SessionRow = {
   sessionId: string;
   running: boolean;
   title: string;
+  agentType?: string;
 };
 
 type SessionsPayload = { revision: string; completeness: string; sessions: SessionRow[] };
@@ -88,7 +91,13 @@ class RecordingSocket implements TunnelWebSocket {
   readyState = 1;
   binaryType = "arraybuffer";
   onopen: ((event: Event) => void) | null = null;
-  onmessage: ((event: TunnelMessageEvent) => void) | null = null;
+  private messageHandler: ((event: TunnelMessageEvent) => void) | null = null;
+  onMessageReady?: () => void;
+  get onmessage() { return this.messageHandler; }
+  set onmessage(handler: ((event: TunnelMessageEvent) => void) | null) {
+    this.messageHandler = handler;
+    if (handler) this.onMessageReady?.();
+  }
   onerror: ((event: TunnelErrorEvent) => void) | null = null;
   onclose: ((event: TunnelCloseEvent) => void) | null = null;
 
@@ -121,7 +130,10 @@ type Harness = {
   publishInventoryEvent: (body: unknown) => void;
 };
 
-async function mountAccountHarness(initial: SessionRow[]): Promise<Harness> {
+async function mountAccountHarness(initial: SessionRow[], chat?: {
+  readonly request: (path: string) => Promise<Response> | undefined;
+  readonly terminalReady: (socket: RecordingSocket) => void;
+}): Promise<Harness> {
   storeAccountSessionToken("parity-account-token", window.location.origin);
 
   let currentPayload = payload(initial);
@@ -135,6 +147,8 @@ async function mountAccountHarness(initial: SessionRow[]): Promise<Harness> {
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
+      const chatResponse = chat?.request(url);
+      if (chatResponse) return chatResponse;
       if (url.endsWith("/api/account/v1/machines")) {
         return new Response(
           JSON.stringify([
@@ -184,6 +198,11 @@ async function mountAccountHarness(initial: SessionRow[]): Promise<Harness> {
 
   const fetchLike = vi.fn(async (path: string, init?: FetchLikeInit): Promise<TunnelResponse> => {
     timeline.push(`${init?.method ?? "GET"} ${path}`);
+    const chatResponse = chat?.request(path);
+    if (chatResponse) {
+      const response = await chatResponse;
+      return respond(await response.json(), response.status);
+    }
     if (path.startsWith("/api/v1/pair/exchange")) {
       return respond({
         token: "tunnel-device-token",
@@ -193,10 +212,18 @@ async function mountAccountHarness(initial: SessionRow[]): Promise<Harness> {
       });
     }
     if (path === "/api/v1/workspace/projects") {
+      if (desktopScopedProjects) return respond({ revision: "1", completeness: "complete", desktopLocalSnapshotExists: true, projects: [], unavailableWorkspaceIds: [] });
       return respond({
         revision: "1",
         completeness: "complete",
         projects: [{ workspaceId: "ws-ferryx", repoRoot: "/srv/ferryx", availability: "ready", revision: "1" }],
+        unavailableWorkspaceIds: [],
+      });
+    }
+    if (path === "/api/v1/workspace/projects?scope=desktopLocal" && desktopScopedProjects) {
+      return respond({
+        revision: "2", completeness: "complete", desktopLocalSnapshotExists: true,
+        projects: desktopScopedProjects.map((project) => ({ ...project, repoRoot: `/srv/${project.workspaceId}`, revision: "2" })),
         unavailableWorkspaceIds: [],
       });
     }
@@ -251,6 +278,9 @@ async function mountAccountHarness(initial: SessionRow[]): Promise<Harness> {
     openedSocketPaths.push(path);
     timeline.push(`WS ${path}`);
     const socket = new RecordingSocket(path);
+    if (chat && path.startsWith("/api/v1/terminal/")) {
+      socket.onMessageReady = () => chat.terminalReady(socket);
+    }
     if (!path.startsWith("/api/v1/terminal/")) eventSockets.push(socket);
     return socket;
   });
@@ -264,8 +294,14 @@ async function mountAccountHarness(initial: SessionRow[]): Promise<Harness> {
   vi.spyOn(accountSessionModule, "openTunnel").mockResolvedValue({ transport, close: () => {} });
   vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({ transport, close: () => {} });
 
-  render(<RemoteApp />);
-  await waitFor(() => expect(screen.getByRole("button", { name: /Change workspace context/i })).toBeDefined());
+  if (chat) {
+    const ready = r25State(() => screen.queryByRole("button", { name: /Change workspace context/i }) !== null);
+    render(<RemoteApp />);
+    await ready;
+  } else {
+    render(<RemoteApp />);
+    await waitFor(() => expect(screen.getByRole("button", { name: /Change workspace context/i })).toBeDefined());
+  }
 
   return {
     openedSocketPaths,
@@ -371,6 +407,47 @@ function awaitSignal<T>(promise: Promise<T>, description: string, timeoutMs = 20
   ]);
 }
 
+const r25Cleanups = new Set<() => void>();
+
+function r25State(matches: () => boolean): Promise<void> {
+  const promise = new Promise<void>((resolve, reject) => {
+    const observer = new MutationObserver(() => { if (matches()) finish(); });
+    const finish = () => {
+      clearTimeout(timer);
+      observer.disconnect();
+      r25Cleanups.delete(finish);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      clearTimeout(timer);
+      observer.disconnect();
+      r25Cleanups.delete(finish);
+      reject(new Error("Missing R25 DOM transition"));
+    }, 2000);
+    r25Cleanups.add(finish);
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+    if (matches()) finish();
+  });
+  return promise;
+}
+
+function r25Signal<T>() {
+  let publish: (value: T) => void = () => { throw new Error("R25 signal not initialized"); };
+  const promise = new Promise<T>((resolve, reject) => {
+    const dispose = () => {
+      clearTimeout(timer);
+      r25Cleanups.delete(dispose);
+    };
+    const timer = setTimeout(() => {
+      dispose();
+      reject(new Error("Missing R25 boundary event"));
+    }, 2000);
+    r25Cleanups.add(dispose);
+    publish = (value) => { dispose(); resolve(value); };
+  });
+  return { promise, resolve: (value: T) => publish(value) };
+}
+
 describe("RemoteApp machine inventory selection", () => {
   beforeEach(() => {
     clearStoredAccountSessionToken();
@@ -388,11 +465,117 @@ describe("RemoteApp machine inventory selection", () => {
 
   afterEach(() => {
     cleanup();
+    desktopScopedProjects = null;
+    for (const dispose of r25Cleanups) dispose();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     clearStoredAccountSessionToken();
     localStorage.clear();
     remoteHostStore.reset();
+  });
+
+  it.each([
+    ["done", "working", "claude", "claude", "matching"],
+    ["working", "done", "claude", "claude", "matching"],
+    ["done", "done", "claude", "codex", "matching"],
+    ["done", "working", "claude", "codex", "machine"],
+    ["done", "working", "claude", "codex", "session"],
+    ["done", "working", "claude", "codex", "epoch"],
+    ["done", "done", "claude", "claude", "none"],
+  ] as const)("r25-ui-m1: %s snapshot to %s observation, %s to %s, %s target", async (snapshot, observed, initialAgent, nextAgent, control) => {
+    const reads: string[] = [];
+    let promptRead: ReturnType<typeof r25Signal<string>> | null = null;
+    let historyRead: ReturnType<typeof r25Signal<string>> | null = null;
+    let terminalRead: ReturnType<typeof r25Signal<RecordingSocket>> | null = null;
+    const request = (path: string): Promise<Response> | undefined => {
+      if (path.includes("/api/v1/capabilities")) return Promise.resolve(new Response(JSON.stringify({
+        apiVersion: 1, machineId: MACHINE_ID, daemonEpoch: EPOCH, referenceOwnerId: "r25-owner", platform: "linux",
+      })));
+      if (!path.includes("/reference-chat/")) return undefined;
+      reads.push(path);
+      if (path.includes("/prompt")) {
+        promptRead?.resolve(path);
+        return Promise.resolve(new Response(JSON.stringify({ prompt: null, screenRevision: null })));
+      }
+      if (path.includes("/history")) {
+        historyRead?.resolve(path);
+        return Promise.resolve(new Response(JSON.stringify({
+          source: "claude-transcript", availability: "native", turns: [], cursor: null,
+          hasMore: false, generation: "r25-generation", unavailableReason: null,
+        })));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ files: [] })));
+    };
+    const harness = await mountAccountHarness([session(SID_SECOND, "native-agent", { agentType: initialAgent })], {
+      request,
+      terminalReady: (socket) => terminalRead?.resolve(socket),
+    });
+    const rowsReady = r25State(() => sessionRow(SID_SECOND_ROW) !== null);
+    act(() => fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i })));
+    await rowsReady;
+    const row = sessionRow(SID_SECOND_ROW);
+    if (!row) throw new Error("Missing R25 native session row");
+    const selected = r25State(() => screen.queryByTestId("chat-composer-textarea") !== null);
+    promptRead = r25Signal<string>();
+    historyRead = r25Signal<string>();
+    await act(async () => { fireEvent.click(row); });
+    await Promise.all([promptRead.promise, historyRead.promise]);
+    await selected;
+    const terminalReady = r25Signal<RecordingSocket>();
+    terminalRead = terminalReady;
+    await act(async () => { fireEvent.click(screen.getByTestId("remote-view-mode-terminal")); });
+    const socket = await terminalReady.promise;
+    const frame = (state: string, agent: string, mismatch = "matching") => JSON.stringify({
+      type: "agent_state", state, agent,
+      target: {
+        machineId: mismatch === "machine" ? OTHER_MACHINE_ID : MACHINE_ID,
+        sessionId: mismatch === "session" ? "unreported-session" : SID_SECOND,
+        daemonEpoch: mismatch === "epoch" ? "999" : EPOCH,
+      },
+    });
+    if (control !== "none") {
+      await act(async () => socket.onmessage?.({ data: frame(snapshot, initialAgent) }));
+      const refresh = harness.expectSessionsQuery();
+      const refreshArrived = r25Signal<void>();
+      void refresh.arrived.then(() => refreshArrived.resolve());
+      const releaseRefresh = () => refresh.answer(payload([session(SID_SECOND, "native-agent", { agentType: initialAgent })]));
+      r25Cleanups.add(releaseRefresh);
+      act(() => { window.dispatchEvent(new Event("online")); });
+      await refreshArrived.promise;
+      await act(async () => {
+        releaseRefresh();
+        await refresh.completed;
+      });
+      r25Cleanups.delete(releaseRefresh);
+    }
+    const queries = harness.sessionsQueryCount();
+    const posts = harness.postPaths();
+    const header = screen.getByTestId("mobile-top-bar");
+    expect(within(header).queryByText("Working") !== null).toBe(snapshot === "working");
+    const matches = control === "matching";
+    const expectedState = matches ? observed : snapshot;
+    const expectedAgent = matches ? nextAgent : initialAgent;
+    const headerChanged = r25State(() =>
+      (within(header).queryByText("Working") !== null) === (expectedState === "working")
+      && header.querySelector("[data-agent-type]")?.getAttribute("data-agent-type") === expectedAgent);
+    await act(async () => {
+      if (control !== "none") socket.onmessage?.({ data: frame(observed, nextAgent, control) });
+    });
+    await headerChanged;
+    expect(within(header).queryByText("Working") !== null).toBe(expectedState === "working");
+    expect(header.querySelector("[data-agent-type]")?.getAttribute("data-agent-type")).toBe(expectedAgent);
+    const controls = r25State(() => screen.queryByTestId(expectedState === "working" ? "stop-button" : "send-button") !== null);
+    promptRead = r25Signal<string>();
+    historyRead = r25Signal<string>();
+    await act(async () => { fireEvent.click(screen.getByTestId("remote-view-mode-chat")); });
+    const [prompt, history] = await Promise.all([promptRead.promise, historyRead.promise]);
+    expect(new URL(prompt, window.location.origin).searchParams.get("registryId")).toBe(expectedAgent);
+    expect(new URL(history, window.location.origin).searchParams.get("registryId")).toBe(expectedAgent);
+    await controls;
+    expect(screen.queryByTestId(expectedState === "working" ? "send-button" : "stop-button")).toBeNull();
+    expect(harness.sessionsQueryCount()).toBe(queries);
+    expect(harness.postPaths()).toEqual(posts);
+    expect(reads.some((path) => path.includes("/prompt"))).toBe(true);
   });
 
   it("attaches to the second existing session by exact id without creating one", async () => {
@@ -470,6 +653,55 @@ describe("RemoteApp machine inventory selection", () => {
       expect(alerts.length).toBeGreaterThan(0);
     });
     expect(harness.terminalPaths().some((path) => path.includes(SID_SECOND))).toBe(false);
+    expect(harness.sessionCreatePosts()).toEqual([]);
+  });
+
+  it("r28-ui keeps the attached session when its project becomes unavailable in the desktop scope", async () => {
+    desktopScopedProjects = [
+      { workspaceId: "ws-aaa", availability: "ready" },
+      { workspaceId: "ws-ferryx", availability: "ready" },
+    ];
+    const harness = await mountAccountHarness([
+      session(SID_FIRST, "alpha-shell", { workspaceId: "ws-aaa", worktree: null }),
+      session(SID_SECOND, "beta-agent"),
+    ]);
+    await waitFor(() => {
+      expect(harness.sessionsQueryCount()).toBeGreaterThan(0);
+    });
+    await openContextPicker();
+    const row = await waitFor(() => {
+      const found = sessionRow(SID_SECOND_ROW);
+      if (!found) throw new Error("second-session row not rendered");
+      return found;
+    });
+    act(() => {
+      fireEvent.click(row);
+    });
+    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+    await waitFor(() => {
+      expect(harness.terminalPaths().some((path) => path.includes(SID_SECOND))).toBe(true);
+    });
+    const attachedBefore = harness.terminalPaths().length;
+
+    // The attached session's project goes offline (for example an unmounted volume).
+    desktopScopedProjects = [
+      { workspaceId: "ws-aaa", availability: "ready" },
+      { workspaceId: "ws-ferryx", availability: "missing" },
+    ];
+    const refresh = harness.expectSessionsQuery();
+    act(() => {
+      harness.publishInventoryEvent({ completeness: "complete", sessions: payload([session(SID_FIRST, "alpha-shell", { workspaceId: "ws-aaa", worktree: null }), session(SID_SECOND, "beta-agent")]) });
+    });
+    await awaitSignal(refresh.arrived, "inventory refresh arrival");
+    refresh.answer(payload([session(SID_FIRST, "alpha-shell", { workspaceId: "ws-aaa", worktree: null }), session(SID_SECOND, "beta-agent")]));
+    await awaitSignal(refresh.completed, "inventory refresh answer completion");
+    await waitFor(() => {
+      expect(harness.timeline()).toContain("GET /api/v1/workspace/projects?scope=desktopLocal");
+    });
+    // Let any reselection the refresh triggers settle before asserting.
+    await act(async () => { await Promise.resolve(); });
+    const opened = harness.terminalPaths().slice(attachedBefore);
+    expect(opened.some((path) => path.includes(SID_FIRST))).toBe(false);
     expect(harness.sessionCreatePosts()).toEqual([]);
   });
 

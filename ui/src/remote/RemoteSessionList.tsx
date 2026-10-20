@@ -70,6 +70,7 @@ export type RemoteContext = {
 };
 
 export type RemoteContextOption = {
+  unavailable?: boolean;
   workspaceId: string;
   worktreeSlug: string | null;
   worktreeLabel: string | null;
@@ -682,7 +683,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         activity={entry.activity}
         agentType={entry.option.agentType ?? null}
         active={entry.active}
-        disabled={pending !== null}
+        disabled={pending !== null || entry.option.unavailable === true}
         busy={isPendingOption(entry.option)}
         density={rowDensity}
         onSelect={() => {
@@ -698,7 +699,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
     // The project header already names the project, so the row shows the worktree alone; the root
     // worktree never inherits the active context's worktree name.
     const visibleLabel = worktree.isRootWorktree
-      ? "root"
+      ? (selectable.unavailable ? "Unavailable" : "root")
       : worktree.label ?? worktree.slug ?? "Worktree";
     return (
       <div key={worktree.key} data-testid="remote-worktree-group">
@@ -707,7 +708,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
           visibleLabel={visibleLabel}
           isRootWorktree={worktree.isRootWorktree}
           active={worktree.active}
-          disabled={pending !== null}
+          disabled={pending !== null || selectable.unavailable === true}
           busy={isPendingOption(selectable)}
           activity={worktree.activity}
           density={rowDensity}

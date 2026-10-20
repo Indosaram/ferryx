@@ -113,6 +113,7 @@ import {
   publishFocusedTerminal,
   onTerminalRemoteStatus,
   registerProject,
+  syncDesktopLocalProjects,
   unregisterProject,
   saveSession,
   setBadgeCount,
@@ -370,6 +371,35 @@ export async function ensureLocalProjectsRegistered(projects: RegisteredProject[
     }),
   );
 }
+
+export function createDesktopLocalProjectSync() {
+  let pending: RegisteredProject[] | null = null;
+  let running: Promise<void> | null = null;
+  return (projects: RegisteredProject[]): Promise<void> => {
+    pending = projects;
+    if (running) return running;
+    running = (async () => {
+      try {
+        while (pending !== null) {
+          const snapshot = pending;
+          pending = null;
+          try { await syncDesktopLocalProjects(snapshot.filter((project) =>
+            project.repoRoot !== "" && project.repoRoot !== "." &&
+            project.workspaceId !== DEFAULT_WORKSPACE_ID &&
+            !isRemoteWorkspaceId(project.workspaceId) && !isPairedWorkspaceId(project.workspaceId) &&
+            (!project.target || project.target.kind === "local"),
+          ).map(({ workspaceId, repoRoot }) => ({ workspaceId, repoRoot }))); }
+          catch (error) { if (pending === null) throw error; }
+        }
+      } finally {
+        running = null;
+      }
+    })();
+    return running;
+  };
+}
+
+const sendDesktopLocalProjects = createDesktopLocalProjectSync();
 
 export function App() {
   useApplyAppearanceSettings();
@@ -657,6 +687,27 @@ function WorkspaceApp({
   activeRemoteHostRef.current = activeRemoteHost;
   const [projects, setProjects] = useState<RegisteredProject[]>(initialProjects);
   const [activeProjectId, setActiveProjectId] = useState(initialActiveProjectId);
+
+  useEffect(() => {
+    if (!isNativeRuntime) return;
+    const sync = () => {
+      void sendDesktopLocalProjects(projects).catch((error) => {
+        console.error("Desktop project membership sync failed:", error);
+      });
+    };
+    sync();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen("desktop_local_projects_resync", sync).then((stop) => {
+      if (disposed) stop(); else unlisten = stop;
+    });
+    window.addEventListener("focus", sync);
+    return () => {
+      disposed = true;
+      unlisten?.();
+      window.removeEventListener("focus", sync);
+    };
+  }, [isNativeRuntime, projects]);
 
   useEffect(() => {
     startNativeWindowFocusTracking();

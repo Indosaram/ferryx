@@ -5,10 +5,11 @@ use std::{
     ffi::OsString,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex, MutexGuard},
+    time::{Duration, Instant},
 };
 
-pub const HELPER_VERSION: &str = "2026.1016.1";
+pub const HELPER_VERSION: &str = "2026.1017.1";
 
 /// Capability tokens this helper can advertise, in handshake order. The last one
 /// is bound at runtime, so the handshake omits it when the listener is unavailable.
@@ -672,64 +673,236 @@ fn try_systemd_unit(exe: &Path, root: &Path, host: &str) -> Result<(), UnitLaunc
     )))
 }
 
-pub fn bridge(root: &Path, mut input: impl Read, mut output: impl Write) -> Result<(), String> {
-    let endpoint = endpoint(root)?;
+/// How long `bridge --stdio` waits for the next client request before it exits.
+///
+/// An SSH server cannot be relied on to end a session whose client vanished: Tailscale SSH and
+/// OpenSSH with the default `ClientAliveInterval 0` keep an idle channel open indefinitely, so
+/// a bridge blocked on stdin would outlive its client for as long as the host stays up. Desktop
+/// clients send a request on every bridge connection at least once per
+/// `ssh::bridge::KEEPALIVE_INTERVAL`, well inside this bound.
+pub const BRIDGE_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+
+const BRIDGE_OPS: [&str; 16] = [
+    "handshake",
+    "project.register",
+    "project.list",
+    "worktree.create",
+    "pty.spawn",
+    "pty.list",
+    "pty.describe",
+    "pty.read",
+    "pty.write",
+    "pty.resize",
+    "pty.stop",
+    "dag.inventory",
+    "dag.poll",
+    "dag.subscribe",
+    "dag.next",
+    "dag.unsubscribe",
+];
+
+#[cfg(unix)]
+type HelperIpc = std::os::unix::net::UnixStream;
+#[cfg(not(unix))]
+type HelperIpc = std::net::TcpStream;
+
+fn connect_helper_ipc(address: &str) -> Result<HelperIpc, String> {
     #[cfg(unix)]
-    let mut stream = {
+    {
         use std::os::unix::fs::FileTypeExt;
-        if !validate_private(Path::new(&endpoint.address))?
+        if !validate_private(Path::new(address))?
             .file_type()
             .is_socket()
         {
             return Err("FORBIDDEN: helper IPC must be a socket".into());
         }
-        std::os::unix::net::UnixStream::connect(endpoint.address).map_err(|e| e.to_string())?
-    };
+        std::os::unix::net::UnixStream::connect(address).map_err(|e| e.to_string())
+    }
     #[cfg(not(unix))]
-    let mut stream = {
-        let address: std::net::SocketAddr = endpoint
-            .address
+    {
+        let address: std::net::SocketAddr = address
             .parse()
             .map_err(|e: std::net::AddrParseError| e.to_string())?;
         if !address.ip().is_loopback() {
             return Err("FORBIDDEN: helper IPC must be loopback".into());
         }
-        let s = std::net::TcpStream::connect(address).map_err(|e| e.to_string())?;
-        s
-    };
-    while let Some(mut request) = read_frame(&mut input)? {
+        std::net::TcpStream::connect(address).map_err(|e| e.to_string())
+    }
+}
+
+struct BridgeState {
+    /// Requests forwarded to the daemon whose response has not been written back yet.
+    pending: usize,
+    last_request: Instant,
+    end: Option<Result<(), String>>,
+}
+
+/// `output` has its own lock so a client that stops reading can stall only the writer,
+/// never the thread that enforces the idle bound.
+struct BridgeShared<O> {
+    state: Mutex<BridgeState>,
+    output: Mutex<O>,
+    changed: Condvar,
+}
+
+impl<O> BridgeShared<O> {
+    fn lock(&self) -> MutexGuard<'_, BridgeState> {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn output(&self) -> MutexGuard<'_, O> {
+        self.output.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Waits until every forwarded request has been answered or the bridge has ended.
+    fn settled<'a>(&'a self, state: MutexGuard<'a, BridgeState>) -> MutexGuard<'a, BridgeState> {
+        self.changed
+            .wait_while(state, |s| s.pending != 0 && s.end.is_none())
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Records the first reason the bridge ends; later reasons are consequences of it.
+    fn finish(&self, result: Result<(), String>) {
+        let mut state = self.lock();
+        if state.end.is_none() {
+            state.end = Some(result);
+        }
+        self.changed.notify_all();
+    }
+}
+
+fn forward_requests<O: Write>(
+    input: &mut impl Read,
+    daemon: &mut impl Write,
+    token: &str,
+    shared: &BridgeShared<O>,
+) -> Result<(), String> {
+    while let Some(mut request) = read_frame(input)? {
         let op = request.get("op").and_then(Value::as_str).unwrap_or("");
-        if !matches!(
-            op,
-            "handshake"
-                | "project.register"
-                | "project.list"
-                | "worktree.create"
-                | "pty.spawn"
-                | "pty.list"
-                | "pty.describe"
-                | "pty.read"
-                | "pty.write"
-                | "pty.resize"
-                | "pty.stop"
-                | "dag.inventory"
-                | "dag.poll"
-                | "dag.subscribe"
-                | "dag.next"
-                | "dag.unsubscribe"
-        ) {
+        let allowed = BRIDGE_OPS.contains(&op);
+        let mut state = shared.lock();
+        state.last_request = Instant::now();
+        if !allowed {
+            // Responses must stay in request order, so earlier forwarded requests go first.
+            if shared.settled(state).end.is_some() {
+                return Ok(());
+            }
             write_frame(
-                &mut output,
+                &mut *shared.output(),
                 &json!({"ok":false,"error":"UNSUPPORTED: operation not allowlisted"}),
             )?;
             continue;
         }
-        request["token"] = json!(endpoint.token);
-        write_frame(&mut stream, &request)?;
-        let response = read_frame(&mut stream)?.ok_or("REMOTE_UNAVAILABLE: daemon EOF")?;
-        write_frame(&mut output, &response)?;
+        state.pending += 1;
+        drop(state);
+        request["token"] = json!(token);
+        write_frame(daemon, &request).map_err(|e| format!("REMOTE_UNAVAILABLE: {e}"))?;
     }
+    // Client EOF: every forwarded request still receives its response before the bridge ends.
+    drop(shared.settled(shared.lock()));
     Ok(())
+}
+
+fn forward_responses<O: Write>(
+    daemon: &mut impl Read,
+    shared: &BridgeShared<O>,
+) -> Result<(), String> {
+    loop {
+        let response = read_frame(daemon)
+            .map_err(|e| format!("REMOTE_UNAVAILABLE: {e}"))?
+            .ok_or_else(|| "REMOTE_UNAVAILABLE: daemon EOF".to_string())?;
+        if shared.lock().pending == 0 {
+            return Err("PROTOCOL_ERROR: helper daemon sent an unsolicited frame".into());
+        }
+        // Only this thread decrements `pending`, so the check above still holds here.
+        write_frame(&mut *shared.output(), &response)?;
+        let mut state = shared.lock();
+        state.pending -= 1;
+        shared.changed.notify_all();
+    }
+}
+
+/// Relays framed requests from `input` to the helper daemon and responses back to `output`.
+///
+/// The bridge ends on whichever comes first: client EOF (after every forwarded request is
+/// answered), the daemon side closing or failing, or `BRIDGE_IDLE_TIMEOUT` without a client
+/// request while nothing is in flight. The daemon side is read continuously, so a daemon that
+/// dies or is replaced ends its bridges immediately instead of when the next request arrives.
+///
+/// A blocking stdin read cannot be interrupted portably, so the request thread is never joined:
+/// the binary exits when this returns, which ends the thread and closes the SSH channel.
+pub fn bridge<I, O>(root: &Path, input: I, output: O) -> Result<(), String>
+where
+    I: Read + Send + 'static,
+    O: Write + Send + 'static,
+{
+    bridge_with_idle_timeout(root, input, output, BRIDGE_IDLE_TIMEOUT)
+}
+
+fn bridge_with_idle_timeout<I, O>(
+    root: &Path,
+    mut input: I,
+    output: O,
+    idle_timeout: Duration,
+) -> Result<(), String>
+where
+    I: Read + Send + 'static,
+    O: Write + Send + 'static,
+{
+    let endpoint = endpoint(root)?;
+    let stream = connect_helper_ipc(&endpoint.address)?;
+    let mut to_daemon = stream.try_clone().map_err(|e| e.to_string())?;
+    let mut from_daemon = stream.try_clone().map_err(|e| e.to_string())?;
+    let shared = Arc::new(BridgeShared {
+        state: Mutex::new(BridgeState {
+            pending: 0,
+            last_request: Instant::now(),
+            end: None,
+        }),
+        output: Mutex::new(output),
+        changed: Condvar::new(),
+    });
+
+    let requests = Arc::clone(&shared);
+    let token = endpoint.token;
+    std::thread::spawn(move || {
+        let result = forward_requests(&mut input, &mut to_daemon, &token, &requests);
+        requests.finish(result);
+        // Lets the daemon release this connection's subscriptions.
+        let _ = to_daemon.shutdown(std::net::Shutdown::Write);
+    });
+    let responses = Arc::clone(&shared);
+    std::thread::spawn(move || {
+        let result = forward_responses(&mut from_daemon, &responses);
+        responses.finish(result);
+    });
+
+    let mut state = shared.lock();
+    let result = loop {
+        if let Some(result) = state.end.take() {
+            break result;
+        }
+        let idle_for = state.last_request.elapsed();
+        if state.pending == 0 && idle_for >= idle_timeout {
+            break Err(format!(
+                "REMOTE_IDLE_TIMEOUT: no client request for {}s",
+                idle_timeout.as_secs()
+            ));
+        }
+        let wait = if state.pending == 0 {
+            idle_timeout - idle_for
+        } else {
+            idle_timeout
+        };
+        state = shared
+            .changed
+            .wait_timeout(state, wait)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .0;
+    };
+    drop(state);
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    result
 }
 
 /// Binary entry: integrator calls this instead of any Tauri initialization.
@@ -755,7 +928,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("start") => start(root,flag("--host-id").ok_or("INVALID_REQUEST: --host-id required")?),
         Some("daemon") => daemon(root,flag("--host-id").ok_or("INVALID_REQUEST: --host-id required")?),
-        Some("bridge") if args.iter().any(|arg|arg=="--stdio") => bridge(&root,std::io::stdin().lock(),std::io::stdout().lock()),
+        Some("bridge") if args.iter().any(|arg|arg=="--stdio") => bridge(&root,std::io::stdin(),std::io::stdout()),
         _ => Err("Usage: ferryx-remote-helper start|daemon --root <private-root> --host-id <id> | bridge --stdio [--root <private-root>]".into()),
     }
 }

@@ -346,5 +346,8 @@ export function createAccountConnection(params: {
       isClosed = true;
       params.httpClose();
     },
+    get isClosed(): boolean {
+      return isClosed || params.httpTransport.isClosed === true;
+    },
   };
 }

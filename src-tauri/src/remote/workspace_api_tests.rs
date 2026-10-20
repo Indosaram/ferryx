@@ -1150,6 +1150,96 @@ async fn r12_router_auth_admission() {
 }
 
 #[tokio::test]
+async fn desktop_scope_retains_offline_members_without_registering_or_deleting_legacy() {
+    use axum::{extract::{Query, State}, http::HeaderMap};
+    let (root, server, token, parent, ready) = crate::ipc::run_blocking(|| {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("volume");
+        let ready = parent.join("repo");
+        std::fs::create_dir_all(&ready).unwrap();
+        let server = DaemonServer::new_with_paths(Some(root.path().join("data/config")), Some(root.path().join("data/auth")));
+        let state = server.remote_state();
+        let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
+        let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "desktop scope").unwrap();
+        let service = &state.machine_services.as_ref().unwrap().workspaces;
+        service.register("legacy", ready.to_str().unwrap()).unwrap();
+        Ok((root, server, token, parent, ready))
+    }).await.unwrap();
+    let state = server.remote_state().clone();
+    let service = state.machine_services.as_ref().unwrap().workspaces.clone();
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let scoped = || Query(serde_json::from_value(serde_json::json!({"scope":"desktopLocal"})).unwrap());
+    let response = super::workspace_api::list_scoped(State(state.clone()), scoped(), headers.clone()).await;
+    assert_eq!(response.status().as_u16(), 200);
+    let before: super::machine_protocol::Projects = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(before.completeness, super::machine_protocol::Completeness::Partial);
+    assert!(!before.desktop_local_snapshot_exists);
+    let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+    let observed_tx = std::sync::Mutex::new(Some(observed_tx));
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let release_rx = std::sync::Mutex::new(release_rx);
+    *service.transaction_probe.write() = Some(std::sync::Arc::new(move |stage| {
+        if stage == "eventInventoryObserved" {
+            if let Some(tx) = observed_tx.lock().unwrap().take() {
+                tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            }
+        }
+    }));
+    let racing_state = state.clone();
+    let racing_headers = headers.clone();
+    let read = tokio::spawn(async move {
+        super::workspace_api::list_scoped(State(racing_state), Query(serde_json::from_value(serde_json::json!({"scope":"desktopLocal"})).unwrap()), racing_headers).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), observed_rx).await.unwrap().unwrap();
+    let owned = service.clone();
+    let saved = ready.clone();
+    let absent = root.path().join("missing/repo");
+    crate::ipc::run_blocking(move || {
+        owned.sync_desktop_local_projects(vec![
+            super::workspace_catalog::DesktopLocalProject { workspace_id:"a".into(), repo_root:saved },
+            super::workspace_catalog::DesktopLocalProject { workspace_id:"b".into(), repo_root:absent },
+        ]).unwrap();
+        Ok(())
+    }).await.unwrap();
+    release_tx.send(()).unwrap();
+    let stale = read.await.unwrap();
+    let stale: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(stale.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(stale["error"]["code"], "STALE_REVISION");
+    *service.transaction_probe.write() = None;
+    for unavailable in [false, true, false] {
+        let response = super::workspace_api::list_scoped(State(state.clone()), scoped(), headers.clone()).await;
+        assert_eq!(response.status().as_u16(), 200);
+        let inventory: super::machine_protocol::Projects = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        assert!(inventory.desktop_local_snapshot_exists);
+        assert_eq!(inventory.projects.iter().map(|p| p.workspace_id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(inventory.projects[0].availability == super::machine_protocol::Availability::Ready, !unavailable);
+        assert_ne!(inventory.projects[1].availability, super::machine_protocol::Availability::Ready);
+        let parent = parent.clone();
+        crate::ipc::run_blocking(move || {
+            let offline = parent.with_file_name("offline");
+            if unavailable { std::fs::rename(&offline, &parent).unwrap(); }
+            else if parent.exists() { std::fs::rename(&parent, &offline).unwrap(); }
+            Ok(())
+        }).await.unwrap();
+    }
+    let all = super::workspace_api::event_projects(service.clone()).await.unwrap();
+    assert_eq!(all.projects.iter().map(|p| p.workspace_id.as_str()).collect::<Vec<_>>(), vec!["legacy"]);
+    let owned = service.clone();
+    crate::ipc::run_blocking(move || { owned.sync_desktop_local_projects(vec![]).unwrap(); Ok(()) }).await.unwrap();
+    let response = super::workspace_api::list_scoped(State(state.clone()), scoped(), headers).await;
+    let empty: super::machine_protocol::Projects = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert!(empty.desktop_local_snapshot_exists && empty.projects.is_empty());
+    assert_eq!(empty.completeness, super::machine_protocol::Completeness::Complete);
+    crate::ipc::run_blocking(move || {
+        assert!(service.catalog().unwrap().workspaces.contains_key("legacy"));
+        assert!(parent.with_file_name("offline").join("repo").is_dir());
+        drop(service); drop(state); drop(server); root.close().unwrap(); Ok(())
+    }).await.unwrap();
+}
+
+#[tokio::test]
 async fn project_inventory_aliases_share_projection_with_distinct_ids() {
     let root = tempfile::tempdir().unwrap();
     let plain = root.path().join("plain");

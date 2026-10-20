@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { useAccountWorktrees } from "./useAccountWorktrees";
 import type { AccountMachineView, AccountGrantResponse, PairExchangeResponse, AllocateSessionResponse } from "./accountSession";
 import type { TunnelResponse } from "./attachTunnel";
@@ -191,6 +191,100 @@ describe("useAccountWorktrees machine projects discovery", () => {
       expect.anything(),
     );
     expect(mockFetchLike).not.toHaveBeenCalledWith("/api/v1/workspace/state", expect.anything());
+  });
+
+  it("uses advertised desktop scope and retains unavailable members on discovery failure", async () => {
+    const machine: AccountMachineView = {
+      machineId: "scoped", machineRecordId: "record", publicKey: "pub", attachPublicKey: "attach",
+      relayOrigin: relayUrl, displayName: "Desktop", platform: "linux", online: true,
+      enrollmentEpoch: "1", lastSeenAt: 1,
+    };
+    vi.mocked(listMachines).mockResolvedValue([machine]);
+    vi.mocked(allocateSession).mockResolvedValue({ sessionId: "scope-session" });
+    vi.mocked(requestGrant).mockResolvedValue({ grantId: "g", machineId: machine.machineId,
+      relayOrigin: relayUrl, machineAttachPublicKey: "attach", pairingToken: "p", grantScope: "machine", expiresAt: 1 });
+    vi.mocked(redeemInTunnel).mockResolvedValue({ token: "token", device: { id: "d", name: "D" },
+      machineId: machine.machineId, displayName: "Desktop" });
+    let fail = false;
+    let discovered: () => void = () => undefined;
+    const discovery = new Promise<void>((resolve) => { discovered = resolve; });
+    const json = (value: unknown): TunnelResponse => ({ status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify(value)) });
+    const fetchLike = vi.fn(async (path: string) => {
+      if (fail) throw new Error("disconnected");
+      if (path === "/api/v1/workspace/projects") return json({ desktopLocalSnapshotExists: true,
+        projects: [{ workspaceId: "legacy", availability: "ready" }] });
+      if (path === "/api/v1/workspace/projects?scope=desktopLocal") return json({ desktopLocalSnapshotExists: true,
+        projects: [{ workspaceId: "member", availability: "ready" }, { workspaceId: "offline", availability: "missing" }] });
+      if (path === "/api/v1/workspace/worktrees?workspaceId=member") return json({ worktrees: [{ workspaceId: "member", identity: null, branch: "main" }] });
+      if (path === "/api/v1/sessions") { discovered(); return json({ revision: "1", completeness: "complete", sessions: [] }); }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.mocked(openTunnel).mockImplementation(async () => ({ transport: { fetchLike, openWebSocket: vi.fn(), close: vi.fn() }, close: vi.fn() }));
+    const { result } = renderHook(() => useAccountWorktrees(relayUrl, sessionToken, true));
+    await act(async () => { await discovery; });
+    expect(result.current.machineStatuses.scoped?.status).toBe("ready");
+    expect(fetchLike).toHaveBeenCalledWith("/api/v1/workspace/projects?scope=desktopLocal", expect.anything());
+    expect(result.current.accountOptions.map((option) => option.workspaceId).sort()).toEqual(["member", "offline"]);
+    expect(result.current.accountOptions.find((option) => option.workspaceId === "offline")?.unavailable).toBe(true);
+    expect(fetchLike).not.toHaveBeenCalledWith("/api/v1/workspace/worktrees?workspaceId=legacy", expect.anything());
+    fail = true;
+    await act(async () => { await result.current.retryMachine(machine.machineId); });
+    expect(result.current.accountOptions).toHaveLength(2);
+    expect(result.current.accountOptions.every((option) => option.unavailable)).toBe(true);
+  });
+
+  it("fetches at most four project worktree lists at once alongside sessions and isolates one failure", async () => {
+    const machine: AccountMachineView = {
+      machineId: "fanout", machineRecordId: "record", publicKey: "pub", attachPublicKey: "attach",
+      relayOrigin: relayUrl, displayName: "Desktop", platform: "linux", online: true,
+      enrollmentEpoch: "1", lastSeenAt: 1,
+    };
+    vi.mocked(listMachines).mockResolvedValue([machine]);
+    vi.mocked(allocateSession).mockResolvedValue({ sessionId: "fanout-session" });
+    vi.mocked(requestGrant).mockResolvedValue({ grantId: "g", machineId: machine.machineId,
+      relayOrigin: relayUrl, machineAttachPublicKey: "attach", pairingToken: "p", grantScope: "machine", expiresAt: 1 });
+    vi.mocked(redeemInTunnel).mockResolvedValue({ token: "token", device: { id: "d", name: "D" },
+      machineId: machine.machineId, displayName: "Desktop" });
+    const json = (value: unknown): TunnelResponse => ({ status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify(value)) });
+    const ids = ["p1", "p2", "p3", "p4", "p5"];
+    const pending = new Map<string, () => void>();
+    let inFlight = 0;
+    let peak = 0;
+    let sessionsRequested = false;
+    let fourStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => { fourStarted = resolve; });
+    const fetchLike = vi.fn(async (path: string) => {
+      if (path === "/api/v1/workspace/projects") {
+        return json({ projects: ids.map((workspaceId) => ({ workspaceId, availability: "ready" })) });
+      }
+      if (path === "/api/v1/sessions") {
+        sessionsRequested = true;
+        return json({ revision: "1", completeness: "complete", sessions: [] });
+      }
+      const wsId = new URLSearchParams(path.split("?")[1]).get("workspaceId") ?? "";
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      if (inFlight === 4) fourStarted();
+      await new Promise<void>((resolve) => pending.set(wsId, resolve));
+      inFlight -= 1;
+      if (wsId === "p2") return { status: 503, headers: {}, body: new Uint8Array() };
+      return json({ worktrees: [{ workspaceId: wsId, identity: null, branch: "main" }] });
+    });
+    vi.mocked(openTunnel).mockImplementation(async () => ({ transport: { fetchLike, openWebSocket: vi.fn(), close: vi.fn() }, close: vi.fn() }));
+    const { result } = renderHook(() => useAccountWorktrees(relayUrl, sessionToken, true));
+    await act(async () => { await started; });
+    expect([...pending.keys()]).toEqual(["p1", "p2", "p3", "p4"]);
+    // Sessions are requested while every worktree reply is still unresolved.
+    expect(sessionsRequested).toBe(true);
+    await act(async () => { pending.get("p1")?.(); });
+    await waitFor(() => expect(pending.has("p5")).toBe(true));
+    await act(async () => { for (const id of ["p2", "p3", "p4", "p5"]) pending.get(id)?.(); });
+    await waitFor(() => expect(result.current.machineStatuses.fanout?.status).toBe("ready"));
+    expect(peak).toBe(4);
+    const options = result.current.accountOptions.filter((option) => option.machineId === "fanout");
+    expect(options.map((option) => option.workspaceId)).toEqual(ids);
+    expect(options.find((option) => option.workspaceId === "p2")?.unavailable).toBe(true);
+    expect(options.filter((option) => option.unavailable)).toHaveLength(1);
   });
 
   it("reuses the paired device token across retries, closes the replaced tunnel, and re-pairs only on 401", async () => {

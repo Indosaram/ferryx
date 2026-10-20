@@ -1237,7 +1237,14 @@ export const ReferencePartView: React.FC<{
 }> = ({ part, context, timestamp, className }) => {
   switch (part.kind) {
     case "text":
-      return <ReferenceProse text={part.text} className={className} />;
+      // Turn body prose matches the user bubble and plain assistant body (16px, primary color);
+      // ReferenceProse's smaller secondary style stays for summaries and task results.
+      return (
+        <ReferenceProse
+          text={part.text}
+          className={cn("text-base leading-relaxed text-chat-foreground", className)}
+        />
+      );
     case "thinking":
       return <ThinkingBlock text={part.text} />;
     // A skill chip is drawn once, by the turn's skill list: the reference filters `skill` out of
