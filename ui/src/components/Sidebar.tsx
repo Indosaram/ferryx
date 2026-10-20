@@ -138,7 +138,6 @@ export type SidebarAttention = {
   onOpen: (row: AttentionRow) => void;
   onDismiss: (row: AttentionRow) => void;
   onDismissAll: () => void;
-  openSessionCount: number;
   inboxOpen: boolean;
   onInboxOpenChange: (open: boolean) => void;
 };

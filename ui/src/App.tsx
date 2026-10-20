@@ -71,7 +71,7 @@ import { getCurrentVersion } from "./lib/updater";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
 import type { SectionId } from "./components/settings/types";
-import type { RemoteContext } from "./lib/machineNavigation";
+import type { MachineProjectTarget, RemoteContext } from "./lib/machineNavigation";
 import {
   AGENTS_SETTINGS_CHANGED_EVENT,
   detectionTargets,
@@ -1999,6 +1999,7 @@ function WorkspaceApp({
 
   const [isAddProjectOpen, setIsAddProjectOpen] = useState(false);
   const [addProjectHostId, setAddProjectHostId] = useState<string | undefined>(undefined);
+  const [addProjectTarget, setAddProjectTarget] = useState<MachineProjectTarget | undefined>(undefined);
   const [createTargetProject, setCreateTargetProject] = useState<RegisteredProject | null>(null);
   const [pendingProjectRemove, setPendingProjectRemove] = useState<RegisteredProject | null>(null);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -2026,9 +2027,6 @@ function WorkspaceApp({
     // liveActivityLookup reads only the mounted workspace id and its per-session activity map.
     [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
   );
-  const openSessionCount = Object.keys(state.sessions).length + listWorkspaceSnapshots()
-    .filter(([workspaceId]) => workspaceId !== activeProject.workspaceId)
-    .reduce((count, [, snapshot]) => count + Object.keys(snapshot.sessions).length, 0);
   const [pendingTabClose, setPendingTabClose] = useState<{
     kind: "pane" | "tab";
     tabId: string;
@@ -2455,10 +2453,9 @@ function WorkspaceApp({
     onOpen: handleOpenAttentionRow,
     onDismiss: (row) => dismissAttentionRows([row]),
     onDismissAll: () => dismissAttentionRows(attentionRows),
-    openSessionCount,
     inboxOpen: isInboxOpen,
     onInboxOpenChange: setIsInboxOpen,
-  }), [attentionRows, dismissAttentionRows, handleOpenAttentionRow, isInboxOpen, openSessionCount]);
+  }), [attentionRows, dismissAttentionRows, handleOpenAttentionRow, isInboxOpen]);
 
   useEffect(() => {
     if (!pendingNotificationTarget) return;
@@ -2913,6 +2910,7 @@ function WorkspaceApp({
   const handleOpenAddProject = useCallback(() => {
     if (activeRemoteHostRef.current) return;
     setAddProjectHostId(undefined);
+    setAddProjectTarget(undefined);
     setIsAddProjectOpen(true);
   }, []);
   const handleOpenSshProject = useCallback((hostId: string) => {
@@ -2920,9 +2918,23 @@ function WorkspaceApp({
     setIsSettingsOpen(false);
     setSettingsInitialSection(undefined);
     setAddProjectHostId(hostId);
+    setAddProjectTarget(undefined);
     setIsAddProjectOpen(true);
   }, []);
-  const handleCloseAddProject = useCallback(() => setIsAddProjectOpen(false), []);
+  // Settings > Remote hands one machine to Add Project; the dialog routes pairedDaemon to its form.
+  const handleOpenMachineProject = useCallback((target: MachineProjectTarget) => {
+    if (activeRemoteHostRef.current) return;
+    setIsSettingsOpen(false);
+    setSettingsInitialSection(undefined);
+    setSettingsRemoteContext(undefined);
+    setAddProjectHostId(undefined);
+    setAddProjectTarget(target);
+    setIsAddProjectOpen(true);
+  }, []);
+  const handleCloseAddProject = useCallback(() => {
+    setIsAddProjectOpen(false);
+    setAddProjectTarget(undefined);
+  }, []);
   const handleOpenCreateWorktree = useCallback((project?: RegisteredProject) => {
     if (activeRemoteHostRef.current) return;
     const target = project ?? activeProjectRef.current;
@@ -3988,7 +4000,8 @@ function WorkspaceApp({
           }
         >
           <SettingsDialog open initialSection={settingsInitialSection} onClose={handleCloseSettings}
-            onOpenSshProject={handleOpenSshProject} remoteContext={settingsRemoteContext} />
+            onOpenSshProject={handleOpenSshProject} onOpenMachineProject={handleOpenMachineProject}
+            remoteContext={settingsRemoteContext} />
         </Suspense>
       ) : null}
       {isResourcesOpen ? (
@@ -4039,6 +4052,7 @@ function WorkspaceApp({
         <AddProjectDialog
           projects={projects}
           initialHostId={addProjectHostId}
+          initialTarget={addProjectTarget}
           onClose={handleCloseAddProject}
           onRegistered={handleRegisteredProject}
           onOpenSettings={handleOpenSshSettings}

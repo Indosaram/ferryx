@@ -147,7 +147,6 @@ const attention = {
   onOpen: () => markFixture("fixtureAttentionOpen")(),
   onDismiss: () => markFixture("fixtureAttentionDismiss")(),
   onDismissAll: () => markFixture("fixtureAttentionDismissAll")(),
-  openSessionCount: 0,
   inboxOpen: params.get("inbox") === "1",
   onInboxOpenChange: () => markFixture("fixtureInboxToggle")(),
 };

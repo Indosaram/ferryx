@@ -83,7 +83,13 @@ vi.mock("./components/ui/sonner", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./components/ui/sonner")>();
   return { ...actual, toast: Object.assign(actual.toast, { warning: toastMocks.warning }) };
 });
-vi.mock("./components/SettingsDialog", () => ({ SettingsDialog: ({ initialSection }: { initialSection?: string }) => <div data-testid="settings-section">{initialSection}</div> }));
+vi.mock("./components/SettingsDialog", () => ({ SettingsDialog: ({ initialSection, onOpenMachineProject }: {
+  initialSection?: string;
+  onOpenMachineProject?: (target: import("./lib/machineNavigation").MachineProjectTarget, context: import("./lib/machineNavigation").RemoteContext) => void;
+}) => <div>
+  <div data-testid="settings-section">{initialSection}</div>
+  <button onClick={() => onOpenMachineProject?.({ kind: "pairedDaemon", hostId: "h", generation: "1" }, { page: "machines", filter: "all" })}>Open paired project</button>
+</div> }));
 vi.mock("./components/TerminalSplitView", () => ({ TerminalSplitView: ({ onAddTab, onSplitPane, layout, onReconnectSshSession, onRefreshSessionIdentity }: {
   onAddTab: () => void;
   onSplitPane: (tabId: string, leafId: string, direction: "horizontal") => void;
@@ -574,6 +580,22 @@ describe("App SSH project lifecycle", () => {
     });
     expect(screen.getByTestId("settings-section")).toHaveTextContent("ssh");
     expect(screen.queryByRole("dialog", { name: "Add Project" })).not.toBeInTheDocument();
+  });
+
+  it("opens the paired project form for the machine Settings hands to Add Project", async () => {
+    seed([]);
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: "Add Project" }));
+    fireEvent.click(screen.getByTestId("project-type-remote"));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("configure-ssh-settings"));
+      await import("./components/SettingsDialog");
+    });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Open paired project" })); });
+    expect(screen.queryByTestId("settings-section")).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Add Paired Daemon Project" })).toBeInTheDocument();
+    // The machine selector is locked only when AddProjectDialog received a pairedDaemon initialTarget.
+    expect(screen.getByRole("combobox", { name: "Paired machine" })).toBeDisabled();
   });
 
   it("adopts the server's canonical host-qualified ID and path before new tabs and splits", async () => {

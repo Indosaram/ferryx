@@ -27,7 +27,7 @@ PROBE_JS='(() => {
     };
   }
   const worktrees = [...document.querySelectorAll("[data-testid=\"worktree-status-dot\"]")]
-    .map((el) => el.getAttribute("data-activity-state"));
+    .map((el) => el.querySelector("[data-status-state]")?.getAttribute("data-status-state") ?? null);
   return JSON.stringify({ byTab, worktrees });
 })()'
 

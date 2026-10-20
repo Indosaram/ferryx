@@ -905,7 +905,6 @@ describe("Sidebar navigation", () => {
       onOpen: vi.fn(),
       onDismiss: vi.fn(),
       onDismissAll: vi.fn(),
-      openSessionCount: 3,
       inboxOpen: false,
       onInboxOpenChange: vi.fn(),
     };

@@ -49,7 +49,6 @@ function attentionProps(overrides: Partial<SidebarAttention> = {}): SidebarAtten
     onOpen: vi.fn(),
     onDismiss: vi.fn(),
     onDismissAll: vi.fn(),
-    openSessionCount: 3,
     inboxOpen: false,
     onInboxOpenChange: vi.fn(),
     ...overrides,
