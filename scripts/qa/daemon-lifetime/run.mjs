@@ -151,8 +151,11 @@ async function main() {
   const runId = opts.runId ?? makeRunId();
   const selected = opts.selfCheck ? [] : selectScenarios({ all: opts.all, only: opts.only }, host.platform);
   assertRunnersComplete(RUNNERS, selected);
-  const runDir = joinFor(host.platform, host.runRoot, runId);
-  const layout = isolationLayout(runDir, host.platform);
+  // Sockets stay under runRoot (short path); bulk storage goes under storageRoot when the host sets one.
+  const runtimeRunDir = joinFor(host.platform, host.runRoot, runId);
+  const runDir = host.storageRoot ? joinFor(host.platform, host.storageRoot, runId) : runtimeRunDir;
+  const runDirs = [...new Set([runDir, runtimeRunDir])];
+  const layout = isolationLayout(runDir, host.platform, runDir === runtimeRunDir ? {} : { runtimeDir: joinFor(host.platform, runtimeRunDir, 'run') });
   // Evidence always lands on this Mac: <evidenceRoot>/q12-<platform>/<runId>.
   const localEvidence = opts.evidenceDir ?? path.join(hostFor('mac').evidenceRoot, `q12-${host.platform}`, runId);
   mkdirSync(localEvidence, { recursive: true });
@@ -169,7 +172,7 @@ async function main() {
 
   const agentPath = joinFor(host.platform, host.transport.kind === 'local' ? HERE : '', 'lib', 'agent.mjs');
   const remoteHarness = host.transport.kind === 'local' ? HERE : joinFor(host.platform, worktreePaths(host, opts.worktreeSlug).worktree, 'scripts', 'qa', 'daemon-lifetime');
-  const agent = await startAgent(host, { agentPath: host.transport.kind === 'local' ? agentPath : joinFor(host.platform, remoteHarness, 'lib', 'agent.mjs'), runId, runDir, allowRoots: [host.cargoTarget, `${host.cargoTarget}-baseline`] }, { log });
+  const agent = await startAgent(host, { agentPath: host.transport.kind === 'local' ? agentPath : joinFor(host.platform, remoteHarness, 'lib', 'agent.mjs'), runId, runDir, allowRoots: [...runDirs.slice(1), host.cargoTarget, `${host.cargoTarget}-baseline`] }, { log });
   const uid = host.platform === 'windows' ? null : Number((await agent.call('exec', { command: 'id', args: ['-u'] })).stdout.trim());
   const home = host.transport.kind === 'local' ? os.homedir() : (await agent.call('exec', host.platform === 'windows' ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', '$env:USERPROFILE'] } : { command: 'sh', args: ['-c', 'printf %s "$HOME"'] })).stdout.trim();
   const forbidden = forbiddenRoots({ platform: host.platform, home, uid });
@@ -277,7 +280,7 @@ async function main() {
     platform: host.platform, runId, host, agent, jobs, gui, mahord, layout, uid, artifacts, keys, hooks: summary.hooks,
     revisions: summary.revisions, isolationEnv: env, repoDir, workspaceId: 'qa-daemon-lifetime', workspaceRegistered: false,
     stagedRoot: joinFor(host.platform, layout.data, 'daemon-runtime'),
-    qaRoots: [runDir, host.cargoTarget, `${host.cargoTarget}-baseline`], guiExecutables: Object.values(artifacts).map((a) => a.guiExecutable).filter(Boolean),
+    qaRoots: [...runDirs, host.cargoTarget, `${host.cargoTarget}-baseline`], guiExecutables: Object.values(artifacts).map((a) => a.guiExecutable).filter(Boolean),
     hostUser: host.transport.user ?? os.userInfo().username, sshPort: 20000 + (Number(runId.slice(-5, -1)) % 20000),
     evidenceDir: localEvidence.split(path.sep).join('/'), state: {}, carry: [], sshd: null,
     writeEvidence: async (file, content) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, content); },
@@ -357,9 +360,11 @@ async function main() {
     ...(await agent.call('table')).filter((r) => r.executable && ctx.qaRoots.some((root) => r.executable.toLowerCase().startsWith(root.toLowerCase()))).map((r) => ({ kind: 'process', pid: r.pid, executable: r.executable })),
   ];
   if (summary.teardown.leftovers.length === 0) {
-    await agent.call('remove', { target: runDir });
-    summary.teardown.dirsRemoved.push(runDir);
-    if (await agent.call('exists', { file: runDir })) summary.teardown.leftovers.push({ kind: 'dir', path: runDir });
+    for (const dir of runDirs) {
+      await agent.call('remove', { target: dir });
+      summary.teardown.dirsRemoved.push(dir);
+      if (await agent.call('exists', { file: dir })) summary.teardown.leftovers.push({ kind: 'dir', path: dir });
+    }
   }
   summary.releaseDaemon.after = await prodSnapshot();
   summary.releaseDaemon.unchanged = summary.releaseDaemon.before === summary.releaseDaemon.after;

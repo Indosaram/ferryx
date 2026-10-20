@@ -158,6 +158,18 @@ test('builds: only debug QA bundles with a private target dir', () => {
   assert.throws(() => assertQaBuild({ ...plan.A, env: {} }), /CARGO_TARGET_DIR/);
 });
 
+test('linux run storage leaves tmpfs while sockets keep a short path', async () => {
+  const { forbiddenRoots, isolationLayout, isInside } = await import('./lib/guards.mjs');
+  const host = hostFor('linux');
+  assert.ok(host.storageRoot && !isInside(host.storageRoot, '/tmp', 'linux'), 'bulk storage is not on /tmp');
+  for (const root of forbiddenRoots({ platform: 'linux', home: '/home/indo', uid: 1000 })) assert.ok(!isInside(host.storageRoot, root, 'linux'), root);
+  const layout = isolationLayout(`${host.storageRoot}/${RUN}`, 'linux', { runtimeDir: `${host.runRoot}/${RUN}/run` });
+  // Longest socket the daemon binds in its runtime dir: handover-<uuid v4>.sock (handover_socket.rs).
+  const longest = `${layout.runtime}/handover-00000000-0000-0000-0000-000000000000.sock`;
+  assert.ok(Buffer.byteLength(longest) < 108, `${longest} exceeds sun_path`);
+  assert.ok(isInside(layout.data, host.storageRoot, 'linux') && isInside(layout.logs, host.storageRoot, 'linux'));
+});
+
 test('agent command: local node or quoted ssh', () => {
   const local = agentCommand(hostFor('mac'), { agentPath: '/a/agent.mjs', runId: RUN, runDir: '/r' });
   assert.equal(local.args[0], '/a/agent.mjs');

@@ -130,14 +130,17 @@ export function assertQaExecutable(executable, { allowedRoots, forbidden, platfo
   return executable;
 }
 
-/** Private directories and env for one run. Every key the daemon reads for its location is set. */
-export function isolationLayout(runDir, platform) {
+/**
+ * Private directories and env for one run. Every key the daemon reads for its location is set.
+ * runtimeDir places the socket dir outside runDir (short path on a host whose runDir is long).
+ */
+export function isolationLayout(runDir, platform, { runtimeDir = null } = {}) {
   const mod = platform === 'windows' ? path.win32 : path.posix;
   const dirs = {
     root: runDir,
     home: mod.join(runDir, 'home'),
     data: mod.join(runDir, 'data'),
-    runtime: mod.join(runDir, 'run'),
+    runtime: runtimeDir ?? mod.join(runDir, 'run'),
     sessions: mod.join(runDir, 'sessions'),
     config: mod.join(runDir, 'home', 'config'),
     xdgData: mod.join(runDir, 'home', 'data'),

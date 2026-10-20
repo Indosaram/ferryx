@@ -30,6 +30,11 @@ export const HOSTS = Object.freeze({
     guiEnv: { WAYLAND_DISPLAY: 'wayland-1', DISPLAY: ':0', XDG_RUNTIME_DIR: '/run/user/1000' },
     evidenceRoot: '/home/indo/code/ferryx-wt/.evidence/daemon-independent-lifetime-20261017',
     runRoot: '/tmp/ferryx-qa-daemon-lifetime',
+    // Bulk run storage (artifacts, data with the staged daemon-runtime copies, logs) goes on the home
+    // filesystem: omarchy's /tmp is a 16 GiB tmpfs with usrquota, and r3b's staging copy failed there
+    // with EDQUOT (os error 122). Only the runtime dir (sockets, owner.json) stays under runRoot, so
+    // handover-<uuid>.sock keeps a path well inside the 108-byte sun_path limit.
+    storageRoot: '/home/indo/code/ferryx-wt/.qaruns',
     node: 'node',
     gui: { kind: 'mahord', host: '100.91.254.71', pairingId: 'AF12D209-AB76-401E-BDB2-0D80E01FC2C8' },
     exeSuffix: '',
