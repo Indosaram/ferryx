@@ -45,17 +45,6 @@ pub struct RemoteSessionDetails {
     pub rows: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemotePairedRecoveryOutcome {
-    pub backend_session_id: String,
-    pub daemon_epoch: String,
-    pub incarnation: String,
-    pub generation: Option<u64>,
-    pub state: String,
-    pub blocked_reason: Option<String>,
-    pub exit_code: Option<i32>,
-}
-
 /// Object-safe abstraction for session routing across local and legacy daemon backends.
 pub trait RemoteSessionBackend: Send + Sync {
     /// None identifies a local PTY. Errors must never downgrade SSH to local input.
@@ -91,13 +80,6 @@ pub trait RemoteSessionBackend: Send + Sync {
     /// process it can inspect. `None` means unknown; callers fall back to `worktree_path`.
     fn live_cwd<'a>(&'a self, _session_id: &'a str) -> BoxFuture<'a, Option<PathBuf>> {
         Box::pin(async { None })
-    }
-
-    fn paired_recovery_outcome<'a>(
-        &'a self,
-        _session_id: &'a str,
-    ) -> BoxFuture<'a, Result<Option<RemotePairedRecoveryOutcome>, String>> {
-        Box::pin(async { Ok(None) })
     }
     fn attach_with_sequence<'a>(
         &'a self,
@@ -179,13 +161,6 @@ impl RemoteSessionBackend for crate::daemon::session_service::DaemonSessionServi
                 .flatten()
                 .map(|cwd| crate::daemon::session_service::normalize_process_cwd(&cwd))
         })
-    }
-
-    fn paired_recovery_outcome<'a>(
-        &'a self,
-        id: &'a str,
-    ) -> BoxFuture<'a, Result<Option<RemotePairedRecoveryOutcome>, String>> {
-        self.router().paired_recovery_outcome(id)
     }
     fn attach_with_sequence<'a>(
         &'a self,

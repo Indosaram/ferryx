@@ -65,54 +65,30 @@ import { moveTabIntoPaneSplit } from "./tabPaneDrop";
 import { notificationCenterStore, type NotificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
 import { hasRecentObservationInteraction } from "../lib/notificationCenter/activityRecording";
 import { countAttentionEntries, liveActivityLookup } from "../features/ferryx/attention/attentionModel";
-import { formatRecoveryKey, RecoveryScheduler, type AuthorityCorrectionReceipt, type RecoveryClock } from "../lib/sessionRecovery";
+import { formatRecoveryKey, RecoveryScheduler, type AuthorityCorrectionReceipt } from "../lib/sessionRecovery";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
 export type LocalRecoveryAdmissionResult =
   | { kind: "pending" }
   | { kind: "ready"; session: TerminalSession }
-  | { kind: "blocked"; reason: "identity_conflict" | "SESSION_EXPIRED" | "CONTROL_CONFLICT" |
-      "STALE_GENERATION" | "PAIRED_HOST_STALE_GENERATION" | "PAIRED_HOST_UNAUTHORIZED" |
-      "UNAUTHORIZED" | "PERMISSION_DENIED" | "PAIRED_HOST_WRONG_MACHINE" |
-      "PAIRED_HOST_INVALID_RESPONSE" | "PAIRED_HOST_MIGRATION_PENDING" | "UNSUPPORTED_PROTOCOL" }
+  | { kind: "blocked"; reason: "identity_conflict" }
   | { kind: "exited" }
   | { kind: "cancelled" };
 type LocalRecoveryOwner = { workspaceId: string; sessionId: string; captured: TerminalSession;
   scheduler: RecoveryScheduler; admitting: boolean; requesters: Set<(result: LocalRecoveryAdmissionResult) => void> };
 const localRecoveryOwners = new Map<string, LocalRecoveryOwner>();
 const localRecoveryReceipts = new Map<string, Map<string, TerminalSession>>();
-function hasPendingLocalSplit(session: TerminalSession | undefined | null): boolean {
-  const intent = localSplitIntent(session);
-  return Boolean(intent && (!intent.ready || intent.cancelRequested));
-}
 function matchesLocalRecoveryReceipt(current: TerminalSession | undefined, receipt: TerminalSession): boolean {
   return Boolean(current && current.id === receipt.id && current.workspaceId === receipt.workspaceId &&
     current.backendSessionId === receipt.backendSessionId && current.incarnation === receipt.incarnation &&
     current.daemonEpoch === receipt.daemonEpoch && current.recoveryKey === receipt.recoveryKey &&
     current.recoveryToken === receipt.recoveryToken && current.lifecycle === "running" &&
     current.reconnectLifecycle === "idle" && current.remoteConnectionState === receipt.remoteConnectionState &&
-    !current.backendUnavailableReason && !current.reconnectError && !hasPendingLocalSplit(current));
+    !current.backendUnavailableReason && !current.reconnectError && !localSplitIntent(current));
 }
 const localRecoveryAdmissions = new Map<string, (action: WorkspaceAction) => void>();
 let persistLocalRecovery: ((workspaceId: string, state: WorkspaceState, current: () => boolean) => Promise<void>) | undefined;
-let localRecoveryClock: RecoveryClock | undefined;
 let reconcilingLocalRecovery = false;
-
-export function setLocalRecoveryClockForTests(clock?: RecoveryClock): void {
-  localRecoveryClock = clock;
-}
-
-export function resetLocalRecoveryForTests(): void {
-  for (const owner of localRecoveryOwners.values()) owner.scheduler.dispose();
-  localRecoveryOwners.clear();
-  localRecoveryReceipts.clear();
-  localRecoveryAdmissions.clear();
-  persistLocalRecovery = undefined;
-  localRecoveryClock = undefined;
-  reconcilingLocalRecovery = false;
-}
-
-if (import.meta.hot) import.meta.hot.dispose(() => resetLocalRecoveryForTests());
 
 export function setLocalRecoveryPersistence(persist: typeof persistLocalRecovery): void {
   persistLocalRecovery = persist;
@@ -239,17 +215,16 @@ export function requestLocalRecoveryAdmission(workspaceId: string, frontendSessi
             return;
           }
           const authority = details?.recoveryAuthority;
-          const resolvedDaemonEpoch = details?.daemonEpoch ?? authority?.daemonEpoch;
           const isAffirmativeOriginal = Boolean(
             details &&
             details.sessionId === retained.backendSessionId &&
             details.running &&
-            resolvedDaemonEpoch &&
+            details.daemonEpoch &&
             retained.incarnation &&
             details.incarnation === retained.incarnation &&
             authority?.status === "running" &&
             authority.incarnation === retained.incarnation &&
-            authority.daemonEpoch === resolvedDaemonEpoch
+            authority.daemonEpoch === details.daemonEpoch
           );
           if (isAffirmativeOriginal) {
             const proof: AuthorityCorrectionReceipt = {
@@ -311,7 +286,7 @@ export function requestLocalRecoveryAdmission(workspaceId: string, frontendSessi
     }
   }
   else {
-    if (!persistLocalRecovery || hasPendingLocalSplit(retained)) { finish({ kind: "cancelled" }); return () => {}; }
+    if (!persistLocalRecovery || localSplitIntent(retained)) { finish({ kind: "cancelled" }); return () => {}; }
     if (revalidate && (retained.backendUnavailableReason === "identity_conflict" || retained.reconnectError?.code === "IDENTITY_CONFLICT")) {
       void (async () => {
         try {
@@ -335,17 +310,16 @@ export function requestLocalRecoveryAdmission(workspaceId: string, frontendSessi
             return;
           }
           const authority = details?.recoveryAuthority;
-          const resolvedDaemonEpoch = details?.daemonEpoch ?? authority?.daemonEpoch;
           const isAffirmativeOriginal = Boolean(
             details &&
             details.sessionId === retained.backendSessionId &&
             details.running &&
-            resolvedDaemonEpoch &&
+            details.daemonEpoch &&
             retained.incarnation &&
             details.incarnation === retained.incarnation &&
             authority?.status === "running" &&
             authority.incarnation === retained.incarnation &&
-            authority.daemonEpoch === resolvedDaemonEpoch
+            authority.daemonEpoch === details.daemonEpoch
           );
           if (isAffirmativeOriginal) {
             reconcilingLocalRecovery = true;
@@ -446,7 +420,7 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
     for (const [workspaceId, state] of listWorkspaceSnapshots()) {
       if (isRemoteWorkspaceId(workspaceId) || isPairedWorkspaceId(workspaceId)) continue;
       for (const session of Object.values(state.sessions)) {
-        if (!session.backendSessionId || hasPendingLocalSplit(session) || session.lifecycle === "exited" ||
+        if (!session.backendSessionId || localSplitIntent(session) || session.lifecycle === "exited" ||
             session.backendUnavailableReason === "identity_conflict" ||
             session.remoteConnectionState !== "reconnecting") continue;
         const identity = { kind: "local" as const, frontendSessionId: session.id,
@@ -455,7 +429,7 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
         if (localRecoveryOwners.has(key)) continue;
         const owner: LocalRecoveryOwner = { workspaceId, sessionId: session.id, captured: session,
           scheduler: null! as RecoveryScheduler, admitting: false, requesters: new Set() };
-        owner.scheduler = new RecoveryScheduler({ identity, clock: localRecoveryClock, attemptAction: async (attempt) => {
+        owner.scheduler = new RecoveryScheduler({ identity, attemptAction: async (attempt) => {
           const before = getWorkspaceSnapshot(workspaceId)?.sessions[session.id];
           if (!before || before.backendSessionId !== owner.captured.backendSessionId ||
               before.incarnation !== owner.captured.incarnation || before.daemonEpoch !== owner.captured.daemonEpoch ||
@@ -480,8 +454,7 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
           if (session.incarnation && details.incarnation && session.incarnation !== details.incarnation) return { kind: "blocked", reason: "identity_conflict" };
           const authority = details.recoveryAuthority;
           if (authority?.status === "blocked" || authority?.status === "identity_conflict" || authority?.status === "correction_required") return { kind: "blocked", reason: "identity_conflict", error: authority };
-          const resolvedDaemonEpoch = details.daemonEpoch ?? authority?.daemonEpoch;
-          if (!session.incarnation || details.incarnation !== session.incarnation || !resolvedDaemonEpoch) return { kind: "retryable", reason: "owner_unknown" };
+          if (!session.incarnation || details.incarnation !== session.incarnation || !details.daemonEpoch) return { kind: "retryable", reason: "owner_unknown" };
           if (authority?.status === "affirmative_exit" && authority.incarnation === session.incarnation &&
               authority.daemonEpoch === session.daemonEpoch) {
             applyLocalRecovery(workspaceId, { type: "SESSION_AFFIRMATIVE_EXIT", sessionId: session.id,
@@ -491,10 +464,10 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
               ? { kind: "exited", exitCode: authority.exitCode } : { kind: "cancelled" };
           }
           if (!details.running || authority?.status !== "running" || authority.incarnation !== session.incarnation ||
-              authority.daemonEpoch !== resolvedDaemonEpoch) return { kind: "retryable", reason: "owner_unknown" };
+              authority.daemonEpoch !== details.daemonEpoch) return { kind: "retryable", reason: "owner_unknown" };
           const snapshot = getWorkspaceSnapshot(workspaceId)!;
           const action: WorkspaceAction = { type: "REBIND_SESSION_BACKEND", sessionId: session.id,
-            backendSessionId: session.backendSessionId!, daemonEpoch: resolvedDaemonEpoch,
+            backendSessionId: session.backendSessionId!, daemonEpoch: details.daemonEpoch,
             incarnation: session.incarnation, recoveryKey: formatRecoveryKey(identity), recoveryToken: attempt.token };
           const next = workspaceReducer(snapshot, action);
           if (!fresh() || !persistLocalRecovery) return { kind: "cancelled" };
@@ -505,7 +478,7 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
           finally { owner.admitting = false; }
           const admitted = getWorkspaceSnapshot(workspaceId)?.sessions[session.id];
           if (admitted?.backendSessionId !== session.backendSessionId || admitted.incarnation !== session.incarnation ||
-              admitted.lifecycle === "exited" || admitted.daemonEpoch !== resolvedDaemonEpoch || admitted.recoveryToken !== admissionToken ||
+              admitted.lifecycle === "exited" || admitted.daemonEpoch !== details.daemonEpoch || admitted.recoveryToken !== admissionToken ||
               admitted.recoveryKey !== admissionKey || admitted.remoteConnectionState === "reconnecting") return { kind: "cancelled" };
           owner.captured = admitted;
           return { kind: "ready" };
@@ -547,7 +520,10 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
 const unsubscribeLocalRecoverySnapshots = subscribeWorkspaceSnapshots(() => reconcileLoadedLocalRecovery());
 if (import.meta.hot) import.meta.hot.dispose(() => {
   unsubscribeLocalRecoverySnapshots();
-  resetLocalRecoveryForTests();
+  for (const owner of localRecoveryOwners.values()) owner.scheduler.dispose();
+  localRecoveryOwners.clear();
+  localRecoveryReceipts.clear();
+  localRecoveryAdmissions.clear();
 });
 /** Lower bound between two fallback session-id probes for the same pane and agent. */
 const PROVIDER_SESSION_PROBE_INTERVAL_MS = 2_000;
@@ -2516,23 +2492,24 @@ export function useWorkspaceStore({
       attemptToken?: number | null,
       outcome?: "retryable" | "blocked",
     ) => {
-      // A local loss is fenced by the session's current recovery owner context. Apply it once
-      // through dispatch so the hook state, its ref and the snapshot cache stay identical; a
-      // snapshot-only write is overwritten by the hook's own (rejected, still running) state.
-      const current = stateRef.current.sessions[sessionId];
-      const local = current?.backendSessionId === backendSessionId &&
-        !isPairedWorkspaceId(workspaceId) && !isRemoteWorkspaceId(workspaceId);
       dispatch({
         type: "SESSION_BACKEND_UNAVAILABLE",
         sessionId,
         backendSessionId,
         bindingKey,
-        attemptKey: attemptKey ?? (local ? current.recoveryKey : undefined),
-        attemptToken: attemptToken ?? (local ? current.recoveryToken : undefined),
+        attemptKey,
+        attemptToken,
         outcome,
         reason,
       });
-      if (local) wakeLocalSessionRecovery(workspaceId, sessionId);
+      const current = stateRef.current.sessions[sessionId];
+      if (current?.backendSessionId === backendSessionId && !isPairedWorkspaceId(workspaceId) && !isRemoteWorkspaceId(workspaceId)) {
+        const action: WorkspaceAction = { type: "SESSION_BACKEND_UNAVAILABLE", sessionId, backendSessionId,
+          attemptKey: current.recoveryKey, attemptToken: current.recoveryToken, outcome, reason };
+        const next = workspaceReducer(stateRef.current, action);
+        setWorkspaceSnapshot(workspaceId, next);
+        wakeLocalSessionRecovery(workspaceId, sessionId);
+      }
     },
     markSessionAffirmativeExit: (
       sessionId: string,
@@ -3605,6 +3582,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           const liveIncarnation = liveInfo.incarnation ?? null;
           const sessionIncarnation = session.incarnation ?? null;
           const sameIncarnationProven = sessionIncarnation && liveIncarnation && sessionIncarnation === liveIncarnation;
+          const isLegacyUnknown = !sessionIncarnation || !liveIncarnation;
           if (!sameIncarnationProven) {
             sessions[id] = {
               ...session,
@@ -3614,7 +3592,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           } else {
             sessions[id] = {
               ...session,
-              remoteConnectionState: undefined,
+              remoteConnectionState: isLegacyUnknown && epochChanged ? "disconnected" : undefined,
               lifecycle: "running",
               ...(liveInfo.daemonEpoch != null ? { daemonEpoch: liveInfo.daemonEpoch } : {}),
               ...(epochChanged ? { lastOutputSequence: null } : {}),
@@ -3678,15 +3656,13 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             return [id, { ...session, remoteConnectionState: "reconnecting", remoteGeneration: null }];
           }
           matchedSessionIds.push(id);
-          const dead = action.lifecycle === "exited" || action.lifecycle === "failed";
           return [
             id,
             {
               ...session,
               lifecycle: action.lifecycle,
-              backendSessionId: dead ? null : session.backendSessionId,
-              reconnectLifecycle: dead ? "idle" : session.reconnectLifecycle,
-              ...(dead ? clearedTransportState(session) : {}),
+              backendSessionId: action.lifecycle === "exited" || action.lifecycle === "failed" ? null : session.backendSessionId,
+              reconnectLifecycle: action.lifecycle === "exited" || action.lifecycle === "failed" ? "idle" : session.reconnectLifecycle,
             },
           ];
         }),
@@ -3728,7 +3704,6 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         lifecycle: "exited",
         backendSessionId: null,
         reconnectLifecycle: "idle",
-        ...clearedTransportState(session),
         backendUnavailableReason: action.reason ?? null,
         recoveryState: { phase: "exited", reason: action.reason ?? null },
       };
@@ -4305,24 +4280,6 @@ function settleActivityForDeadSessions(state: WorkspaceState, sessionIds: Iterab
     nextState = applySessionActivity(nextState, tabId, sessionId, { ...current, state: "done" });
   }
   return nextState;
-}
-
-/**
- * Transport fields a session must drop once its PTY is confirmed gone.
- *
- * `remoteConnectionState` describes a live binding that may come back (`disconnected` invites a
- * reattach); once the backend id is cleared there is nothing left to reattach to, so keeping it
- * leaves an exited pane advertising a recoverable outage. `running` likewise cannot outlive the
- * process; hibernated and suspended are deliberate user states and stay as they are.
- */
-function clearedTransportState(session: TerminalSession): Partial<TerminalSession> {
-  return {
-    remoteConnectionState: undefined,
-    remoteGeneration: null,
-    remoteFailure: null,
-    remoteReplayGap: null,
-    ...(session.processState === "running" ? { processState: "standby" as const } : {}),
-  };
 }
 
 /**

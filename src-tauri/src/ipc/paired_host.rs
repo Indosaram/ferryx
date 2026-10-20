@@ -11,66 +11,6 @@ use tauri::{Emitter, State};
 
 pub const PAIRED_HOST_INVENTORY_CHANGED_EVENT: &str = "paired_host_inventory_changed";
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairedSessionRetryResult {
-    pub admitted: bool,
-    pub owner_unavailable: bool,
-    pub stale_tuple: bool,
-    pub blocked: bool,
-    pub affirmative_exit: bool,
-    pub actor_identity: Option<PairedSessionActorIdentity>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairedSessionActorIdentity {
-    pub backend_session_id: String,
-    pub daemon_epoch: String,
-    pub incarnation: String,
-    pub generation: Option<u64>,
-}
-
-#[tauri::command]
-pub async fn cmd_retry_paired_session<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    daemon: State<'_, Arc<DaemonClient>>,
-    backend_session_id: String,
-    daemon_epoch: String,
-    incarnation: String,
-) -> std::result::Result<PairedSessionRetryResult, crate::ipc::IpcError> {
-    use crate::daemon::protocol::DaemonResponse;
-
-    let res = daemon.retry_paired_session(backend_session_id.clone(), daemon_epoch.clone(), incarnation.clone()).await?;
-    let retry_res = match res {
-        DaemonResponse::RetryPairedSessionResult {
-            admitted, owner_unavailable, stale_tuple, blocked, affirmative_exit,
-        } => PairedSessionRetryResult { admitted, owner_unavailable, stale_tuple, blocked, affirmative_exit, actor_identity: None },
-        other => return Err(crate::ipc::IpcError::internal(format!("Unexpected daemon response: {other:?}"))),
-    };
-
-    let actor_identity = match daemon.paired_recovery_outcome(backend_session_id.clone()).await {
-        Ok(DaemonResponse::PairedRecoveryOutcomeResult { outcome: Some(outcome) })
-            if outcome.backend_session_id == backend_session_id &&
-                outcome.daemon_epoch == daemon_epoch && outcome.incarnation == incarnation => {
-            let actor = PairedSessionActorIdentity {
-                backend_session_id: outcome.backend_session_id.clone(),
-                daemon_epoch: outcome.daemon_epoch.clone(),
-                incarnation: outcome.incarnation.clone(),
-                generation: outcome.generation,
-            };
-            let _ = app.emit("paired_session_recovery_status", &outcome);
-            Some(actor)
-        }
-        _ => None,
-    };
-    if let Some(actor_identity) = actor_identity {
-        return Ok(PairedSessionRetryResult { actor_identity: Some(actor_identity), ..retry_res });
-    }
-
-    Ok(retry_res)
-}
-
 pub fn emit_paired_host_inventory_changed<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     event: &InventoryChangeEvent,

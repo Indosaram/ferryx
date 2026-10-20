@@ -3,17 +3,11 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { ChevronLeft } from "lucide-react";
 
 import { MobileKeyDock } from "../components/MobileKeyDock";
-import { observeWebOwner } from "./webRecoveryObservation";
-import {
-  decodeRemoteTerminalFrame,
-  REMOTE_TERMINAL_FRAME_PREFIX,
-  stripTerminalControlSequences,
-} from "./remoteTerminalFrames";
 import { useTerminalSettings } from "../lib/terminalSettings";
 import { isTauriRuntime } from "../lib/tauri";
 import { BUILD_STAMP } from "../lib/buildStamp";
 import { composeJamoRuns, isUncomposedJamoRun } from "./hangulComposition";
-import { remoteSocketUrl, SocketTicketError } from "./remoteClient";
+import { remoteSocketUrl } from "./remoteClient";
 import { MAX_OUTBOUND_BUFFER_BYTES } from "../lib/terminalTransport/remoteTransport";
 import { buildAttachSocketUrl, getOrCreateAttachKey, type AttachKeyPair } from "./accountAttach";
 import {
@@ -100,21 +94,8 @@ type SocketRequest = {
   readonly geometry: GridGeometry;
 };
 
-type TerminalOutcomeFrame = {
-  type: "terminalOutcome";
-  target: { sessionId: string; backendSessionId: string; daemonEpoch: string };
-  incarnation: string;
-  generation: string | null;
-  state: string;
-  blockedReason: string | null;
-  exitCode: number | null;
-};
-
 const MAX_GRID_COLS = 512;
 const MAX_GRID_ROWS = 256;
-const HANDSHAKE_TIMEOUT_MS = 10000;
-const MAX_BACKOFF_DELAY_MS = 10000;
-const BASE_BACKOFF_DELAY_MS = 1000;
 
 const KEY_SEQUENCES = {
   tab: "\t",
@@ -426,8 +407,6 @@ export function RemoteTerminal({
   showTitleBar = true,
 }: RemoteTerminalProps) {
   const socketRef = useRef<WebSocket | WebSocketLike | null>(null);
-  const dialEpochRef = useRef(0);
-  const retryOwnerRef = useRef<() => void>(() => {});
   // The account tunnel dials the machine terminal protocol: PTY input is raw binary and
   // resize/signal/scroll are MachineTerminalControl frames fenced by the Epoch generation
   // (canonical decimal string) from `attached`. The legacy gateway keeps remoteStatus
@@ -455,10 +434,8 @@ export function RemoteTerminal({
   const lastSentMachineGenerationRef = useRef<string | null>(null);
   const pendingMachineSignalRef = useRef<string | null>(null);
   const pendingMachineScrollRowsRef = useRef(0);
-  const isTerminalReadyRef = useRef(false);
   const [socketRequest, setSocketRequest] = useState<SocketRequest | null>(null);
   const [connected, setConnected] = useState(false);
-  const [terminalOutcome, setTerminalOutcome] = useState<TerminalOutcomeFrame | null>(null);
   const [grid, setGrid] = useState<TerminalGridState | null>(null);
   const [cellMetrics, setCellMetrics] = useState<CellMetrics>({ width: 0, height: 0 });
   const [preedit, setPreedit] = useState<string | null>(null);
@@ -466,7 +443,6 @@ export function RemoteTerminal({
   const outboundBytesRef = useRef(0);
   const [pendingInputBytes, setPendingInputBytes] = useState(0);
   const [inputOverflow, setInputOverflow] = useState(false);
-  const [replayGap, setReplayGap] = useState(false);
   const [, setDroppedInputBytes] = useState(0);
   const droppedInputBytesRef = useRef(0);
   const { settings, refreshNativePreferences } = useTerminalSettings(
@@ -518,18 +494,6 @@ export function RemoteTerminal({
   }, [onInputDrop, onInputOverflow]);
 
   const sendInput = useCallback((payload: string | Uint8Array) => {
-    // Pre-readiness user input is rejected rather than carried into the next generation; desired geometry is retained separately.
-    if (!isTerminalReadyRef.current) {
-      const byteLength = typeof payload === "string"
-        ? new TextEncoder().encode(payload).byteLength
-        : payload.byteLength;
-      droppedInputBytesRef.current += byteLength;
-      setDroppedInputBytes(droppedInputBytesRef.current);
-      setInputOverflow(true);
-      onInputOverflow?.(byteLength);
-      onInputDrop?.(byteLength);
-      return;
-    }
     if (generationRef.current !== null) {
       const data = typeof payload === "string" ? payload : new TextDecoder().decode(payload);
       sendPayload(JSON.stringify({ type: "remoteWrite", generation: generationRef.current, data }));
@@ -599,10 +563,6 @@ export function RemoteTerminal({
     inputSinkRef.current?.focus({ preventScroll: true });
   }, []);
 
-  const retryTerminal = useCallback(() => {
-    retryOwnerRef.current();
-  }, []);
-
   useLayoutEffect(() => {
     // A held tail belongs to the session that was on screen; never leak it into the next one.
     resetSinkState();
@@ -619,6 +579,12 @@ export function RemoteTerminal({
     if (!window.matchMedia?.("(pointer: coarse)").matches) focusInput();
   }, [sessionId, activeTabId, focusInput]);
 
+  useEffect(() => {
+    if (connected && !window.matchMedia?.("(pointer: coarse)").matches) {
+      focusInput();
+    }
+  }, [connected, focusInput]);
+
   useLayoutEffect(() => {
     const surface = surfaceRef.current;
     const cellMeasure = cellMeasureRef.current;
@@ -627,31 +593,24 @@ export function RemoteTerminal({
     const measureAndResize = () => {
       const surfaceRect = surface.getBoundingClientRect();
       const cellRect = cellMeasure.getBoundingClientRect();
-      const hasMeasuredLayout = surfaceRect.width > 0 && surfaceRect.height > 0 && cellRect.width > 0 && cellRect.height > 0;
-      const nextCellMetrics = hasMeasuredLayout ? { width: cellRect.width, height: cellRect.height } : null;
-      const geometry = hasMeasuredLayout
-        ? {
-            cols: Math.min(MAX_GRID_COLS, Math.max(1, Math.floor(surfaceRect.width / cellRect.width))),
-            rows: Math.min(MAX_GRID_ROWS, Math.max(1, Math.floor(surfaceRect.height / cellRect.height))),
-          }
-        : { cols: 80, rows: 24 };
+      if (surfaceRect.width <= 0 || surfaceRect.height <= 0 || cellRect.width <= 0 || cellRect.height <= 0) return;
 
-      if (nextCellMetrics) {
-        setCellMetrics((current) => (
-          current.width === nextCellMetrics.width && current.height === nextCellMetrics.height
-            ? current
-            : nextCellMetrics
-        ));
-      }
+      const nextCellMetrics = { width: cellRect.width, height: cellRect.height };
+      setCellMetrics((current) => (
+        current.width === nextCellMetrics.width && current.height === nextCellMetrics.height
+          ? current
+          : nextCellMetrics
+      ));
 
-
+      const geometry = {
+        cols: Math.min(MAX_GRID_COLS, Math.max(1, Math.floor(surfaceRect.width / cellRect.width))),
+        rows: Math.min(MAX_GRID_ROWS, Math.max(1, Math.floor(surfaceRect.height / cellRect.height))),
+      };
       if (!socketRequestMatches(scheduledSocketRequestRef.current, sessionId, token)) {
         const nextRequest = { sessionId, token, geometry };
         scheduledSocketRequestRef.current = nextRequest;
         setGrid(null);
         setConnected(false);
-        setReplayGap(false);
-        isTerminalReadyRef.current = false;
         lastSentGeometryRef.current = null;
         lastSentGenerationRef.current = null;
         generationRef.current = null;
@@ -722,8 +681,6 @@ export function RemoteTerminal({
     if (!socketRequest) return;
     setGrid(null);
     setConnected(false);
-    setTerminalOutcome(null);
-    isTerminalReadyRef.current = false;
     lastSentGeometryRef.current = socketRequest.geometry;
     lastSentGenerationRef.current = null;
     generationRef.current = null;
@@ -733,52 +690,10 @@ export function RemoteTerminal({
     pendingMachineScrollRowsRef.current = 0;
 
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-        let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
     let backoffAttempt = 0;
     let disposed = false;
     let dialSequence = 0;
-    let wakeMicrotask = false;
-    let attemptAbort: AbortController | null = null;
     const abort = new AbortController();
-    let pendingCompletion = false;
-    let presentationSequence = 0;
-    let identityConfirmed = false;
-    let outcomeGatesRetry = false;
-    let latestValidatedOutcome: TerminalOutcomeFrame | null = null;
-    let observedSocketId: string | null = null;
-    let staleCompletionsRejected = 0;
-    let exitSettlements: number | null = null;
-    let currentIncarnation: string | null = null;
-    let replayGapsObserved = 0;
-    const cancelledAttemptIds = new Set<string>();
-    const rejectedAttemptIds = new Set<string>();
-    const ownerTarget = Object.freeze({ sessionId: socketRequest.sessionId,
-      daemonEpoch: daemonEpoch == null ? null : String(daemonEpoch).trim() });
-    const observation = observeWebOwner(ownerTarget, () => {
-      const inFlight = !disposed && (pendingCompletion || handshakeTimer !== null);
-      const isSettled = exitSettlements !== null && exitSettlements > 0 &&
-        reconnectTimer === null && handshakeTimer === null &&
-        !pendingCompletion && !inFlight;
-      const activity: "active" | "settled" | "disposed" = isSettled
-        ? "settled"
-        : (!disposed ? "active" : "disposed");
-      const validatedState = latestValidatedOutcome?.state === "ready" && !isTerminalReadyRef.current
-        ? null : latestValidatedOutcome?.state;
-      const outcomeState = validatedState ??
-        (isTerminalReadyRef.current ? "ready" : (outcomeGatesRetry ? "blocked" : (inFlight ? "retryable" : null)));
-      return {
-        retainedTarget: ownerTarget, socketId: observedSocketId, generation: dialSequence,
-        presentationSequence, pendingTimers: Number(reconnectTimer !== null) + Number(handshakeTimer !== null),
-        inFlight, disposed, identityConfirmed, exitSettlements,
-        cancelledAttemptIds: [...cancelledAttemptIds], staleCompletionsRejected,
-        rejectedAttemptIds: [...rejectedAttemptIds],
-        incarnation: currentIncarnation, outcome: outcomeState, activity,
-        replayGapsObserved,
-      };
-    });
-    const cancelAttemptObservation = () => {
-      if (pendingCompletion || handshakeTimer !== null) cancelledAttemptIds.add(String(dialSequence));
-    };
 
     const clearReconnectTimer = () => {
       if (reconnectTimer !== null) {
@@ -787,19 +702,10 @@ export function RemoteTerminal({
       }
     };
 
-    const clearHandshakeTimer = () => {
-      if (handshakeTimer !== null) {
-        clearTimeout(handshakeTimer);
-        handshakeTimer = null;
-      }
-    };
-
     // Exponential backoff with jitter in (0.5, 1], so many clients dropped by one outage do not
     // redial in lockstep.
     const scheduleRedial = () => {
-      if (outcomeGatesRetry) return;
-      const cappedAttempt = Math.min(backoffAttempt, 10);
-      const delay = Math.min(MAX_BACKOFF_DELAY_MS, BASE_BACKOFF_DELAY_MS * Math.pow(2, cappedAttempt)) * (1 - 0.5 * Math.random());
+      const delay = Math.min(10000, 1000 * Math.pow(2, backoffAttempt)) * (1 - 0.5 * Math.random());
       backoffAttempt += 1;
       clearReconnectTimer();
       reconnectTimer = setTimeout(() => {
@@ -808,186 +714,68 @@ export function RemoteTerminal({
       }, delay);
     };
 
-    const handleDialFailure = (error: unknown, attemptSeq: number) => {
-      if (disposed || attemptSeq !== dialSequence || outcomeGatesRetry) return;
-      cancelAttemptObservation();
-      pendingCompletion = false;
-      identityConfirmed = false;
-      clearHandshakeTimer();
-      isTerminalReadyRef.current = false;
-      wheelRemainderRowsRef.current = 0;
-      setConnected(false);
-      lastSentGenerationRef.current = null;
-      generationRef.current = null;
-      lastSentMachineGenerationRef.current = null;
-      machineGenerationRef.current = null;
-      pendingMachineSignalRef.current = null;
-      pendingMachineScrollRowsRef.current = 0;
-      outboundBufferRef.current = [];
-      outboundBytesRef.current = 0;
-      setPendingInputBytes(0);
-      if (latestValidatedOutcome?.state === "ready") {
-        latestValidatedOutcome = null;
-      }
-
-      const isAuthDenial = error instanceof SocketTicketError && error.isAuthDenial;
-
-      if (isAuthDenial) {
-        outcomeGatesRetry = true;
-        latestValidatedOutcome = {
-          type: "terminalOutcome",
-          target: {
-            sessionId: socketRequest.sessionId,
-            backendSessionId: socketRequest.sessionId,
-            daemonEpoch: daemonEpoch == null ? "" : String(daemonEpoch).trim(),
-          },
-          incarnation: currentIncarnation ?? "",
-          generation: null,
-          state: "blocked",
-          blockedReason: "unauthorized",
-          exitCode: null,
-        };
-        setTerminalOutcome(latestValidatedOutcome);
-        if (onTransportFailure) {
-          try {
-            onTransportFailure();
-          } catch (err) {
-            console.warn("Parent transport failure callback error", err);
-          }
-        }
+    // Without a parent-owned recovery path, a failed ticket or dial retries like a closed socket
+    // instead of leaving the pane on "Connecting" forever.
+    const reportDialFailure = (error: unknown) => {
+      if (disposed) return;
+      if (onTransportFailure) {
+        onTransportFailure();
         return;
       }
-
-      if (onTransportFailure) {
-        try {
-          onTransportFailure();
-        } catch (err) {
-          console.warn("Parent transport failure callback error", err);
-        }
-      }
-      // If parent does not unmount/rebind (e.g. callback no-op, failed, or fallback already selected),
-      // terminal ownership resumes and schedules the next retry.
-      if (!disposed && attemptSeq === dialSequence) {
-        console.warn("Terminal socket connection failed, scheduling retry", error);
-        scheduleRedial();
-      }
+      console.warn("Terminal socket connection failed", error);
+      scheduleRedial();
     };
 
     const dial = () => {
-      cancelAttemptObservation();
       clearReconnectTimer();
-      clearHandshakeTimer();
       if (disposed) return;
-      outcomeGatesRetry = false;
-      setTerminalOutcome(null);
-      if (latestValidatedOutcome?.state === "ready") {
-        latestValidatedOutcome = null;
-      }
-      setReplayGap(false);
-      replayGapsObserved = 0;
-      if (attemptAbort) {
-        cancelAttemptObservation();
-        attemptAbort.abort();
-        attemptAbort = null;
-      }
-      attemptAbort = new AbortController();
       const sequence = ++dialSequence;
-      dialEpochRef.current = sequence;
-      identityConfirmed = false;
-      observedSocketId = null;
-      presentationSequence = 0;
-      pendingCompletion = true;
-      let failureHandled = false;
-      let completionObserved = false;
-      const rejectStaleCompletion = () => {
-        if (completionObserved) return;
-        completionObserved = true;
-        staleCompletionsRejected += 1;
-        rejectedAttemptIds.add(String(sequence));
-        observation?.staleCompletionRejected(String(sequence));
-      };
-
-      // Bounded handshake timeout: closes the exact attempt socket and triggers recovery
-      handshakeTimer = setTimeout(() => {
-        if (disposed || sequence !== dialSequence || isTerminalReadyRef.current) return;
-        if (failureHandled) return;
-        failureHandled = true;
-        const currentSocket = socketRef.current;
-        if (currentSocket) {
-          socketRef.current = null;
-          try { currentSocket.close(); } catch { /* ignore */ }
-        }
-        handleDialFailure(new Error("Handshake deadline exceeded"), sequence);
-      }, HANDSHAKE_TIMEOUT_MS);
-
-      observation?.publish();
-
-      const reportDialFailure = (error: unknown) => {
-        if (disposed || sequence !== dialSequence || failureHandled) {
-          rejectStaleCompletion();
-          return;
-        }
-        completionObserved = true;
-        pendingCompletion = false;
-        failureHandled = true;
-        handleDialFailure(error, sequence);
-      };
 
       const initSocket = (socketOrUrl: string | WebSocketLike) => {
-        // A socket handed over after teardown, newer dial, or failed attempt is closed, never leaked.
-        if (disposed || sequence !== dialSequence || failureHandled) {
-          rejectStaleCompletion();
-          if (typeof socketOrUrl !== "string") {
-            try { socketOrUrl.close(); } catch { /* ignore */ }
-          }
+        // A socket handed over after teardown or a newer dial is closed, never leaked.
+        if (disposed || sequence !== dialSequence) {
+          if (typeof socketOrUrl !== "string") socketOrUrl.close();
           return;
         }
         const socket = typeof socketOrUrl === "string" ? new WebSocket(socketOrUrl) : socketOrUrl;
-        completionObserved = true;
-        pendingCompletion = false;
-        observedSocketId = "__task9Id" in socket && typeof socket.__task9Id === "string" ? socket.__task9Id : null;
-        socketRef.current = socket;
-        activeSocketRequestRef.current = socketRequest;
-
         socket.onerror = () => {
-          if (disposed || sequence !== dialSequence || socketRef.current !== socket) return;
-          if (failureHandled) return;
-          failureHandled = true;
-          const current = socketRef.current;
-          socketRef.current = null;
-          if (current) {
-            try { current.close(); } catch { /* ignore */ }
-          }
-          handleDialFailure(new Error("Socket error"), sequence);
+          if (!disposed && socketRef.current === socket) onTransportFailure?.();
         };
         try {
           socket.binaryType = "arraybuffer";
         } catch {
           // ignore
         }
+        socketRef.current = socket;
+        activeSocketRequestRef.current = socketRequest;
         socket.onopen = () => {
-          if (disposed || sequence !== dialSequence || socketRef.current !== socket) return;
+          if (disposed || socketRef.current !== socket) return;
+          backoffAttempt = 0;
           wheelRemainderRowsRef.current = 0;
+          setConnected(true);
           onSocketLifecycle?.(socketRequest.sessionId, "open");
-          if (isTerminalReadyRef.current) {
-            flushOutboundBuffer();
-          }
+          flushOutboundBuffer();
           requestResizeRef.current();
         };
         socket.onclose = () => {
-          if (disposed || sequence !== dialSequence || socketRef.current !== socket) return;
-          const current = socketRef.current;
-          socketRef.current = null;
-          if (current && current !== socket) {
-            try { current.close(); } catch { /* ignore */ }
+          if (disposed || socketRef.current !== socket || reconnectTimer !== null) return;
+          wheelRemainderRowsRef.current = 0;
+          setConnected(false);
+          lastSentGenerationRef.current = null;
+          generationRef.current = null;
+          lastSentMachineGenerationRef.current = null;
+          machineGenerationRef.current = null;
+          pendingMachineSignalRef.current = null;
+          pendingMachineScrollRowsRef.current = 0;
+          if (onTransportFailure) {
+            onTransportFailure();
+            return;
           }
           onSocketLifecycle?.(socketRequest.sessionId, "closed");
-          if (failureHandled) return;
-          failureHandled = true;
-          handleDialFailure(new Error("Socket closed"), sequence);
+          scheduleRedial();
         };
         socket.onmessage = (event: any) => {
-          if (disposed || sequence !== dialSequence || socketRef.current !== socket || outcomeGatesRetry) return;
+          if (disposed || socketRef.current !== socket) return;
           const rawData = event.data;
           if (typeof rawData === "string") onAgentStateFrame?.(rawData);
           const data = typeof rawData === "string"
@@ -997,64 +785,6 @@ export function RemoteTerminal({
             : rawData instanceof ArrayBuffer
             ? new TextDecoder().decode(new Uint8Array(rawData))
             : String(rawData ?? "");
-          if (data.startsWith(REMOTE_TERMINAL_FRAME_PREFIX)) {
-            const wireFrame = decodeRemoteTerminalFrame(data);
-            if (wireFrame) {
-              if (wireFrame.kind === "replayGap") {
-                replayGapsObserved += 1;
-                setReplayGap(true);
-                if (wireFrame.payload) {
-                  const gridFrame = parseGridFrame(wireFrame.payload);
-                  if (gridFrame) {
-                    presentationSequence += 1;
-                    if (!isTerminalReadyRef.current) {
-                      clearHandshakeTimer();
-                      isTerminalReadyRef.current = true;
-                      backoffAttempt = 0;
-                      setConnected(true);
-                      flushOutboundBuffer();
-                    }
-                    setGrid((current) => applyGridFrame(current, gridFrame));
-                  } else {
-                    const tail = stripTerminalControlSequences(wireFrame.payload);
-                    if (tail) {
-                      presentationSequence += 1;
-                      setGrid((current) => {
-                        if (!current) {
-                          return {
-                            cols: Math.max(80, tail.length),
-                            rows: 24,
-                            cursor: { x: tail.length, y: 0, visible: true, blinking: false, wideTail: false, visualStyle: "block" },
-                            lines: [{ index: 0, runs: [{ text: tail, fg: null, bg: null, attrs: 0 }] }],
-                          };
-                        }
-                        const lines = [...current.lines];
-                        const line0 = lines[0] ?? { index: 0, runs: [] };
-                        lines[0] = { ...line0, runs: [...line0.runs, { text: tail, fg: null, bg: null, attrs: 0 }] };
-                        return { ...current, lines };
-                      });
-                    }
-                  }
-                }
-                return;
-              }
-              if (wireFrame.kind === "output" || wireFrame.kind === "replay") {
-                const gridFrame = parseGridFrame(wireFrame.payload);
-                if (gridFrame) {
-                  presentationSequence += 1;
-                  if (!isTerminalReadyRef.current) {
-                    clearHandshakeTimer();
-                    isTerminalReadyRef.current = true;
-                    backoffAttempt = 0;
-                    setConnected(true);
-                    flushOutboundBuffer();
-                  }
-                  setGrid((current) => applyGridFrame(current, gridFrame));
-                  return;
-                }
-              }
-            }
-          }
           if (!data.startsWith('{"type":"grid')) {
             try {
               const parsed = JSON.parse(data);
@@ -1062,65 +792,7 @@ export function RemoteTerminal({
                 generationRef.current = parsed.generation;
                 lastSentGenerationRef.current = null;
                 requestResizeRef.current();
-                // remoteStatus generation alone is NOT sufficient to establish presentation readiness.
                 return;
-              }
-              if (parsed?.type === "terminalOutcome") {
-                const outcome = parsed as TerminalOutcomeFrame;
-                const request = activeSocketRequestRef.current;
-                const targetSession = outcome.target?.sessionId;
-                const targetEpoch = outcome.target?.daemonEpoch;
-                const normalizedTargetEpoch = targetEpoch == null ? null : String(targetEpoch).trim();
-                const normalizedRequestEpoch = daemonEpoch == null ? null : String(daemonEpoch).trim();
-                if (
-                  socketRef.current === socket &&
-                  request !== null && socketRequestMatches(request, sessionId, token) &&
-                  targetSession === sessionId &&
-                  normalizedTargetEpoch === normalizedRequestEpoch &&
-                  outcome.target?.backendSessionId === sessionId &&
-                  typeof outcome.incarnation === "string" && outcome.incarnation.length > 0 &&
-                  (outcome.generation === null || isMachineGeneration(outcome.generation)) &&
-                  dialEpochRef.current === sequence
-                ) {
-                  latestValidatedOutcome = outcome;
-                  setTerminalOutcome(outcome);
-                  currentIncarnation = outcome.incarnation;
-                  outcomeGatesRetry = outcome.state === "blocked" || outcome.state === "affirmative_exit";
-                  if (outcome.state === "affirmative_exit") {
-                    if (exitSettlements === null) {
-                      exitSettlements = 1;
-                    }
-                  }
-                  if (outcomeGatesRetry) {
-                    clearHandshakeTimer();
-                    clearReconnectTimer();
-                    isTerminalReadyRef.current = false;
-                    setConnected(false);
-                  }
-                }
-                return;
-              }
-              if (parsed?.type === "replayGap" || parsed?.kind === "replayGap") {
-                replayGapsObserved += 1;
-                setReplayGap(true);
-                const tail = typeof parsed?.tail === "string" ? parsed.tail : (typeof parsed?.data === "string" ? parsed.data : null);
-                if (tail) {
-                  presentationSequence += 1;
-                  setGrid((current) => {
-                    if (!current) {
-                      return {
-                        cols: Math.max(80, tail.length),
-                        rows: 24,
-                        cursor: { x: tail.length, y: 0, visible: true, blinking: false, wideTail: false, visualStyle: "block" },
-                        lines: [{ index: 0, runs: [{ text: tail, fg: null, bg: null, attrs: 0 }] }],
-                      };
-                    }
-                    const lines = [...current.lines];
-                    const line0 = lines[0] ?? { index: 0, runs: [] };
-                    lines[0] = { ...line0, runs: [...line0.runs, { text: tail, fg: null, bg: null, attrs: 0 }] };
-                    return { ...current, lines };
-                  });
-                }
               }
               if (parsed?.type === "attached" && isMachineGeneration(parsed.generation)) {
                 const target =
@@ -1129,33 +801,18 @@ export function RemoteTerminal({
                     : null;
                 const targetSession = typeof target?.sessionId === "string" ? target.sessionId : null;
                 const targetEpoch = typeof target?.daemonEpoch === "string" ? target.daemonEpoch : null;
+                // Adopt only a boundary addressed to this dial: an unrelated target
+                // session or epoch never fences a socket it did not request.
                 const requestEpoch =
                   daemonEpoch === undefined || daemonEpoch === null ? "" : String(daemonEpoch).trim();
-
-                // Machine sockets require an attached frame with exact target session/epoch and validated generation;
-                // missing target fields do not establish readiness.
                 const addressed =
-                  targetSession !== null &&
-                  targetEpoch !== null &&
-                  targetSession === socketRequest.sessionId &&
-                  targetEpoch === requestEpoch;
-
+                  (targetSession === null || targetSession === socketRequest.sessionId) &&
+                  (targetEpoch === null || targetEpoch === requestEpoch);
                 if (addressed) {
-                  identityConfirmed = true;
-                  currentIncarnation = String(parsed.generation);
-                  clearHandshakeTimer();
-                  isTerminalReadyRef.current = true;
-                  backoffAttempt = 0;
-                  setConnected(true);
                   machineGenerationRef.current = parsed.generation;
                   lastSentMachineGenerationRef.current = null;
-                  flushOutboundBuffer();
                   requestResizeRef.current();
                   flushMachineControls();
-                  if (parsed.replayGap || parsed.replay_gap) {
-                    replayGapsObserved += 1;
-                    setReplayGap(true);
-                  }
                 }
                 return;
               }
@@ -1165,20 +822,6 @@ export function RemoteTerminal({
           }
           const frame = parseGridFrame(data);
           if (!frame) return;
-          presentationSequence += 1;
-
-          // Legacy gateway sockets use the first valid full grid snapshot received on the
-          // current request-bound socket as their presentation-ready boundary.
-          if (!machineTransport && !isTerminalReadyRef.current && frame.type === "grid") {
-            clearHandshakeTimer();
-            if (!machineTransport) {
-              identityConfirmed = true;
-            }
-            isTerminalReadyRef.current = true;
-            backoffAttempt = 0;
-            setConnected(true);
-            flushOutboundBuffer();
-          }
           setGrid((current) => applyGridFrame(current, frame));
         };
 
@@ -1205,18 +848,9 @@ export function RemoteTerminal({
         // The machine tunnel renders the grid server-side (Ghostty mirror); geometry stays
         // server-owned, so cols/rows are never sent on this route.
         const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(socketRequest.sessionId)}?daemonEpoch=${encodeURIComponent(epoch)}&render=grid`;
-        try {
-          const socketOrPromise = createWebSocket(pathAndQuery);
-          if (socketOrPromise instanceof Promise) {
-            socketOrPromise
-              .then(initSocket)
-              .catch(reportDialFailure);
-          } else {
-            initSocket(socketOrPromise);
-          }
-        } catch (error) {
-          reportDialFailure(error);
-        }
+        Promise.resolve(createWebSocket(pathAndQuery))
+          .then(initSocket)
+          .catch(reportDialFailure);
         return;
       }
 
@@ -1237,7 +871,7 @@ export function RemoteTerminal({
           socketRequest.token,
           socketRequest.geometry,
           transportUrl,
-          attemptAbort.signal,
+          abort.signal,
           followHostSize,
         );
       } catch (error) {
@@ -1254,64 +888,9 @@ export function RemoteTerminal({
 
     // Coming back online or to the foreground redials at once instead of sitting out the backoff.
     const recover = () => {
-      if (disposed) return;
-      if (outcomeGatesRetry) return;
+      if (disposed || reconnectTimer === null) return;
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      // Online/visibility wake applies to pending handshake as well as backoff, without concurrent dials.
-      if (reconnectTimer !== null) {
-        clearReconnectTimer();
-        dial();
-      } else if (!isTerminalReadyRef.current) {
-        if (wakeMicrotask) return;
-        wakeMicrotask = true;
-        queueMicrotask(() => {
-          wakeMicrotask = false;
-        });
-
-        // Invalidate current dial sequence FIRST so any synchronous callbacks from close no-op
-        cancelAttemptObservation();
-        dialSequence += 1;
-        clearHandshakeTimer();
-
-        if (attemptAbort) {
-          attemptAbort.abort();
-          attemptAbort = null;
-        }
-
-        const stalled = socketRef.current;
-        socketRef.current = null;
-        if (stalled) {
-          try {
-            stalled.close();
-          } catch {
-            // ignore
-          }
-        }
-
-        dial();
-      }
-    };
-
-    retryOwnerRef.current = () => {
-      if (disposed || wakeMicrotask) return;
-      wakeMicrotask = true;
-      queueMicrotask(() => {
-        wakeMicrotask = false;
-        if (disposed) return;
-        outcomeGatesRetry = false;
-        latestValidatedOutcome = null;
-        setTerminalOutcome(null);
-        cancelAttemptObservation();
-        dialSequence += 1;
-        clearHandshakeTimer();
-        clearReconnectTimer();
-        attemptAbort?.abort();
-        attemptAbort = null;
-        const current = socketRef.current;
-        socketRef.current = null;
-        current?.close();
-        dial();
-      });
+      dial();
     };
 
     dial();
@@ -1319,10 +898,7 @@ export function RemoteTerminal({
     document.addEventListener("visibilitychange", recover);
 
     return () => {
-      cancelAttemptObservation();
       disposed = true;
-      retryOwnerRef.current = () => {};
-      observation?.dispose();
       window.removeEventListener("online", recover);
       document.removeEventListener("visibilitychange", recover);
       wheelRemainderRowsRef.current = 0;
@@ -1333,13 +909,7 @@ export function RemoteTerminal({
       pendingMachineSignalRef.current = null;
       pendingMachineScrollRowsRef.current = 0;
       abort.abort();
-      if (attemptAbort) {
-        attemptAbort.abort();
-        attemptAbort = null;
-      }
       clearReconnectTimer();
-      clearHandshakeTimer();
-      isTerminalReadyRef.current = false;
       const currentSocket = socketRef.current;
       if (socketRef.current === currentSocket) {
         socketRef.current = null;
@@ -1729,25 +1299,9 @@ export function RemoteTerminal({
               <span>Buffered input</span>
             </span>
           ) : null}
-          {replayGap ? (
-            <span
-              data-testid="remote-terminal-replay-gap"
-              role="status"
-              className="flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] text-amber-300"
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-              <span>Output gap</span>
-            </span>
-          ) : null}
           <span data-testid="remote-terminal-build-stamp" className="font-mono text-[10px] text-[#838383]/70">{BUILD_STAMP}</span>
-          <span data-testid="remote-terminal-connection-status" role="status" className="font-mono text-[10px] text-[#838383]">
-            {connected
-              ? "Live"
-              : terminalOutcome?.state === "blocked"
-              ? "Blocked"
-              : terminalOutcome?.state === "affirmative_exit"
-              ? "Exited"
-              : "Connecting"}
+          <span role="status" className="font-mono text-[10px] text-[#838383]">
+            {connected ? "Live" : "Connecting"}
           </span>
         </span>
       </div>
@@ -1881,24 +1435,9 @@ export function RemoteTerminal({
           touchAction: followHostSize ? "pan-x" : "none",
         }}
       >
-        {(embedded && !connected) || terminalOutcome?.state === "blocked" || terminalOutcome?.state === "affirmative_exit" || terminalOutcome?.generation === null ? (
-          <div className="absolute inset-x-0 top-0 z-10 flex justify-center gap-2 pt-1.5">
-            {terminalOutcome?.state === "blocked" || terminalOutcome?.state === "affirmative_exit" ? (
-              <span role="status" data-testid="remote-terminal-outcome" className="rounded border border-amber-500/40 bg-[#111111]/95 px-2 py-1 font-mono text-[10px] text-amber-200 shadow-sm">
-                {terminalOutcome.state === "blocked" ? terminalOutcome.blockedReason ?? "Terminal blocked" : terminalOutcome.state === "affirmative_exit" ? `Terminal exited${terminalOutcome.exitCode == null ? "" : ` (${terminalOutcome.exitCode})`}` : terminalOutcome.state}
-                <button type="button" className="ml-2 underline" onClick={retryTerminal}>Retry</button>
-              </span>
-            ) : terminalOutcome?.generation === null ? (
-              <span role="status" data-testid="remote-terminal-outcome-unknown" className="rounded-full border border-[#191919] bg-[#111111]/95 px-2 py-0.5 font-mono text-[10px] leading-tight text-[#838383] shadow-sm">
-                Recovery outcome unknown
-                <button type="button" className="ml-2 underline" onClick={retryTerminal}>Retry</button>
-              </span>
-            ) : terminalOutcome ? (
-              <span role="status" data-testid="remote-terminal-outcome" className="rounded border border-amber-500/40 bg-[#111111]/95 px-2 py-1 font-mono text-[10px] text-amber-200 shadow-sm">
-                {terminalOutcome.state}
-                <button type="button" className="ml-2 underline" onClick={retryTerminal}>Retry</button>
-              </span>
-            ) : <span role="status" className="rounded-full border border-[#191919] bg-[#111111]/95 px-2 py-0.5 font-mono text-[10px] leading-tight text-[#838383] shadow-sm">Connecting</span>}
+        {embedded && !connected ? (
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center gap-2 pt-1.5">
+            <span role="status" className="rounded-full border border-[#191919] bg-[#111111]/95 px-2 py-0.5 font-mono text-[10px] leading-tight text-[#838383] shadow-sm">Connecting</span>
             {inputOverflow ? (
               <span
                 data-testid="remote-terminal-overflow-indicator"
@@ -1914,15 +1453,6 @@ export function RemoteTerminal({
                 className="rounded-full border border-amber-500/40 bg-amber-500/20 px-2 py-0.5 font-mono text-[10px] leading-tight text-amber-300 shadow-sm"
               >
                 Buffered input
-              </span>
-            ) : null}
-            {replayGap ? (
-              <span
-                data-testid="remote-terminal-replay-gap"
-                role="status"
-                className="rounded-full border border-amber-500/40 bg-amber-500/20 px-2 py-0.5 font-mono text-[10px] leading-tight text-amber-300 shadow-sm"
-              >
-                Output gap
               </span>
             ) : null}
           </div>

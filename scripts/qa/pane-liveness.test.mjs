@@ -2921,16 +2921,6 @@ test('a split whose own pane never presents or reports cannot pass on the app pa
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('read-only pane discovery preserves selectors without generating input', async () => {
-  const native = await import('../lib/qa-scenarios/native-driver.mjs');
-  const options = { windows: [{ hwnd: 19, title: 'F', className: 'T' }] };
-  const discovery = native.buildWindowsNewPaneScript(4242, { ...options, readOnly: true });
-  expect(discovery).toContain("$diag.result = 'PANE_TARGET'");
-  expect(discovery).toContain('$diag.chosen = $candidates[$chosenIndex]');
-  expect(discovery).not.toMatch(/InvokePattern|\.Invoke\(|SetFocus|SetForegroundWindow|SendKeys/);
-  expect(native.buildWindowsNewPaneScript(4242, options)).toContain('$invoke.Invoke();');
-});
-
 test('the pane affordance is searched by its exact accessible name and only one actionable match is clicked', async () => {
   const native = await import('../lib/qa-scenarios/native-driver.mjs');
   expect(native.PANE_AFFORDANCE_NAMES_WIN32).toEqual(['New Terminal']);

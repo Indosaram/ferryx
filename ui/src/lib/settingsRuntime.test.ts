@@ -5,15 +5,6 @@ import { createElement } from "react";
 import { act, render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const terminalIpc = vi.hoisted(() => ({
-  setTerminalAppearance: vi.fn(),
-}));
-
-vi.mock("./tauri", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./tauri")>();
-  return { ...actual, setTerminalAppearance: terminalIpc.setTerminalAppearance };
-});
-
 import {
   APPEARANCE_SETTINGS_EVENT,
   applyAppearanceSettings,
@@ -32,12 +23,9 @@ import {
   _resetSettingsRuntimeBridgeForTest,
   installSettingsRuntimeBridge,
 } from "./settingsRuntimeBridge";
-import { TERMINAL_BACKGROUND_STORAGE_KEY } from "./terminalSettings";
 
 beforeEach(() => {
   localStorage.clear();
-  terminalIpc.setTerminalAppearance.mockReset();
-  terminalIpc.setTerminalAppearance.mockResolvedValue(null);
   document.documentElement.removeAttribute("data-theme");
   document.documentElement.removeAttribute("data-accent");
   document.documentElement.removeAttribute("data-density");
@@ -179,111 +167,6 @@ describe("settings runtime contracts", () => {
       expect(document.documentElement.dataset.theme).toBe("dark");
 
       vi.unstubAllGlobals();
-    });
-
-    describe("terminal appearance push (desktop shell)", () => {
-      type MediaStub = { matches: boolean; fire: () => void };
-
-      function stubColorScheme(prefersLight: boolean): MediaStub {
-        const listeners: Array<() => void> = [];
-        const stub: MediaStub = {
-          matches: prefersLight,
-          fire: () => listeners.forEach((listener) => listener()),
-        };
-        vi.stubGlobal("matchMedia", vi.fn().mockImplementation((query: string) => ({
-          get matches() {
-            return stub.matches;
-          },
-          media: query,
-          addEventListener: (_event: string, cb: () => void) => listeners.push(cb),
-          removeEventListener: (_event: string, cb: () => void) => {
-            const index = listeners.indexOf(cb);
-            if (index >= 0) listeners.splice(index, 1);
-          },
-        })));
-        return stub;
-      }
-
-      beforeEach(() => {
-        (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
-        document.documentElement.style.removeProperty("--terminal");
-        return () => {
-          delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
-          _resetSettingsRuntimeBridgeForTest();
-          vi.unstubAllGlobals();
-        };
-      });
-
-      it("pushes light to the terminal when the OS flips to light under system theme", async () => {
-        saveAppearanceSettings({ theme: "system" });
-        const media = stubColorScheme(false);
-        installSettingsRuntimeBridge();
-        expect(terminalIpc.setTerminalAppearance).toHaveBeenLastCalledWith("dark");
-
-        terminalIpc.setTerminalAppearance.mockResolvedValue({ theme: { background: "#fafafa" } });
-        media.matches = true;
-        media.fire();
-
-        expect(document.documentElement.dataset.theme).toBe("light");
-        expect(terminalIpc.setTerminalAppearance).toHaveBeenLastCalledWith("light");
-        await vi.waitFor(() => {
-          expect(document.documentElement.style.getPropertyValue("--terminal")).toBe("#fafafa");
-        });
-        expect(localStorage.getItem(TERMINAL_BACKGROUND_STORAGE_KEY)).toBe("#fafafa");
-      });
-
-      it("does not push when theme is dark and the OS flips", () => {
-        saveAppearanceSettings({ theme: "dark" });
-        const media = stubColorScheme(false);
-        installSettingsRuntimeBridge();
-        expect(terminalIpc.setTerminalAppearance).toHaveBeenCalledTimes(1);
-        expect(terminalIpc.setTerminalAppearance).toHaveBeenLastCalledWith("dark");
-
-        media.matches = true;
-        media.fire();
-
-        expect(terminalIpc.setTerminalAppearance).toHaveBeenCalledTimes(1);
-      });
-
-      it("charcoal resolves to dark", () => {
-        saveAppearanceSettings({ theme: "light" });
-        stubColorScheme(true);
-        installSettingsRuntimeBridge();
-        expect(terminalIpc.setTerminalAppearance).toHaveBeenLastCalledWith("light");
-
-        saveAppearanceSettings({ theme: "charcoal" });
-
-        expect(terminalIpc.setTerminalAppearance).toHaveBeenLastCalledWith("dark");
-      });
-
-      it("keeps the UI working when the terminal appearance push rejects", async () => {
-        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-        terminalIpc.setTerminalAppearance.mockRejectedValue(new Error("daemon unavailable"));
-        saveAppearanceSettings({ theme: "system" });
-        const media = stubColorScheme(false);
-        installSettingsRuntimeBridge();
-        await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
-
-        media.matches = true;
-        media.fire();
-
-        expect(document.documentElement.dataset.theme).toBe("light");
-        expect(terminalIpc.setTerminalAppearance).toHaveBeenLastCalledWith("light");
-        await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(2));
-        warn.mockRestore();
-      });
-
-      it("never pushes outside the desktop shell", () => {
-        delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
-        saveAppearanceSettings({ theme: "system" });
-        const media = stubColorScheme(false);
-        installSettingsRuntimeBridge();
-        media.matches = true;
-        media.fire();
-        saveAppearanceSettings({ theme: "light" });
-
-        expect(terminalIpc.setTerminalAppearance).not.toHaveBeenCalled();
-      });
     });
   });
 });

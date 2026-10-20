@@ -14,7 +14,6 @@ import {
 import { getBrowserScroll, type BrowserScrollPosition } from "./browserHistory";
 import { normalizeSessionId, providerSessionKeyForAgent } from "./agentResume";
 import { isAbsoluteTerminalCwd } from "./terminalCwd";
-import type { RecoveryAuthorityEvidence } from "./tauri";
 import { getSessionProcessState, getSessionRecentScrollback, restoreSessionRecentScrollback } from "./sessionLifecycle";
 import {
   createBrowserPaneContent,
@@ -383,35 +382,21 @@ export function migrateLegacyAgentType(agentType: string | null | undefined): st
   return agentType;
 }
 
-export type LiveSessionInventoryItem =
-  | string
-  | {
-      sessionId: string;
-      incarnation?: string | null;
-      daemonEpoch?: string | number | null;
-      worktreePath?: string | null;
-      running?: boolean;
-      affirmativeExit?: boolean;
-      recoveryAuthority?: RecoveryAuthorityEvidence | null;
-    };
-
-export type LiveSessionInventory =
-  | Iterable<LiveSessionInventoryItem>
-  | {
-      authoritative?: boolean;
-      complete?: boolean;
-      epoch?: string | null;
-      daemonEpoch?: string | null;
-      sessionIds?: Iterable<LiveSessionInventoryItem>;
-      sessions?: Iterable<LiveSessionInventoryItem>;
-    }
-  | Map<string, { incarnation?: string | null; daemonEpoch?: string | number | null; running?: boolean; affirmativeExit?: boolean; recoveryAuthority?: RecoveryAuthorityEvidence | null } | boolean>
-  | null;
-
 export function deserializeWorkspaceState(
   workspaceId: string,
   persistedSession: PersistedWorkspaceSession,
-  liveBackendSessionIds?: LiveSessionInventory,
+  liveBackendSessionIds?:
+    | Iterable<string | { sessionId: string; incarnation?: string | null; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>
+    | {
+        authoritative?: boolean;
+        complete?: boolean;
+        epoch?: string | null;
+        daemonEpoch?: string | null;
+        sessionIds?: Iterable<string>;
+        sessions?: Iterable<string | { sessionId: string; incarnation?: string | null; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>;
+      }
+    | Map<string, { incarnation?: string | null; daemonEpoch?: string | null; running?: boolean } | boolean>
+    | null,
 ): WorkspaceState | null {
   const ws = persistedSession.workspaces?.[workspaceId];
   if (!ws) return null;
@@ -428,7 +413,7 @@ export function deserializeWorkspaceState(
   const fallbackProfileId = resolveSupportedBrowserProfileId(browserSettings.defaultProfileId, browserSettings);
 
   let globalLiveEpoch: string | null = null;
-  const liveSessionMap = new Map<string, { daemonEpoch: string | null; running: boolean; incarnation?: string | null; recoveryAuthority?: RecoveryAuthorityEvidence | null }>();
+  const liveSessionMap = new Map<string, { daemonEpoch: string | null; running: boolean; incarnation?: string | null }>();
   const hasLiveSessionQuery = liveBackendSessionIds !== null && liveBackendSessionIds !== undefined;
   let isAuthoritative = hasLiveSessionQuery;
   if (typeof liveBackendSessionIds === "object" && liveBackendSessionIds !== null) {
@@ -452,12 +437,7 @@ export function deserializeWorkspaceState(
       for (const [key, value] of (liveBackendSessionIds as Map<any, any>).entries()) {
         const itemEpoch = typeof value === "object" && value !== null && value.daemonEpoch != null ? String(value.daemonEpoch) : globalLiveEpoch;
         const isRunning = typeof value === "object" && value !== null && "running" in value ? value.running !== false : value !== false;
-        liveSessionMap.set(String(key), {
-          daemonEpoch: itemEpoch,
-          running: isRunning,
-          incarnation: typeof value === "object" && value !== null ? value.incarnation ?? null : null,
-          recoveryAuthority: typeof value === "object" && value !== null ? value.recoveryAuthority ?? null : null,
-        });
+        liveSessionMap.set(String(key), { daemonEpoch: itemEpoch, running: isRunning, incarnation: typeof value === "object" ? value?.incarnation : null });
       }
     } else if (
       typeof liveBackendSessionIds === "object" &&
@@ -469,8 +449,8 @@ export function deserializeWorkspaceState(
         complete?: boolean;
         epoch?: string | null;
         daemonEpoch?: string | null;
-        sessionIds?: Iterable<LiveSessionInventoryItem>;
-        sessions?: Iterable<LiveSessionInventoryItem>;
+        sessionIds?: Iterable<string>;
+        sessions?: Iterable<string | { sessionId: string; incarnation?: string | null; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>;
       };
       const rawEpoch = container.epoch ?? container.daemonEpoch;
       if (rawEpoch != null) {
@@ -483,16 +463,11 @@ export function deserializeWorkspaceState(
         } else if (item && typeof item === "object" && "sessionId" in item) {
           const itemEpoch = item.daemonEpoch != null ? String(item.daemonEpoch) : globalLiveEpoch;
           const isRunning = item.running !== false;
-          liveSessionMap.set(item.sessionId, {
-            daemonEpoch: itemEpoch,
-            running: isRunning,
-            incarnation: item.incarnation ?? null,
-            recoveryAuthority: item.recoveryAuthority ?? null,
-          });
+          liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch, running: isRunning, incarnation: item.incarnation });
         }
       }
     } else {
-      for (const item of liveBackendSessionIds as Iterable<LiveSessionInventoryItem>) {
+      for (const item of liveBackendSessionIds as Iterable<any>) {
         if (typeof item === "string") {
           liveSessionMap.set(item, { daemonEpoch: null, running: true });
         } else if (item && typeof item === "object" && "sessionId" in item) {
@@ -501,12 +476,7 @@ export function deserializeWorkspaceState(
             globalLiveEpoch = itemEpoch;
           }
           const isRunning = item.running !== false;
-          liveSessionMap.set(item.sessionId, {
-            daemonEpoch: itemEpoch,
-            running: isRunning,
-            incarnation: item.incarnation ?? null,
-            recoveryAuthority: item.recoveryAuthority ?? null,
-          });
+          liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch, running: isRunning, incarnation: item.incarnation });
         }
       }
     }
@@ -541,9 +511,7 @@ export function deserializeWorkspaceState(
 
     const isSshSession = ws.target?.kind === "ssh" || workspaceId.startsWith("ssh:");
     const isPairedSession = ws.target?.kind === "pairedDaemon";
-    const persistedLifecycle: TerminalLifecycle = "working";
     let isReconnecting = false;
-    let isBlockedConflict = false;
     if (isPairedSession) {
       // Local inventory is not authority for remote liveness or remote epochs.
       // Retain the proxy binding for exact-target reattach, never create a shell.
@@ -568,99 +536,50 @@ export function deserializeWorkspaceState(
       backendSessionId = isLive ? persistedBackendSessionId : null;
       daemonEpoch = isLive ? persistedEpoch : null;
       lastOutputSequence = isLive ? (daemonEpoch === persistedEpoch ? persistedSequence : null) : null;
-      lifecycle = isLive ? persistedLifecycle : "exited";
-      processState = isLive ? processState : "standby";
+      lifecycle = isLive ? "working" : "exited";
+      processState = isLive ? "running" : processState;
       if (isLive && (!hasLiveSessionQuery || !liveSessionMap.has(persistedBackendSessionId!))) {
         isReconnecting = true;
       }
     } else {
-      if (!persistedBackendSessionId) {
+      if (!persistedBackendSessionId || !liveSessionMap.has(persistedBackendSessionId)) {
         backendSessionId = null;
         daemonEpoch = null;
         lastOutputSequence = null;
         lifecycle = "exited";
-      } else if (!liveSessionMap.has(persistedBackendSessionId)) {
-        // Under consistent recovery (INV-1):
-        // Scoped absence in listSessions does NOT establish process death.
-        // Preserve persistedBackendSessionId, mark reconnecting, retain persisted lifecycle.
-        backendSessionId = persistedBackendSessionId;
-        daemonEpoch = persistedEpoch;
-        lastOutputSequence = persistedSequence;
-        lifecycle = persistedLifecycle;
-        isReconnecting = true;
       } else {
         const liveInfo = liveSessionMap.get(persistedBackendSessionId);
         const effectiveLiveEpoch = liveInfo?.daemonEpoch ?? globalLiveEpoch;
         const isProcessRunning = liveInfo ? liveInfo.running !== false : true;
 
-        // Under consistent recovery, daemon epoch change alone cannot prove identity without matching incarnation.
-        // A live hit with missing incarnation under changed epoch stays unconfirmed, not adopted.
-        let epochMatches = false;
+        // A hit in liveSessionMap came from listSessions on the daemon running right now, and
+        // backend ids do not survive a daemon restart. So a live hit already proves the PTY is
+        // ours; only a RECORDED epoch that disagrees can disprove it.
+        //
+        // Treating a missing persisted epoch as a mismatch orphaned every restored session,
+        // because no reducer writes daemonEpoch onto a session -- it is null in every save file.
+        let epochMatches = true;
         if (effectiveLiveEpoch !== null && persistedEpoch !== null) {
-          if (effectiveLiveEpoch === persistedEpoch) {
-            epochMatches = true;
-          } else if (sess.incarnation && liveInfo?.incarnation && sess.incarnation === liveInfo.incarnation) {
-            epochMatches = true;
-          } else {
-            epochMatches = false;
-          }
-        } else if (effectiveLiveEpoch === null && persistedEpoch === null) {
-          epochMatches = true;
+          epochMatches = effectiveLiveEpoch === persistedEpoch || Boolean(sess.incarnation && liveInfo?.incarnation === sess.incarnation);
+        } else if (liveInfo === undefined && effectiveLiveEpoch !== null && persistedEpoch === null) {
+          epochMatches = false;
         }
 
-        const hasIncarnationConflict = Boolean(
-          sess.incarnation && liveInfo?.incarnation && sess.incarnation !== liveInfo.incarnation
-        );
-        const authority = liveInfo?.recoveryAuthority;
-        const matchesIncarnation = Boolean(
-          sess.incarnation &&
-          (authority?.incarnation ?? liveInfo?.incarnation) === sess.incarnation
-        );
-        const authEpoch = authority?.daemonEpoch != null ? String(authority.daemonEpoch) : null;
-        const liveEpoch = effectiveLiveEpoch != null ? String(effectiveLiveEpoch) : null;
-        const matchesEpoch = Boolean(
-          persistedEpoch &&
-          authEpoch &&
-          authEpoch === persistedEpoch &&
-          (!liveEpoch || liveEpoch === persistedEpoch)
-        );
-        const hasAffirmativeExitProof = Boolean(
-          liveInfo &&
-          liveInfo.running === false &&
-          authority &&
-          authority.status === "affirmative_exit" &&
-          matchesIncarnation &&
-          matchesEpoch
-        );
-
-        if (hasIncarnationConflict) {
-          // Different incarnation is blocked (identity conflict), NOT adopted, NOT killed, and NOT speculative running (INV-3)
-          backendSessionId = persistedBackendSessionId;
-          daemonEpoch = persistedEpoch;
-          lastOutputSequence = persistedSequence;
-          lifecycle = persistedLifecycle;
-          isBlockedConflict = true;
-        } else if (hasAffirmativeExitProof) {
-          backendSessionId = null;
-          daemonEpoch = null;
-          lastOutputSequence = null;
-          lifecycle = "exited";
-        } else if (epochMatches && isProcessRunning && Boolean(sess.incarnation && liveInfo?.incarnation === sess.incarnation)) {
+        if (epochMatches && isProcessRunning) {
           backendSessionId = persistedBackendSessionId;
           daemonEpoch = effectiveLiveEpoch ?? persistedEpoch;
           lastOutputSequence = daemonEpoch === persistedEpoch ? persistedSequence : null;
           lifecycle = "working";
           processState = "running";
         } else {
-          // Unconfirmed absence or epoch mismatch with missing incarnation: retain identity (INV-1)
-          backendSessionId = persistedBackendSessionId;
-          daemonEpoch = persistedEpoch;
-          lastOutputSequence = persistedSequence;
-          lifecycle = persistedLifecycle;
-          isReconnecting = true;
+          backendSessionId = null;
+          daemonEpoch = null;
+          lastOutputSequence = null;
+          lifecycle = "exited";
         }
       }
     }
+
     if (!isSshSession && !isPairedSession && persistedBackendSessionId && lifecycle === "exited") {
       const live = liveSessionMap.get(persistedBackendSessionId);
       const epoch = live?.daemonEpoch ?? globalLiveEpoch;
@@ -670,7 +589,8 @@ export function deserializeWorkspaceState(
         backendSessionId = persistedBackendSessionId;
         daemonEpoch = persistedEpoch;
         lastOutputSequence = persistedSequence;
-        lifecycle = persistedLifecycle;
+        lifecycle = "working";
+        processState = "running";
         isReconnecting = true;
       }
     }
@@ -703,26 +623,17 @@ export function deserializeWorkspaceState(
       lifecycle,
       daemonEpoch,
       lastOutputSequence,
-      incarnation: sess.incarnation ?? null,
       attachTuple: sess.attachTuple,
       agentType,
       agentSessionId,
       providerSession,
-      reconnectLifecycle: isBlockedConflict ? "failed" : "idle",
-      reconnectError: isBlockedConflict
-        ? {
-            code: "IDENTITY_CONFLICT",
-            message: "Different incarnation detected for session; recovery blocked",
-          }
-        : null,
-      backendUnavailableReason: isBlockedConflict ? "identity_conflict" : null,
+      reconnectLifecycle: "idle",
+      reconnectError: null,
       reconnectRequestId: null,
       ...(isSshSession || isPairedSession
-        ? { remoteConnectionState: persistedBackendSessionId ? "reconnecting" : "legacyLost" }
-        : isBlockedConflict
-          ? { remoteConnectionState: "disconnected" }
+        ? { remoteConnectionState: persistedBackendSessionId ? ("reconnecting" as const) : ("legacyLost" as const) }
         : isReconnecting
-          ? { remoteConnectionState: "reconnecting" }
+          ? { remoteConnectionState: "reconnecting" as const }
           : {}),
     };
     const persistedIncarnation = sess.incarnation ?? null;

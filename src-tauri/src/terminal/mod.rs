@@ -38,8 +38,6 @@ pub mod protocol_dto;
 pub mod pty;
 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
 pub(crate) mod qa_liveness;
-#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-pub use qa_liveness::run_exact_pid_probe;
 pub mod remote;
 #[cfg(test)]
 mod remote_runtime_tests;

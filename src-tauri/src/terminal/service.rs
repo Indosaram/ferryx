@@ -83,8 +83,6 @@ impl TerminalService {
         // no-op and the daemon keeps no QA surface.
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         super::qa_liveness::start(service.clone());
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        super::qa_liveness::ensure_local_owner_control();
         service
     }
 
@@ -273,20 +271,14 @@ impl TerminalService {
         state_endpoint: Option<&crate::ssh::state_bridge::StateEndpoint>,
     ) -> Result<(String, watch::Receiver<()>), PtyError> {
         let session_id = uuid::Uuid::new_v4().to_string();
-        // With the integration turned off the pane gets no socket forward and no state endpoint.
         let agent_sock = crate::daemon::server::agent_state_socket_path();
         let has_sock = std::path::Path::new(&agent_sock).exists();
-        let (agent_socket, state_endpoint) = crate::ssh::operations::integration_forwarding(
-            self.pty_manager.agent_integration_enabled(),
-            if has_sock { Some(&agent_sock) } else { None },
-            state_endpoint,
-        );
         let plan = crate::ssh::operations::shell_plan(
             host,
             environment,
             remote_root,
             &session_id,
-            agent_socket,
+            if has_sock { Some(&agent_sock) } else { None },
             state_endpoint,
         )
         .map_err(|e| PtyError::Other(e.to_string()))?;

@@ -754,6 +754,7 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use super::*;
+    use std::process::Command;
 
     /// Windows has no `/proc`, and each CIM query costs a PowerShell launch. One script answers
     /// host CPU, memory, swap, disk and the process table together, so the cost is paid once per
@@ -778,7 +779,7 @@ mod platform {
                processes=$procs }} | ConvertTo-Json -Compress -Depth 4",
             root = disk_path.to_string_lossy().replace('\'', "''")
         );
-        let output = crate::util::no_window_command("powershell.exe")
+        let output = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output();
         let reading = match output {

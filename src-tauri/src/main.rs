@@ -17,16 +17,6 @@ fn main() {
         std::process::exit(code);
     }
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).is_some_and(|arg| arg == "qa-exact-pid-probe") {
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        if args.len() == 3 {
-            if let Some(pid) = args[2].parse::<u32>().ok().filter(|pid| *pid > 0 && *pid <= i32::MAX as u32) {
-                std::process::exit(ferryx_lib::terminal::run_exact_pid_probe(pid));
-            }
-        }
-        eprintln!("INVALID_QA_PID_PROBE: requires QA features and exactly one positive PID");
-        std::process::exit(2);
-    }
     // Task 3 (local-split-qa): private headless diagnostic-classifier
     // dispatch, BEFORE any GUI/daemon routing. Explicit argv only:
     // `ferryx diagnostic-classifier --headless`.
@@ -126,6 +116,5 @@ fn main() {
             let _ = raised_limit;
             ferryx_lib::run();
         }
-        LaunchMode::DaemonSupervisor => std::process::exit(run_daemon_supervisor(&args)),
     }
 }

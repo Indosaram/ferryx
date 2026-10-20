@@ -2208,21 +2208,14 @@ describe("Remote UI Components", () => {
     );
 
     fireEvent.click(screen.getByTestId("remote-terminal"));
-    // Attribution (Task 7/8): Stale pre-Task-7/8 test expected parent RemoteApp to remount RemoteTerminal
-    // on socket closure. Under approved Task 7/8 recovery contract, RemoteTerminal owns its own indefinite
-    // recovery loop; once selection is confirmed, RemoteApp retains the existing terminal instance (preventing
-    // duplicate socket mounts/state teardown) and retains the active session binding.
-    expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+    expect(screen.getByTestId("remote-terminal")).not.toHaveAttribute(
       "data-instance-id",
       optimisticInstanceId,
     );
     expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
   });
 
-  // Attribution (Task 7/8): Stale pre-Task-7/8 test expected second socket closure to test remount cap.
-  // Under approved Task 7/8 recovery contract, RemoteTerminal owns indefinite recovery without parent
-  // remounting; repeated closures retain the mounted terminal instance and session binding.
-  it("retains terminal instance and session binding across repeated socket closures without duplicate remount", async () => {
+  it("does not retry again when the confirmed replacement socket also closes", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const stateWithSessions = {
       ...focusedState,
@@ -2269,17 +2262,15 @@ describe("Remote UI Components", () => {
     await waitFor(() => expect(devServerPaneInList).toBeEnabled());
 
     fireEvent.click(screen.getByTestId("remote-terminal"));
-    const confirmedTerminal = screen.getByTestId("remote-terminal");
-    // Under Task 7/8 terminal-owned recovery: instance is preserved without duplicate remount
-    expect(confirmedTerminal).toHaveAttribute("data-instance-id", firstInstanceId);
-    expect(confirmedTerminal).toHaveAttribute("data-session-id", "session-dev");
+    const replacement = screen.getByTestId("remote-terminal");
+    expect(replacement).not.toHaveAttribute("data-instance-id", firstInstanceId);
+    const replacementInstanceId = replacement.getAttribute("data-instance-id");
 
-    fireEvent.click(confirmedTerminal);
+    fireEvent.click(replacement);
     expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
       "data-instance-id",
-      firstInstanceId,
+      replacementInstanceId,
     );
-    expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
   });
 
   it("does not perform immediate post-POST workspace/state refresh on selection", async () => {
@@ -2764,140 +2755,5 @@ describe("Remote UI Components", () => {
         value: originalLocation,
       });
     }
-  });
-
-  describe("remote consumer recovery and uncertainty retention", () => {
-    it("retains selection, chat mode, and activity while socket is open-but-not-attached during pending selection recovery", async () => {
-      localStorage.setItem("ferryx_remote_token", "test-token");
-      const selectionResponse = deferred<Response>();
-      const stateWithSessions = {
-        ...focusedState,
-        activeContext: {
-          ...focusedState.activeContext,
-          activeTerminal: {
-            sessionId: "session-editor",
-            title: "Editor",
-            running: true,
-          },
-          tabId: "tab-1",
-          terminalTabs: [
-            { id: "tab-1", label: "Editor", sessionId: "session-editor" },
-            { id: "tab-2", label: "Dev Server", sessionId: "session-dev", activityState: "working", agentType: "claude" },
-          ],
-        },
-      };
-      const switchedState = {
-        ...stateWithSessions,
-        activeContext: {
-          ...stateWithSessions.activeContext,
-          activeTerminal: {
-            sessionId: "session-dev",
-            title: "Dev Server",
-            running: true,
-          },
-          tabId: "tab-2",
-        },
-      };
-      const fetchMock = vi
-        .fn<typeof fetch>()
-        .mockResolvedValueOnce(jsonResponse(stateWithSessions))
-        .mockImplementationOnce(() => selectionResponse.promise)
-        .mockResolvedValueOnce(jsonResponse(switchedState));
-      vi.stubGlobal("fetch", ticketed(fetchMock));
-      vi.stubGlobal("WebSocket", EventWebSocket);
-
-      render(<RemoteApp />);
-      await switchToTerminalMode();
-
-      const initialTerminal = await screen.findByTestId("remote-terminal");
-      expect(initialTerminal).toHaveAttribute("data-session-id", "session-editor");
-
-      const tablist = await openWorktreeSheet();
-      const devTab = within(tablist).getByRole("tab", { name: /dev server/i });
-
-      // Optimistically select dev server
-      fireEvent.click(devTab);
-
-      const optimisticTerminal = screen.getByTestId("remote-terminal");
-      expect(optimisticTerminal).toHaveAttribute("data-session-id", "session-dev");
-
-      // Double-click triggers onSocketLifecycle("session-dev", "open")
-      // In this open-but-not-attached state, selection response is still pending
-      fireEvent.doubleClick(optimisticTerminal);
-
-      // 1. Retained selection: terminal continues to point to session-dev
-      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
-
-      // 2. Retained activity: Dev Server tab in sheet retains working state indicator
-      expect(within(tablist).getByTestId("tab-working-indicator")).toBeInTheDocument();
-
-      // 3. Retained chat mode transition: can switch to chat mode and back without losing selection
-      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
-      expect(screen.queryByTestId("remote-terminal")).toBeNull();
-
-      // Switch back to terminal mode
-      await switchToTerminalMode();
-      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
-
-      // Clean up in-flight request
-      await act(async () => {
-        selectionResponse.resolve(jsonResponse({ accepted: true }));
-        await selectionResponse.promise;
-      });
-    });
-
-    it("retains selection, chat mode, and activity when socket reports closed while recovery is uncertain", async () => {
-      localStorage.setItem("ferryx_remote_token", "test-token");
-      const activeDevState = {
-        ...focusedState,
-        activeContext: {
-          ...focusedState.activeContext,
-          activeTerminal: {
-            sessionId: "session-dev",
-            title: "Dev Server",
-            running: true,
-          },
-          tabId: "tab-2",
-          terminalTabs: [
-            { id: "tab-1", label: "Editor", sessionId: "session-editor" },
-            { id: "tab-2", label: "Dev Server", sessionId: "session-dev", activityState: "working", agentType: "claude" },
-          ],
-        },
-      };
-      const fetchMock = vi
-        .fn<typeof fetch>()
-        .mockResolvedValueOnce(jsonResponse(activeDevState));
-      vi.stubGlobal("fetch", ticketed(fetchMock));
-      vi.stubGlobal("WebSocket", EventWebSocket);
-
-      render(<RemoteApp />);
-      await switchToTerminalMode();
-
-      const terminal = await screen.findByTestId("remote-terminal");
-      expect(terminal).toHaveAttribute("data-session-id", "session-dev");
-
-      // Socket unexpectedly closes while recovery is uncertain (single-click triggers onSocketLifecycle("session-dev", "closed"))
-      fireEvent.click(terminal);
-
-      // 1. Retained selection: terminal stays mounted and retains session-dev identity
-      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
-
-      // 2. Retained activity: worktree sheet tab remains selected and displays working indicator
-      const tablist = await openWorktreeSheet();
-      const devTab = within(tablist).getByRole("tab", { name: /dev server/i });
-      expect(devTab).toHaveAttribute("aria-selected", "true");
-      expect(within(devTab).getByTestId("tab-working-indicator")).toBeInTheDocument();
-
-      // 3. Retained chat mode: switching to chat preserves accessible context surface state
-      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
-      expect(screen.queryByTestId("remote-terminal")).toBeNull();
-      // Assert actual accessible context surface state in mobile-top-bar and drawer trigger
-      expect(within(screen.getByTestId("mobile-top-bar")).getByText("Dev Server")).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: /Change workspace context/i })).toBeInTheDocument();
-
-      // Switching back to terminal mode preserves session-dev
-      await switchToTerminalMode();
-      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
-    });
   });
 });

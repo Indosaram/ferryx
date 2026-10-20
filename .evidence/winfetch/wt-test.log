@@ -1,0 +1,1334 @@
+    Blocking waiting for file lock on package cache
+   Compiling ferryx v2026.1013.2 (/Volumes/T9-Mac/project/ferryx-wt/winfetch-20261015/src-tauri)
+warning: unused import: `seal_offer`
+ --> src/account/offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src/agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src/browser/chromium_cookie_source.rs:13:44
+   |
+13 |     resolve_installed_browser_profile_dir, ImportedCookie, InstalledBrowserKind,
+   |                                            ^^^^^^^^^^^^^^
+
+warning: unused import: `std::os::fd::IntoRawFd`
+   --> src/daemon/handover_wire.rs:465:9
+    |
+465 |     use std::os::fd::IntoRawFd;
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src/ipc/remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `tauri::Manager`
+    --> src/ipc/terminal.rs:5687:13
+     |
+5687 |         use tauri::Manager;
+     |             ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+    --> src/ipc/terminal.rs:5711:13
+     |
+5711 |         use tauri::Manager;
+     |             ^^^^^^^^^^^^^^
+
+warning: unused imports: `DaemonRequest`, `SplitAttachAttempt`, `SplitOperationRequest`, and `SplitOperationResponse`
+ --> src/ipc/pane_liveness_contract.rs:4:28
+  |
+4 |         clip_stage_budget, DaemonRequest, DaemonResponse, DaemonSessionDetails,
+  |                            ^^^^^^^^^^^^^
+5 |         LocalSplitEnvelope, PaneAttachTuple, PanePresentationReceipt, PreparedLocalSplit,
+6 |         SplitAttachAttempt, SplitDelivery, SplitErrorDetails, SplitIdentity, SplitNoChild,
+  |         ^^^^^^^^^^^^^^^^^^
+7 |         SplitOperationRequest, SplitOperationResponse, SplitOperationResult, SplitOwnership,
+  |         ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+   --> src/remote/attach_router.rs:184:35
+    |
+184 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncWriteExt as _`
+   --> src/remote/attach_router.rs:240:13
+    |
+240 |         use tokio::io::AsyncWriteExt as _;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused doc comment
+   --> src/remote/reference_chat/history_omo.rs:758:5
+    |
+758 |     /// Tool parts still waiting for their result: (turn index, part index).
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+759 |     let mut pending: HashMap<String, (usize, usize)> = HashMap::new();
+    |     ------------------------------------------------------------------ rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> src/remote/reference_chat/history_omo.rs:760:5
+    |
+760 |     /// The last assistant message stopped for good: the next one starts a turn of its own.
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+761 |     let mut settled = false;
+    |     ------------------------ rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1924:1
+     |
+1924 | /// Upstream `ANSI_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1926:1
+     |
+1926 | /// Upstream's OSC form, dropped alongside `ANSI_RE` in `parseClaudeSuggestion`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1928:1
+     |
+1928 | /// Upstream `sgrRuns`'s escape: a CSI with its params, an OSC, or a two-character escape.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1930:1
+     |
+1930 | /// Upstream `SELECTED_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1932:1
+     |
+1932 | /// Upstream `DIVIDER_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1934:1
+     |
+1934 | /// Upstream `NUMBERED_OPTION_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1936:1
+     |
+1936 | /// Upstream `parseNumberedRows`'s checkbox test.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1938:1
+     |
+1938 | /// Upstream `parseNumberedRows`'s checkbox strip.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1940:1
+     |
+1940 | /// Upstream `SOLID_RULE_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1942:1
+     |
+1942 | /// Upstream `CLAUDE_ASK_HINT_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1947:1
+     |
+1947 | /// Upstream `CLAUDE_TABS_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1949:1
+     |
+1949 | /// One tab of the bar: its marker and its label.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1951:1
+     |
+1951 | /// Upstream `CLAUDE_CONFIRM_HINT_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1953:1
+     |
+1953 | /// Upstream `CLAUDE_MODEL_HINT_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1958:1
+     |
+1958 | /// Upstream `CLAUDE_MODEL_ROW_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1960:1
+     |
+1960 | /// Upstream `CLAUDE_MODEL_MORE_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1962:1
+     |
+1962 | /// Upstream `CLAUDE_TASKS_HEAD_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1967:1
+     |
+1967 | /// Upstream `CLAUDE_TASK_ROW_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1969:1
+     |
+1969 | /// Upstream `CLAUDE_TASKS_MORE_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1971:1
+     |
+1971 | /// Upstream's guard on a task's activity line: a prompt or bullet of its own.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1973:1
+     |
+1973 | /// Upstream `LABELED_RULE_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1975:1
+     |
+1975 | /// Upstream `CLAUDE_HINT_TAIL_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1977:1
+     |
+1977 | /// Upstream `CLAUDE_PREVIEW_HINT_RE`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1979:1
+     |
+1979 | /// Upstream's preview box corner: two or more spaces, then the box's top-left corner.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1981:1
+     |
+1981 | /// Upstream's preview notes line.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1983:1
+     |
+1983 | /// Upstream `claudeChip`'s chip.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1985:1
+     |
+1985 | /// Upstream `claudeQuestionText`'s chip test.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1987:1
+     |
+1987 | /// Upstream's typed-answer row (`Type something.`).
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1989:1
+     |
+1989 | /// Upstream's multiple-choice row test.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1991:1
+     |
+1991 | /// Upstream's plan question.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1996:1
+     |
+1996 | /// Upstream's plan panel title.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:1998:1
+     |
+1998 | /// Upstream's plan row that takes feedback.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2000:1
+     |
+2000 | /// Upstream's command-approval marker.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2002:1
+     |
+2002 | /// Upstream's dangerous-rm marker.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2004:1
+     |
+2004 | /// Upstream's approval question.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2006:1
+     |
+2006 | /// Upstream's approval hint tail.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2008:1
+     |
+2008 | /// Upstream's dropped `Tip:` line.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2010:1
+     |
+2010 | /// Upstream's tool call: `● name(`, a dotted or dashed name, an optional `(MCP)`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2012:1
+     |
+2012 | /// Upstream's review header line.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2014:1
+     |
+2014 | /// Upstream's submit question.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2016:1
+     |
+2016 | /// Upstream's submit tail: the last row is `Cancel`.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2018:1
+     |
+2018 | /// Upstream's approval tail.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2020:1
+     |
+2020 | /// Upstream's plan tail.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2025:1
+     |
+2025 | /// Upstream `nearestQuestion`'s skipped lines.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2030:1
+     |
+2030 | /// Upstream's `(N selected)` prefix on a question line.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2032:1
+     |
+2032 | /// Upstream's `asked` sentence inside a confirm panel's prose.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2034:1
+     |
+2034 | /// Upstream's `✔`/`✓` mark on the model in use.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2036:1
+     |
+2036 | /// Upstream's `(recommended)` tag.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2038:1
+     |
+2038 | /// Upstream's two-or-more-space run.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/remote/reference_chat/prompt_claude.rs:2040:1
+     |
+2040 | /// Upstream `CLAUDE_TIP_RE`: Claude's new-session tip, not a suggestion.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused import: `crate::scoped_contracts::Epoch`
+  --> src/remote/machine_agent_state_tests.rs:14:5
+   |
+14 | use crate::scoped_contracts::Epoch;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncBufReadExt`
+    --> src/ssh/bridge_tests.rs:2368:9
+     |
+2368 |     use tokio::io::AsyncBufReadExt;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AsyncBufReadExt`
+   --> src/daemon/client.rs:252:21
+    |
+252 |     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+    |                     ^^^^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+   --> src/daemon/client.rs:252:43
+    |
+252 |     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+    |                                           ^^^^^^^^^^^^^
+
+warning: unused import: `std::io::Write`
+   --> src/daemon/handover_socket.rs:343:9
+    |
+343 |     use std::io::Write;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `base64::Engine`
+   --> src/remote/account_grants.rs:108:9
+    |
+108 |     use base64::Engine as _;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+  --> src/ssh/bridge.rs:28:25
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                         ^^^^^^^
+
+warning: unused import: `FromRawFd`
+  --> src/ssh/bridge.rs:28:34
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                                  ^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+    --> src/terminal/session.rs:1497:27
+     |
+1497 |         use std::os::fd::{AsRawFd, FromRawFd};
+     |                           ^^^^^^^
+
+warning: unused variable: `pid`
+    --> src/daemon/client.rs:2521:17
+     |
+2521 |                 pid,
+     |                 ^^^ help: try ignoring the field: `pid: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:190:9
+    |
+190 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:319:9
+    |
+319 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_wire.rs:202:9
+    |
+202 |     let mut iov_index = 0usize;
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `sent` is never read
+   --> src/daemon/handover_wire.rs:188:20
+    |
+188 |     let mut sent = 0usize;
+    |                    ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `written_total` is never read
+   --> src/daemon/handover_wire.rs:213:37
+    |
+213 |             let mut written_total = 0usize;
+    |                                     ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `header` is never read
+   --> src/daemon/handover_wire.rs:557:9
+    |
+557 |         header = [0u8; HANDOVER_HEADER_BYTES];
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `cursor` is never read
+   --> src/daemon/handover_wire.rs:571:26
+    |
+571 |         let mut cursor = 0usize;
+    |                          ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `sender`
+   --> src/daemon/handover_wire.rs:597:14
+    |
+597 |         let (sender, receiver) = socketpair();
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_sender`
+
+warning: unused variable: `receiver`
+   --> src/daemon/handover_wire.rs:622:22
+    |
+622 |         let (sender, receiver) = socketpair();
+    |                      ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receiver`
+
+warning: variable does not need to be mutable
+   --> src/daemon/server.rs:954:41
+    |
+954 |     pub(crate) fn detach_without_unlock(mut self) -> File {
+    |                                         ----^^^^
+    |                                         |
+    |                                         help: remove this `mut`
+
+warning: unused variable: `host`
+   --> src/ipc/remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:207:13
+    |
+207 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/snapshot_codec.rs:280:5
+    |
+280 |     mut writer: W,
+    |     ----^^^^^^
+    |     |
+    |     help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:7701:13
+     |
+7701 |         let mut harness = DirectRenderHarness::new(
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:7752:13
+     |
+7752 |         let mut harness = DirectRenderHarness::new(vec![
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `receipt`
+     --> src/native_terminal/surface_host.rs:10428:13
+      |
+10428 |         let receipt = harness
+      |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receipt`
+
+warning: unused variable: `render_receipt`
+     --> src/native_terminal/surface_host.rs:10438:13
+      |
+10438 |         let render_receipt = harness
+      |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_render_receipt`
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1759:14
+     |
+1759 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+
+warning: variable does not need to be mutable
+   --> src/remote/reference_chat/prompt_codex.rs:581:9
+    |
+581 |     let mut question: Option<String>;
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `menu_labels`
+   --> src/remote/reference_chat/prompt_codex.rs:897:9
+    |
+897 |     let menu_labels: Vec<String> = if first.options.is_empty() {
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_menu_labels`
+
+warning: variable does not need to be mutable
+   --> src/remote/reference_chat/prompt_omo.rs:397:23
+    |
+397 | pub fn omo_asks_after(mut open: Vec<OmoAskCall>, entry: &Value) -> Vec<OmoAskCall> {
+    |                       ----^^^^
+    |                       |
+    |                       help: remove this `mut`
+
+warning: irrefutable `let...else` pattern
+   --> src/remote/machine_grid_tests.rs:477:5
+    |
+477 |     let Attached::Attached { generation, .. } = attached else {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this pattern will always match, so the `else` clause is useless
+    = help: consider removing the `else` clause
+    = note: `#[warn(irrefutable_let_patterns)]` on by default
+
+warning: irrefutable `let...else` pattern
+   --> src/remote/machine_grid_tests.rs:516:5
+    |
+516 |     let Attached::Attached { generation, .. } = attached else {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this pattern will always match, so the `else` clause is useless
+    = help: consider removing the `else` clause
+
+warning: irrefutable `let...else` pattern
+   --> src/remote/machine_grid_tests.rs:615:5
+    |
+615 |     let Attached::Attached { generation, .. } = attached else {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this pattern will always match, so the `else` clause is useless
+    = help: consider removing the `else` clause
+
+warning: irrefutable `let...else` pattern
+   --> src/remote/machine_grid_tests.rs:641:5
+    |
+641 |     let Attached::Attached { generation: raw_gen, .. } = attached_raw else {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this pattern will always match, so the `else` clause is useless
+    = help: consider removing the `else` clause
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1680:9
+     |
+1680 |     let mut child = spawn_cat_child();
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1694:9
+     |
+1694 |     let mut child = tokio::process::Command::new("/bin/sh")
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1711:9
+     |
+1711 |     let mut child = tokio::process::Command::new("/bin/sh")
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `initial_len`
+   --> src/ssh/projects.rs:512:13
+    |
+512 |         let initial_len = target_len as u64;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_len`
+
+warning: unused variable: `session`
+   --> src/terminal/pty.rs:623:22
+    |
+623 |             let Some(session) = manager.get_session(&session_id) else {
+    |                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session`
+
+warning: value assigned to `desired_size` is never read
+    --> src/terminal/remote.rs:1134:56
+     |
+1134 |             let mut desired_size: Option<(u16, u16)> = None;
+     |                                                        ^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+    --> src/terminal/session.rs:1560:13
+     |
+1560 |         let mut master_pty = portable_pty::master_from_owned_fd(master, None)
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: type `DaemonLockFiles` is more private than the item `handover_socket::adopt_authority`
+    --> src/daemon/handover_socket.rs:227:1
+     |
+ 227 | / pub fn adopt_authority(
+ 228 | |     authority: TransferredAuthority,
+ 229 | | ) -> Result<(Option<tokio::net::UnixListener>, DaemonLockFiles), HandoverSocketError> {
+     | |_____________________________________________________________________________________^ function `handover_socket::adopt_authority` is reachable at visibility `pub`
+     |
+note: but type `DaemonLockFiles` is only usable at visibility `pub(crate)`
+    --> src/daemon/server.rs:1096:1
+     |
+1096 | pub(crate) struct DaemonLockFiles {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `daemon::agent_state::AgentState` is more private than the item `session_service::DaemonSessionService::publish_agent_state_for_test`
+   --> src/daemon/session_service.rs:635:5
+    |
+635 |     pub fn publish_agent_state_for_test(&self, state: crate::daemon::agent_state::AgentState) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `session_service::DaemonSessionService::publish_agent_state_for_test` is reachable at visibility `pub`
+    |
+note: but type `daemon::agent_state::AgentState` is only usable at visibility `pub(crate)`
+   --> src/daemon/agent_state.rs:8:1
+    |
+  8 | pub(crate) struct AgentState {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `MachineSender` is more private than the item `SessionHub::machine_senders`
+   --> src/terminal/output_hub.rs:726:5
+    |
+726 |     pub(crate) machine_senders: Vec<machine_output::MachineSender>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SessionHub::machine_senders` is reachable at visibility `pub(crate)`
+    |
+note: but type `MachineSender` is only usable at visibility `pub(in crate::terminal::output_hub)`
+   --> src/terminal/machine_output.rs:81:1
+    |
+ 81 | pub(super) struct MachineSender {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::AgentStateSink` is more private than the item `paired_daemon::Proxy::set_agent_sink`
+   --> src/terminal/paired_daemon.rs:107:5
+    |
+107 |     pub fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_daemon::Proxy::set_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::AgentStateSink` is more private than the item `paired_runtime::Runtime::set_agent_sink`
+   --> src/terminal/paired_runtime.rs:294:5
+    |
+294 |     pub fn set_agent_sink(&self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtime::set_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `paired_runtime::Command` is more private than the item `paired_runtime::Runtime::sender`
+   --> src/terminal/paired_runtime.rs:731:5
+    |
+731 |     pub(crate) fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtime::sender` is reachable at visibility `pub(crate)`
+    |
+note: but type `paired_runtime::Command` is only usable at visibility `pub(self)`
+   --> src/terminal/paired_runtime.rs:166:1
+    |
+166 | enum Command {
+    | ^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `terminal::remote::RemoteRuntime::live_import`
+   --> src/terminal/remote.rs:859:5
+    |
+859 | /     pub fn live_import(
+860 | |         &self,
+861 | |         state: RemoteExportState,
+862 | |         transport: Option<Arc<dyn Transport>>,
+863 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `terminal::remote::RemoteRuntime::live_import` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:185:1
+    |
+185 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `terminal::remote::RemoteRuntime::import_transferred`
+   --> src/terminal/remote.rs:880:5
+    |
+880 | /     pub fn import_transferred(
+881 | |         &self,
+882 | |         state: RemoteExportState,
+883 | |         transport: Option<Arc<dyn Transport>>,
+884 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `terminal::remote::RemoteRuntime::import_transferred` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:185:1
+    |
+185 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::AgentStateSink` is more private than the item `terminal::service::TerminalService::set_paired_agent_sink`
+   --> src/terminal/service.rs:93:5
+    |
+ 93 |     pub fn set_paired_agent_sink(&self, sink: Arc<dyn super::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `terminal::service::TerminalService::set_paired_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `idle_upgrade_requested` is never used
+  --> src/daemon/handover.rs:33:15
+   |
+33 | pub(crate) fn idle_upgrade_requested() -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `machine_sessions` is never used
+    --> src/daemon/session_service.rs:1177:19
+     |
+ 371 | impl DaemonSessionService {
+     | ------------------------- method in this implementation
+...
+1177 |     pub(crate) fn machine_sessions(
+     |                   ^^^^^^^^^^^^^^^^
+
+warning: field `workspace_queues` is never read
+  --> src/daemon/workspace_service.rs:25:5
+   |
+19 | pub struct DaemonWorkspaceService {
+   |            ---------------------- field in this struct
+...
+25 |     workspace_queues: parking_lot::Mutex<
+   |     ^^^^^^^^^^^^^^^^
+
+warning: method `spawn_queue` is never used
+  --> src/daemon/workspace_service.rs:42:19
+   |
+41 | impl DaemonWorkspaceService {
+   | --------------------------- method in this implementation
+42 |     pub(crate) fn spawn_queue(&self, workspace: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+   |                   ^^^^^^^^^^^
+
+warning: function `desktop_application_dirs` is never used
+   --> src/ipc/file_open_with.rs:103:15
+    |
+103 | pub(crate) fn desktop_application_dirs() -> Vec<PathBuf> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `kind` is never read
+   --> src/ipc/file_preview.rs:539:5
+    |
+534 | struct HandleRecord {
+    |        ------------ field in this struct
+...
+539 |     kind: FilePreviewKind,
+    |     ^^^^
+
+warning: function `identity_holds` is never used
+    --> src/ipc/file_preview.rs:1147:4
+     |
+1147 | fn identity_holds(path: &Path, identity: Option<(u64, u64)>) -> bool {
+     |    ^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src/ipc/file_preview.rs:1163:25
+     |
+1163 | struct ChildReservation(String);
+     |        ---------------- ^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: field `number` is never read
+   --> src/ipc/github_issue.rs:237:5
+    |
+236 | struct GhIssueResponse {
+    |        --------------- field in this struct
+237 |     number: u64,
+    |     ^^^^^^
+    |
+    = note: `GhIssueResponse` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:29:5
+   |
+28 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+29 |     app: AppHandle<R>,
+   |     ^^^
+
+warning: method `presentation_tuple` is never used
+   --> src/native_terminal/surface_host.rs:567:8
+    |
+560 | impl NativeTerminalSession {
+    | -------------------------- method in this implementation
+...
+567 |     fn presentation_tuple(&self) -> Option<&crate::daemon::protocol::PaneAttachTuple> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: constant `GHOSTTY_SNAPSHOT_DECODER_DATA_INVALID` is never used
+   --> src/native_terminal/sys/constants.rs:148:11
+    |
+148 | pub const GHOSTTY_SNAPSHOT_DECODER_DATA_INVALID: c_int = 0;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ghostty_snapshot_encode_alloc` is never used
+   --> src/native_terminal/sys/ffi.rs:280:12
+    |
+280 |     pub fn ghostty_snapshot_encode_alloc(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ghostty_snapshot_decoder_new` is never used
+   --> src/native_terminal/sys/ffi.rs:287:12
+    |
+287 |     pub fn ghostty_snapshot_decoder_new(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ghostty_snapshot_decoder_get_multi` is never used
+   --> src/native_terminal/sys/ffi.rs:318:12
+    |
+318 |     pub fn ghostty_snapshot_decoder_get_multi(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ghostty_terminal_continuation_write` is never used
+   --> src/native_terminal/sys/ffi.rs:327:12
+    |
+327 |     pub fn ghostty_terminal_continuation_write(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ghostty_terminal_continuation_buf` is never used
+   --> src/native_terminal/sys/ffi.rs:331:12
+    |
+331 |     pub fn ghostty_terminal_continuation_buf(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ghostty_terminal_continuation_alloc` is never used
+   --> src/native_terminal/sys/ffi.rs:337:12
+    |
+337 |     pub fn ghostty_terminal_continuation_alloc(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `GhosttyReaderFn` is never used
+  --> src/native_terminal/sys/types.rs:31:10
+   |
+31 | pub type GhosttyReaderFn = unsafe extern "C" fn(
+   |          ^^^^^^^^^^^^^^^
+
+warning: struct `GhosttyReader` is never constructed
+  --> src/native_terminal/sys/types.rs:48:12
+   |
+48 | pub struct GhosttyReader {
+   |            ^^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src/remote/auth.rs:1246:18
+     |
+1246 | struct StoreLock(std::fs::File);
+     |        --------- ^^^^^^^^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: method `number` is never used
+   --> src/remote/reference_chat/history_omo.rs:128:8
+    |
+100 | impl<'a> Row<'a> {
+    | ---------------- method in this implementation
+...
+128 |     fn number(&self, key: &str) -> Option<f64> {
+    |        ^^^^^^
+
+warning: field `first` is never read
+   --> src/remote/reference_chat/prompt_claude.rs:198:5
+    |
+194 | struct ListRows {
+    |        -------- field in this struct
+...
+198 |     first: i64,
+    |     ^^^^^
+    |
+    = note: `ListRows` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `Held` is never constructed
+   --> src/remote/../../tests/support/machine_input_fixture.rs:163:12
+    |
+163 | pub struct Held {
+    |            ^^^^
+
+warning: associated items `start` and `drain` are never used
+   --> src/remote/../../tests/support/machine_input_fixture.rs:170:18
+    |
+169 | impl Held {
+    | --------- associated items in this implementation
+170 |     pub async fn start(fixture: &Fixture, session: &Value, socket: &mut Socket) -> Self {
+    |                  ^^^^^
+...
+227 |     pub async fn drain(mut self) {
+    |                  ^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src/remote/server.rs:8636:12
+     |
+8636 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: function `timeout_error_with_stderr` is never used
+   --> src/ssh/direct.rs:695:4
+    |
+695 | fn timeout_error_with_stderr(stderr: &[u8]) -> IpcError {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ssh_status_error` is never used
+   --> src/ssh/direct.rs:707:4
+    |
+707 | fn ssh_status_error(status: std::process::ExitStatus, stderr: &[u8]) -> IpcError {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: method `snapshot_after_ring` is never used
+   --> src/terminal/output_hub.rs:439:19
+    |
+266 | impl BoundedBuffer {
+    | ------------------ method in this implementation
+...
+439 |     pub(crate) fn snapshot_after_ring(
+    |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: method `observe_for_test` is never used
+    --> src/terminal/output_hub.rs:1011:19
+     |
+ 803 | impl TerminalOutputHub {
+     | ---------------------- method in this implementation
+...
+1011 |     pub(crate) fn observe_for_test(
+     |                   ^^^^^^^^^^^^^^^^
+
+warning: function `test_persist_count` is never used
+   --> src/terminal/paired_runtime.rs:101:15
+    |
+101 | pub(crate) fn test_persist_count() -> usize {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: struct `PumpToken` is never constructed
+  --> src/terminal/service.rs:39:19
+   |
+39 | pub(crate) struct PumpToken(u64);
+   |                   ^^^^^^^^^
+
+warning: struct `PumpTokenFence` is never constructed
+  --> src/terminal/service.rs:42:19
+   |
+42 | pub(crate) struct PumpTokenFence {
+   |                   ^^^^^^^^^^^^^^
+
+warning: methods `install`, `is_active`, and `remove` are never used
+  --> src/terminal/service.rs:48:19
+   |
+47 | impl PumpTokenFence {
+   | ------------------- methods in this implementation
+48 |     pub(crate) fn install(&self) -> PumpToken {
+   |                   ^^^^^^^
+...
+54 |     pub(crate) fn is_active(&self, token: PumpToken) -> bool { *self.active.lock() == Some(token) }
+   |                   ^^^^^^^^^
+55 |
+56 |     pub(crate) fn remove(&self, token: PumpToken) -> bool {
+   |                   ^^^^^^
+
+warning: field `close_grace` is never read
+   --> src/terminal/session.rs:411:9
+    |
+384 | pub(crate) struct PtySessionConfig {
+    |                   ---------------- field in this struct
+...
+411 |     pub close_grace: Arc<Mutex<Option<Duration>>>,
+    |         ^^^^^^^^^^^
+
+warning: function `test_adopted_process_liveness_observation` is never used
+    --> src/terminal/session.rs:1821:8
+     |
+1821 |     fn test_adopted_process_liveness_observation() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: associated items `acquire_writer_lease` and `validate_ref_component` are never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- associated items in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+398 |     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused `std::result::Result` that must be used
+   --> src/daemon/a03_owner_cli_fixture.rs:126:5
+    |
+126 | /     auth.register_scoped_pairing_capability(
+127 | |         &token,
+128 | |         crate::remote::auth::DevicePermission::Control,
+129 | |         expected,
+130 | |     );
+    | |_____^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+126 |     let _ = auth.register_scoped_pairing_capability(
+    |     +++++++
+
+warning: unused `std::result::Result` that must be used
+    --> src/remote/server.rs:8253:9
+     |
+8253 |         state.auth_manager.revoke_device(&device.id);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+8253 |         let _ = state.auth_manager.revoke_device(&device.id);
+     |         +++++++
+
+warning: `ferryx` (lib test) generated 162 warnings (run `cargo fix --lib -p ferryx --tests` to apply 36 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6m 19s
+     Running unittests src/lib.rs (/tmp/ferryx-winfetch-target/debug/deps/ferryx_lib-dd0c331f76dc1022)
+
+running 21 tests
+test ipc::remote_file::tests::test_remote_read_command_expands_only_home ... ok
+test ipc::remote_file::tests::test_remote_read_command_quotes_path_with_single_quote ... ok
+test ipc::remote_file::tests::test_remote_target_path_dot_dot_normalization_inside_root ... ok
+test ipc::remote_file::tests::test_remote_target_path_home_relative_stays_home_relative ... ok
+test ipc::remote_file::tests::test_remote_target_path_relative_join ... ok
+test ipc::remote_file::tests::test_remote_target_path_absolute_passthrough ... ok
+test ipc::remote_file::tests::test_remote_target_path_control_char_rejected ... ok
+test ipc::remote_file::tests::test_remote_target_path_climbing_above_root_rejected ... ok
+test ipc::remote_file::tests::test_remote_target_path_home_relative_cannot_climb_above_home ... ok
+test ipc::remote_file::tests::test_remote_target_path_empty_rejected ... ok
+test ipc::remote_file::tests::test_ensure_within_limit ... ok
+test ipc::remote_file::tests::mark_downloaded_sets_the_quarantine_xattr ... ok
+test ipc::remote_file::tests::windows_read_script_passes_path_as_data_and_caps_read ... ok
+test ipc::remote_file::tests::cache_path_uses_windows_basename ... ok
+test ipc::remote_file::tests::test_remote_cache_path_sanitizes_basename ... ok
+test ipc::remote_file::tests::test_remote_cache_path_deterministic ... ok
+test ipc::remote_file::tests::test_remote_cache_path_differs_per_workspace ... ok
+test ipc::remote_file::tests::test_remote_cache_path_stays_under_cache_root ... ok
+test ipc::remote_file::tests::windows_target_path_rejects_escapes_and_ambiguous_forms ... ok
+test ipc::remote_file::tests::windows_target_path_normalizes_absolute_and_relative_inputs ... ok
+test ipc::remote_file::tests::windows_payload_round_trips_binary_and_bounds_wire ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3459 filtered out; finished in 0.05s
+
+EXIT=0

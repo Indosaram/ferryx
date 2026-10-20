@@ -3,15 +3,7 @@ import path from "node:path";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  plugins: [react(), {
-    name: "workspace-store-test-hmr",
-    enforce: "pre",
-    transform(source, id) {
-      if (id.split("?")[0].replaceAll("\\", "/").endsWith("/src/state/workspaceStore.ts")) {
-        return source.replaceAll("import.meta.hot", "globalThis.__workspaceStoreTestHot");
-      }
-    },
-  }],
+  plugins: [react()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

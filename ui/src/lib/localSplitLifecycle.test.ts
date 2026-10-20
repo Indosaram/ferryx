@@ -329,23 +329,6 @@ describe("durable split races", () => {
     expect(f.read()?.reconnectLifecycle).toBe("idle");
     expect(f.persisted.some((saved) => saved.backendSessionId === "back")).toBe(true);
   });
-  it("binds with the same incarnation-qualified key the native pane presents", async () => {
-    const f = fixture(undefined, false);
-    const create = f.create.getMockImplementation()!;
-    f.create.mockImplementation(async () => {
-      const response = await create();
-      return { ...response, session: { ...response.session, incarnation: "inc-1" } };
-    });
-    const attach = f.attach.getMockImplementation()!;
-    f.attach.mockImplementation(async () => {
-      const response = await attach();
-      return { ...response, attachTuple: { ...response.attachTuple!, incarnation: "inc-1", bindingKey: "back:7:0::inc-1" } };
-    });
-    await f.controller.run({ workspaceId: "default", worktree: null });
-    expect(f.read()?.spawnIntent?.attachTuple?.bindingKey).toBe("back:7:0::inc-1");
-    expect(f.read()?.spawnIntent?.bindingPersisted).toBe(true);
-    expect(f.read()?.reconnectLifecycle).not.toBe("failed");
-  });
   it("retry durably advances the attempt before reattaching the same PTY", async () => {
     const f = fixture(undefined, false);
     await f.controller.run({ workspaceId: "default", worktree: null });

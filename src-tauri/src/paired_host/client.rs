@@ -627,11 +627,7 @@ impl MachineClient {
         match response.result {
             OperationResult::Session(m::SessionDetail::Running { session })
                 if session.target == descriptor.target => {}
-            OperationResult::Session(m::SessionDetail::Exited { session, .. })
-                if session.target == descriptor.target => return Err(ClientError::local("PAIRED_SESSION_EXITED")),
-            OperationResult::Session(m::SessionDetail::Expired { target })
-                if target == descriptor.target => return Err(ClientError::local("SESSION_EXPIRED")),
-            _ => return Err(ClientError::local("PAIRED_HOST_WRONG_MACHINE")),
+            _ => return Err(ClientError::local("SESSION_EXPIRED")),
         }
         let (host, lease) = service
             .capture_operation(descriptor.host_id.clone(), descriptor.generation)

@@ -10,17 +10,6 @@ export function remoteApiUrl(baseUrl: string, path: string): string {
   return baseUrl === window.location.origin ? path : `${baseUrl}${path}`;
 }
 
-export class SocketTicketError extends Error {
-  readonly status: number;
-  readonly isAuthDenial: boolean;
-  constructor(status: number, message?: string) {
-    super(message ?? `Socket ticket request failed (${status})`);
-    this.name = "SocketTicketError";
-    this.status = status;
-    this.isAuthDenial = status === 401 || status === 403;
-  }
-}
-
 /** Each dial (including retries) gets its own target-bound, single-use ticket. */
 export async function remoteSocketUrl(
   baseUrl: string,
@@ -37,9 +26,7 @@ export async function remoteSocketUrl(
     body: JSON.stringify({ target }),
     signal,
   });
-  if (!response.ok) {
-    throw new SocketTicketError(response.status, `Socket ticket request failed (${response.status})`);
-  }
+  if (!response.ok) throw new Error(`Socket ticket request failed (${response.status})`);
   const data: unknown = await response.json();
   if (!data || typeof data !== "object" || !("ticket" in data)
     || typeof data.ticket !== "string" || !data.ticket) throw new Error("Invalid socket ticket response");

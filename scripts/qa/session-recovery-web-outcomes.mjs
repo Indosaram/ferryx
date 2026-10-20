@@ -33,48 +33,34 @@ function sameWebTarget(a, b) {
   return ['sessionId', 'daemonEpoch'].every(key => a?.[key] !== undefined && a[key] === b?.[key]);
 }
 
-export function hasLegacyPresentationProof(proof, target) {
-  const receipt = proof?.fullGridReceipt;
-  return sameWebTarget(proof, target) && sameWebTarget(receipt, target) &&
-    typeof proof.socketId === 'string' && proof.socketId.length > 0 && proof.socketId === receipt.socketId &&
-    typeof receipt.receiptId === 'string' && receipt.receiptId.length > 0 &&
-    Number.isInteger(proof.generation) && proof.generation > 0 &&
-    Number.isInteger(proof.presentationSequence) && proof.presentationSequence > 0 && proof.outcome === 'ready';
-}
-
 // Install the MutationObserver before the trigger, and return a handle immediately.
 // The promise is retained in the page, not awaited by evaluate during registration.
-export async function armDOM(browser, expression, timeoutMs) {
+async function armDOM(browser, expression, timeoutMs) {
   const id = randomUUID();
   await browser.evaluate(`(() => {
     window.__task9Outcomes ??= new Map();
-    let observer, timer, abandon, inspect;
-    const cleanup = () => {
-      observer.disconnect(); clearTimeout(timer);
-      window.removeEventListener('ferryx-web-owner-observation', inspect);
-    };
+    let observer, timer, abandon;
     const promise = new Promise((resolve, reject) => {
       abandon = () => reject(new Error('TASK9_DOM_CANCELLED'));
-      inspect = () => {
+      const inspect = () => {
         try {
           const value = (${expression})();
           if (!value) return;
-          cleanup(); resolve(value);
-        } catch (error) { cleanup(); reject(error); }
+          observer.disconnect(); clearTimeout(timer); resolve(value);
+        } catch (error) { observer.disconnect(); clearTimeout(timer); reject(error); }
       };
       observer = new MutationObserver(inspect);
       observer.observe(document.documentElement, {
         subtree: true, childList: true, characterData: true, attributes: true
       });
-      window.addEventListener('ferryx-web-owner-observation', inspect);
       timer = setTimeout(() => {
-        cleanup(); reject(new Error('TASK9_DOM_DEADLINE'));
+        observer.disconnect(); reject(new Error('TASK9_DOM_DEADLINE'));
       }, ${JSON.stringify(timeoutMs)});
       inspect();
     });
     promise.catch(() => {});
     window.__task9Outcomes.set(${JSON.stringify(id)}, {
-      promise, cancel: () => { cleanup(); abandon(); }
+      promise, cancel: () => { observer.disconnect(); clearTimeout(timer); abandon(); }
     });
   })()`);
   return {
@@ -91,21 +77,14 @@ export function outcomeExpression(target, outcomes) {
     const target = ${JSON.stringify(target)};
     const outcomes = ${JSON.stringify(outcomes)};
 
-    // The product installs this observer when RemoteTerminal mounts its owner; keep waiting
-    // (bounded by the DOM deadline) instead of failing on the first pre-mount inspection.
-    if (!window.__ferryxRecoveryQA) return null;
-
-    let snap;
-    try {
-      snap = window.__ferryxRecoveryQA.snapshot({
-        sessionId: target.sessionId,
-        daemonEpoch: target.daemonEpoch ?? null,
-      });
-    } catch (error) {
-      // The owner for this target registers when its socket dial starts; until then keep waiting.
-      if (String(error && error.message) === 'WEB_OWNER_TARGET_EVIDENCE_REQUIRED') return null;
-      throw error;
+    if (!window.__ferryxRecoveryQA) {
+      throw new Error('TASK9_PRODUCT_SEAM_REQUIRED: __ferryxRecoveryQA');
     }
+
+    const snap = window.__ferryxRecoveryQA.snapshot({
+      sessionId: target.sessionId,
+      daemonEpoch: target.daemonEpoch ?? null,
+    });
     if (!snap ||
         snap.retainedTarget?.sessionId !== target.sessionId ||
         snap.retainedTarget?.daemonEpoch !== (target.daemonEpoch ?? null)) {
@@ -114,8 +93,9 @@ export function outcomeExpression(target, outcomes) {
 
     const snapIncarnation = snap.incarnation ?? null;
     const snapOutcome = snap.outcome ?? null;
-    const isSettled = snap.pendingTimers === 0 && snap.inFlight === false && (
-      snap.activity === 'settled' || (typeof snap.exitSettlements === 'number' && snap.exitSettlements > 0)
+    const isSettled = snap.activity === 'settled' || (
+      typeof snap.exitSettlements === 'number' && snap.exitSettlements > 0 &&
+      snap.pendingTimers === 0 && snap.inFlight === false
     );
     const snapActivity = isSettled ? 'settled' : (!snap.disposed ? 'active' : 'disposed');
 
@@ -125,9 +105,8 @@ export function outcomeExpression(target, outcomes) {
         const grid = document.querySelector(${JSON.stringify(GRID)});
         const outcome = document.querySelector(${JSON.stringify(STATUS)});
         if (live && live.textContent.includes('Live') && grid && grid.getClientRects().length > 0 && !outcome) {
-          if (snapOutcome !== 'ready') return null;
           return {
-            outcome: snapOutcome,
+            outcome: snapOutcome ?? 'ready',
             reason: 'live',
             sessionId: snap.retainedTarget.sessionId,
             daemonEpoch: snap.retainedTarget.daemonEpoch,
@@ -147,9 +126,8 @@ export function outcomeExpression(target, outcomes) {
       if (outcome && outcome.getClientRects().length > 0) {
         const text = outcome.textContent || '';
         if (text.includes('Terminal exited') || text.includes('exited')) {
-          if (snapOutcome !== 'affirmative_exit') return null;
           return {
-            outcome: snapOutcome,
+            outcome: snapOutcome ?? 'exited',
             reason: text.replace('Retry', '').trim(),
             sessionId: snap.retainedTarget.sessionId,
             daemonEpoch: snap.retainedTarget.daemonEpoch,
@@ -157,7 +135,7 @@ export function outcomeExpression(target, outcomes) {
             socketId: snap.socketId,
             generation: snap.generation,
             presentationSequence: snap.presentationSequence,
-            activity: isSettled ? 'settled' : (snap.exitSettlements === null && snap.activity !== 'settled' ? null : 'unsettled'),
+            activity: snap.activity ?? (isSettled ? 'settled' : (snap.exitSettlements === null ? null : 'unsettled')),
             text: text.trim(),
           };
         }
@@ -169,9 +147,9 @@ export function outcomeExpression(target, outcomes) {
       const unknown = document.querySelector('[data-testid="remote-terminal-outcome-unknown"]');
       if (outcome && outcome.getClientRects().length > 0) {
         const text = outcome.textContent || '';
-        if (snapOutcome === 'blocked' && !text.includes('Terminal exited') && !text.includes('exited')) {
+        if (!text.includes('Terminal exited') && !text.includes('exited')) {
           return {
-            outcome: snapOutcome,
+            outcome: snapOutcome ?? 'blocked',
             reason: text.replace('Retry', '').trim(),
             sessionId: snap.retainedTarget.sessionId,
             daemonEpoch: snap.retainedTarget.daemonEpoch,
@@ -186,9 +164,8 @@ export function outcomeExpression(target, outcomes) {
       }
       if (unknown && unknown.getClientRects().length > 0) {
         const text = unknown.textContent || '';
-        if (snapOutcome !== 'blocked') return null;
         return {
-          outcome: snapOutcome,
+          outcome: snapOutcome ?? 'blocked',
           reason: text.replace('Retry', '').trim(),
           sessionId: snap.retainedTarget.sessionId,
           daemonEpoch: snap.retainedTarget.daemonEpoch,
@@ -207,9 +184,8 @@ export function outcomeExpression(target, outcomes) {
         const statusEls = Array.from(document.querySelectorAll('[role="status"]'));
         const connecting = statusEls.find(el => el.textContent.includes('Connecting') && el.getClientRects().length > 0);
         if (connecting) {
-          if (snapOutcome !== 'retryable') return null;
           return {
-            outcome: snapOutcome,
+            outcome: snapOutcome ?? 'retryable',
             reason: 'Connecting',
             sessionId: snap.retainedTarget.sessionId,
             daemonEpoch: snap.retainedTarget.daemonEpoch,
@@ -330,7 +306,7 @@ async function ready(run) {
   } finally { await grid.dispose(); }
   const proof = await run.gateway.currentTarget();
   const currentBinding = await run.gateway.validatedBinding();
-  requireEvidence(sameLifetime(currentBinding, run.target) && hasLegacyPresentationProof(proof, currentBinding),
+  requireEvidence(sameLifetime(proof, run.target) && sameTarget(proof, currentBinding) && proof.socketId && proof.generation && proof.presentationSequence,
     'TASK9_CURRENT_TARGET_PROOF', JSON.stringify(proof));
   run.target = { ...currentBinding };
   run.timeline.push({ event: 'current-target', proof });
@@ -357,7 +333,7 @@ async function authRevocation(run) {
     action: () => run.correctToken() });
   await capture(run, 'corrected'); await assertLedger(run);
   const corrected = await run.gateway.currentTarget();
-  requireEvidence(hasLegacyPresentationProof(corrected, run.target) && sameTarget(run.target, await run.gateway.validatedBinding()),
+  requireEvidence(sameLifetime(corrected, run.target) && sameTarget(corrected, await run.gateway.validatedBinding()),
     'TASK9_AUTH_TARGET_CHANGED', 'Token correction');
 }
 
@@ -389,11 +365,8 @@ async function closeRebind(run) {
   const ledger = await assertLedger(run);
   requireEvidence(ledger.owner.cancelledAttemptIds.length === 1 && ledger.owner.staleCompletionsRejected === 1,
     'TASK9_STALE_DIAL_ACCEPTED', JSON.stringify(ledger.owner));
-  if (run.variant === 'rebind') {
-    const observed = await run.gateway.currentTarget();
-    requireEvidence(hasLegacyPresentationProof(observed, next),
-      'TASK9_REBIND_TARGET', JSON.stringify({ expected: next, observed }));
-  }
+  if (run.variant === 'rebind') requireEvidence(sameTarget(await run.gateway.currentTarget(), next),
+    'TASK9_REBIND_TARGET', 'Old target was adopted');
 }
 
 async function outputReplayGap(run) {
@@ -412,15 +385,12 @@ async function outputReplayGap(run) {
       'TASK9_GAP_NOT_REAL', JSON.stringify(receipt));
     run.timeline.push({ event: 'replay-gap', receipt, rendered });
   } finally { wire.dispose(); await gap.dispose(); }
-  requireEvidence(hasLegacyPresentationProof(await run.gateway.currentTarget(), run.target), 'TASK9_GAP_TARGET', 'Gap dropped web binding');
+  requireEvidence(sameTarget(await run.gateway.currentTarget(), run.target), 'TASK9_GAP_TARGET', 'Gap dropped target');
   await capture(run, 'gap'); await assertLedger(run);
 }
 
 async function noFocusSteal(run) {
-  let phase = 'initial-ready';
-  try {
   await ready(run); await sendIdentifiedMutations(run);
-  phase = 'focus-setup';
   await run.browser.evaluate(`(() => {
     const el = document.querySelector(${JSON.stringify(run.focusSelector)});
     if (!el || !el.getClientRects().length) throw new Error('TASK9_ACTIVE_PANE_MISSING');
@@ -433,37 +403,15 @@ async function noFocusSteal(run) {
     document.addEventListener('focusin', window.__task9Focus.listener, true);
   })()`);
   try {
-    phase = 'disconnect-retryable-dom';
     await transition(run, { command: 'disconnect', event: 'transport-closed', outcomes: ['retryable'] });
-    phase = 'reconnect-ready';
     await ready(run);
-    phase = 'focus-retention';
     const focus = await run.browser.evaluate(`({ retained: document.activeElement === window.__task9Focus.el,
       stolen: window.__task9Focus.stolen })`);
     requireEvidence(focus.retained && focus.stolen.length === 0, 'TASK9_FOCUS_STOLEN', JSON.stringify(focus));
     run.timeline.push({ event: 'focus', ...focus });
-    phase = 'capture-and-ledger';
     await capture(run, 'retained-focus'); await assertLedger(run);
   } finally {
     await run.browser.evaluate('document.removeEventListener("focusin", window.__task9Focus.listener, true)');
-  }
-  } catch (error) {
-    let diagnostic;
-    try {
-      diagnostic = await run.browser.evaluate(`(() => {
-        let owner;
-        try { owner = window.__ferryxRecoveryQA?.snapshot(${JSON.stringify({ sessionId: run.target.sessionId, daemonEpoch: run.target.daemonEpoch ?? null })}); }
-        catch (error) { owner = { error: String(error) }; }
-        return { owner, statuses: Array.from(document.querySelectorAll('[role="status"]')).map(el => ({
-          text: el.textContent, visible: el.getClientRects().length > 0 })),
-          focus: window.__task9Focus ? { retained: document.activeElement === window.__task9Focus.el,
-            stolen: window.__task9Focus.stolen } : null };
-      })()`);
-    } catch (diagnosticError) { diagnostic = { error: String(diagnosticError) }; }
-    throw new Error(`${error instanceof Error ? error.message : String(error)}; TASK9_FOCUS_PHASE ${JSON.stringify({
-      phase, viewport: run.viewport, theme: run.theme, target: run.target,
-      timeline: run.timeline, diagnostic,
-    })}`, { cause: error });
   }
 }
 
@@ -480,18 +428,8 @@ async function coldStartUnknown(run) {
   requireEvidence(before.owner.identityConfirmed === false && sameWebTarget(before.owner.retainedTarget, run.target),
     'TASK9_UNKNOWN_IDENTITY_LOST', JSON.stringify(before.owner));
   await capture(run, 'unknown');
-  const oldSnapshot = await run.snapshotOwner(run.target);
-  requireEvidence(oldSnapshot.identityConfirmed === false && oldSnapshot.inFlight && !oldSnapshot.disposed &&
-    oldSnapshot.generation > 0 && sameWebTarget(oldSnapshot.retainedTarget, run.target),
-    'TASK9_COLDSTART_OLD_ATTEMPT_NOT_PENDING', JSON.stringify(oldSnapshot));
-  const oldAttemptId = String(oldSnapshot.generation);
-  const completionKey = await run.armTicketCompletion(run.target, oldAttemptId, run.timeoutMs);
   const create = armWire(run.gateway, 'create-request', run.target, run.timeoutMs);
-  let releasedTicket = false;
   try {
-    const held = await run.waitTicketHeld(completionKey, run.timeoutMs);
-    requireEvidence(held.status === 200 && held.requestId && !held.delivered && sameWebTarget(held.target, run.target),
-      'TASK9_COLDSTART_TICKET_NOT_HELD', JSON.stringify(held));
     const actionTestId = await run.newTerminalOwner();
     const request = await create.read();
     requireEvidence(actionTestId && request.requestId && request.browserActionId && request.browserActionTestId === actionTestId,
@@ -499,36 +437,7 @@ async function coldStartUnknown(run) {
     // This is the sole exception, correlated to a real button action and received API request.
     await assertLedger(run, request.requestId);
     run.timeline.push({ event: 'explicit-new-terminal', request });
-    const live = await armDOM(run.browser, outcomeExpression(run.rebindTarget, ['ready']), run.timeoutMs);
-    try { await live.read(); } finally { await live.dispose(); }
-    const beforeRelease = await run.snapshotOwner(run.target);
-    requireEvidence(beforeRelease.disposed && beforeRelease.pendingTimers === 0 && !beforeRelease.inFlight &&
-      beforeRelease.cancelledAttemptIds.includes(oldAttemptId), 'TASK9_COLDSTART_OLD_OWNER_NOT_DISPOSED', JSON.stringify(beforeRelease));
-    const released = await run.releaseTicketCompletion(completionKey);
-    releasedTicket = true;
-    requireEvidence(released.status === 200 && released.requestId === held.requestId && sameWebTarget(released.target, run.target),
-      'TASK9_COLDSTART_RELEASED_TICKET_MISMATCH', JSON.stringify({ held, released }));
-    const rejected = await run.readRetiredObserver(completionKey);
-    requireEvidence(rejected.disposed && rejected.pendingTimers === 0 && !rejected.inFlight &&
-      rejected.staleCompletionsRejected === 1 && rejected.cancelledAttemptIds.includes(oldAttemptId) &&
-      rejected.rejectedAttemptIds.includes(oldAttemptId), 'TASK9_COLDSTART_LATE_COMPLETION_NOT_REJECTED', JSON.stringify(rejected));
-    const current = await run.currentOwner();
-    requireEvidence(hasLegacyPresentationProof(await run.gateway.currentTarget(), run.rebindTarget) &&
-      sameWebTarget(current, run.rebindTarget) && current.socketId && current.presentationSequence > 0,
-      'TASK9_COLDSTART_NEW_OWNER_NOT_LIVE', JSON.stringify(current));
-    requireEvidence(sameTarget(await run.gateway.validatedBinding(), run.rebindTarget),
-      'TASK9_COLDSTART_NEW_OWNER_IDENTITY', JSON.stringify(current));
-    await assertLedger(run, request.requestId);
-    run.timeline.push({ event: 'late-old-owner-completion-rejected', attemptId: oldAttemptId,
-      oldOwner: rejected, newOwner: current, held, released });
-  } finally {
-    create.dispose();
-    if (!releasedTicket) {
-      const held = await run.waitTicketHeld(completionKey, run.timeoutMs);
-      await run.releaseTicketCompletion(completionKey);
-      run.timeline.push({ event: 'late-old-owner-completion-released-after-failed-assertion', held });
-    }
-  }
+  } finally { create.dispose(); }
   await capture(run, 'explicit-new-terminal');
 }
 

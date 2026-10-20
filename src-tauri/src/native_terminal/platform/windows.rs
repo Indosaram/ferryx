@@ -99,21 +99,11 @@ unsafe extern "system" {
         flags: u32,
     ) -> i32;
     fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32;
-    #[cfg(feature = "local-split-qa")]
-    fn GetWindowThreadProcessId(hwnd: Hwnd, process_id: *mut u32) -> u32;
-    #[cfg(feature = "local-split-qa")]
-    fn IsWindowVisible(hwnd: Hwnd) -> i32;
-    #[cfg(feature = "local-split-qa")]
-    fn GetParent(hwnd: Hwnd) -> Hwnd;
-    #[cfg(feature = "local-split-qa")]
-    fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize;
 }
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetModuleHandleW(name: *const u16) -> Hinstance;
-    #[cfg(feature = "local-split-qa")]
-    fn GetCurrentThreadId() -> u32;
 }
 
 unsafe extern "system" fn child_wnd_proc(
@@ -284,15 +274,6 @@ impl WindowsCompositorTarget {
             hinstance: NonZeroIsize::new(instance as isize),
         });
 
-        #[cfg(feature = "local-split-qa")]
-        if crate::ipc::qa_barrier::active_channel().is_some() {
-            eprintln!(
-                "[native_qa_predicates] stage=target_create hwnd={} parent={}",
-                child_hwnd.get(),
-                parent_hwnd.get()
-            );
-        }
-
         Ok(Self {
             handle,
             visibility: Mutex::new(ChildSurfaceVisibility::default()),
@@ -341,46 +322,20 @@ impl WindowsCompositorTarget {
 
     /// Shows the child HWND once the first frame has been presented.
     pub fn reveal(&self) {
-        let child_hwnd = self.handle.hwnd.get() as Hwnd;
-        let visibility_guard = self.visibility.lock();
-        #[cfg(feature = "local-split-qa")]
-        let qa_active = crate::ipc::qa_barrier::active_channel().is_some();
-
-        #[cfg(feature = "local-split-qa")]
-        if qa_active {
-            if let Ok(ref vis) = visibility_guard {
-                eprintln!(
-                    "[native_qa_predicates] stage=reveal hwnd={} lock=true should_map={} mapped={} detached={}",
-                    self.handle.hwnd.get(),
-                    vis.should_map_on_present(),
-                    vis.mapped(),
-                    vis.detached(),
-                );
-            } else {
-                eprintln!(
-                    "[native_qa_predicates] stage=reveal hwnd={} lock=false should_map=false mapped=unknown detached=unknown",
-                    self.handle.hwnd.get()
-                );
-            }
-        }
-
-        let Ok(mut visibility) = visibility_guard else {
+        let Ok(mut visibility) = self.visibility.lock() else {
             return;
         };
         if !visibility.should_map_on_present() {
             return;
         }
         // SAFETY: The child HWND is owned by this target and remains valid until drop.
-        #[cfg_attr(not(feature = "local-split-qa"), allow(unused_variables))]
-        let show_res = unsafe {
-            ShowWindow(child_hwnd, SW_SHOWNOACTIVATE)
-        };
         unsafe {
+            ShowWindow(self.handle.hwnd.get() as Hwnd, SW_SHOWNOACTIVATE);
             // WebView2 is created after the terminal child, so it sits above it in the sibling
             // z-order and would occlude every presented frame. Raise the terminal child to the
             // top of the parent's child z-order once it has something to show.
             SetWindowPos(
-                child_hwnd,
+                self.handle.hwnd.get() as Hwnd,
                 HWND_TOP as Hwnd,
                 0,
                 0,
@@ -389,41 +344,12 @@ impl WindowsCompositorTarget {
                 SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
             );
         }
-
-        #[cfg(feature = "local-split-qa")]
-        if qa_active {
-            let current_tid = unsafe { GetCurrentThreadId() };
-            let mut wnd_pid: u32 = 0;
-            let wnd_tid = unsafe { GetWindowThreadProcessId(child_hwnd, &mut wnd_pid) };
-            let child_visible = (unsafe { IsWindowVisible(child_hwnd) }) != 0;
-            let parent_hwnd = unsafe { GetParent(child_hwnd) };
-            let parent_visible = if !parent_hwnd.is_null() {
-                (unsafe { IsWindowVisible(parent_hwnd) }) != 0
-            } else {
-                false
-            };
-            let style = unsafe { GetWindowLongPtrW(child_hwnd, -16) };
-            let ws_visible = (style & 0x1000_0000) != 0;
-            eprintln!(
-                "[native_qa_predicates] stage=reveal hwnd={} show_res={show_res} current_tid={current_tid} wnd_tid={wnd_tid} wnd_pid={wnd_pid} child_visible={child_visible} parent_hwnd={} parent_visible={parent_visible} style_ws_visible={ws_visible}",
-                self.handle.hwnd.get(),
-                parent_hwnd as isize
-            );
-        }
-
         visibility.mark_presented();
     }
 }
 
 impl Drop for WindowsCompositorTarget {
     fn drop(&mut self) {
-        #[cfg(feature = "local-split-qa")]
-        if crate::ipc::qa_barrier::active_channel().is_some() {
-            eprintln!(
-                "[native_qa_predicates] stage=target_drop hwnd={}",
-                self.handle.hwnd.get()
-            );
-        }
         if let Ok(mut visibility) = self.visibility.lock() {
             visibility.mark_detached();
         }

@@ -353,7 +353,7 @@ fn git(
     args: &[&str],
     context: &RequestContext,
 ) -> Result<Option<String>, String> {
-    let mut command = crate::util::no_window_tokio_command("git");
+    let mut command = tokio::process::Command::new("git");
     command
         .arg("-C")
         .arg(root)

@@ -25,9 +25,6 @@ fn details(workspace_id: Option<&str>, cwd: Option<&str>) -> DaemonSessionDetail
         registry_suspended: None,
         suspension_source: None,
         incarnation: None, // File-link fixture has no local split incarnation.
-        recovery_authority: None,
-        is_paired_proxy: None,
-        generation: None,
     }
 }
 
@@ -645,90 +642,6 @@ fn resolve_file_link_relative_normalizes_slashes_to_native_separators() {
     let resolved = resolve_file_link("src/a/b.rs", Some(&cwd), None);
     let expected = temp.path().join("src").join("a").join("b.rs");
     assert_eq!(resolved, expected);
-}
-
-// --- Relative tokens printed against a different root than the shell cwd ---
-
-fn touch(path: &Path) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, b"x").unwrap();
-}
-
-#[test]
-fn relative_token_resolves_inside_a_sibling_project_of_the_cwd() {
-    // An agent running in `projects/ferryx` prints a path relative to `projects/video`.
-    let temp = tempfile::tempdir().expect("tempdir");
-    let projects = temp.path().join("projects");
-    let cwd = projects.join("ferryx");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let target = projects.join("video").join("launch").join("renders").join("v5.mp4");
-    touch(&target);
-
-    let resolved = resolve_file_link("launch/renders/v5.mp4", Some(&cwd.to_string_lossy()), None);
-    assert_eq!(resolved, target);
-}
-
-#[test]
-fn relative_token_resolves_under_a_child_directory_or_an_ancestor_of_the_cwd() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let cwd = temp.path().join("repo");
-    let child = cwd.join("ui").join("src").join("App.tsx");
-    touch(&child);
-    assert_eq!(find_relative_near_cwd(&cwd, "src/App.tsx", None), Some(child));
-
-    let nested = cwd.join("crates").join("core");
-    std::fs::create_dir_all(&nested).unwrap();
-    let at_root = cwd.join("docs").join("guide.md");
-    touch(&at_root);
-    assert_eq!(find_relative_near_cwd(&nested, "docs/guide.md", None), Some(at_root));
-}
-
-#[test]
-fn an_existing_cwd_join_wins_over_any_near_match() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let cwd = temp.path().join("repo");
-    let direct = cwd.join("out").join("a.png");
-    touch(&direct);
-    touch(&cwd.join("other").join("out").join("a.png"));
-
-    let resolved = resolve_file_link("out/a.png", Some(&cwd.to_string_lossy()), None);
-    assert_eq!(resolved, direct);
-}
-
-#[test]
-fn an_ambiguous_near_match_is_reported_as_the_missing_cwd_join() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let projects = temp.path().join("projects");
-    let cwd = projects.join("ferryx");
-    std::fs::create_dir_all(&cwd).unwrap();
-    touch(&projects.join("one").join("out").join("a.png"));
-    touch(&projects.join("two").join("out").join("a.png"));
-
-    assert_eq!(find_relative_near_cwd(&cwd, "out/a.png", None), None);
-    let resolved = resolve_file_link("out/a.png", Some(&cwd.to_string_lossy()), None);
-    assert_eq!(resolved, cwd.join("out").join("a.png"));
-}
-
-#[test]
-fn near_search_skips_hidden_dirs_dot_segments_and_shallow_or_home_ancestors() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let cwd = temp.path().join("repo");
-    touch(&cwd.join(".git").join("out").join("a.png"));
-    touch(&temp.path().join("secret.txt"));
-    assert_eq!(find_relative_near_cwd(&cwd, "out/a.png", None), None);
-    assert_eq!(find_relative_near_cwd(&cwd, "../secret.txt", None), None);
-
-    // Home itself is searchable; its ancestors (`/Users`, `/`) are not.
-    let home = temp.path().join("home");
-    let in_home = home.join("project");
-    std::fs::create_dir_all(&in_home).unwrap();
-    touch(&temp.path().join("other").join("x.txt"));
-    assert_eq!(find_relative_near_cwd(&in_home, "other/x.txt", Some(&home)), None);
-    assert_eq!(
-        find_relative_near_cwd(&in_home, "other/x.txt", None),
-        Some(temp.path().join("other").join("x.txt"))
-    );
-    assert_eq!(find_relative_near_cwd(Path::new("/"), "etc/hosts", None), None);
 }
 
 // --- R3-RS-1: fetched remote cache files never launch through the OS opener ---

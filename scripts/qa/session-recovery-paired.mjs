@@ -1,6 +1,5 @@
 /** Real paired transport scenarios. Missing owner/route controls remain unverified. */
 import assert from 'node:assert/strict';
-import { randomUUID, createHash } from 'node:crypto';
 import { createTransportProvider } from './fixtures/transport-provider.mjs';
 import { TransportBarrier } from './fixtures/transport-provider.mjs';
 
@@ -51,11 +50,6 @@ export function pairedOwnerControls(control) {
       if (response.type !== 'qaPairedDialAuditOk') throw new TransportBarrier('PAIRED_DIAL_AUDIT_UNAVAILABLE', JSON.stringify(response));
       return response.audit;
     },
-    async ownerAudit(session) {
-      const response = await control.call({ type: 'qaPairedOwnerAudit', backendSessionId: session.identity.backendSessionId });
-      if (response.type !== 'qaPairedOwnerAuditOk') throw new TransportBarrier('PAIRED_OWNER_AUDIT_UNAVAILABLE', JSON.stringify(response));
-      return response;
-    },
     async restoreDescriptorCold(fixture) {
       const response = await control.call({ type: 'qaPairedColdDescriptor', backendSessionId: fixture.backendSessionId });
       if (response.type !== 'pairedTerminalDescriptorOk' || !response.descriptor) {
@@ -89,7 +83,7 @@ export async function runPairedScenario(ctx, scenario) {
       throw new TransportBarrier('PAIRED_FIXTURE_REQUIRED',
         'paired {descriptor,target,hostId,daemonEpoch,incarnation,expectedRoute,backendEndpoint,relayFaultEndpoint}');
     }
-    provider = await (ctx.createTransportProvider ?? createTransportProvider)(ctx);
+    provider = await createTransportProvider(ctx);
     const owner = provider.pairedOwner ?? pairedOwnerControls(provider.control);
     requireFunction(owner?.bind, 'PAIRED_OWNER_CONTROL_REQUIRED',
       'feature-gated daemon owner setup/audit/state-wait/restore APIs for an actual paired actor');
@@ -122,89 +116,40 @@ export async function runPairedScenario(ctx, scenario) {
     assert.equal(beforeOwner.incarnation, session.identity.incarnation);
     assert.equal(beforeOwner.daemonEpoch, session.identity.daemonEpoch);
 
-    let deliveryFenceId = null;
     if (scenario === 'paired-relay-loss') {
       if (fixture.expectedRoute !== 'relay') throw new TransportBarrier('RELAY_ROUTE_REQUIRED', 'actual selected route receipt must say relay');
-      if (provider.deliveryObserver) {
-        if (!fixture.deviceId) {
-          throw new TransportBarrier('DEVICE_IDENTITY_REQUIRED', 'fixture.deviceId required for physical delivery observer');
-        }
-        if (!fixture.descriptor?.generation) {
-          throw new TransportBarrier('GENERATION_REQUIRED', 'fixture.descriptor.generation required for physical delivery observer');
-        }
-        deliveryFenceId = await provider.deliveryObserver.armFence({
-          target: fixture.target,
-          deviceId: fixture.deviceId,
-          generation: fixture.descriptor.generation,
-          expectedWriteMultiplicity: 1,
-          expectedSignalMultiplicity: 1,
-        });
-        observations.push({ check: 'host-delivery-fence-armed', source: 'host-delivery-observer', evidence: { fenceId: deliveryFenceId } });
-      }
       const state = owner.waitState(session, ['owner_unavailable'], ctx.timeoutMs, ctx.signal);
       await route.closeRealUpstream();
       timeline.push(await state);
       // Execute identified uncertain write and signal under transport outage:
-      const writeIntentId = randomUUID();
-      const writePayload = Buffer.from(`printf '%s\n' '${writeIntentId}'\n`);
-      const signalIntentId = randomUUID();
-      observations.push({ check: 'original-mutation-intents', source: 'qa-original-intent',
-        evidence: { writeIntentId, writePayloadHash: createHash('sha256').update(writePayload).digest('hex'), signalIntentId } });
+      const writePayload = Buffer.from('ls -la\n');
+      const signalPayload = Buffer.from([2]); // SIGINT (Ctrl+C)
       if (typeof owner.mutate === 'function') {
         try {
-          await owner.mutate(session, 'write', writePayload, writeIntentId);
+          await owner.mutate(session, 'write', writePayload);
         } catch (err) {
           timeline.push({ kind: 'uncertain-write', error: err.message });
         }
         try {
-          await owner.mutate(session, 'signal', Buffer.alloc(0), signalIntentId);
+          await owner.mutate(session, 'signal', signalPayload);
         } catch (err) {
-          timeline.push({ kind: 'uncertain-signal', intentId: signalIntentId, error: err.message });
+          timeline.push({ kind: 'uncertain-signal', error: err.message });
         }
       }
-      const recovered = owner.waitState(session, ['proxy_attached'], ctx.timeoutMs, ctx.signal);
       if (route.restoreRealUpstream) await route.restoreRealUpstream();
-      const attached = await recovered;
-      timeline.push(attached);
-      observations.push({ check: 'automatic-owner-recovery', source: 'daemon-owner-state', evidence: attached });
-
-      if (deliveryFenceId && provider.deliveryObserver) {
-        const sealedFence = await provider.deliveryObserver.sealFence({
-          fenceId: deliveryFenceId,
-          target: fixture.target,
-        });
-        observations.push({ check: 'host-delivery-fence-sealed', source: 'host-delivery-observer', evidence: sealedFence });
-
-        const deliveryAudit = await provider.deliveryObserver.audit({
-          target: fixture.target,
-          fenceId: deliveryFenceId,
-        });
-        observations.push({ check: 'host-delivery-audit', source: 'host-delivery-observer', evidence: deliveryAudit });
-
-        if (deliveryAudit.interval?.replayViolations?.length) {
-          throw new TransportBarrier('DELIVERY_REPLAY_VIOLATION', JSON.stringify(deliveryAudit.interval.replayViolations));
-        }
-        if (deliveryAudit.interval?.writeMultiplicityViolation) {
-          throw new TransportBarrier('WRITE_MULTIPLICITY_VIOLATION', 'Delivered writes exceeded expected multiplicity');
-        }
-        if (deliveryAudit.interval?.signalMultiplicityViolation) {
-          throw new TransportBarrier('SIGNAL_MULTIPLICITY_VIOLATION', 'Delivered signals exceeded expected multiplicity');
-        }
-      }
+      const recovered = owner.waitState(session, ['proxy_attached'], ctx.timeoutMs, ctx.signal);
+      const wake = await owner.retry(session, fixture);
+      observations.push({ check: 'same-owner-retry-admission', source: 'daemon-retry-ipc', evidence: wake });
+      assert.equal(wake.admitted, true);
+      timeline.push(await recovered);
     } else if (scenario === 'paired-backend-unavailable') {
       const state = owner.waitState(session, ['owner_unavailable'], ctx.timeoutMs, ctx.signal);
       await route.closeRealUpstream();
       timeline.push(await state);
-      const outageAudit = await owner.dialAudit(session);
-      observations.push({ check: 'adversarial-outage-attempts', source: 'daemon-dial-audit', evidence: outageAudit });
-      const attempts = outageAudit.recoveryAttempts - beforeDial.recoveryAttempts;
-      if (!Number.isSafeInteger(attempts) || attempts < 21) {
-        throw new TransportBarrier('PAIRED_21_FAILURE_WINDOW_REQUIRED',
-          'event-driven fault interval with at least 21 measured failed dial attempts; corrective retry is not automatic recovery');
-      }
-      throw new TransportBarrier('PAIRED_FAILED_DIAL_RECEIPTS_REQUIRED',
-        'recoveryAttempts counts attempts, not failures; identity-fenced failed-dial receipts are required');
-
+      const wake = await owner.retry(session, fixture);
+      assert.ok(wake.admitted || wake.ownerUnavailable);
+      const cancelled = await owner.cancelPendingDial(session);
+      observations.push({ check: 'bounded-pending-dial-cancellation', source: 'daemon-owner-event', evidence: cancelled });
     } else {
       const state = owner.waitState(session, ['owner_unavailable'], ctx.timeoutMs, ctx.signal);
       await route.closeRealUpstream();
@@ -219,11 +164,12 @@ export async function runPairedScenario(ctx, scenario) {
       observations.push({ check: 'cold-daemon-restarted-descriptor', source: 'restarted-client-daemon', evidence: restored });
       assert.deepEqual(restored.target, fixture.descriptor.target);
       assert.equal(restored.generation, fixture.descriptor.generation);
-      const recovered = coldOwner.waitState(session, ['proxy_attached'], ctx.timeoutMs, ctx.signal);
       if (route.restoreRealUpstream) await route.restoreRealUpstream();
-      const attached = await recovered;
-      timeline.push(attached);
-      observations.push({ check: 'cold-owner-automatic-recovery', source: 'restarted-client-daemon-state', evidence: attached });
+      const recovered = coldOwner.waitState(session, ['proxy_attached'], ctx.timeoutMs, ctx.signal);
+      const wake = await coldOwner.retry(session, fixture);
+      observations.push({ check: 'cold-owner-reconnected-target', source: 'restarted-client-daemon-retry', evidence: wake });
+      assert.equal(wake.admitted, true);
+      timeline.push(await recovered);
 
       // Measure PID, incarnation, and cursor across BOTH daemons:
       const coldOwnerAudit = await coldOwner.ownerAudit(session);
@@ -253,20 +199,15 @@ export async function runPairedScenario(ctx, scenario) {
     assert.equal(afterDial.pendingDial, false);
 
     // Wire-level delivery and replay proof for identified uncertain write/signal:
+    // The candidate paired isolated provider (paired-isolated-provider.mjs) has no verified
+    // wire traffic auditor or delivery ledger producer seam. In accordance with recovery policy,
+    // missing verified existing producer contract must reject with typed TransportBarrier
+    // ('unverified') rather than accepting synthetic fixture assertions or creating false passing paths.
     if (scenario === 'paired-relay-loss') {
-      if (!deliveryFenceId) {
-        requirements.push('traffic-endpoint-audit-producer-required');
-        throw new TransportBarrier(
-          'TRAFFIC_AUDITOR_PRODUCER_REQUIRED',
-          'traffic-endpoint-audit-producer-required: verified existing producer wire traffic auditor or delivery ledger absent on paired route; minimal producer seam required',
-        );
-      }
-      // Signal intent replay proof remains unproven by multiplicity alone:
-      // Sender now transports intentId; require per-intent host completion evidence, not aggregate counts.
-      requirements.push('signal-intent-replay-proof-unverified');
+      requirements.push('traffic-endpoint-audit-producer-required');
       throw new TransportBarrier(
-        'SIGNAL_INTENT_REPLAY_UNPROVEN',
-        'per-intent physical completion and complete failed-dial interval evidence remain required',
+        'TRAFFIC_AUDITOR_PRODUCER_REQUIRED',
+        'traffic-endpoint-audit-producer-required: verified existing producer wire traffic auditor or delivery ledger absent on paired route; minimal producer seam required',
       );
     }
     return {

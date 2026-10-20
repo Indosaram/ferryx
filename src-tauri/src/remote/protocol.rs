@@ -13,8 +13,6 @@ pub enum MachineTerminalControl {
     Signal {
         generation: crate::scoped_contracts::Epoch,
         signal: String,
-        #[serde(default, rename = "intentId")]
-        intent_id: Option<String>,
     },
     Ping,
     Scroll {

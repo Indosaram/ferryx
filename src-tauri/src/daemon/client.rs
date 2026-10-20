@@ -462,8 +462,6 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
             | DaemonRequest::PairedTerminalDescriptor { .. }
-            | DaemonRequest::RetryPairedSession { .. }
-            | DaemonRequest::PairedRecoveryOutcome { .. }
             | DaemonRequest::UpgradeBinary { .. }
             | DaemonRequest::RemoteSessionDetails { .. }
             | DaemonRequest::RetryRemoteSession { .. }
@@ -513,44 +511,6 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::PairedHostList => "pairedHostList",
         DaemonRequest::PairedTerminalReattach { .. } => "pairedTerminalReattach",
         DaemonRequest::PairedTerminalDetach { .. } => "pairedTerminalDetach",
-        DaemonRequest::RetryPairedSession { .. } => "retryPairedSession",
-        DaemonRequest::PairedRecoveryOutcome { .. } => "pairedRecoveryOutcome",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaPairedOwnerAudit { .. } => "qaPairedOwnerAudit",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaPairedOwnerWaitState { .. } => "qaPairedOwnerWaitState",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaPairedOwnerRetry { .. } => "qaPairedOwnerRetry",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaPairedDropLoopbackTransport { .. } => "qaPairedDropLoopbackTransport",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaPairedCancelPendingDial { .. } => "qaPairedCancelPendingDial",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaPairedRouteReceipt { .. } => "qaPairedRouteReceipt",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaPairedColdDescriptor { .. } => "qaPairedColdDescriptor",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaPairedDialAudit { .. } => "qaPairedDialAudit",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaPairedMutation { .. } => "qaPairedMutation",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaPairedHostDeliveryArmFence { .. } => "qaPairedHostDeliveryArmFence",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaPairedHostDeliverySealFence { .. } => "qaPairedHostDeliverySealFence",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaPairedHostDeliveryAudit { .. } => "qaPairedHostDeliveryAudit",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaCreateRemoteSession { .. } => "qaCreateRemoteSession",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaRemoteOwnerMutation { .. } => "qaRemoteOwnerMutation",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaRemoteOwnerAudit { .. } => "qaRemoteOwnerAudit",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaRemoteOwnerWaitState { .. } => "qaRemoteOwnerWaitState",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaRemoteOwnerWaitRefusals { .. } => "qaRemoteOwnerWaitRefusals",
-        #[cfg(feature = "local-split-qa")]
-        DaemonRequest::QaRemoteOwnerReleaseFaultRoute { .. } => "qaRemoteOwnerReleaseFaultRoute",
         DaemonRequest::PairedTerminalDescriptor { .. } => "pairedTerminalDescriptor",
         DaemonRequest::PairedHostOperation { .. } => "pairedHostOperation",
         DaemonRequest::PairedHostRead { .. } => "pairedHostRead",
@@ -575,9 +535,6 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SubscribeDag { .. } => "subscribeDag",
         DaemonRequest::UnsubscribeDag { .. } => "unsubscribeDag",
         DaemonRequest::Shutdown => "shutdown",
-        DaemonRequest::AgentControl { .. } => "agentControl",
-        DaemonRequest::GetAgentIntegration => "getAgentIntegration",
-        DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
     }
 }
 
@@ -1158,7 +1115,7 @@ impl DaemonClient {
 
     pub fn new() -> Self {
         Self {
-            socket_path: Self::resolve_default_socket_path(),
+            socket_path: get_socket_path(),
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
             spawn_connection: Arc::new(Mutex::new(None)),
@@ -1876,23 +1833,6 @@ impl DaemonClient {
             _ => Err(ClientError::local("PAIRED_PROXY_UNAVAILABLE")),
         }
     }
-
-    pub async fn retry_paired_session(
-        &self,
-        backend_session_id: String,
-        daemon_epoch: String,
-        incarnation: String,
-    ) -> Result<DaemonResponse, IpcError> {
-        self.paired_host_request(DaemonRequest::RetryPairedSession {
-            backend_session_id,
-            daemon_epoch,
-            incarnation,
-        }).await.map_err(|error| IpcError::new(IpcErrorCode::IoError, error.message))
-    }
-    pub async fn paired_recovery_outcome(&self, backend_session_id: String) -> Result<DaemonResponse, IpcError> {
-        self.paired_host_request(DaemonRequest::PairedRecoveryOutcome { backend_session_id })
-            .await.map_err(|error| IpcError::new(IpcErrorCode::IoError, error.message))
-    }
     pub async fn paired_terminal_detach(
         &self,
         session_id: String,
@@ -2126,14 +2066,6 @@ impl DaemonClient {
     }
 
     fn validate_existing_socket_path(path: &Path) -> Result<(), IpcError> {
-        #[cfg(feature = "local-split-qa")]
-        {
-            if let Some(forwarder) = Self::resolve_qa_forwarder_socket_path() {
-                if path == forwarder {
-                    return Ok(());
-                }
-            }
-        }
         // `new_with_socket` is a dependency-injection hook used by tests and local harnesses
         // with arbitrary temporary UDS paths. Section-9 trust requirements govern the fixed
         // production runtime endpoint, so do not impose `/tmp/rorca-{uid}` directory-mode
@@ -2166,84 +2098,6 @@ impl DaemonClient {
             .parse()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         DaemonStream::connect(format!("127.0.0.1:{port}")).await
-    }
-
-    #[cfg(feature = "local-split-qa")]
-    pub fn resolve_qa_forwarder_socket_path_from(
-        forwarder_override: Option<&Path>,
-        data_dir: Option<&Path>,
-        runtime_dir: Option<&Path>,
-    ) -> Option<PathBuf> {
-        let path = forwarder_override?;
-        let data_path = data_dir?;
-        let _runtime_path = runtime_dir?;
-
-        let parent = path.parent()?;
-        let Ok(canonical_parent) = parent.canonicalize() else {
-            return None;
-        };
-        let Ok(canonical_data) = data_path.canonicalize() else {
-            return None;
-        };
-
-        let Some(profile_dir) = canonical_data.parent() else {
-            return None;
-        };
-        if profile_dir == Path::new("/") || !canonical_parent.starts_with(profile_dir) {
-            return None;
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let Ok(meta) = fs::metadata(&canonical_parent) else {
-                return None;
-            };
-            let current_uid = unsafe { libc::getuid() };
-            if meta.uid() != current_uid {
-                return None;
-            }
-            if let Ok(symlink_meta) = fs::symlink_metadata(&path) {
-                if symlink_meta.file_type().is_symlink() || symlink_meta.uid() != current_uid {
-                    return None;
-                }
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            if !canonical_parent.exists() {
-                return None;
-            }
-        }
-
-        Some(path.to_path_buf())
-    }
-
-    #[cfg(feature = "local-split-qa")]
-    pub fn resolve_qa_forwarder_socket_path() -> Option<PathBuf> {
-        let forwarder_raw = std::env::var_os("FERRYX_FORWARDER_SOCKET")?;
-        if forwarder_raw.is_empty() {
-            return None;
-        }
-        let data_raw = std::env::var_os("FERRYX_DATA_DIR")?;
-        let runtime_raw = std::env::var_os("FERRYX_RUNTIME_DIR")?;
-
-        Self::resolve_qa_forwarder_socket_path_from(
-            Some(Path::new(&forwarder_raw)),
-            Some(Path::new(&data_raw)),
-            Some(Path::new(&runtime_raw)),
-        )
-    }
-
-    pub(crate) fn resolve_default_socket_path() -> PathBuf {
-        #[cfg(feature = "local-split-qa")]
-        {
-            if let Some(forwarder) = Self::resolve_qa_forwarder_socket_path() {
-                return forwarder;
-            }
-        }
-        get_socket_path()
     }
 
     fn upgrade_rpc_client(&self) -> Self {
@@ -2406,19 +2260,18 @@ impl DaemonClient {
         // of the app and died with it leaving no record. The detached spawn below stays as the
         // fallback for platforms with no agent and for isolated runtimes, where installing one would
         // point the user's login autostart at a test build.
-        // A user who turned autostart off gets the detached spawn directly: no agent install, no
-        // supervised wait and no reload.
-        if crate::daemon::supervisor::supported() && !crate::daemon::supervisor::user_opted_out() {
-            let agent = crate::ipc::run_blocking(|| {
-                crate::daemon::supervisor::ensure()
+        if crate::daemon::launchd::agent_management_supported() {
+            let agent_binary = binary_path.clone();
+            let agent = crate::ipc::run_blocking(move || {
+                crate::daemon::launchd::ensure_launchd_agent(&agent_binary)
                     .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
             })
             .await;
             match agent {
-                Ok(reinstalled) => {
+                Ok(plist_path) => {
                     tracing::info!(
-                        reinstalled,
-                        "Daemon lifetime handed to the supervisor"
+                        plist = %plist_path.display(),
+                        "Daemon lifetime handed to the launchd agent"
                     );
                     if let Ok(stream) = self.wait_for_supervised_daemon(SUPERVISED_START_WAIT).await
                     {
@@ -2428,9 +2281,12 @@ impl DaemonClient {
                     // the process is gone (a committed handover, a duplicate-endpoint exit, or a
                     // crash it is not configured to relaunch). Reloading re-runs `RunAtLoad`, which
                     // is what starts it again without waiting out the long readiness budget.
-                    let reload = crate::ipc::run_blocking(|| {
-                        crate::daemon::supervisor::reload()
-                            .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
+                    let reload = crate::ipc::run_blocking({
+                        let plist_path = plist_path.clone();
+                        move || {
+                            crate::daemon::launchd::load_launchd_agent(&plist_path)
+                                .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
+                        }
                     })
                     .await;
                     match reload {
@@ -2438,18 +2294,18 @@ impl DaemonClient {
                             Ok(stream) => return Ok(stream),
                             Err(error) => tracing::warn!(
                                 %error,
-                                "The supervisor still published no daemon endpoint; spawning a detached daemon instead"
+                                "The launchd agent still published no daemon endpoint; spawning a detached daemon instead"
                             ),
                         },
                         Err(error) => tracing::warn!(
                             %error,
-                            "Could not reload the supervisor; spawning a detached daemon instead"
+                            "Could not reload the launchd agent; spawning a detached daemon instead"
                         ),
                     }
                 }
                 Err(error) => tracing::warn!(
                     %error,
-                    "Could not hand the daemon lifetime to the supervisor; spawning a detached daemon instead"
+                    "Could not hand the daemon lifetime to launchd; spawning a detached daemon instead"
                 ),
             }
         }
@@ -2696,7 +2552,6 @@ impl DaemonClient {
                         drop(reader);
                         drop(write_half);
 
-                        Self::retarget_supervisor_before_replacing_daemon().await;
                         let termination =
                             Self::terminate_stale_daemon_process_windows(pid).await;
                         if !stale_daemon_endpoint_files_removable(termination) {
@@ -2761,7 +2616,6 @@ impl DaemonClient {
                     drop(reader);
                     drop(write_half);
 
-                    Self::retarget_supervisor_before_replacing_daemon().await;
                     if let Err(error) = self.spawn_successor_daemon().await {
                         tracing::warn!(
                             %error,
@@ -2789,28 +2643,6 @@ impl DaemonClient {
                 IpcErrorCode::InternalError,
                 "Unexpected handshake response from daemon",
             )),
-        }
-    }
-
-    /// Points the Windows supervisor task at this build before an incompatible daemon is replaced.
-    ///
-    /// The watchdog respawns whatever executable the task names. Retargeting first means a crash of
-    /// the replacement, or of the old daemon while it is being replaced, is restarted with the new
-    /// build instead of the incompatible one. A failure is logged and does not block the
-    /// replacement: the task keeps its previous definition and the GUI retargets it on next start.
-    #[cfg(not(unix))]
-    async fn retarget_supervisor_before_replacing_daemon() {
-        let retarget = crate::ipc::run_blocking(|| {
-            crate::daemon::supervisor::retarget()
-                .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
-        })
-        .await;
-        match retarget {
-            Ok(changed) => tracing::info!(changed, "Supervisor task points at this build"),
-            Err(error) => tracing::warn!(
-                %error,
-                "Could not retarget the supervisor task before replacing the incompatible daemon"
-            ),
         }
     }
 
@@ -8185,47 +8017,5 @@ mod local_split_transport_tests {
         tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(peer, action); }).await.unwrap();
         drop(fixture.listener);
         fixture.root.close().unwrap();
-    }
-
-    #[cfg(all(test, feature = "local-split-qa"))]
-    #[test]
-    fn qa_forwarder_socket_resolves_under_validated_task_owned_profile() {
-        let root = tempfile::tempdir().unwrap();
-        let profile = root.path().join("task-profile");
-        let data = profile.join("data");
-        let runtime = profile.join("runtime");
-        let forwarder = profile.join("forwarder");
-        fs::create_dir_all(&data).unwrap();
-        fs::create_dir_all(&runtime).unwrap();
-        fs::create_dir_all(&forwarder).unwrap();
-        let socket = forwarder.join("daemon.sock");
-
-        let resolved = DaemonClient::resolve_qa_forwarder_socket_path_from(
-            Some(&socket),
-            Some(&data),
-            Some(&runtime),
-        );
-        assert_eq!(resolved, Some(socket.clone()));
-    }
-
-    #[cfg(all(test, feature = "local-split-qa"))]
-    #[test]
-    fn qa_forwarder_socket_rejects_paths_outside_task_profile() {
-        let root = tempfile::tempdir().unwrap();
-        let profile = root.path().join("task-profile");
-        let data = profile.join("data");
-        let runtime = profile.join("runtime");
-        let outside = root.path().join("outside-forwarder");
-        fs::create_dir_all(&data).unwrap();
-        fs::create_dir_all(&runtime).unwrap();
-        fs::create_dir_all(&outside).unwrap();
-        let socket = outside.join("daemon.sock");
-
-        let resolved = DaemonClient::resolve_qa_forwarder_socket_path_from(
-            Some(&socket),
-            Some(&data),
-            Some(&runtime),
-        );
-        assert_eq!(resolved, None);
     }
 }

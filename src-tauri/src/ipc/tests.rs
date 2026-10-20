@@ -1162,9 +1162,6 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
                                     registry_suspended: None,
                                     suspension_source: None,
                                     incarnation: None, // Legacy session fixture.
-                                    recovery_authority: None,
-                                    is_paired_proxy: None,
-                                    generation: None,
                                 },
                             },
                             DaemonRequest::Attach { .. } => DaemonResponse::AttachOk {

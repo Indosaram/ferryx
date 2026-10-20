@@ -38,28 +38,12 @@ type NativeTerminalAttachOperation = NativeTerminalLifecycleOperation<void | fal
 const lifecycleTails = new Map<string, Promise<void>>();
 const attachedSessionIds = new Set<string>();
 const attachments = new Map<string, Promise<void>>();
-// Attach IPCs that a cancelled lifecycle operation stopped awaiting but that are still in
-// flight. Only the next attach for the same backend ID waits on them; detach does not.
-const inFlightAttachIpcs = new Map<string, Promise<void>>();
-
-export function holdNativeTerminalAttachIpc(sessionId: string, ipc: Promise<unknown>): void {
-  const settled = ipc.then(() => undefined, () => undefined);
-  inFlightAttachIpcs.set(sessionId, settled);
-  void settled.finally(() => {
-    if (inFlightAttachIpcs.get(sessionId) === settled) inFlightAttachIpcs.delete(sessionId);
-  });
-}
-
-export function nativeTerminalAttachIpcSettled(sessionId: string): Promise<void> {
-  return inFlightAttachIpcs.get(sessionId) ?? Promise.resolve();
-}
 const queuedAttachments = new Map<string, { operation: NativeTerminalAttachOperation }>();
 const sessionGenerations = new Map<string, number>();
 
 type PendingDetachment = {
   readonly sessionId: string;
   readonly generation: number;
-  replacementBindingKey?: string | null;
   readonly operation: NativeTerminalLifecycleOperation<void>;
   readonly resolve: (detached: boolean) => void;
   readonly reject: (error: unknown) => void;
@@ -137,24 +121,16 @@ function executeDetachment(pending: PendingDetachment): void {
   );
 }
 
-function releasePresentationWaiters(sessionId: string, bindingKey?: string | null): void {
+function releasePresentationWaiters(sessionId: string): void {
   const pending = detachmentsWaitingForPresentation.get(sessionId);
   if (!pending) return;
-  const released = bindingKey === undefined
-    ? pending
-    : pending.filter((detachment) => detachment.replacementBindingKey === bindingKey);
-  const remaining = bindingKey === undefined
-    ? []
-    : pending.filter((detachment) => detachment.replacementBindingKey !== bindingKey);
-  if (released.length === 0) return;
   switchDebug("terminal.lifecycle.presentation.release", {
     backendSessionId: sessionId,
-    detachmentCount: released.length,
-    detachedSessionIds: released.map((detachment) => detachment.sessionId),
+    detachmentCount: pending.length,
+    detachedSessionIds: pending.map((detachment) => detachment.sessionId),
   });
-  if (remaining.length) detachmentsWaitingForPresentation.set(sessionId, remaining);
-  else detachmentsWaitingForPresentation.delete(sessionId);
-  for (const detachment of released) executeDetachment(detachment);
+  detachmentsWaitingForPresentation.delete(sessionId);
+  for (const detachment of pending) executeDetachment(detachment);
 }
 
 /**
@@ -187,7 +163,6 @@ function cancelHeldDetachmentsFor(sessionId: string): boolean {
 function holdDetachmentForPresentation(
   pending: PendingDetachment,
   replacementSessionId: string,
-  replacementBindingKey: string | null,
 ): void {
   pendingDetachments.delete(pending.sessionId);
   const inherited = detachmentsWaitingForPresentation.get(pending.sessionId) ?? [];
@@ -195,10 +170,9 @@ function holdDetachmentForPresentation(
     detachmentsWaitingForPresentation.delete(pending.sessionId);
   }
   const waiting = detachmentsWaitingForPresentation.get(replacementSessionId) ?? [];
-  pending.replacementBindingKey = replacementBindingKey;
   detachmentsWaitingForPresentation.set(
     replacementSessionId,
-    [...waiting, ...inherited.map((detachment) => ({ ...detachment, replacementBindingKey })), pending],
+    [...waiting, ...inherited, pending],
   );
   switchDebug("terminal.lifecycle.detach.held", {
     outgoingBackendSessionId: pending.sessionId,
@@ -247,7 +221,6 @@ function startLifecycleOperation<T>(
 export function attachNativeTerminalLifecycle(
   sessionId: string,
   operation: NativeTerminalAttachOperation,
-  bindingKey?: string | null,
 ): Promise<void> {
   switchDebug("terminal.lifecycle.attach.requested", {
     backendSessionId: sessionId,
@@ -268,7 +241,7 @@ export function attachNativeTerminalLifecycle(
       // effect, a sibling pane re-mounting) replaces nothing: parking an
       // unrelated pane's detachment under it would tear that live pane down as
       // soon as this one presents, leaving a blank split pane.
-      holdDetachmentForPresentation(pending, sessionId, bindingKey ?? getDurableNativeBinding(sessionId)?.bindingKey ?? null);
+      holdDetachmentForPresentation(pending, sessionId);
     }
   }
   if (cancelHeldDetachmentsFor(sessionId)) {
@@ -305,11 +278,7 @@ export function attachNativeTerminalLifecycle(
     // parked under it must not wait for a presentation that cannot come.
     if (result === false) {
       switchDebug("terminal.lifecycle.attach.noop", { backendSessionId: sessionId, generation });
-      if (attachments.get(sessionId) === attachment) {
-        attachedSessionIds.delete(sessionId);
-        attachments.delete(sessionId);
-        releasePresentationWaiters(sessionId);
-      }
+      releasePresentationWaiters(sessionId);
     }
   }, (error: unknown) => {
     if (attachments.get(sessionId) === attachment) {
@@ -335,10 +304,9 @@ export function attachNativeTerminalLifecycle(
 export function reattachNativeTerminalLifecycle(
   sessionId: string,
   operation: NativeTerminalAttachOperation,
-  bindingKey?: string | null,
 ): Promise<void> {
   attachedSessionIds.delete(sessionId);
-  return attachNativeTerminalLifecycle(sessionId, operation, bindingKey);
+  return attachNativeTerminalLifecycle(sessionId, operation);
 }
 
 /**
@@ -349,11 +317,11 @@ export function reattachNativeTerminalLifecycle(
  * compositor frame without using timing delays. A real unmount with no
  * replacement still detaches in the next microtask.
  */
-export function presentNativeTerminalLifecycle(sessionId: string, bindingKey = getDurableNativeBinding(sessionId)?.bindingKey ?? null): void {
+export function presentNativeTerminalLifecycle(sessionId: string): void {
   switchDebug("terminal.lifecycle.present", {
     backendSessionId: sessionId,
   });
-  releasePresentationWaiters(sessionId, bindingKey);
+  releasePresentationWaiters(sessionId);
 }
 
 /**
@@ -367,9 +335,8 @@ export function presentNativeTerminalLifecycle(sessionId: string, bindingKey = g
  * without a fallback timer of its own.
  *
  * This runs alongside the generic `presentNativeTerminalLifecycle` signal,
- * never instead of it: callers must validate positive current presentation
- * before generic present releases held detachments; it never notifies these
- * subscribers itself.
+ * never instead of it: generic present keeps releasing held detachments for
+ * every non-deferred receipt and never notifies these subscribers.
  */
 export type NativeTerminalPresentationReceipt = {
   readonly frontendSessionId: string;
@@ -516,36 +483,6 @@ export function emitNativeTerminalPresentation(
   return delivered;
 }
 
-export function settleNativeTerminalExit(
-  frontendSessionId: string,
-  expected: Pick<PaneAttachTuple, "backendSessionId" | "incarnation" | "daemonEpoch" | "bindingKey" | "attemptGeneration">,
-): boolean {
-  const current = durableBindings.get(expected.backendSessionId)?.tuple;
-  if (!current || current.frontendSessionId !== frontendSessionId ||
-      current.incarnation !== expected.incarnation || current.daemonEpoch !== expected.daemonEpoch ||
-      current.bindingKey !== expected.bindingKey || current.attemptGeneration !== expected.attemptGeneration) return false;
-  bumpSessionGeneration(expected.backendSessionId);
-  attachedSessionIds.delete(expected.backendSessionId);
-  attachments.delete(expected.backendSessionId);
-  queuedAttachments.delete(expected.backendSessionId);
-  const pending = pendingDetachments.get(expected.backendSessionId);
-  if (pending) {
-    pendingDetachments.delete(expected.backendSessionId);
-    pending.resolve(false);
-  }
-  for (const [waiterId, waiters] of detachmentsWaitingForPresentation) {
-    const retained = waiters.filter((waiter) => waiter.sessionId !== expected.backendSessionId);
-    if (retained.length !== waiters.length) {
-      for (const waiter of waiters) {
-        if (waiter.sessionId === expected.backendSessionId) waiter.resolve(false);
-      }
-      if (retained.length) detachmentsWaitingForPresentation.set(waiterId, retained);
-      else detachmentsWaitingForPresentation.delete(waiterId);
-    }
-  }
-  return true;
-}
-
 export function detachNativeTerminalLifecycle(
   sessionId: string,
   operation: NativeTerminalLifecycleOperation<void>,
@@ -575,10 +512,6 @@ export function detachNativeTerminalLifecycle(
       if (pendingDetachments.get(sessionId) !== pending) return;
       pendingDetachments.delete(sessionId);
       releasePresentationWaiters(sessionId);
-      if (getSessionGeneration(sessionId) !== generation) {
-        pending.resolve(false);
-        return;
-      }
       executeDetachment(pending);
     });
   });
@@ -610,7 +543,6 @@ function enqueueNativeTerminalLifecycle<T>(
 export function resetNativeTerminalLifecycleForTest(): void {
   durableBindings.clear();
   lifecycleTails.clear();
-  inFlightAttachIpcs.clear();
   attachedSessionIds.clear();
   attachments.clear();
   queuedAttachments.clear();

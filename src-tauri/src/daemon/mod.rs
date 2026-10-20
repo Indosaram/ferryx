@@ -24,17 +24,7 @@ pub mod server;
 pub mod session_lifecycle;
 pub mod session_service;
 pub mod split_journal;
-// Portable facade over the OS service manager that owns the daemon's lifetime (macOS: `launchd`).
-pub mod supervisor;
-// Windows backend of the facade: per-user scheduled task + `--daemon-supervisor` watchdog. Its pure
-// parts (task XML, watchdog decisions) build and test on every target.
-pub mod supervisor_windows;
-// systemd user unit and sd_notify for the Linux supervisor backend.
-#[cfg(unix)]
-pub mod supervisor_linux;
 pub mod workspace_service;
-#[cfg(test)]
-pub mod recovery_consistency_tests;
 
 /// Shared headless authority supplied only by the session-owning daemon.
 pub struct MachineServices {

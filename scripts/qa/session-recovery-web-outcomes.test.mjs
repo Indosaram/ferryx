@@ -5,8 +5,6 @@ import {
   WEB_OUTCOME_SCENARIOS,
   executeWebOutcome,
   outcomeExpression,
-  armDOM,
-  hasLegacyPresentationProof,
   runConfirmedExitScenario,
   runAuthRevocationScenario,
   runCloseRebindPendingDialScenario,
@@ -18,18 +16,13 @@ import {
 function createMockGateway(target, rebindTarget) {
   const emitter = new EventEmitter();
   const rawRequests = [];
-  let deliveries = [];
+  const deliveries = [];
   const selectionRequests = [];
   const current = {
-    sessionId: target.sessionId,
-    daemonEpoch: target.daemonEpoch,
-    incarnation: null,
+    ...target,
     socketId: 'sock-01',
-    generation: 8,
+    generation: '8',
     presentationSequence: 1,
-    outcome: 'ready',
-    fullGridReceipt: { sessionId: target.sessionId, daemonEpoch: target.daemonEpoch,
-      socketId: 'sock-01', receiptId: 'grid-01' },
   };
 
   return {
@@ -37,7 +30,7 @@ function createMockGateway(target, rebindTarget) {
     off: emitter.off.bind(emitter),
     emit: emitter.emit.bind(emitter),
     currentTarget: async () => current,
-    validatedBinding: async () => current.sessionId === rebindTarget.sessionId ? rebindTarget : target,
+    validatedBinding: async () => target,
     inject: async (command, { target: cmdTarget, tail } = {}) => {
       switch (command) {
         case 'ready':
@@ -56,12 +49,7 @@ function createMockGateway(target, rebindTarget) {
           emitter.emit('dial-held', { target: cmdTarget, attemptId: 'att-1', sequence: 1 });
           break;
         case 'rebind':
-          Object.assign(current, { sessionId: cmdTarget.sessionId, daemonEpoch: cmdTarget.daemonEpoch,
-            socketId: 'sock-rebound', presentationSequence: 2,
-            fullGridReceipt: { sessionId: cmdTarget.sessionId, daemonEpoch: cmdTarget.daemonEpoch,
-              socketId: 'sock-rebound', receiptId: 'grid-rebound' } });
           emitter.emit('presentation-sent', { target: cmdTarget, sequence: 2 });
-          emitter.emit('dial-cancelled', { target, attemptId: 'att-1', sequence: 2 });
           break;
         case 'release-stale-dial':
           break;
@@ -82,20 +70,12 @@ function createMockGateway(target, rebindTarget) {
           throw new Error('UNKNOWN_MOCK_COMMAND: ' + command);
       }
     },
-    recordDelivery: (record) => {
-      deliveries.push(record);
-    },
-    clearDeliveries: () => { deliveries = []; },
-    recordRequest: (record) => {
-      rawRequests.push(record);
-    },
-    clearRequests: () => { rawRequests.length = 0; },
     fence: async () => ({
       complete: true,
       fenceId: 'fence-123',
       source: 'mock-gateway',
       requests: rawRequests,
-      deliveries: [...deliveries],
+      deliveries,
       selectionRequests,
       owner: {
         pendingTimers: 0,
@@ -129,16 +109,6 @@ function createMockHarness(scenario, { targetOverrides } = {}) {
     openWebOutcome: async (options) => {
       const gateway = createMockGateway(target, rebindTarget);
       let state = 'initial';
-      let oldOwnerDisposed = false;
-      let armedCompletionKey = null;
-      let armedAttemptId = null;
-      let releasedSocketKey = null;
-      let staleCompletionRejectedCount = 0;
-      let currentLiveOwner = {
-        ...target,
-        socketId: 'sock-new',
-        presentationSequence: 1,
-      };
 
       const browser = {
         evaluate: async (code) => {
@@ -155,10 +125,10 @@ function createMockHarness(scenario, { targetOverrides } = {}) {
                 }
                 if (scenario === 'cold-start-unknown') {
                   return {
-                    outcome: oldOwnerDisposed ? 'ready' : 'blocked',
+                    outcome: 'blocked',
                     reason: 'Recovery outcome unknown',
-                    sessionId: oldOwnerDisposed ? rebindTarget.sessionId : target.sessionId,
-                    daemonEpoch: oldOwnerDisposed ? rebindTarget.daemonEpoch : target.daemonEpoch,
+                    sessionId: target.sessionId,
+                    daemonEpoch: target.daemonEpoch,
                     incarnation: null,
                     activity: 'active',
                     text: 'Recovery outcome unknown',
@@ -287,75 +257,14 @@ function createMockHarness(scenario, { targetOverrides } = {}) {
             socketId: 'sock-01',
             kind: intent.kind,
             target,
-            ...intent.delivery,
-          });
-          gateway.recordDelivery({
-            payload: intent.payload,
-            requestId: 'req-1',
-            socketId: 'sock-01',
-            kind: intent.kind,
-            target,
           });
         },
         correctToken: async () => {
           state = 'correcting';
-          await gateway.inject('correct-token', { target });
         },
-        rebindOwner: async () => {
-          await gateway.inject('rebind', { target: rebindTarget });
-        },
-        closeOwner: async () => {
-          gateway.emit('dial-cancelled', { target, attemptId: 'att-1', sequence: 2 });
-        },
-        snapshotOwner: async (snapTarget) => ({
-          identityConfirmed: false,
-          generation: 1,
-          cancelledAttemptIds: oldOwnerDisposed ? ['1'] : [],
-          disposed: oldOwnerDisposed,
-          pendingTimers: 0,
-          inFlight: !oldOwnerDisposed,
-          retainedTarget: { sessionId: snapTarget.sessionId, daemonEpoch: snapTarget.daemonEpoch },
-        }),
-        armTicketCompletion: async (armTarget, attemptId, waitMs) => {
-          assert.equal(oldOwnerDisposed, false);
-          assert.equal(attemptId, '1');
-          armedCompletionKey = `${armTarget.sessionId}:${armTarget.daemonEpoch}:${attemptId}`;
-          armedAttemptId = attemptId;
-          return armedCompletionKey;
-        },
-        waitTicketHeld: async (key, waitMs) => {
-          if (!armedCompletionKey || key !== armedCompletionKey) throw new Error('TASK9_SOCKET_COMPLETION_NOT_ARMED');
-          return { status: 200, requestId: 'ticket-1', target, delivered: false };
-        },
-        releaseTicketCompletion: async (key) => {
-          if (!armedCompletionKey || key !== armedCompletionKey) throw new Error('TASK9_SOCKET_COMPLETION_NOT_ARMED');
-          if (!oldOwnerDisposed || releasedSocketKey === key) throw new Error('TASK9_COLDSTART_RELEASE_INVALID');
-          releasedSocketKey = key;
-          staleCompletionRejectedCount++;
-          return { status: 200, requestId: 'ticket-1', target };
-        },
-        readRetiredObserver: async (key) => ({
-          disposed: oldOwnerDisposed,
-          pendingTimers: 0,
-          inFlight: false,
-          staleCompletionsRejected: staleCompletionRejectedCount,
-          cancelledAttemptIds: armedAttemptId ? [armedAttemptId] : ['old-att'],
-          rejectedAttemptIds: releasedSocketKey === key && armedAttemptId ? [armedAttemptId] : [],
-        }),
-        currentOwner: async () => currentLiveOwner,
+        rebindOwner: async () => {},
+        closeOwner: async () => {},
         newTerminalOwner: async () => {
-          oldOwnerDisposed = true;
-          await gateway.inject('rebind', { target: rebindTarget });
-          currentLiveOwner = {
-            ...rebindTarget,
-            socketId: 'sock-new',
-            presentationSequence: 1,
-          };
-          gateway.recordRequest({
-            type: 'createSession',
-            requestId: 'create-req-1',
-            target: rebindTarget,
-          });
           gateway.emit('create-request', {
             target,
             requestId: 'create-req-1',
@@ -372,20 +281,6 @@ function createMockHarness(scenario, { targetOverrides } = {}) {
   };
 }
 
-test('legacy browser proof requires the exact full-grid socket without fixture lifetime fields', () => {
-  const target = { sessionId: 's', daemonEpoch: 'e', incarnation: 'fixture-only', pid: 7 };
-  const proof = { sessionId: 's', daemonEpoch: 'e', incarnation: null,
-    socketId: 'socket', generation: 1, presentationSequence: 1, outcome: 'ready',
-    fullGridReceipt: { sessionId: 's', daemonEpoch: 'e', socketId: 'socket', receiptId: 'grid' } };
-  assert.equal(hasLegacyPresentationProof(proof, target), true);
-  for (const change of [{ socketId: 'foreign' }, { daemonEpoch: 'wrong' },
-    { outcome: 'retryable' }, { presentationSequence: 0 }, { generation: 0 }]) {
-    assert.equal(hasLegacyPresentationProof({ ...proof, ...change }, target), false, JSON.stringify(change));
-  }
-  assert.equal(hasLegacyPresentationProof({ ...proof,
-    fullGridReceipt: { ...proof.fullGridReceipt, daemonEpoch: 'wrong' } }, target), false);
-});
-
 test('web outcome scenarios roster contains exactly the six authorized recovery scenarios', () => {
   assert.deepEqual(WEB_OUTCOME_SCENARIOS, [
     'confirmed-exit',
@@ -397,36 +292,13 @@ test('web outcome scenarios roster contains exactly the six authorized recovery 
   ]);
 });
 
-test('owner notification wakes a retryable predicate without any DOM mutation', async () => {
-  const window = new EventTarget();
-  let owner = { retainedTarget: { sessionId: 's', daemonEpoch: 'e' }, identityConfirmed: false,
-    disposed: false, inFlight: false, pendingTimers: 1, outcome: null };
-  window.__ferryxRecoveryQA = { snapshot: () => owner };
-  let disconnected = 0;
-  class MutationObserver {
-    observe() {}
-    disconnect() { disconnected++; }
-  }
-  const status = { textContent: 'Connecting', getClientRects: () => [{}] };
-  const document = { documentElement: {}, querySelectorAll: () => [status] };
-  const browser = { evaluate: code => new Function('window', 'document', 'MutationObserver',
-    `return (${code});`)(window, document, MutationObserver) };
-  const subscription = await armDOM(browser, outcomeExpression(owner.retainedTarget, ['retryable']), 5000);
-  try {
-    // No DOM observer callback is invoked: only owner state changes.
-    owner = { ...owner, inFlight: true, outcome: 'retryable', generation: 4 };
-    window.dispatchEvent(new Event('ferryx-web-owner-observation'));
-    const rendered = await subscription.read();
-    assert.equal(rendered.outcome, 'retryable');
-    assert.equal(rendered.generation, 4);
-    assert.equal(disconnected, 1);
-  } finally { await subscription.dispose(); }
-});
-
-test('outcomeExpression returns null while waiting for the recovery observer to mount', () => {
+test('outcomeExpression requires window.__ferryxRecoveryQA and throws typed error when absent', () => {
   const expr = outcomeExpression({ sessionId: 's1', daemonEpoch: 'e1' }, ['ready']);
   const fn = new Function('window', 'document', `return (${expr})()`);
-  assert.equal(fn({}, {}), null);
+  assert.throws(
+    () => fn({}, {}),
+    err => err.message.includes('TASK9_PRODUCT_SEAM_REQUIRED: __ferryxRecoveryQA')
+  );
 });
 
 test('outcomeExpression enforces exact sessionId and daemonEpoch match on snapshot query', () => {
@@ -453,7 +325,6 @@ test('outcomeExpression matches ready when snapshot is live, grid mounted, and s
       retainedTarget: { sessionId: 's1', daemonEpoch: 'e1' },
       identityConfirmed: true,
       disposed: false,
-      outcome: 'ready',
       socketId: 'sock-1',
       generation: 1,
       presentationSequence: 2,
@@ -478,12 +349,12 @@ test('outcomeExpression matches ready when snapshot is live, grid mounted, and s
   assert.equal(res.activity, 'active');
 });
 
-test('outcomeExpression matches affirmative exit and requires idle activity for inferred settlement', () => {
+test('outcomeExpression matches exited and does not claim settled unless exitSettlements > 0', () => {
   const target = { sessionId: 's1', daemonEpoch: 'e1' };
   const expr = outcomeExpression(target, ['exited']);
   const fn = new Function('window', 'document', `return (${expr})()`);
 
-  // Missing settlement evidence must remain unproven.
+  // Product currently has exitSettlements: null -> activity must be null (unproven)
   const mockQANull = {
     snapshot: () => ({
       retainedTarget: { sessionId: 's1', daemonEpoch: 'e1' },
@@ -491,7 +362,6 @@ test('outcomeExpression matches affirmative exit and requires idle activity for 
       disposed: false,
       inFlight: false,
       pendingTimers: 0,
-      outcome: 'affirmative_exit',
       exitSettlements: null,
     }),
   };
@@ -504,10 +374,10 @@ test('outcomeExpression matches affirmative exit and requires idle activity for 
     },
   };
   const unproven = fn({ __ferryxRecoveryQA: mockQANull }, mockDocExited);
-  assert.equal(unproven.outcome, 'affirmative_exit');
+  assert.equal(unproven.outcome, 'exited');
   assert.equal(unproven.activity, null);
 
-  // A settlement count proves settlement only when no timer or dial remains active.
+  // Once product author 1395d supplies exitSettlements: 1 -> activity is settled
   const mockQAProven = {
     snapshot: () => ({
       retainedTarget: { sessionId: 's1', daemonEpoch: 'e1' },
@@ -515,38 +385,12 @@ test('outcomeExpression matches affirmative exit and requires idle activity for 
       disposed: false,
       inFlight: false,
       pendingTimers: 0,
-      outcome: 'affirmative_exit',
       exitSettlements: 1,
     }),
   };
   const proven = fn({ __ferryxRecoveryQA: mockQAProven }, mockDocExited);
-  assert.equal(proven.outcome, 'affirmative_exit');
+  assert.equal(proven.outcome, 'exited');
   assert.equal(proven.activity, 'settled');
-
-  for (const activity of [{ pendingTimers: 1 }, { inFlight: true }]) {
-    const active = fn({ __ferryxRecoveryQA: {
-      snapshot: () => ({ ...mockQAProven.snapshot(), activity: 'settled', ...activity }),
-    } }, mockDocExited);
-    assert.equal(active.outcome, 'affirmative_exit');
-    assert.equal(active.activity, 'unsettled');
-  }
-
-  // Rendered exit text alone cannot establish an authoritative exit.
-  const unconfirmed = fn({ __ferryxRecoveryQA: {
-    snapshot: () => ({ ...mockQAProven.snapshot(), outcome: 'retryable' }),
-  } }, mockDocExited);
-  assert.equal(unconfirmed, null);
-});
-
-test('blocked-only observation rejects an affirmative exit', () => {
-  const target = { sessionId: 's1', daemonEpoch: 'e1' };
-  const fn = new Function('window', 'document', `return (${outcomeExpression(target, ['blocked'])})()`);
-  const result = fn({ __ferryxRecoveryQA: { snapshot: () => ({
-    retainedTarget: target, identityConfirmed: true, disposed: false,
-    outcome: 'affirmative_exit', exitSettlements: 1,
-  }) } }, { querySelector: selector => selector === '[data-testid="remote-terminal-outcome"]'
-    ? { textContent: 'Terminal exited (0) Retry', getClientRects: () => [{}] } : null });
-  assert.equal(result, null);
 });
 
 test('outcomeExpression matches all blockedReason variants including identity_conflict, auth_revoked, permission_denied', () => {
@@ -559,7 +403,6 @@ test('outcomeExpression matches all blockedReason variants including identity_co
       retainedTarget: { sessionId: 's1', daemonEpoch: 'e1' },
       identityConfirmed: true,
       disposed: false,
-      outcome: 'blocked',
     }),
   };
 
@@ -603,7 +446,6 @@ test('outcomeExpression matches retryable when connecting status is rendered and
       inFlight: true,
       pendingTimers: 1,
       disposed: false,
-      outcome: 'retryable',
     }),
   };
   const mockDoc = {
@@ -700,41 +542,4 @@ test('runOutputReplayGapScenario executes gap wire receipt verification', async 
   assert.equal(result.scenario, 'output-replay-gap');
   assert.equal(result.status, 'passed');
   assert.equal(result.evidence.length, 4);
-});
-
-test('rebindOwner and correctToken emit wire receipts preserving target and cancellation identities', async () => {
-  const rebindHarness = createMockHarness('close-rebind-pending-dial');
-  const rebindRun = await rebindHarness.openWebOutcome({ scenario: 'close-rebind-pending-dial', variant: 'rebind' });
-  let rebindPresentation = null;
-  let rebindCancelled = null;
-  rebindRun.gateway.on('presentation-sent', receipt => { rebindPresentation = receipt; });
-  rebindRun.gateway.on('dial-cancelled', receipt => { rebindCancelled = receipt; });
-  await rebindRun.rebindOwner();
-  assert.equal(rebindPresentation?.target?.sessionId, rebindRun.rebindTarget.sessionId);
-  assert.equal(rebindCancelled?.target?.sessionId, rebindRun.target.sessionId);
-  assert.equal(rebindCancelled?.attemptId, 'att-1');
-
-  const authHarness = createMockHarness('auth-revocation');
-  const authRun = await authHarness.openWebOutcome({ scenario: 'auth-revocation' });
-  let authPresentation = null;
-  authRun.gateway.on('presentation-sent', receipt => { authPresentation = receipt; });
-  await authRun.correctToken();
-  assert.equal(authPresentation?.target?.sessionId, authRun.target.sessionId);
-});
-
-test('cold-start explicit create records request in ledger fence and rejects omission', async () => {
-  const harness = createMockHarness('cold-start-unknown');
-  const run = await harness.openWebOutcome({ scenario: 'cold-start-unknown' });
-  const before = await run.gateway.fence();
-  assert.equal(before.requests.filter(r => r.type === 'createSession').length, 0);
-
-  await run.newTerminalOwner();
-  const after = await run.gateway.fence();
-  const creates = after.requests.filter(r => r.type === 'createSession');
-  assert.equal(creates.length, 1);
-  assert.equal(creates[0].requestId, 'create-req-1');
-
-  run.gateway.clearRequests();
-  const stripped = await run.gateway.fence();
-  assert.equal(stripped.requests.filter(r => r.type === 'createSession').length, 0);
 });

@@ -8,17 +8,17 @@
 //!
 //! On macOS the fix is to stop treating the daemon as a GUI child and hand its lifetime to
 //! `launchd`: the agent starts the daemon at login, restarts it when it dies unexpectedly, and -
-//! critically - does **not** kill it when the GUI quits. Callers never use this module directly:
-//! the GUI and the daemon client go through the portable facade in `daemon::supervisor`, whose
-//! macOS backend is this module.
+//! critically - does **not** kill it when the GUI quits. The GUI only ensures the agent exists and
+//! then connects to whatever daemon is already there.
 //!
 //! `KeepAlive` is deliberately `{ SuccessfulExit = false }` rather than `true`. The daemon exits 0
 //! on purpose in three legitimate cases - a committed handover, an idle binary swap, and a
 //! duplicate-endpoint startup - and an unconditional `KeepAlive` would fight all three by
 //! relaunching instantly into the instance lock.
 //!
-//! Other targets plug their own backend into `daemon::supervisor`; where none is supported the
-//! client keeps the detached-spawn path in `daemon::client`, which already survives a GUI exit.
+//! Windows and Linux have no equivalent wired here yet (no service registration, no
+//! `systemd --user` unit, no XDG autostart file). They keep the detached-spawn path in
+//! `daemon::client`, which already survives a GUI exit; only crash-restart is macOS-only today.
 //!
 //! Every path that spawns the `launchctl` binary is gated to `#[cfg(target_os = "macos")]`, so a
 //! caller cannot shell out to a macOS-only tool on Windows or Linux.

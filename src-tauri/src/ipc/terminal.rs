@@ -346,10 +346,9 @@ pub fn start_managed_pump_token<R: Runtime>(
                                 generation,
                                 failure,
                                 replay_gap,
-                                descriptor,
                                 ..
                             }) => {
-                                let _ = app.emit("terminal_remote_status", serde_json::json!({"sessionId":session_id_clone,"state":state,"generation":generation,"failure":failure,"replayGap":replay_gap,"descriptor":descriptor}));
+                                let _ = app.emit("terminal_remote_status", serde_json::json!({"sessionId":session_id_clone,"state":state,"generation":generation,"failure":failure,"replayGap":replay_gap}));
                             }
                             Ok(DaemonStreamMessage::AgentState { .. })
                             | Ok(DaemonStreamMessage::DagRunUpdated { .. })
@@ -362,13 +361,7 @@ pub fn start_managed_pump_token<R: Runtime>(
                                     last_seq.take(),
                                     Some(epoch),
                                 );
-                                emit_terminal_exit(
-                                    &app,
-                                    &session_id_clone,
-                                    exit_code,
-                                    None,
-                                    Some(epoch.to_string()),
-                                );
+                                emit_terminal_exit(&app, &session_id_clone, exit_code);
                                 return;
                             }
                             Err(_) => break,
@@ -438,10 +431,9 @@ pub fn start_managed_pump_token<R: Runtime>(
                     generation,
                     failure,
                     replay_gap,
-                    descriptor,
                     ..
                 }) => {
-                    let _ = app.emit("terminal_remote_status", serde_json::json!({"sessionId":session_id_clone,"state":state,"generation":generation,"failure":failure,"replayGap":replay_gap,"descriptor":descriptor}));
+                    let _ = app.emit("terminal_remote_status", serde_json::json!({"sessionId":session_id_clone,"state":state,"generation":generation,"failure":failure,"replayGap":replay_gap}));
                 }
                 Some(DaemonStreamMessage::AgentState { .. })
                 | Some(DaemonStreamMessage::DagRunUpdated { .. })
@@ -454,13 +446,7 @@ pub fn start_managed_pump_token<R: Runtime>(
                         last_seq.take(),
                         Some(epoch),
                     );
-                    emit_terminal_exit(
-                        &app,
-                        &session_id_clone,
-                        exit_code,
-                        None,
-                        Some(epoch.to_string()),
-                    );
+                    emit_terminal_exit(&app, &session_id_clone, exit_code);
                     break;
                 }
                 None => break,
@@ -628,10 +614,6 @@ pub struct TerminalLifecyclePayload {
     pub state: TerminalLifecycleState,
     pub exit_code: Option<i32>,
     pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub incarnation: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub daemon_epoch: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -833,13 +815,7 @@ fn emit_terminal_replay_gap<R: Runtime>(
     }
 }
 
-fn emit_terminal_exit<R: Runtime>(
-    app: &AppHandle<R>,
-    session_id: &str,
-    exit_code: Option<i32>,
-    incarnation: Option<String>,
-    daemon_epoch: Option<String>,
-) {
+fn emit_terminal_exit<R: Runtime>(app: &AppHandle<R>, session_id: &str, exit_code: Option<i32>) {
     let _ = app.emit(
         TERMINAL_LIFECYCLE_EVENT,
         TerminalLifecyclePayload {
@@ -847,8 +823,6 @@ fn emit_terminal_exit<R: Runtime>(
             state: TerminalLifecycleState::Exited,
             exit_code,
             reason: None,
-            incarnation,
-            daemon_epoch,
         },
     );
 }
@@ -4776,15 +4750,15 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         // owner's authoritative answer, so this spawn must project the proxy's own incarnation.
         // Leaving the field empty (the previous behaviour) made the binding unbuildable, so every
         // paired attach was rejected as unprovable before it could reach the fence's owner check.
-        let (incarnation, generation) = match daemon_client.describe_session(&proxy_session_id).await {
-            Ok(details) => (details.incarnation, details.generation),
+        let incarnation = match daemon_client.describe_session(&proxy_session_id).await {
+            Ok(details) => details.incarnation,
             Err(error) => {
                 tracing::warn!(
                     session_id = %proxy_session_id,
                     %error,
                     "paired spawn could not read the proxy incarnation; attach re-reads it from the owner"
                 );
-                (None, None)
+                None
             }
         };
 
@@ -4812,9 +4786,6 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 suspension_source: None,
                 // The paired proxy actor's own incarnation, as reported by its owning daemon.
                 incarnation,
-                recovery_authority: None,
-                is_paired_proxy: Some(true),
-                generation,
             },
         }
     } else {
@@ -4967,8 +4938,6 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         state: TerminalLifecycleState::Started,
         exit_code: None,
         reason: None,
-        incarnation: None,
-        daemon_epoch: None,
     };
     if let Err(error) = app.emit(TERMINAL_LIFECYCLE_EVENT, started) {
         if let Some(host) =
@@ -5435,16 +5404,9 @@ pub async fn cmd_terminal_write(
     session_id: String,
     data: String,
 ) -> Result<(), IpcError> {
-    #[cfg(feature = "local-split-qa")]
-    let mutation_id = crate::native_terminal::surface_host::record_gui_terminal_input_request(&session_id, &data);
-    let result = daemon_client
+    daemon_client
         .write_terminal(&session_id, data.into_bytes())
-        .await;
-    #[cfg(feature = "local-split-qa")]
-    if result.is_ok() {
-        crate::native_terminal::surface_host::record_gui_terminal_write_delivery(&session_id, &mutation_id);
-    }
-    result
+        .await
 }
 
 #[tauri::command]
@@ -5464,16 +5426,9 @@ pub async fn cmd_terminal_remote_write(
     generation: u64,
     data: String,
 ) -> Result<(), IpcError> {
-    #[cfg(feature = "local-split-qa")]
-    let mutation_id = crate::native_terminal::surface_host::record_gui_terminal_input_request(&session_id, &data);
-    let result = daemon_client
+    daemon_client
         .write_terminal_at_generation(&session_id, Some(generation), data.into_bytes())
-        .await;
-    #[cfg(feature = "local-split-qa")]
-    if result.is_ok() {
-        crate::native_terminal::surface_host::record_gui_terminal_write_delivery(&session_id, &mutation_id);
-    }
-    result
+        .await
 }
 
 #[tauri::command]

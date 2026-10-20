@@ -308,7 +308,7 @@ mod platform {
     /// from the whole process table; taking that sample is one `powershell.exe` launch, which
     /// is why a tick takes it once and shares it with every session it observes.
     pub(super) fn sample() -> std::io::Result<Vec<Process>> {
-        let output = crate::util::no_window_command("powershell.exe")
+        let output = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", "ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId,ParentProcessId,Name,CommandLine)"])
             .output()?;
         if !output.status.success() {

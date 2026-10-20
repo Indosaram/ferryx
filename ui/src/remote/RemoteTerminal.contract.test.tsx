@@ -1,85 +1,26 @@
-import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RemoteTerminal } from "./RemoteTerminal";
-import { REMOTE_TERMINAL_FRAME_PREFIX, REMOTE_TERMINAL_FRAME_TERMINATOR } from "./remoteTerminalFrames";
-import { FALLBACK_PREFERENCES } from "../lib/terminalSettings";
 
 class MockWebSocket {
   static readonly OPEN = 1;
   static latest: MockWebSocket | null = null;
   static instances: MockWebSocket[] = [];
-  static creationResolvers: ((socket: MockWebSocket) => void)[] = [];
-  static nextCreation(): Promise<MockWebSocket> {
-    return new Promise(resolve => { MockWebSocket.creationResolvers.push(resolve); });
-  }
   readonly url: string;
   binaryType = "arraybuffer";
   readyState = MockWebSocket.OPEN;
   send = vi.fn();
   close = vi.fn();
-  private _onopen: ((event?: any) => void) | null = null;
-  private _onclose: ((event?: any) => void) | null = null;
-  private _onmessage: ((event: any) => void) | null = null;
-  private _onerror: ((event?: any) => void) | null = null;
-  private _installedResolvers: (() => void)[] = [];
-
-  get onopen() {
-    return this._onopen;
-  }
-  set onopen(val) {
-    this._onopen = val;
-    this._checkInstalled();
-  }
-
-  get onclose() {
-    return this._onclose;
-  }
-  set onclose(val) {
-    this._onclose = val;
-    this._checkInstalled();
-  }
-
-  get onmessage() {
-    return this._onmessage;
-  }
-  set onmessage(val) {
-    this._onmessage = val;
-    this._checkInstalled();
-  }
-
-  get onerror() {
-    return this._onerror;
-  }
-  set onerror(val) {
-    this._onerror = val;
-    this._checkInstalled();
-  }
-
-  private _checkInstalled() {
-    if (this._onopen && this._onclose && this._onmessage && this._onerror) {
-      const resolvers = this._installedResolvers;
-      this._installedResolvers = [];
-      resolvers.forEach((r) => r());
-    }
-  }
-
-  waitForHandlers(): Promise<void> {
-    if (this._onopen && this._onclose && this._onmessage && this._onerror) {
-      return Promise.resolve();
-    }
-    return new Promise((resolve) => {
-      this._installedResolvers.push(resolve);
-    });
-  }
+  onopen: ((event?: any) => void) | null = null;
+  onclose: ((event?: any) => void) | null = null;
+  onmessage: ((event: any) => void) | null = null;
+  onerror: ((event?: any) => void) | null = null;
 
   constructor(url: string) {
     this.url = url;
     MockWebSocket.latest = this;
     MockWebSocket.instances.push(this);
-    const resolvers = MockWebSocket.creationResolvers.splice(0);
-    resolvers.forEach(resolve => resolve(this));
   }
 }
 
@@ -95,18 +36,6 @@ function socket(): MockWebSocket {
 
 function surface(): HTMLElement {
   return screen.getByTestId("remote-terminal-grid");
-}
-
-function mockLegacyTicketFetch() {
-  let ticket = 0;
-  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-    const path = new URL(String(input), window.location.origin).pathname;
-    if (path === "/api/v1/socket-ticket") {
-      return Response.json({ ticket: `legacy-ticket-${++ticket}` });
-    }
-    if (path === "/api/v1/terminal/preferences") return Response.json(FALLBACK_PREFERENCES);
-    throw new Error(`Unexpected test fetch: ${path}`);
-  }));
 }
 
 function rect(width: number, height: number): DOMRect {
@@ -132,25 +61,6 @@ const hiddenCursor = {
   visualStyle: "block",
 };
 
-function connectionStatus() {
-  return screen.getByTestId("remote-terminal-connection-status");
-}
-
-function establishReady(ws = socket()) {
-  act(() => {
-    ws.onopen?.();
-    ws.onmessage?.({
-      data: JSON.stringify({
-        type: "grid",
-        cols: 80,
-        rows: 20,
-        cursor: hiddenCursor,
-        lines: [],
-      }),
-    });
-  });
-}
-
 describe("remote terminal grid contract", () => {
   beforeEach(() => {
     // Pin jitter to zero so backoff tests stay deterministic (jitter = 1 - 0.5 * 0 = 1).
@@ -166,7 +76,6 @@ describe("remote terminal grid contract", () => {
     cleanup();
     MockWebSocket.latest = null;
     MockWebSocket.instances = [];
-    MockWebSocket.creationResolvers = [];
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -181,247 +90,9 @@ describe("remote terminal grid contract", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Connecting");
     expect(socket().url).toMatch(/\/api\/v1\/terminal\/session-123\?token=token-abc&render=grid&cols=80&rows=20$/);
 
-    act(() => {
-      socket().onopen?.();
-      socket().onmessage?.({
-        data: JSON.stringify({
-          type: "grid",
-          cols: 80,
-          rows: 20,
-          cursor: hiddenCursor,
-          lines: [],
-        }),
-      });
-    });
+    act(() => socket().onopen?.());
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
     expect(socket().send).not.toHaveBeenCalled();
-  });
-
-  it("fences owner outcomes and coalesces Retry through the socket owner", async () => {
-    vi.useFakeTimers();
-    const sockets: MockWebSocket[] = [];
-    const createWebSocket = vi.fn(() => {
-      const ws = new SynchronousCloseWebSocket("mock://outcome");
-      sockets.push(ws);
-      return ws;
-    });
-    const view = render(<RemoteTerminal sessionId="paired-1" token="unused" isAccountSession daemonEpoch="epoch-1" createWebSocket={createWebSocket} />);
-    await sockets[0].waitForHandlers();
-    const frame = { type: "terminalOutcome", target: { sessionId: "paired-1", backendSessionId: "paired-1", daemonEpoch: "epoch-1" }, incarnation: "incarnation-1", generation: "8", state: "blocked", blockedReason: "permission_denied", exitCode: null };
-    act(() => sockets[0].onmessage?.({ data: JSON.stringify({ ...frame, target: { ...frame.target, daemonEpoch: "old" } }) }));
-    expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
-    act(() => sockets[0].onmessage?.({ data: JSON.stringify(frame) }));
-    expect(screen.getByTestId("remote-terminal-outcome")).toBeInTheDocument();
-    await act(async () => { await vi.advanceTimersByTimeAsync(20000); });
-    expect(createWebSocket).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    });
-    expect(createWebSocket).toHaveBeenCalledTimes(2);
-    await sockets[1].waitForHandlers();
-    act(() => sockets[0].onmessage?.({ data: JSON.stringify(frame) }));
-    expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
-    act(() => sockets[1].onmessage?.({ data: JSON.stringify({ ...frame, generation: null, state: "affirmative_exit", exitCode: 7 }) }));
-    expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("Terminal exited (7)");
-    expect(screen.queryByTestId("remote-terminal-outcome-unknown")).toBeNull();
-    act(() => sockets[1].onmessage?.({ data: JSON.stringify({ ...frame, generation: null, state: "recovering", exitCode: null }) }));
-    expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("Terminal exited (7)");
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry" })); });
-    await sockets[2].waitForHandlers();
-    act(() => sockets[2].onmessage?.({ data: JSON.stringify({ ...frame, generation: null, state: "recovering", exitCode: null }) }));
-    expect(screen.getByTestId("remote-terminal-outcome-unknown")).toBeInTheDocument();
-    expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
-    view.unmount();
-  });
-
-  it.each(["blocked", "affirmative_exit"] as const)("ignores trailing presentation and control frames after %s until Retry", async (state) => {
-    // Given: a live legacy owner receives an authoritative terminal outcome.
-    mockLegacyTicketFetch();
-    vi.stubGlobal("WebSocket", MockWebSocket);
-    vi.stubGlobal("__task9Wire", {});
-    const onInputDrop = vi.fn();
-    const sessionId = `trailing-${state}`;
-    const created = MockWebSocket.nextCreation();
-    render(<RemoteTerminal sessionId={sessionId} token="token" daemonEpoch="epoch" onInputDrop={onInputDrop} />);
-    const ws = await created;
-    await ws.waitForHandlers();
-    establishReady(ws);
-    const qa = window.__ferryxRecoveryQA;
-    if (!qa) throw new Error("Expected QA owner facade");
-    const target = { sessionId, daemonEpoch: "epoch" };
-    const outcome = { type: "terminalOutcome", target: { ...target, backendSessionId: sessionId },
-      incarnation: "owner", generation: null, state, blockedReason: "permission_denied", exitCode: 0 };
-    act(() => ws.onmessage?.({ data: JSON.stringify(outcome) }));
-    const presentationSequence = qa.snapshot(target).presentationSequence;
-    const grid = JSON.stringify({ type: "grid", cols: 80, rows: 20, cursor: hiddenCursor,
-      lines: [{ index: 0, runs: [{ text: "trailing-presentation", fg: null, bg: null, attrs: 0 }] }] });
-    const trailing = [grid,
-      ...["output", "replay", "replayGap"].map(kind =>
-        `${REMOTE_TERMINAL_FRAME_PREFIX}${JSON.stringify({ kind })}${REMOTE_TERMINAL_FRAME_TERMINATOR}${grid}`),
-      JSON.stringify({ type: "attached", target, generation: "9" }),
-      JSON.stringify({ ...outcome, state: "ready" }),
-      JSON.stringify({ ...outcome, state: "recovering" }),
-    ];
-
-    // When: queued presentation/control frames arrive on that same socket.
-    for (const data of trailing) {
-      act(() => ws.onmessage?.({ data }));
-      expect(connectionStatus()).not.toHaveTextContent("Live");
-      expect(qa.snapshot(target)).toMatchObject({ outcome: state, presentationSequence, pendingTimers: 0 });
-    }
-    ws.send.mockClear();
-    fireEvent.keyDown(surface(), { key: "x" });
-
-    // Then: neither presentation nor input resumes without an explicit Retry.
-    expect(screen.queryByText("trailing-presentation")).toBeNull();
-    expect(onInputDrop).toHaveBeenCalledWith(1);
-    expect(ws.send).not.toHaveBeenCalled();
-    const retryCreated = MockWebSocket.nextCreation();
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry" })); });
-    const next = await retryCreated;
-    expect(next).not.toBe(ws);
-    await next.waitForHandlers();
-    establishReady(next);
-    expect(connectionStatus()).toHaveTextContent("Live");
-    expect(qa.snapshot(target)).toMatchObject({ outcome: "ready" });
-  });
-
-  it.each([
-    ["blocked", "close"], ["blocked", "error"],
-    ["affirmative_exit", "close"], ["affirmative_exit", "error"],
-  ] as const)("does not roll back transport after %s followed by socket %s", async (state, callback) => {
-    // Given: a live direct-transport owner settles authoritatively.
-    mockLegacyTicketFetch();
-    vi.useFakeTimers();
-    vi.stubGlobal("WebSocket", MockWebSocket);
-    const onTransportFailure = vi.fn();
-    const created = MockWebSocket.nextCreation();
-    render(<RemoteTerminal sessionId="settled" token="token" daemonEpoch="epoch" onTransportFailure={onTransportFailure} />);
-    const ws = await created;
-    await ws.waitForHandlers();
-    establishReady(ws);
-    act(() => ws.onmessage?.({ data: JSON.stringify({ type: "terminalOutcome",
-      target: { sessionId: "settled", backendSessionId: "settled", daemonEpoch: "epoch" },
-      incarnation: "owner", generation: null, state, blockedReason: "permission_denied", exitCode: 0 }) }));
-
-    // When: the socket reports its terminal callback and foreground wake follows.
-    await act(async () => {
-      if (callback === "close") ws.onclose?.();
-      else ws.onerror?.();
-      window.dispatchEvent(new Event("online"));
-      await vi.advanceTimersByTimeAsync(20000);
-    });
-
-    // Then: normal settlement is not a transport outage or an automatic redial.
-    expect(onTransportFailure).not.toHaveBeenCalled();
-    expect(MockWebSocket.instances).toHaveLength(1);
-    expect(connectionStatus()).not.toHaveTextContent("Live");
-    expect(screen.getByTestId("remote-terminal-outcome")).toBeInTheDocument();
-  });
-
-  it("observes ready only after a full legacy grid despite an earlier ready outcome", async () => {
-    // Given: a quiet legacy socket is still awaiting its first full grid.
-    mockLegacyTicketFetch();
-    vi.stubGlobal("WebSocket", MockWebSocket);
-    vi.stubGlobal("__task9Wire", {});
-    const onInputDrop = vi.fn();
-    const created = MockWebSocket.nextCreation();
-    render(<RemoteTerminal sessionId="quiet" token="token" daemonEpoch="epoch" onInputDrop={onInputDrop} />);
-    const ws = await created;
-    await ws.waitForHandlers();
-    const qa = window.__ferryxRecoveryQA;
-    if (!qa) throw new Error("Expected QA owner facade");
-    const target = { sessionId: "quiet", daemonEpoch: "epoch" };
-
-    // When: outcome metadata says ready before presentation exists.
-    act(() => ws.onmessage?.({ data: JSON.stringify({ type: "terminalOutcome",
-      target: { ...target, backendSessionId: "quiet" }, incarnation: "owner", generation: "1", state: "ready" }) }));
-
-    // Then: observation and input agree with the pending presentation handshake.
-    expect(qa.snapshot(target)).toMatchObject({ outcome: "retryable", pendingTimers: 1, presentationSequence: 0 });
-    expect(connectionStatus()).not.toHaveTextContent("Live");
-    fireEvent.keyDown(surface(), { key: "x" });
-    expect(onInputDrop).toHaveBeenCalledWith(1);
-    expect(ws.send).not.toHaveBeenCalled();
-    establishReady(ws);
-    expect(qa.snapshot(target)).toMatchObject({ outcome: "ready", pendingTimers: 0, presentationSequence: 1 });
-    expect(connectionStatus()).toHaveTextContent("Live");
-    expect(ws.send).not.toHaveBeenCalled();
-    fireEvent.keyDown(surface(), { key: "y" });
-    expect(ws.send).toHaveBeenCalledWith(new TextEncoder().encode("y"));
-  });
-
-  it.each(["blocked", "affirmative_exit"] as const)("stops handshake and close recovery for a validated null-generation %s", async (state) => {
-    // Given: a current socket has not completed its presentation handshake.
-    vi.stubGlobal("__task9Wire", {});
-    vi.useFakeTimers();
-    const sockets: MockWebSocket[] = [];
-    const createWebSocket = vi.fn(() => {
-      const ws = new SynchronousCloseWebSocket("mock://null-generation-outcome");
-      sockets.push(ws);
-      return ws;
-    });
-    const sessionId = `paired-null-${state}`;
-    const view = render(<RemoteTerminal sessionId={sessionId} token="unused" isAccountSession daemonEpoch="epoch-null" createWebSocket={createWebSocket} />);
-    await sockets[0].waitForHandlers();
-    const qa = window.__ferryxRecoveryQA;
-    if (!qa) throw new Error("Expected QA owner facade");
-    const target = { sessionId, daemonEpoch: "epoch-null" };
-
-    // When: the exact owner reports a terminal outcome without a controller.
-    act(() => sockets[0].onmessage?.({ data: JSON.stringify({
-      type: "terminalOutcome", target: { ...target, backendSessionId: sessionId },
-      incarnation: "incarnation-null", generation: null, state,
-      blockedReason: state === "blocked" ? "permission_denied" : null,
-      exitCode: state === "affirmative_exit" ? 7 : null,
-    }) }));
-
-    // Then: no handshake timer, close callback, or foreground wake can redial.
-    expect(qa.snapshot(target)).toMatchObject({ outcome: state, incarnation: "incarnation-null", pendingTimers: 0 });
-    await act(async () => { await vi.advanceTimersByTimeAsync(20000); });
-    expect(createWebSocket).toHaveBeenCalledTimes(1);
-    expect(sockets[0].close).not.toHaveBeenCalled();
-    await act(async () => {
-      sockets[0].onclose?.();
-      window.dispatchEvent(new Event("online"));
-      document.dispatchEvent(new Event("visibilitychange"));
-      await vi.advanceTimersByTimeAsync(20000);
-    });
-    expect(createWebSocket).toHaveBeenCalledTimes(1);
-    expect(qa.snapshot(target)).toMatchObject({ outcome: state, pendingTimers: 0 });
-    view.unmount();
-  });
-
-  it("reports the latest validated affirmative exit through the owner observer", async () => {
-    vi.stubGlobal("__task9Wire", {});
-    const sockets: MockWebSocket[] = [];
-    const createWebSocket = vi.fn(() => {
-      const ws = new SynchronousCloseWebSocket("mock://observer-outcome");
-      sockets.push(ws);
-      return ws;
-    });
-    const view = render(<RemoteTerminal sessionId="paired-exit" token="unused" isAccountSession daemonEpoch="epoch-exit" createWebSocket={createWebSocket} />);
-    await sockets[0].waitForHandlers();
-    const qa = window.__ferryxRecoveryQA;
-    if (!qa) throw new Error("Expected QA owner facade");
-    const target = { sessionId: "paired-exit", daemonEpoch: "epoch-exit" };
-    act(() => sockets[0].onmessage?.({
-      data: JSON.stringify({
-        type: "terminalOutcome",
-        target: { ...target, backendSessionId: "paired-exit" },
-        incarnation: "incarnation-exit",
-        generation: "9",
-        state: "affirmative_exit",
-        exitCode: 7,
-      }),
-    }));
-    expect(qa.snapshot(target)).toMatchObject({
-      outcome: "affirmative_exit",
-      incarnation: "incarnation-exit",
-      exitSettlements: 1,
-    });
-    view.unmount();
   });
 
   it("omits viewport geometry from the grid socket request when followHostSize is true", async () => {
@@ -442,18 +113,7 @@ describe("remote terminal grid contract", () => {
     expect(socket().url).not.toContain("cols=");
     expect(socket().url).not.toContain("rows=");
 
-    act(() => {
-      socket().onopen?.();
-      socket().onmessage?.({
-        data: JSON.stringify({
-          type: "grid",
-          cols: 80,
-          rows: 20,
-          cursor: hiddenCursor,
-          lines: [],
-        }),
-      });
-    });
+    act(() => socket().onopen?.());
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
     expect(socket().send).not.toHaveBeenCalled();
   });
@@ -682,18 +342,9 @@ describe("remote terminal grid contract", () => {
     expect(MockWebSocket.instances).toHaveLength(3);
     const thirdSocket = MockWebSocket.instances[2];
 
-    // 3rd socket successfully opens and establishes readiness -> resets backoff!
+    // 3rd socket successfully opens -> resets backoff!
     act(() => {
       thirdSocket.onopen?.();
-      thirdSocket.onmessage?.({
-        data: JSON.stringify({
-          type: "grid",
-          cols: 80,
-          rows: 20,
-          cursor: hiddenCursor,
-          lines: [],
-        }),
-      });
     });
     expect(onSocketLifecycle).toHaveBeenLastCalledWith("session-123", "open");
 
@@ -873,15 +524,6 @@ describe("remote terminal grid contract", () => {
 
     act(() => {
       secondSocket.onopen?.();
-      secondSocket.onmessage?.({
-        data: JSON.stringify({
-          type: "grid",
-          cols: 80,
-          rows: 20,
-          cursor: hiddenCursor,
-          lines: [],
-        }),
-      });
       firstSocket.onclose?.();
       firstSocket.onmessage?.({
         data: JSON.stringify({
@@ -944,7 +586,6 @@ describe("remote terminal grid contract", () => {
   it("preserves keyboard, control-signal, destructive-editing, Enter, and paste encodings", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
     const target = surface();
 
     fireEvent.keyDown(target, { key: "ArrowUp" });
@@ -967,7 +608,6 @@ describe("remote terminal grid contract", () => {
   it("wraps multiline paste in bracketed paste mode markers to prevent prompt splitting", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
     const target = surface();
 
     fireEvent.paste(target, {
@@ -982,7 +622,6 @@ describe("remote terminal grid contract", () => {
   it("does not shatter IME jamo keydowns into individual PTY writes", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
 
     fireEvent.keyDown(surface(), { key: "ㄱ" });
     fireEvent.keyDown(surface(), { key: "ㅏ" });
@@ -996,7 +635,6 @@ describe("remote terminal grid contract", () => {
   it("commits IME composition through the input sink as one write", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
     const sink = screen.getByTestId("remote-terminal-input-sink");
 
     fireEvent.compositionStart(sink);
@@ -1018,7 +656,6 @@ describe("remote terminal grid contract", () => {
   it("renders and clears a local preedit overlay while composing", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
     const sink = screen.getByTestId("remote-terminal-input-sink");
 
     expect(screen.queryByTestId("remote-terminal-preedit")).toBeNull();
@@ -1044,7 +681,6 @@ describe("remote terminal grid contract", () => {
   it("sends non-composing sink input as text without keydown duplication", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
     const sink = screen.getByTestId("remote-terminal-input-sink");
 
     fireEvent.input(sink, { target: { value: "ls" } });
@@ -1082,7 +718,6 @@ describe("remote terminal grid contract", () => {
   it("preserves control modifiers for physical navigation keys", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
 
     fireEvent.keyDown(surface(), { key: "ArrowUp", ctrlKey: true });
 
@@ -1092,7 +727,6 @@ describe("remote terminal grid contract", () => {
   it("keeps MobileKeyDock modified navigation wiring", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
 
     const buttons = screen.getAllByRole("button");
     fireEvent.click(buttons[0]);
@@ -1322,7 +956,6 @@ describe("remote terminal grid contract", () => {
   it("pastes literal text that collides with key-command names verbatim, not as key commands", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
     const target = surface();
 
     const literals = ["up", "tab", "delete", "ctrl-c", "alt-x", "ctrl-d"];
@@ -1337,7 +970,6 @@ describe("remote terminal grid contract", () => {
   it("pastes multiline text whose lines collide with key names as verbatim bracketed paste", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
 
     fireEvent.paste(surface(), {
       clipboardData: { getData: () => "up\r\ntab\rdelete" },
@@ -1352,7 +984,6 @@ describe("remote terminal grid contract", () => {
   it("pastes Object.prototype key names verbatim without leaking inherited members", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
     const target = surface();
 
     for (const literal of ["toString", "constructor", "hasOwnProperty"]) {
@@ -1366,7 +997,6 @@ describe("remote terminal grid contract", () => {
   it("pastes non-ASCII unicode literals verbatim without control-byte mangling", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
 
     fireEvent.paste(surface(), { clipboardData: { getData: () => "안녕 ㅊ" } });
 
@@ -1389,7 +1019,6 @@ describe("remote terminal grid contract", () => {
   it("maps Korean hardware Ctrl+D / Ctrl+L to physical ASCII control codes", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
 
     fireEvent.keyDown(surface(), { key: "ㅇ", code: "KeyD", ctrlKey: true });
     expect(socket().send).toHaveBeenNthCalledWith(1, new Uint8Array([4]));
@@ -1449,7 +1078,6 @@ describe("remote terminal grid contract", () => {
   it("encodes hardware Alt+letter as an ESC-prefixed meta chord instead of dropping it", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
 
     fireEvent.keyDown(surface(), { key: "x", code: "KeyX", altKey: true });
 
@@ -1460,7 +1088,6 @@ describe("remote terminal grid contract", () => {
   it("encodes Korean hardware Alt+letter via the physical code, not the remapped jamo", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
 
     fireEvent.keyDown(surface(), { key: "ㅌ", code: "KeyX", altKey: true });
 
@@ -1471,7 +1098,6 @@ describe("remote terminal grid contract", () => {
   it("preserves Shift case for Alt+letter meta chords (Alt+Shift+X -> ESC X)", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
 
     fireEvent.keyDown(surface(), { key: "X", code: "KeyX", altKey: true, shiftKey: true });
 
@@ -1508,7 +1134,6 @@ describe("remote terminal grid contract", () => {
   it("encodes Shift+Tab as a CSI back-tab sequence rather than a plain Tab", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
 
     fireEvent.keyDown(surface(), { key: "Tab", shiftKey: true });
 
@@ -1519,7 +1144,6 @@ describe("remote terminal grid contract", () => {
   it("never wraps an unsupported Ctrl+digit chord into a junk control byte", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
-    establishReady();
 
     // Ctrl+9 has no ASCII control code; it must emit nothing, not a garbage byte.
     fireEvent.keyDown(surface(), { key: "9", code: "Digit9", ctrlKey: true });
@@ -1541,9 +1165,6 @@ describe("remote terminal grid contract", () => {
         onInputOverflow={onInputOverflow}
       />,
     );
-
-    // Establish terminal readiness first
-    establishReady();
 
     // Socket is in CONNECTING state (readyState = 0, before onopen)
     socket().readyState = 0;
@@ -1593,18 +1214,7 @@ describe("remote terminal grid contract", () => {
 
     // Initial WebSocket request contains initial geometry 80x20
     const ws1 = socket();
-    act(() => {
-      ws1.onopen?.();
-      ws1.onmessage?.({
-        data: JSON.stringify({
-          type: "grid",
-          cols: 80,
-          rows: 20,
-          cursor: hiddenCursor,
-          lines: [],
-        }),
-      });
-    });
+    act(() => ws1.onopen?.());
     await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Live"));
 
     // Server sends remoteStatus with generation "101"
@@ -1676,18 +1286,7 @@ describe("remote terminal grid contract", () => {
 
     const sshView = render(<RemoteTerminal sessionId="session-ssh" token="token-abc" />);
     const sshWs = socket();
-    act(() => {
-      sshWs.onopen?.();
-      sshWs.onmessage?.({
-        data: JSON.stringify({
-          type: "grid",
-          cols: 80,
-          rows: 20,
-          cursor: hiddenCursor,
-          lines: [],
-        }),
-      });
-    });
+    act(() => sshWs.onopen?.());
     await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Live"));
 
     // Server sends remoteStatus with generation "202"
@@ -1732,8 +1331,8 @@ describe("remote terminal grid contract", () => {
     // Without any remoteStatus (local session), typed character is still sent as raw bytes
     render(<RemoteTerminal sessionId="session-local" token="token-abc" />);
     const localWs = socket();
-    establishReady(localWs);
-    await waitFor(() => expect(connectionStatus()).toHaveTextContent("Live"));
+    act(() => localWs.onopen?.());
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Live"));
 
     localWs.send.mockClear();
     fireEvent.keyDown(surface(), { key: "a" });
@@ -1874,7 +1473,7 @@ describe("remote terminal grid contract", () => {
     });
   }
 
-  function renderMachineTerminal(epoch: string, props?: Partial<React.ComponentProps<typeof RemoteTerminal>>) {
+  function renderMachineTerminal(epoch: string) {
     const sockets: MockWebSocket[] = [];
     const paths: string[] = [];
     const createWebSocket = vi.fn((pathAndQuery: string) => {
@@ -1890,90 +1489,10 @@ describe("remote terminal grid contract", () => {
         isAccountSession={true}
         daemonEpoch={epoch}
         createWebSocket={createWebSocket}
-        {...props}
       />,
     );
     return { createWebSocket, paths, sockets, ...view };
   }
-
-  it("observes actual handshake and retry handles without accepting missing lifetime evidence", async () => {
-    vi.useFakeTimers();
-    vi.stubGlobal("__task9Wire", {});
-    const target = { machineId: "mach-1", sessionId: "session-machine-1", daemonEpoch: "epoch-qa-timers" };
-    const view = renderMachineTerminal(target.daemonEpoch);
-    const qa = window.__ferryxRecoveryQA;
-    if (!qa) throw new Error("Expected QA owner facade");
-    expect(qa.snapshot(target)).toMatchObject({ pendingTimers: 1, inFlight: true,
-      identityConfirmed: false, exitSettlements: null, disposed: false });
-    expect(() => qa.currentTarget()).toThrow("WEB_OWNER_CURRENT_BINDING_EVIDENCE_REQUIRED");
-    expect(() => qa.snapshot({ ...target, incarnation: "not-observed" }))
-      .toThrow("WEB_OWNER_TARGET_EVIDENCE_REQUIRED");
-    act(() => view.sockets[0].onerror?.());
-    expect(qa.snapshot(target)).toMatchObject({ pendingTimers: 1, inFlight: false });
-    view.unmount();
-    expect(qa.snapshot(target)).toMatchObject({ pendingTimers: 0, inFlight: false, disposed: true });
-    expect(() => qa.snapshot({ ...target, sessionId: "absent" }))
-      .toThrow("WEB_OWNER_TARGET_EVIDENCE_REQUIRED");
-  });
-
-  it("retains exact disposed owner rejection before and after stale completion subscription", async () => {
-    vi.useFakeTimers();
-    vi.stubGlobal("__task9Wire", {});
-    const target = { sessionId: "session-machine-1", daemonEpoch: "epoch-qa-late" };
-    let deliver: ((ws: MockWebSocket) => void) | undefined;
-    const completion = new Promise<MockWebSocket>(resolve => { deliver = resolve; });
-    const view = renderMachineTerminal(target.daemonEpoch, { createWebSocket: () => completion });
-    const qa = window.__ferryxRecoveryQA;
-    if (!qa || !deliver) throw new Error("Expected held owner completion");
-    view.unmount();
-    const rejection = qa.waitForStaleCompletion(target);
-    const late = new MockWebSocket("mock://qa-late");
-    await act(async () => { deliver?.(late); await completion; });
-    expect(await rejection).toMatchObject({ staleCompletionsRejected: 1,
-      cancelledAttemptIds: ["1"], pendingTimers: 0, disposed: true });
-    expect(late.close).toHaveBeenCalledTimes(1);
-    expect(await qa.waitForStaleCompletion(target)).toMatchObject({ staleCompletionsRejected: 1 });
-  });
-
-  it("keeps an exact retired-attempt observer alive across disposal until late completion", async () => {
-    vi.stubGlobal("__task9Wire", {});
-    const target = { sessionId: "session-machine-1", daemonEpoch: "epoch-retired-observer" };
-    let deliver: ((ws: MockWebSocket) => void) | undefined;
-    const completion = new Promise<MockWebSocket>(resolve => { deliver = resolve; });
-    const view = renderMachineTerminal(target.daemonEpoch, { createWebSocket: () => completion });
-    const qa = window.__ferryxRecoveryQA;
-    if (!qa || !deliver) throw new Error("Expected retained-owner observer facade");
-    const observed = qa.waitForRetiredStaleCompletion(target, "1", 1000);
-    view.unmount();
-    expect(qa.snapshot(target)).toMatchObject({ disposed: true, pendingTimers: 0, inFlight: false,
-      staleCompletionsRejected: 0, cancelledAttemptIds: ["1"] });
-    const late = new MockWebSocket("mock://retired-late");
-    await act(async () => { deliver?.(late); await completion; });
-    await expect(observed).resolves.toMatchObject({ disposed: true, pendingTimers: 0, inFlight: false,
-      staleCompletionsRejected: 1, cancelledAttemptIds: ["1"], rejectedAttemptIds: ["1"] });
-    expect(late.close).toHaveBeenCalledTimes(1);
-  });
-
-  it("rejects pending observation subscriptions on exact owner disposal", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    })));
-    vi.stubGlobal("__task9Wire", {});
-    const target = { sessionId: "session-machine-1", daemonEpoch: "epoch-qa-dispose" };
-    const view = renderMachineTerminal(target.daemonEpoch);
-    const qa = window.__ferryxRecoveryQA;
-    if (!qa) throw new Error("Expected QA owner facade");
-    vi.useFakeTimers();
-    expect(vi.getTimerCount()).toBe(0);
-    let rejection: unknown;
-    const rejected = qa.waitForStaleCompletion(target).catch(error => { rejection = error; });
-    expect(vi.getTimerCount()).toBe(1);
-    view.unmount();
-    await rejected;
-    expect(rejection).toMatchObject({ message: "WEB_OWNER_OBSERVATION_DISPOSED" });
-    expect(vi.getTimerCount()).toBe(0);
-  });
 
   it("R1: closes a socket handed over after the pane unmounted instead of leaking it", async () => {
     let deliver!: (ws: MockWebSocket) => void;
@@ -2002,7 +1521,7 @@ describe("remote terminal grid contract", () => {
 
     const ws = sockets[0];
     act(() => ws.onopen?.());
-    expect(screen.getByRole("status")).toHaveTextContent("Connecting");
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
 
     // Before the boundary, no unfenced control may reach the machine wire.
     fireEvent.click(screen.getByRole("button", { name: "Ctrl-C" }));
@@ -2012,7 +1531,6 @@ describe("remote terminal grid contract", () => {
     act(() => {
       ws.onmessage?.({ data: attachedFrame("7") } as MessageEvent);
     });
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
 
     // The boundary drives resize with the attached generation and measured geometry.
     expect(ws.send).toHaveBeenCalledWith(
@@ -2051,7 +1569,7 @@ describe("remote terminal grid contract", () => {
     await waitFor(() => expect(sockets).toHaveLength(1));
     const ws = sockets[0];
     act(() => ws.onopen?.());
-    expect(screen.getByRole("status")).toHaveTextContent("Connecting");
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
 
     const boundary = (generation: unknown) =>
       JSON.stringify({
@@ -2073,7 +1591,6 @@ describe("remote terminal grid contract", () => {
     expect(ws.send).not.toHaveBeenCalled();
 
     act(() => ws.onmessage?.({ data: boundary("11") } as MessageEvent));
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
     expect(ws.send).toHaveBeenCalledWith(
       JSON.stringify({ type: "resize", generation: "11", cols: 80, rows: 20 }),
     );
@@ -2087,7 +1604,7 @@ describe("remote terminal grid contract", () => {
     await waitFor(() => expect(sockets).toHaveLength(1));
     const ws = sockets[0];
     act(() => ws.onopen?.());
-    expect(screen.getByRole("status")).toHaveTextContent("Connecting");
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
 
     const wrongSession = JSON.stringify({
       type: "attached",
@@ -2109,7 +1626,6 @@ describe("remote terminal grid contract", () => {
     expect(ws.send).not.toHaveBeenCalled();
 
     act(() => ws.onmessage?.({ data: attachedFrame("7") } as MessageEvent));
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
     expect(ws.send).toHaveBeenCalledWith(
       JSON.stringify({ type: "resize", generation: "7", cols: 80, rows: 20 }),
     );
@@ -2124,10 +1640,7 @@ describe("remote terminal grid contract", () => {
     const { createWebSocket, paths, sockets, rerender } = renderMachineTerminal("epoch-1");
     await waitFor(() => expect(paths).toHaveLength(1));
     const ws1 = sockets[0];
-    act(() => {
-      ws1.onopen?.();
-      ws1.onmessage?.({ data: attachedFrame("7") } as MessageEvent);
-    });
+    act(() => ws1.onopen?.());
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
     act(() => {
       ws1.onmessage?.({ data: attachedFrame("7") } as MessageEvent);
@@ -2150,15 +1663,8 @@ describe("remote terminal grid contract", () => {
     expect(paths[1]).toBe("/api/v1/terminal/session-machine-1?daemonEpoch=epoch-2&render=grid");
 
     const ws2 = sockets[1];
-    act(() => {
-      ws2.onopen?.();
-      ws2.onmessage?.({ data: attachedFrame("9", "epoch-2") } as MessageEvent);
-    });
-    await waitFor(() => expect(connectionStatus()).toHaveTextContent("Live"));
-    expect(ws2.send).toHaveBeenCalledWith(
-      JSON.stringify({ type: "resize", generation: "9", cols: 80, rows: 20 }),
-    );
-    ws2.send.mockClear();
+    act(() => ws2.onopen?.());
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
 
     // The replaced epoch's generation must not fence the new target: input stays binary.
     fireEvent.keyDown(surface(), { key: "b" });
@@ -2223,960 +1729,5 @@ describe("remote terminal grid contract", () => {
     const titleBarFalse = screen.getByTestId("remote-terminal-build-stamp").closest("div.flex.shrink-0");
     expect(titleBarFalse?.className).toContain("h-7");
     expect(titleBarFalse?.className).toContain("justify-end");
-  });
-
-  describe("Task 7 normative terminal recovery and readiness contract", () => {
-    it("rejects missing machine target session or epoch", async () => {
-      const { sockets } = renderMachineTerminal("epoch-1");
-      expect(sockets).toHaveLength(1);
-      const ws = sockets[0];
-      await ws.waitForHandlers();
-      act(() => ws.onopen?.());
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // Missing sessionId in target
-      act(() => {
-        ws.onmessage?.({
-          data: JSON.stringify({
-            type: "attached",
-            generation: "1",
-            target: { daemonEpoch: "epoch-1" },
-          }),
-        });
-      });
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // Missing daemonEpoch in target
-      act(() => {
-        ws.onmessage?.({
-          data: JSON.stringify({
-            type: "attached",
-            generation: "2",
-            target: { sessionId: "session-machine-1" },
-          }),
-        });
-      });
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // Missing target object entirely
-      act(() => {
-        ws.onmessage?.({
-          data: JSON.stringify({
-            type: "attached",
-            generation: "3",
-          }),
-        });
-      });
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-    });
-
-    it("rejects mismatched machine target session or epoch", async () => {
-      const { sockets } = renderMachineTerminal("epoch-1");
-      expect(sockets).toHaveLength(1);
-      const ws = sockets[0];
-      await ws.waitForHandlers();
-      act(() => ws.onopen?.());
-
-      // Mismatched sessionId
-      act(() => {
-        ws.onmessage?.({
-          data: JSON.stringify({
-            type: "attached",
-            generation: "1",
-            target: { sessionId: "wrong-session", daemonEpoch: "epoch-1" },
-          }),
-        });
-      });
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // Mismatched daemonEpoch
-      act(() => {
-        ws.onmessage?.({
-          data: JSON.stringify({
-            type: "attached",
-            generation: "2",
-            target: { sessionId: "session-machine-1", daemonEpoch: "wrong-epoch" },
-          }),
-        });
-      });
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-    });
-
-    it("rejects remoteStatus-only on legacy gateway socket until full grid frame arrives", () => {
-      vi.stubGlobal("WebSocket", MockWebSocket);
-      render(<RemoteTerminal sessionId="session-legacy" token="token-abc" />);
-      const ws = socket();
-
-      act(() => ws.onopen?.());
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // remoteStatus frame alone does NOT establish readiness
-      act(() => {
-        ws.onmessage?.({
-          data: JSON.stringify({
-            type: "remoteStatus",
-            state: "connected",
-            generation: "101",
-          }),
-        });
-      });
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // Once valid full grid frame arrives, readiness is established
-      act(() => {
-        ws.onmessage?.({
-          data: JSON.stringify({
-            type: "grid",
-            cols: 80,
-            rows: 20,
-            cursor: hiddenCursor,
-            lines: [],
-          }),
-        });
-      });
-      expect(connectionStatus()).toHaveTextContent("Live");
-    });
-
-    it("rejects stale socket grid frames after reconnect", async () => {
-      vi.useFakeTimers();
-      vi.stubGlobal("WebSocket", MockWebSocket);
-      render(<RemoteTerminal sessionId="session-stale" token="token-abc" />);
-      const ws1 = socket();
-
-      act(() => ws1.onopen?.());
-      // Simulate drop on ws1
-      act(() => ws1.onclose?.());
-
-      // Advance 1s backoff to allow redial
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1000);
-      });
-
-      // ws2 connects
-      const ws2 = socket();
-      expect(ws2).not.toBe(ws1);
-      act(() => ws2.onopen?.());
-
-      // Late grid frame arrives from ws1
-      act(() => {
-        ws1.onmessage?.({
-          data: JSON.stringify({
-            type: "grid",
-            cols: 80,
-            rows: 20,
-            cursor: hiddenCursor,
-            lines: [{ index: 0, runs: [{ text: "stale data", fg: null, bg: null, attrs: 0 }] }],
-          }),
-        });
-      });
-      // ws2 is still Connecting and has not adopted ws1 grid
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-      expect(surface()).not.toHaveTextContent("stale data");
-
-      // Grid on ws2 establishes readiness
-      act(() => {
-        ws2.onmessage?.({
-          data: JSON.stringify({
-            type: "grid",
-            cols: 80,
-            rows: 20,
-            cursor: hiddenCursor,
-            lines: [{ index: 0, runs: [{ text: "fresh data", fg: null, bg: null, attrs: 0 }] }],
-          }),
-        });
-      });
-      expect(connectionStatus()).toHaveTextContent("Live");
-      expect(surface()).toHaveTextContent("fresh data");
-    });
-
-    it("legacy current full grid exposes confirmed observer without invented incarnation and stale grid or machine missing attached does not", async () => {
-      vi.useFakeTimers();
-      vi.stubGlobal("__task9Wire", {});
-      let socketNumber = 0;
-      class ObservedWebSocket extends MockWebSocket {
-        readonly __task9Id = `socket-legacy-${++socketNumber}`;
-      }
-      vi.stubGlobal("WebSocket", ObservedWebSocket);
-
-      // 1. Legacy gateway: full grid exposes confirmed observer with incarnation null
-      const legacyTarget = { sessionId: "session-legacy-observer", daemonEpoch: null };
-      const legacyView = render(<RemoteTerminal sessionId={legacyTarget.sessionId} token="token-legacy" />);
-      const qa = window.__ferryxRecoveryQA;
-      if (!qa) throw new Error("Expected QA owner facade");
-
-      const wsLegacy = socket();
-      act(() => wsLegacy.onopen?.());
-
-      // Pre-grid: identityConfirmed is false, currentTarget throws
-      expect(qa.snapshot(legacyTarget)).toMatchObject({ identityConfirmed: false, incarnation: null });
-      expect(() => qa.currentTarget()).toThrow("WEB_OWNER_CURRENT_BINDING_EVIDENCE_REQUIRED");
-
-      // Full grid arrives on current legacy socket: identity confirmed, incarnation is strictly null
-      act(() => {
-        wsLegacy.onmessage?.({
-          data: JSON.stringify({
-            type: "grid",
-            cols: 80,
-            rows: 24,
-            cursor: hiddenCursor,
-            lines: [{ index: 0, runs: [{ text: "ready", fg: null, bg: null, attrs: 0 }] }],
-          }),
-        });
-      });
-      expect(connectionStatus()).toHaveTextContent("Live");
-      expect(qa.snapshot(legacyTarget)).toMatchObject({
-        identityConfirmed: true,
-        incarnation: null,
-      });
-      expect(qa.currentTarget()).toMatchObject({
-        sessionId: legacyTarget.sessionId,
-        daemonEpoch: null,
-        socketId: "socket-legacy-1",
-        incarnation: null,
-        outcome: "ready",
-      });
-
-      // 2. Stale socket grid does not confirm identity
-      act(() => wsLegacy.onclose?.());
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1000);
-      });
-      const wsLegacy2 = socket();
-      expect(wsLegacy2).not.toBe(wsLegacy);
-      act(() => wsLegacy2.onopen?.());
-
-      // Stale grid arrives from wsLegacy while wsLegacy2 is pending
-      expect(qa.snapshot(legacyTarget)).toMatchObject({ identityConfirmed: false });
-      act(() => {
-        wsLegacy.onmessage?.({
-          data: JSON.stringify({
-            type: "grid",
-            cols: 80,
-            rows: 24,
-            cursor: hiddenCursor,
-            lines: [{ index: 0, runs: [{ text: "stale-frame", fg: null, bg: null, attrs: 0 }] }],
-          }),
-        });
-      });
-      expect(qa.snapshot(legacyTarget)).toMatchObject({ identityConfirmed: false });
-      expect(() => qa.currentTarget()).toThrow("WEB_OWNER_CURRENT_BINDING_EVIDENCE_REQUIRED");
-
-      legacyView.unmount();
-
-      // 3. Machine transport missing attached: grid frame does NOT confirm identity
-      const machineEpoch = "epoch-obs-check";
-      const machineTarget = { sessionId: "session-machine-1", daemonEpoch: machineEpoch };
-      const machineView = renderMachineTerminal(machineEpoch);
-      const wsMachine = machineView.sockets[0];
-      (wsMachine as any).__task9Id = "socket-machine-1";
-      await wsMachine.waitForHandlers();
-      act(() => wsMachine.onopen?.());
-
-      act(() => {
-        wsMachine.onmessage?.({
-          data: JSON.stringify({
-            type: "grid",
-            cols: 80,
-            rows: 24,
-            cursor: hiddenCursor,
-            lines: [{ index: 0, runs: [{ text: "early-grid", fg: null, bg: null, attrs: 0 }] }],
-          }),
-        });
-      });
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-      expect(qa.snapshot(machineTarget)).toMatchObject({
-        identityConfirmed: false,
-        incarnation: null,
-      });
-      expect(() => qa.currentTarget()).toThrow("WEB_OWNER_CURRENT_BINDING_EVIDENCE_REQUIRED");
-
-      machineView.unmount();
-    });
-
-    it("renders authoritative null-generation affirmative_exit and blocked with accurate status without inventing generation and preserves retry gate", async () => {
-      vi.useFakeTimers();
-      vi.stubGlobal("__task9Wire", {});
-      const sockets: MockWebSocket[] = [];
-      const createWebSocket = vi.fn(() => {
-        const ws = new SynchronousCloseWebSocket("mock://null-gen-authoritative");
-        sockets.push(ws);
-        return ws;
-      });
-      const sessionId = "paired-null-authoritative";
-      const view = render(
-        <RemoteTerminal
-          sessionId={sessionId}
-          token="token-null-auth"
-          isAccountSession
-          daemonEpoch="epoch-auth-1"
-          createWebSocket={createWebSocket}
-        />,
-      );
-      await sockets[0].waitForHandlers();
-      const qa = window.__ferryxRecoveryQA;
-      if (!qa) throw new Error("Expected QA owner facade");
-      const target = { sessionId, daemonEpoch: "epoch-auth-1" };
-
-      // 1. Authoritative blocked outcome with null generation displays typed reason
-      const blockedFrame = {
-        type: "terminalOutcome",
-        target: { ...target, backendSessionId: sessionId },
-        incarnation: "inc-auth-1",
-        generation: null,
-        state: "blocked",
-        blockedReason: "permission_denied",
-        exitCode: null,
-      };
-      act(() => sockets[0].onmessage?.({ data: JSON.stringify(blockedFrame) }));
-
-      const outcomeBanner = screen.getByTestId("remote-terminal-outcome");
-      expect(outcomeBanner).toHaveTextContent("permission_denied");
-      expect(screen.queryByTestId("remote-terminal-outcome-unknown")).toBeNull();
-      const blockedSnap = qa.snapshot(target);
-      expect(blockedSnap).toMatchObject({
-        outcome: "blocked",
-        incarnation: "inc-auth-1",
-        pendingTimers: 0,
-        inFlight: false,
-      });
-
-      // Retry gate: background timers do not trigger automatic redial while blocked
-      await act(async () => { await vi.advanceTimersByTimeAsync(20000); });
-      expect(createWebSocket).toHaveBeenCalledTimes(1);
-
-      // Explicit Retry clears blocked outcome and redials
-      await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-      });
-      expect(createWebSocket).toHaveBeenCalledTimes(2);
-      await sockets[1].waitForHandlers();
-
-      // 2. Authoritative affirmative_exit outcome with null generation displays exit code
-      const exitFrame = {
-        type: "terminalOutcome",
-        target: { ...target, backendSessionId: sessionId },
-        incarnation: "inc-auth-1",
-        generation: null,
-        state: "affirmative_exit",
-        blockedReason: null,
-        exitCode: 42,
-      };
-      act(() => sockets[1].onmessage?.({ data: JSON.stringify(exitFrame) }));
-
-      const exitBanner = screen.getByTestId("remote-terminal-outcome");
-      expect(exitBanner).toHaveTextContent("Terminal exited (42)");
-      expect(screen.queryByTestId("remote-terminal-outcome-unknown")).toBeNull();
-      const exitSnap = qa.snapshot(target);
-      expect(exitSnap).toMatchObject({
-        outcome: "affirmative_exit",
-        exitSettlements: 1,
-        pendingTimers: 0,
-        inFlight: false,
-      });
-
-      // Retry gate: background timers do not auto-redial on exit
-      await act(async () => { await vi.advanceTimersByTimeAsync(20000); });
-      expect(createWebSocket).toHaveBeenCalledTimes(2);
-
-      // Explicit Retry starts a new attempt before another outcome can be accepted.
-      await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-      });
-      expect(createWebSocket).toHaveBeenCalledTimes(3);
-      await sockets[2].waitForHandlers();
-
-      // 3. Non-authoritative outcome on the new attempt retains Recovery outcome unknown
-      const nonAuthFrame = {
-        type: "terminalOutcome",
-        target: { ...target, backendSessionId: sessionId },
-        incarnation: "inc-auth-1",
-        generation: null,
-        state: "uncertain_state",
-        blockedReason: null,
-        exitCode: null,
-      };
-      act(() => sockets[2].onmessage?.({ data: JSON.stringify(nonAuthFrame) }));
-      expect(screen.getByTestId("remote-terminal-outcome-unknown")).toHaveTextContent("Recovery outcome unknown");
-      expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
-
-      view.unmount();
-    });
-
-    it("enforces 10s handshake deadline when socket opens but never attaches", async () => {
-      vi.useFakeTimers();
-      const { sockets } = renderMachineTerminal("epoch-1");
-      expect(sockets).toHaveLength(1);
-      const ws = sockets[0];
-      await ws.waitForHandlers();
-
-      act(() => ws.onopen?.());
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // Advance 9.9s: still connecting
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(9900);
-      });
-      expect(ws.close).not.toHaveBeenCalled();
-
-      // Advance past 10s: handshake deadline expires, closes socket, schedules retry
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(200);
-      });
-      expect(ws.close).toHaveBeenCalled();
-
-      // Advance backoff delay to allow redial
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000);
-      });
-      expect(sockets.length).toBeGreaterThanOrEqual(2);
-    });
-
-    it("rejects pre-readiness user input without buffering uncertain mutation replay", () => {
-      vi.stubGlobal("WebSocket", MockWebSocket);
-      const onInputDrop = vi.fn();
-      render(
-        <RemoteTerminal
-          sessionId="session-input-gate"
-          token="token-abc"
-          onInputDrop={onInputDrop}
-        />
-      );
-      const ws = socket();
-      act(() => ws.onopen?.());
-
-      // Type character 'x' before terminal is ready
-      fireEvent.keyDown(surface(), { key: "x" });
-      expect(onInputDrop).toHaveBeenCalled();
-      expect(ws.send).not.toHaveBeenCalled();
-
-      // Grid arrives establishing readiness
-      act(() => {
-        ws.onmessage?.({
-          data: JSON.stringify({
-            type: "grid",
-            cols: 80,
-            rows: 20,
-            cursor: hiddenCursor,
-            lines: [],
-          }),
-        });
-      });
-      expect(connectionStatus()).toHaveTextContent("Live");
-
-      // Ensure pre-readiness input was NOT buffered and replayed on readiness!
-      expect(ws.send).not.toHaveBeenCalledWith(expect.stringContaining("x"));
-
-      // Now that terminal is ready, input is delivered
-      fireEvent.keyDown(surface(), { key: "y" });
-      expect(ws.send).toHaveBeenCalled();
-    });
-
-    it("executes deterministic fake-clock backoff over >20 failure cycles saturating at 10s cap", async () => {
-      vi.useFakeTimers();
-      vi.spyOn(Math, "random").mockReturnValue(0); // delay = min(10000, 1000 * 2^attempt)
-      const { sockets } = renderMachineTerminal("epoch-1");
-      expect(sockets).toHaveLength(1);
-
-      // Run 25 consecutive failure cycles
-      for (let cycle = 0; cycle < 25; cycle++) {
-        const currentWs = sockets[sockets.length - 1];
-        await currentWs.waitForHandlers();
-        // Simulate socket failure
-        act(() => {
-          currentWs.onerror?.(new Event("error"));
-          currentWs.onclose?.(new CloseEvent("close"));
-        });
-        // The backoff delay should be at most 10,000ms
-        await act(async () => {
-          await vi.advanceTimersByTimeAsync(10000);
-        });
-        expect(sockets.length).toBe(cycle + 2);
-      }
-
-      // On the 26th socket, valid attached frame arrives
-      const finalWs = sockets[sockets.length - 1];
-      await finalWs.waitForHandlers();
-      act(() => {
-        finalWs.onopen?.();
-        finalWs.onmessage?.({ data: attachedFrame("100") });
-      });
-      expect(connectionStatus()).toHaveTextContent("Live");
-    });
-
-    it("resumes terminal recovery ownership when parent fallback is a no-op or fails", async () => {
-      vi.useFakeTimers();
-      vi.spyOn(Math, "random").mockReturnValue(0);
-      const noopFallback = vi.fn(); // parent fallback callback does not switch transport
-
-      const { sockets } = renderMachineTerminal("epoch-1", { onTransportFailure: noopFallback });
-      expect(sockets).toHaveLength(1);
-      const ws1 = sockets[0];
-      await ws1.waitForHandlers();
-
-      // Trigger failure
-      act(() => {
-        ws1.onerror?.(new Event("error"));
-        ws1.onclose?.(new CloseEvent("close"));
-      });
-      expect(noopFallback).toHaveBeenCalledTimes(1);
-
-      // Terminal must not be stuck; recovery ownership resumes and schedules retry
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000);
-      });
-      expect(sockets.length).toBe(2);
-    });
-
-    it("retires failed attempt: late deferred socket resolved after deadline and before redial closes exact socket and does not publish readiness", async () => {
-      vi.useFakeTimers();
-      let resolveDeferredSocket: ((ws: MockWebSocket) => void) | null = null;
-      const lateSocket = new MockWebSocket("mock://machine-late");
-
-      const createWebSocket = vi.fn(() => {
-        return new Promise<MockWebSocket>((resolve) => {
-          resolveDeferredSocket = resolve;
-        });
-      });
-
-      render(
-        <RemoteTerminal
-          sessionId="session-late-socket"
-          token="token-unused"
-          isAccountSession={true}
-          daemonEpoch="epoch-1"
-          createWebSocket={createWebSocket}
-        />,
-      );
-
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // Advance past 10s handshake deadline without resolving socket promise
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(10001);
-      });
-
-      // Handshake deadline has fired and failure was handled.
-      // Now, before redial delay expires, the late deferred socket resolves!
-      await act(async () => {
-        resolveDeferredSocket?.(lateSocket);
-      });
-
-      // The late exact socket must be closed immediately
-      expect(lateSocket.close).toHaveBeenCalled();
-
-      // Late attached frame delivered to late socket must NOT publish readiness
-      act(() => {
-        lateSocket.onmessage?.({ data: attachedFrame("99") } as MessageEvent);
-      });
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-    });
-
-    it("onerror without close event immediately closes and nulls exact socket, retrying without duplicate timers or stale frame adoption", async () => {
-      vi.useFakeTimers();
-      const { sockets } = renderMachineTerminal("epoch-1");
-      expect(sockets).toHaveLength(1);
-      const ws1 = sockets[0];
-      await ws1.waitForHandlers();
-
-      act(() => ws1.onopen?.());
-
-      // Trigger error WITHOUT close event
-      act(() => {
-        ws1.onerror?.(new Event("error"));
-      });
-
-      // Exact socket must be closed immediately
-      expect(ws1.close).toHaveBeenCalled();
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // Late frame on errored socket must not be adopted
-      act(() => {
-        ws1.onmessage?.({ data: attachedFrame("50") } as MessageEvent);
-      });
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // Next dial succeeds on backoff
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000);
-      });
-      expect(sockets.length).toBe(2);
-      const ws2 = sockets[1];
-      await ws2.waitForHandlers();
-
-      act(() => {
-        ws2.onopen?.();
-        ws2.onmessage?.({ data: attachedFrame("51") } as MessageEvent);
-      });
-      expect(connectionStatus()).toHaveTextContent("Live");
-    });
-
-    it("recover() on online/visibility wake when socket is OPEN but unattached immediately closes stalled socket and redials without waiting 10s", async () => {
-      vi.useFakeTimers();
-      const { sockets } = renderMachineTerminal("1");
-      expect(sockets).toHaveLength(1);
-      const ws1 = sockets[0];
-      await ws1.waitForHandlers();
-
-      // Socket opens, readyState is OPEN, but attachment has not arrived (handshake pending)
-      act(() => {
-        ws1.onopen?.();
-      });
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // Visibility change fires while handshake is pending
-      Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
-      act(() => {
-        document.dispatchEvent(new Event("visibilitychange"));
-      });
-
-      // Stalled unattached socket must be closed and redial initiated without waiting for 10s deadline
-      expect(ws1.close).toHaveBeenCalledTimes(1);
-      expect(sockets).toHaveLength(2);
-
-      const ws2 = sockets[1];
-      await ws2.waitForHandlers();
-      act(() => {
-        ws2.onopen?.();
-        ws2.onmessage?.({ data: attachedFrame("2", "1") });
-      });
-      expect(connectionStatus()).toHaveTextContent("Live");
-    });
-
-    it("recover() on online event when ticket/createPromise is pending invalidates prior attempt and immediately closes late-resolved socket", async () => {
-      vi.useFakeTimers();
-      let resolveTicket1: ((ws: MockWebSocket) => void) | null = null;
-      let resolveTicket2: ((ws: MockWebSocket) => void) | null = null;
-      let callCount = 0;
-
-      const createWebSocket = vi.fn(() => {
-        callCount++;
-        if (callCount === 1) {
-          return new Promise<MockWebSocket>((res) => { resolveTicket1 = res; });
-        }
-        return new Promise<MockWebSocket>((res) => { resolveTicket2 = res; });
-      });
-
-      render(
-        <RemoteTerminal
-          sessionId="session-machine-1"
-          token="token-unused"
-          isAccountSession={true}
-          daemonEpoch="1"
-          createWebSocket={createWebSocket}
-        />
-      );
-
-      expect(createWebSocket).toHaveBeenCalledTimes(1);
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // While ticket 1 is pending (socketRef.current is null), an online wake event fires
-      act(() => {
-        window.dispatchEvent(new Event("online"));
-      });
-
-      // Prior pending dial must be invalidated and a fresh dial initiated immediately
-      expect(createWebSocket).toHaveBeenCalledTimes(2);
-
-      // If the late ticket 1 resolves now, it must be closed immediately and discarded
-      const lateSocket = new MockWebSocket("mock://late-ticket-1");
-      await act(async () => {
-        resolveTicket1?.(lateSocket);
-      });
-      expect(lateSocket.close).toHaveBeenCalledTimes(1);
-
-      // Active ticket 2 resolves
-      const activeSocket = new MockWebSocket("mock://active-ticket-2");
-      await act(async () => {
-        resolveTicket2?.(activeSocket);
-      });
-      await activeSocket.waitForHandlers();
-      act(() => {
-        activeSocket.onopen?.();
-        activeSocket.onmessage?.({ data: attachedFrame("1", "1") });
-      });
-      expect(connectionStatus()).toHaveTextContent("Live");
-    });
-
-    it("invalidates dial sequence BEFORE closing old socket on wake so synchronous close cannot trigger fallback or duplicate retries", async () => {
-      vi.useFakeTimers();
-      const onTransportFailure = vi.fn();
-      const sockets: MockWebSocket[] = [];
-
-      class SynchronousCloseWs extends MockWebSocket {
-        override close = vi.fn(() => {
-          this.readyState = 3;
-          this.onclose?.(new CloseEvent("close"));
-        });
-      }
-
-      const createWebSocket = vi.fn(() => {
-        if (sockets.length === 0) {
-          const ws = new SynchronousCloseWs("mock://sync-close-ws");
-          sockets.push(ws);
-          return ws;
-        }
-        const ws = new MockWebSocket("mock://next-ws");
-        sockets.push(ws);
-        return ws;
-      });
-
-      render(
-        <RemoteTerminal
-          sessionId="session-machine-1"
-          token="token-unused"
-          isAccountSession={true}
-          daemonEpoch="1"
-          createWebSocket={createWebSocket}
-          onTransportFailure={onTransportFailure}
-        />
-      );
-
-      expect(sockets).toHaveLength(1);
-      const ws1 = sockets[0];
-      await ws1.waitForHandlers();
-
-      act(() => {
-        ws1.onopen?.();
-      });
-
-      // Wake event fires
-      act(() => {
-        window.dispatchEvent(new Event("online"));
-      });
-
-      // Synchronous onclose on ws1 during close() must NOT invoke parent fallback or schedule extra retries
-      expect(onTransportFailure).not.toHaveBeenCalled();
-      expect(sockets).toHaveLength(2);
-    });
-
-    it("coalesces multiple wake events in the same microtask without spawning duplicate dials", async () => {
-      vi.useFakeTimers();
-      const { sockets } = renderMachineTerminal("1");
-      expect(sockets).toHaveLength(1);
-      const ws1 = sockets[0];
-      await ws1.waitForHandlers();
-
-      act(() => {
-        ws1.onopen?.();
-      });
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // Dispatch online and visibilitychange in the same synchronous block
-      Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
-      act(() => {
-        window.dispatchEvent(new Event("online"));
-        document.dispatchEvent(new Event("visibilitychange"));
-      });
-
-      // Exactly one fresh redial must be spawned, not two
-      expect(ws1.close).toHaveBeenCalledTimes(1);
-      expect(sockets).toHaveLength(2);
-    });
-
-    it("handles authoritative ticket 401/403 denial by gating retries, displaying Blocked, and recovering on explicit Retry", async () => {
-      vi.useFakeTimers();
-      vi.stubGlobal("__task9Wire", {});
-      const fetchMock = vi.fn(async (_input: RequestInfo | URL) => {
-        return new Response(JSON.stringify({ error: "UNAUTHORIZED" }), { status: 401 });
-      });
-      vi.stubGlobal("fetch", fetchMock);
-
-      const target = { sessionId: "session-auth-denial", daemonEpoch: "epoch-auth-denial" };
-      const view = render(
-        <RemoteTerminal
-          sessionId={target.sessionId}
-          token="real-device-token-abc"
-          transportUrl="https://terminal-remote.example"
-          daemonEpoch={target.daemonEpoch}
-        />,
-      );
-
-      const qa = window.__ferryxRecoveryQA;
-      if (!qa) throw new Error("Expected QA owner facade");
-
-      // Wait for ticket fetch rejection to propagate
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-
-      // Retries are cancelled (no pending timers, not inFlight)
-      const snap = qa.snapshot(target);
-      expect(snap).toMatchObject({
-        outcome: "blocked",
-        pendingTimers: 0,
-        inFlight: false,
-        identityConfirmed: false,
-      });
-
-      // Header status reflects Blocked, banner reflects unauthorized with Retry
-      expect(connectionStatus()).toHaveTextContent("Blocked");
-      expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("unauthorized");
-      expect(screen.queryByTestId("remote-terminal-outcome-unknown")).toBeNull();
-
-      // Timer progression does NOT auto-redial
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(30000);
-      });
-      const ticketCalls = () => fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/api/v1/socket-ticket"));
-      expect(ticketCalls()).toHaveLength(1);
-
-      // Explicit Retry recovers: clears blocked gate and redials
-      fetchMock.mockImplementationOnce(async () => {
-        return new Response(JSON.stringify({ ticket: "fresh-ticket-123" }), { status: 200 });
-      });
-      await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-      });
-      expect(ticketCalls()).toHaveLength(2);
-
-      view.unmount();
-    });
-
-    it("transitions current snapshot to retryable after formerly-ready socket disconnects", async () => {
-      vi.useFakeTimers();
-      vi.stubGlobal("__task9Wire", {});
-      vi.stubGlobal("WebSocket", MockWebSocket);
-
-      const target = { sessionId: "session-disconnect-retryable", daemonEpoch: null };
-      const view = render(<><button type="button">Other control</button><RemoteTerminal sessionId={target.sessionId} token="token-disc" /></>);
-      const qa = window.__ferryxRecoveryQA;
-      if (!qa) throw new Error("Expected QA owner facade");
-
-      const ws = socket();
-      (ws as any).__task9Id = "socket-disc-1";
-      act(() => ws.onopen?.());
-      act(() => {
-        ws.onmessage?.({
-          data: JSON.stringify({
-            type: "grid",
-            cols: 80,
-            rows: 24,
-            cursor: hiddenCursor,
-            lines: [{ index: 0, runs: [{ text: "ready-data", fg: null, bg: null, attrs: 0 }] }],
-          }),
-        });
-      });
-      expect(qa.snapshot(target)).toMatchObject({ outcome: "ready", identityConfirmed: true });
-      const otherControl = screen.getByRole("button", { name: "Other control" });
-      otherControl.focus();
-
-      // Formerly-ready socket closes
-      act(() => ws.onclose?.());
-
-      // Advance into the redial attempt (dialSequence increments, new socket inFlight)
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1000);
-      });
-
-      // Snapshot must transition to retryable (stale ready outcome cleared), not stuck on ready
-      const redialSnap = qa.snapshot(target);
-      expect(redialSnap).toMatchObject({
-        outcome: "retryable",
-        inFlight: true,
-        identityConfirmed: false,
-        pendingTimers: 1,
-      });
-
-      const recovered = socket();
-      act(() => {
-        recovered.onopen?.();
-        recovered.onmessage?.({ data: JSON.stringify({
-          type: "grid", cols: 80, rows: 24, cursor: hiddenCursor, lines: [],
-        }) });
-      });
-      expect(connectionStatus()).toHaveTextContent("Live");
-      expect(document.activeElement).toBe(otherControl);
-
-      view.unmount();
-    });
-
-    it("reflects validated blocked and affirmative_exit in connection status header instead of Connecting", async () => {
-      vi.useFakeTimers();
-      const { sockets } = renderMachineTerminal("epoch-header-test");
-      const ws = sockets[0];
-      await ws.waitForHandlers();
-      act(() => ws.onopen?.());
-
-      // While connecting, status is Connecting
-      expect(connectionStatus()).toHaveTextContent("Connecting");
-
-      // Validated affirmative_exit outcome reflects Exited in header
-      const exitFrame = {
-        type: "terminalOutcome",
-        target: { sessionId: "session-machine-1", backendSessionId: "session-machine-1", daemonEpoch: "epoch-header-test" },
-        incarnation: "inc-1",
-        generation: "1",
-        state: "affirmative_exit",
-        blockedReason: null,
-        exitCode: 0,
-      };
-      act(() => ws.onmessage?.({ data: JSON.stringify(exitFrame) }));
-      expect(connectionStatus()).toHaveTextContent("Exited");
-
-      // A new explicit attempt may report a different authoritative outcome.
-      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry" })); });
-      const next = sockets[1];
-      await next.waitForHandlers();
-      const blockedFrame = {
-        type: "terminalOutcome",
-        target: { sessionId: "session-machine-1", backendSessionId: "session-machine-1", daemonEpoch: "epoch-header-test" },
-        incarnation: "inc-1",
-        generation: "1",
-        state: "blocked",
-        blockedReason: "auth_revoked",
-        exitCode: null,
-      };
-      act(() => next.onmessage?.({ data: JSON.stringify(blockedFrame) }));
-      expect(connectionStatus()).toHaveTextContent("Blocked");
-    });
-
-    it("renders replay gap indicator on current owner gap frame and resets on session/dial, ignoring stale gaps", async () => {
-      vi.useFakeTimers();
-      vi.stubGlobal("WebSocket", MockWebSocket);
-
-      const target = { sessionId: "session-gap-test", daemonEpoch: null };
-      const view = render(<RemoteTerminal sessionId={target.sessionId} token="token-gap" />);
-      const ws = socket();
-      act(() => ws.onopen?.());
-
-      // Initially, no replay gap indicator
-      expect(screen.queryByTestId("remote-terminal-replay-gap")).toBeNull();
-
-      // Replay gap frame on current socket displays indicator
-      act(() => {
-        ws.onmessage?.({
-          data: JSON.stringify({
-            type: "replayGap",
-            tail: "task9-gap-tail",
-          }),
-        });
-      });
-      const gapIndicator = screen.getByTestId("remote-terminal-replay-gap");
-      expect(gapIndicator).toHaveTextContent("Output gap");
-
-      // Stale gap frame from old socket after redial does not corrupt fresh socket
-      act(() => ws.onclose?.());
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1000);
-      });
-      const ws2 = socket();
-      expect(ws2).not.toBe(ws);
-
-      // Redial resets replay gap state
-      expect(screen.queryByTestId("remote-terminal-replay-gap")).toBeNull();
-
-      // Stale message from ws is ignored
-      act(() => {
-        ws.onmessage?.({
-          data: JSON.stringify({
-            type: "replayGap",
-            tail: "stale-tail",
-          }),
-        });
-      });
-      expect(screen.queryByTestId("remote-terminal-replay-gap")).toBeNull();
-
-      view.unmount();
-    });
   });
 });

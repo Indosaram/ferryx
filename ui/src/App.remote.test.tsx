@@ -121,16 +121,9 @@ async function mount() { await act(async () => { render(<App />); }); }
 beforeEach(() => {
   localStorage.clear(); resetWorkspaceRestore(); vi.clearAllMocks(); hosts.current = [];
   native.isTauriRuntime.mockReturnValue(false);
-  const remoteStatusListeners = new Set<(status: import("./lib/types").TerminalRemoteStatus) => void>();
   native.onTerminalRemoteStatus.mockImplementation(async (handler: (status: import("./lib/types").TerminalRemoteStatus) => void) => {
-    remoteStatusListeners.add(handler);
-    native.remoteStatusHandler = (status: import("./lib/types").TerminalRemoteStatus) => {
-      for (const listener of Array.from(remoteStatusListeners)) listener(status);
-    };
-    return () => {
-      remoteStatusListeners.delete(handler);
-      if (remoteStatusListeners.size === 0) native.remoteStatusHandler = null;
-    };
+    native.remoteStatusHandler = handler;
+    return () => { if (native.remoteStatusHandler === handler) native.remoteStatusHandler = null; };
   });
   native.registerProject.mockImplementation(async (request: { workspaceId: string; repoPath: string }) => ({ workspaceId: request.workspaceId, repoRoot: request.repoPath, gitRoot: null }));
   native.registerRemoteProject.mockResolvedValue(registered);
@@ -220,8 +213,9 @@ describe("App SSH project lifecycle", () => {
     native.retryTerminalRemoteSession.mockReturnValue(reboundRetry.promise);
     const reboundResults: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
     native.refresh!(retained.id, result => reboundResults.push(result));
-    await act(async () => {
-      await appRebindHandler!(retained.id, retained.backendSessionId!, retained.cwd, "new-epoch");
+    const changed = { ...retained, daemonEpoch: "new-epoch" };
+    (await import("./state/workspaceSnapshotCache")).setWorkspaceSnapshot(remote.workspaceId, {
+      ...snapshot, sessions: { ...snapshot.sessions, [retained.id]: changed },
     });
     await act(async () => { reboundRetry.resolve({ type: "retryRemoteSessionOk" }); await reboundRetry.promise; });
     await act(async () => { native.remoteStatusHandler!({ sessionId: retained.backendSessionId!, state: "connected", generation: 6, failure: null, replayGap: null }); });
@@ -259,80 +253,6 @@ describe("App SSH project lifecycle", () => {
 
     expect(await firstError).toMatchObject({ code: "RECOVERY_OWNER_CHANGED" });
     expect(await secondOutcome).toBe("ok");
-  });
-  it("preserves rebound SSH owner operation when earlier captured cancel is invoked and resolves ready", async () => {
-    seed([remote]);
-    await mount();
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
-    const snapshot = (await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!;
-    const retained = Object.values(snapshot.sessions)[0];
-    const oldRetry = deferred<{ type: string }>();
-    const newRetry = deferred<{ type: string }>();
-    native.retryTerminalRemoteSession
-      .mockReturnValueOnce(oldRetry.promise)
-      .mockReturnValueOnce(newRetry.promise);
-
-    let oldReconnect!: Promise<void>;
-    act(() => { oldReconnect = native.reconnect!(retained.id); });
-    const oldOutcome = oldReconnect.catch(err => err);
-
-    const oldResults: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
-    let oldCancel!: () => void;
-    await act(async () => {
-      oldCancel = native.refresh!(retained.id, res => oldResults.push(res));
-    });
-    expect(oldResults).toEqual([{ kind: "pending" }]);
-
-    await act(async () => {
-      await appRebindHandler!(retained.id, retained.backendSessionId!, retained.cwd, "epoch-rebound");
-    });
-
-    let newReconnect!: Promise<void>;
-    act(() => { newReconnect = native.reconnect!(retained.id); });
-    const newOutcome = newReconnect.then(() => "ok", err => err);
-
-    const newResults: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
-    await act(async () => {
-      native.refresh!(retained.id, res => newResults.push(res));
-    });
-    expect(newResults).toEqual([{ kind: "pending" }]);
-
-    oldCancel();
-
-    await act(async () => {
-      oldRetry.resolve({ type: "retryRemoteSessionOk" });
-      await oldRetry.promise;
-    });
-    await act(async () => {
-      newRetry.resolve({ type: "retryRemoteSessionOk" });
-      await newRetry.promise;
-    });
-
-    expect(native.remoteStatusHandler).not.toBeNull();
-    await act(async () => {
-      native.remoteStatusHandler!({
-        sessionId: retained.backendSessionId!,
-        state: "connected",
-        generation: 7,
-        failure: null,
-        replayGap: null,
-      });
-    });
-
-    expect(await oldOutcome).toMatchObject({ code: "RECOVERY_CANCELLED" });
-    expect(oldResults).toEqual([{ kind: "pending" }]);
-    expect(await newOutcome).toBe("ok");
-    expect(newResults.at(-1)).toMatchObject({
-      kind: "ready",
-      session: {
-        id: retained.id,
-        backendSessionId: retained.backendSessionId,
-        daemonEpoch: "epoch-rebound",
-        remoteConnectionState: "connected",
-        remoteGeneration: 7,
-      },
-    });
-    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
   });
   it("aborts before retryTerminalRemoteSession when cancelled during listener registration", async () => {
     seed([remote]);

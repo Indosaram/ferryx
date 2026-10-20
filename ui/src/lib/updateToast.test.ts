@@ -11,7 +11,6 @@ import { DISMISSED_UPDATE_VERSION_STORAGE_KEY } from "./storageKeys";
 
 let statusSubscriber: ((status: any) => void) | null = null;
 const mockDownloadAndInstallUpdate = vi.fn().mockResolvedValue(undefined);
-const mockCancelUpdateDownload = vi.fn().mockResolvedValue(undefined);
 const mockRelaunchApp = vi.fn().mockResolvedValue(undefined);
 let updateState = "available";
 
@@ -25,7 +24,6 @@ vi.mock("./updater", () => ({
     };
   }),
   downloadAndInstallUpdate: () => mockDownloadAndInstallUpdate(),
-  cancelUpdateDownload: () => mockCancelUpdateDownload(),
   getUpdateStatus: () => ({ state: updateState }),
   relaunchApp: () => mockRelaunchApp(),
   updatesManagedExternally: () => mockUpdatesManagedExternally(),
@@ -71,7 +69,6 @@ describe("updateToast", () => {
     vi.clearAllMocks();
     mockUpdatesManagedExternally.mockResolvedValue(false);
     mockDownloadAndInstallUpdate.mockResolvedValue(undefined);
-    mockCancelUpdateDownload.mockResolvedValue(undefined);
     updateState = "available";
     statusSubscriber = null;
   });
@@ -177,90 +174,6 @@ describe("updateToast", () => {
         expect.objectContaining({
           id: UPDATE_TOAST_ID,
           duration: 8000,
-        }),
-      );
-    });
-
-    it("toast shows Cancel while downloading", () => {
-      handleUpdateStatusChange(
-        { state: "downloading", version: "2026.830.3", downloadProgress: 0.3 },
-        storage,
-      );
-
-      const options = mockToast.loading.mock.calls[0][1];
-      expect(options.action).toEqual(expect.objectContaining({ label: "Cancel" }));
-      options.action.onClick();
-      expect(mockCancelUpdateDownload).toHaveBeenCalledTimes(1);
-      expect(mockDownloadAndInstallUpdate).not.toHaveBeenCalled();
-
-      // The same toast id is updated in place, so later states must clear the Cancel action.
-      handleUpdateStatusChange({ state: "downloaded", version: "2026.830.3" }, storage);
-      handleUpdateStatusChange({ state: "error", version: "2026.830.3", error: "disk full" }, storage);
-      expect(mockToast.success.mock.calls[0][1]).toHaveProperty("action", undefined);
-      expect(mockToast.error.mock.calls[0][1]).toHaveProperty("action", undefined);
-    });
-
-    it("offers no Cancel once a cancel is pending or the update is installing", () => {
-      handleUpdateStatusChange(
-        { state: "downloading", version: "2026.830.3", downloadProgress: 0.3, cancelRequested: true },
-        storage,
-      );
-      handleUpdateStatusChange(
-        { state: "downloading", version: "2026.830.3", downloadProgress: 1, installing: true },
-        storage,
-      );
-
-      expect(mockToast.loading).toHaveBeenCalledTimes(2);
-      expect(mockToast.loading.mock.calls[0][1]).toMatchObject({
-        id: UPDATE_TOAST_ID,
-        description: "Cancelling download…",
-        action: undefined,
-      });
-      expect(mockToast.loading.mock.calls[1]).toEqual([
-        "Installing update",
-        expect.objectContaining({ id: UPDATE_TOAST_ID, action: undefined }),
-      ]);
-    });
-
-    it("shows Retry when the download stalled, even for a dismissed version", async () => {
-      saveDismissedUpdateVersion("2026.830.3", storage);
-      mockDownloadAndInstallUpdate.mockImplementationOnce(async () => {
-        updateState = "downloaded";
-      });
-
-      handleUpdateStatusChange(
-        { state: "available", version: "2026.830.3", lastFailure: "stalled" },
-        storage,
-      );
-
-      expect(mockToast.info).not.toHaveBeenCalled();
-      const [title, options] = mockToast.error.mock.calls[0];
-      expect(title).toBe("Update download stalled");
-      expect(options).toEqual(
-        expect.objectContaining({
-          id: UPDATE_TOAST_ID,
-          duration: Infinity,
-          action: expect.objectContaining({ label: "Retry" }),
-        }),
-      );
-      await options.action.onClick();
-      expect(mockDownloadAndInstallUpdate).toHaveBeenCalledTimes(1);
-      expect(mockRelaunchApp).toHaveBeenCalledTimes(1);
-    });
-
-    it("re-offers a cancelled update without marking it dismissed", () => {
-      handleUpdateStatusChange(
-        { state: "available", version: "2026.830.3", lastFailure: "cancelled" },
-        storage,
-      );
-
-      expect(loadDismissedUpdateVersion(storage)).toBeNull();
-      expect(mockToast.info).toHaveBeenCalledWith(
-        "Update available",
-        expect.objectContaining({
-          id: UPDATE_TOAST_ID,
-          description: "Download of Ferryx v2026.830.3 was cancelled. Nothing was installed.",
-          action: expect.objectContaining({ label: "Update" }),
         }),
       );
     });

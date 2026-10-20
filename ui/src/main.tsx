@@ -57,9 +57,6 @@ async function boot() {
 
   if (isTauriApp) {
     void bootTrace("app.import.start");
-    const { installNativeShortcutTablePush } = await import("./lib/nativeShortcutTable");
-    const stopNativeShortcutTablePush = installNativeShortcutTablePush();
-    import.meta.hot?.dispose(stopNativeShortcutTablePush);
     const { bootstrapPairedHostInventory } = await import("./lib/pairedHostInventory");
     void bootstrapPairedHostInventory();
     const { startTailscaleDiscovery } = await import("./lib/tailscaleDiscovery");

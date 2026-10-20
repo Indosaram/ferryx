@@ -106,7 +106,6 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
 
     invokeMock.mockImplementation(async (command: string, args?: any) => {
       if (command === "cmd_ssh_list_hosts") return [mockSshHost];
-      if (command === "cmd_agent_integration_get") return { enabled: true };
       if (command === "cmd_ssh_read_system_config") {
         return {
           path: "/Users/test/.ssh/config",

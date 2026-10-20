@@ -69,8 +69,6 @@ describe("workspaceStore audit lifecycle regression tests", () => {
         backendSessionId: "backend-failed-1",
         lifecycle: "working",
         reconnectLifecycle: "binding",
-        incarnation: "inc-fail",
-        daemonEpoch: "epoch-fail",
       };
 
       const state: WorkspaceState = {
@@ -88,8 +86,6 @@ describe("workspaceStore audit lifecycle regression tests", () => {
         type: "SESSION_LIFECYCLE",
         backendSessionId: "backend-failed-1",
         lifecycle: "failed",
-        incarnation: "inc-fail",
-        daemonEpoch: "epoch-fail",
       });
 
       expect(next.sessions["term-fail"].lifecycle).toBe("failed");

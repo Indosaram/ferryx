@@ -977,29 +977,6 @@ impl RemoteSessionBackend for SessionRouter {
         })
     }
 
-    fn paired_recovery_outcome<'a>(
-        &'a self,
-        session_id: &'a str,
-    ) -> BoxFuture<'a, Result<Option<crate::remote::backend::RemotePairedRecoveryOutcome>, String>> {
-        Box::pin(async move {
-            let outcome = self.terminal_service.paired().recovery_outcome(session_id);
-            Ok(outcome.filter(|outcome| {
-                outcome.backend_session_id == session_id
-                    && !outcome.incarnation.is_empty()
-                    && !outcome.daemon_epoch.is_empty()
-            }).map(|outcome| crate::remote::backend::RemotePairedRecoveryOutcome {
-                backend_session_id: outcome.backend_session_id,
-                daemon_epoch: outcome.daemon_epoch,
-                incarnation: outcome.incarnation,
-                generation: outcome.generation,
-                state: outcome.state,
-                blocked_reason: outcome.blocked_reason,
-                exit_code: outcome.exit_code,
-            }))
-        })
-    }
-
-
     fn attach_with_sequence(
         &self,
         session_id: &str,

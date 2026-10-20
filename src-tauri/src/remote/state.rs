@@ -249,7 +249,7 @@ fn probe_tailscale_cli(target: &std::net::Ipv4Addr) -> Option<bool> {
     ];
 
     for bin in candidates {
-        let output = crate::util::no_window_command(bin)
+        let output = std::process::Command::new(bin)
             .args(["status", "--json"])
             .output();
         if let Ok(out) = output {
@@ -330,7 +330,7 @@ fn verify_overlay_with_interface(iface_name: Option<&str>, addr: &std::net::Ipv4
             return cli_result;
         }
         let target_str = addr.to_string();
-        if let Ok(output) = crate::util::no_window_command("ipconfig")
+        if let Ok(output) = std::process::Command::new("ipconfig")
             .args(["/all"])
             .output()
         {

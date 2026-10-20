@@ -157,16 +157,6 @@ impl ChildSurfaceVisibility {
         !self.mapped && !self.detached
     }
 
-    #[cfg(feature = "local-split-qa")]
-    pub fn mapped(&self) -> bool {
-        self.mapped
-    }
-
-    #[cfg(feature = "local-split-qa")]
-    pub fn detached(&self) -> bool {
-        self.detached
-    }
-
     pub fn mark_presented(&mut self) {
         if !self.detached {
             self.mapped = true;

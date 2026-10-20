@@ -1,0 +1,227 @@
+﻿<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob:; style-src 'unsafe-inline' data:; img-src data: blob:; font-src data:; media-src data: blob:; worker-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'"><html lang="ko"><head><meta name="viewport" content="width=device-width, initial-scale=1"><style id="t3-theme">:root{color-scheme:dark;--background:#0a0a0a;--foreground:#f5f5f5;--muted-foreground:#818181;--chart-1:#60a5fa;--font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;--font-mono:"SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;--radius:0.625rem;}@media (prefers-color-scheme: light){:root{color-scheme:light;--background:#ffffff;--foreground:#0a0a0a;--muted-foreground:#525252;--chart-1:#1d4ed8;--font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;--font-mono:"SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;--radius:0.625rem;}}html{background:var(--background);color:var(--foreground);font-family:var(--font-sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;scrollbar-width:none}html::-webkit-scrollbar{display:none}body{margin:0}code,kbd,pre,samp{font-family:var(--font-mono)}</style><script>(function(){var s=document.getElementById("t3-theme");if(!s)return;var b="html{background:var(--background);color:var(--foreground);font-family:var(--font-sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;scrollbar-width:none}html::-webkit-scrollbar{display:none}body{margin:0}code,kbd,pre,samp{font-family:var(--font-mono)}";try{var m=window.matchMedia("(prefers-color-scheme: light)");var a=function(){s.textContent=m.matches?":root{color-scheme:light;--background:#ffffff;--foreground:#0a0a0a;--muted-foreground:#525252;--chart-1:#1d4ed8;--font-sans:-apple-system, BlinkMacSystemFont, \"Segoe UI\", system-ui, sans-serif;--font-mono:\"SF Mono\", \"SFMono-Regular\", Menlo, Consolas, \"Liberation Mono\", monospace;--radius:0.625rem;}":":root{color-scheme:dark;--background:#0a0a0a;--foreground:#f5f5f5;--muted-foreground:#818181;--chart-1:#60a5fa;--font-sans:-apple-system, BlinkMacSystemFont, \"Segoe UI\", system-ui, sans-serif;--font-mono:\"SF Mono\", \"SFMono-Regular\", Menlo, Consolas, \"Liberation Mono\", monospace;--radius:0.625rem;}"+b;};a();if(m.addEventListener)m.addEventListener("change",a);}catch(e){}})();</script><meta charset="utf-8"><title>Sidebar mockup v2</title><style>
+:root{--bg:#23262d;--card:#171717;--sb:#2a2a2a;--sbacc:#353535;--fg:#fafafa;--mut:#a1a1a1;--bd:rgba(255,255,255,.0706);--ring:#737373;
+--work:#60a5fa;--warn:#fbbf24;--ok:#86efac;--idle:#737373}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--fg);font:12px/1.35 ui-sans-serif,-apple-system,"Geist",system-ui,sans-serif;padding:24px;-webkit-font-smoothing:antialiased}
+h1{font-size:15px;font-weight:600;margin-bottom:4px}
+.lead{color:var(--mut);font-size:12px;margin-bottom:20px;max-width:900px}
+.row{display:flex;gap:28px;align-items:flex-start;flex-wrap:wrap}
+.col h2{font-size:12px;font-weight:600;margin-bottom:8px;color:var(--mut);letter-spacing:.02em}
+.col h2 b{color:var(--fg)}
+.sb{background:var(--sb);color:rgba(250,250,250,.88);height:560px;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;box-shadow:0 0 0 1px var(--bd),0 12px 30px rgba(0,0,0,.35);position:relative}
+.tb{height:36px;display:flex;align-items:center;gap:2px;padding:0 8px;flex-shrink:0}
+.tl{display:flex;gap:7px;width:72px}.tl i{width:11px;height:11px;border-radius:50%;background:#4a4a4a}
+.ib{all:unset;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:5px;color:var(--mut);cursor:default}
+.ib:hover{background:rgba(255,255,255,.06);color:var(--fg)}.ib.sm{width:20px;height:20px}
+.ic{flex-shrink:0;display:block}.ic.mut{color:var(--mut)}
+.badge-n{position:absolute;right:-2px;top:-2px;background:var(--warn);color:#000;font-size:9px;font-weight:700;min-width:14px;height:14px;border-radius:7px;display:flex;align-items:center;justify-content:center;padding:0 3px}
+.scroll{flex:1;overflow:auto;padding:4px 8px 8px}
+.tr{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0;flex:1}
+.fg{color:var(--fg)}
+.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;display:inline-block}
+.dot-work{background:var(--work);box-shadow:0 0 0 3px rgba(96,165,250,.18)}.dot-wait{background:var(--warn);box-shadow:0 0 0 3px rgba(251,191,36,.18)}
+.dot-idle{background:var(--idle)}.dot-ok{background:var(--ok)}.dot-unread{background:var(--fg)}
+.chev{display:inline-flex;width:20px;height:20px;align-items:center;justify-content:center;color:var(--mut);flex-shrink:0}.chev.open svg{transform:rotate(90deg)}
+.ft{display:flex;align-items:center;justify-content:flex-end;gap:4px;padding:6px 8px;border-top:1px solid var(--bd);flex-shrink:0}
+.watch{margin-right:auto;display:flex;align-items:center;gap:6px;color:var(--mut);font-size:10.5px;padding-left:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mono{font-family:ui-monospace,"Geist Mono",SFMono-Regular,Menlo,monospace}
+/* current */
+.c-proj{display:flex;align-items:center;height:28px;border-radius:6px;padding-right:4px;color:rgba(250,250,250,.65);gap:2px}
+.c-proj.hover{background:rgba(53,53,53,.6);color:rgba(250,250,250,.9)}
+.c-name{display:flex;align-items:center;gap:6px;flex:1;min-width:0}
+.c-hov{display:flex;gap:4px;align-items:center;color:var(--mut)}.danger{color:#f87171}
+.pill-run{font-size:9px;font-weight:500;background:rgba(96,165,250,.12);color:var(--work);border-radius:9px;padding:2px 6px;white-space:nowrap}
+.c-stat{font-size:10px;color:var(--idle);white-space:nowrap}
+.c-kids{padding-left:20px}
+.c-wt{display:flex;align-items:center;gap:6px;min-height:28px;padding:4px 8px;margin:2px 0;border-radius:6px;border:1px solid transparent;overflow:hidden}
+.c-wt b{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.c-wt.active{border-color:#6c6c6c;background:#3f3f3f;color:#fafafa}
+.c-prim,.c-host{background:#4a4a4a;color:#d8d8d8;border-radius:4px;font-size:10px;padding:1px 6px;white-space:nowrap}
+.c-host{margin-left:auto}
+.c-dirty{color:var(--warn);font-size:10px;white-space:nowrap}
+.c-sub{font-size:10px;color:var(--mut);padding-left:22px;margin-top:-4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* proposed */
+.seg-wrap{padding:0 8px 6px;position:relative}
+.seg{display:flex;background:rgba(0,0,0,.22);border-radius:7px;padding:2px;gap:2px}
+.seg button{all:unset;flex:1;text-align:center;font-size:11px;padding:4px 0;border-radius:5px;color:var(--mut);display:flex;align-items:center;justify-content:center;gap:5px}
+.seg button.on{background:var(--sbacc);color:var(--fg)}
+.cnt{font-size:10px;color:var(--mut);font-variant-numeric:tabular-nums}
+.seg .cnt{background:rgba(251,191,36,.16);color:var(--warn);border-radius:8px;padding:0 5px;line-height:15px}
+.search{margin:0 8px 6px;height:26px;display:flex;align-items:center;gap:6px;padding:0 8px;border-radius:6px;background:rgba(255,255,255,.04);color:var(--mut);font-size:12px;position:relative}
+.search span{flex:1}
+kbd{font:10px ui-monospace,monospace;color:var(--mut);background:rgba(255,255,255,.06);border-radius:4px;padding:1px 5px}
+.sh{display:flex;align-items:center;justify-content:space-between;height:28px;padding:0 16px 0 14px;font-size:11px;font-weight:500;color:var(--mut);letter-spacing:.02em}
+.p-proj{display:flex;align-items:center;gap:6px;height:28px;border-radius:6px;padding-right:4px;color:rgba(250,250,250,.7);position:relative}
+.p-proj .chev{margin-right:-4px}
+.p-proj.hover{background:rgba(53,53,53,.6)}
+.p-hov{display:flex;gap:0}
+.slot{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:var(--mut);white-space:nowrap;flex-shrink:0}
+.p-kids{position:relative;margin-left:16px;padding:2px 0 4px}
+.p-kids:before{content:"";position:absolute;left:0;top:2px;bottom:6px;width:1px;background:var(--bd)}
+.p-wt{position:relative;display:flex;border-radius:6px;margin:1px 0 1px 8px;padding:5px 8px 5px 10px}
+.p-wt:hover{background:rgba(255,255,255,.04)}
+.p-wt.active{background:var(--sbacc)}
+.rail{position:absolute;left:-8px;top:6px;bottom:6px;width:1px}
+.rail.on{background:var(--ring)}
+.p-wt-body{min-width:0;flex:1}
+.l1{display:flex;align-items:center;gap:8px;font-weight:600;font-size:12px}
+.l2{display:flex;align-items:center;gap:4px;font-size:10.5px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden}
+.l2 .mono{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.l2 .sep{opacity:.5}.warn{color:var(--warn);flex-shrink:0}
+.mark{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;background:#e879f9;color:#000;font-size:9px;font-weight:700;flex-shrink:0;margin-left:4px}
+.seg-wrap .mark,.search .mark{position:absolute;right:-4px;top:-5px}
+.legend{margin-top:22px;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px 24px;max-width:1100px}
+.legend div{display:flex;gap:8px;color:var(--mut);font-size:12px;line-height:1.5}.legend b{color:var(--fg);font-weight:600}
+.legend .mark{margin:2px 0 0}
+.note{margin-top:6px;font-size:11px;color:var(--mut)}
+.p-wt{padding:0 8px 0 10px;min-height:28px;align-items:center}.p-wt .rail{top:5px;bottom:5px}.l1 .slot+.slot{margin-left:2px}</style></head><body>
+<h1>Ferryx 사이드바 — 현재 vs 제안 (v2: git 정보 제거)</h1>
+<p class="lead">같은 데이터를 두 버전으로 그렸습니다. 제안 쪽에는 worktree를 하나(daemon-lifetime, idle) 더 넣어, 아무 신호가 없을 때 행이 얼마나 조용해지는지 보이게 했습니다. 색상은 <code>ui/DESIGN.md</code> 토큰만 사용했고, 첫 번째 프로젝트 행은 hover 상태입니다.</p>
+<div class="row">
+ <div class="col"><h2><b>현재</b> · 236px</h2>
+<aside class="sb" style="width:236px">
+  <div class="tb"><div class="tl"><i></i><i></i><i></i></div>
+    <button class="ib"><svg class="ic " width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg></button><button class="ib"><svg class="ic " width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button>
+    <div style="margin-left:auto;position:relative"><button class="ib"><svg class="ic " width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></button><span class="badge-n">3</span></div>
+  </div>
+  <div class="scroll">
+    <div class="c-proj hover"><span class="chev open"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span><span class="c-name"><svg class="ic " width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="tr">ferryx</span>
+      <span class="pill-run">2 running</span><span class="dot dot-wait"></span></span>
+      <span class="c-hov"><svg class="ic " width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="danger"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg></span></span></div>
+    <div class="c-kids">
+      <div class="c-wt"><span class="dot dot-work"></span><b>main</b><span class="c-prim">primary</span><span class="c-dirty">Dirty · 3 files</span></div>
+      <div class="c-wt active"><span class="dot dot-work"></span><b>sidebar-redesign</b></div>
+      <div class="c-wt"><span class="dot dot-idle"></span><b>relay-latency</b><span class="c-dirty">Dirty · 12 files</span></div>
+      <div class="c-wt"><span class="dot dot-idle"></span><b>omarchy</b><span class="c-host">omarchy</span></div>
+      <div class="c-sub">/home/sook/code/ferryx - Online (relay)</div>
+    </div>
+    <div class="c-proj"><span class="chev"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span><span class="c-name"><svg class="ic " width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="tr">maho-ws (daas)</span><span class="c-stat">Online (relay)</span></span></div>
+    <div class="c-proj"><span class="chev"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span><span class="c-name"><svg class="ic " width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="tr">piratetalk</span><span class="dot dot-unread"></span></span></div>
+    <div class="c-proj"><span class="chev"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span><span class="c-name"><svg class="ic " width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="tr">site</span></span></div>
+  </div>
+  <div class="ft"><span class="watch"><span class="dot dot-ok"></span>12 sessions watched</span><button class="ib"><svg class="ic " width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></button><button class="ib"><svg class="ic " width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg></button></div>
+</aside></div>
+ <div class="col"><h2><b>제안</b> · 236px</h2>
+<aside class="sb" style="width:236px">
+  <div class="tb"><div class="tl"><i></i><i></i><i></i></div>
+    <button class="ib"><svg class="ic " width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg></button>
+    <button class="ib" style="margin-left:auto" title="Add project"><svg class="ic " width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button>
+  </div>
+  <div class="seg-wrap">
+    <div class="seg" role="tablist"><button class="on">Worktrees</button><button>Inbox <span class="cnt">3</span></button></div><span class="mark">6</span>
+  </div>
+  <div class="search"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg><span>Filter worktrees</span><kbd>⌘P</kbd><span class="mark">5</span></div>
+  <div class="sh"><span>Projects</span><span class="cnt">4</span></div>
+  <div class="scroll">
+    <div class="p-proj hover">
+      <span class="chev open"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span><svg class="ic mut" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+      <span class="tr fg">ferryx</span>
+      <span class="p-hov"><button class="ib sm"><svg class="ic " width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button><button class="ib sm"><svg class="ic " width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></button></span><span class="mark">4</span>
+    </div>
+    <div class="p-kids">
+      
+  <div class="p-wt " >
+    <span class="rail "></span>
+    <div class="p-wt-body">
+      <div class="l1"><span class="tr ">main</span><span class="slot">running<span class="dot dot-work"></span></span></div>
+    </div>
+  </div>
+      
+  <div class="p-wt active" aria-current="true">
+    <span class="rail on"></span>
+    <div class="p-wt-body">
+      <div class="l1"><span class="tr fg">sidebar-redesign</span><span class="slot">running<span class="dot dot-work"></span></span></div>
+    </div>
+  </div>
+      
+  <div class="p-wt " >
+    <span class="rail "></span>
+    <div class="p-wt-body">
+      <div class="l1"><span class="tr ">relay-latency</span><span class="slot">needs input<span class="dot dot-wait"></span></span></div>
+    </div>
+  </div>
+      
+  <div class="p-wt " >
+    <span class="rail "></span>
+    <div class="p-wt-body">
+      <div class="l1"><span class="tr ">daemon-lifetime</span></div>
+    </div>
+  </div>
+      
+  <div class="p-wt " >
+    <span class="rail "></span>
+    <div class="p-wt-body">
+      <div class="l1"><span class="tr ">omarchy</span><span class="slot"><svg class="ic " width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>omarchy</span></div>
+    </div>
+  </div>
+    </div>
+    <div class="p-proj"><span class="chev"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span><svg class="ic mut" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="tr">maho-ws</span><span class="slot"><svg class="ic " width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>daas</span></div>
+    <div class="p-proj"><span class="chev"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span><svg class="ic mut" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="tr">piratetalk</span><span class="slot"><span class="dot dot-unread"></span></span></div>
+    <div class="p-proj"><span class="chev"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span><svg class="ic mut" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="tr">site</span></div>
+  </div>
+  <div class="ft"><span class="watch">2 running · 1 needs input</span><span class="mark">7</span><button class="ib"><svg class="ic " width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></button><button class="ib"><svg class="ic " width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg></button></div>
+</aside></div>
+ <div class="col"><h2><b>제안</b> · 220px (최소 폭)</h2>
+<aside class="sb" style="width:220px">
+  <div class="tb"><div class="tl"><i></i><i></i><i></i></div>
+    <button class="ib"><svg class="ic " width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg></button>
+    <button class="ib" style="margin-left:auto" title="Add project"><svg class="ic " width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button>
+  </div>
+  <div class="seg-wrap">
+    <div class="seg" role="tablist"><button class="on">Worktrees</button><button>Inbox <span class="cnt">3</span></button></div>
+  </div>
+  <div class="search"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg><span>Filter worktrees</span><kbd>⌘P</kbd></div>
+  <div class="sh"><span>Projects</span><span class="cnt">4</span></div>
+  <div class="scroll">
+    <div class="p-proj hover">
+      <span class="chev open"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span><svg class="ic mut" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+      <span class="tr fg">ferryx</span>
+      <span class="p-hov"><button class="ib sm"><svg class="ic " width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button><button class="ib sm"><svg class="ic " width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></button></span>
+    </div>
+    <div class="p-kids">
+      
+  <div class="p-wt " >
+    <span class="rail "></span>
+    <div class="p-wt-body">
+      <div class="l1"><span class="tr ">main</span><span class="slot">running<span class="dot dot-work"></span></span></div>
+    </div>
+  </div>
+      
+  <div class="p-wt active" aria-current="true">
+    <span class="rail on"></span>
+    <div class="p-wt-body">
+      <div class="l1"><span class="tr fg">sidebar-redesign</span><span class="slot">running<span class="dot dot-work"></span></span></div>
+    </div>
+  </div>
+      
+  <div class="p-wt " >
+    <span class="rail "></span>
+    <div class="p-wt-body">
+      <div class="l1"><span class="tr ">relay-latency</span><span class="slot">needs input<span class="dot dot-wait"></span></span></div>
+    </div>
+  </div>
+      
+  <div class="p-wt " >
+    <span class="rail "></span>
+    <div class="p-wt-body">
+      <div class="l1"><span class="tr ">daemon-lifetime</span></div>
+    </div>
+  </div>
+      
+  <div class="p-wt " >
+    <span class="rail "></span>
+    <div class="p-wt-body">
+      <div class="l1"><span class="tr ">omarchy</span><span class="slot"><svg class="ic " width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>omarchy</span></div>
+    </div>
+  </div>
+    </div>
+    <div class="p-proj"><span class="chev"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span><svg class="ic mut" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="tr">maho-ws</span><span class="slot"><svg class="ic " width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>daas</span></div>
+    <div class="p-proj"><span class="chev"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span><svg class="ic mut" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="tr">piratetalk</span><span class="slot"><span class="dot dot-unread"></span></span></div>
+    <div class="p-proj"><span class="chev"><svg class="ic " width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span><svg class="ic mut" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="tr">site</span></div>
+  </div>
+  <div class="ft"><span class="watch">2 running · 1 needs input</span><button class="ib"><svg class="ic " width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></button><button class="ib"><svg class="ic " width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg></button></div>
+</aside></div>
+</div>
+<div class="legend"><div><span class="mark">1</span><span><b>이름 클릭 = 선택만</b> — 이미 펼쳐진 프로젝트 이름을 눌러도 접히지 않습니다. 접기는 chevron만 담당합니다.</span></div><div><span class="mark">2</span><span><b>활성 행 = 배경 톤 + 레일</b> — 회색 테두리와 hex 값을 없애고 <code>worktree-sidebar-accent</code> 배경으로 표시합니다. 왼쪽 가이드 레일이 활성 행에서만 밝아집니다.</span></div><div><span class="mark">3</span><span><b>한 줄 행</b> — 이름과 상태 슬롯 하나만 둡니다. 브랜치, 변경 수, primary 배지 같은 git 정보는 모두 뺐습니다. 원격 호스트만 오른쪽에 작게 남깁니다. idle 점은 표시하지 않습니다.</span></div><div><span class="mark">4</span><span><b>hover 버튼 2개로 축소</b> — <code>+</code>와 <code>⋯</code>만 남깁니다. 휴지통과 History는 ⋯ 메뉴 / 우클릭 메뉴로 옮깁니다.</span></div><div><span class="mark">5</span><span><b>필터 필드</b> — 프로젝트·worktree 이름과 브랜치로 바로 좁힐 수 있습니다.</span></div><div><span class="mark">6</span><span><b>Worktrees / Inbox 세그먼트</b> — 지금 보고 있는 모드가 항상 보입니다. 아이콘 pressed 상태로만 알던 것을 대체합니다.</span></div><div><span class="mark">7</span><span><b>푸터는 실제 의미로</b> — "12 sessions watched" 대신 실행 중·입력 대기 수를 보여 줍니다.</span></div></div>
+<p class="note">①은 클릭 동작이라 그림에는 표시하지 않았습니다.</p>
+</body></html>

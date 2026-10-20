@@ -234,58 +234,19 @@ export type TerminalLifecycle = "starting" | "working" | "waiting" | "exited" | 
 export type ReconnectLifecycle = "idle" | "validating" | "spawning" | "binding" | "failed";
 
 export type RemoteConnectionState = "connected" | "reconnecting" | "disconnected" | "expired";
-export type SessionRecoveryState =
-  | { phase: "recovering"; reason: string }
-  | { phase: "blocked"; reason: string }
-  | { phase: "exited"; reason: string | null };
 export type RemoteFailure = {
   kind: "network" | "transport" | "authentication" | "missing" | "expired" | "protocol" | "busy" | "staleGeneration" | "disconnected";
   message: string;
 };
 export type RemoteReplayGap = { requestedAfterCursor: string; availableFromCursor: string };
-export type PairedTerminalStatusDescriptor = {
-  backendSessionId: string;
-  hostId: string;
-  target: { machineId: string; daemonEpoch: string; sessionId: string } | import("./scopedContracts").TargetRef;
-  incarnation: string;
-  daemonEpoch: string;
-};
-export type PairedRuntimeStatusTarget = { machineId: string; daemonEpoch: string; sessionId: string };
 export type TerminalRemoteStatus = {
   sessionId: string;
-  daemonEpoch?: string | null;
-  incarnation?: string | null;
-  target?: { kind: "local" } | { kind: "ssh" | "pairedDaemon"; hostId: string } | import("./scopedContracts").TargetRef | PairedRuntimeStatusTarget | null;
   state: RemoteConnectionState;
   generation: number;
   failure: RemoteFailure | null;
   replayGap: RemoteReplayGap | null;
-  descriptor?: RemoteSessionDetails["descriptor"] | PairedTerminalStatusDescriptor | null;
 };
-export type PairedSessionActorIdentity = {
-  backendSessionId: string;
-  daemonEpoch: string;
-  incarnation: string;
-  generation: number | null;
-};
-export type PairedSessionRetryResult = {
-  admitted: boolean;
-  ownerUnavailable: boolean;
-  staleTuple: boolean;
-  blocked: boolean;
-  affirmativeExit: boolean;
-  actorIdentity: PairedSessionActorIdentity | null;
-};
-export type PairedRecoveryStatus = {
-  backendSessionId: string;
-  daemonEpoch: string;
-  incarnation: string;
-  generation: number | null;
-  state: "proxy_attached" | "blocked" | "affirmative_exit" | "owner_unavailable";
-  blockedReason: string | null;
-  exitCode: number | null;
-};
-export type RemoteSessionDetails = Omit<TerminalRemoteStatus, "sessionId" | "descriptor"> & {
+export type RemoteSessionDetails = Omit<TerminalRemoteStatus, "sessionId"> & {
   descriptor: {
     backendSessionId: string;
     target: import("./scopedContracts").TargetRef;
@@ -339,17 +300,12 @@ export type TerminalSession = {
   reconnectError?: StructuredIpcError | null;
   /** Transient reason the backing PTY went away (spawn or attach failure). Never persisted. */
   backendUnavailableReason?: string | null;
-  recoveryState?: SessionRecoveryState | null;
   reconnectRequestId?: string | null;
   /** Transient SSH transport state, separate from process lifecycle. Never persisted. */
   remoteConnectionState?: SshRecoveryStatus["state"];
   remoteGeneration?: number | null;
   remoteFailure?: RemoteFailure | null;
   remoteReplayGap?: RemoteReplayGap | null;
-  /** Monotonic recovery attempt key fencing unavailable dispatches (INV-7). */
-  recoveryKey?: string | null;
-  /** Monotonic recovery attempt token fencing unavailable dispatches (INV-7). */
-  recoveryToken?: number | null;
 };
 
 export type TerminalTab = {
@@ -712,10 +668,6 @@ export type TerminalLifecyclePayload = {
   state: "started" | "exited" | "failed";
   exitCode: number | null;
   reason: string | null;
-  /** Stable lifetime PTY incarnation string separate from owner daemonEpoch (INV-2, INV-5). */
-  incarnation?: string | null;
-  /** Owner daemon epoch of the process emitting this lifecycle event. */
-  daemonEpoch?: string | null;
 };
 
 /** Emitted per attached session by the native daemon stream pump, independent of pane mounting. */

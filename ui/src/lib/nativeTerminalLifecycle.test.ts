@@ -4,11 +4,9 @@ vi.mock("./switchDebug", () => ({ switchDebug: vi.fn() }));
 
 import {
   attachNativeTerminalLifecycle,
-  reattachNativeTerminalLifecycle,
   detachNativeTerminalLifecycle,
   presentNativeTerminalLifecycle,
   emitNativeTerminalPresentation,
-  settleNativeTerminalExit,
   resetNativeTerminalLifecycleForTest,
   registerDurableNativeBinding,
   getDurableNativeBinding,
@@ -60,14 +58,6 @@ describe("nativeTerminalLifecycle presentation budget", () => {
     nowMs = 60_000;
     expect(nativeBindingRemainingMs("back", 500)).toBe(500);
     expect(nativeBindingRemainingMs("missing", 2_000)).toBe(0);
-  });
-
-  it("cancels retries only for a matching current exit incarnation", () => {
-    expect(registerDurableNativeBinding(tuple)).toBe(true);
-    expect(settleNativeTerminalExit(tuple.frontendSessionId, { ...tuple, incarnation: "old-life" })).toBe(false);
-    expect(getDurableNativeBinding(tuple.backendSessionId)).toEqual(tuple);
-    expect(settleNativeTerminalExit(tuple.frontendSessionId, tuple)).toBe(true);
-    expect(attachNativeTerminalLifecycle(tuple.backendSessionId, async () => {})).resolves.toBeUndefined();
   });
 
   it("does not refresh an expired unready attempt or accept its late receipt", () => {
@@ -325,50 +315,6 @@ describe("nativeTerminalLifecycle sibling pane ownership", () => {
     await attachNativeTerminalLifecycle("pane-incoming", async () => false);
     await expect(outgoingDetach).resolves.toBe(true);
     expect(detached).toEqual(["pane-outgoing"]);
-  });
-
-  it("runs a real attach after a reused pending operation completes as a no-op", async () => {
-    const held = deferred();
-    const noop = attachNativeTerminalLifecycle("noop", async () => { await held.promise; return false; });
-    const reused = attachNativeTerminalLifecycle("noop", async () => undefined);
-    expect(reused).toBe(noop);
-
-    held.resolve();
-    await reused;
-    const real = vi.fn(async () => undefined);
-    await attachNativeTerminalLifecycle("noop", real);
-
-    expect(real).toHaveBeenCalledOnce();
-  });
-
-  it("preserves replacement readiness and presentation waiters after a stale no-op", async () => {
-    await attachNativeTerminalLifecycle("outgoing", async () => undefined);
-    const detached = vi.fn(async () => undefined);
-    const detachment = detachNativeTerminalLifecycle("outgoing", detached);
-    const oldHeld = deferred();
-    const old = attachNativeTerminalLifecycle("replacement", async () => { await oldHeld.promise; return false; });
-    const replacementStarted = deferred();
-    const replacementHeld = deferred();
-    const replacement = reattachNativeTerminalLifecycle("replacement", async () => {
-      replacementStarted.resolve();
-      await replacementHeld.promise;
-    });
-
-    oldHeld.resolve();
-    await old;
-    await replacementStarted.promise;
-    const duplicate = vi.fn(async () => undefined);
-    expect(attachNativeTerminalLifecycle("replacement", duplicate)).toBe(replacement);
-    expect(detached).not.toHaveBeenCalled();
-    replacementHeld.resolve();
-    await replacement;
-    expect(detached).not.toHaveBeenCalled();
-    presentNativeTerminalLifecycle("replacement");
-    expect(await detachment).toBe(true);
-    expect(detached).toHaveBeenCalledOnce();
-    expect(duplicate).not.toHaveBeenCalled();
-    await attachNativeTerminalLifecycle("replacement", duplicate);
-    expect(duplicate).not.toHaveBeenCalled();
   });
 
   it("settles a pending detach that a newer detach of the same session replaces", async () => {

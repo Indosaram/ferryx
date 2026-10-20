@@ -270,8 +270,6 @@ pub struct PtyManager {
     cwd_probe_permits: Arc<parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
     pty_system: Arc<Mutex<Box<dyn PtySystem + Send>>>,
     output_hub: Arc<RwLock<Option<Arc<TerminalOutputHub>>>>,
-    /// Whether new panes get the agent-state endpoint in their environment.
-    agent_integration: Arc<crate::daemon::agent_extension::AgentIntegration>,
     #[cfg(unix)]
     transfer_owners: Arc<Mutex<HashMap<String, PtySessionSnapshot>>>,
     #[cfg(test)]
@@ -291,9 +289,6 @@ impl PtyManager {
             cwd_probe_permits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pty_system: Arc::new(Mutex::new(native_pty_system())),
             output_hub: Arc::new(RwLock::new(None)),
-            agent_integration: Arc::new(crate::daemon::agent_extension::AgentIntegration::in_memory(
-                true,
-            )),
             #[cfg(unix)]
             transfer_owners: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
@@ -304,20 +299,6 @@ impl PtyManager {
     pub fn with_output_hub(self, hub: Arc<TerminalOutputHub>) -> Self {
         *self.output_hub.write() = Some(hub);
         self
-    }
-
-    /// Shares the daemon-held agent integration setting with every pane this manager spawns.
-    pub fn with_agent_integration(
-        mut self,
-        setting: Arc<crate::daemon::agent_extension::AgentIntegration>,
-    ) -> Self {
-        self.agent_integration = setting;
-        self
-    }
-
-    /// Whether the daemon-held agent integration setting is currently on.
-    pub fn agent_integration_enabled(&self) -> bool {
-        self.agent_integration.enabled()
     }
 
     pub fn set_output_hub(&self, hub: Arc<TerminalOutputHub>) {
@@ -407,8 +388,6 @@ impl PtyManager {
         cols: u16,
         rows: u16,
     ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        super::qa_liveness::ensure_local_owner_control();
         self.spawn_with_id_and_worktree(session_id.into(), cmd, cols, rows, None)
     }
 
@@ -465,8 +444,6 @@ impl PtyManager {
             )));
         }
         let incarnation = Uuid::new_v4().to_string();
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let create_mutation_id = super::qa_liveness::record_local_pty_create_request(&session_id, &incarnation);
         cmd.env("FERRYX_PTY_INCARNATION", &incarnation);
 
         // The agent extension reports state for the pane it runs in, so it needs the session
@@ -479,25 +456,13 @@ impl PtyManager {
         }
         // Unix panes report agent state over the daemon's unix socket; every other platform has
         // no such socket and reaches the daemon's loopback TCP ingress instead.
-        // With the integration turned off a pane gets no endpoint at all, including one the
-        // daemon may have inherited from its own environment.
-        if self.agent_integration.enabled() {
-            #[cfg(unix)]
-            cmd.env(
-                "FERRYX_AGENT_STATE_SOCKET",
-                crate::daemon::agent_state_socket_path(),
-            );
-            #[cfg(not(unix))]
-            apply_agent_state_tcp_env(&mut cmd);
-        } else {
-            for key in [
-                "FERRYX_AGENT_STATE_SOCKET",
-                "FERRYX_AGENT_STATE_PORT",
-                "FERRYX_AGENT_STATE_TOKEN",
-            ] {
-                cmd.env_remove(key);
-            }
-        }
+        #[cfg(unix)]
+        cmd.env(
+            "FERRYX_AGENT_STATE_SOCKET",
+            crate::daemon::agent_state_socket_path(),
+        );
+        #[cfg(not(unix))]
+        apply_agent_state_tcp_env(&mut cmd);
 
         // A GUI-launched daemon inherits TERM=dumb, which agent TUIs read as a non-interactive
         // terminal: they drop to plain mode and stop reporting activity. A PTY is a real
@@ -638,9 +603,6 @@ impl PtyManager {
             close_grace: Arc::new(Mutex::new(None)),
         }));
 
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let created_identity = session.qa_owned_identity().ok();
-
         if let Some(hub) = self.output_hub.read().clone() {
             session.set_output_hub(hub);
         }
@@ -650,9 +612,7 @@ impl PtyManager {
             .insert(session_id.clone(), Arc::clone(&session));
         session.mark_running();
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        super::qa_liveness::record_owned_pty_creation(&session);
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        super::qa_liveness::record_local_pty_event(&session, "create", "delivery", serde_json::json!({"created": true, "mutationId":create_mutation_id}), created_identity, Ok(()));
+        super::qa_liveness::record_owned_pty_creation(&session_id);
         self.start_lifecycle_watcher(session_id);
         Ok(rx)
     }
@@ -863,29 +823,8 @@ impl PtyManager {
     }
 
     pub async fn close_session(&self, session_id: &str) -> Result<(), PtyError> {
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        super::qa_liveness::ensure_local_owner_control();
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let session = self.get_session(session_id);
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let identity = session.as_ref().and_then(|session| session.qa_owned_identity().ok());
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let close_mutation_id = session.as_ref().and_then(|session| {
-            super::qa_liveness::record_local_pty_event(session, "close", "request", serde_json::json!({"sessionId": session_id}), identity.clone(), Ok(()))
-        });
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        if session.is_none() {
-            super::qa_liveness::record_local_pty_missing_session(session_id, "close", Err("session not found".into()));
-        }
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let result = self.close_authorized(session_id, TERM_GRACE_TIMEOUT, Arc::new(|| Ok(()))).await;
-        #[cfg(not(all(feature = "local-split-qa", feature = "native-terminal")))]
-        let result = self.close_authorized(session_id, TERM_GRACE_TIMEOUT, Arc::new(|| Ok(()))).await;
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        if let Some(session) = session.as_ref() {
-            let _ = super::qa_liveness::record_local_pty_event(session, "close", "delivery", serde_json::json!({"closed": true, "mutationId": close_mutation_id}), identity.clone(), result.as_ref().map(|_| ()).map_err(ToString::to_string));
-        }
-        result
+        self.close_authorized(session_id, TERM_GRACE_TIMEOUT, Arc::new(|| Ok(())))
+            .await
     }
 
     pub(crate) async fn close_authorized(
@@ -1038,26 +977,10 @@ impl PtyManager {
     }
 
     pub fn write_input(&self, session_id: &str, data: &[u8]) -> Result<(), PtyError> {
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        super::qa_liveness::ensure_local_owner_control();
         let session = self
             .get_session(session_id)
-            .ok_or_else(|| {
-                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-                super::qa_liveness::record_local_pty_missing_session(session_id, "write", Err("session not found".into()));
-                PtyError::SessionNotFound(session_id.to_string())
-            })?;
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let identity = session.qa_owned_identity().ok();
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let mutation_id = super::qa_liveness::record_local_pty_event(&session, "write", "request", serde_json::json!({"bytes": data}), identity.clone(), Ok(()));
-        #[cfg(not(all(feature = "local-split-qa", feature = "native-terminal")))]
-        let result = session.write_input(data);
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let result = session.write_input(data);
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        super::qa_liveness::record_local_pty_event(&session, "write", "delivery", serde_json::json!({"bytesWritten": data.len(), "mutationId": mutation_id}), identity, result.as_ref().map(|_| ()).map_err(ToString::to_string));
-        result
+            .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))?;
+        session.write_input(data)
     }
 
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), PtyError> {
@@ -1068,43 +991,17 @@ impl PtyManager {
     }
 
     pub fn kill(&self, session_id: &str) -> Result<(), PtyError> {
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        super::qa_liveness::ensure_local_owner_control();
         let session = self
             .get_session(session_id)
-            .ok_or_else(|| {
-                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-                super::qa_liveness::record_local_pty_missing_session(session_id, "kill", Err("session not found".into()));
-                PtyError::SessionNotFound(session_id.to_string())
-            })?;
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let identity = session.qa_owned_identity().ok();
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let mutation_id = super::qa_liveness::record_local_pty_event(&session, "kill", "request", serde_json::json!({}), identity.clone(), Ok(()));
-        let result = session.kill();
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        super::qa_liveness::record_local_pty_event(&session, "kill", "delivery", serde_json::json!({"mutationId": mutation_id}), identity, result.as_ref().map(|_| ()).map_err(ToString::to_string));
-        result
+            .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))?;
+        session.kill()
     }
 
     pub fn signal(&self, session_id: &str, signal: TerminalSignal) -> Result<(), PtyError> {
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        super::qa_liveness::ensure_local_owner_control();
         let session = self
             .get_session(session_id)
-            .ok_or_else(|| {
-                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-                super::qa_liveness::record_local_pty_missing_session(session_id, "signal", Err("session not found".into()));
-                PtyError::SessionNotFound(session_id.to_string())
-            })?;
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let identity = session.qa_owned_identity().ok();
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        let mutation_id = super::qa_liveness::record_local_pty_event(&session, "signal", "request", serde_json::json!({"signal": format!("{signal:?}")}), identity.clone(), Ok(()));
-        let result = session.signal(signal);
-        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        super::qa_liveness::record_local_pty_event(&session, "signal", "delivery", serde_json::json!({"signal": format!("{signal:?}"), "mutationId": mutation_id}), identity, result.as_ref().map(|_| ()).map_err(ToString::to_string));
-        result
+            .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))?;
+        session.signal(signal)
     }
 
     pub fn get_session(&self, session_id: &str) -> Option<Arc<PtySession>> {

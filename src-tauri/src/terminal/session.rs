@@ -199,31 +199,6 @@ pub(crate) enum ProcessHandle {
     Adopted(AdoptedProcess),
 }
 
-#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-pub(crate) struct QaOwnedChild {
-    child: Arc<Mutex<Option<ProcessHandle>>>,
-    pub(crate) pid: u32,
-    pub(crate) incarnation: String,
-}
-
-#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-impl QaOwnedChild {
-    pub(crate) fn capture<T>(&self, read: impl FnOnce(u32) -> Result<T, String>) -> Result<T, String> {
-        let mut slot = self.child.lock();
-        let Some(ProcessHandle::Spawned(child)) = slot.as_mut() else {
-            return Err("creation child was removed or adopted".into());
-        };
-        if child.process_id() != Some(self.pid) || child.try_wait().map_err(|error| error.to_string())?.is_some() {
-            return Err("creation child exited or changed PID".into());
-        }
-        let identity = read(self.pid)?;
-        if child.process_id() != Some(self.pid) || child.try_wait().map_err(|error| error.to_string())?.is_some() {
-            return Err("creation child exited during identity capture".into());
-        }
-        Ok(identity)
-    }
-}
-
 impl ProcessHandle {
     pub fn pid(&self) -> Option<u32> {
         match self {
@@ -716,28 +691,6 @@ impl PtySession {
         self.incarnation.as_deref()
     }
 
-    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-    pub(crate) fn qa_owned_identity(&self) -> Result<super::qa_liveness::OwnedProcessIdentity, String> {
-        let mut slot = self.child.lock();
-        let Some(ProcessHandle::Spawned(child)) = slot.as_mut() else {
-            return Err("session has no live Ferryx-owned child".into());
-        };
-        let pid = child.process_id().ok_or_else(|| "owned child PID unavailable".to_string())?;
-        let incarnation = self.incarnation.clone().filter(|value| !value.is_empty())
-            .ok_or_else(|| "PTY incarnation unavailable".to_string())?;
-        match child.try_wait().map_err(|error| error.to_string())? {
-            Some(_) => return Err("owned child already exited".into()),
-            None => {}
-        }
-        let identity = super::qa_liveness::capture_owned_identity(pid)?;
-        if child.process_id() != Some(pid) || self.incarnation.as_deref() != Some(incarnation.as_str())
-            || child.try_wait().map_err(|error| error.to_string())?.is_some() {
-            return Err("owned child identity changed during capture".into());
-        }
-        Ok(super::qa_liveness::OwnedProcessIdentity { pid, incarnation, executable: identity.executable,
-            process_start: identity.process_start })
-    }
-
     pub(crate) fn set_suspension_receipt(&self, receipt: Option<super::ActuationReceipt>) {
         *self.suspension_receipt.lock() = receipt.filter(|receipt|
             receipt.source == super::SuspensionSource::FerryxOwned && self.pid() == Some(receipt.pid)
@@ -880,19 +833,6 @@ impl PtySession {
             .lock()
             .as_ref()
             .and_then(|child| child.pid())
-    }
-
-    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-    pub(crate) fn qa_owned_child(&self) -> Result<QaOwnedChild, String> {
-        let slot = self.child.lock();
-        let Some(ProcessHandle::Spawned(child)) = slot.as_ref() else {
-            return Err("creation child is no longer owned".into());
-        };
-        let pid = child.process_id().filter(|pid| *pid > 0)
-            .ok_or("spawned child has no PID")?;
-        let incarnation = self.incarnation.as_ref().filter(|value| !value.is_empty())
-            .ok_or("spawned child has no incarnation")?.clone();
-        Ok(QaOwnedChild { child: Arc::clone(&self.child), pid, incarnation })
     }
 
     /// The shell's own process group. This is what handover records and what lifecycle

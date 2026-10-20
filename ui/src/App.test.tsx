@@ -260,6 +260,9 @@ vi.mock("./lib/tauri", () => ({
   isStructuredIpcError: (_error: unknown) => false,
 }));
 
+vi.mock("@tauri-apps/plugin-updater", () => ({
+  check: (...args: unknown[]) => updater.check(...args),
+}));
 vi.mock("./lib/updater", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./lib/updater")>();
   return {
@@ -1264,11 +1267,6 @@ describe("App project workspace flow", () => {
     native.isTauriRuntime.mockReturnValue(true);
     const runtimeDescriptor = Object.getOwnPropertyDescriptor(globalThis, "isTauri");
     Object.defineProperty(globalThis, "isTauri", { configurable: true, value: true });
-    // The availability check is the Rust `cmd_updater_check` command.
-    const internals = (window as any).__TAURI_INTERNALS__;
-    const originalInvoke = internals.invoke;
-    internals.invoke = (cmd: string, ...rest: unknown[]) =>
-      cmd === "cmd_updater_check" ? updater.check() : originalInvoke(cmd, ...rest);
     let checked!: () => void;
     const request = new Promise<void>((resolve) => { checked = resolve; });
     updater.check.mockImplementation(async () => {
@@ -1277,7 +1275,7 @@ describe("App project workspace flow", () => {
     });
     let deadline: ReturnType<typeof setTimeout> | undefined;
     const failure = new Promise<never>((_, reject) => {
-      deadline = setTimeout(() => reject(new Error("Startup update check not received")), 1000);
+      deadline = setTimeout(() => reject(new Error("Startup plugin check not received")), 1000);
     });
     try {
       render(<App />);
@@ -1288,7 +1286,6 @@ describe("App project workspace flow", () => {
     } finally {
       clearTimeout(deadline);
       cleanup();
-      internals.invoke = originalInvoke;
       if (runtimeDescriptor) Object.defineProperty(globalThis, "isTauri", runtimeDescriptor);
       else Reflect.deleteProperty(globalThis, "isTauri");
     }
@@ -2356,19 +2353,7 @@ describe("App project workspace flow", () => {
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
-    native.listTerminalSessions.mockResolvedValue([
-      {
-        sessionId: "dead-sess-1",
-        running: false,
-        daemonEpoch: "epoch-1",
-        incarnation: "pty-1",
-        recoveryAuthority: {
-          status: "affirmative_exit",
-          daemonEpoch: "epoch-1",
-          incarnation: "pty-1",
-        },
-      },
-    ]);
+    native.listTerminalSessions.mockResolvedValue([]);
     native.spawnTerminal.mockResolvedValue("new-spawned-session-id");
 
     const savedSession = {
@@ -2391,8 +2376,6 @@ describe("App project workspace flow", () => {
           terminalSessions: {
             "dead-sess-1": {
               sessionId: "dead-sess-1",
-              daemonEpoch: "epoch-1",
-              incarnation: "pty-1",
               worktreePath: "/repo/main",
               cwd: "/repo/main",
               createdAt: Date.now(),
@@ -2413,9 +2396,8 @@ describe("App project workspace flow", () => {
     expect(restoredState).toBeDefined();
     expect(restoredState.sessions["dead-sess-1"]).toMatchObject({
       id: "dead-sess-1",
-      backendSessionId: "dead-sess-1",
-      lifecycle: "working",
-      remoteConnectionState: "reconnecting",
+      backendSessionId: "standby:dead-sess-1",
+      lifecycle: "exited",
       cwd: "/repo/main",
     });
   });
@@ -2600,10 +2582,7 @@ describe("App project workspace flow", () => {
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
-    native.listTerminalSessions.mockResolvedValue([
-      { sessionId: "live-sess-1", daemonEpoch: "epoch-1", incarnation: "pty-live-1", running: true, worktreePath: "/repo/main" },
-      { sessionId: "dead-sess-2", daemonEpoch: "epoch-1", incarnation: "pty-dead-2", running: false, worktreePath: "/repo/main", recoveryAuthority: { status: "affirmative_exit", daemonEpoch: "epoch-1", incarnation: "pty-dead-2" } },
-    ]);
+    native.listTerminalSessions.mockResolvedValue([{ sessionId: "live-sess-1", worktreePath: "/repo/main" }]);
     native.spawnTerminal.mockClear();
     native.spawnTerminal.mockResolvedValue("respawned-sess-2");
 
@@ -2643,16 +2622,12 @@ describe("App project workspace flow", () => {
           terminalSessions: {
             "live-sess-1": {
               sessionId: "live-sess-1",
-              daemonEpoch: "epoch-1",
-              incarnation: "pty-live-1",
               worktreePath: "/repo/main",
               cwd: "/repo/main",
               createdAt: Date.now(),
             },
             "dead-sess-2": {
               sessionId: "dead-sess-2",
-              daemonEpoch: "epoch-1",
-              incarnation: "pty-dead-2",
               worktreePath: "/repo/main",
               cwd: "/repo/main",
               createdAt: Date.now(),
@@ -2677,9 +2652,8 @@ describe("App project workspace flow", () => {
     });
     expect(restoredState.sessions["dead-sess-2"]).toMatchObject({
       id: "dead-sess-2",
-      backendSessionId: "dead-sess-2",
-      lifecycle: "working",
-      remoteConnectionState: "reconnecting",
+      backendSessionId: "standby:dead-sess-2",
+      lifecycle: "exited",
     });
   });
 
@@ -2688,18 +2662,8 @@ describe("App project workspace flow", () => {
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
     native.listTerminalSessions.mockResolvedValue([
-      { sessionId: "live-backend-1", daemonEpoch: "epoch-10", incarnation: "matching-pty", running: true },
-      {
-        sessionId: "live-backend-2",
-        daemonEpoch: "epoch-OLD",
-        incarnation: "old-pty",
-        running: false,
-        recoveryAuthority: {
-          status: "affirmative_exit",
-          daemonEpoch: "epoch-OLD",
-          incarnation: "old-pty",
-        },
-      },
+      { sessionId: "live-backend-1", daemonEpoch: "epoch-10" },
+      { sessionId: "live-backend-2", daemonEpoch: "epoch-10", incarnation: "replacement-pty" },
     ]);
     native.spawnTerminal.mockClear();
 
@@ -2728,7 +2692,6 @@ describe("App project workspace flow", () => {
               localSessionId: "sess-matching",
               backendSessionId: "live-backend-1",
               daemonEpoch: "epoch-10",
-              incarnation: "matching-pty",
               lastOutputSequence: "777",
               worktreePath: "/repo/main",
               cwd: "/repo/main",
@@ -2768,9 +2731,9 @@ describe("App project workspace flow", () => {
     });
     expect(restoredState.sessions["sess-mismatch"]).toMatchObject({
       id: "sess-mismatch",
-      backendSessionId: "live-backend-2",
-      lifecycle: "working",
-      daemonEpoch: "epoch-OLD",
+      backendSessionId: "standby:sess-mismatch",
+      lifecycle: "exited",
+      daemonEpoch: null,
       lastOutputSequence: null,
     });
   });
@@ -3341,19 +3304,7 @@ describe("App project workspace flow", () => {
 
     setHmrWorkspaceState(workspaceId, hmrState as any);
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
-    native.listTerminalSessions.mockResolvedValue([
-      {
-        sessionId: "stale-backend-pty-888",
-        running: false,
-        daemonEpoch: "epoch-old",
-        incarnation: "pty-888",
-        recoveryAuthority: {
-          status: "affirmative_exit",
-          daemonEpoch: "epoch-old",
-          incarnation: "pty-888",
-        },
-      },
-    ]);
+    native.listTerminalSessions.mockResolvedValue([]);
     native.loadSession.mockClear();
     workspace.restoreWorkspace.mockClear();
     workspace.ensureSessionBackends.mockClear();
@@ -3391,9 +3342,8 @@ describe("App project workspace flow", () => {
       expect(restoredState).toBeDefined();
       expect(restoredState.sessions["dead-sess-1"]).toMatchObject({
         id: "dead-sess-1",
-        backendSessionId: "stale-backend-pty-888",
-        lifecycle: "working",
-        remoteConnectionState: "reconnecting",
+        backendSessionId: null,
+        lifecycle: "exited",
       });
     } finally {
       clearHmrWorkspaceState(workspaceId);

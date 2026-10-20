@@ -91,24 +91,13 @@ describe("agent reconnect cross-layer contracts", () => {
         ws: {
           workspaceId: "ws", repoRoot: "/repo", worktrees: [], activeWorktreePath: null,
           layout: { splitMode: "none", primaryTabId: "tab", secondaryTabId: null, activeTabId: "tab", tabs: [{ id: "tab", kind: "terminal", label: "Claude", terminal: { primarySessionId: "local-agent", paneTree: { type: "leaf", leafId: "leaf" }, sessionIdsByLeafId: { leaf: "local-agent" }, activeLeafId: "leaf", expandedLeafId: null } }] },
-          terminalSessions: { "local-agent": { localSessionId: "local-agent", backendSessionId: "backend-old", cwd: "/repo", worktreePath: "/repo", createdAt: 1, agentType: "claude", providerSession: { key: "session_id", id: "provider-1" }, daemonEpoch: "old", incarnation: "inc-old", lastOutputSequence: "900" } },
+          terminalSessions: { "local-agent": { localSessionId: "local-agent", backendSessionId: "backend-old", cwd: "/repo", worktreePath: "/repo", createdAt: 1, agentType: "claude", providerSession: { key: "session_id", id: "provider-1" }, daemonEpoch: "old", lastOutputSequence: "900" } },
         },
       },
     } as PersistedWorkspaceSession;
-    // An affirmative stopped record establishes death; unconfirmed absence does not.
-    const restored = deserializeWorkspaceState("ws", persisted, { epoch: "old", sessions: [
-      {
-        sessionId: "backend-old",
-        daemonEpoch: "old",
-        incarnation: "inc-old",
-        running: false,
-        recoveryAuthority: {
-          status: "affirmative_exit",
-          exitCode: 0,
-          incarnation: "inc-old",
-          daemonEpoch: "old",
-        },
-      },
+    // An explicit stopped record establishes death; absence in a successor epoch does not.
+    const restored = deserializeWorkspaceState("ws", persisted, { epoch: "new-daemon", sessions: [
+      { sessionId: "backend-old", daemonEpoch: "new-daemon", running: false },
     ] });
     expect(restored).not.toBeNull();
     if (!restored) return;

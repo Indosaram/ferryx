@@ -368,9 +368,7 @@ export class LocalSplitLifecycle {
         resolvePresented = resolve;
       });
 
-      // Must equal NativeTerminalPane's bindingKey, which appends the incarnation
-      // when known; otherwise every receipt for the split pane reads as stale.
-      const bindingKey = `${backendSessionId}:${session.daemonEpoch ?? ""}:${session.remoteGeneration ?? 0}:${session.remoteConnectionState ?? ""}${session.incarnation != null ? `:${session.incarnation}` : ""}`;
+      const bindingKey = `${backendSessionId}:${session.daemonEpoch ?? ""}:${session.remoteGeneration ?? 0}:${session.remoteConnectionState ?? ""}`;
       const tuple: PaneAttachTuple = {
         backendSessionId, incarnation: session.incarnation ?? null,
         daemonEpoch: session.daemonEpoch ?? "", frontendSessionId: session.id,

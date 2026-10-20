@@ -19,14 +19,7 @@ import {
   type AgentSettings,
   type CustomAgentValidationError,
 } from "../../lib/agentsSettings";
-import {
-  detectAgents,
-  getAgentIntegration,
-  removeLocalAgentIntegration,
-  setAgentIntegration,
-  type AgentDetection,
-} from "../../lib/tauri";
-import { useModalDialog } from "../useModalDialog";
+import { detectAgents, type AgentDetection } from "../../lib/tauri";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -78,90 +71,6 @@ type CustomAgentDraft = {
 
 const EMPTY_DRAFT: CustomAgentDraft = { name: "", command: "", args: "" };
 
-const DAEMON_UPGRADE_REQUIRED = "DAEMON_UPGRADE_REQUIRED";
-
-function ipcErrorCode(error: unknown): string | null {
-  if (typeof error === "object" && error !== null && "code" in error) {
-    const code = (error as { code: unknown }).code;
-    return typeof code === "string" ? code : null;
-  }
-  return null;
-}
-
-function ipcErrorMessage(error: unknown, fallback: string): string {
-  if (typeof error === "object" && error !== null && "message" in error) {
-    const message = (error as { message: unknown }).message;
-    if (typeof message === "string" && message) return message;
-  }
-  return fallback;
-}
-
-function RemoveAgentIntegrationDialog({
-  busy,
-  error,
-  onCancel,
-  onConfirm,
-}: {
-  busy: boolean;
-  error: string | null;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const { dialogRef } = useModalDialog({ onEscape: onCancel, dismissible: !busy });
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
-      onMouseDown={(event) => {
-        event.stopPropagation();
-        if (!busy) onCancel();
-      }}
-    >
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-label="Remove agent integration"
-        aria-modal="true"
-        className="w-full max-w-md animate-enter overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <header className="flex items-center gap-2 border-b border-border px-4 py-3 text-sm font-semibold text-foreground">
-          <Trash2 className="size-4 text-destructive" />
-          Remove agent integration
-        </header>
-        <div className="space-y-4 p-4 text-[12px]">
-          <p className="text-muted-foreground">
-            Ferryx will remove the agent state hooks it installed on this computer. Files you
-            modified after installation are kept.
-          </p>
-          {error ? (
-            <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-              {error}
-            </div>
-          ) : null}
-          <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={onCancel}
-              disabled={busy}
-              className="rounded-md px-3 py-2 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={onConfirm}
-              disabled={busy}
-              className="rounded-md bg-destructive px-3 py-2 font-semibold text-destructive-foreground disabled:opacity-50"
-            >
-              Remove
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function AgentsSection() {
   const [settings, setSettings] = useState<AgentSettings>(loadAgentSettings);
   const [detections, setDetections] = useState<AgentDetection[]>([]);
@@ -171,14 +80,6 @@ export function AgentsSection() {
   const [draft, setDraft] = useState<CustomAgentDraft | null>(null);
   const [editingName, setEditingName] = useState<string | null>(null);
   const [draftError, setDraftError] = useState<string | null>(null);
-  const [integrationEnabled, setIntegrationEnabled] = useState<boolean | null>(null);
-  const [integrationBusy, setIntegrationBusy] = useState(false);
-  const [integrationRestartNote, setIntegrationRestartNote] = useState(false);
-  const [integrationError, setIntegrationError] = useState<string | null>(null);
-  const [removeDialogOpen, setRemoveDialogOpen] = useState(false);
-  const [removeBusy, setRemoveBusy] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
-  const [removeSummary, setRemoveSummary] = useState<string | null>(null);
 
   const targetKey = useMemo(() => detectionTargets(settings).join("\u0000"), [settings]);
 
@@ -199,63 +100,6 @@ export function AgentsSection() {
   useEffect(() => {
     void runDetection(targetKey.split("\u0000"), false);
   }, [runDetection, targetKey]);
-
-  useEffect(() => {
-    let active = true;
-    getAgentIntegration()
-      .then((state) => {
-        if (active) setIntegrationEnabled(state.enabled);
-      })
-      .catch((err: unknown) => {
-        if (!active) return;
-        if (ipcErrorCode(err) === DAEMON_UPGRADE_REQUIRED) {
-          setIntegrationRestartNote(true);
-        } else {
-          setIntegrationError(ipcErrorMessage(err, "Failed to read agent state integration"));
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  // Turning the integration off only stops it; removing installed files is a separate,
-  // explicitly confirmed action below.
-  const toggleIntegration = async (enabled: boolean) => {
-    const previous = integrationEnabled;
-    setIntegrationEnabled(enabled);
-    setIntegrationBusy(true);
-    setIntegrationError(null);
-    try {
-      await setAgentIntegration(enabled);
-    } catch (err) {
-      if (ipcErrorCode(err) === DAEMON_UPGRADE_REQUIRED) {
-        setIntegrationRestartNote(true);
-      } else {
-        setIntegrationEnabled(previous);
-        setIntegrationError(ipcErrorMessage(err, "Failed to update agent state integration"));
-      }
-    } finally {
-      setIntegrationBusy(false);
-    }
-  };
-
-  const confirmRemoveIntegration = async () => {
-    setRemoveBusy(true);
-    setRemoveError(null);
-    try {
-      const result = await removeLocalAgentIntegration();
-      const failed = result.failed.length > 0 ? `, ${result.failed.length} failed` : "";
-      setRemoveSummary(
-        `Removed ${result.removed.length}, kept ${result.keptModified.length} modified${failed}`,
-      );
-      setRemoveDialogOpen(false);
-    } catch (err) {
-      setRemoveError(ipcErrorMessage(err, "Failed to remove agent integration"));
-    } finally {
-      setRemoveBusy(false);
-    }
-  };
 
   const resolvedAgents = mergeDetections(settings, detections);
   const availableAgents = resolvedAgents.filter((agent) => agent.available);
@@ -370,62 +214,7 @@ export function AgentsSection() {
             </SelectContent>
           </Select>
         </SettingRow>
-        <SettingRow
-          label="Agent state integration"
-          description={
-            <>
-              Let Ferryx track agent working and waiting states through hooks installed in each
-              agent's configuration. Turning this off stops tracking without removing anything.
-              {integrationRestartNote ? (
-                <span data-testid="agent-integration-restart-note" className="mt-1 block text-foreground">
-                  Takes effect after Ferryx restarts
-                </span>
-              ) : null}
-              {integrationError ? (
-                <span role="alert" className="mt-1 block text-destructive">
-                  {integrationError}
-                </span>
-              ) : null}
-              {removeSummary ? (
-                <span data-testid="agent-integration-remove-summary" className="mt-1 block text-foreground">
-                  {removeSummary}
-                </span>
-              ) : null}
-            </>
-          }
-        >
-          <div className="flex items-center gap-2">
-            <Switch
-              id="settings-agent-integration"
-              aria-label="Agent state integration"
-              checked={integrationEnabled ?? false}
-              disabled={integrationBusy}
-              onCheckedChange={(checked) => void toggleIntegration(checked)}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setRemoveError(null);
-                setRemoveDialogOpen(true);
-              }}
-              className="no-drag h-7 px-2.5 text-[11px] text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-            >
-              Remove from this computer
-            </Button>
-          </div>
-        </SettingRow>
       </div>
-
-      {removeDialogOpen ? (
-        <RemoveAgentIntegrationDialog
-          busy={removeBusy}
-          error={removeError}
-          onCancel={() => setRemoveDialogOpen(false)}
-          onConfirm={() => void confirmRemoveIntegration()}
-        />
-      ) : null}
 
       <div className="mt-8">
         <div className="mb-3 flex items-center justify-between">

@@ -1981,23 +1981,6 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       );
     });
 
-    act(() => {
-      mockTerminalWsInstance.onopen?.();
-      mockTerminalWsInstance.onmessage?.({
-        data: JSON.stringify({
-          type: "attached",
-          target: {
-            machineId: "2773ab38-d556-4a81-ae49-18a3b0fb83af",
-            sessionId: "machine-chat-sess",
-            daemonEpoch: "1790742255752",
-          },
-          generation: "1",
-          cols: 80,
-          rows: 24,
-        }),
-      });
-    });
-
     const terminalInput = await screen.findByRole("textbox", { name: "Remote terminal input" });
     fireEvent.input(terminalInput, { target: { value: "hello agent\n" } });
 

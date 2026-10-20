@@ -149,7 +149,6 @@ function createSession(
     id,
     cwd: "/repo/matrix",
     workspaceId,
-    worktree: null,
     backendSessionId: `backend-${id}`,
     incarnation: "inc-matrix-1",
     daemonEpoch: "epoch-1",
@@ -218,7 +217,9 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
       }
 
       // Verify structured reason rendered in status container
-      expect(screen.getByText(recoveringSession.recoveryState!.reason!)).toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent(
+        recoveringSession.recoveryState!.reason!,
+      );
 
       // Verify task activity is preserved (not settled to exited or idle)
       expect(screen.queryByRole("heading", { name: /Shell exited|Remote session exited/ })).toBeNull();
@@ -271,7 +272,9 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
 
       // Verify blocked presentation
       expect(screen.getByRole("heading", { name: "Session recovery blocked" })).toBeInTheDocument();
-      expect(screen.getByText(blockedSession.recoveryState!.reason!)).toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent(
+        blockedSession.recoveryState!.reason!,
+      );
 
       // Verify appropriate buttons: both corrective Retry and explicit Open new shell escape
       const retryBtn = screen.getByRole("button", { name: "Retry session recovery" });

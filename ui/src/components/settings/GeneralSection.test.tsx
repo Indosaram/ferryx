@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GeneralSection, SoftwareUpdateCard } from "./GeneralSection";
@@ -23,18 +23,9 @@ vi.mock("../../lib/updater", () => ({
   updatesManagedExternally: () => updater.updatesManagedExternally(),
 }));
 
-const native = vi.hoisted(() => ({
+vi.mock("../../lib/tauri", () => ({
   getCliLauncherStatus: vi.fn(),
   installCliLauncher: vi.fn(),
-  getDaemonSupervisor: vi.fn(),
-  setDaemonSupervisor: vi.fn(),
-}));
-
-vi.mock("../../lib/tauri", () => ({
-  getCliLauncherStatus: native.getCliLauncherStatus,
-  installCliLauncher: native.installCliLauncher,
-  getDaemonSupervisor: native.getDaemonSupervisor,
-  setDaemonSupervisor: native.setDaemonSupervisor,
 }));
 
 const WINDOWS_USER_AGENT =
@@ -63,7 +54,6 @@ describe("SoftwareUpdateCard externally managed installs", () => {
     updater.subscribeUpdateStatus.mockReturnValue(() => undefined);
     updater.getCurrentVersion.mockResolvedValue("2026.924.1");
     updater.updatesManagedExternally.mockResolvedValue(true);
-    native.getDaemonSupervisor.mockResolvedValue({ supported: false, enabled: false });
   });
 
   afterEach(() => {
@@ -106,48 +96,5 @@ describe("SoftwareUpdateCard externally managed installs", () => {
   it("does not render auto-suspend setting row", () => {
     render(<GeneralSection />);
     expect(screen.queryByLabelText("Auto-suspend idle sessions")).toBeNull();
-  });
-});
-
-describe("GeneralSection background service supervisor", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    updater.getUpdateStatus.mockReturnValue({ state: "idle" });
-    updater.subscribeUpdateStatus.mockReturnValue(() => undefined);
-    updater.getCurrentVersion.mockResolvedValue("2026.924.1");
-    updater.updatesManagedExternally.mockResolvedValue(false);
-    native.getCliLauncherStatus.mockResolvedValue({ isSupported: false, isInstalled: false });
-    native.setDaemonSupervisor.mockResolvedValue(undefined);
-  });
-
-  afterEach(() => {
-    cleanup();
-  });
-
-  it("supervisor switch calls uninstall when turned off", async () => {
-    native.getDaemonSupervisor.mockResolvedValue({ supported: true, enabled: true });
-
-    render(<GeneralSection />);
-
-    const toggle = await screen.findByRole("switch", {
-      name: "Restart background service automatically",
-    });
-    expect(toggle).toBeChecked();
-
-    fireEvent.click(toggle);
-
-    await waitFor(() => expect(native.setDaemonSupervisor).toHaveBeenCalledWith(false));
-    expect(native.setDaemonSupervisor).toHaveBeenCalledTimes(1);
-  });
-
-  it("hides the supervisor switch when the host does not support it", async () => {
-    native.getDaemonSupervisor.mockResolvedValue({ supported: false, enabled: false });
-
-    render(<GeneralSection />);
-
-    await waitFor(() => expect(native.getDaemonSupervisor).toHaveBeenCalled());
-    expect(
-      screen.queryByRole("switch", { name: "Restart background service automatically" }),
-    ).toBeNull();
   });
 });

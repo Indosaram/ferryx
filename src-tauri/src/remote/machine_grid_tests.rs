@@ -456,7 +456,6 @@ async fn machine_terminal_grid_emits_initial_replay_and_live_grid() {
     fixture.stop().await;
 }
 
-
 #[tokio::test]
 async fn machine_terminal_preserves_raw_mode_and_rejects_scroll() {
     let fixture = MachineTestFixture::new().await;

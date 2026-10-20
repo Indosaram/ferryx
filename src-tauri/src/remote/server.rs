@@ -1,7 +1,5 @@
 #[path = "machine_owner_socket.rs"]
 mod machine_owner_socket;
-#[path = "agent_control_service.rs"]
-pub(crate) mod agent_control_service;
 use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
 use crate::remote::browser_admission::AdmissionController;
@@ -1931,10 +1929,15 @@ async fn ws_terminal_handler(
         if let Some((cols, rows)) =
             requested_geometry.filter(|_| device.permission == DevicePermission::Control)
         {
-            if state.session_backend.recovery(&session_id).await?.is_none()
-                && state.session_backend.resize(&session_id, cols, rows).await.is_ok()
-            {
-                initial_resized = true;
+            if state.session_backend.recovery(&session_id).await?.is_none() {
+                if state
+                    .session_backend
+                    .resize(&session_id, cols, rows)
+                    .await
+                    .is_ok()
+                {
+                    initial_resized = true;
+                }
             }
         }
         state
@@ -1970,7 +1973,6 @@ async fn ws_terminal_handler(
 
 fn machine_socket_error(code: &str) -> (StatusCode, String) {
     let status = match code {
-
         "UNAUTHORIZED" => StatusCode::UNAUTHORIZED,
         "MACHINE_ACCESS_REQUIRED" => StatusCode::FORBIDDEN,
         "SESSION_NOT_FOUND" => StatusCode::NOT_FOUND,
@@ -2090,9 +2092,6 @@ pub(crate) mod machine_input_fixture;
 #[cfg(test)]
 #[path = "machine_input_probe.rs"]
 pub(crate) mod machine_input_probe;
-#[cfg(feature = "local-split-qa")]
-#[path = "machine_delivery_observer.rs"]
-pub(crate) mod machine_delivery_observer;
 
 fn machine_control_message(value: serde_json::Value) -> Message {
     Message::Text(value.to_string().into())
@@ -2580,15 +2579,10 @@ async fn handle_machine_terminal_socket(
             let operation = async {
                 match message {
                     Message::Binary(bytes) if bytes.len() <= 64 * 1024 => {
-                        #[cfg(feature = "local-split-qa")]
-                        let obs_seq = machine_delivery_observer::record_ingress(target, generation, "write", &bytes, None);
                         let input = pty.write_input_cancellable(&bytes);
                         #[cfg(test)]
                         let input = machine_input_probe::observe(&target.session_id, input);
-                        let res = input.await.map_err(|error| error.to_string());
-                        #[cfg(feature = "local-split-qa")]
-                        machine_delivery_observer::record_delivery(obs_seq, res.is_ok(), res.as_ref().err().cloned());
-                        res
+                        input.await.map_err(|error| error.to_string())
                     }
                     Message::Text(text) if text.len() <= 16 * 1024 => {
                         match serde_json::from_str::<MachineTerminalControl>(&text) {
@@ -2621,17 +2615,11 @@ async fn handle_machine_terminal_socket(
                             Ok(MachineTerminalControl::Signal {
                                 generation: supplied,
                                 signal,
-                                intent_id: _intent_id,
                             }) if supplied.0 == generation && signal == "interrupt" => {
-                                #[cfg(feature = "local-split-qa")]
-                                let obs_seq = machine_delivery_observer::record_ingress(target, generation, "signal", signal.as_bytes(), _intent_id.as_deref());
-                                let res = state
+                                state
                                     .session_backend
                                     .signal(&target.session_id, TerminalSignal::Interrupt)
-                                    .await;
-                                #[cfg(feature = "local-split-qa")]
-                                machine_delivery_observer::record_delivery(obs_seq, res.is_ok(), res.as_ref().err().cloned());
-                                res
+                                    .await
                             }
                             Ok(MachineTerminalControl::Ping) => {
                                 let control = machine_control(machine_control_message(
@@ -2987,25 +2975,6 @@ fn grid_text_message(frame: RemoteGridFrame) -> Message {
     Message::Text(text.into())
 }
 
-pub(crate) fn terminal_outcome_message(
-    session_id: &str,
-    outcome: crate::remote::backend::RemotePairedRecoveryOutcome,
-) -> Message {
-    Message::Text(serde_json::json!({
-        "type": "terminalOutcome",
-        "target": {
-            "sessionId": session_id,
-            "backendSessionId": outcome.backend_session_id,
-            "daemonEpoch": outcome.daemon_epoch,
-        },
-        "incarnation": outcome.incarnation,
-        "generation": outcome.generation.map(|generation| generation.to_string()),
-        "state": outcome.state,
-        "blockedReason": outcome.blocked_reason,
-        "exitCode": outcome.exit_code,
-    }).to_string().into())
-}
-
 fn enqueue_grid_operation<E>(
     mirror: &Arc<parking_lot::Mutex<RemoteTerminalMirror>>,
     outbound_tx: &mpsc::UnboundedSender<Message>,
@@ -3020,7 +2989,7 @@ fn enqueue_grid_operation<E>(
 }
 
 async fn handle_terminal_grid_socket(
-    mut socket: WebSocket,
+    socket: WebSocket,
     session_id: String,
     attachment: SessionAttachment,
     device: DeviceInfo,
@@ -3030,9 +2999,6 @@ async fn handle_terminal_grid_socket(
     resized: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let is_ssh = recovery_state.read().is_some();
-    if let Ok(Some(outcome)) = state.session_backend.paired_recovery_outcome(&session_id).await {
-        if outcome.backend_session_id == session_id && socket.send(terminal_outcome_message(&session_id, outcome)).await.is_err() { return; }
-    }
     let (mut sender, mut receiver) = socket.split();
     let SessionAttachment {
         snapshot,
@@ -3042,10 +3008,7 @@ async fn handle_terminal_grid_socket(
     let Ok(details) = state.session_backend.describe_session(&session_id).await else {
         return;
     };
-    let (cols, rows) = (
-        details.cols.max(1).min(REMOTE_GRID_MAX_COLS),
-        details.rows.max(1).min(REMOTE_GRID_MAX_ROWS),
-    );
+    let (cols, rows) = (details.cols, details.rows);
     let mirror = match RemoteTerminalMirror::new(cols, rows) {
         Ok(mirror) => Arc::new(parking_lot::Mutex::new(mirror)),
         Err(_) => return,
@@ -3073,38 +3036,9 @@ async fn handle_terminal_grid_socket(
     if sender.send(grid_text_message(initial_frame)).await.is_err() {
         return;
     }
-    if let Ok(Some(outcome)) = state.session_backend.paired_recovery_outcome(&session_id).await {
-        if outcome.backend_session_id == session_id
-            && !outcome.incarnation.is_empty()
-            && !outcome.daemon_epoch.is_empty()
-        {
-            if sender.send(terminal_outcome_message(&session_id, outcome)).await.is_err() {
-                return;
-            }
-        }
-    }
     let mut last_emitted_sequence = snapshot.history_end_sequence;
 
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Message>();
-    let outcome_backend = Arc::clone(&state.session_backend);
-    let outcome_session_id = session_id.clone();
-    let outcome_tx = outbound_tx.clone();
-    let mut outcome_task = std::pin::pin!(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(100));
-        let mut previous = None;
-        loop {
-            tick.tick().await;
-            let current = outcome_backend.paired_recovery_outcome(&outcome_session_id).await.ok().flatten();
-            if current == previous { continue; }
-            previous = current.clone();
-            if let Some(outcome) = current {
-                if outcome.backend_session_id == outcome_session_id
-                    && !outcome.daemon_epoch.is_empty() && !outcome.incarnation.is_empty()
-                    && outcome_tx.send(terminal_outcome_message(&outcome_session_id, outcome)).is_err()
-                { break; }
-            }
-        }
-    });
     let status_tx = outbound_tx.clone();
     let status_recovery_state = Arc::clone(&recovery_state);
     let mut status_task = std::pin::pin!(async move {
@@ -3165,78 +3099,14 @@ async fn handle_terminal_grid_socket(
                         // A gap invalidates even bytes waiting for the next grid tick.
                         pending_bytes.clear();
                         pending_end_sequence = None;
-                        let recovered = match recover_remote_terminal_attachment(
-                            &session_backend,
-                            &send_session_id,
-                            last_emitted_sequence,
-                        )
-                        .await
-                        {
-                            Ok(attachment) => attachment,
-                            Err(_) => break,
-                        };
-                        let mut recovered_receiver = recovered.receiver;
-                        let snapshot = recovered.snapshot;
-                        // Preserve already-published continuation across receiver replacement.
-                        let mut resumed_chunk = None;
-                        while let Ok(chunk) = recovered_receiver.try_recv() {
-                            if chunk.replay_gap.is_none()
-                                && chunk.sequence > snapshot.history_end_sequence.unwrap_or(0)
-                            {
-                                resumed_chunk = Some(chunk);
-                                break;
-                            }
-                        }
-                        let (cols, rows) = match session_backend.describe_session(&send_session_id).await {
-                            Ok(details) => (
-                                details.cols.max(1).min(REMOTE_GRID_MAX_COLS),
-                                details.rows.max(1).min(REMOTE_GRID_MAX_ROWS),
-                            ),
-                            Err(_) => break,
-                        };
-                        let mut replacement = match RemoteTerminalMirror::new(cols, rows) {
-                            Ok(mirror) => mirror,
-                            Err(_) => break,
-                        };
-                        // publish_gap clears the hub's pre-gap chunks, so a snapshot that starts after
-                        // this gap boundary holds only post-gap output: send the reset first, then that output.
-                        let post_gap_snapshot = snapshot
-                            .history_start_sequence
-                            .is_some_and(|start| start > chunk.sequence);
-                        if !post_gap_snapshot {
-                            if !snapshot.history_segments.is_empty() {
-                                if replacement.feed_segments(&snapshot.history_segments).is_err() { break; }
-                            } else if !snapshot.history.is_empty() && replacement.feed(&snapshot.history).is_err() {
-                                break;
-                            }
-                        }
-                        let chunk_covered = snapshot.history_end_sequence.is_some_and(|end| chunk.sequence <= end);
-                        if !chunk_covered && !chunk.bytes.is_empty() && replacement.feed(&chunk.bytes).is_err() {
+                        if !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| {
+                            let (cols, rows) = mirror.dimensions()?;
+                            *mirror = RemoteTerminalMirror::new(cols, rows)?;
+                            mirror.full_frame()
+                        }) {
                             break;
                         }
-                        if replacement.dimensions().ok() != Some((cols, rows)) && replacement.resize(cols, rows).is_err() {
-                            break;
-                        }
-                        let frame = match replacement.full_frame() { Ok(frame) => frame, Err(_) => break };
-                        *send_mirror.lock() = replacement;
-                        if send_tx.send(grid_text_message(frame)).is_err() { break; }
-                        if post_gap_snapshot
-                            && !snapshot.history.is_empty()
-                            && !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| mirror.feed(&snapshot.history))
-                        {
-                            break;
-                        }
-                        last_emitted_sequence = Some(snapshot.history_end_sequence.unwrap_or(chunk.sequence).max(chunk.sequence));
-                        if let Some(resumed_chunk) = resumed_chunk {
-                            if resumed_chunk.sequence > last_emitted_sequence.unwrap_or(0) {
-                                if !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| mirror.feed(&resumed_chunk.bytes)) {
-                                    break;
-                                }
-                                last_emitted_sequence = Some(resumed_chunk.sequence);
-                            }
-                        }
-                        output_rx = recovered_receiver;
-                        next_emit = tokio::time::Instant::now() + frame_interval;
+                        last_emitted_sequence = Some(chunk.sequence);
                         continue;
                     }
                     if latest_sequence.is_some_and(|last| chunk.sequence <= last) {
@@ -3262,10 +3132,7 @@ async fn handle_terminal_grid_socket(
                     let snapshot = recovered.snapshot;
                     let (cols, rows) =
                         match session_backend.describe_session(&send_session_id).await {
-                            Ok(d) => (
-                                d.cols.max(1).min(REMOTE_GRID_MAX_COLS),
-                                d.rows.max(1).min(REMOTE_GRID_MAX_ROWS),
-                            ),
+                            Ok(d) => (d.cols, d.rows),
                             Err(_) => break,
                         };
 
@@ -3462,7 +3329,6 @@ async fn handle_terminal_grid_socket(
         _ = &mut recv_task => {},
         _ = &mut writer_task => {},
         _ = &mut status_task => {},
-        _ = &mut outcome_task => {},
     };
 }
 
