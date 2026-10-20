@@ -156,6 +156,8 @@ test('builds: only debug QA bundles with a private target dir', () => {
   assert.throws(() => assertQaBuild({ ...plan.A, args: plan.A.args.filter((a) => a !== '--debug') }), /debug/);
   assert.throws(() => assertQaBuild({ ...plan.baseline, args: [...plan.baseline.args, '--release'] }), /release/);
   assert.throws(() => assertQaBuild({ ...plan.A, env: {} }), /CARGO_TARGET_DIR/);
+  const win = buildPlan({ host: hostFor('windows'), runDir: 'C:\\r', worktree: 'C:\\w', v1Worktree: 'C:\\v', baselineWorktree: 'C:\\b' });
+  for (const k of ['A', 'B', 'C', 'bump', 'v1bump', 'baseline']) assert.equal(win[k].env.CARGO_INCREMENTAL, '0', k);
 });
 
 test('linux run storage leaves tmpfs while sockets keep a short path', async () => {
