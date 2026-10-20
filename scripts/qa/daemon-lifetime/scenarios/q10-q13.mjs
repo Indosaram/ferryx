@@ -28,21 +28,64 @@ async function loginRegistration(ctx, key) {
 
 const autostarts = (reg) => reg.runAtLoad ?? reg.enabled ?? reg.logonTrigger;
 
+/**
+ * Keyboard path to the General switch "Restart background service automatically"
+ * (ui/src/components/settings/GeneralSection.tsx:447, id general-daemon-supervisor) on a fresh QA
+ * profile: settings.toggle is mod+, (ui/src/lib/shortcuts.ts:369; mod is Control off macOS) and
+ * opens on General with focus on "Back to app" (SettingsDialog.tsx:117). Tab then walks the nine
+ * section buttons (no Plan entry: a fresh QA profile has no account token, SettingsDialog.tsx:95)
+ * and the three General controls before the switch. Space toggles the focused Radix switch.
+ */
+export const SUPERVISOR_SWITCH_TABS = 1 + 9 + 3;
+
+/** Drives the real settings toggle through MahoRD; the product writes the marker as its receipt. */
+async function toggleAutostartOffThroughSettings(ctx, optout) {
+  if (!ctx.mahord) throw new Error('the settings toggle needs MahoRD on remote hosts');
+  await ctx.mahord.hotkey(['Control', ',']);
+  // The switch renders only after cmd_daemon_supervisor_get answers; give the dialog that long
+  // before walking focus, so Space never lands on the CLI launcher button that follows it.
+  await new Promise((resolve) => setTimeout(resolve, 3_000));
+  for (let i = 0; i < SUPERVISOR_SWITCH_TABS; i += 1) await ctx.mahord.key('Tab');
+  const before = await ctx.mahord.screenshot().catch(() => null);
+  await ctx.mahord.key('Space');
+  const marker = await ctx.agent.call('waitPath', { file: optout, deadlineMs: 30_000 });
+  const after = await ctx.mahord.screenshot().catch(() => null);
+  await ctx.mahord.key('Escape');
+  return { marker, before, after };
+}
+
+/** remove_autostart runs right after the marker write in the same command: wait for its effect. */
+async function waitAutostartRemoved(ctx, key, deadlineMs = 30_000) {
+  const end = Date.now() + deadlineMs;
+  let reg = await loginRegistration(ctx, key);
+  while (autostarts(reg) !== false && Date.now() < end) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    reg = await loginRegistration(ctx, key);
+  }
+  return reg;
+}
+
 export async function Q10(ctx, result) {
   const key = ctx.keys.A;
   const owner = await ownerIdentity(ctx);
   const optout = hjoin(ctx.layout.data, 'remote', OPTOUT_FILE);
   const regBefore = await loginRegistration(ctx, key);
   assertion(result, 'newest generation registered for login before opt-out', autostarts(regBefore) === true, regBefore.raw?.slice?.(0, 400) ?? regBefore.raw);
-  // Toggle through the product: the CLI-free path is the settings toggle, which writes the marker
-  // and calls remove_autostart. The harness drives the same function through the QA GUI env.
+  // Toggle through the product: Settings > General > "Restart background service automatically"
+  // calls cmd_daemon_supervisor_set(false) (ipc/agent_integration.rs:100-102), which writes the
+  // marker and then calls remove_autostart. Writing the marker directly only skips future
+  // registration (supervisor.rs:256-259) and never removes an existing one.
+  // A fresh GUI holds keyboard focus, so the shortcut reaches its window.
   await ctx.gui.quit(ctx.state.gui);
-  await ctx.agent.call('writeFile', { file: optout, content: '' });
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A);
-  const settled = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.logs, `gui-${ctx.state.gui.tag}.log`), pattern: 'autostart|opt-?out', flags: 'i', deadlineMs: DAEMON_READY_TIMEOUT_MS });
-  const regAfter = await loginRegistration(ctx, key);
+  const settled = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.logs, `gui-${ctx.state.gui.tag}.log`), pattern: 'Daemon supervisor armed', deadlineMs: DAEMON_READY_TIMEOUT_MS });
+  const toggle = await toggleAutostartOffThroughSettings(ctx, optout);
+  if (toggle.before) await evidence(ctx, result, 'settings-before-space.png.b64', toggle.before.toString('base64'));
+  if (toggle.after) await evidence(ctx, result, 'settings-after-space.png.b64', toggle.after.toString('base64'));
+  assertion(result, 'settings toggle wrote the opt-out marker (product receipt)', toggle.marker === true, optout);
+  const regAfter = toggle.marker ? await waitAutostartRemoved(ctx, key) : await loginRegistration(ctx, key);
   const ownerAfter = await ownerIdentity(ctx);
-  await evidence(ctx, result, 'toggle.json', { regBefore, regAfter, settled, owner, ownerAfter });
+  await evidence(ctx, result, 'toggle.json', { regBefore, regAfter, settled, marker: toggle.marker, owner, ownerAfter });
   assertion(result, 'opt-out removed login autostart', autostarts(regAfter) === false, regAfter.raw?.slice?.(0, 400) ?? regAfter.raw);
   assertSameOwner(result, owner, ownerAfter, 'opt-out toggle never stops the running owner');
   if (ctx.platform === 'windows') {
