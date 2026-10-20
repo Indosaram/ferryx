@@ -101,7 +101,10 @@ ${envXml}
       const home = (await agent.call('exec', { command: 'sh', args: ['-c', 'printf %s "$HOME"'] })).stdout;
       const file = `${home}/.config/systemd/user/${base}.service`;
       const envLines = Object.entries(env).map(([k, v]) => `Environment="${k}=${v}"`).join('\n');
-      await agent.call('exec', { command: 'install', args: ['-D', '-m', '0644', '/dev/stdin', file], input: `[Unit]\nDescription=Ferryx QA legacy daemon ${runId}\n\n[Service]\nType=simple\nExecStart=${executable} --daemon\nKillMode=process\nRestart=on-failure\n${envLines}\n\n[Install]\nWantedBy=default.target\n` });
+      // Not 'install -D /dev/stdin': the agent's stdin is a socket, and opening /dev/stdin on a
+      // socket fails with ENXIO (measured on omarchy), so the unit file was never written.
+      const written = await agent.call('exec', { command: 'sh', args: ['-c', 'umask 022; mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', file], input: `[Unit]\nDescription=Ferryx QA legacy daemon ${runId}\n\n[Service]\nType=simple\nExecStart=${executable} --daemon\nKillMode=process\nRestart=on-failure\n${envLines}\n\n[Install]\nWantedBy=default.target\n` });
+      if (written.status !== 0) return written;
       await agent.call('exec', { command: 'systemctl', args: ['--user', 'daemon-reload'] });
       await agent.call('exec', { command: 'systemctl', args: ['--user', 'enable', `${base}.service`] });
       return agent.call('exec', { command: 'systemctl', args: ['--user', 'start', `${base}.service`] });

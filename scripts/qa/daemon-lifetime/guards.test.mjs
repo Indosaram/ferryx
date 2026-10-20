@@ -57,6 +57,10 @@ test('isolation env points every daemon location into the run dir', () => {
   assert.equal(env.HOME, layout.home);
   const linux = isolationEnv({ runId: RUN, layout: isolationLayout('/tmp/qa/' + RUN, 'linux'), platform: 'linux' });
   assert.equal(linux.HOME, undefined);
+  const split = isolationLayout('/home/q/qaruns/' + RUN, 'linux', { runtimeDir: '/tmp/qa/' + RUN + '/run' });
+  assert.equal(split.runtime, '/tmp/qa/' + RUN + '/run');
+  assert.equal(split.data, '/home/q/qaruns/' + RUN + '/data');
+  assert.equal(split.logs, '/home/q/qaruns/' + RUN + '/logs');
   const forbidden = forbiddenRoots({ platform: 'mac', home: '/Users/q', uid: 501 });
   assert.ok(assertIsolatedEnv(env, { runId: RUN, forbidden, platform: 'mac' }));
   assert.throws(() => assertIsolatedEnv({ ...env, FERRYX_RUNTIME_DIR: '/tmp/rorca-501' }, { runId: RUN, forbidden, platform: 'mac' }), /ENV_NOT_ISOLATED/);
@@ -82,6 +86,9 @@ test('OS-job commands: reads allowed, mutations only on QA jobs, kills never', (
   assert.ok(!ok('systemctl', ['--user', 'stop', 'ferryx-daemon.service'], 'linux'));
   assert.ok(!ok('systemctl', ['stop', `${base}-k.service`], 'linux'));
   assert.ok(!ok('systemctl', ['--user', 'disable', '--now', `${base}-k.service`], 'linux'));
+  assert.ok(ok('systemctl', ['--user', 'kill', '--signal=SIGKILL', `${base}-gui-g3.scope`], 'linux'));
+  assert.ok(!ok('systemctl', ['--user', 'kill', '--signal=SIGKILL', 'app-foo.scope'], 'linux'));
+  assert.ok(!ok('systemctl', ['--user', 'kill', '--signal=SIGKILL'], 'linux'));
   assert.ok(ok('schtasks', ['/Query', '/TN', 'Ferryx\\Daemon'], 'windows'));
   assert.ok(ok('schtasks', ['/Run', '/TN', `Ferryx\\${base}-k`], 'windows'));
   assert.ok(!ok('schtasks', ['/End', '/TN', 'Ferryx\\Daemon'], 'windows'));

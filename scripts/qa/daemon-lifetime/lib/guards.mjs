@@ -130,14 +130,17 @@ export function assertQaExecutable(executable, { allowedRoots, forbidden, platfo
   return executable;
 }
 
-/** Private directories and env for one run. Every key the daemon reads for its location is set. */
-export function isolationLayout(runDir, platform) {
+/**
+ * Private directories and env for one run. Every key the daemon reads for its location is set.
+ * runtimeDir places the socket dir outside runDir (short path on a host whose runDir is long).
+ */
+export function isolationLayout(runDir, platform, { runtimeDir = null } = {}) {
   const mod = platform === 'windows' ? path.win32 : path.posix;
   const dirs = {
     root: runDir,
     home: mod.join(runDir, 'home'),
     data: mod.join(runDir, 'data'),
-    runtime: mod.join(runDir, 'run'),
+    runtime: runtimeDir ?? mod.join(runDir, 'run'),
     sessions: mod.join(runDir, 'sessions'),
     config: mod.join(runDir, 'home', 'config'),
     xdgData: mod.join(runDir, 'home', 'data'),
@@ -223,7 +226,8 @@ export function classifyCommand(command, args, { runId, platform }) {
     if (!SYSTEMCTL_QA_MUTATIONS.has(verb)) return deny(`systemctl ${verb} is not a harness operation`);
     if (list.includes('--now') && verb === 'disable') return deny('disable --now stops a unit');
     if (verb === 'daemon-reload') return { allowed: true, reason: 'reload of unit files only' };
-    const units = rest.slice(1);
+    // Option flags (e.g. --signal=SIGKILL for Q03's scope kill) are not unit names.
+    const units = rest.slice(1).filter((a) => !a.startsWith('-'));
     if (units.length === 0 || !units.every((u) => isQaJobName(u, runId, 'linux'))) return deny(`systemctl ${verb} targets a non-QA unit`);
     return { allowed: true, reason: 'qa unit' };
   }

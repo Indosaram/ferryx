@@ -101,8 +101,15 @@ export async function interrupt(conn, sessionId) {
   return conn.call({ type: 'write', sessionId, data: Buffer.from('\u0003').toString('base64') });
 }
 
-/** Fresh nonce echoed exactly once in one session (input accepted, output delivered, no replay). */
+/**
+ * Fresh nonce echoed exactly once in one session (input accepted, output delivered, no replay).
+ * The daemon sends output only on a connection that attached the session (server.rs Attach ->
+ * pump_session_stream); a data connection opened after a GUI quit/relaunch has no stream yet, so
+ * attach first. The agent gives each attach its own stream connection (agent.mjs call()).
+ */
 export async function nonceRoundTrip(ctx, conn, sessionId, result, label) {
+  const attached = await conn.call(D.attach(sessionId, 0));
+  assertion(result, `${label}: attach accepted`, attached?.type === 'attachOk', attached?.type === 'attachOk' ? 'attachOk' : attached);
   await interrupt(conn, sessionId);
   const marker = nonce('NONCE');
   const w = await conn.call(D.write(sessionId, echoCommand(ctx.platform, marker)));
@@ -135,6 +142,8 @@ export async function retireOwner(ctx) {
   if (ctx.state.gui) { await ctx.gui.quit(ctx.state.gui).catch(() => {}); ctx.state.gui = null; }
   const owner = await ownerIdentity(ctx);
   if (!owner.pid) return { retired: true, pid: null };
+  // owner.json outlives its daemon: a recorded pid that no longer runs is already retired.
+  if (!owner.os) return { retired: true, pid: owner.pid, reason: 'owner pid no longer runs' };
   if (ctx.state.conn) {
     const desc = await ctx.state.conn.describe().catch(() => ({ sessions: [] }));
     for (const s of desc.sessions ?? []) await ctx.state.conn.call({ type: 'close', sessionId: s.backendId }).catch(() => {});

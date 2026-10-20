@@ -8,7 +8,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, watch, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { GuardError, ProcessRegistry, isInside, assertRunId } from './guards.mjs';
@@ -64,7 +64,9 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
       await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
       children.set(child.pid, { child, exited });
       if (!record) return { pid: child.pid, role, recorded: false };
-      return registry.record(child.pid, { role, executable });
+      // The OS reports the resolved image (/proc/<pid>/exe): on Arch /usr/sbin is a symlink to
+      // /usr/bin, so sshd launched as /usr/sbin/sshd runs as /usr/bin/sshd. Record the canonical path.
+      return registry.record(child.pid, { role, executable: existsSync(executable) ? realpathSync(executable) : executable });
     },
     // Writes one line to a spawned child's stdin (launcher control on Windows).
     stdin: async ({ pid, line }) => { children.get(pid)?.child.stdin?.write(`${line}\n`); return true; },

@@ -48,6 +48,33 @@ export function receiptCount(text) {
   return String(text ?? '').split(/\r?\n/).filter((line) => line.trim()).length;
 }
 
+/**
+ * client.rs DAEMON_CLIENT_BUSY_RECEIPT (e4bc115f): one line per DAEMON_BUSY a QA client receives,
+ * correlated to the armed daemon-listener-stall operation.
+ */
+export const DAEMON_CLIENT_BUSY = 'daemon-client-busy';
+
+/** waitLog pattern for a DAEMON_BUSY line of this run and operation (base keys precede the settlement). */
+export function busyReceiptPattern(runId, operationId) {
+  return `"runId":"${runId}","operationId":"${operationId}",[^\\n]*"code":"DAEMON_BUSY"`;
+}
+
+/** The pid of an `OwnerState::Alive { pid, .. }` Debug string, else null. */
+export function aliveOwnerPid(ownerState) {
+  const m = /^Alive \{ pid: (\d+),/.exec(String(ownerState ?? ''));
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * The run's DAEMON_BUSY receipts for one operation, and the one (if any) that reports a silent
+ * handshake to the Alive owner whose pid the runner recorded before the stall.
+ */
+export function busyVerdict(text, { runId, operationId, pidBefore }) {
+  const busy = parseReceipts(text, runId).filter((r) => r.operationId === operationId && r.code === 'DAEMON_BUSY');
+  const match = busy.find((r) => r.details?.type === 'daemonOwnerBusy' && r.details?.cause === 'handshakeSilent' && pidBefore != null && aliveOwnerPid(r.details?.ownerState) === pidBefore);
+  return { correlated: busy.length, match: match ?? null, receipts: busy.map((r) => ({ producerPid: r.producerPid, details: r.details })) };
+}
+
 /** waitLog pattern for one stage written by one process (base keys precede the settlement). */
 export function stagePattern(pid, stage) {
   return `"producerPid":${Number(pid)},[^\\n]*"stage":"${stage}"`;

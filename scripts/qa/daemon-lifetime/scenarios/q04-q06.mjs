@@ -3,6 +3,7 @@
 import { hjoin } from '../lib/hostpath.mjs';
 import { assertion, block } from '../lib/summary.mjs';
 import { supervisorMutations } from '../lib/os-jobs.mjs';
+import { DAEMON_CLIENT_BUSY, busyReceiptPattern, busyVerdict } from '../lib/receipts.mjs';
 import { evidence, dataConn, controlConn, ownerIdentity, seedLocalSession, nonceRoundTrip, assertSameOwner, retireOwner, freshOwner, SUPERVISED_START_WAIT_MS, DAEMON_READY_TIMEOUT_MS } from './common.mjs';
 import { launchGuiAndOwner } from './q00-q03.mjs';
 
@@ -20,9 +21,14 @@ export function releaseFile(layout, name, runId, operationId) {
   return { file: hjoin(layout.barrier, `${name}.release.json`), content: JSON.stringify({ name, runId, operationId }) };
 }
 
+/** GUI tracing logs with ANSI styling (lib.rs fmt()); escapes sit between field names and values. */
+export function stripAnsi(text) {
+  return String(text ?? '').replace(/\x1b\[[0-9;]*m/g, '');
+}
+
 async function guiLogMutations(ctx, gui) {
   const text = (await ctx.agent.call('readFile', { file: hjoin(ctx.layout.logs, `gui-${gui.tag}.log`) })) ?? '';
-  return { mutations: supervisorMutations(text.split('\n')), text };
+  return { mutations: supervisorMutations(stripAnsi(text).split('\n')), text };
 }
 
 async function jobPid(ctx, key) {
@@ -48,12 +54,17 @@ export async function Q04(ctx, result) {
   if (!stalled) return;
   const gui = await ctx.gui.launch(ctx.artifacts.A);
   ctx.state.gui = gui;
-  // The GUI must wait past SUPERVISED_START_WAIT (and up to DAEMON_READY_TIMEOUT) without touching the job.
-  const busy = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.logs, `gui-${gui.tag}.log`), pattern: 'DAEMON_BUSY|DaemonBusy', deadlineMs: DAEMON_READY_TIMEOUT_MS + SUPERVISED_START_WAIT_MS + 15_000 });
+  // The GUI's data connection meets the stall without touching the job: client.rs answers the
+  // silent handshake with DAEMON_BUSY and appends a receipt correlated to this stall's operation.
+  const busyFile = hjoin(ctx.layout.barrier, `${DAEMON_CLIENT_BUSY}.receipt.jsonl`);
+  const busy = await ctx.agent.call('waitLog', { file: busyFile, pattern: busyReceiptPattern(ctx.runId, op), deadlineMs: DAEMON_READY_TIMEOUT_MS + SUPERVISED_START_WAIT_MS + 15_000 });
   const pidDuring = await jobPid(ctx, ctx.keys.A);
+  const verdict = busyVerdict((await ctx.agent.call('readFile', { file: busyFile })) ?? '', { runId: ctx.runId, operationId: op, pidBefore });
   const { mutations, text } = await guiLogMutations(ctx, gui);
   await evidence(ctx, result, 'gui-during-stall.log', text);
-  assertion(result, 'client reported DaemonBusy instead of starting anything (carry-over todo 2)', Boolean(busy.matched), busy);
+  await evidence(ctx, result, 'client-busy-receipts.json', verdict);
+  assertion(result, 'client received DAEMON_BUSY for this stall (daemon-client-busy receipt of this runId and operation; carry-over todo 2)', Boolean(busy.matched) && verdict.correlated > 0, { operationId: op, matched: busy.matched ?? null, timedOut: Boolean(busy.timedOut), correlated: verdict.correlated });
+  assertion(result, 'busy receipt is daemonOwnerBusy/handshakeSilent from the pre-stall Alive owner pid', verdict.match !== null, { pidBefore, receipts: verdict.receipts });
   assertion(result, 'job pid unchanged during the stall', pidBefore !== null && pidBefore === pidDuring, { pidBefore, pidDuring });
   assertion(result, 'zero supervisor mutations in the GUI log', mutations.length === 0, mutations);
   await ctx.agent.call('writeFile', releaseFile(ctx.layout, LISTENER_STALL, ctx.runId, op));
