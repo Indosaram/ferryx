@@ -298,4 +298,3 @@ export { AgentsSection, AgentsSection as AgentsSettings } from "./settings/Agent
 export { BrowserSection, BrowserSection as BrowserSettings, BrowserSection as BrowserSettingsPanel } from "./settings/BrowserSection";
 export { NotificationsSection, NotificationsSection as NotificationSettings } from "./settings/NotificationsSection";
 export { RemoteAccessSection, RemoteAccessSection as RemoteAccessSettings } from "./settings/RemoteAccessSection";
-export { SshSection } from "./settings/SshSection";
