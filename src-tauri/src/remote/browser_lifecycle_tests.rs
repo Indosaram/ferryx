@@ -214,7 +214,7 @@ async fn test_browser_websocket_full_lifecycle_and_reconnection() {
         encode_binary_frame(BrowserImageFormat::Jpeg, 1, &meta, sample_jpeg_frame())
             .expect("Encode initial frame");
     let admit_outcome = initial_queue.enqueue_frame(1, initial_frame_bytes.clone(), Instant::now());
-    assert_eq!(admit_outcome, AdmissionOutcome::Admit);
+    assert_eq!(admit_outcome, AdmissionOutcome::Admit(initial_frame_bytes.clone()));
 
     let decoded_initial = decode_binary_frame(&initial_frame_bytes).expect("Decode initial frame");
     assert_eq!(decoded_initial.seq, 1);
