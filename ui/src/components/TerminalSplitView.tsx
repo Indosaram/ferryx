@@ -36,7 +36,7 @@ import type {
 } from "../lib/types";
 import { defaultContentForTab, focusedPaneSessionId, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
 import { computeTerminalTabDisplay, type TerminalTabDisplay } from "../state/tabDisplay";
-import { isRemoteWorkspaceId } from "../lib/remoteProject";
+import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import { formatPaneDebugInfo } from "../lib/paneDebugInfo";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { createFileTabMenuHandlers } from "../lib/fileTabPaths";
@@ -226,7 +226,7 @@ type TerminalSplitViewProps = {
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
   onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
-  onRefreshSessionIdentity?: (sessionId: string) => Promise<TerminalSession | null | void> | void;
+  onRefreshSessionIdentity?: (sessionId: string, onResult: (result: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => void;
   onResetAgentState?: (tabId: string) => void;
   onBackendSessionUnavailable?: (
@@ -719,7 +719,7 @@ type TabGroupViewProps = {
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
   onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
-  onRefreshSessionIdentity?: (sessionId: string) => Promise<TerminalSession | null | void> | void;
+  onRefreshSessionIdentity?: (sessionId: string, onResult: (result: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -960,7 +960,7 @@ type PaneRendererProps = {
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
   onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
-  onRefreshSessionIdentity?: (sessionId: string) => Promise<TerminalSession | null | void> | void;
+  onRefreshSessionIdentity?: (sessionId: string, onResult: (result: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -1063,7 +1063,7 @@ type PaneLeafViewProps = {
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
   onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
-  onRefreshSessionIdentity?: (sessionId: string) => Promise<TerminalSession | null | void> | void;
+  onRefreshSessionIdentity?: (sessionId: string, onResult: (result: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -1352,7 +1352,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
                 activity?.isAgent ||
                 activity?.agentType
               );
-              const onReconnect = session && isRemoteWorkspaceId(session.workspaceId)
+              const onReconnect = session && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId))
                 ? (onReconnectSshSession ?? onReconnectAgentSession)
                 : isAgent
                   ? onReconnectAgentSession

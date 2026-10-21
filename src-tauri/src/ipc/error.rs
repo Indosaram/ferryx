@@ -30,6 +30,8 @@ pub enum IpcErrorCode {
     AgentResumeInvalid,
     AgentSessionConflict,
     DaemonProtocolMismatch,
+    /// The running daemon predates the request; the change takes effect after a restart.
+    DaemonUpgradeRequired,
     /// The daemon is retiring (control-v1 RetireWhenIdle / Shutdown) and accepts no new session.
     DaemonRetiring,
     /// An update is installed but the running daemon owner speaks another data protocol; it keeps

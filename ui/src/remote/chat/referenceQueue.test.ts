@@ -103,6 +103,37 @@ describe("reference held queue persistence", () => {
     expect(data.has(otherPane)).toBe(true);
   });
 
+  it("ui-reference-logic-r22-1: held rows saved before a rolling handover are migrated to the successor's key", () => {
+    const data = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        data.set(key, value);
+      },
+      removeItem: (key: string) => {
+        data.delete(key);
+      },
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const epochKey = `${REFERENCE_QUEUE_STORAGE_PREFIX}${base.hostId}|epoch-before-handover|${base.backendSessionId}`;
+    const ownerKey = `${REFERENCE_QUEUE_STORAGE_PREFIX}${base.hostId}|owner-old|epoch-older|${base.backendSessionId}`;
+    const otherPane = `${REFERENCE_QUEUE_STORAGE_PREFIX}${base.hostId}|epoch-before-handover|sess-other`;
+    data.set(epochKey, JSON.stringify({ version: 1, messages: [{ id: "h1", text: "deploy later" }] }));
+    data.set(otherPane, JSON.stringify({ version: 1, messages: [{ id: "o1", text: "other pane" }] }));
+    data.set(ownerKey, JSON.stringify({ version: 1, messages: [{ id: "h2", text: "run tests" }] }));
+    const queue = new ReferenceQueueStore(() => storage);
+    const successor = target({ epoch: "epoch-after-handover" });
+
+    expect(texts(queue, successor)).toEqual(["deploy later", "run tests"]);
+    expect(data.has(queue.storageKey(successor))).toBe(true);
+    expect(data.has(epochKey)).toBe(false);
+    expect(data.has(ownerKey)).toBe(false);
+    expect(data.has(otherPane)).toBe(true);
+  });
+
   it("keys the queue on the frozen target key under the canonical prefix", () => {
     const { queue } = fixture();
     expect(queue.storageKey(paneA)).toBe(REFERENCE_QUEUE_STORAGE_PREFIX + referenceDraftKey(paneA));

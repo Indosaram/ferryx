@@ -35,6 +35,7 @@ vi.mock("../components/NativeTerminalPane", () => ({
 vi.mock("../lib/sshHosts", () => ({
   useSshHosts: () => ({ hosts: [{ id: "build", label: "Build machine" }] }),
   getCachedSshHosts: () => [{ id: "build", label: "Build machine" }],
+  subscribeSshHosts: () => () => undefined,
 }));
 
 beforeEach(() => {

@@ -104,7 +104,6 @@ const KEY_UP: &str = "up";
 const KEY_DOWN: &str = "down";
 const KEY_ENTER: &str = "enter";
 const KEY_RIGHT: &str = "right";
-const KEY_BACKTAB: &str = "shift+tab";
 
 /// The key Claude's `/model` list takes a pick with: `s` keeps it to this session, where Enter
 /// would save it as the default for every new one.
@@ -280,11 +279,10 @@ pub fn plan_claude_answer(
             steps.push(ReferenceKeyStep::keys([KEY_ENTER]));
         }
         steps.push(ReferenceKeyStep::typed(text));
-        if parsed.responder == RESPONDER_CLAUDE_PLAN {
-            steps.push(ReferenceKeyStep::keys([KEY_BACKTAB]));
-        } else {
-            steps.push(ReferenceKeyStep::keys([KEY_ENTER]));
-        }
+        // Every typed answer is submitted with Enter. On Claude's plan card the typed row is
+        // "Tell Claude what to change": Enter sends the text back as change feedback, while
+        // shift+tab would approve the plan with the text attached.
+        steps.push(ReferenceKeyStep::keys([KEY_ENTER]));
         return Ok(steps);
     }
 
@@ -2281,8 +2279,9 @@ mod tests {
             .is_some_and(|body| body.contains("→ Repo owner")));
     }
 
+    // rs-prompts-r22-1
     #[test]
-    fn plan_card_takes_feedback_and_confirms_it_with_a_backtab() {
+    fn plan_card_sends_change_feedback_with_enter_not_approval() {
         let parsed = read(PLAN);
         assert_eq!(parsed.responder, RESPONDER_CLAUDE_PLAN);
         assert_eq!(parsed.prompt.kind, ReferencePromptKind::Plan);
@@ -2301,7 +2300,7 @@ mod tests {
                 ReferenceKeyStep::keys([KEY_DOWN]),
                 ReferenceKeyStep::keys([KEY_DOWN]),
                 ReferenceKeyStep::typed("Keep the existing introduction"),
-                ReferenceKeyStep::keys([KEY_BACKTAB]),
+                ReferenceKeyStep::keys([KEY_ENTER]),
             ]
         );
     }

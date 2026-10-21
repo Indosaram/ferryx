@@ -54,8 +54,8 @@ Single family: **Geist** variable (`font-sans`), self-hosted, weights 100 to 900
 Sidebar scale, smallest to largest:
 | Size | Use |
 |---|---|
-| `text-[9px]` | Tertiary metadata (status line, agent task) |
-| `text-[10px]` | Badges (`primary`), footer runtime label |
+| `text-[9px]` | Reserved; sidebar rows carry no second line (§4 rule 6) |
+| `text-[10px]` | Sidebar state slot labels, footer status line |
 | `text-[11px]` | Tree guide labels, empty states |
 | `text-[12px]` | Worktree name, project name, search field |
 | `text-[13px]` | Workspace switcher row |
@@ -93,6 +93,8 @@ Reusable, already shipped. Compose these; don't hand-roll equivalents.
 - `ui/IconButton` (`ui/src/components/ui/IconButton.tsx`): Square icon control (`size-6` sm / `size-7` md), `aria-label` and `title` required.
 - `ui/SectionHeader` (`ui/src/components/ui/SectionHeader.tsx`): `h-8` section title with optional count pill and trailing actions.
 - `ui/StatusDot` (`ui/src/components/ui/StatusDot.tsx`): Maps `AgentState` to a status glyph; `working` pulses, `motion-reduce` safe.
+- `ui/SegmentedControl` (`ui/src/components/ui/SegmentedControl.tsx`): `role="tablist"` of equal-width `role="tab"` buttons with `aria-selected` and arrow-key roving. Track `bg-card rounded-md p-0.5`; segment `text-[11px] rounded-sm text-muted-foreground`; selected segment `bg-worktree-sidebar-accent text-foreground`. An optional count renders `text-status-warning` beside the label. Selection is a fill, never a border.
+- `sidebar/SidebarStateSlot` (`ui/src/components/sidebar/SidebarStateSlot.tsx`): The single trailing status element of a sidebar row. `waiting` renders "needs input" + `StatusDot`; `working` renders "running" (or "N running") + `StatusDot`; `unread` and `done` render a `StatusDot` only; remote renders lucide `Server` `size-2.5` + host text truncated at `max-w-[88px]`. `text-[10px] text-muted-foreground shrink-0`. A `button` only when it has an action, otherwise a non-interactive `span`. Renders nothing for idle.
 - `lib/cn` (`ui/src/lib/cn.ts`): `twMerge(clsx(...))` for conditional classes. All conditional styling goes through it.
 
 ### shadcn Base Primitives (`ui/src/components/ui/`)
@@ -182,11 +184,19 @@ The settings redesign originated from the audit documented in `ui/docs/settings-
 The sidebar presents **one nested tree**, not two disjoint lists:
 
 ```
-Projects                        [+ add project]  <- SectionHeader, count = projects.length
-+- v maho-workspace             <- project row (folder icon, active)
-|    +- o main        [primary] <- worktree row, nested under its project
-|    \- o feature/api           <- worktree row
-\- > content-intel-dashboard    <- collapsed project row
+[ Worktrees | Inbox 3 ]                  <- SegmentedControl
+[ Filter worktrees      ]                <- Input
+Projects 4                               <- SectionHeader, count = project groups
++- v ferryx                    [+] [...] <- project row; + and ... on hover only
+|  |  main                  running o   <- worktree row, one 28px line
+|  |# sidebar-redesign      running o   <- active row: accent fill + bright rail
+|  |  relay-latency     needs input o   <- state slot
+|  |  daemon-lifetime                    <- idle: nothing after the name
+|  |  omarchy               [] omarchy  <- remote host slot
++- > maho-ws                    [] daas  <- collapsed project row with status slot
++- > piratetalk                      o   <- unread
+\- > site
+2 running · 1 needs input                <- footer
 ```
 
 Rules:
@@ -198,10 +208,26 @@ Rules:
 3. **Selecting a collapsed project switches the active project**, which loads its worktrees and
    expands it. Selecting a worktree activates that worktree, switching project first if needed.
 4. **Depth is expressed with a guide rail**, not indentation alone. Nested worktrees sit behind a
-   1px `border-worktree-sidebar-border` vertical rail, which brightens to
-   `border-worktree-sidebar-ring` for the active row. Indentation step is `pl-3`.
-5. **The `primary` badge** marks the repository's root worktree (the one whose branch is not an
-   `orca/<ws>/<slug>` worktree branch). It is a token-colored pill, never a colored emoji.
+   1px `border-worktree-sidebar-border` vertical rail. Indentation step is `pl-3`.
+5. **Active worktree = fill + rail, never a border.** The active row is
+   `bg-worktree-sidebar-accent text-foreground`, and its 1px rail segment brightens to
+   `worktree-sidebar-ring`. No raw hex classes; no state borders on rows.
+6. **A worktree row is one `h-7` (28px) line**: name (`text-[12px] font-semibold truncate`), then
+   at most one `SidebarStateSlot`. No git data: no branch, dirty count, `primary` badge, or remote
+   path line. Root-worktree status is logic only (no delete action), never display.
+7. **State-slot priority** (one slot per row, highest wins): needs input > running > unread >
+   remote host. Idle shows nothing; no grey idle dot. A project row uses the same slot; a listing
+   failure ("Unavailable", reason in `title`) outranks all, and paired machine state ranks last,
+   with text from the shared remote status vocabulary (see Remote settings). A not-connected
+   paired slot is a button that opens Settings > Remote on that machine.
+8. **Project name click selects and expands; it never collapses.** Only the chevron collapses.
+9. **Project hover actions are exactly `+` and `...`** (`IconButton` sm). `...` opens the native
+   project menu (Past conversations, Remove Project); no DOM dropdown in the sidebar.
+10. **Anatomy, top to bottom**: `SegmentedControl` Worktrees / Inbox (Inbox carries the attention
+    count), a filter `Input` ("Filter worktrees", Escape clears, not persisted), `SectionHeader`
+    "Projects N", the tree, and a footer reading `<n> running · <m> needs input` in
+    `text-[10px] text-muted-foreground`. Each footer part is omitted at zero; both zero = empty footer.
+    A non-empty filter forces projects with a matching worktree expanded.
 
 ## 5. Motion
 
@@ -221,8 +247,8 @@ Rules:
 ## 6. Responsive Behavior
 
 The sidebar is user-resizable and persisted (`orca.sidebar.width`), clamped 220-420px, default 236px.
-Every row must survive the 220px floor: names `truncate`, badges and action icons `shrink-0`,
-metadata lines truncate rather than wrap.
+Every row must survive the 220px floor: names `truncate`; the state slot and action icons are
+`shrink-0`; the host label truncates at `max-w-[88px]`.
 
 ### Mobile chat surface constants
 - Drawer heights: `45vh` collapsed / `85vh` expanded.
@@ -236,7 +262,8 @@ metadata lines truncate rather than wrap.
 - The tree uses semantic disclosure: project rows expose `aria-expanded`; the worktree group is
   labelled by its project row via `aria-label`.
 - Active worktree is announced with `aria-current="true"`, not color alone.
-- Status is never encoded by color alone; the dirty/clean state also carries text.
+- Status is never encoded by color alone; a running/needs-input slot always carries its text label
+  next to the dot, and dots without text (unread/done) carry an accessible name.
 - All icon-only controls carry `aria-label` (enforced by `IconButton`).
 - Focus is visible on every control: `focus-visible:ring-1 focus-visible:ring-ring`.
 - Nested action buttons must not be DOM descendants of the row button (no nested interactives).
@@ -249,6 +276,8 @@ metadata lines truncate rather than wrap.
   per project). Deferred; the collapsed chevron communicates "expandable" without promising a number.
 - Worktree rows re-derive display names from branch strings on each render. Cheap at realistic
   worktree counts; revisit only if a project exceeds a few hundred worktrees.
+- **The sidebar filter only matches loaded worktrees.** Inactive projects match by project label
+  only, because their worktrees are not loaded (same constraint as the missing count above).
 - **Mobile composer attachment staging:** The mobile composer can stage attachments but sending is blocked until remote upload exists, so the composer states the block in a polite status region.
 
 ## 9. Onboarding wizard
@@ -349,3 +378,44 @@ Updated for post-magic-link unified top picker selection (`ui/src/remote/useAcco
 - **Failure Isolation & Non-blocking Degraded States**:
   - Offline machines and partial host discovery failures only remove rows from the worktree list, without failing online machines or blocking the UI shell.
   - Inflight selection failures provide explicit "Retry Selection" and "Back to Worktrees" recovery actions without leaving the interface stalled.
+
+## 12. Remote settings
+
+Desktop Settings > Remote (`ui/src/components/settings/RemoteSection.tsx`). Machine-centric, not a
+flat stack of panels.
+
+### Information architecture
+Sections render in this order, each with `SettingsHeading` semantics (S1):
+1. **Account bar**: one row. Signed-in email or a Sign in action, plus account actions.
+2. **My machines**: paired and SSH machines in one list, one row per machine. Never merged
+   automatically.
+3. **Discovered**: machines found but not yet set up (for example Tailscale peers). Their only
+   primary action is "Set up". They never appear under My machines until set up.
+4. **This machine**: this device's enrollment code, devices, gateway and relay settings.
+5. **Advanced**: collapsed by default. Native inventory, credential migration, account server URL
+   and other diagnostics live only here.
+
+### Status vocabulary
+Paired and SSH machines share one vocabulary, produced by one pure status function that the
+sidebar slot also uses. The label is always text; color never carries status alone.
+| Label | Token | Meaning |
+|---|---|---|
+| Connected | `text-status-success` | Reachable and usable |
+| Offline | `text-muted-foreground` | Probe says unreachable |
+| Checking… | `text-muted-foreground` | Not probed yet; never shown as Connected |
+| Needs access | `text-status-warning` | Grant, re-pair or credentials required |
+| Setting up | `text-status-working` | Provisioning or preparing in progress |
+| Error | `text-destructive` | Last action failed; reason shown |
+| Disabled | `text-muted-foreground` | Turned off by the user |
+
+### Row rules
+- A machine row is name, status label, and **exactly one primary action** (`Button size="sm" h-7
+  text-[11px]`); every other action lives in the row's overflow menu.
+- **A disabled primary action shows its reason as visible text** in the row
+  (`text-[11px] text-muted-foreground`), never in `title` alone.
+- **Details and edit open in a right-side Sheet** (`bg-popover`, `border-l border-border`) with a
+  focus trap and Escape to close. Opening it never reflows the list; no inline expand.
+- Rows follow S6/S7: `border-y border-border` groups with `border-border/40` dividers, no
+  tinted borders for state.
+- No new tokens. `--destructive` and `--border` are the existing shadcn set (§3 Token
+  Alignment); every other value is a §1 token.

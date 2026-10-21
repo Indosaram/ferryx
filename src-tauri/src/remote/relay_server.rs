@@ -93,6 +93,42 @@ fn relay_timeout_response(stage: &'static str) -> Response {
     response
 }
 
+/// Is this forwarded request a non-idempotent reference-chat mutation (submit, stop, answer)?
+///
+/// The host runs such a transaction on its own task, so once the relay has forwarded the
+/// request, losing the answer does not mean the pane was left untouched.
+fn reference_chat_mutation(method: &Method, path: &str) -> bool {
+    let route = path.split('?').next().unwrap_or_default();
+    *method == Method::POST
+        && matches!(
+            route
+                .strip_prefix("/api/v1/")
+                .map(|route| route.split('/').collect::<Vec<_>>())
+                .as_deref(),
+            Some(["reference-chat", _, "submit" | "stop" | "answer"])
+        )
+}
+
+/// The frozen ScopeResult failure a forwarded reference-chat mutation answers with when the
+/// relay lost the host's answer: the host may have typed it, so it is never retried as unsent.
+fn reference_chat_outcome_unknown(request_id: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "ok": false,
+            "error": {
+                "code": crate::remote::reference_chat::types::REFERENCE_OUTCOME_UNKNOWN_CODE,
+                "message": "the relay lost the host's answer after forwarding the request; it may have been applied",
+                "retryable": false,
+                "details": serde_json::Value::Null,
+            },
+            "requestId": request_id,
+        })),
+    )
+        .into_response()
+}
+
 /// Notification pushed down the control channel when a client asks to open
 /// a new session against this daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2163,6 +2199,17 @@ async fn proxy_http(
         raw.extend_from_slice(b"\r\n");
     }
     raw.extend_from_slice(b"\r\n");
+    let mutation = reference_chat_mutation(&method, path);
+    let request_id = if mutation {
+        serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|body| body.get("requestId")?.as_str().map(str::to_owned))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    // Set once the request is handed to a fresh channel: from then on the host may act on it.
+    let forwarded = std::sync::atomic::AtomicBool::new(false);
     raw.extend(body);
     let head = method == Method::HEAD;
     let max_response = if path
@@ -2196,6 +2243,7 @@ async fn proxy_http(
         let (socket, _guard, control_generation) = state
             .open_session_channel_at(machine, expected_generation)
             .await?;
+        forwarded.store(true, Ordering::SeqCst);
         match http_round_trip(socket, &raw, head, max_response).await {
             Ok((response, reusable)) => {
                 if let Some(socket) = reusable {
@@ -2203,18 +2251,36 @@ async fn proxy_http(
                 }
                 Ok(response)
             }
+            Err(RoundTripError::Unanswered) if mutation => {
+                Ok(reference_chat_outcome_unknown(&request_id))
+            }
             Err(RoundTripError::Unanswered) => Err(StatusCode::BAD_GATEWAY),
+            Err(RoundTripError::Failed(_)) if mutation => {
+                Ok(reference_chat_outcome_unknown(&request_id))
+            }
             Err(RoundTripError::Failed(status)) => Err(status),
         }
     };
     // Machine Git mutations have a 30-second child deadline. Leave time for
     // admission and the final response without relaxing socket write deadlines.
-    match timeout(Duration::from_secs(40), transfer).await {
+    // A reference-chat mutation may wait behind earlier input for the host's own
+    // REFERENCE_SUBMIT_DEADLINE_MS before it types, so its budget covers that wait.
+    let budget = if mutation {
+        Duration::from_millis(
+            crate::remote::reference_chat::input::REFERENCE_SUBMIT_DEADLINE_MS,
+        ) + Duration::from_secs(15)
+    } else {
+        Duration::from_secs(40)
+    };
+    match timeout(budget, transfer).await {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(StatusCode::GATEWAY_TIMEOUT)) => {
             Ok(relay_timeout_response(RELAY_STAGE_DATA_PAIRING_TIMEOUT))
         }
         Ok(Err(status)) => Err(status),
+        Err(_) if mutation && forwarded.load(Ordering::SeqCst) => {
+            Ok(reference_chat_outcome_unknown(&request_id))
+        }
         Err(_) => {
             Ok(relay_timeout_response(RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT))
         }
@@ -3684,6 +3750,107 @@ mod tests {
     async fn get_via_relay(state: &RelayState, machine: &str, generation: u64) -> StatusCode {
         proxy_http(state, machine, Some(generation), Method::GET, "/api/v1/capabilities",
             HeaderMap::new(), Vec::new()).await.unwrap().status()
+    }
+
+    // rs-input-screen-r22-1
+    #[tokio::test]
+    async fn a_forwarded_reference_chat_submit_whose_answer_is_lost_reports_outcome_unknown() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, mut notices, _grants) =
+            state.register_control_channel("submit-host".into());
+        let path = "/api/v1/reference-chat/sess-1/submit?hostId=h";
+        let http = proxy_http(&state, "submit-host", Some(generation), Method::POST, path,
+            HeaderMap::new(), br#"{"requestId":"req-1","text":"hi"}"#.to_vec());
+        let peer = async {
+            let notice = notices.recv().await.unwrap();
+            let (mut data, _) = tokio_tungstenite::connect_async(format!(
+                "{base}/tunnel/data/{}",
+                notice.session_id
+            ))
+            .await
+            .unwrap();
+            let request = data.next().await.unwrap().unwrap().into_data();
+            assert!(request.starts_with(b"POST /api/v1/reference-chat/sess-1/submit"));
+            // The host received the submit, then the channel drops before any answer.
+            data.close(None).await.unwrap();
+        };
+        let (response, ()) =
+            timeout(Duration::from_secs(10), async { tokio::join!(http, peer) }).await.unwrap();
+        let response = response.expect("a lost answer to a forwarded submit is not a bare 502");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 4096).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"]["code"], "OPERATION_OUTCOME_UNKNOWN");
+        assert_eq!(body["error"]["retryable"], false);
+        assert_eq!(body["requestId"], "req-1");
+        state.unregister_control_channel("submit-host", generation);
+        server.abort();
+    }
+
+    async fn reference_chat_partial_response_case(method: Method, suffix: &str, partial: &[u8]) {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, mut notices, _grants) =
+            state.register_control_channel("r23-partial-host".into());
+        let path = format!("/api/v1/reference-chat/sess-1/{suffix}?hostId=h");
+        let mutation = method == Method::POST;
+        let expected_prefix = format!("{method} {path} HTTP/1.1\r\n");
+        let http = proxy_http(&state, "r23-partial-host", Some(generation), method, &path,
+            HeaderMap::new(), br#"{"requestId":"req-r23-partial","params":{}}"#.to_vec());
+        let peer = async {
+            let notice = notices.recv().await.unwrap();
+            let (mut data, _) = tokio_tungstenite::connect_async(format!(
+                "{base}/tunnel/data/{}", notice.session_id,
+            )).await.unwrap();
+            let request = data.next().await.unwrap().unwrap().into_data();
+            assert!(request.starts_with(expected_prefix.as_bytes()));
+            data.send(TMessage::Binary(partial.to_vec().into())).await.unwrap();
+            data.close(None).await.unwrap();
+        };
+        let (response, ()) = timeout(Duration::from_secs(10), async {
+            tokio::join!(http, peer)
+        }).await.unwrap();
+        if mutation {
+            let response = response.expect("a truncated mutation response is typed uncertainty");
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body: serde_json::Value = serde_json::from_slice(
+                &to_bytes(response.into_body(), 4096).await.unwrap(),
+            ).unwrap();
+            assert_eq!(body["ok"], false);
+            assert_eq!(body["error"]["code"], "OPERATION_OUTCOME_UNKNOWN");
+            assert_eq!(body["error"]["retryable"], false);
+            assert_eq!(body["requestId"], "req-r23-partial");
+        } else {
+            assert_eq!(response.err(), Some(StatusCode::BAD_GATEWAY));
+        }
+        assert!(notices.try_recv().is_err(), "a partially answered request is never replayed");
+        assert!(state.inner.pending_sessions.lock().is_empty());
+        state.unregister_control_channel("r23-partial-host", generation);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn r23_truncated_reference_chat_mutations_report_outcome_unknown() {
+        for suffix in ["submit", "stop", "answer"] {
+            for partial in [
+                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n".as_slice(),
+                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"ok\":true".as_slice(),
+            ] {
+                reference_chat_partial_response_case(Method::POST, suffix, partial).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn r23_truncated_reference_chat_read_remains_bad_gateway() {
+        reference_chat_partial_response_case(Method::GET, "screen",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"text\":",
+        ).await;
     }
 
     /// rs-files-routes-8: a staged-file preview is base64 of up to ATTACHMENT_MAX_FILE_BYTES,

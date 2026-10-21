@@ -164,23 +164,6 @@ pub fn shell_plan(host: &SshHost, root: &str) -> Result<ShellCommandPlan, IpcErr
     shell_plan_with_session(host, root, None, None)
 }
 
-pub fn install_remote_extension_script() -> String {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let source_b64 = STANDARD.encode(crate::daemon::agent_extension::EXTENSION_SOURCE);
-    format!(
-        "sh -c 'for b in \"$HOME/.omo\" \"$HOME/.pi\" \"$HOME/.omp\"; do \
-            if [ -d \"$b\" ] || [ \"$b\" = \"$HOME/.omo\" ]; then \
-                d=\"$b/agent/extensions\"; \
-                mkdir -p \"$d\" 2>/dev/null; \
-                t=\"$d/ferryx-agent-state.ts\"; \
-                tmp=\"$d/.ferryx-agent-state.ts.tmp\"; \
-                echo \"{source_b64}\" | (base64 -d 2>/dev/null || base64 -D 2>/dev/null || openssl enc -base64 -d 2>/dev/null) > \"$tmp\" 2>/dev/null; \
-                if [ -s \"$tmp\" ]; then mv -f \"$tmp\" \"$t\" 2>/dev/null; else rm -f \"$tmp\" 2>/dev/null; fi; \
-            fi; \
-        done'"
-    )
-}
-
 pub async fn ensure_remote_extension_installed(host: &SshHost) -> Result<(), IpcError> {
     let environment = super::runtime::detect(host).await?;
     super::operations::prepare_integration(host, &environment).await
@@ -372,7 +355,7 @@ fn spawn_child_with_stdout(
     stdin: Stdio,
     stdout: Stdio,
 ) -> Result<tokio::process::Child, IpcError> {
-    tokio::process::Command::new(&plan.program)
+    crate::util::no_window_tokio_command(&plan.program)
         .args(&plan.args)
         .envs(super::password::environment(&plan.args)?)
         .stdin(stdin)

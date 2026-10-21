@@ -5,8 +5,16 @@ import { remoteHostStore } from "../state/remoteHostStore";
 import { projectRootWorktree } from "../lib/projectIdentity";
 import { groupProjects } from "../lib/projectGrouping";
 import type { RegisteredProject } from "../lib/types";
-vi.mock("../lib/sshHosts", () => ({ useSshHosts: () => ({ hosts: [{ id: "ssh", label: "SSH machine" }] }) }));
-afterEach(() => { cleanup(); localStorage.clear(); remoteHostStore.reset(); });
+import type { PairedHostReachabilityView } from "../lib/pairedHostReachability";
+const reach = vi.hoisted(() => ({ view: { supported: false, entry: null } as PairedHostReachabilityView }));
+vi.mock("../lib/pairedHostReachability", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/pairedHostReachability")>()),
+  getPairedHostReachability: () => reach.view,
+  subscribePairedHostReachability: () => () => undefined,
+  usePairedHostReachability: () => reach.view,
+}));
+vi.mock("../lib/sshHosts", () => ({ useSshHosts: () => ({ hosts: [{ id: "ssh", label: "SSH machine" }] }), subscribeSshHosts: () => () => undefined }));
+afterEach(() => { cleanup(); localStorage.clear(); remoteHostStore.reset(); reach.view = { supported: false, entry: null }; });
 it("opens the registered SSH folder rather than its parent Git worktree", () => {
   const local: RegisteredProject = { workspaceId: "project", repoRoot: "/Users/indo/code/project", gitRoot: null };
   const remote: RegisteredProject = {
@@ -46,4 +54,36 @@ it("keeps identical local, SSH and paired paths separate and selects explicit pa
   expect(screen.getAllByText("Offline").length).toBeGreaterThan(0);
   fireEvent.click(screen.getByRole("button", { name: /main.*Beta/ }));
   expect(select).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: paired[1].workspaceId, path: "/srv/repo" }));
+});
+function renderPairedProject(online: boolean, onOpenSettings = vi.fn()) {
+  const project: RegisteredProject = { workspaceId: `daemon:${"c".repeat(64)}`, repoRoot: "/srv/app", gitRoot: "/srv/app", remoteWorkspaceId: "app", target: { kind: "pairedDaemon", hostId: "h" } };
+  remoteHostStore.setState(s => ({ ...s, nativeStatus: "ready", machineFeaturesEnabled: true, hosts: { h: { hostId: "h", name: "Gamma", address: "", transport: "relay", online, authStatus: "paired", grantScope: "machine", generation: "7" } } }));
+  render(<Sidebar projects={[project]} activeProjectId={project.workspaceId} activePath="" worktrees={[]} agents={[]} onSelectWorktree={vi.fn()} onCreateWorktree={vi.fn()} onOpenSettings={onOpenSettings} />);
+  return onOpenSettings;
+}
+it("makes a not-connected paired project slot a button that deep-links to that machine in Settings > Remote", () => {
+  const onOpenSettings = renderPairedProject(false);
+  const slot = screen.getByRole("button", { name: "Offline: open remote settings for Gamma" });
+  fireEvent.click(slot);
+  expect(onOpenSettings).toHaveBeenCalledExactlyOnceWith("remote", {
+    page: "machines", filter: "all", machine: { kind: "pairedDaemon", hostId: "h", generation: "7" },
+  });
+});
+it("renders a connected paired project slot as plain text, not a button", () => {
+  const onOpenSettings = renderPairedProject(true);
+  const header = screen.getByRole("button", { name: "app (Gamma)" });
+  expect(header).toHaveTextContent("Connected");
+  expect(screen.queryByRole("button", { name: /open remote settings/ })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByText("Connected"));
+  expect(onOpenSettings).not.toHaveBeenCalledWith("remote", expect.anything());
+});
+it("labels paired worktree rows with the header's status when reachability says offline but host.online is stale", () => {
+  reach.view = { supported: true, entry: { hostId: "h", generation: "7", state: "offline", checkedAtMs: 1, lastError: null } };
+  localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, "[]");
+  renderPairedProject(true);
+  expect(screen.getByRole("button", { name: "Offline: open remote settings for Gamma" })).toHaveTextContent("Offline");
+  // Rows carry no remote path line; the machine status rides on the row's host slot title.
+  expect(screen.queryByText("/srv/app - Offline")).not.toBeInTheDocument();
+  expect(screen.getByTestId("remote-machine-badge").getAttribute("title")).toContain("Offline");
+  expect(screen.queryByText(/Online \(/)).not.toBeInTheDocument();
 });

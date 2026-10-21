@@ -318,6 +318,9 @@ pub struct PairedHostService {
     inventory: Arc<Mutex<Owner>>,
     http: reqwest::Client,
     pub(crate) event_sink: Option<InventoryEventSink>,
+    authority_changes: tokio::sync::watch::Sender<(u64, String)>,
+    #[cfg(test)]
+    verification_gate: Arc<Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>>,
     #[cfg(test)]
     loopback_http: bool,
 }
@@ -340,12 +343,21 @@ impl PairedHostService {
                 .build()
                 .expect("native HTTP client"),
             event_sink: None,
+            authority_changes: tokio::sync::watch::channel((0, String::new())).0,
+            #[cfg(test)]
+            verification_gate: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             loopback_http: false,
         }
     }
     pub fn set_event_sink(&mut self, sink: InventoryEventSink) {
         self.event_sink = Some(sink);
+    }
+    pub(crate) fn subscribe_authority(&self) -> tokio::sync::watch::Receiver<(u64, String)> {
+        self.authority_changes.subscribe()
+    }
+    fn authority_changed(&self, host: &str) {
+        self.authority_changes.send_modify(|event| *event = (event.0.wrapping_add(1), host.to_owned()));
     }
     /// Test/audit hook: whether a production event sink was installed.
     pub fn has_event_sink(&self) -> bool {
@@ -381,8 +393,27 @@ impl PairedHostService {
         .await
     }
     pub(crate) async fn current_generation(&self, host: String, generation: Epoch) -> Result<()> {
+        #[cfg(test)]
+        {
+            let gate = self.verification_gate.lock().unwrap().take();
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+        }
         self.run(move |store| store.read_verified(&host, generation).map(|_| ()))
             .await
+    }
+    #[cfg(test)]
+    pub(crate) fn test_hold_verification(&self) -> (tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (release, held) = tokio::sync::oneshot::channel();
+        *self.verification_gate.lock().unwrap() = Some((entered, held));
+        (observed, release)
+    }
+    #[cfg(test)]
+    pub(crate) fn test_authority_event(&self, host: &str) {
+        self.authority_changed(host);
     }
     pub async fn available(&self) -> bool {
         self.run(|store| store.generation_snapshot().map(|_| ()))
@@ -445,6 +476,7 @@ impl PairedHostService {
             .await?;
         // Synchronously drop the forgotten credential's direct worker and route.
         stop_direct(&GLOBAL_DIRECT_ROUTES, &host_id_clone, expected.0);
+        self.authority_changed(&host_id_clone);
         if let Some(sink) = &self.event_sink {
             sink(InventoryChangeEvent {
                 r#type: "forget".into(),
@@ -470,6 +502,7 @@ impl PairedHostService {
             .await
         };
         if let Ok(view) = view {
+            self.authority_changed(&host_id);
             // Only the revoked (captured) generation is stopped; a newer worker survives.
             stop_direct(&GLOBAL_DIRECT_ROUTES, &host_id, generation.0);
             let generation = view.generation.0.to_string();
@@ -604,6 +637,7 @@ impl PairedHostService {
             &host.host_id,
             host.generation.0.saturating_sub(1),
         );
+        self.authority_changed(&host.host_id);
         if let Some(sink) = &self.event_sink {
             sink(InventoryChangeEvent {
                 r#type: "pair".into(),
@@ -653,6 +687,7 @@ impl PairedHostService {
             return Err(InventoryError::Unauthorized.into());
         }
         let host_id = inventory::host_key(&origin, &exchanged.machine_id)?;
+        let device_id = Some(exchanged.device.id);
         let pairing = Pairing {
             relay_origin: origin,
             machine_id: exchanged.machine_id,
@@ -664,7 +699,7 @@ impl PairedHostService {
             if store.generation_snapshot()?.get(&host_id) != snapshot.get(&host_id) {
                 return Err(InventoryError::StaleGeneration);
             }
-            store.pair(&pairing)
+            store.pair_with_device(&pairing, device_id)
         })
         .await
     }
@@ -681,6 +716,7 @@ impl PairedHostService {
             receipt.generation.0.saturating_sub(1),
         );
         let generation = receipt.generation.0.to_string();
+        self.authority_changed(&receipt.host_id);
         if let Some(sink) = &self.event_sink {
             sink(InventoryChangeEvent {
                 r#type: "migrate".into(),

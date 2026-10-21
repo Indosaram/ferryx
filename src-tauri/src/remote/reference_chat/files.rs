@@ -80,6 +80,58 @@ pub const REFERENCE_FILE_MAX_NAME_BYTES: usize = 255;
 /// Route suffix for the file routes, under the frozen reference-chat prefix.
 pub const REFERENCE_FILE_ROUTE_SUFFIX: &str = "files";
 
+pub const REFERENCE_PREVIEW_HANDLE_LIMIT: usize = 64;
+
+pub struct ReferencePreviewLease {
+    retained: parking_lot::Mutex<Option<(std::fs::File, tokio::sync::OwnedSemaphorePermit)>>,
+    expiry: std::sync::OnceLock<tokio::task::AbortHandle>,
+    deadline: tokio::time::Instant,
+}
+
+impl ReferencePreviewLease {
+    pub fn new(
+        file: std::fs::File,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> std::sync::Arc<Self> {
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(reference_unreferenced_ttl_ms());
+        let lease = std::sync::Arc::new(Self {
+            retained: parking_lot::Mutex::new(Some((file, permit))),
+            expiry: std::sync::OnceLock::new(),
+            deadline,
+        });
+        let weak = std::sync::Arc::downgrade(&lease);
+        let task = tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            let _ = crate::ipc::run_blocking(move || {
+                if let Some(lease) = weak.upgrade() {
+                    lease.retained.lock().take();
+                }
+                Ok::<_, crate::ipc::error::IpcError>(())
+            }).await;
+        });
+        let _ = lease.expiry.set(task.abort_handle());
+        lease
+    }
+
+    pub fn read(&self, receipt: &AttachmentReceipt) -> Result<Vec<u8>, ScopeErrorCode> {
+        let mut retained = self.retained.lock();
+        if tokio::time::Instant::now() >= self.deadline {
+            retained.take();
+        }
+        let (file, _) = retained.as_mut().ok_or(ScopeErrorCode::NotFound)?;
+        read_reference_staged_file(file, receipt)
+    }
+}
+
+impl Drop for ReferencePreviewLease {
+    fn drop(&mut self) {
+        if let Some(expiry) = self.expiry.get() {
+            expiry.abort();
+        }
+    }
+}
+
 /// The staging base inside one pane's working directory.
 pub fn reference_staging_base_dir(worktree: &Path) -> PathBuf {
     worktree.join(REFERENCE_STAGING_DIR_NAME)
@@ -260,34 +312,18 @@ pub fn reference_file_bounds_check(
     Ok(())
 }
 
-/// Read a staged file for preview.
-///
-/// The staged path lives in the pane's own worktree, where the agent can replace it: a symlink or
-/// any other non-regular file there (a link to a secret, a device that never reaches EOF) is
-/// refused without being followed, the read is capped at [ATTACHMENT_MAX_FILE_BYTES], and bytes
-/// whose length differs from the receipt are not the file that was staged.
+/// Read the retained staging handle, never a potentially replaced pathname.
 pub fn read_reference_staged_file(
-    path: &Path,
-    expected_size: u64,
+    file: &mut std::fs::File,
+    receipt: &AttachmentReceipt,
 ) -> Result<Vec<u8>, ScopeErrorCode> {
-    use std::io::Read as _;
+    use std::io::{Read as _, Seek as _};
 
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| ScopeErrorCode::NotFound)?;
-    if !metadata.file_type().is_file() {
-        return Err(ScopeErrorCode::NotFound);
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        // A link swapped in between the check above and this open is refused too.
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let file = options.open(path).map_err(|_| ScopeErrorCode::NotFound)?;
     if !file.metadata().map_err(|_| ScopeErrorCode::NotFound)?.is_file() {
         return Err(ScopeErrorCode::NotFound);
     }
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|_| ScopeErrorCode::NotFound)?;
     let mut bytes = Vec::new();
     file.take(ATTACHMENT_MAX_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -295,7 +331,9 @@ pub fn read_reference_staged_file(
     if bytes.len() as u64 > ATTACHMENT_MAX_FILE_BYTES {
         return Err(ScopeErrorCode::PayloadTooLarge);
     }
-    if bytes.len() as u64 != expected_size {
+    if bytes.len() as u64 != receipt.size_bytes
+        || format!("{:x}", Sha256::digest(&bytes)) != receipt.sha256
+    {
         return Err(ScopeErrorCode::NotFound);
     }
     Ok(bytes)
@@ -374,6 +412,14 @@ pub fn stage_reference_file_in(
     worktree: &Path,
     payload: &ReferenceFileStagePayload,
 ) -> Result<ReferenceFileReceipt, ScopeErrorCode> {
+    stage_reference_file_with_preview_in(host_id, worktree, payload).map(|(receipt, _)| receipt)
+}
+
+pub fn stage_reference_file_with_preview_in(
+    host_id: &str,
+    worktree: &Path,
+    payload: &ReferenceFileStagePayload,
+) -> Result<(ReferenceFileReceipt, std::fs::File), ScopeErrorCode> {
     let name = validate_reference_file_name(&payload.name)?;
     let bytes = decode_reference_file_payload(payload)?;
 
@@ -387,27 +433,33 @@ pub fn stage_reference_file_in(
     create_reference_staging_dir(&staging_dir)?;
 
     let staged_path = staging_dir.join(&name);
-    if write_reference_staged_file(&staged_path, &bytes).is_err() {
-        let _ = std::fs::remove_dir_all(&staging_dir);
-        return Err(reference_staging_failure_code());
-    }
+    let file = match write_reference_staged_file(&staged_path, &bytes) {
+        Ok(file) => file,
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            return Err(reference_staging_failure_code());
+        }
+    };
 
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     let sha256 = format!("{:x}", hasher.finalize());
 
     let mention_path = format!("{REFERENCE_STAGING_DIR_NAME}/{attachment_id}/{name}");
-    Ok(ReferenceFileReceipt {
-        receipt: AttachmentReceipt {
-            host_id: host_id.to_string(),
-            attachment_id,
-            sha256,
-            size_bytes: bytes.len() as u64,
-            media_type: payload.media_type,
+    Ok((
+        ReferenceFileReceipt {
+            receipt: AttachmentReceipt {
+                host_id: host_id.to_string(),
+                attachment_id,
+                sha256,
+                size_bytes: bytes.len() as u64,
+                media_type: payload.media_type,
+            },
+            display_name: name.clone(),
+            mention_text: ReferenceFileReceipt::mention_for(&mention_path),
         },
-        display_name: name.clone(),
-        mention_text: ReferenceFileReceipt::mention_for(&mention_path),
-    })
+        file,
+    ))
 }
 
 /// Cancel a staged attachment's directory: the explicit cleanup path a cancelled upload takes.
@@ -639,10 +691,12 @@ fn create_reference_staging_dir(dir: &Path) -> Result<(), ScopeErrorCode> {
         .map_err(|_| reference_staging_failure_code())
 }
 
-fn write_reference_staged_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn write_reference_staged_file(path: &Path, bytes: &[u8]) -> std::io::Result<std::fs::File> {
     use std::io::Write as _;
     let mut file = std::fs::OpenOptions::new()
         .create_new(true)
+        // Keep std's Windows FILE_SHARE_READ | WRITE | DELETE defaults for deletion/TTL.
+        .read(true)
         .write(true)
         .open(path)?;
     #[cfg(unix)]
@@ -651,7 +705,8 @@ fn write_reference_staged_file(path: &Path, bytes: &[u8]) -> std::io::Result<()>
         let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
     }
     file.write_all(bytes)?;
-    file.flush()
+    file.flush()?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -663,40 +718,45 @@ mod tests {
 
     // rs-files-routes-r6-1
     #[test]
-    fn a_staged_file_read_refuses_a_symlink_an_oversized_file_and_a_size_mismatch() {
+    fn a_staged_handle_read_refuses_an_oversized_file_and_a_size_mismatch() {
         let root = scratch_dir();
-        std::fs::write(root.join("shot.png"), b"png!").expect("write staged");
+        let (mut receipt, mut file) = stage_reference_file_with_preview_in(
+            "host-test", &root, &payload("shot.png", b"png!"),
+        ).expect("stage");
         assert_eq!(
-            read_reference_staged_file(&root.join("shot.png"), 4).expect("the staged file reads"),
+            read_reference_staged_file(&mut file, &receipt.receipt).expect("the staged file reads"),
             b"png!".to_vec()
         );
+        receipt.receipt.size_bytes = 5;
         assert_eq!(
-            read_reference_staged_file(&root.join("shot.png"), 5),
+            read_reference_staged_file(&mut file, &receipt.receipt),
             Err(ScopeErrorCode::NotFound),
             "a file whose size differs from its receipt is not the staged file"
         );
 
-        #[cfg(unix)]
-        {
-            std::fs::write(root.join("secret"), b"key").expect("write secret");
-            std::os::unix::fs::symlink(root.join("secret"), root.join("link.png"))
-                .expect("symlink");
-            assert_eq!(
-                read_reference_staged_file(&root.join("link.png"), 3),
-                Err(ScopeErrorCode::NotFound),
-                "a symlink swapped in at the staged path is never followed"
-            );
-        }
-
         let big = vec![0u8; (ATTACHMENT_MAX_FILE_BYTES + 1) as usize];
-        std::fs::write(root.join("big.png"), &big).expect("write big");
+        let mut big_file = write_reference_staged_file(&root.join("big.png"), &big).expect("write big");
         assert_eq!(
-            read_reference_staged_file(&root.join("big.png"), ATTACHMENT_MAX_FILE_BYTES + 1),
+            read_reference_staged_file(&mut big_file, &receipt.receipt),
             Err(ScopeErrorCode::PayloadTooLarge),
             "nothing past the file cap is served"
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn staging_cleanup_removes_a_directory_while_its_preview_handle_is_retained() {
+        let root = scratch_dir();
+        let (receipt, mut file) = stage_reference_file_with_preview_in(
+            "host-test", &root, &payload("held.txt", b"held"),
+        ).expect("stage");
+        let dir = staged_dir(&root, &receipt.receipt.attachment_id);
+        assert!(reference_cancel_staged_file(&dir));
+        assert!(!dir.exists(), "the cleanup used by cancellation must remove the directory");
+        assert_eq!(read_reference_staged_file(&mut file, &receipt.receipt).expect("retained file"), b"held");
+        drop(file);
+        std::fs::remove_dir_all(root).expect("cleanup root");
     }
 
     fn scratch_dir() -> PathBuf {

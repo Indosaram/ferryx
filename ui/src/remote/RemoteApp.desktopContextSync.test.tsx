@@ -586,6 +586,34 @@ describe("read-only desktop context sync", () => {
     });
     expect(postSelectPaths()).toHaveLength(0);
   });
+
+  it("ui-workspace-wiring-r22-1: following the desktop keeps the active tab keyed by session id, so the chat still finds its pane", async () => {
+    armState(freshActiveContext("main"));
+    // The desktop answer is held until the pick has fully landed, so nothing refreshes after it.
+    deferStateResponse = true;
+    await mountAccountApp();
+    await pickWorktree();
+    await waitFor(() => {
+      expect(stateDeferreds.length).toBeGreaterThanOrEqual(1);
+    });
+    await waitFor(() => {
+      expect(terminalPaths().length).toBeGreaterThan(0);
+    });
+    expect(terminalPaths().some((entry) => entry.includes(SID_DESKTOP))).toBe(false);
+    fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
+    await act(async () => {
+      await new Promise<void>((done) => setTimeout(done, 0));
+    });
+
+    deferStateResponse = false;
+    await act(async () => {
+      for (const deferred of stateDeferreds.splice(0)) deferred.resolve(respond(stateBody));
+    });
+    // The desktop answer is applied in the same update that moves the active terminal to its session.
+    await waitFor(() => {
+      expect(screen.getByTestId("mobile-chat-header")).toHaveTextContent("desktop active shell");
+    });
+  });
 });
 
 describe("always-follow desktop focus", () => {

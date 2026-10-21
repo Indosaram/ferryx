@@ -1214,6 +1214,44 @@ async fn reference_chat_reads_serve_the_pane_screen_and_an_honest_history_page()
     fixture.server.stop().await;
 }
 
+// rs-history-r22-1
+#[tokio::test]
+async fn a_history_read_naming_a_rotated_provider_session_is_refused_target_expired() {
+    let fixture = fixture().await;
+    let services = fixture.state.machine_services.as_ref().expect("machine services");
+    // The pane's agent started a new conversation: the daemon now publishes the rotated id.
+    services.sessions.publish_agent_state_for_test(crate::daemon::agent_state::AgentState {
+        session_id: fixture.session_id.clone(),
+        state: "working".into(),
+        agent: Some("omo".into()),
+        provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+            key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+            id: "provider-rotated".into(),
+            transcript_path: None,
+        }),
+        detail: None,
+        origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+    });
+    let stale = fixture.read_query(
+        "omo",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[("providerSessionId", "provider-before".to_string())],
+    );
+    let (status, body) = fixture
+        .server
+        .request(
+            "GET",
+            &format!("{}?{stale}", fixture.route("history")),
+            Some(&fixture.control),
+            None,
+        )
+        .await;
+    assert_eq!(status, 410, "a stale provider session is never served: {body}");
+    assert!(body.contains("TARGET_EXPIRED"), "{body}");
+    fixture.server.stop().await;
+}
+
 /// The file lane stages on the owning host, previews what it staged, and deletes only explicitly.
 #[tokio::test]
 async fn staged_reference_files_round_trip_on_the_owning_host() {
@@ -1280,6 +1318,19 @@ async fn staged_reference_files_round_trip_on_the_owning_host() {
     let preview: serde_json::Value = serde_json::from_str(&body).expect("a preview");
     assert_eq!(preview["contentBase64"], content, "{body}");
 
+    let (status, body) = fixture
+        .server
+        .request(
+            "GET",
+            &format!("{}?{query}", fixture.route(&format!("files/{attachment_id}"))),
+            Some(&fixture.control),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "a second preview must rewind the retained handle: {body}");
+    let preview: serde_json::Value = serde_json::from_str(&body).expect("second preview");
+    assert_eq!(preview["contentBase64"], content, "{body}");
+
     // A file id that is not this target's is not a preview of anything.
     let foreign = fixture.route(&format!("files/{}", uuid::Uuid::new_v4()));
     let (status, body) = fixture
@@ -1302,6 +1353,13 @@ async fn staged_reference_files_round_trip_on_the_owning_host() {
         .request("DELETE", &format!("{own}?{query}"), Some(&fixture.control), None)
         .await;
     assert_eq!(status, 204, "an explicit delete: {body}");
+    assert!(
+        !reference_files::reference_staging_base_dir(&fixture.worktree().await)
+            .join(&attachment_id)
+            .join("reference-fixture.txt")
+            .exists(),
+        "the retained handle must not prevent physical deletion"
+    );
 
     let (status, body) = fixture
         .server
@@ -1309,6 +1367,253 @@ async fn staged_reference_files_round_trip_on_the_owning_host() {
         .await;
     assert_eq!(status, 404, "the deleted file is gone: {body}");
 
+    fixture.server.stop().await;
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn staged_preview_keeps_original_bytes_after_parent_replacement() {
+    use base64::Engine as _;
+
+    for replacement in ["uuid", "base", "leaf"] {
+        let fixture = fixture().await;
+        let (status, body) = fixture.stage("original.txt", b"original").await;
+        assert_eq!(status, 200, "{body}");
+        let staged: serde_json::Value = serde_json::from_str(&body).expect("stage result");
+        let id = staged["data"]["receipt"]["attachmentId"].as_str().expect("id");
+        let base = reference_files::reference_staging_base_dir(&fixture.worktree().await);
+        let replaced = match replacement {
+            "base" => base.clone(),
+            "leaf" => base.join(id).join("original.txt"),
+            _ => base.join(id),
+        };
+        let held = replaced.with_extension("held");
+        let outside = tempfile::tempdir().expect("outside directory");
+        let outside_dir = if replacement == "base" { outside.path().join(id) } else { outside.path().to_path_buf() };
+        std::fs::create_dir_all(&outside_dir).expect("outside parent");
+        std::fs::write(outside_dir.join("original.txt"), b"outsider").expect("same-size outside bytes");
+        std::fs::rename(&replaced, &held).expect("rename parent while handle is retained");
+        let link_target = if replacement == "leaf" {
+            outside_dir.join("original.txt")
+        } else {
+            outside.path().to_path_buf()
+        };
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&link_target, &replaced).expect("replace staged path with symlink");
+        #[cfg(windows)]
+        if replacement == "leaf" {
+            std::os::windows::fs::symlink_file(&link_target, &replaced).expect("file symlink privilege");
+        } else {
+            std::os::windows::fs::symlink_dir(&link_target, &replaced)
+                .expect("directory symlink fixture requires Windows Developer Mode or symlink privilege");
+        }
+        let query = fixture.read_query(
+            "codex", &fixture.daemon_epoch, &reference_files::reference_host_id(), &[],
+        );
+        for _ in 0..2 {
+            let (status, body) = fixture.server.request(
+                "GET", &format!("{}?{query}", fixture.route(&format!("files/{id}"))),
+                Some(&fixture.control), None,
+            ).await;
+            assert_eq!(status, 200, "{body}");
+            let preview: serde_json::Value = serde_json::from_str(&body).expect("preview");
+            assert_eq!(preview["contentBase64"], base64::engine::general_purpose::STANDARD.encode(b"original"), "{body}");
+        }
+        #[cfg(unix)]
+        std::fs::remove_file(&replaced).expect("remove symlink");
+        #[cfg(windows)]
+        if replacement == "leaf" {
+            std::fs::remove_file(&replaced).expect("remove file symlink");
+        } else {
+            std::fs::remove_dir(&replaced).expect("remove directory symlink");
+        }
+        std::fs::rename(&held, &replaced).expect("restore parent");
+        let (status, body) = fixture.server.request(
+            "DELETE", &format!("{}?{query}", fixture.route(&format!("files/{id}"))),
+            Some(&fixture.control), None,
+        ).await;
+        assert_eq!(status, 204, "{body}");
+        assert!(!base.join(id).join("original.txt").exists(), "physical cleanup");
+        assert_eq!(std::fs::read(outside_dir.join("original.txt")).expect("outside untouched"), b"outsider");
+        fixture.server.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn staged_preview_refuses_same_size_in_place_content_changes() {
+    let fixture = fixture().await;
+    let (status, body) = fixture.stage("changed.txt", b"original").await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("stage result");
+    let id = staged["data"]["receipt"]["attachmentId"].as_str().expect("id");
+    let path = reference_files::reference_staging_base_dir(&fixture.worktree().await)
+        .join(id).join("changed.txt");
+    std::fs::write(&path, b"modified").expect("same-size in-place write");
+    let query = fixture.read_query(
+        "codex", &fixture.daemon_epoch, &reference_files::reference_host_id(), &[],
+    );
+    let (status, body) = fixture.server.request(
+        "GET", &format!("{}?{query}", fixture.route(&format!("files/{id}"))),
+        Some(&fixture.control), None,
+    ).await;
+    assert_eq!(status, 404, "receipt digest mismatch: {body}");
+    assert!(body.contains("NOT_FOUND"), "{body}");
+    let (status, body) = fixture.server.request(
+        "DELETE", &format!("{}?{query}", fixture.route(&format!("files/{id}"))),
+        Some(&fixture.control), None,
+    ).await;
+    assert_eq!(status, 204, "{body}");
+    assert!(!path.exists(), "physical cleanup");
+    fixture.server.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn r23_preview_runtime_budget_survives_repeated_turns_and_expires_without_staging() {
+    let runtime = crate::remote::server::ReferenceChatRuntime::default();
+    let root = tempfile::tempdir().expect("root");
+    let mut retained = Vec::new();
+    for _ in 0..reference_files::REFERENCE_PREVIEW_HANDLE_LIMIT {
+        let permit = runtime.reserve_preview().expect("admit within aggregate budget");
+        let payload = super::types::ReferenceFileStagePayload {
+            name: "turn.txt".to_string(),
+            media_type: crate::scoped_contracts::AttachmentMediaType::Text,
+            size_bytes: 4,
+            content_base64: "dHVybg==".to_string(),
+        };
+        let (receipt, file) = reference_files::stage_reference_file_with_preview_in(
+            "test-host", root.path(), &payload,
+        ).expect("stage accepted turn");
+        retained.push((receipt, reference_files::ReferencePreviewLease::new(file, permit)));
+    }
+    assert_eq!(runtime.reserve_preview().err(), Some(crate::scoped_contracts::ScopeErrorCode::ControlConflict));
+    let released = runtime.await_preview_capacity();
+    tokio::pin!(released);
+    assert!(matches!(futures_util::poll!(&mut released), std::task::Poll::Pending));
+    tokio::time::advance(std::time::Duration::from_millis(reference_files::reference_unreferenced_ttl_ms() - 1)).await;
+    assert!(matches!(futures_util::poll!(&mut released), std::task::Poll::Pending));
+    assert_eq!(retained[0].1.read(&retained[0].0.receipt).expect("live lease before deadline"), b"turn");
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    let released = tokio::time::timeout(std::time::Duration::from_secs(5), released)
+        .await.expect("expiry releases every permit without another stage");
+    for (receipt, lease) in retained {
+        assert_eq!(lease.read(&receipt.receipt), Err(crate::scoped_contracts::ScopeErrorCode::NotFound));
+    }
+    drop(released);
+}
+
+#[tokio::test(start_paused = true)]
+async fn r23_dropped_preview_lease_releases_admission_before_deadline() {
+    let runtime = crate::remote::server::ReferenceChatRuntime::default();
+    let root = tempfile::tempdir().expect("root");
+    let payload = super::types::ReferenceFileStagePayload {
+        name: "drop.txt".to_string(),
+        media_type: crate::scoped_contracts::AttachmentMediaType::Text,
+        size_bytes: 4,
+        content_base64: "dHVybg==".to_string(),
+    };
+    let (_, file) = reference_files::stage_reference_file_with_preview_in(
+        "test-host", root.path(), &payload,
+    ).expect("stage");
+    let lease = reference_files::ReferencePreviewLease::new(file, runtime.reserve_preview().expect("permit"));
+    let released = runtime.await_preview_capacity();
+    tokio::pin!(released);
+    assert!(matches!(futures_util::poll!(&mut released), std::task::Poll::Pending));
+    drop(lease);
+    assert!(matches!(futures_util::poll!(&mut released), std::task::Poll::Ready(_)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn r23_repeated_accepted_route_turns_obey_aggregate_preview_budget() {
+    let runtime = Box::leak(Box::new(crate::remote::server::ReferenceChatRuntime::default()));
+    let root = tempfile::tempdir().expect("root");
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let backend = Arc::new(ScreenStubBackend {
+        session_id: session_id.clone(), cols: 100, rows: 30, screen: b"ready\r\n".to_vec(),
+        writes: std::sync::Mutex::new(Vec::new()), written: None,
+        on_screen: None, on_write: None, worktree: Some(root.path().to_path_buf()),
+        screen_gate: None, screen_seen: None, fail_write: false,
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        backend as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    *state.agent_history_home.write() = Some(root.path().join("history"));
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state.auth_manager.exchange_pairing_code(&pin, "budget").expect("token");
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let fixture = ReferenceRouteFixture {
+        _root: root, server, state: Arc::clone(&state), control, view: String::new(),
+        session_id: session_id.clone(),
+        daemon_epoch: state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire).to_string(),
+    };
+    for turn in 0..=reference_files::REFERENCE_PREVIEW_HANDLE_LIMIT {
+        let request = axum::http::Request::builder().method("POST").uri(fixture.route("files"))
+            .header("authorization", format!("Bearer {}", fixture.control))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(fixture.mutation(&uuid::Uuid::new_v4().to_string(),
+                serde_json::json!({"name":"turn.txt", "mediaType":"text/plain", "sizeBytes":4, "contentBase64":"dHVybg=="}))))
+            .expect("stage request");
+        let response = crate::remote::server::reference_chat_stage_file_with_runtime(
+            Arc::clone(&state), session_id.clone(), request, runtime,
+        ).await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), 65536).await.expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("result");
+        if turn == reference_files::REFERENCE_PREVIEW_HANDLE_LIMIT {
+            assert_eq!(status, 409, "{body}");
+            assert_eq!(body["error"]["code"], "CONTROL_CONFLICT");
+            break;
+        }
+        assert_eq!(status, 200, "{body}");
+        let mut submit: serde_json::Value = serde_json::from_str(&fixture.mutation(
+            &uuid::Uuid::new_v4().to_string(), serde_json::json!({"text":body["data"]["mentionText"], "origin":"chat"}),
+        )).expect("submit");
+        submit["registryId"] = serde_json::json!("claude");
+        let request = axum::http::Request::builder().method("POST").uri(fixture.route("submit"))
+            .header("authorization", format!("Bearer {}", fixture.control))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(submit.to_string())).expect("submit request");
+        let response = crate::remote::server::reference_chat_submit_with_runtime(
+            Arc::clone(&state), session_id.clone(), request, runtime,
+        ).await;
+        assert_eq!(response.status().as_u16(), 200, "accepted turn {turn}");
+    }
+    let released = runtime.await_preview_capacity();
+    tokio::pin!(released);
+    assert!(matches!(futures_util::poll!(&mut released), std::task::Poll::Pending));
+    tokio::time::advance(std::time::Duration::from_millis(reference_files::reference_unreferenced_ttl_ms())).await;
+    let _released = tokio::time::timeout(std::time::Duration::from_secs(5), released)
+        .await.expect("independent expiry after accepted turns");
+    fixture.server.stop().await;
+}
+
+// rs-files-routes-r22-1
+#[tokio::test]
+async fn deleting_a_staged_file_this_target_no_longer_holds_succeeds_and_touches_nothing_else() {
+    let fixture = fixture().await;
+    let (status, body) = fixture.stage("kept.txt", b"kept").await;
+    assert_eq!(status, 200, "{body}");
+    let staged: serde_json::Value = serde_json::from_str(&body).expect("a ScopeResult");
+    let kept_id = staged["data"]["receipt"]["attachmentId"]
+        .as_str()
+        .expect("attachmentId")
+        .to_string();
+    let kept_dir =
+        reference_files::reference_staging_base_dir(&fixture.worktree().await).join(&kept_id);
+    let query = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    // An id this target does not hold, as after the TTL prune dropped it: already gone.
+    let gone = fixture.route(&format!("files/{}", uuid::Uuid::new_v4()));
+    let (status, body) = fixture
+        .server
+        .request("DELETE", &format!("{gone}?{query}"), Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 204, "a file the host no longer holds is already removed: {body}");
+    assert!(kept_dir.is_dir(), "the delete touched no other staged file");
     fixture.server.stop().await;
 }
 
@@ -1373,6 +1678,12 @@ struct ScreenStubBackend {
     writes: std::sync::Mutex<Vec<Vec<u8>>>,
     /// Every write, as it is handed over, for a test that waits on a specific one.
     written: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    on_screen: Option<Box<dyn Fn() + Send + Sync>>,
+    on_write: Option<Box<dyn Fn() + Send + Sync>>,
+    worktree: Option<std::path::PathBuf>,
+    screen_gate: Option<Arc<tokio::sync::Semaphore>>,
+    screen_seen: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    fail_write: bool,
 }
 
 impl crate::remote::backend::RemoteSessionBackend for ScreenStubBackend {
@@ -1394,7 +1705,7 @@ impl crate::remote::backend::RemoteSessionBackend for ScreenStubBackend {
                 session_id: self.session_id.clone(),
                 workspace_id: None,
                 worktree_label: None,
-                worktree_path: None,
+                worktree_path: self.worktree.clone(),
                 running: true,
                 cols: self.cols,
                 rows: self.rows,
@@ -1408,6 +1719,15 @@ impl crate::remote::backend::RemoteSessionBackend for ScreenStubBackend {
     ) -> futures_util::future::BoxFuture<'a, Result<crate::terminal::SessionAttachment, String>>
     {
         Box::pin(async move {
+            if let Some(seen) = &self.screen_seen {
+                seen.send(()).expect("screen observer");
+            }
+            if let Some(gate) = &self.screen_gate {
+                gate.acquire().await.expect("screen gate").forget();
+            }
+            if let Some(on_screen) = &self.on_screen {
+                on_screen();
+            }
             let (sender, receiver) = tokio::sync::broadcast::channel(1);
             // A live pane's output stream stays open while it is attached: a closed one would end
             // a terminal socket before it reads the input it was sent.
@@ -1436,10 +1756,15 @@ impl crate::remote::backend::RemoteSessionBackend for ScreenStubBackend {
         data: &'a [u8],
     ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
         self.writes.lock().expect("writes").push(data.to_vec());
+        if let Some(on_write) = &self.on_write {
+            on_write();
+        }
         if let Some(written) = self.written.as_ref() {
             let _ = written.send(data.to_vec());
         }
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            if self.fail_write { Err("writer outcome is unknown".into()) } else { Ok(()) }
+        })
     }
     fn resize<'a>(
         &'a self,
@@ -1456,6 +1781,242 @@ impl crate::remote::backend::RemoteSessionBackend for ScreenStubBackend {
     ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
         Box::pin(async { Err("this stub never signals".to_string()) })
     }
+}
+
+fn publish_reference_provider(state: &RemoteGatewayState, session_id: &str, provider: &str) {
+    state.machine_services.as_ref().expect("machine services").sessions
+        .publish_agent_state_for_test(crate::daemon::agent_state::AgentState {
+            session_id: session_id.into(),
+            state: "working".into(),
+            agent: Some("omo".into()),
+            provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+                key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+                id: provider.into(),
+                transcript_path: None,
+            }),
+            detail: None,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+        });
+}
+
+async fn reference_provider_rotation_case(rotation: &str, named: Option<&str>) {
+    let root = tempfile::tempdir().expect("tempdir");
+    let daemon = crate::daemon::server::DaemonServer::new_with_paths(
+        Some(root.path().join("config")),
+        Some(root.path().join("auth")),
+    );
+    let services = Arc::clone(daemon.remote_state().machine_services.as_ref().expect("services"));
+    let session_id = format!("reference-provider-{}", uuid::Uuid::new_v4());
+    let rotate_services = Arc::clone(&services);
+    let rotate_session = session_id.clone();
+    let rotate = move || {
+        rotate_services.sessions.publish_agent_state_for_test(crate::daemon::agent_state::AgentState {
+            session_id: rotate_session.clone(),
+            state: "working".into(),
+            agent: Some("omo".into()),
+            provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+                key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+                id: "provider-b".into(),
+                transcript_path: None,
+            }),
+            detail: None,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+        });
+    };
+    let hook: Box<dyn Fn() + Send + Sync> = Box::new(rotate);
+    let (on_screen, on_write) = match rotation {
+        "screen" => (Some(hook), None),
+        "write" => (None, Some(hook)),
+        "admission" => (None, None),
+        other => panic!("unknown rotation {other}"),
+    };
+    let backend = Arc::new(ScreenStubBackend {
+        session_id: session_id.clone(), cols: 80, rows: 24,
+        screen: b"ready\r\n".to_vec(),
+        writes: std::sync::Mutex::new(Vec::new()), written: None,
+        on_screen, on_write,
+        worktree: None, screen_gate: None, screen_seen: None, fail_write: false,
+    });
+    let mut gateway = RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    );
+    gateway.machine_services = Some(services);
+    *gateway.agent_history_home.write() = Some(root.path().join("history"));
+    let state = Arc::new(gateway);
+    publish_reference_provider(&state, &session_id, "provider-a");
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state.auth_manager.exchange_pairing_code(&pin, "provider-test").expect("token");
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let mut body: serde_json::Value = serde_json::from_str(
+        &unhubbed_submit(&state, &session_id, "hello"),
+    ).expect("submit");
+    body["registryId"] = serde_json::json!("omo");
+    if let Some(named) = named {
+        body["providerSessionId"] = serde_json::json!(named);
+    }
+    if rotation == "admission" {
+        publish_reference_provider(&state, &session_id, "provider-b");
+    }
+    let (status, response) = server.request(
+        "POST", &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/submit"),
+        Some(&control), Some(&body.to_string()),
+    ).await;
+    let response: serde_json::Value = serde_json::from_str(&response).expect("result");
+    let writes = backend.writes.lock().expect("writes").clone();
+    if named.is_none() || named == Some("provider-b") && rotation == "admission" {
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(writes, vec![b"hello".to_vec(), b"\r".to_vec()]);
+    } else if rotation == "write" {
+        assert_eq!(response["error"]["code"], "OPERATION_OUTCOME_UNKNOWN", "{response}");
+        assert_eq!(writes, vec![b"hello".to_vec()], "no Enter reaches the new conversation");
+    } else {
+        assert_eq!(status, 410, "{response}");
+        assert_eq!(response["error"]["code"], "TARGET_EXPIRED", "{response}");
+        assert!(writes.is_empty(), "{writes:?}");
+    }
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn r23_provider_rotation_before_mutation_admission_types_nothing() {
+    reference_provider_rotation_case("admission", Some("provider-a")).await;
+}
+
+#[tokio::test]
+async fn r23_provider_rotation_during_prompt_probe_types_nothing() {
+    reference_provider_rotation_case("screen", Some("provider-a")).await;
+}
+
+#[tokio::test]
+async fn r23_provider_rotation_after_text_write_never_sends_enter() {
+    reference_provider_rotation_case("write", Some("provider-a")).await;
+}
+
+#[tokio::test]
+async fn r23_matching_provider_session_still_accepts_submit() {
+    reference_provider_rotation_case("admission", Some("provider-b")).await;
+}
+
+#[tokio::test]
+async fn r23_unnamed_provider_session_still_accepts_submit() {
+    reference_provider_rotation_case("admission", None).await;
+}
+
+async fn reference_attachment_cleanup_case(outcome: &str, delete_first: bool) {
+    let root = tempfile::tempdir().expect("root");
+    let session_id = format!("reference-attachment-{}", uuid::Uuid::new_v4());
+    let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let screen = if outcome == "refused" {
+        include_str!("fixtures/claude/prompt/approval-command.screen").as_bytes().to_vec()
+    } else { b"ready\r\n".to_vec() };
+    let backend = Arc::new(ScreenStubBackend {
+        session_id: session_id.clone(), cols: 100, rows: 30, screen,
+        writes: std::sync::Mutex::new(Vec::new()), written: None,
+        on_screen: None, on_write: None,
+        worktree: Some(root.path().to_path_buf()),
+        screen_gate: Some(Arc::clone(&gate)), screen_seen: Some(seen_tx),
+        fail_write: outcome == "unknown",
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    *state.agent_history_home.write() = Some(root.path().join("history"));
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state.auth_manager.exchange_pairing_code(&pin, "attachment-test").expect("token");
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let fixture = ReferenceRouteFixture {
+        _root: root, server, state: Arc::clone(&state), control, view: String::new(),
+        session_id: session_id.clone(),
+        daemon_epoch: state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire).to_string(),
+    };
+    let (status, response) = fixture.stage("notes.txt", b"notes").await;
+    assert_eq!(status, 200, "{response}");
+    let staged: serde_json::Value = serde_json::from_str(&response).expect("stage");
+    let id = staged["data"]["receipt"]["attachmentId"].as_str().expect("id");
+    let mention = staged["data"]["mentionText"].as_str().expect("mention");
+    let path = fixture._root.path().join(mention.trim().trim_start_matches('@'));
+    let query = fixture.read_query("claude", &fixture.daemon_epoch, &reference_files::reference_host_id(), &[]);
+    let file_route = format!("{}?{query}", fixture.route(&format!("files/{id}")));
+    if delete_first {
+        assert_eq!(fixture.server.request("DELETE", &file_route, Some(&fixture.control), None).await.0, 204);
+    }
+    let mut body: serde_json::Value = serde_json::from_str(&fixture.mutation(
+        &uuid::Uuid::new_v4().to_string(), serde_json::json!({"text": mention, "origin": "chat"}),
+    )).expect("submit");
+    body["registryId"] = serde_json::json!("claude");
+    let request = axum::http::Request::builder().method("POST").uri(fixture.route("submit"))
+        .header("authorization", format!("Bearer {}", fixture.control))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string())).expect("request");
+    let mut tasks = tokio::task::JoinSet::new();
+    let request_state = Arc::clone(&state);
+    tasks.spawn(async move {
+        crate::remote::server::reference_chat_submit(
+            axum::extract::State(request_state), axum::extract::Path(session_id), request,
+        ).await
+    });
+    if !delete_first {
+        tokio::time::timeout(std::time::Duration::from_secs(5), seen.recv()).await
+            .expect("submit reached screen read").expect("screen event");
+        let (status, response) = fixture.server.request("DELETE", &file_route, Some(&fixture.control), None).await;
+        assert_eq!(status, 409, "in-flight deletion: {response}");
+        assert!(path.is_file());
+        gate.add_permits(1);
+    } else {
+        gate.add_permits(1);
+    }
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), tasks.join_next()).await
+        .expect("submit bounded").expect("task").expect("joined");
+    let status = response.status().as_u16();
+    if delete_first {
+        assert_eq!(status, 404);
+        assert!(backend.writes.lock().expect("writes").is_empty());
+    } else {
+        match outcome {
+            "accepted" => assert_eq!(status, 200),
+            "refused" => assert_eq!(status, 409),
+            "unknown" => {
+                assert_ne!(status, 200);
+                let bytes = axum::body::to_bytes(response.into_body(), 65536).await.expect("body");
+                let body: serde_json::Value = serde_json::from_slice(&bytes).expect("result");
+                assert_eq!(body["error"]["code"], "OPERATION_OUTCOME_UNKNOWN");
+                assert_eq!(backend.writes.lock().expect("writes").len(), 1);
+            }
+            _ => panic!("outcome"),
+        }
+        let (status, response) = fixture.server.request("DELETE", &file_route, Some(&fixture.control), None).await;
+        if outcome == "refused" {
+            assert_eq!(status, 204, "definitely unsent files are releasable: {response}");
+            assert!(!path.exists());
+        } else {
+            assert_eq!(status, 409, "submitted files survive stale cleanup: {response}");
+            assert!(path.is_file());
+        }
+    }
+    fixture.server.stop().await;
+}
+
+#[tokio::test]
+async fn r23_attachment_cleanup_cannot_delete_inflight_or_accepted_files() {
+    reference_attachment_cleanup_case("accepted", false).await;
+}
+
+#[tokio::test]
+async fn r23_attachment_cleanup_cannot_delete_uncertain_files() {
+    reference_attachment_cleanup_case("unknown", false).await;
+}
+
+#[tokio::test]
+async fn r23_attachment_cleanup_releases_definitely_unsent_files() {
+    reference_attachment_cleanup_case("refused", false).await;
+}
+
+#[tokio::test]
+async fn r23_attachment_deleted_before_submit_refuses_without_writing() {
+    reference_attachment_cleanup_case("accepted", true).await;
 }
 
 /// A screen too large to answer from must not read as "no prompt": a chat message is not typed
@@ -1478,6 +2039,9 @@ async fn a_chat_submit_is_refused_when_the_screen_cannot_be_read_whole() {
         screen,
         writes: std::sync::Mutex::new(Vec::new()),
         written: None,
+        on_screen: None,
+        on_write: None,
+        worktree: None, screen_gate: None, screen_seen: None, fail_write: false,
     });
     let state = Arc::new(RemoteGatewayState::new_with_backend(
         Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
@@ -1534,6 +2098,9 @@ async fn a_chat_submit_without_a_registry_id_is_still_delivered() {
         screen: b"$ ".to_vec(),
         writes: std::sync::Mutex::new(Vec::new()),
         written: None,
+        on_screen: None,
+        on_write: None,
+        worktree: None, screen_gate: None, screen_seen: None, fail_write: false,
     });
     let state = Arc::new(RemoteGatewayState::new_with_backend(
         Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
@@ -1590,6 +2157,9 @@ fn unhubbed_pane(
         screen: b"$ ".to_vec(),
         writes: std::sync::Mutex::new(Vec::new()),
         written,
+        on_screen: None,
+        on_write: None,
+        worktree: None, screen_gate: None, screen_seen: None, fail_write: false,
     });
     let state = Arc::new(RemoteGatewayState::new_with_backend(
         Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
@@ -1648,6 +2218,271 @@ async fn a_multi_line_submit_to_a_pane_whose_paste_mode_is_unknown_types_nothing
     server.stop().await;
 }
 
+struct R25RouteClock(std::sync::atomic::AtomicU64);
+
+fn r25_history_identity(state: &RemoteGatewayState, session: &str)
+    -> super::history::ReferenceHistoryIdentity
+{
+    let body: serde_json::Value = serde_json::from_str(&unhubbed_submit(state, session, "hello"))
+        .expect("envelope");
+    super::history::ReferenceHistoryIdentity::new(
+        super::types::ReferenceTargetRef::without_provider_session(
+            serde_json::from_value(body["target"].clone()).expect("target"),
+        ), "omo",
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn r25_history_resolver_yields_worker_and_preserves_typed_refusal() {
+    let root = tempfile::tempdir().expect("isolated root");
+    let (_, state, _) = unhubbed_pane("r25-scheduling", None);
+    let identity = r25_history_identity(&state, "r25-scheduling");
+    let (entered_tx, entered) = tokio::sync::oneshot::channel();
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let (finished_tx, finished) = std::sync::mpsc::channel();
+    let watchdog_gate = Arc::clone(&gate);
+    let watchdog = std::thread::spawn(move || {
+        let timed_out = finished.recv_timeout(std::time::Duration::from_secs(5)).is_err();
+        let (lock, ready) = &*watchdog_gate;
+        *lock.lock().expect("watchdog gate") = true;
+        ready.notify_all();
+        timed_out
+    });
+    let worker_gate = Arc::clone(&gate);
+    let controller = tokio::spawn(async move {
+        let observed = entered.await;
+        let (lock, ready) = &*gate;
+        *lock.lock().expect("controller gate") = true;
+        ready.notify_all();
+        observed
+    });
+    let refusal = crate::remote::server::reference_chat_resolve_history(
+        root.path().to_path_buf(), identity, Vec::new(), move |_, _, _| {
+            entered_tx.send(()).expect("entry subscriber");
+            let (lock, ready) = &*worker_gate;
+            let mut released = lock.lock().expect("resolver gate");
+            while !*released {
+                released = ready.wait(released).expect("resolver release");
+            }
+            Err(crate::scoped_contracts::ScopeError {
+                code: crate::scoped_contracts::ScopeErrorCode::ControlConflict,
+                message: "r25-refusal".into(), retryable: true,
+                details: serde_json::json!({"marker": 25}),
+            })
+        },
+    ).await.expect_err("typed refusal");
+    let controller_result = controller.await;
+    let signal_result = finished_tx.send(());
+    let timed_out = watchdog.join().expect("watchdog joined");
+    assert!(!timed_out, "resolver occupied the current-thread async worker");
+    controller_result.expect("controller").expect("entry");
+    signal_result.expect("watchdog completion");
+    assert_eq!(refusal.code, crate::scoped_contracts::ScopeErrorCode::ControlConflict);
+    assert_eq!(refusal.message, "r25-refusal");
+    assert!(refusal.retryable);
+    assert_eq!(refusal.details, serde_json::json!({"marker":25}));
+}
+
+#[tokio::test]
+async fn r25_history_route_refusal_and_prompt_none_keep_structured_contract() {
+    let root = tempfile::tempdir().expect("isolated history");
+    let session = "r25-refusal";
+    let (_, state, control) = unhubbed_pane(session, None);
+    *state.agent_history_home.write() = Some(root.path().to_path_buf());
+    let identity = r25_history_identity(&state, session);
+    let query = serde_json::from_value(serde_json::json!({
+        "hostId": identity.target.target.host_id,
+        "ownerId": identity.target.target.owner_id,
+        "epoch": identity.target.target.epoch.0.to_string(),
+        "backendSessionId": session, "registryId": "omo",
+    })).expect("query");
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {control}").parse().expect("bearer"));
+    let refuse = |_: &std::path::Path, _: &super::history::ReferenceHistoryIdentity,
+        _: &[super::history::ReferenceHistorySibling]| {
+        Err(crate::scoped_contracts::ScopeError {
+            code: crate::scoped_contracts::ScopeErrorCode::ControlConflict,
+            message: "r25-refusal".into(), retryable: true,
+            details: serde_json::json!({"marker":25}),
+        })
+    };
+    let response = crate::remote::server::reference_chat_history_with_resolver(
+        Arc::clone(&state), session.into(), Ok(axum::extract::Query(query)), headers, refuse,
+    ).await;
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    let bytes = axum::body::to_bytes(response.into_body(), 65_536).await.expect("body");
+    let envelope: serde_json::Value = serde_json::from_slice(&bytes).expect("refusal");
+    let body = &envelope["error"];
+    assert_eq!(body["code"], "CONTROL_CONFLICT", "{body}");
+    assert_eq!(body["message"], "r25-refusal", "{body}");
+    assert_eq!(body["retryable"], true, "{body}");
+    assert_eq!(body["details"], serde_json::json!({"marker":25}), "{body}");
+    assert!(crate::remote::server::reference_chat_session_jsonl_with_resolver(
+        &state, &identity, refuse,
+    ).await.is_none());
+}
+
+impl super::input::ReferenceInputClock for R25RouteClock {
+    fn now_ms(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn sleep_ms(&self, _ms: u64) -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(async {})
+    }
+}
+
+#[tokio::test]
+async fn r25_history_and_prompt_preserve_real_resolver_selection_matrix() {
+    for case in ["exact", "cwd", "ambiguous", "sibling", "missing", "remote"] {
+        let root = tempfile::tempdir().expect("isolated home");
+        let cwd = root.path().join("worktree");
+        let session = format!("r25-history-{case}");
+        let backend = Arc::new(ScreenStubBackend {
+            session_id: session.clone(), cols: 80, rows: 24, screen: b"ready\r\n".to_vec(),
+            writes: std::sync::Mutex::new(Vec::new()), written: None,
+            on_screen: None, on_write: None, worktree: Some(cwd.clone()),
+            screen_gate: None, screen_seen: None, fail_write: false,
+        });
+        let mut gateway = RemoteGatewayState::new_with_backend(
+            backend as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+            crate::worktree::registry::WorkspaceRegistry::new(),
+        );
+        let daemon = crate::daemon::server::DaemonServer::new_with_paths(
+            Some(root.path().join("config")), Some(root.path().join("auth")),
+        );
+        if case == "remote" {
+            let services = Arc::clone(daemon.remote_state().machine_services.as_ref().expect("services"));
+            let store = services.sessions.remote_sessions_store_path();
+            std::fs::create_dir_all(store.parent().expect("store parent")).expect("store directory");
+            std::fs::write(store, serde_json::json!({"remoteSessions":[{"descriptor":{
+                "backendSessionId":session,
+                "config":{"host":{"hostname":"test.invalid"},
+                    "environment":{"home":"/isolated", "platform":"posix"},
+                    "projectPath":"/isolated/worktree"}
+            }}]}).to_string()).expect("isolated remote store");
+            gateway.machine_services = Some(services);
+        }
+        let state = Arc::new(gateway);
+        *state.agent_history_home.write() = Some(root.path().to_path_buf());
+        let mut identity = r25_history_identity(&state, &session).with_cwd(cwd.to_string_lossy());
+        if case == "exact" {
+            identity.target.provider_session_id = Some("native-r25".into());
+        }
+        let folder = root.path().join(".omo/agent/sessions")
+            .join(super::history_omo::omo_session_folder(&cwd.to_string_lossy()));
+        std::fs::create_dir_all(&folder).expect("transcript folder");
+        let jsonl = format!("{}\n{}\n",
+            serde_json::json!({"type":"session","id":"native-r25","cwd":cwd.to_string_lossy()}),
+            serde_json::json!({"type":"message","id":"turn-r25","message":{
+                "role":"user","content":[{"type":"text","text":"hello"}]}}));
+        if case != "missing" {
+            std::fs::write(folder.join("native-r25.jsonl"), &jsonl).expect("transcript");
+        }
+        if case == "ambiguous" {
+            std::fs::write(folder.join("other.jsonl"), &jsonl).expect("ambiguous transcript");
+        }
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (control, _) = state.auth_manager.exchange_pairing_code(&pin, case).expect("token");
+        let query = serde_json::from_value(serde_json::json!({
+            "hostId":identity.target.target.host_id, "ownerId":identity.target.target.owner_id,
+            "epoch":identity.target.target.epoch.0.to_string(), "backendSessionId":session,
+            "providerSessionId":identity.target.provider_session_id, "registryId":"omo",
+        })).expect("query");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {control}").parse().expect("bearer"));
+        let resolve = move |home: &std::path::Path, identity: &super::history::ReferenceHistoryIdentity,
+            siblings: &[super::history::ReferenceHistorySibling]| {
+            assert_ne!(case, "remote", "remote session must never resolve locally");
+            let mut siblings = siblings.to_vec();
+            if case == "sibling" {
+                siblings.push(super::history::ReferenceHistorySibling::new("other-pane", identity.cwd.clone()));
+            }
+            super::history::resolve_reference_history_stream(home, identity, &siblings)
+        };
+        let response = crate::remote::server::reference_chat_history_with_resolver(
+            Arc::clone(&state), session.clone(), Ok(axum::extract::Query(query)), headers, resolve,
+        ).await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), 65_536).await.expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("page or refusal");
+        let prompt = crate::remote::server::reference_chat_session_jsonl_with_resolver(
+            &state, &identity, resolve,
+        ).await;
+        match case {
+            "exact" | "cwd" => {
+                assert_eq!(status, 200, "{case}: {body}");
+                assert_eq!(body["availability"], "native", "{body}");
+                assert_eq!(prompt.as_deref(), Some(jsonl.as_str()));
+            }
+            "ambiguous" | "sibling" => {
+                assert_eq!(status, 409, "{case}: {body}");
+                assert_eq!(body["error"]["code"], "CONTROL_CONFLICT");
+                assert!(prompt.is_none());
+            }
+            "missing" => {
+                assert_eq!(status, 404, "{body}");
+                assert_eq!(body["error"]["code"], "NOT_FOUND");
+                assert!(prompt.is_none());
+            }
+            "remote" => {
+                assert_eq!(status, 422, "{body}");
+                assert_eq!(body["error"]["code"], "UNSUPPORTED");
+                assert!(prompt.is_none());
+            }
+            _ => unreachable!("fixed matrix"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn r25_submit_http_admission_spends_arrival_budget() {
+    for elapsed in [44_999, 45_000, 45_001] {
+        let session_id = format!("r25-arrival-{elapsed}");
+        let (backend, state, control) = unhubbed_pane(&session_id, None);
+        let root = tempfile::tempdir().expect("isolated history");
+        *state.agent_history_home.write() = Some(root.path().to_path_buf());
+        let (entered_tx, mut entered) = tokio::sync::mpsc::unbounded_channel();
+        let mut isolated_runtime = crate::remote::server::ReferenceChatRuntime::default();
+        isolated_runtime.submit_staging_entered = Some(entered_tx);
+        let runtime: &'static _ = Box::leak(Box::new(isolated_runtime));
+        let staging = runtime.hold_staging_sweep().await;
+        let clock = Arc::new(R25RouteClock(std::sync::atomic::AtomicU64::new(7_000)));
+        let payload = unhubbed_submit(&state, &session_id, "hello");
+        let request = axum::http::Request::builder().method("POST")
+            .header("authorization", format!("Bearer {control}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(payload)).expect("request");
+        let request_clock = Arc::clone(&clock);
+        let mut handler = tokio::spawn(async move {
+            crate::remote::server::reference_chat_submit_with_clock(
+                state, session_id, request, runtime, request_clock,
+            ).await
+        });
+        let admission = tokio::time::timeout(std::time::Duration::from_secs(5), entered.recv()).await;
+        clock.0.store(7_000 + elapsed, std::sync::atomic::Ordering::SeqCst);
+        drop(staging);
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), &mut handler).await;
+        if completed.is_err() {
+            handler.abort();
+            assert!(handler.await.expect_err("aborted handler").is_cancelled());
+        }
+        assert!(admission.is_ok_and(|entry| entry.is_some()), "handler reached staging read");
+        let response = completed.expect("bounded handler").expect("handler");
+        let bytes = axum::body::to_bytes(response.into_body(), 65_536).await.expect("body");
+        let result: serde_json::Value = serde_json::from_slice(&bytes).expect("result");
+        let writes = backend.writes.lock().expect("writes").clone();
+        if elapsed > 45_000 {
+            assert_eq!(result["error"]["code"], "TIMEOUT", "{result}");
+            assert_eq!(result["error"]["retryable"], true, "{result}");
+            assert!(writes.is_empty(), "NotTyped: {writes:?}");
+        } else {
+            assert_eq!(result["data"]["receipt"]["stage"], "accepted", "{result}");
+            assert_eq!(writes, vec![b"hello".to_vec(), b"\r".to_vec()]);
+        }
+    }
+}
+
 /// rs-input-screen-r3-2: a caller that goes away between the paste and its Enter must not leave
 /// the paste unsent in the pane. The handler future is dropped exactly as hyper drops it on a
 /// disconnect, right after the paste is written.
@@ -1683,6 +2518,101 @@ async fn a_submit_whose_caller_leaves_after_the_paste_still_writes_its_enter() {
         Some(b"\r".as_slice()),
         "the paste was left unsent in the pane after its caller left"
     );
+}
+
+/// rs-input-screen-r3-2: dropping an answer handler after navigation must not cancel its
+/// remaining navigation keys or the Enter that confirms the answer.
+#[tokio::test(start_paused = true)]
+async fn an_answer_whose_caller_leaves_after_navigation_still_finishes_its_keys() {
+    // Given: a fixed approval menu and a subscribed writer, with an isolated transcript root.
+    let session_id = "reference-route-answer-caller-left";
+    let home = tempfile::tempdir().expect("isolated transcript root");
+    let (written_tx, mut written) = tokio::sync::mpsc::unbounded_channel();
+    let menu = include_str!("fixtures/claude/prompt/approval-command.screen");
+    let screen = menu.trim_end().replace('\n', "\r\n").into_bytes();
+    let backend = Arc::new(ScreenStubBackend {
+        session_id: session_id.to_string(),
+        cols: 160,
+        rows: 30,
+        screen: screen.clone(),
+        writes: std::sync::Mutex::new(Vec::new()),
+        written: Some(written_tx),
+        on_screen: None,
+        on_write: None,
+        worktree: None,
+        screen_gate: None,
+        screen_seen: None,
+        fail_write: false,
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    *state.agent_history_home.write() = Some(home.path().to_path_buf());
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, session_id)
+        .expect("control token");
+    let mut mirror = crate::remote::mirror::RemoteTerminalMirror::new(160, 30)
+        .expect("fixture mirror");
+    let snapshot = super::screen::snapshot_reference_screen(&mut mirror, Some(&[screen]))
+        .expect("fixture snapshot");
+    let prompt = super::prompts::detect_reference_prompt("claude", &snapshot.text)
+        .expect("approval card");
+    let epoch = state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire).to_string();
+    let body = serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(),
+        "registryId": "claude",
+        "target": {
+            "hostId": reference_files::reference_host_id(),
+            "ownerId": state.reference_owner_id,
+            "epoch": epoch,
+            "backendSessionId": session_id,
+        },
+        "params": {
+            "promptId": prompt.id,
+            "screenRevision": snapshot.revision,
+            "answer": { "optionIndex": 3 },
+        },
+    });
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/answer"))
+        .header("authorization", format!("Bearer {control}"))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .expect("answer request");
+
+    // When: the first down key is observed, drop the actual handler during its step gap.
+    // Paused time keeps that gap from elapsing while the channel event is ready to be read.
+    let handler = crate::remote::server::reference_chat_answer(
+        axum::extract::State(Arc::clone(&state)),
+        axum::extract::Path(session_id.to_string()),
+        request,
+    );
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            biased;
+            key = written.recv() => key.expect("first answer key"),
+            response = handler => panic!("answer finished before cancellation: {:?}", response.status()),
+        }
+    })
+    .await
+    .expect("first answer key arrived");
+    assert_eq!(first, b"\x1b[B");
+
+    // Then: the detached transaction completes both remaining down keys and its Enter.
+    let remaining = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut keys = Vec::new();
+        for _ in 0..3 {
+            keys.push(written.recv().await.expect("remaining answer key"));
+        }
+        keys
+    })
+    .await
+    .expect("the answer finishes after its caller leaves");
+    assert_eq!(remaining, vec![b"\x1b[B".to_vec(), b"\x1b[B".to_vec(), b"\r".to_vec()]);
 }
 
 /// rs-input-screen-r15-1: raw keystrokes typed through the remote terminal socket must hold a chat

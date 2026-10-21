@@ -11,8 +11,9 @@ import { getHostPlatform } from "../lib/platform";
 import { revealPath } from "../lib/tauri";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
+import { SidebarStateSlot, type SidebarSlotState } from "./sidebar/SidebarStateSlot";
 import { IconButton } from "./ui/IconButton";
-import { StatusDot, type StatusDotState } from "./ui/StatusDot";
+import type { StatusDotState } from "./ui/StatusDot";
 
 type WorktreeListProps = {
   readonly worktrees: readonly Worktree[];
@@ -86,12 +87,19 @@ export function isPrimaryWorktree(worktree: Worktree, repoRoot?: string | null):
   return worktreeIdentity(worktree) === null;
 }
 
+/** Maps a row's activity to its slot state; idle and failed rows show nothing (ui/DESIGN.md section 4 rule 7). */
+function slotStateFor(indicator: StatusDotState | null): SidebarSlotState {
+  if (indicator === "working" || indicator === "starting") return "working";
+  if (indicator === "waiting" || indicator === "unread") return indicator;
+  if (indicator === "done" || indicator === "exited") return "done";
+  return null;
+}
+
 export const WorktreeRow = memo(function WorktreeRow({
   worktree,
   repoRoot,
   active,
   agent,
-  status,
   unread,
   activitySummary,
   onSelect,
@@ -126,6 +134,8 @@ export const WorktreeRow = memo(function WorktreeRow({
   const aggregateIndicator = resolveActivityIndicator(displaySummary);
   const indicator: StatusDotState | null =
     aggregateIndicator ?? (activitySummary === undefined && agent ? agent.state : null);
+  const slotState = slotStateFor(indicator);
+  const hostName = isRemote ? (worktree.hostLabel ?? worktree.hostSummary ?? "Remote") : undefined;
 
   const handleContextMenu = (event: React.MouseEvent) => {
     event.preventDefault();
@@ -203,13 +213,20 @@ export const WorktreeRow = memo(function WorktreeRow({
         data-disabled={isDisabled ? "true" : undefined}
         onContextMenu={handleContextMenu}
         className={cn(
-          "group/worktree-row relative my-0.5 w-full rounded-md border transition-colors",
+          "group/worktree-row relative my-0.5 w-full rounded-md transition-colors",
           isDisabled && "opacity-60",
           active
-            ? "border-[#6c6c6c] bg-[#3f3f3f]"
-            : "border-transparent bg-transparent hover:bg-white/[0.04]",
+            ? "bg-worktree-sidebar-accent text-foreground"
+            : "bg-transparent hover:bg-white/[0.04]",
         )}
       >
+        {active ? (
+          <span
+            aria-hidden="true"
+            data-testid="worktree-rail-active"
+            className="pointer-events-none absolute -left-[9px] top-1 bottom-1 w-px bg-worktree-sidebar-ring"
+          />
+        ) : null}
         <button
           type="button"
           onClick={() => {
@@ -224,51 +241,23 @@ export const WorktreeRow = memo(function WorktreeRow({
           aria-current={active ? "true" : undefined}
           aria-disabled={isDisabled ? "true" : undefined}
           title={unavailableReason ?? (isRemote ? `Remote SSH root: ${worktree.path}${worktree.hostLabel ? ` (${worktree.hostLabel})` : ""}` : undefined)}
-          className="flex min-h-[28px] w-full flex-col justify-center rounded-md px-2 py-1 pr-8 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-disabled:cursor-not-allowed"
+          className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 pr-8 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-disabled:cursor-not-allowed"
         >
-          <span className="flex min-w-0 flex-col">
-            <span className="flex min-w-0 items-center gap-1.5">
-              <span
-                data-testid="worktree-status-dot"
-                data-activity-state={indicator ?? "idle"}
-                className="inline-flex size-2 shrink-0 items-center justify-center"
-              >
-                {indicator ? <StatusDot state={indicator} /> : <span className="size-2 shrink-0 rounded-full bg-status-idle" />}
-              </span>
-              <span
-                className={cn(
-                  "truncate text-[12px] font-semibold leading-tight",
-                  active ? "text-[#fafafa]" : "text-worktree-sidebar-foreground",
-                )}
-              >
-                {displayName}
-              </span>
-              {primary ? (
-                <span className="shrink-0 rounded bg-[#4a4a4a] px-1.5 py-px text-[10px] font-medium leading-none text-[#d8d8d8]">
-                  primary
-                </span>
-              ) : null}
-              {status?.isDirty ? (
-                <span className="shrink-0 text-[10px] text-status-warning">
-                  Dirty · {status.files.length} {status.files.length === 1 ? "file" : "files"}
-                </span>
-              ) : null}
-              {isRemote ? (
-                <span
-                  data-testid="remote-machine-badge"
-                  title={worktree.hostSummary ? `${worktree.hostLabel ?? "Remote"} (${worktree.hostSummary})` : (worktree.hostLabel ?? "Remote")}
-                  className="ml-auto max-w-[88px] shrink-0 truncate rounded bg-[#4a4a4a] px-1.5 py-px text-[10px] font-medium leading-none text-[#d8d8d8]"
-                >
-                  {worktree.hostLabel ?? worktree.hostSummary ?? "Remote"}
-                </span>
-              ) : null}
-            </span>
-            {isRemote ? (
-              <span className="truncate text-[10px] text-muted-foreground pl-3.5">
-                {worktree.path}{worktree.hostSummary ? ` - ${worktree.hostSummary}` : ""}
-              </span>
-            ) : null}
+          <span
+            className={cn(
+              "min-w-0 truncate text-[12px] font-semibold leading-tight",
+              active ? "text-foreground" : "text-worktree-sidebar-foreground",
+            )}
+          >
+            {displayName}
           </span>
+          <SidebarStateSlot
+            state={slotState}
+            host={hostName}
+            title={isRemote && slotState === null ? (worktree.hostSummary ? `${worktree.hostLabel ?? "Remote"} (${worktree.hostSummary})` : hostName) : undefined}
+            className="ml-auto min-w-0 truncate"
+            data-testid={slotState ? "worktree-status-dot" : "remote-machine-badge"}
+          />
         </button>
 
         <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/worktree-row:opacity-100">

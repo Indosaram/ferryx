@@ -54,6 +54,8 @@ export interface MachineDiscoveryStatus {
   options: AccountWorktreeOption[];
   /** Repository basenames keyed by workspace id; never absolute paths. */
   projectLabels?: Record<string, string>;
+  desktopLocalSnapshotExists?: boolean;
+  memberWorkspaceIds?: string[];
 }
 
 export interface UseAccountWorktreesResult {
@@ -289,7 +291,8 @@ export function useAccountWorktrees(
       if (isGenerationAlive()) {
         setMachineStatuses((prev) => ({
           ...prev,
-          [machine.machineId]: { machine, status: "tunneling", options: [] },
+          [machine.machineId]: { ...prev[machine.machineId], machine, status: "tunneling",
+            options: (prev[machine.machineId]?.options ?? []).map((option) => ({ ...option, unavailable: true })) },
         }));
       }
 
@@ -341,11 +344,20 @@ export function useAccountWorktrees(
         }
 
         const projsText = new TextDecoder().decode(projRes.body);
-        let projsData: { projects?: Array<{ workspaceId: string; availability: string }> };
+        let projsData: { desktopLocalSnapshotExists?: boolean; projects?: Array<{ workspaceId: string; availability: string }> };
         try {
           projsData = JSON.parse(projsText);
         } catch {
           throw new Error("Machine projects query returned invalid JSON");
+        }
+        const desktopLocalSnapshotExists = projsData.desktopLocalSnapshotExists === true;
+        if (desktopLocalSnapshotExists) {
+          const scoped = await localTunnel.transport.fetchLike("/api/v1/workspace/projects?scope=desktopLocal", {
+            headers: { Authorization: `Bearer ${pair.token}` },
+          });
+          if (scoped.status < 200 || scoped.status >= 300) throw new Error("Desktop projects query failed");
+          projsData = JSON.parse(new TextDecoder().decode(scoped.body));
+          if (!isGenerationAlive()) return;
         }
         const validProjects = (projsData.projects ?? []).filter(
           (p) => p.availability === "ready" && p.workspaceId && p.workspaceId.trim().length > 0,
@@ -354,27 +366,68 @@ export function useAccountWorktrees(
         const machineName = machine.displayName || machine.machineId;
         const projectLabels = Object.fromEntries(workspaceLabelsFromCatalog(projsData));
         const machineOpts: AccountWorktreeOption[] = [];
+        for (const project of projsData.projects ?? []) {
+          if (project.availability === "ready") continue;
+          machineOpts.push({
+            workspaceId: project.workspaceId, worktreeSlug: null, worktreeLabel: "Unavailable",
+            unavailable: true, projectLabel: projectLabels[project.workspaceId] ?? project.workspaceId,
+            machineId: machine.machineId, machineDisplayName: machineName,
+            machinePlatform: machine.platform || "remote", machineOnline: machine.online !== false,
+          });
+        }
         const seen = new Set<string>();
 
-        for (const proj of validProjects) {
-          const wsId = proj.workspaceId;
-          const wtRes = await localTunnel.transport.fetchLike(
+        type WorktreeRows = Array<{ workspaceId: string; identity: { wsId: string; slug: string } | null; branch: string | null }>;
+        const fetchWorktrees = async (wsId: string): Promise<WorktreeRows> => {
+          const wtRes = await localTunnel!.transport.fetchLike(
             `/api/v1/workspace/worktrees?workspaceId=${encodeURIComponent(wsId)}`,
             { headers: { Authorization: `Bearer ${pair.token}` } },
           );
-
           if (wtRes.status < 200 || wtRes.status >= 300) {
             throw new Error(`Machine worktrees query failed for ${wsId} (${wtRes.status})`);
           }
-
-          const wtText = new TextDecoder().decode(wtRes.body);
-          let wtData: { worktrees?: Array<{ workspaceId: string; identity: { wsId: string; slug: string } | null; branch: string | null }> };
+          let wtData: { worktrees?: WorktreeRows };
           try {
-            wtData = JSON.parse(wtText);
+            wtData = JSON.parse(new TextDecoder().decode(wtRes.body));
           } catch {
             throw new Error(`Machine worktrees query returned invalid JSON for ${wsId}`);
           }
-          const worktrees = wtData.worktrees ?? [];
+          return wtData.worktrees ?? [];
+        };
+        // At most four worktree requests are in flight; the sessions request runs
+        // alongside them. Results keep project order, and one project's failure
+        // marks only that project unavailable.
+        const worktreeResults: Array<{ ok: true; rows: WorktreeRows } | { ok: false }> = new Array(validProjects.length);
+        let nextProject = 0;
+        const worktreeWorker = async () => {
+          while (nextProject < validProjects.length) {
+            const index = nextProject++;
+            try {
+              worktreeResults[index] = { ok: true, rows: await fetchWorktrees(validProjects[index].workspaceId) };
+            } catch {
+              worktreeResults[index] = { ok: false };
+            }
+          }
+        };
+        const sessionsRequest = localTunnel.transport.fetchLike("/api/v1/sessions", {
+          headers: { Authorization: `Bearer ${pair.token}` },
+        });
+        sessionsRequest.catch(() => undefined);
+        await Promise.all(Array.from({ length: Math.min(4, validProjects.length) }, worktreeWorker));
+
+        for (const [index, proj] of validProjects.entries()) {
+          const wsId = proj.workspaceId;
+          const result = worktreeResults[index];
+          if (!result.ok) {
+            machineOpts.push({
+              workspaceId: wsId, worktreeSlug: null, worktreeLabel: "Unavailable", unavailable: true,
+              projectLabel: projectLabels[wsId] ?? wsId, machineId: machine.machineId,
+              machineDisplayName: machineName, machinePlatform: machine.platform || "remote",
+              machineOnline: machine.online !== false,
+            });
+            continue;
+          }
+          const worktrees = result.rows;
 
           for (const wt of worktrees) {
             if (wt.workspaceId !== wsId) continue;
@@ -397,9 +450,7 @@ export function useAccountWorktrees(
           }
         }
 
-        const sessRes = await localTunnel.transport.fetchLike("/api/v1/sessions", {
-          headers: { Authorization: `Bearer ${pair.token}` },
-        });
+        const sessRes = await sessionsRequest;
 
         if (sessRes.status < 200 || sessRes.status >= 300) {
           throw new Error(`Machine sessions query failed (${sessRes.status})`);
@@ -420,7 +471,8 @@ export function useAccountWorktrees(
         if (isGenerationAlive()) {
           setMachineStatuses((prev) => ({
             ...prev,
-            [machine.machineId]: { machine, status: "ready", options: machineOpts, projectLabels },
+            [machine.machineId]: { machine, status: "ready", options: machineOpts, projectLabels,
+              desktopLocalSnapshotExists, memberWorkspaceIds: (projsData.projects ?? []).map((p) => p.workspaceId) },
           }));
         }
       } catch (err) {
@@ -439,11 +491,12 @@ export function useAccountWorktrees(
           setMachineStatuses((prev) => ({
             ...prev,
             [machine.machineId]: {
+              ...prev[machine.machineId],
               machine,
               status: "error",
               error: err instanceof Error ? err.message : "Tunnel discovery failed",
               errorCode,
-              options: [],
+              options: (prev[machine.machineId]?.options ?? []).map((option) => ({ ...option, unavailable: true })),
             },
           }));
         }
@@ -574,10 +627,11 @@ export function useAccountWorktrees(
           setMachineStatuses((prev) => ({
             ...prev,
             [machine.machineId]: {
+              ...prev[machine.machineId],
               machine,
               status: "error",
               error: err instanceof Error ? err.message : "Retry failed",
-              options: [],
+              options: (prev[machine.machineId]?.options ?? []).map((option) => ({ ...option, unavailable: true })),
             },
           }));
         }
@@ -591,12 +645,19 @@ export function useAccountWorktrees(
       const existing = tunnelsRef.current.get(machineId);
       if (existing) {
         tunnelsRef.current.delete(machineId);
-        return {
-          transport: existing.transport,
-          close: existing.close,
-          machine: existing.machine,
-          deviceToken: existing.deviceToken,
-        };
+        // The relay drops an idle tunnel; a discovery tunnel it already closed is discarded,
+        // not handed out, so the caller gets a fresh one below.
+        if (existing.transport.isClosed !== true) {
+          return {
+            transport: existing.transport,
+            close: existing.close,
+            machine: existing.machine,
+            deviceToken: existing.deviceToken,
+          };
+        }
+        try {
+          existing.close();
+        } catch {}
       }
 
       const machine = machinesRef.current.find((m) => m.machineId === machineId);
@@ -647,7 +708,7 @@ export function useAccountWorktrees(
   const accountOptions: AccountWorktreeOption[] = [];
   for (const machine of machines) {
     const status = machineStatuses[machine.machineId];
-    if (status?.status !== "ready") continue;
+    if (!status) continue;
     const machineName = status.machine.displayName || machine.displayName || machine.machineId;
     const machinePlatform = status.machine.platform || machine.platform || "remote";
     const machineOnline = status.machine.online !== false;
@@ -675,6 +736,9 @@ export function useAccountWorktrees(
       /* Stopped sessions stay in `sessionInventories` for honest display, but they are not
          pickable attach targets. */
       if (!entry.running) continue;
+      if (status.status !== "ready" || (status.desktopLocalSnapshotExists &&
+          !status.memberWorkspaceIds?.includes(entry.workspaceId))) continue;
+      if (status.options.some((option) => option.workspaceId === entry.workspaceId && option.unavailable)) continue;
       const label = entry.title
         ? `${entry.title} (${entry.sessionId.slice(0, 8)})`
         : `Session ${entry.sessionId.slice(0, 8)}`;

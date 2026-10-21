@@ -28,7 +28,10 @@ type PairingGatewayStatus = RemoteGatewayStatus & {
   controlChannelConnected?: boolean;
 };
 
-export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boolean } = {}) {
+const ACCESS_DESCRIPTION = "Controls incoming device access only. Outbound machines and workspace sessions are unaffected. Device access is not a machine-project grant.";
+
+/** hideTitle: the embedding container already shows the "Access to This Machine" title. */
+export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: { detailsOnly?: boolean; hideTitle?: boolean } = {}) {
   const [status, setStatus] = useState<PairingGatewayStatus | null>(null);
   const statusRef = useRef<PairingGatewayStatus | null>(null);
   statusRef.current = status;
@@ -135,11 +138,11 @@ export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boo
 
   return (
     <section aria-labelledby="settings-remote-heading" aria-label="Access to This Machine">
-      <SettingsHeading
-        icon={<Radio />}
-        title="Access to This Machine"
-        description="Controls incoming device access only. Outbound machines and workspace sessions are unaffected. Device access is not a machine-project grant."
-      />
+      {hideTitle ? (
+        <p className="mb-4 mt-2 text-[12px] text-muted-foreground">{ACCESS_DESCRIPTION}</p>
+      ) : (
+        <SettingsHeading icon={<Radio />} title="Access to This Machine" description={ACCESS_DESCRIPTION} />
+      )}
       <h2 id="settings-remote-heading" className="sr-only">
         Remote Access
       </h2>
@@ -174,11 +177,14 @@ export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boo
           />
         </SettingRow>
 
-        <SettingRow
-          label="Relay / Signaling Server URL"
-          description="Use an HTTPS URL for your own relay. Apply it to this machine; sign in to the same account origin separately to find its machines."
-        >
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-col gap-2 border-b border-border/40 py-3 last:border-0 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+          <div className="max-w-[480px] space-y-0.5">
+            <div className="text-[13px] font-medium text-foreground">Relay / Signaling Server URL</div>
+            <p className="text-[11px] text-muted-foreground">
+              Use an HTTPS URL for your own relay. Apply it to this machine; sign in to the same account origin separately to find its machines.
+            </p>
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-2 sm:shrink-0">
             <Input
               type="url"
               aria-label="Relay / Signaling Server URL"
@@ -197,7 +203,7 @@ export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boo
               Apply relay URL
             </Button>
           </div>
-        </SettingRow>
+        </div>
       </div>
 
       <div className="mt-8 space-y-3">

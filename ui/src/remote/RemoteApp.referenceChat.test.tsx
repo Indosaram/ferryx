@@ -18,6 +18,7 @@ import {
   parseChatGatewayIdentity,
 } from "./RemoteApp";
 import { referenceDrafts } from "./chat/referenceDraft";
+import { referenceQueues } from "./chat/referenceQueue";
 import type { ReferenceTargetRef } from "./chat/referenceTypes";
 
 vi.mock("./RemoteTerminal", () => ({
@@ -294,6 +295,40 @@ describe("reference chat lane (task 12)", () => {
     cleanup();
     localStorage.clear();
     vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ["idle", false],
+    ["working", false],
+    ["idle", true],
+  ] as const)("r25-ui-m1: direct %s snapshot preserves controls with prompt=%s", async (activityState, hasPrompt) => {
+    const harness = installFetch({
+      state: () => ({ activeContext: {
+        ...remoteState.activeContext,
+        terminalTabs: remoteState.activeContext.terminalTabs.map((tab) => ({ ...tab, activityState })),
+      } }),
+      prompt: () => hasPrompt ? promptBody("r25-direct", false) : { prompt: null, screenRevision: null },
+    });
+    const promptRead = harness.whenCalled("/prompt");
+    const running = activityState === "working" || hasPrompt;
+    let dispose = () => {};
+    const ready = new Promise<void>((resolve, reject) => {
+      const matches = () => screen.queryByTestId(running ? "stop-button" : "send-button") !== null
+        && (!hasPrompt || screen.queryByTestId("reference-prompt-card") !== null);
+      const observer = new MutationObserver(() => { if (matches()) { dispose(); resolve(); } });
+      const timer = setTimeout(() => { dispose(); reject(new Error("Missing R25 direct controls")); }, 2000);
+      dispose = () => { clearTimeout(timer); observer.disconnect(); };
+      observer.observe(document.body, { subtree: true, childList: true, attributes: true });
+    });
+    try {
+      await act(async () => { render(<RemoteApp />); });
+      await Promise.all([promptRead, ready]);
+      if (hasPrompt) expect(screen.queryByTestId("send-button")).not.toBeNull();
+      else expect(screen.queryByTestId(running ? "send-button" : "stop-button")).toBeNull();
+      expect(harness.calls.filter((call) => call.url.includes("/workspace/select"))).toHaveLength(0);
+    } finally {
+      dispose();
+    }
   });
 
   it("QA-01: chat is the first surface at 360, 390 and 1280 wide", async () => {
@@ -1333,6 +1368,93 @@ describe("reference chat lane review fixes", () => {
     expect(calls.filter((call) => call.url.includes("/submit"))).toHaveLength(2);
   });
 
+  it("ui-reference-logic-1: a typed answer waiting for Confirm is dropped when the prompt changes", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const menu = (id: string) => {
+      const body = promptBody(id, false);
+      return { ...body, prompt: { ...(body.prompt as Record<string, unknown>), kind: "menu" } };
+    };
+    let current = menu("P1");
+    const calls = installLane(({ url }) => (url.includes("/prompt") ? jsonResponse(current) : undefined));
+    render(<RemoteApp />);
+    await screen.findByText("Question P1", undefined, { timeout: 15000 });
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "1" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    expect(screen.getByTestId("reference-prompt-confirm-send")).toBeInTheDocument();
+
+    current = menu("P2");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await screen.findByText("Question P2");
+
+    // the "1" was typed for P1: P2's card offers no Confirm that would answer it with that pick
+    expect(screen.queryByTestId("reference-prompt-confirm-send")).toBeNull();
+    expect(calls.some((call) => call.url.includes("/answer"))).toBe(false);
+  });
+
+  it("ui-reference-logic-5: tapping a held row again while its send is in flight, after another row was sent, sends it once", async () => {
+    const submits: Array<(response: Response) => void> = [];
+    const calls = installLane(({ url }) => {
+      if (url.includes("/prompt")) return jsonResponse(promptBody("P", false));
+      if (url.includes("/submit")) return new Promise<Response>((done) => submits.push(done));
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await screen.findByText("Question P", undefined, { timeout: 15000 });
+    const textarea = screen.getByTestId("chat-composer-textarea");
+    for (const text of ["held A", "held B"]) {
+      fireEvent.change(textarea, { target: { value: text } });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("send-button"));
+      });
+    }
+    const [sendA, sendB] = screen.getAllByTestId(/^held-message-send-/);
+    await act(async () => {
+      fireEvent.click(sendA);
+    });
+    await act(async () => {
+      fireEvent.click(sendB);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId(/^held-message-send-/)[0]);
+    });
+
+    const submitsOf = (text: string) =>
+      calls.filter(
+        (call) => call.url.includes("/submit") && (call.body as { params?: { text?: string } }).params?.text === text,
+      );
+    expect(submitsOf("held B")).toHaveLength(1);
+    expect(submitsOf("held A")).toHaveLength(1);
+    await act(async () => {
+      for (const done of submits) done(okSubmit());
+    });
+    await drainSettledResponses();
+  });
+
+  it("ui-workspace-wiring-1: picks ticked on one multi-select prompt are not carried to the next prompt", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let current = promptBody("M1", true);
+    installLane(({ url }) => (url.includes("/prompt") ? jsonResponse(current) : undefined));
+    render(<RemoteApp />);
+    await screen.findByText("Question M1", undefined, { timeout: 15000 });
+    fireEvent.click(within(screen.getByTestId("reference-prompt-multi-0")).getByRole("checkbox"));
+    fireEvent.click(within(screen.getByTestId("reference-prompt-multi-2")).getByRole("checkbox"));
+    expect(screen.getByTestId("reference-prompt-submit")).toBeEnabled();
+
+    current = promptBody("M2", true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await screen.findByText("Question M2");
+
+    expect(within(screen.getByTestId("reference-prompt-multi-0")).getByRole("checkbox")).not.toBeChecked();
+    expect(within(screen.getByTestId("reference-prompt-multi-2")).getByRole("checkbox")).not.toBeChecked();
+    expect(screen.getByTestId("reference-prompt-submit")).toBeDisabled();
+  });
+
   it("ui-composer-prompt-3: a keyboard answer hands the focus on to the message box", async () => {
     let answered = false;
     installLane(({ url }) => {
@@ -1722,6 +1844,102 @@ describe("reference chat lane review fixes", () => {
     } finally {
       remoteHostStore.reset();
     }
+  });
+
+  it("ui-composer-prompt-r22-1: a typed reply sent while the target is briefly null stays in the message box", async () => {
+    try {
+      seedSavedHost();
+      const freeForm = {
+        prompt: {
+          promptId: "Q",
+          agent: "codex",
+          kind: "question",
+          title: "Question Q",
+          question: "Question Q",
+          options: [],
+          customOptionIndex: 0,
+          multiSelect: false,
+        },
+        screenRevision: "rev-Q",
+        cols: 80,
+        rows: 24,
+      };
+      const identity = gatedMovedCapabilities();
+      const calls = installLane((call) => (call.url.includes("/prompt") ? jsonResponse(freeForm) : identity.route(call)));
+      render(<RemoteApp />);
+      // The lane is bound and its card is up before the transport moves.
+      await laneReady();
+      await screen.findByText("Question Q");
+      await drainSettledResponses();
+
+      // The transport moves: the target is null until the host re-answers, and the card stays.
+      moveTransportBase();
+      await drainSettledResponses();
+      expect(screen.getByText("Question Q")).toBeInTheDocument();
+
+      const reply = "please keep the parser streaming";
+      fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: reply } });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("send-button"));
+      });
+      await drainSettledResponses();
+
+      expect(calls.some((call) => call.url.includes("/answer"))).toBe(false);
+      expect(screen.getByTestId("chat-composer-textarea")).toHaveValue(reply);
+      expect(screen.getAllByText(/not attached yet, so nothing was sent/).length).toBeGreaterThan(0);
+    } finally {
+      remoteHostStore.reset();
+    }
+  });
+
+  it("rs-history-r22-1: a provider session that rotated under the pane is re-read from the host's session rows", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let provider = "prov-A";
+    let sessionReads = 0;
+    const calls = installLane(({ url }) => {
+      if (url.includes("/api/v1/sessions")) {
+        sessionReads += 1;
+        return jsonResponse({
+          sessions: [
+            { sessionId: SESSION_ID, daemonEpoch: DAEMON_EPOCH, running: true, providerSession: { key: "claude", id: provider } },
+            { sessionId: SECOND_SESSION_ID, daemonEpoch: DAEMON_EPOCH, running: true },
+          ],
+        });
+      }
+      if (url.includes("/history") && url.includes(SESSION_ID)) {
+        if (url.includes("providerSessionId=prov-B")) {
+          return jsonResponse(
+            nativePage({ turns: [{ role: "assistant", parts: [{ kind: "text", text: "fresh conversation B" }], startedAt: "2026-10-06T00:00:02Z" }] }),
+          );
+        }
+        // the daemon now publishes prov-B for this pane, so a read naming prov-A is refused
+        if (provider !== "prov-A") return jsonResponse({ error: { code: "TARGET_EXPIRED" } }, false, 410);
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    expect(calls.some((call) => call.url.includes("/history") && call.url.includes("providerSessionId=prov-A"))).toBe(true);
+    await drainSettledResponses();
+    const readsBefore = sessionReads;
+
+    // /new on the desktop: the pane's provider session rotates
+    provider = "prov-B";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await drainSettledResponses();
+    await drainSettledResponses();
+
+    // the refusal re-read the pane's session rows ...
+    expect(sessionReads).toBeGreaterThan(readsBefore);
+    // ... and the next read speaks to the new conversation
+    await waitFor(() => {
+      expect(calls.some((call) => call.url.includes("/history") && call.url.includes("providerSessionId=prov-B"))).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.getByText("fresh conversation B")).toBeInTheDocument();
+    });
   });
 
   it("ui-workspace-wiring-r19-1: a send failing after a switch to a different pane stays with its own pane", async () => {
@@ -2226,6 +2444,161 @@ describe("reference chat lane review fixes", () => {
     expect(screen.queryByTestId("chat-history-warning")?.textContent ?? "").not.toMatch(/not available/);
   });
 
+  it.each([
+    ["accepted", "different-id"],
+    ["refused", "different-id"],
+    ["accepted", "same-id-new-revision"],
+    ["refused", "same-id-new-revision"],
+    ["accepted", "same-occurrence"],
+    ["refused", "same-occurrence"],
+    ["accepted", "A-B-A"],
+    ["refused", "A-B-A"],
+    ["accepted", "A-null-A"],
+    ["refused", "A-null-A"],
+  ] as const)("r24-ui-m1: %s completion protects %s prompt ownership", async (result, replacement) => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const answer = deferred<Response>();
+    const arrived = deferred<void>();
+    const nextArrived = deferred<void>();
+    let promptRead = deferred<void>();
+    const customPrompt = (id: string, revision: string) => ({
+      ...promptBody(id, false),
+      prompt: {
+        promptId: id,
+        agent: "claude",
+        kind: "question",
+        title: `Question ${revision}`,
+        question: `Question ${revision}`,
+        options: [{ label: "alpha" }, { label: "Other" }],
+        customOptionIndex: 1,
+        multiSelect: false,
+      },
+      screenRevision: revision,
+    });
+    let current: Record<string, unknown> = customPrompt("A", "rev-A");
+    let polling = false;
+    let completed = false;
+    const calls = installLane(({ url }) => {
+      if (url.includes("/prompt")) {
+        if (polling) promptRead.resolve();
+        return jsonResponse(completed && replacement === "same-occurrence" && result === "accepted"
+          ? { prompt: null, screenRevision: null }
+          : current);
+      }
+      if (url.includes("/answer")) {
+        if (calls.filter((call) => call.url.includes("/answer")).length > 1) nextArrived.resolve();
+        arrived.resolve();
+        return answer.promise;
+      }
+      return undefined;
+    });
+    const bounded = <T,>(signal: Promise<T>): Promise<T> => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Missing R24 prompt event")), 2000);
+      signal.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error: unknown) => { clearTimeout(timer); reject(error); },
+      );
+    });
+    const whenState = (matches: () => boolean): Promise<void> => new Promise((resolve, reject) => {
+      const observer = new MutationObserver(() => {
+        if (matches()) finish();
+      });
+      const timer = setTimeout(() => {
+        observer.disconnect();
+        reject(new Error("Missing R24 prompt state transition"));
+      }, 2000);
+      const finish = () => {
+        clearTimeout(timer);
+        observer.disconnect();
+        resolve();
+      };
+      observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+      if (matches()) finish();
+    });
+    const ready = whenState(() => screen.queryByTestId("reference-prompt-option-0") !== null);
+    render(<RemoteApp />);
+    await ready;
+    const firstCard = screen.getByTestId("reference-prompt-card");
+    const dispatched = bounded(arrived.promise);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("reference-prompt-option-0"));
+      await dispatched;
+    });
+    expect(calls.find((call) => call.url.includes("/answer"))?.body).toMatchObject({
+      params: { promptId: "A", screenRevision: "rev-A" },
+    });
+
+    const changed = replacement !== "same-occurrence";
+    const recurring = replacement === "A-B-A" || replacement === "A-null-A";
+    if (changed) current = replacement === "A-null-A"
+      ? { prompt: null, screenRevision: null }
+      : customPrompt(replacement === "different-id" || replacement === "A-B-A" ? "B" : "A", "rev-B");
+    const published = whenState(() => changed
+      ? replacement === "A-null-A"
+        ? screen.queryByTestId("reference-prompt-card") === null
+        : screen.queryByTestId("reference-prompt-card") !== null && screen.queryByTestId("reference-prompt-card") !== firstCard
+      : screen.queryByTestId("reference-prompt-option-0")?.hasAttribute("disabled") === true);
+    const polled = bounded(promptRead.promise);
+    polling = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+      await polled;
+    });
+    await published;
+    if (recurring) {
+      const intermediateCard = screen.queryByTestId("reference-prompt-card");
+      current = customPrompt("A", "rev-A");
+      promptRead = deferred<void>();
+      const returnedRead = bounded(promptRead.promise);
+      const returned = whenState(() => {
+        const shown = screen.queryByTestId("reference-prompt-card");
+        return shown !== null && shown !== firstCard && shown !== intermediateCard;
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+        await returnedRead;
+      });
+      await returned;
+    }
+    const card = screen.getByTestId("reference-prompt-card");
+    const customDraft = recurring ? "A2 custom draft" : "B custom draft";
+    if (changed) {
+      fireEvent.change(screen.getByTestId("reference-prompt-custom-input"), { target: { value: customDraft } });
+    }
+    const settled = changed ? null : whenState(() => result === "accepted"
+      ? screen.queryByTestId("reference-prompt-card") === null
+      : screen.queryAllByText("R24 answer refused").length > 0);
+    completed = true;
+    await act(async () => {
+      answer.resolve(result === "accepted"
+        ? jsonResponse({ ok: true, data: {}, requestId: "r24" })
+        : jsonResponse({ ok: false, error: { code: "INTERNAL", message: "R24 answer refused", retryable: true }, requestId: "r24" }, false, 500));
+      await answer.promise;
+    });
+    if (settled) await settled;
+    if (!changed) {
+      if (result === "accepted") expect(screen.queryByTestId("reference-prompt-card")).not.toBeInTheDocument();
+      else {
+        expect(screen.getByTestId("reference-prompt-card")).toBe(card);
+        expect(screen.getByTestId("reference-prompt-option-0")).toBeEnabled();
+      }
+      return;
+    }
+    expect(screen.getByTestId("reference-prompt-card")).toBe(card);
+    expect(screen.getByTestId("reference-prompt-custom-input")).toHaveValue(customDraft);
+    expect(screen.queryAllByText("R24 answer refused")).toHaveLength(0);
+    const nextAnswer = calls.filter((call) => call.url.includes("/answer")).length;
+    const nextDispatched = bounded(nextArrived.promise);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("reference-prompt-custom-send"));
+      await nextDispatched;
+    });
+    expect(calls.filter((call) => call.url.includes("/answer"))).toHaveLength(nextAnswer + 1);
+    expect(calls.filter((call) => call.url.includes("/answer"))[nextAnswer].body).toMatchObject({
+      params: { promptId: replacement === "different-id" ? "B" : "A", screenRevision: recurring ? "rev-A" : "rev-B", answer: { customText: customDraft } },
+    });
+  });
+
   it("ui-workspace-wiring-r11-1: an answer refused after a pane switch leaves the new pane's prompt card alone", async () => {
     const answer = deferred<Response>();
     installLane(({ url }) => {
@@ -2561,6 +2934,271 @@ describe("reference chat lane review fixes", () => {
 
   const noPrompt = () => jsonResponse({ prompt: null, screenRevision: "rev-1", cols: 80, rows: 24 });
 
+  function r26Bounded<T>(signal: Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Missing R26 transport settlement")), 2000);
+      signal.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error: unknown) => { clearTimeout(timer); reject(error); },
+      );
+    });
+  }
+
+  function r26DomEvent(matches: () => boolean): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const finish = () => {
+        clearTimeout(timer);
+        observer.disconnect();
+        resolve();
+      };
+      const observer = new MutationObserver(() => { if (matches()) finish(); });
+      const timer = setTimeout(() => {
+        observer.disconnect();
+        reject(new Error("Missing R26 DOM state event"));
+      }, 2000);
+      observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+      if (matches()) finish();
+    });
+  }
+
+  const r26Target: ReferenceTargetRef = {
+    target: { hostId: "local", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, backendSessionId: SESSION_ID },
+  };
+
+  function r26Receipt(name: string) {
+    return {
+      receipt: { hostId: "local", attachmentId: `att-${name}`, sha256: NOTES_TXT_SHA256, sizeBytes: 3, mediaType: "text/plain" },
+      displayName: name,
+      mentionText: `@.ferryx/chat/att-${name}/${name} `,
+    };
+  }
+
+  function r26Registry() {
+    const desktop = followingDesktop();
+    const files = new Map<string, Map<string, ReturnType<typeof r26Receipt>>>();
+    const writes: string[] = [];
+    let prompt = true;
+    let deleteFails = false;
+    let submitGate: ReturnType<typeof deferred<Response>> | null = null;
+    const dispatched = deferred<void>();
+    const key = (session: string) => `local\u0000${session}`;
+    const bucket = (session: string) => {
+      const targetKey = key(session);
+      let entries = files.get(targetKey);
+      if (!entries) { entries = new Map(); files.set(targetKey, entries); }
+      return entries;
+    };
+    const calls = installLane((call) => {
+      const url = new URL(call.url, "http://harness.invalid");
+      const session = url.pathname.match(/\/reference-chat\/([^/]+)\//)?.[1];
+      if (!session) return desktop(call);
+      if (url.pathname.endsWith("/prompt")) {
+        return session === SESSION_ID && prompt ? jsonResponse(promptBody("R26", false)) : noPrompt();
+      }
+      const entries = bucket(session);
+      if (url.pathname.includes("/files")) {
+        if (call.method === "GET") return jsonResponse({ files: [...entries.values()] });
+        if (call.method === "DELETE") {
+          if (deleteFails) return jsonResponse({ ok: false }, false, 500);
+          entries.delete(decodeURIComponent(url.pathname.split("/").pop() ?? ""));
+          return jsonResponse({ ok: true });
+        }
+        const body = call.body as { target: { hostId: string; backendSessionId: string }; params: { name: string } };
+        expect(body.target).toMatchObject({ hostId: "local", backendSessionId: session });
+        const file = r26Receipt(body.params.name);
+        entries.set(file.receipt.attachmentId, file);
+        return jsonResponse({ ok: true, data: file, requestId: "r26-stage" });
+      }
+      if (url.pathname.endsWith("/submit")) {
+        const body = call.body as { target: { hostId: string; backendSessionId: string }; params: { text: string } };
+        expect(body.target).toMatchObject({ hostId: "local", backendSessionId: session });
+        const mentions = body.params.text.match(/@\.ferryx\/chat\/[^\s]+/g) ?? [];
+        const missing = mentions.some((mention) => ![...entries.values()].some((file) => file.mentionText.trimEnd() === mention));
+        dispatched.resolve();
+        if (missing) return jsonResponse({ ok: false, error: { code: "NOT_FOUND", message: "nothing was typed", retryable: false } }, false, 404);
+        if (submitGate) return submitGate.promise;
+        writes.push(body.params.text);
+        return okSubmit();
+      }
+      return desktop(call);
+    });
+    return {
+      calls, writes, bucket, dispatched,
+      clearPrompt: () => { prompt = false; },
+      failDelete: () => { deleteFails = true; },
+      deferSubmit: () => { const gate = deferred<Response>(); submitGate = gate; return gate; },
+    };
+  }
+
+  async function r26Open(): Promise<void> {
+    const ready = r26DomEvent(() => screen.queryByText("Question R26") !== null);
+    await act(async () => { render(<RemoteApp />); });
+    await ready;
+  }
+
+  async function r26Stage(name: string): Promise<void> {
+    const staged = r26DomEvent(() => screen.queryByTestId(`attachment-preview-att-${name}`) !== null);
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("file-upload-input"), {
+        target: { files: [readableFile("abc", name, "text/plain")] },
+      });
+    });
+    await staged;
+  }
+
+  async function r26Hold(text: string): Promise<void> {
+    const count = referenceQueues.read(r26Target).length;
+    const held = r26DomEvent(() => screen.queryAllByTestId(/^held-message-send-/).length === count + 1);
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: text } });
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await held;
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "" } });
+    });
+  }
+
+  it("r26-ui: held upload survives departure, GET rehydration and explicit send while unheld upload is deleted", async () => {
+    const registry = r26Registry();
+    await r26Open();
+    await r26Stage("held.txt");
+    const text = `review ${r26Receipt("held.txt").mentionText}`.trimEnd();
+    await r26Hold(text);
+    await r26Stage("unheld.txt");
+    await switchToSecondTab();
+    expect(registry.bucket(SESSION_ID).has("att-held.txt")).toBe(true);
+    expect(registry.bucket(SESSION_ID).has("att-unheld.txt")).toBe(false);
+    expect(registry.calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
+    expect(referenceDrafts.read(r26Target).text).not.toContain("att-unheld.txt");
+    registry.clearPrompt();
+    const rehydrated = r26DomEvent(() => screen.queryByTestId("attachment-preview-att-held.txt") !== null);
+    await switchBackToFirstTab();
+    await rehydrated;
+    expect(screen.queryByTestId("attachment-preview-att-unheld.txt")).toBeNull();
+    const acknowledged = r26DomEvent(() => screen.queryAllByTestId(/^held-message-send-/).length === 0);
+    await act(async () => { fireEvent.click(screen.getAllByTestId(/^held-message-send-/)[0]); });
+    await acknowledged;
+    expect(registry.writes).toEqual([text]);
+    expect(referenceQueues.read(r26Target)).toEqual([]);
+    expect(registry.bucket(SESSION_ID).has("att-held.txt")).toBe(true);
+  });
+
+  it("r26-ui: late definite refusal after departure preserves the held row and its bytes", async () => {
+    const registry = r26Registry();
+    const response = registry.deferSubmit();
+    await r26Open();
+    await r26Stage("held.txt");
+    await r26Hold(`later ${r26Receipt("held.txt").mentionText}`);
+    const dispatched = r26Bounded(registry.dispatched.promise);
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId(/^held-message-send-/)[0]);
+      await dispatched;
+    });
+    await switchToSecondTab();
+    const ended = deferred<void>();
+    const unsubscribe = referenceDrafts.subscribe(() => ended.resolve());
+    const settled = r26Bounded(ended.promise);
+    try {
+      await act(async () => {
+        response.resolve(jsonResponse({ ok: false, error: { code: "NOT_FOUND", message: "nothing was typed", retryable: false } }, false, 404));
+        await settled;
+      });
+    } finally {
+      unsubscribe();
+    }
+    expect(registry.calls.filter((call) => call.method === "DELETE")).toHaveLength(0);
+    expect(registry.bucket(SESSION_ID).has("att-held.txt")).toBe(true);
+    expect(referenceQueues.read(r26Target)).toHaveLength(1);
+    expect(screen.getByText("B0")).toBeInTheDocument();
+    const returned = r26DomEvent(() => screen.queryByTestId("attachment-preview-att-held.txt") !== null);
+    await switchBackToFirstTab();
+    await returned;
+    expect(screen.getAllByTestId(/^held-message-send-/)[0]).toBeEnabled();
+    expect(registry.writes).toEqual([]);
+  });
+
+  it("r26-ui: chip removal is visibly refused until every held reference is explicitly edited or removed", async () => {
+    const registry = r26Registry();
+    await r26Open();
+    await r26Stage("held.txt");
+    await r26Hold(`one ${r26Receipt("held.txt").mentionText}`);
+    await r26Hold(`two ${r26Receipt("held.txt").mentionText}`);
+    const notice = r26DomEvent(() => screen.queryByTestId("chat-composer-attach-error") !== null);
+    await act(async () => { fireEvent.click(screen.getByTestId("remove-attachment-att-held.txt")); });
+    await notice;
+    expect(screen.getByTestId("chat-composer-attach-error").textContent?.length).toBeGreaterThan(0);
+    expect(registry.calls.filter((call) => call.method === "DELETE")).toHaveLength(0);
+    const [first, second] = referenceQueues.read(r26Target);
+    await act(async () => { fireEvent.click(screen.getByTestId(`held-message-edit-${first.id}`)); });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId(`held-message-input-${first.id}`), { target: { value: "no attachment" } });
+      fireEvent.keyDown(screen.getByTestId(`held-message-input-${first.id}`), { key: "Enter" });
+    });
+    await act(async () => { fireEvent.click(screen.getByTestId("remove-attachment-att-held.txt")); });
+    expect(registry.bucket(SESSION_ID).has("att-held.txt")).toBe(true);
+    expect(referenceQueues.read(r26Target).find((row) => row.id === second.id)?.text).toContain("att-held.txt");
+    await act(async () => { fireEvent.click(screen.getByTestId(`held-message-remove-${second.id}`)); });
+    const removed = r26DomEvent(() => screen.queryByTestId("attachment-preview-att-held.txt") === null);
+    await act(async () => { fireEvent.click(screen.getByTestId("remove-attachment-att-held.txt")); });
+    await removed;
+    expect(registry.bucket(SESSION_ID).has("att-held.txt")).toBe(false);
+    expect(referenceQueues.read(r26Target)).toEqual([{ id: first.id, text: "no attachment" }]);
+  });
+
+  it("r26-ui: cold GET rehydration protects held ownership through another departure without a draft", async () => {
+    const registry = r26Registry();
+    registry.bucket(SESSION_ID).set("att-held.txt", r26Receipt("held.txt"));
+    localStorage.setItem(referenceQueues.storageKey(r26Target), JSON.stringify({ version: 1, messages: [
+      { id: "r26-cold", text: r26Receipt("held.txt").mentionText },
+    ] }));
+    const ready = r26DomEvent(() => screen.queryByTestId("attachment-preview-att-held.txt") !== null);
+    await act(async () => { render(<RemoteApp />); });
+    await ready;
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("");
+    await switchToSecondTab();
+    const returned = r26DomEvent(() => screen.queryByTestId("attachment-preview-att-held.txt") !== null);
+    await switchBackToFirstTab();
+    await returned;
+    await switchToSecondTab();
+    expect(registry.calls.filter((call) => call.method === "DELETE")).toHaveLength(0);
+    expect(registry.bucket(SESSION_ID).has("att-held.txt")).toBe(true);
+  });
+
+  it.each([false, true])("r26-ui: unheld departure honors DELETE confirmation with failure=%s", async (fails) => {
+    const registry = r26Registry();
+    if (fails) registry.failDelete();
+    await r26Open();
+    await r26Stage("unheld.txt");
+    await switchToSecondTab();
+    expect(registry.calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
+    expect(registry.bucket(SESSION_ID).has("att-unheld.txt")).toBe(fails);
+    expect(referenceDrafts.read(r26Target).text.includes("att-unheld.txt")).toBe(fails);
+  });
+
+  it("r26-ui: a missing generated mention refuses before writing and keeps the held row", async () => {
+    const registry = r26Registry();
+    await r26Open();
+    await r26Stage("held.txt");
+    await r26Hold(r26Receipt("held.txt").mentionText);
+    registry.bucket(SESSION_ID).clear();
+    const previousNotice = screen.getByTestId("chat-composer-warning").textContent;
+    const refused = r26DomEvent(() => {
+      const notice = screen.queryByTestId("chat-composer-warning");
+      return notice !== null && notice.textContent !== previousNotice
+        && !screen.getAllByTestId(/^held-message-send-/)[0].hasAttribute("disabled");
+    });
+    const dispatched = r26Bounded(registry.dispatched.promise);
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId(/^held-message-send-/)[0]);
+      await dispatched;
+    });
+    await refused;
+    expect(registry.writes).toEqual([]);
+    expect(referenceQueues.read(r26Target)).toHaveLength(1);
+    expect(registry.calls.filter((call) => call.url.includes("/submit"))).toHaveLength(1);
+  });
+
   it("lane-sweep-1: a held row still in flight after leaving and returning to its pane cannot be sent twice", async () => {
     const submit = deferred<Response>();
     const desktop = followingDesktop();
@@ -2625,5 +3263,211 @@ describe("reference chat lane review fixes", () => {
     await switchBackToFirstTab();
     await screen.findByText("Question A");
     expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toBe("2");
+  });
+
+  it("ui-reference-logic-3: files delivered with a send stop counting against the next turn's file bound", async () => {
+    const calls = installLane(({ url, method, body }) => {
+      if (url.includes("/files") && method === "GET") return jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" });
+      if (!url.includes("/files") || method !== "POST") return undefined;
+      const name = (body as { params: { name: string } }).params.name;
+      return jsonResponse({
+        ok: true,
+        data: {
+          receipt: { hostId: "local", attachmentId: `att-${name}`, sha256: NOTES_TXT_SHA256, sizeBytes: 3, mediaType: "text/plain" },
+          displayName: name,
+          mentionText: `@${name} `,
+        },
+        requestId: `r-${name}`,
+      });
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("file-upload-input"), {
+        target: { files: ["a.txt", "b.txt", "c.txt", "d.txt"].map((name) => readableFile("abc", name, "text/plain")) },
+      });
+    });
+    await screen.findByTestId("attachment-preview-att-d.txt");
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await waitFor(() => {
+      expect(calls.some((call) => call.url.includes("/submit"))).toBe(true);
+    });
+    await drainSettledResponses();
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("file-upload-input"), {
+        target: { files: [readableFile("abc", "e.txt", "text/plain")] },
+      });
+    });
+    await drainSettledResponses();
+
+    expect(screen.queryByTestId("chat-composer-attach-error")).not.toBeInTheDocument();
+    expect(calls.filter((call) => call.method === "POST" && call.url.includes("/files"))).toHaveLength(5);
+    await screen.findByTestId("attachment-preview-att-e.txt");
+  });
+
+  it("ui-workspace-wiring-4: an older page whose cursor names the newest page's stream keeps Load earlier reachable", async () => {
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      return url.includes("cursor=")
+        ? jsonResponse(nativePage({
+            turns: [{ role: "user", parts: [{ kind: "text", text: "OLDER-PAGE-1" }], startedAt: "2026-10-05T00:00:00Z" }],
+            cursor: { streamId: "claude:abc", offset: 2048 },
+            hasMore: true,
+          }))
+        : jsonResponse(nativePage({ cursor: { streamId: "claude:abc", offset: 4096 }, hasMore: true }));
+    });
+    render(<RemoteApp />);
+    const olderButton = await screen.findByTestId("reference-older-button");
+    await act(async () => {
+      fireEvent.click(olderButton);
+    });
+    await screen.findByText("OLDER-PAGE-1");
+    await drainSettledResponses();
+
+    expect(screen.queryByTestId("reference-older-endcap")).not.toBeInTheDocument();
+    expect(screen.getByTestId("reference-older-button")).toBeInTheDocument();
+  });
+
+  it("ui-workspace-wiring-r16-1: a newest-page disclosure is drawn once and does not outlive the page that said it", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const notStarted = "This session has not written a turn yet.";
+    let reads = 0;
+    installLane(({ url }) => {
+      if (!url.includes("/history") || url.includes(SECOND_SESSION_ID)) return undefined;
+      reads += 1;
+      return jsonResponse(
+        reads === 1
+          ? nativePage({ source: "omo-transcript", availability: "notStarted", turns: [], unavailableReason: "session_not_written" })
+          : nativePage(),
+      );
+    });
+    render(<RemoteApp />);
+    await waitFor(() => {
+      expect(screen.getByTestId("reference-disclosure")).toHaveTextContent(notStarted);
+    });
+    await drainSettledResponses();
+    expect(document.body.textContent?.split(notStarted).length).toBe(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await laneReady();
+    await drainSettledResponses();
+
+    expect(reads).toBe(2);
+    expect(document.body.textContent).not.toContain(notStarted);
+  });
+
+  it.each(["accepted", "refused", "fetch-lost", "body-truncated", "invalid-envelope"] as const)(
+    "r23-ui: protects dispatched mentions across a switch until %s settles",
+    async (result) => {
+      const response = deferred<Response>();
+      const arrived = deferred<void>();
+      const desktop = followingDesktop();
+      const calls = installLane((call) => {
+        if (call.url.includes("/files") && call.method === "GET") {
+          return jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" });
+        }
+        if (call.url.includes("/submit")) {
+          arrived.resolve();
+          return response.promise.then((answer) => {
+            if (result === "fetch-lost") throw new TypeError("Connection closed after dispatch");
+            return answer;
+          });
+        }
+        return desktop(call);
+      });
+      const bounded = <T,>(signal: Promise<T>): Promise<T> => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Missing submit state event")), 2000);
+        signal.then(
+          (value) => { clearTimeout(timer); resolve(value); },
+          (error: unknown) => { clearTimeout(timer); reject(error); },
+        );
+      });
+      render(<RemoteApp />);
+      await laneReady();
+      await stageNotes();
+      await screen.findByTestId("attachment-preview-att-1");
+      const target: ReferenceTargetRef = {
+        target: { hostId: "local", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, backendSessionId: SESSION_ID },
+      };
+      const ended = deferred<void>();
+      let sending = false;
+      const unsubscribe = referenceDrafts.subscribe(() => {
+        const draft = referenceDrafts.read(target);
+        if (draft.sending) sending = true;
+        else if (sending) ended.resolve();
+      });
+      try {
+        const dispatched = bounded(arrived.promise);
+        await act(async () => {
+          fireEvent.click(screen.getByTestId("send-button"));
+          await dispatched;
+        });
+        await act(async () => {
+          fireEvent.click(screen.getByTestId("remove-attachment-att-1"));
+        });
+        expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(0);
+        await switchToSecondTab();
+        const deletes = () => calls.filter((call) => call.method === "DELETE" && call.url.includes("/files/att-1"));
+        expect(deletes()).toHaveLength(0);
+
+        const settled = bounded(ended.promise);
+        await act(async () => {
+          response.resolve(
+            result === "refused"
+              ? jsonResponse({ ok: false, error: { code: "FORBIDDEN", message: "no", retryable: false } }, false, 403)
+              : result === "body-truncated"
+                ? new Response('{"ok":true,', { status: 200 })
+                : result === "invalid-envelope"
+                  ? jsonResponse({})
+                  : okSubmit(),
+          );
+          await settled;
+        });
+        expect(deletes()).toHaveLength(result === "refused" ? 1 : 0);
+        if (result === "refused") expect(deletes()[0].url).toContain(`/reference-chat/${SESSION_ID}/files/att-1`);
+        expect(screen.getByText("B0")).toBeInTheDocument();
+      } finally {
+        unsubscribe();
+      }
+    },
+  );
+
+  it("ui-workspace-wiring-r5-1: a released staged file's mention leaves the previous pane's saved draft", async () => {
+    const desktop = followingDesktop();
+    const calls = installLane((call) => {
+      if (call.url.includes("/files") && call.method === "GET") return jsonResponse({ ok: true, data: { files: [] }, requestId: "r6" });
+      return desktop(call);
+    });
+    const savedDrafts = (): string[] => {
+      const values: string[] = [];
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (key?.startsWith("ferryx.referenceChat.draft:")) values.push(localStorage.getItem(key) ?? "");
+      }
+      return values;
+    };
+    render(<RemoteApp />);
+    await laneReady();
+    await stageNotes();
+    await screen.findByTestId("attachment-preview-att-1");
+    await waitFor(() => {
+      expect(savedDrafts().some((text) => text.includes("@notes.txt"))).toBe(true);
+    });
+
+    await switchToSecondTab();
+    await waitFor(() => {
+      expect(
+        calls.some((call) => call.method === "DELETE" && call.url.includes(`/reference-chat/${SESSION_ID}/files/att-1`)),
+      ).toBe(true);
+    });
+    await drainSettledResponses();
+
+    expect(savedDrafts().some((text) => text.includes("@notes.txt"))).toBe(false);
   });
 });

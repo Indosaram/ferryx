@@ -11,6 +11,7 @@ import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./comp
 import { Sidebar, type SidebarAttention } from "./components/Sidebar";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
+import { TERMINAL_COPY_MODE_EVENT, type TerminalCopyModeEventDetail } from "./components/TerminalCopyMode";
 import { RemoteHostConnection } from "./remote/RemoteApp";
 import { RemoteBrowserSharingIndicator } from "./components/RemoteBrowserSharingIndicator";
 import { remoteHostStore, selectActiveHost } from "./state/remoteHostStore";
@@ -42,7 +43,8 @@ import { notificationEntryId } from "./lib/notificationCenter/types";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
-import { isMacShortcutPlatform, SHORTCUTS, useShortcuts } from "./lib/shortcuts";
+import { isMacShortcutPlatform, resolvedShortcuts, useShortcuts } from "./lib/shortcuts";
+import { useShortcutOverrides } from "./lib/shortcutOverrides";
 import { initUpdateToasts } from "./lib/updateToast";
 // Wave 3a cross-platform onboarding, release notes, and getting started checklist
 import {
@@ -69,6 +71,7 @@ import { getCurrentVersion } from "./lib/updater";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
 import type { SectionId } from "./components/settings/types";
+import type { MachineProjectTarget, RemoteContext } from "./lib/machineNavigation";
 import {
   AGENTS_SETTINGS_CHANGED_EVENT,
   detectionTargets,
@@ -86,7 +89,6 @@ import {
 } from "./lib/storageKeys";
 import {
   DEFAULT_WORKSPACE_ID,
-  closeTerminal,
   detectAgents,
   getCliLauncherStatus,
   getAccountEnrollmentStatus,
@@ -109,13 +111,14 @@ import {
   onNewTerminalTabMenu,
   onRemoteSelectionRequested,
   publishFocusedTerminal,
+  onTerminalRemoteStatus,
   registerProject,
+  syncDesktopLocalProjects,
   unregisterProject,
   saveSession,
   setBadgeCount,
   spawnTerminal,
-  spawnTerminalDetailed,
-  onTerminalRemoteStatus,
+  retryPairedSession,
   retryTerminalRemoteSession,
   listTerminalSessions,
   toIpcError,
@@ -128,7 +131,6 @@ import {
   type RegisteredProject,
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
-import { safeRandomUUID } from "./lib/uuid";
 import { dagRemoteWatchTargets, useDagWatchLifecycle } from "./lib/useDagWatchLifecycle";
 import { getCachedSshHosts } from "./lib/sshHosts";
 import { reconnectAgentSession } from "./lib/agentReconnect";
@@ -144,7 +146,7 @@ import { persistActiveProjectId, persistProjects, persistSidebarOpen } from "./l
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { reconnectLocalSession, replaceExitedShellSession } from "./lib/shellReplacement";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
-import { workspaceReducer } from "./state/workspaceStore";
+import { workspaceReducer, requestLocalRecoveryAdmission, type LocalRecoveryAdmissionResult } from "./state/workspaceStore";
 import type { NotificationTarget, PersistedWorkspaceSession, SystemPermissionsStatus } from "./lib/types";
 import { staticTabLabel } from "./lib/tabTitle";
 import { subscribeNotificationActivations } from "./lib/notificationActivation";
@@ -173,7 +175,7 @@ import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } 
 import { emptySidebarWorkspaceIds, worktreeHasOpenTabs } from "./state/sidebarWorkspaceState";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
-import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
+import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 type InboxNavigationTarget = NotificationTarget & { revision?: number };
@@ -369,6 +371,35 @@ export async function ensureLocalProjectsRegistered(projects: RegisteredProject[
     }),
   );
 }
+
+export function createDesktopLocalProjectSync() {
+  let pending: RegisteredProject[] | null = null;
+  let running: Promise<void> | null = null;
+  return (projects: RegisteredProject[]): Promise<void> => {
+    pending = projects;
+    if (running) return running;
+    running = (async () => {
+      try {
+        while (pending !== null) {
+          const snapshot = pending;
+          pending = null;
+          try { await syncDesktopLocalProjects(snapshot.filter((project) =>
+            project.repoRoot !== "" && project.repoRoot !== "." &&
+            project.workspaceId !== DEFAULT_WORKSPACE_ID &&
+            !isRemoteWorkspaceId(project.workspaceId) && !isPairedWorkspaceId(project.workspaceId) &&
+            (!project.target || project.target.kind === "local"),
+          ).map(({ workspaceId, repoRoot }) => ({ workspaceId, repoRoot }))); }
+          catch (error) { if (pending === null) throw error; }
+        }
+      } finally {
+        running = null;
+      }
+    })();
+    return running;
+  };
+}
+
+const sendDesktopLocalProjects = createDesktopLocalProjectSync();
 
 export function App() {
   useApplyAppearanceSettings();
@@ -656,6 +687,27 @@ function WorkspaceApp({
   activeRemoteHostRef.current = activeRemoteHost;
   const [projects, setProjects] = useState<RegisteredProject[]>(initialProjects);
   const [activeProjectId, setActiveProjectId] = useState(initialActiveProjectId);
+
+  useEffect(() => {
+    if (!isNativeRuntime) return;
+    const sync = () => {
+      void sendDesktopLocalProjects(projects).catch((error) => {
+        console.error("Desktop project membership sync failed:", error);
+      });
+    };
+    sync();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen("desktop_local_projects_resync", sync).then((stop) => {
+      if (disposed) stop(); else unlisten = stop;
+    });
+    window.addEventListener("focus", sync);
+    return () => {
+      disposed = true;
+      unlisten?.();
+      window.removeEventListener("focus", sync);
+    };
+  }, [isNativeRuntime, projects]);
 
   useEffect(() => {
     startNativeWindowFocusTracking();
@@ -1281,23 +1333,31 @@ function WorkspaceApp({
       const deadSessions = Object.values(restoredState.sessions).filter(
         (session) =>
           (session.backendSessionId === null || isStandbyBackendSessionId(session.backendSessionId)) &&
-          !isRemoteWorkspaceId(session.workspaceId),
+          !isRemoteWorkspaceId(session.workspaceId) &&
+          !isPairedWorkspaceId(session.workspaceId),
       );
 
       const shellRecoverySessionIds: string[] = [];
       let hasResumableAgents = false;
       for (const session of deadSessions) {
         const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
+        const hasRetainedRecoveryProvenance = Boolean(
+          session.recoveryKey ||
+          session.remoteConnectionState === "reconnecting" ||
+          session.reconnectLifecycle != null ||
+          session.recoveryToken != null ||
+          session.backendUnavailableReason != null
+        );
         if (!isAgent) {
           // Only eagerly spawn fallback shells for null backendSessionIds, not standby sessions
-          if (!recoveredFromHmr && session.backendSessionId === null) {
+          if (!recoveredFromHmr && session.backendSessionId === null && !hasRetainedRecoveryProvenance) {
             shellRecoverySessionIds.push(session.id);
           }
         } else {
           const affordance = getAgentReconnectAffordance(session, restoredState.sessions);
           if (affordance.canReconnect) {
             hasResumableAgents = true;
-          } else if (!recoveredFromHmr && session.backendSessionId === null) {
+          } else if (!recoveredFromHmr && session.backendSessionId === null && !hasRetainedRecoveryProvenance) {
             shellRecoverySessionIds.push(session.id);
           }
         }
@@ -1324,7 +1384,7 @@ function WorkspaceApp({
     workspaceId: activeProject.workspaceId,
     recoveredFromHmr,
     restoreWorkspace: restoreWorkspaceAndReconnect,
-    reconcileLocalSessions: (live) => dispatchWorkspaceAction({ type: "LOCAL_SESSIONS_RECONCILED", live }),
+    reconcileLocalSessions: () => wakeLocalSessionRecovery(activeProject.workspaceId),
     enabled: registeredProjectId === activeProject.workspaceId,
   });
 
@@ -1340,8 +1400,9 @@ function WorkspaceApp({
 
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const cachedLoadedSessionRef = useRef<PersistedWorkspaceSession | null>(null);
-  const persistSessionStrict = useCallback((workspaceId: string, repoRoot: string, currentState: WorkspaceState) => {
+  const persistSessionStrict = useCallback((workspaceId: string, repoRoot: string, currentState: WorkspaceState, current?: () => boolean) => {
     return enqueueStrictPersistence(saveChainRef, async () => {
+        if (current && !current()) throw new Error("Recovery admission cancelled");
         let existing = cachedLoadedSessionRef.current;
         if (!existing) {
           existing = await loadSession().catch(() => null);
@@ -1353,10 +1414,18 @@ function WorkspaceApp({
           existing,
           projectsRef.current.find((project) => project.workspaceId === workspaceId),
         );
+        if (current && !current()) throw new Error("Recovery admission cancelled");
         cachedLoadedSessionRef.current = session;
         await saveSession(session);
     });
   }, []);
+  useEffect(() => {
+    setLocalRecoveryPersistence((workspaceId, snapshot, current) => {
+      const project = projectsRef.current.find((candidate) => candidate.workspaceId === workspaceId);
+      if (!project) return Promise.reject(new Error("Recovery workspace is unavailable"));
+      return persistSessionStrict(workspaceId, project.repoRoot, snapshot, current);
+    });
+  }, [persistSessionStrict]);
   const persistSession = useCallback((workspaceId: string, repoRoot: string, currentState: WorkspaceState) => {
     return persistSessionStrict(workspaceId, repoRoot, currentState).catch((error) => {
       console.error("Failed to save workspace session:", error);
@@ -1448,6 +1517,7 @@ function WorkspaceApp({
     async (sessionId: string) => {
       await reconnectLocalSession(sessionId, {
         getSessions: () => stateRef.current.sessions,
+        recover: () => wakeLocalSessionRecovery(activeProjectRef.current.workspaceId, sessionId),
         list: listTerminalSessions,
         dispatch: dispatchWorkspaceAction,
         persist: async (session) => {
@@ -1471,60 +1541,6 @@ function WorkspaceApp({
       });
     },
     [dispatchWorkspaceAction, handleOpenNewShell, persistSessionStrict],
-  );
-
-  const handleRefreshSessionIdentity = useCallback(
-    async (sessionId: string): Promise<TerminalSession | null> => {
-      const session = stateRef.current.sessions[sessionId];
-      if (!session || !session.backendSessionId) return null;
-      const project = activeProjectRef.current;
-      try {
-        const liveSummaries = await listTerminalSessions();
-        if (activeProjectRef.current !== project || stateRef.current.sessions[sessionId] !== session) return null;
-        const live = liveSummaries.find(
-          (candidate) => candidate.sessionId === session.backendSessionId && candidate.running !== false,
-        );
-        if (!live) return null;
-        const daemonEpoch = live.daemonEpoch ?? session.daemonEpoch;
-        const incarnation = live.incarnation ?? session.incarnation ?? null;
-        if (daemonEpoch === session.daemonEpoch && incarnation === (session.incarnation ?? null)) {
-          return session;
-        }
-        const updatedSession: TerminalSession = {
-          ...session,
-          daemonEpoch,
-          ...(incarnation != null ? { incarnation } : {}),
-        };
-        const current = stateRef.current;
-        const nextState = workspaceReducer(current, {
-          type: "REBIND_SESSION_BACKEND",
-          sessionId,
-          backendSessionId: session.backendSessionId,
-          cwd: session.cwd,
-          daemonEpoch,
-          ...(incarnation != null ? { incarnation } : {}),
-        });
-        stateRef.current = nextState;
-        dispatchWorkspaceAction({
-          type: "REBIND_SESSION_BACKEND",
-          sessionId,
-          backendSessionId: session.backendSessionId,
-          cwd: session.cwd,
-          daemonEpoch,
-          ...(incarnation != null ? { incarnation } : {}),
-        });
-        if (project) {
-          await persistSessionStrict(project.workspaceId, project.repoRoot, nextState).catch((err) => {
-            console.error("Failed to persist refreshed session:", err);
-          });
-        }
-        if (activeProjectRef.current !== project || stateRef.current.sessions[sessionId]?.backendSessionId !== session.backendSessionId) return null;
-        return updatedSession;
-      } catch {
-        return null;
-      }
-    },
-    [dispatchWorkspaceAction, persistSessionStrict],
   );
 
   const reconnectingSshRef = useRef<Map<string, {
@@ -1623,20 +1639,6 @@ function WorkspaceApp({
     return operation;
   }, [reportRuntimeError]);
 
-  const handleSshOwnerRetry = useCallback((sessionId: string) => {
-    const op = getOrCreateSshOwnerRetryOperation(sessionId);
-    if (!op) return Promise.reject({ code: "SESSION_NOT_FOUND", message: "Retained SSH backend is unavailable" });
-    return op.promise;
-  }, [getOrCreateSshOwnerRetryOperation]);
-
-  const cancelSshOwnerRetry = useCallback((sessionId: string, workspaceId: string) => {
-    const session = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
-    if (!session) return;
-    const key = JSON.stringify([workspaceId, sessionId, session.backendSessionId, session.daemonEpoch,
-      session.incarnation, session.recoveryKey, session.recoveryToken]);
-    reconnectingSshRef.current.get(key)?.cancel();
-  }, []);
-
   const handleReconnectSshSession = useCallback(
     (sessionId: string) => {
       const op = getOrCreateSshOwnerRetryOperation(sessionId);
@@ -1645,6 +1647,239 @@ function WorkspaceApp({
       return op.voidPromise;
     },
     [getOrCreateSshOwnerRetryOperation],
+  );
+
+  const handleRefreshSessionIdentity = useCallback(
+    (sessionId: string, onResult: (result: LocalRecoveryAdmissionResult) => void): (() => void) => {
+      const project = activeProjectRef.current;
+      if (!project) {
+        onResult({ kind: "cancelled" }); return () => {};
+      }
+      const session = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+
+      if (project.target?.kind === "pairedDaemon" || isPairedWorkspaceId(project.workspaceId)) {
+        if (!session?.backendSessionId) {
+          onResult({ kind: "cancelled" });
+          return () => {};
+        }
+        const captured = {
+          workspaceId: project.workspaceId,
+          backendSessionId: session.backendSessionId,
+          daemonEpoch: session.daemonEpoch ?? null,
+          incarnation: session.incarnation ?? null,
+          recoveryKey: session.recoveryKey,
+          recoveryToken: session.recoveryToken,
+          remoteGeneration: typeof session.remoteGeneration === "number" ? session.remoteGeneration : null,
+        };
+        let live = true;
+        let settled = false;
+        let unlistenFn: (() => void) | undefined;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+
+        const stopListening = () => {
+          if (unlistenFn) {
+            unlistenFn();
+            unlistenFn = undefined;
+          }
+        };
+
+        const cleanup = () => {
+          if (timer != null) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          stopListening();
+        };
+
+        const checkCurrent = () => {
+          const currentProject = activeProjectRef.current;
+          const current = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+          return (
+            currentProject?.workspaceId === captured.workspaceId &&
+            current?.backendSessionId === captured.backendSessionId &&
+            (current?.daemonEpoch ?? null) === captured.daemonEpoch &&
+            (current?.incarnation ?? null) === captured.incarnation &&
+            current?.recoveryKey === captured.recoveryKey &&
+            current?.recoveryToken === captured.recoveryToken
+          );
+        };
+
+        const settle = (result: LocalRecoveryAdmissionResult) => {
+          if (!live || settled) return;
+          settled = true;
+          cleanup();
+          onResult(result);
+        };
+
+        onResult({ kind: "pending" });
+        let retryAdmitted = false;
+        let pendingStatus: import("./lib/types").TerminalRemoteStatus | undefined;
+        let admissionIdentity: import("./lib/types").PairedSessionActorIdentity | null = null;
+
+        const handleStatus = (status: import("./lib/types").TerminalRemoteStatus) => {
+          if (!live || settled || !checkCurrent()) return;
+          if (status.sessionId !== captured.backendSessionId) return;
+          if (!Number.isSafeInteger(status.generation) || status.generation < 0 ||
+              status.generation < (captured.remoteGeneration ?? 0)) return;
+          const descriptor = status.descriptor;
+          const pairedDescriptor = descriptor && "hostId" in descriptor ? descriptor : null;
+          const target = pairedDescriptor?.target;
+          const expectedTarget = project.target;
+          if (expectedTarget?.kind !== "pairedDaemon") {
+            return;
+          }
+          if (!pairedDescriptor || !target || !("machineId" in target) ||
+              !captured.daemonEpoch || !captured.incarnation ||
+              pairedDescriptor.backendSessionId !== captured.backendSessionId ||
+              pairedDescriptor.incarnation !== captured.incarnation || pairedDescriptor.daemonEpoch !== captured.daemonEpoch ||
+              pairedDescriptor.hostId !== expectedTarget.hostId || target.machineId !== expectedTarget.hostId ||
+              target.daemonEpoch !== captured.daemonEpoch || target.sessionId !== captured.backendSessionId) return;
+
+          if (status.state === "disconnected" && status.failure?.kind === "disconnected") {
+            // Exact codes from paired_daemon::Proxy::recovery_failed, not transport error prose.
+            const reason = status.failure.message;
+            switch (reason) {
+              case "SESSION_EXPIRED": case "CONTROL_CONFLICT": case "STALE_GENERATION":
+              case "PAIRED_HOST_STALE_GENERATION": case "PAIRED_HOST_UNAUTHORIZED":
+              case "UNAUTHORIZED": case "PERMISSION_DENIED": case "PAIRED_HOST_WRONG_MACHINE":
+              case "PAIRED_HOST_INVALID_RESPONSE": case "PAIRED_HOST_MIGRATION_PENDING": case "UNSUPPORTED_PROTOCOL": {
+                if (admissionIdentity && (admissionIdentity.backendSessionId !== captured.backendSessionId ||
+                    admissionIdentity.daemonEpoch !== captured.daemonEpoch || admissionIdentity.incarnation !== captured.incarnation ||
+                    (admissionIdentity.generation != null && (!Number.isSafeInteger(admissionIdentity.generation) ||
+                      admissionIdentity.generation < 0 || status.generation < admissionIdentity.generation)))) return;
+                const current = stateRef.current;
+                const retained = current.sessions[sessionId];
+                if (!retained) return;
+                dispatchWorkspaceAction({ type: "RESTORE_WORKSPACE", state: { ...current, sessions: {
+                  ...current.sessions, [sessionId]: { ...retained,
+                    recoveryState: { phase: "blocked", reason }, backendUnavailableReason: reason,
+                    remoteConnectionState: "disconnected", reconnectLifecycle: "failed",
+                    remoteFailure: status.failure,
+                  },
+                } } });
+                settle({ kind: "blocked", reason });
+                return;
+              }
+            }
+          }
+          if (status.state !== "connected") return;
+          if (!retryAdmitted) {
+            pendingStatus = status;
+            return;
+          }
+          if (!pairedDescriptor || !target || !("machineId" in target) || !admissionIdentity ||
+              admissionIdentity.backendSessionId !== captured.backendSessionId ||
+              admissionIdentity.daemonEpoch !== captured.daemonEpoch || admissionIdentity.incarnation !== captured.incarnation ||
+              (admissionIdentity.generation != null &&
+                (!Number.isSafeInteger(admissionIdentity.generation) || admissionIdentity.generation < 0)) ||
+              pairedDescriptor.backendSessionId !== admissionIdentity.backendSessionId ||
+              pairedDescriptor.incarnation !== admissionIdentity.incarnation || pairedDescriptor.daemonEpoch !== admissionIdentity.daemonEpoch ||
+              status.generation < (admissionIdentity.generation ?? 0) ||
+              pairedDescriptor.hostId !== expectedTarget.hostId ||
+              target.machineId !== expectedTarget.hostId || target.daemonEpoch !== captured.daemonEpoch ||
+              target.sessionId !== pairedDescriptor.backendSessionId) return;
+
+          const currentGeneration = status.generation;
+          if (currentGeneration <= 0 || currentGeneration < (admissionIdentity.generation ?? 0)) return;
+          const current = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+          if (!current) return;
+          settle({
+            kind: "ready",
+            session: {
+              ...current,
+              daemonEpoch: captured.daemonEpoch,
+              incarnation: captured.incarnation,
+              remoteGeneration: currentGeneration,
+              remoteConnectionState: "connected",
+            },
+          });
+        };
+
+        const subscriptionReady = onTerminalRemoteStatus((status) => {
+          handleStatus(status);
+        }).then((unlisten) => {
+          unlistenFn = unlisten;
+          if (!live || settled) {
+            stopListening();
+          }
+        }).catch(() => {
+          if (!live || settled) return;
+          settle({ kind: "cancelled" });
+        });
+
+        timer = setTimeout(() => {
+          if (!settled && live) {
+            settle({ kind: "cancelled" });
+          }
+        }, 15000);
+
+        void subscriptionReady.then(() => {
+          if (!live || settled || !checkCurrent()) return;
+          return retryPairedSession({
+            backendSessionId: captured.backendSessionId,
+            daemonEpoch: captured.daemonEpoch ?? "",
+            incarnation: captured.incarnation ?? "",
+          });
+        }).then((outcome) => {
+          if (!outcome || !live || settled || !checkCurrent()) return;
+          if (outcome.blocked || outcome.staleTuple) {
+            settle({ kind: "blocked", reason: "identity_conflict" });
+          } else if (outcome.affirmativeExit) {
+            settle({ kind: "exited" });
+          } else if (outcome.admitted) {
+            admissionIdentity = outcome.actorIdentity ?? null;
+            retryAdmitted = true;
+            if (pendingStatus) {
+              handleStatus(pendingStatus);
+            }
+          }
+        }).catch(() => {
+          if (!live || settled) return;
+          settle({ kind: "cancelled" });
+        });
+
+        return () => {
+          live = false;
+          cleanup();
+        };
+      }
+
+      if (project.target?.kind === "ssh" || isRemoteWorkspaceId(project.workspaceId)) {
+        if (!session?.backendSessionId) { onResult({ kind: "cancelled" }); return () => {}; }
+        const captured = {
+          backendSessionId: session.backendSessionId,
+          daemonEpoch: session.daemonEpoch,
+          incarnation: session.incarnation,
+          recoveryKey: session.recoveryKey,
+          recoveryToken: session.recoveryToken,
+        };
+        const operation = getOrCreateSshOwnerRetryOperation(sessionId);
+        if (!operation) { onResult({ kind: "cancelled" }); return () => {}; }
+        let live = true;
+        let stopListening: (() => void) | undefined;
+        onResult({ kind: "pending" });
+        const waiting = operation.promise;
+        stopListening = () => {
+          live = false;
+          operation.cancel();
+        };
+        void waiting.then((status) => {
+          if (!live || activeProjectRef.current.workspaceId !== session.workspaceId) return;
+          const current = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+          if (!current || current.backendSessionId !== captured.backendSessionId ||
+              current.daemonEpoch !== captured.daemonEpoch || current.incarnation !== captured.incarnation ||
+              current.recoveryKey !== captured.recoveryKey || current.recoveryToken !== captured.recoveryToken) {
+            onResult({ kind: "cancelled" });
+            return;
+          }
+          onResult({ kind: "ready", session: { ...current, remoteConnectionState: "connected", remoteGeneration: status.generation } });
+        }).catch(() => { if (live) onResult({ kind: "cancelled" }); });
+        return () => { live = false; stopListening?.(); };
+      }
+
+      return requestLocalRecoveryAdmission(project.workspaceId, sessionId, true, onResult);
+    },
+    [getOrCreateSshOwnerRetryOperation, dispatchWorkspaceAction],
   );
 
   const activeAutoResumeCancelRef = useRef<(() => void) | null>(null);
@@ -1766,6 +2001,7 @@ function WorkspaceApp({
 
   const [isAddProjectOpen, setIsAddProjectOpen] = useState(false);
   const [addProjectHostId, setAddProjectHostId] = useState<string | undefined>(undefined);
+  const [addProjectTarget, setAddProjectTarget] = useState<MachineProjectTarget | undefined>(undefined);
   const [createTargetProject, setCreateTargetProject] = useState<RegisteredProject | null>(null);
   const [pendingProjectRemove, setPendingProjectRemove] = useState<RegisteredProject | null>(null);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -1779,6 +2015,7 @@ function WorkspaceApp({
   const [onboardingPermissions, setOnboardingPermissions] = useState<SystemPermissionsStatus | null>(null);
   const [whatsNew, setWhatsNew] = useState<WhatsNewEntry | null>(null);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SectionId | undefined>(undefined);
+  const [settingsRemoteContext, setSettingsRemoteContext] = useState<RemoteContext | undefined>(undefined);
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
@@ -1792,9 +2029,6 @@ function WorkspaceApp({
     // liveActivityLookup reads only the mounted workspace id and its per-session activity map.
     [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
   );
-  const openSessionCount = Object.keys(state.sessions).length + listWorkspaceSnapshots()
-    .filter(([workspaceId]) => workspaceId !== activeProject.workspaceId)
-    .reduce((count, [, snapshot]) => count + Object.keys(snapshot.sessions).length, 0);
   const [pendingTabClose, setPendingTabClose] = useState<{
     kind: "pane" | "tab";
     tabId: string;
@@ -2221,10 +2455,9 @@ function WorkspaceApp({
     onOpen: handleOpenAttentionRow,
     onDismiss: (row) => dismissAttentionRows([row]),
     onDismissAll: () => dismissAttentionRows(attentionRows),
-    openSessionCount,
     inboxOpen: isInboxOpen,
     onInboxOpenChange: setIsInboxOpen,
-  }), [attentionRows, dismissAttentionRows, handleOpenAttentionRow, isInboxOpen, openSessionCount]);
+  }), [attentionRows, dismissAttentionRows, handleOpenAttentionRow, isInboxOpen]);
 
   useEffect(() => {
     if (!pendingNotificationTarget) return;
@@ -2612,6 +2845,19 @@ function WorkspaceApp({
     setSearchLeafId(leafId);
   }, []);
 
+  // Desktop only: the remote web client has no native surface to select on.
+  const handleToggleTerminalCopyMode = useCallback(() => {
+    if (activeRemoteHostRef.current) return;
+    const currentState = stateRef.current;
+    const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
+    if (!activeTab || !isTerminalTab(activeTab)) return;
+    const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
+    const leafId = activeLayout?.activeLeafId ?? (activeLayout?.root ? collectLeafIds(activeLayout.root)[0] : null);
+    const sessionId = (leafId && activeLayout?.sessionIdsByLeafId?.[leafId]) || activeTab.sessionId;
+    if (!sessionId) return;
+    window.dispatchEvent(new CustomEvent<TerminalCopyModeEventDetail>(TERMINAL_COPY_MODE_EVENT, { detail: { sessionId } }));
+  }, []);
+
   const handleSelectWorktreeByIndex = useCallback(
     (index: number) => {
       if (activeRemoteHostRef.current) return;
@@ -2666,6 +2912,7 @@ function WorkspaceApp({
   const handleOpenAddProject = useCallback(() => {
     if (activeRemoteHostRef.current) return;
     setAddProjectHostId(undefined);
+    setAddProjectTarget(undefined);
     setIsAddProjectOpen(true);
   }, []);
   const handleOpenSshProject = useCallback((hostId: string) => {
@@ -2673,9 +2920,23 @@ function WorkspaceApp({
     setIsSettingsOpen(false);
     setSettingsInitialSection(undefined);
     setAddProjectHostId(hostId);
+    setAddProjectTarget(undefined);
     setIsAddProjectOpen(true);
   }, []);
-  const handleCloseAddProject = useCallback(() => setIsAddProjectOpen(false), []);
+  // Settings > Remote hands one machine to Add Project; the dialog routes pairedDaemon to its form.
+  const handleOpenMachineProject = useCallback((target: MachineProjectTarget) => {
+    if (activeRemoteHostRef.current) return;
+    setIsSettingsOpen(false);
+    setSettingsInitialSection(undefined);
+    setSettingsRemoteContext(undefined);
+    setAddProjectHostId(undefined);
+    setAddProjectTarget(target);
+    setIsAddProjectOpen(true);
+  }, []);
+  const handleCloseAddProject = useCallback(() => {
+    setIsAddProjectOpen(false);
+    setAddProjectTarget(undefined);
+  }, []);
   const handleOpenCreateWorktree = useCallback((project?: RegisteredProject) => {
     if (activeRemoteHostRef.current) return;
     const target = project ?? activeProjectRef.current;
@@ -2697,7 +2958,7 @@ function WorkspaceApp({
       setIsCommandPaletteOpen(false);
     }
   }, [activeRemoteHost]);
-  const handleOpenSettings = useCallback((section?: SectionId) => {
+  const handleOpenSettings = useCallback((section?: SectionId, remoteContext?: RemoteContext) => {
     preloadSettingsDialog();
     const validSection =
       typeof section === "string" &&
@@ -2716,6 +2977,7 @@ function WorkspaceApp({
         ? (section as SectionId)
         : undefined;
     setSettingsInitialSection(validSection);
+    setSettingsRemoteContext(validSection === "remote" ? remoteContext : undefined);
     setIsSettingsOpen(true);
   }, []);
   handleOpenSettingsRef.current = handleOpenSettings;
@@ -2723,6 +2985,7 @@ function WorkspaceApp({
   const handleCloseSettings = useCallback(() => {
     setIsSettingsOpen(false);
     setSettingsInitialSection(undefined);
+    setSettingsRemoteContext(undefined);
   }, []);
 
   useEffect(() => {
@@ -3455,6 +3718,7 @@ function WorkspaceApp({
         "terminal.focusUp": browserShortcutsActive ? undefined : () => handleDirectionalPaneFocus("up"),
         "terminal.focusDown": browserShortcutsActive ? undefined : () => handleDirectionalPaneFocus("down"),
         "terminal.search": browserShortcutsActive ? undefined : handleOpenTerminalSearch,
+        "terminal.copyMode": browserShortcutsActive ? undefined : handleToggleTerminalCopyMode,
         "sidebar.left.toggle": toggleSidebar,
         "project.add": handleOpenAddProject,
         "commandPalette.open": handleOpenCommandPalette,
@@ -3478,6 +3742,7 @@ function WorkspaceApp({
       handleOpenAddProject,
       handleOpenCommandPalette,
       handleOpenTerminalSearch,
+      handleToggleTerminalCopyMode,
       handleSelectTerminalTabByIndex,
       handleSelectWorktreeByIndex,
       handleSplitActive,
@@ -3493,7 +3758,8 @@ function WorkspaceApp({
       toggleSidebar,
     ],
   );
-  useShortcuts(shortcutHandlers);
+  const { overrides: shortcutOverrides } = useShortcutOverrides();
+  useShortcuts(shortcutHandlers, { overrides: shortcutOverrides });
 
   const sshHostId = activeProject.target?.kind === "ssh" ? activeProject.target.hostId : null;
   const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId
@@ -3519,7 +3785,7 @@ function WorkspaceApp({
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
       <ShortcutHints
-        enabledActions={SHORTCUTS.filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
+        enabledActions={resolvedShortcuts(shortcutOverrides).filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
         getContext={() => {
           const current = stateRef.current;
           const group = current.layout.focusedGroupId ? current.layout.tabGroups?.[current.layout.focusedGroupId] : undefined;
@@ -3707,18 +3973,6 @@ function WorkspaceApp({
             onOpenNewShell={handleOpenNewShell}
             onBackendSessionUnavailable={(sessionId, backendSessionId, reason, bindingKey) => {
               markBackendSessionUnavailable(sessionId, backendSessionId, reason, bindingKey);
-              const session = stateRef.current.sessions[sessionId];
-              if (
-                session &&
-                isPairedWorkspaceId(session.workspaceId) &&
-                !session.agentType &&
-                !session.providerSession
-              ) {
-                setPendingBackendRecovery({
-                  workspaceId: activeProjectRef.current.workspaceId,
-                  sessionIds: [sessionId],
-                });
-              }
             }}
             leadingSpacer={isSidebarOpen ? 0 : isMacShortcutPlatform() ? 108 : 36}
           />
@@ -3749,7 +4003,8 @@ function WorkspaceApp({
           }
         >
           <SettingsDialog open initialSection={settingsInitialSection} onClose={handleCloseSettings}
-            onOpenSshProject={handleOpenSshProject} />
+            onOpenSshProject={handleOpenSshProject} onOpenMachineProject={handleOpenMachineProject}
+            remoteContext={settingsRemoteContext} />
         </Suspense>
       ) : null}
       {isResourcesOpen ? (
@@ -3800,6 +4055,7 @@ function WorkspaceApp({
         <AddProjectDialog
           projects={projects}
           initialHostId={addProjectHostId}
+          initialTarget={addProjectTarget}
           onClose={handleCloseAddProject}
           onRegistered={handleRegisteredProject}
           onOpenSettings={handleOpenSshSettings}

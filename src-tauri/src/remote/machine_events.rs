@@ -241,7 +241,9 @@ pub(crate) async fn serve(
                     }
                 }
                 let sessions = inventory;
-                let payload = json!({"projects":catalog,"sessions":sessions});
+                let payload = json!({"desktopLocalMembership": if catalog.desktop_local_snapshot_exists {
+                    Some(json!({"scope":"desktopLocal","invalidated":true}))
+                } else { None }, "projects":catalog,"sessions":sessions});
                 if payload.to_string().len() > 1024 * 1024 {
                     return Err(crate::ipc::IpcError::internal("OUTPUT_LIMIT_EXCEEDED"));
                 }

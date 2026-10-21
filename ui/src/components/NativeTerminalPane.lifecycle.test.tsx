@@ -46,7 +46,15 @@ const tauriCoreMocks = {
 };
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: (cmd: string, args?: any) => tauriInvoke(cmd, args),
+  invoke: async (cmd: string, args?: any) => {
+    const result = await tauriInvoke(cmd, args);
+    // Native bounds replies echo the tuple captured at dispatch. Preserve an
+    // explicitly supplied stale tuple so identity rejection remains testable.
+    if (cmd === "cmd_native_terminal_set_bounds" && result && typeof result === "object") {
+      return { attachTuple: args?.attachTuple, ...result };
+    }
+    return result;
+  },
   isTauri: () => tauriIsTauri(),
 }));
 
@@ -274,10 +282,15 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     try {
       await act(async () => { await attempts[0].promise; });
       for (let index = 1; index < attempts.length; index++) {
+        const delay = index <= 4 ? 250 * 2 ** (index - 1) : 4000;
         await act(async () => {
-          await vi.advanceTimersByTimeAsync(Math.min(4000, 250 * 2 ** (index - 1)));
-          await attempts[index].promise;
+          await vi.advanceTimersByTimeAsync(delay - 1);
         });
+        expect(count).toBe(index);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1);
+        });
+        expect(count).toBe(index + 1);
       }
       expect(count).toBe(25);
       expect(tauriInvoke.mock.calls.some(([command]) => command.includes("spawn") || command === "cmd_native_terminal_send_input")).toBe(false);
@@ -439,6 +452,53 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     tauriListen.mockImplementation(async () => () => undefined);
   });
 
+  it("preserves paired blocked admission reason and stops attachment retries", async () => {
+    // Given: stream and admission signals are registered before triggering recovery.
+    vi.useFakeTimers();
+    let ended: ((event: { payload: { sessionId: string } }) => void) | undefined;
+    let publish: ((value: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) | undefined;
+    const registered = deferred(); const attached = deferred(); const started = deferred();
+    const unsubscribe = vi.fn();
+    tauriListen.mockImplementation(async (event, handler) => {
+      if (event === "native_terminal_stream_ended") { ended = handler; registered.resolve(); }
+      return () => undefined;
+    });
+    tauriInvoke.mockImplementation(async command => {
+      if (command === "cmd_native_terminal_attach") attached.resolve();
+      return command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined;
+    });
+    const refresh = vi.fn((_id: string, result: (value: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => {
+      publish = result; result({ kind: "pending" }); started.resolve(); return unsubscribe;
+    });
+    const retained = { ...session("paired-blocked"), incarnation: "process" };
+    const view = render(<NativeTerminalPane session={retained} onRefreshSessionIdentity={refresh} />);
+    try {
+      await act(async () => { await registered.promise; await attached.promise; });
+      const emit = ended;
+      if (!emit) throw new Error("Missing stream subscription");
+      await act(async () => { emit({ payload: { sessionId: "paired-blocked" } }); await started.promise; });
+      const result = publish;
+      if (!result) throw new Error("Missing admission subscription");
+
+      // When: the paired owner rejects recovery with its exact typed code.
+      await act(async () => { result({ kind: "blocked", reason: "PAIRED_HOST_UNAUTHORIZED" }); });
+
+      // Then: the reason survives the adapter and no timer or repeated stream event retries attachment.
+      expect(view.container.textContent).toContain("PAIRED_HOST_UNAUTHORIZED");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100_000);
+        emit({ payload: { sessionId: "paired-blocked" } });
+      });
+      expect(lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach")).toHaveLength(1);
+      expect(unsubscribe).toHaveBeenCalledOnce();
+      expect(tauriInvoke.mock.calls.some(([command]) => command.includes("spawn"))).toBe(false);
+    } finally {
+      await act(async () => { view.unmount(); });
+      vi.useRealTimers();
+      tauriListen.mockImplementation(async () => () => undefined);
+    }
+  });
+
   it("keeps owner admission pending beyond transport deadlines then attaches only its ready tuple", async () => {
     vi.useFakeTimers();
     let ended: ((event: { payload: { sessionId: string } }) => void) | undefined;
@@ -468,6 +528,45 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     expect(tauriInvoke.mock.calls.some(([command]) => command.includes("spawn"))).toBe(false);
     await act(async () => { view.unmount(); });
     vi.useRealTimers();
+  });
+
+  it("cancels held admission on incarnation-only replacement and ignores its late ready result", async () => {
+    let ended!: (event: { payload: { sessionId: string } }) => void;
+    let publish!: (value: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void;
+    const registered = deferred(); const admission = deferred(); const replacementAttached = deferred();
+    const unsubscribe = vi.fn();
+    tauriListen.mockImplementation(async (event, handler) => {
+      if (event === "native_terminal_stream_ended") { ended = handler; registered.resolve(); }
+      return () => undefined;
+    });
+    tauriInvoke.mockImplementation(async (command, args) => {
+      if (command === "cmd_native_terminal_attach" && args.attachTuple.incarnation === "replacement") replacementAttached.resolve();
+      return command === "cmd_native_terminal_set_bounds" ? { ...PRESENTED, attachTuple: args.attachTuple } : undefined;
+    });
+    const original = { ...session("incarnation-admission"), incarnation: "original" };
+    const refresh = vi.fn((_id: string, result: typeof publish) => {
+      publish = result; result({ kind: "pending" }); admission.resolve(); return unsubscribe;
+    });
+    const view = render(<NativeTerminalPane session={original} onRefreshSessionIdentity={refresh} />);
+    await act(async () => { await registered.promise; });
+    const oldEnded = ended;
+    await act(async () => { oldEnded({ payload: { sessionId: original.backendSessionId! } }); await admission.promise; });
+    await act(async () => {
+      view.rerender(<NativeTerminalPane session={{ ...original, incarnation: "replacement" }} onRefreshSessionIdentity={refresh} />);
+    });
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    await act(async () => { await replacementAttached.promise; });
+    const attaches = lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach");
+    await act(async () => {
+      publish({ kind: "ready", session: original });
+      oldEnded({ payload: { sessionId: original.backendSessionId! } });
+    });
+    expect(lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach")).toEqual(attaches);
+    expect(getDurableNativeBinding(original.backendSessionId!)?.incarnation).toBe("replacement");
+    expect(view.queryByRole("alert")).toBeNull();
+    expect(refresh).toHaveBeenCalledOnce();
+    await act(async () => { view.unmount(); });
+    tauriListen.mockImplementation(async () => () => undefined);
   });
 
   it("coalesces stream events while refresh is pending and blocks conflicting incarnation", async () => {
@@ -839,24 +938,31 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     tauriListen.mockImplementation(async () => () => undefined);
   });
 
-  it("held positive bounds cannot present a newer attempt or incarnation", async () => {
+  it.each(["stale-positive", "missing", "deferred"] as const)("held %s bounds cannot release outgoing detach before current presentation", async (receiptKind) => {
     const lifecycle = await import("../lib/nativeTerminalLifecycle");
     const started = deferred();
-    const held = deferred<typeof PRESENTED & { attachTuple: import("../lib/types").PaneAttachTuple }>();
+    const held = deferred<(typeof PRESENTED & { attachTuple: import("../lib/types").PaneAttachTuple }) | { presented: false; renderDeferred: true } | undefined>();
     const confirmed = deferred();
+    const currentStarted = deferred();
+    const currentBounds = deferred<typeof PRESENTED & { attachTuple: import("../lib/types").PaneAttachTuple }>();
     let first = true;
-    tauriInvoke.mockImplementation(async (command, args) => {
+    tauriInvoke.mockImplementation(async (command) => {
       if (command === "cmd_native_terminal_set_bounds") {
         if (first) { first = false; started.resolve(); return held.promise; }
-        return { ...PRESENTED, attachTuple: args.attachTuple };
+        currentStarted.resolve();
+        return currentBounds.promise;
       }
       return undefined;
     });
     const current = { ...session("held-receipt"), incarnation: "life-1", daemonEpoch: "7" };
     lifecycle.resetNativeTerminalLifecycleForTest();
     const tuple = { backendSessionId: "held-receipt", incarnation: "life-1", daemonEpoch: "7",
-      frontendSessionId: current.id, paneIdentity: current.id, bindingKey: "held-receipt:7:0:", attemptGeneration: 1 };
+      frontendSessionId: current.id, paneIdentity: current.id, bindingKey: "held-receipt:7:0::life-1", attemptGeneration: 1 };
     lifecycle.registerDurableNativeBinding(tuple);
+    await lifecycle.attachNativeTerminalLifecycle("outgoing-receipt", async () => {});
+    const detachOutgoing = vi.fn(async () => {});
+    const detached = lifecycle.detachNativeTerminalLifecycle("outgoing-receipt", detachOutgoing);
+    await lifecycle.attachNativeTerminalLifecycle("held-receipt", async () => {});
     const receipts: number[] = [];
     const unsubscribe = lifecycle.subscribeNativeTerminalPresentation({}, (receipt) => {
       receipts.push(receipt.attemptGeneration);
@@ -867,9 +973,19 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     await act(async () => {
       lifecycle.registerDurableNativeBinding({ ...tuple, attemptGeneration: 2 });
       view.rerender(<NativeTerminalPane session={current} splitAttempt={{ frontendSessionId: current.id, generation: 2 }} />);
-      held.resolve({ ...PRESENTED, attachTuple: tuple });
+      held.resolve(receiptKind === "missing" ? undefined : receiptKind === "deferred"
+        ? { presented: false, renderDeferred: true }
+        : { ...PRESENTED, attachTuple: tuple });
     });
-    await confirmed.promise;
+    await act(async () => { await currentStarted.promise; });
+    expect(detachOutgoing).not.toHaveBeenCalled();
+    expect(receipts).toEqual([]);
+    await act(async () => {
+      currentBounds.resolve({ ...PRESENTED, attachTuple: { ...tuple, attemptGeneration: 2 } });
+      await confirmed.promise;
+      await detached;
+    });
+    expect(detachOutgoing).toHaveBeenCalledOnce();
     expect(receipts).toEqual([2]);
     expect(view.queryByTestId("native-terminal-error-backing")).toBeNull();
     unsubscribe();
@@ -1112,7 +1228,7 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     expect(lifecycleCalls().filter(([cmd, id]) => cmd === "cmd_native_terminal_attach" && id === "owner-a")).toHaveLength(1);
     expect(tauriInvoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_send_input")).toHaveLength(1);
     expect(tauriInvoke).toHaveBeenCalledWith("cmd_native_terminal_attach", expect.objectContaining({ sessionId: "owner-b", bounds: { x: 90, y: 100, width: 400, height: 300 } }));
-    await act(async () => { boundary.bounds.resolve(PRESENTED); await boundary.detached.promise; });
+    await act(async () => { boundary.bounds.resolve(PRESENTED); });
     expect(lifecycleCalls().filter(([cmd]) => cmd === "cmd_native_terminal_detach")).toEqual([["cmd_native_terminal_detach", "owner-a"]]);
     expect(view.queryByRole("alert")).toBeNull();
   });
@@ -1146,7 +1262,7 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     await boundary.boundsStarted.promise;
     await act(async () => { boundary.bounds.resolve(PRESENTED); });
     const anchor = view.getByTestId("native-terminal-focus-sink").getAttribute("style");
-    await act(async () => { boundary.recovery.resolve(); await boundary.detached.promise; });
+    await act(async () => { boundary.recovery.resolve(); });
 
     expect(tauriInvoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_send_input")).toHaveLength(1);
     expect(view.getByTestId("native-terminal-focus-sink").getAttribute("style")).toBe(anchor);
@@ -1176,12 +1292,14 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
 
     if (returns) {
       await act(async () => { view.rerender(<NativeTerminalPane session={session("owner-b")} />); });
-      await boundary.boundsStarted.promise;
+      await act(async () => { await boundary.boundsStarted.promise; });
       HTMLElement.prototype.getBoundingClientRect = () => ({ ...PANE_RECT, x: 150, width: 500 });
       await act(async () => { view.rerender(<NativeTerminalPane session={session("owner-a")} />); });
     } else {
       await act(async () => { view.unmount(); });
     }
+    // The owner returns before the replacement presents (base ordering): once owner-b has
+    // presented, releasing owner-a's held detachment is the correct lifecycle outcome.
     await act(async () => { initialAttach.resolve(); boundary.bounds.resolve(PRESENTED); });
     if (returns) await act(async () => { await returningBounds.promise; });
 
@@ -1193,7 +1311,9 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
       expect(lifecycleCalls()).not.toContainEqual(["cmd_native_terminal_detach", "owner-a"]);
       expect(tauriInvoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", expect.objectContaining({ sessionId: "owner-a" }));
     } else {
-      await boundary.detached.promise;
+      await act(async () => {
+        await waitFor(() => expect(lifecycleCalls()).toContainEqual(["cmd_native_terminal_detach", "owner-a"]));
+      });
     }
   });
 
@@ -1308,10 +1428,15 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     });
     vi.stubGlobal("cancelAnimationFrame", (id: number) => { frames.delete(id); });
     let attempts = 0;
+    const incomingPresented = deferred();
+    const outgoingDetached = deferred();
     tauriInvoke.mockImplementation(async (command, args) => {
+      if (command === "cmd_native_terminal_detach" && args?.sessionId === "frame-outgoing") outgoingDetached.resolve();
       if (command !== "cmd_native_terminal_set_bounds") return undefined;
       const presented = args?.sessionId !== "frame-incoming" || ++attempts > 1;
-      return { presented, cols: 80, rows: 24, cursorCol: 0, cursorRow: 0, cellWidthPx: 10, cellHeightPx: 20 };
+      const receipt = { presented, cols: 80, rows: 24, cursorCol: 0, cursorRow: 0, cellWidthPx: 10, cellHeightPx: 20 };
+      if (args?.sessionId === "frame-incoming" && presented) incomingPresented.resolve();
+      return receipt;
     });
     const view = render(<NativeTerminalPane session={session("frame-outgoing")} />);
     await act(async () => {});
@@ -1326,8 +1451,10 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
       const callbacks = [...frames.values()];
       frames.clear();
       for (const callback of callbacks) callback(16);
+      await incomingPresented.promise;
     });
     expect(attempts).toBe(2);
+    await act(async () => { await outgoingDetached.promise; });
     expect(lifecycleCalls()).toContainEqual(["cmd_native_terminal_detach", "frame-outgoing"]);
   });
 
@@ -1362,6 +1489,7 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     const newBounds = deferred<typeof PRESENTED>();
     const newBoundsStarted = deferred();
     const oldDetached = deferred();
+    const newPresented = deferred();
 
     tauriCoreMocks.invoke.mockImplementation(async (cmd, args) => {
       if (cmd === "cmd_native_terminal_attach" && args?.sessionId === "backend-a") {
@@ -1371,7 +1499,9 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
       if (cmd === "cmd_native_terminal_attach" && args?.sessionId === "backend-b") newStarted.resolve();
       if (cmd === "cmd_native_terminal_set_bounds" && args?.sessionId === "backend-b") {
         newBoundsStarted.resolve();
-        return newBounds.promise;
+        const receipt = await newBounds.promise;
+        newPresented.resolve();
+        return receipt;
       }
       if (cmd === "cmd_native_terminal_detach" && args?.sessionId === "backend-a") oldDetached.resolve();
       return undefined;
@@ -1390,11 +1520,8 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
         ["cmd_native_terminal_attach", "backend-b"],
       ]);
 
-    await act(async () => {
-      oldAttach.resolve();
-      newBounds.resolve(PRESENTED);
-      await oldDetached.promise;
-    });
+    await act(async () => { newBounds.resolve(PRESENTED); await newPresented.promise; });
+    await act(async () => { oldAttach.resolve(); await oldDetached.promise; });
 
     expect(lifecycleCalls()).toEqual([
         ["cmd_native_terminal_attach", "backend-a"],

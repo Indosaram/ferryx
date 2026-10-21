@@ -297,12 +297,15 @@ export async function runTransportWriteDelivery(ctx, provider, connectHelper = c
       recoveryObserved: true, uncertainWriteNotReplayed: true,
       ownerMutationAuditComplete: true,
       closeNotYetObserved: true, nativePresentationObserved: false };
-    return { scenario: 'ssh-ipc-failure', status: 'passed', timeline: [],
+    return { scenario: 'ssh-ipc-failure', status: 'unverified', timeline: [],
+      barrierCode: 'SSH_SURFACE_EVIDENCE_REQUIRED',
+      required: [...requirements, 'owner-close'],
+      detail: 'Transport delivery observed; native presentation, owner close, and outstanding scenario requirements remain unverified.',
       observations: [{ check: 'daemon-created-descriptor-details-target-match',
         source: 'qa-gated-daemon-create-rpc', evidence: evidence.mapping }],
       requirements, evidence, assertions: [] };
   } catch (error) {
-    return { scenario: 'ssh-ipc-failure', status: 'failed',
+    return { scenario: 'ssh-ipc-failure', status: error instanceof TransportBarrier ? 'unverified' : 'failed',
       barrierCode: error.code, detail: error.message, required: error.required, evidence, requirements, assertions: [] };
   } finally { for (const connection of connections) connection.close(); }
 }

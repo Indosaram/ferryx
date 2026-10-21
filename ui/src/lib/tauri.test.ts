@@ -21,6 +21,7 @@ import {
   deleteWorktreeDestructive,
   getInitialProject,
   getTerminalPreferences,
+  setTerminalAppearance,
   getWorktreeStatus,
   listProjectBranches,
   previewGitHubIssue,
@@ -169,6 +170,14 @@ describe("Tauri IPC wrapper contract", () => {
 
     await expect(getTerminalPreferences()).resolves.toEqual(preferences);
     expect(core.invoke).toHaveBeenCalledWith("cmd_terminal_preferences", undefined);
+  });
+
+  it("pushes the resolved app appearance to the terminal", async () => {
+    const preferences = { theme: { background: "#fafafa" } };
+    core.invoke.mockResolvedValue(preferences);
+
+    await expect(setTerminalAppearance("light")).resolves.toEqual(preferences);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_terminal_set_appearance", { appearance: "light" });
   });
 
   it("spawns terminals with caller-stable clientRequestId, workspace/worktree identity, and an optional cwd slot", async () => {

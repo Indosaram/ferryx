@@ -87,6 +87,22 @@ pub struct Proxy {
     recovery: Option<PairedHostService>,
     agent_sink: Option<Arc<dyn crate::terminal::remote::AgentStateSink>>,
     remote_pid: Option<crate::ssh::bridge::RemotePid>,
+    desired_geometry: Option<(u16, u16)>,
+    reconnect_delay: Duration,
+    blocked: Option<String>,
+    exit_code: Option<i32>,
+}
+#[cfg(feature = "local-split-qa")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairedRouteReceipt {
+    pub selected: String,
+    pub websocket: bool,
+    pub target: m::RemoteTerminalTarget,
+    pub generation: Option<Epoch>,
+    pub direct_epoch: Option<u64>,
+    pub loopback: bool,
+    pub after_sequence: Option<Epoch>,
 }
 impl Proxy {
     pub fn new(descriptor: Descriptor, hub: Arc<TerminalOutputHub>) -> Result<Self> {
@@ -115,6 +131,10 @@ impl Proxy {
             recovery: None,
             agent_sink: None,
             remote_pid: None,
+            desired_geometry: None,
+            reconnect_delay: Duration::from_millis(500),
+            blocked: None,
+            exit_code: None,
         })
     }
     pub fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
@@ -136,6 +156,62 @@ impl Proxy {
             connected: self.transport.is_some() && self.controller.is_some(),
         }
     }
+    pub(crate) fn exited(&self) -> bool {
+        self.exited
+    }
+    pub(crate) fn set_recovery(&mut self, service: PairedHostService) {
+        self.recovery = Some(service);
+    }
+    pub(crate) fn subscribe_authority(&self) -> Option<tokio::sync::watch::Receiver<(u64, String)>> {
+        self.recovery.as_ref().map(PairedHostService::subscribe_authority)
+    }
+    pub(crate) fn outcome(&self) -> (&str, Option<i32>) {
+        if self.exited {
+            ("affirmative_exit", self.exit_code)
+        } else if self.blocked.is_some() {
+            ("blocked", None)
+        } else if self.controller.is_some() {
+            ("proxy_attached", None)
+        } else {
+            ("owner_unavailable", None)
+        }
+    }
+    pub(crate) fn blocked_reason(&self) -> Option<&str> {
+        self.blocked.as_deref()
+    }
+    pub(crate) fn rearm(&mut self) {
+        self.blocked = None;
+    }
+    pub(crate) fn retry_admission(&mut self) -> std::result::Result<(), &'static str> {
+        if self.exited { return Err("PAIRED_PROXY_EXITED"); }
+        if self.blocked.is_some() { return Err("PAIRED_PROXY_BLOCKED"); }
+        if self.controller.is_none() { self.rearm(); }
+        Ok(())
+    }
+    pub(crate) async fn rearm_authority(&mut self, host: &str) -> bool {
+        if host != self.descriptor.host_id || self.exited || !matches!(self.blocked.as_deref(), Some("PAIRED_HOST_UNAUTHORIZED" | "UNAUTHORIZED" | "PERMISSION_DENIED" | "STALE_GENERATION" | "PAIRED_HOST_STALE_GENERATION")) {
+            return false;
+        }
+        let Some(service) = &self.recovery else { return false; };
+        if service.current_generation(self.descriptor.host_id.clone(), self.descriptor.generation).await.is_err() {
+            return false;
+        }
+        self.rearm();
+        true
+    }
+    pub(crate) fn recovery_failed(&mut self, failure: &ClientError) {
+        self.mark_disconnected();
+        match failure.code.as_str() {
+            "PAIRED_SESSION_EXITED" => self.exited = true,
+            "SESSION_EXPIRED" | "CONTROL_CONFLICT" | "STALE_GENERATION" | "PAIRED_HOST_STALE_GENERATION"
+            | "PAIRED_HOST_UNAUTHORIZED" | "UNAUTHORIZED" | "PERMISSION_DENIED"
+            | "PAIRED_HOST_WRONG_MACHINE" | "PAIRED_HOST_INVALID_RESPONSE"
+            | "PAIRED_HOST_MIGRATION_PENDING" | "UNSUPPORTED_PROTOCOL" => {
+                self.blocked = Some(failure.code.clone());
+            }
+            _ => {}
+        }
+    }
 
     /// Explicit reattach only. A failed connection never submits CreateSession.
     pub async fn reattach(
@@ -143,12 +219,34 @@ impl Proxy {
         client: &MachineClient,
         service: &PairedHostService,
     ) -> Result<()> {
-        self.detach().await?;
+        self.attach(client, service, true).await
+    }
+
+    pub(crate) async fn recover(&mut self) -> Result<()> {
+        let Some(service) = self.recovery.clone() else {
+            return Err(error("PAIRED_HOST_UNAVAILABLE"));
+        };
+        tokio::time::timeout(Duration::from_secs(30), self.attach(&MachineClient::new(), &service, false))
+            .await.map_err(|_| error("TIMEOUT"))?
+    }
+
+    async fn attach(
+        &mut self,
+        client: &MachineClient,
+        service: &PairedHostService,
+        explicit: bool,
+    ) -> Result<()> {
+        if explicit {
+            self.detach().await?;
+        }
         self.recovery = Some(service.clone());
         let mut transport = client.attach_terminal(service, &self.descriptor).await?;
         let Message::Text(text) = transport.receive().await? else {
             return Err(error("PAIRED_HOST_INVALID_RESPONSE"));
         };
+        if let Ok(m::Control::Error { error: rejection }) = serde_json::from_str(&text) {
+            return Err(ClientError { code: rejection.code.clone(), machine_error: Some(rejection), request_id: None, ambiguous: false });
+        }
         let m::Attached::Attached {
             target,
             generation,
@@ -159,8 +257,19 @@ impl Proxy {
         if target != self.descriptor.target {
             return Err(error("PAIRED_HOST_WRONG_MACHINE"));
         }
+        transport.lease.token()?;
+        service.current_generation(self.descriptor.host_id.clone(), self.descriptor.generation).await?;
+        transport.lease.token()?;
+        if cols == 0 || rows == 0 || cols > 1000 || rows > 1000 {
+            return Err(error("PAIRED_HOST_INVALID_RESPONSE"));
+        }
+        if let Some((cols, rows)) = self.desired_geometry {
+            transport.send(Message::Text(serde_json::json!({"type":"resize","generation":generation,"cols":cols,"rows":rows}).to_string().into())).await?;
+        }
         self.hub.record_initial_size(&self.id, cols, rows);
         self.controller = Some(generation);
+        self.blocked = None;
+        self.reconnect_delay = Duration::from_millis(500);
         self.replay_pending = true;
         if transport.remote_pid.is_some() {
             self.remote_pid = transport.remote_pid;
@@ -168,14 +277,67 @@ impl Proxy {
         self.transport = Some(transport);
         Ok(())
     }
+    pub(crate) fn recovery_delay(&self) -> Duration {
+        self.reconnect_delay
+    }
+    pub(crate) fn backoff_recovery(&mut self) {
+        self.reconnect_delay = self.reconnect_delay.saturating_mul(2).min(Duration::from_secs(30));
+    }
+    pub(crate) fn can_recover(&self) -> bool {
+        !self.exited && self.blocked.is_none() && self.controller.is_none() && self.recovery.is_some()
+    }
+    pub(crate) fn mark_disconnected(&mut self) {
+        self.transport = None;
+        self.controller = None;
+    }
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) fn qa_route_receipt(&self) -> std::result::Result<PairedRouteReceipt, &'static str> {
+        let transport = self.transport.as_ref().ok_or("OWNER_UNAVAILABLE")?;
+        let peer = match transport.socket.get_ref() {
+            MaybeTlsStream::Plain(socket) => socket.peer_addr(),
+            MaybeTlsStream::Rustls(socket) => socket.get_ref().0.peer_addr(),
+            _ => return Err("QA_LOOPBACK_REQUIRED"),
+        }.map_err(|_| "OWNER_UNAVAILABLE")?;
+        Ok(PairedRouteReceipt {
+            selected: if transport.direct_epoch.is_some() { "direct" } else { "relay" }.into(),
+            websocket: true,
+            target: self.descriptor.target.clone(),
+            generation: self.controller,
+            direct_epoch: transport.direct_epoch,
+            loopback: peer.ip().is_loopback(),
+            after_sequence: self.descriptor.after_sequence,
+        })
+    }
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) fn qa_drop_loopback_transport(&mut self) -> std::result::Result<(), &'static str> {
+        let transport = self.transport.as_ref().ok_or("OWNER_UNAVAILABLE")?;
+        let peer = match transport.socket.get_ref() {
+            MaybeTlsStream::Plain(socket) => socket.peer_addr(),
+            MaybeTlsStream::Rustls(socket) => socket.get_ref().0.peer_addr(),
+            _ => return Err("QA_LOOPBACK_REQUIRED"),
+        }.map_err(|_| "OWNER_UNAVAILABLE")?;
+        if !peer.ip().is_loopback() { return Err("QA_LOOPBACK_REQUIRED"); }
+        self.mark_disconnected();
+        Ok(())
+    }
+    pub(crate) fn remember_geometry(&mut self, cols: u16, rows: u16) {
+        if cols > 0 && rows > 0 && cols <= 1000 && rows <= 1000 {
+            self.desired_geometry = Some((cols, rows));
+        }
+    }
+    pub(crate) fn agent_sink(&self) -> Option<Arc<dyn crate::terminal::remote::AgentStateSink>> {
+        self.agent_sink.clone()
+    }
     pub async fn detach(&mut self) -> Result<()> {
         self.controller = None;
-        if let Some(mut transport) = self.transport.take() {
-            transport.send(Message::Close(None)).await?;
-        }
+        // Dropping the exact socket preempts IO; no remote close command is sent.
+        self.transport = None;
         Ok(())
     }
     async fn send(&mut self, generation: Epoch, message: Message) -> Result<()> {
+        if self.controller.is_none() {
+            return Err(error("PAIRED_NOT_SENT"));
+        }
         if self.controller != Some(generation) {
             return Err(error("STALE_GENERATION"));
         }
@@ -191,7 +353,7 @@ impl Proxy {
             self.controller = None;
             // The failed message is never resent; recovery only restores the
             // stream so the owner loop keeps receiving under a new generation.
-            self.recover_direct_loss(direct, failure).await;
+            self.retire_direct_loss(direct, failure);
         }
         result
     }
@@ -199,16 +361,13 @@ impl Proxy {
     /// reattach from the retained cursor (the path manager now picks the relay or
     /// a newer direct route). Never CreateSession, never replays input, never
     /// resets the hub. Relay loss, remote exit and host answers keep old semantics.
-    async fn recover_direct_loss(&mut self, direct: Option<u64>, failure: &ClientError) -> bool {
+    fn retire_direct_loss(&mut self, direct: Option<u64>, failure: &ClientError) {
         let Some(epoch) = direct else {
-            return false;
+            return;
         };
         if self.exited || !crate::paired_host::direct_client::is_transport_failure(failure) {
-            return false;
+            return;
         }
-        let Some(service) = self.recovery.clone() else {
-            return false;
-        };
         crate::paired_host::direct_route::GLOBAL_DIRECT_ROUTES.mark_disconnected(
             &self.descriptor.host_id,
             epoch,
@@ -216,7 +375,6 @@ impl Proxy {
         );
         self.transport = None;
         self.controller = None;
-        self.reattach(&MachineClient::new(), &service).await.is_ok()
     }
     pub async fn write(&mut self, generation: Epoch, bytes: &[u8]) -> Result<()> {
         if bytes.len() > 64 * 1024 {
@@ -228,6 +386,7 @@ impl Proxy {
                 // Bytes may have reached the host before the socket failed.
                 if crate::paired_host::direct_client::is_transport_failure(&failure) {
                     failure.ambiguous = true;
+                    failure.code = "PAIRED_UNCERTAIN_SEND".into();
                 }
                 failure
             })
@@ -236,20 +395,37 @@ impl Proxy {
         if cols == 0 || rows == 0 || cols > 1000 || rows > 1000 {
             return Err(error("INVALID_REQUEST"));
         }
+        if self.controller.map_or(generation != Epoch(0), |current| generation != current) {
+            return Err(error("STALE_GENERATION"));
+        }
+        self.remember_geometry(cols, rows);
         self.send(generation, Message::Text(serde_json::json!({"type":"resize","generation":generation,"cols":cols,"rows":rows}).to_string().into())).await?;
         self.hub.record_resize(&self.id, cols, rows);
+        self.desired_geometry = Some((cols, rows));
         Ok(())
     }
     pub async fn interrupt(&mut self, generation: Epoch) -> Result<()> {
+        self.interrupt_with_intent(generation, None).await
+    }
+    pub async fn interrupt_with_intent(&mut self, generation: Epoch, intent_id: Option<String>) -> Result<()> {
+        let mut message = serde_json::json!({"type":"signal","generation":generation,"signal":"interrupt"});
+        if let Some(intent_id) = intent_id {
+            message["intentId"] = serde_json::Value::String(intent_id);
+        }
         self.send(
             generation,
             Message::Text(
-                serde_json::json!({"type":"signal","generation":generation,"signal":"interrupt"})
-                    .to_string()
+                message.to_string()
                     .into(),
             ),
         )
-        .await
+        .await.map_err(|mut failure| {
+            if crate::paired_host::direct_client::is_transport_failure(&failure) {
+                failure.ambiguous = true;
+                failure.code = "PAIRED_UNCERTAIN_SEND".into();
+            }
+            failure
+        })
     }
     /// A keepalive that tripped a recovered direct loss reports success: the
     /// stream lives on under the new controller generation.
@@ -271,9 +447,7 @@ impl Proxy {
         if let Err(failure) = &result {
             self.transport = None;
             self.controller = None;
-            if self.recover_direct_loss(direct, failure).await {
-                return Ok(None);
-            }
+            self.retire_direct_loss(direct, failure);
         }
         result
     }
@@ -326,12 +500,40 @@ impl Proxy {
                     }
                 }
                 if matches!(value["type"].as_str(), Some("exit")) {
+                    let m::Control::Exit { target, exit } = serde_json::from_value(value.clone())
+                        .map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))? else {
+                            return Err(error("PAIRED_HOST_INVALID_RESPONSE"));
+                        };
+                    if target != self.descriptor.target {
+                        return Err(error("PAIRED_HOST_WRONG_MACHINE"));
+                    }
                     self.exited = true;
+                    self.exit_code = exit.code;
                     self.controller = None;
                     self.transport = None;
-                } else if matches!(value["type"].as_str(), Some("status" | "error")) {
-                    self.controller = None;
-                    self.transport = None;
+                } else if value["type"].as_str() == Some("error") {
+                    let m::Control::Error { error: rejection } = serde_json::from_value(value.clone())
+                        .map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))? else {
+                            return Err(error("PAIRED_HOST_INVALID_RESPONSE"));
+                        };
+                    return Err(ClientError { code: rejection.code.clone(), machine_error: Some(rejection), request_id: None, ambiguous: false });
+                } else if value["type"].as_str() == Some("status") {
+                    let m::Control::Status { target, status } = serde_json::from_value(value.clone())
+                        .map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))? else {
+                            return Err(error("PAIRED_HOST_INVALID_RESPONSE"));
+                        };
+                    if target != self.descriptor.target { return Err(error("PAIRED_HOST_WRONG_MACHINE")); }
+                    match status {
+                        m::SessionStatus::Running => {},
+                        m::SessionStatus::Exited => {
+                            self.exited = true;
+                            self.mark_disconnected();
+                        }
+                        m::SessionStatus::Expired => {
+                            self.mark_disconnected();
+                            self.blocked = Some("SESSION_EXPIRED".into());
+                        }
+                    }
                 } else if matches!(value["type"].as_str(), Some("agent_state")) {
                     // Required fields that do not decode are a wire-contract violation,
                     // not a message to drop: a silent skip would lose authoritative

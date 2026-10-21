@@ -17,7 +17,6 @@ vi.mock("../lib/tauri", async (importOriginal) => {
 import { createLayoutState } from "./layout";
 import {
   useWorkspaceStore,
-  workspaceReducer,
   setLocalRecoveryPersistence,
   wakeLocalSessionRecovery,
   requestLocalRecoveryAdmission,
@@ -926,7 +925,7 @@ describe("workspaceRestore coordinator", () => {
   it("under Active Only policy, retains both unknown backend identities without standby replacement", async () => {
     localStorage.setItem(
       "ferryx.settings.general",
-      JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "activeOnly", sessionIdleTimeoutMinutes: 30 }),
+      JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "activeOnly" }),
     );
 
     const workspaceId = "ws-active-only";
@@ -1288,6 +1287,42 @@ describe("retained local recovery owner", () => {
     expect(tauriMocks.describeTerminal).toHaveBeenCalledTimes(1);
     unsubscribe();
   });
+  it("recovers an active running session automatically after an ordinary backend-unavailable event", async () => {
+    const snapshot = await load();
+    let available = true;
+    tauriMocks.describeTerminal.mockImplementation(async () => available ? running() : null);
+    const spawnTerminal = vi.fn(async () => "unexpected-spawn");
+    const closeTerminal = vi.fn(async () => {});
+    const service: WorkspaceServices = { ensureTerminalEvents: async () => {}, spawnTerminal,
+      getTerminalCwd: async () => null, closeTerminal, waitForTerminalExit: async () => {} };
+    const live = () => getWorkspaceSnapshot("local")?.sessions["sess-1"];
+    const isLive = () => live()?.lifecycle === "running" && live()?.daemonEpoch === "new" &&
+      live()?.remoteConnectionState === undefined;
+    let firstReady = deferred<void>();
+    const unsubscribe = subscribeWorkspaceSnapshots(() => { if (isLive()) firstReady.resolve(); });
+    const hook = renderHook(() => useWorkspaceStore({ workspaceId: "local", services: service }));
+    act(() => hook.result.current.restoreWorkspace(snapshot));
+    setLocalRecoveryPersistence(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000); await firstReady.promise; });
+    const probesBeforeLoss = tauriMocks.describeTerminal.mock.calls.length;
+
+    // An ordinary loss on a live, non-sleeping pane: the owner is briefly unreachable.
+    available = false;
+    firstReady = deferred<void>();
+    act(() => hook.result.current.markBackendSessionUnavailable("sess-1", "backend", "stream-ended"));
+    expect(live()).toMatchObject({ backendSessionId: "backend", incarnation: "process", remoteConnectionState: "reconnecting" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(tauriMocks.describeTerminal.mock.calls.length).toBeGreaterThan(probesBeforeLoss + 2);
+    expect(live()?.remoteConnectionState).toBe("reconnecting");
+
+    available = true;
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000); await firstReady.promise; });
+    expect(live()).toMatchObject({ backendSessionId: "backend", incarnation: "process", daemonEpoch: "new", lifecycle: "running" });
+    expect(spawnTerminal).not.toHaveBeenCalled();
+    expect(closeTerminal).not.toHaveBeenCalled();
+    unsubscribe();
+    hook.unmount();
+  });
   it("coalesces manual Retry during an in-flight probe", async () => {
     await load();
     const reply = deferred<ReturnType<typeof running>>();
@@ -1423,5 +1458,48 @@ describe("retained local recovery owner", () => {
     release.resolve(); await resumed.promise; await persist.mock.results[0].value;
     expect(getWorkspaceSnapshot("local")?.sessions["sess-1"].daemonEpoch).toBe("old");
     expect(persist).toHaveBeenCalledTimes(1);
+  });
+  it("admits a session with a completed local split spawnIntent (ready: true) instead of cancelling", async () => {
+    const snapshot = await load();
+    setWorkspaceSnapshot("local", {
+      ...snapshot,
+      sessions: {
+        ...snapshot.sessions,
+        "sess-1": {
+          ...snapshot.sessions["sess-1"],
+          spawnIntent: { requestId: "split-req-1", generation: 1, ready: true },
+        },
+      },
+    });
+    tauriMocks.describeTerminal.mockResolvedValue(running());
+    const persist = vi.fn(async () => {});
+    setLocalRecoveryPersistence(persist);
+    const results: LocalRecoveryAdmissionResult[] = [];
+    const ready = deferred<void>();
+    const unsubscribe = requestLocalRecoveryAdmission("local", "sess-1", true, (result) => {
+      results.push(result);
+      if (result.kind === "ready") ready.resolve();
+    });
+    await ready.promise;
+    expect(results.map((r) => r.kind)).toContain("ready");
+    expect(results.map((r) => r.kind)).not.toContain("cancelled");
+    unsubscribe();
+  });
+  it("admits recovery when DaemonSessionDetails omits top-level daemonEpoch and provides recoveryAuthority.daemonEpoch", async () => {
+    await load();
+    const { daemonEpoch: _omitted, ...wireDetails } = running();
+    tauriMocks.describeTerminal.mockResolvedValue(wireDetails as ReturnType<typeof running>);
+    const persist = vi.fn(async () => {});
+    setLocalRecoveryPersistence(persist);
+    const results: LocalRecoveryAdmissionResult[] = [];
+    const ready = deferred<void>();
+    const unsubscribe = requestLocalRecoveryAdmission("local", "sess-1", true, (result) => {
+      results.push(result);
+      if (result.kind === "ready") ready.resolve();
+    });
+    await ready.promise;
+    expect(results.map((r) => r.kind)).toContain("ready");
+    expect(getWorkspaceSnapshot("local")?.sessions["sess-1"].daemonEpoch).toBe("new");
+    unsubscribe();
   });
 });

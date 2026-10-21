@@ -8,6 +8,7 @@ import { Sidebar } from "./Sidebar";
 vi.mock("../lib/sshHosts", () => ({
   useSshHosts: () => ({ hosts: [{ id: "build", label: "Build machine" }] }),
   getCachedSshHosts: () => [{ id: "build", label: "Build machine" }],
+  subscribeSshHosts: () => () => undefined,
 }));
 
 beforeEach(() => localStorage.clear());
@@ -39,7 +40,7 @@ it.each(["/srv/repo", "C:\\work\\repo"])(
     expect(onSelectWorktree).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: project.workspaceId, path,
     }));
-    fireEvent.click(header);
+    fireEvent.click(screen.getByRole("button", { name: /^Collapse / }));
     expect(document.querySelector('[data-shortcut-workspace-id="ssh:build"]')).not.toBeInTheDocument();
     expect(header.querySelector('[data-status-state="working"]')).toHaveClass("animate-spin");
   },

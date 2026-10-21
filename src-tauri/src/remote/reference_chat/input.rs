@@ -726,6 +726,15 @@ impl ReferenceInputQueue {
         };
 
         let session_id = request.target.target.backend_session_id.as_str();
+        // The asynchronous probe can exhaust the budget after the earlier deadline check.
+        // Refuse only before dispatch; once text is typed, its Enter must still be attempted.
+        if clock.now_ms().saturating_sub(request.arrived_at_ms) > REFERENCE_SUBMIT_DEADLINE_MS {
+            return ReferenceInputOutcome::not_typed(
+                ScopeErrorCode::Timeout,
+                true,
+                REFERENCE_SUBMIT_DEADLINE_MESSAGE,
+            );
+        }
         // Reauthorize right before the first byte, after the (possibly slow) prompt probe, so a
         // revoke that lands during the probe is still a clean refusal that types nothing.
         if let Err(error) = (request.authorize)() {
@@ -1567,6 +1576,105 @@ mod tests {
         assert_eq!(outcome.wire_code().as_deref(), Some("TIMEOUT"));
         assert_eq!(outcome.wire_message(), Some(REFERENCE_SUBMIT_DEADLINE_MESSAGE));
         assert!(writer.writes().is_empty(), "a message past its deadline must type nothing");
+    }
+
+    #[tokio::test]
+    async fn a_submit_that_expires_during_the_prompt_probe_types_nothing() {
+        // Given: subscribe before submitting, and hold the Clear probe inside the real queue.
+        let queue = ReferenceInputQueue::new();
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::at(44_000);
+        let target = target("sess-a");
+        let payload = submit_payload("late");
+        let authorize = allow();
+        let (started_tx, started) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let gate = Mutex::new(Some((started_tx, release_rx)));
+        let probe = || {
+            let (started_tx, release_rx) = gate.lock().expect("probe gate").take().expect("one probe");
+            async move {
+                started_tx.send(()).expect("probe observer");
+                release_rx.await.expect("probe released");
+                ReferencePromptProbe::Clear
+            }
+        };
+        let request = ReferenceSubmitRequest {
+            target: &target,
+            request_id: "r1",
+            payload: &payload,
+            bracketed_paste: &paste_on,
+            blocked_prompt: None,
+            arrived_at_ms: 0,
+            last_typed_at_ms: None,
+            authorize: &authorize,
+        };
+
+        // When: the asynchronous probe finishes after the arrival-relative deadline.
+        let submit = queue.submit_with_probe(&request, probe, writer.as_ref(), &clock);
+        let finish_probe = async {
+            started.await.expect("probe started");
+            clock.advance(2_000);
+            release.send(()).expect("release Clear probe");
+        };
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(submit, finish_probe)
+        })
+        .await
+        .expect("controlled probe completes");
+
+        // Then: a retryable refusal types nothing and releases the request record.
+        assert!(matches!(
+            &outcome,
+            ReferenceInputOutcome::NotTyped { error }
+                if error.code == ScopeErrorCode::Timeout && error.retryable
+        ), "{outcome:?}");
+        assert_eq!(outcome.wire_code().as_deref(), Some("TIMEOUT"));
+        assert_eq!(outcome.wire_message(), Some(REFERENCE_SUBMIT_DEADLINE_MESSAGE));
+        assert!(writer.writes().is_empty());
+        assert!(queue.records.lock().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_submit_probed_within_or_at_its_deadline_still_sends_enter_after_expiry() {
+        for elapsed in [REFERENCE_SUBMIT_DEADLINE_MS - 1, REFERENCE_SUBMIT_DEADLINE_MS] {
+            // Given: a nonzero arrival timestamp and a probe that consumes the remaining budget.
+            let queue = ReferenceInputQueue::new();
+            let writer = RecordingWriter::new();
+            let arrived_at_ms = 1_000;
+            let clock = ManualClock::at(arrived_at_ms + 44_000);
+            let target = target("sess-a");
+            let payload = submit_payload("hello");
+            let authorize = allow();
+            let probe = || async {
+                clock.advance(elapsed - 44_000);
+                ReferencePromptProbe::Clear
+            };
+            let request = ReferenceSubmitRequest {
+                target: &target,
+                request_id: "r1",
+                payload: &payload,
+                bracketed_paste: &paste_on,
+                blocked_prompt: None,
+                arrived_at_ms,
+                last_typed_at_ms: None,
+                authorize: &authorize,
+            };
+
+            // When: dispatch is within budget, but the text-to-Enter gap crosses the deadline.
+            let outcome = queue.submit_with_probe(&request, probe, writer.as_ref(), &clock).await;
+
+            // Then: strict greater-than permits both dispatches, and Enter is not cancelled.
+            assert!(outcome.is_typed(), "elapsed={elapsed}: {outcome:?}");
+            assert_eq!(
+                writer.writes(),
+                vec![
+                    format!("{REFERENCE_PASTE_START}hello{REFERENCE_PASTE_END}").into_bytes(),
+                    REFERENCE_SUBMIT_ENTER.to_vec(),
+                ]
+            );
+            assert_eq!(clock.now_ms(), arrived_at_ms + elapsed + REFERENCE_SUBMIT_DELAY_MS);
+            assert!(clock.now_ms() - arrived_at_ms > REFERENCE_SUBMIT_DEADLINE_MS);
+        }
     }
 
     #[tokio::test]

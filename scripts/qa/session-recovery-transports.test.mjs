@@ -150,7 +150,7 @@ test('owner state wait is a typed subscription request bound to one backend sess
   assert.deepEqual(request, { type: 'qaRemoteOwnerWaitState', sessionId: 'backend-1', state: 'disconnected' });
 });
 
-test('runTransportWriteDelivery drives one uncertain write through 21 refusals and same-owner recovery', async () => {
+test('runTransportWriteDelivery retains mutation evidence but cannot scenario-pass incomplete surface observations', async () => {
   const target = { hostId: 'host', ownerId: 'owner', epoch: '7', backendSessionId: 'backend-1' };
   const descriptor = { backendSessionId: 'backend-1', target, config: { projectId: 'project' } };
   const state = (name, attempts, generation = 4) => ({ descriptor, state: name, attempts, generation });
@@ -158,7 +158,14 @@ test('runTransportWriteDelivery drives one uncertain write through 21 refusals a
   const receipts = [];
   let appInput;
   const owner = {
-    async remoteOwnerAudit(id) { calls.push(['audit', id]); return { type: 'qaRemoteOwnerAuditOk', details: state('connected', 0), events: [] }; },
+    async remoteOwnerAudit(id) {
+      calls.push(['audit', id]);
+      const recovered = calls.some(([kind]) => kind === 'recover');
+      const events = [{ operation: 'create', outcome: 'registered', backendSessionId: id, target }];
+      if (calls.some(([kind]) => kind === 'write')) events.push({ operation: 'write', outcome: 'dispatched', backendSessionId: id, target });
+      if (recovered) events.push({ operation: 'recovery', outcome: 'rearmed', backendSessionId: id, target });
+      return { type: 'qaRemoteOwnerAuditOk', details: state('connected', recovered ? 21 : 0, recovered ? 5 : 4), events };
+    },
     async remoteOwnerWaitState(id, next) { calls.push(['subscribe-state', id, next]);
       if (next === 'connected') return new Promise((resolve) => { owner.resolveConnected = resolve; });
       return new Promise((resolve) => { owner.resolveDisconnected = resolve; }); },
@@ -190,7 +197,11 @@ test('runTransportWriteDelivery drives one uncertain write through 21 refusals a
     selection: { backendSessionId: 'selected' }, delivery: { runId: 'run', operationId: 'op', nonce: 'nonce', ownerId: 'test',
       sshSession: { config: { projectId: 'project', host: { hostname: 'ssh.example', port: 22 } },
         params: { args: ['application.mjs', '--run-id', 'run'] }, clientRequestId: 'request' },
-      faultRoute: { upstream: { host: '127.0.0.1', port: 22 } }, maxReads: 1, recoveryReads: 0, payload: 'body' } };
+      faultRoute: { upstream: { host: '127.0.0.1', port: 22 } }, maxReads: 1, recoveryReads: 1, payload: 'body' } };
+  faultSocket.socket.interrupt = (count) => {
+    faultSocket.socket.remaining = 0;
+    faultSocket.interrupt(count);
+  };
   const helper = { async call(op, params) {
     if (op === 'pty.write') {
       if (params.text.includes('"type":"configure"')) appInput.emit('data', Buffer.from(params.text));
@@ -246,7 +257,14 @@ test('runTransportWriteDelivery drives one uncertain write through 21 refusals a
     async createFaultSocket() { return faultSocket; },
   }, connect);
   const result = await run;
-  assert.equal(result.status, 'passed', JSON.stringify(result));
+  assert.equal(result.status, 'unverified', JSON.stringify(result));
+  assert.equal(result.barrierCode, 'SSH_SURFACE_EVIDENCE_REQUIRED');
+  assert.equal(result.evidence.window.nativePresentationObserved, false);
+  assert.equal(result.evidence.window.closeNotYetObserved, true);
+  assert.deepEqual(result.requirements, ['candidate-ssh-fault-route', 'machine-native-signal-surface', 'native-presentation']);
+  assert.deepEqual(result.required, [...result.requirements, 'owner-close']);
+  assert.equal(result.evidence.window.ownerMutationAuditComplete, true);
+  assert.equal(result.evidence.window.uncertainWriteNotReplayed, true);
   assert.equal(result.evidence.baseline.ready.event, 'ready');
   assert.deepEqual(result.evidence.baseline.ready.target, target);
   assert.equal(await readyObserved.then(() => true), true);
@@ -259,7 +277,9 @@ test('runTransportWriteDelivery drives one uncertain write through 21 refusals a
   assert.equal(calls.filter(([kind]) => kind === 'write').length, 1);
   assert.equal(receipts.filter((r) => r.kind === 'dial-refused').length, 21);
   const ownerSetup = calls.filter(([kind]) => ['audit', 'subscribe-state', 'subscribe-refusals', 'interrupt'].includes(kind));
-  assert.deepEqual(ownerSetup.slice(0, 4).map(([kind]) => kind), ['audit', 'subscribe-state', 'subscribe-refusals', 'interrupt']);
+  assert.deepEqual(ownerSetup.slice(0, 5).map(([kind, , next]) => [kind, next]),
+    [['audit', undefined], ['subscribe-state', 'disconnected'], ['subscribe-refusals', 21],
+      ['subscribe-state', 'connected'], ['interrupt', undefined]]);
   assert.ok(calls.findIndex(([kind]) => kind === 'authorize-release') < calls.findIndex(([kind]) => kind === 'release'));
   const connectedSubscribe = calls.findIndex(([kind, , next]) => kind === 'subscribe-state' && next === 'connected');
   assert.ok(connectedSubscribe >= 0 && connectedSubscribe < calls.findIndex(([kind]) => kind === 'release'));
@@ -349,13 +369,13 @@ test('createAckLossDaemonControlClient frames NDJSON and suppresses uncertain dr
   }
 });
 
-test('transportScenarioExecutors reports missing paired fixture without guessing pairedSession', async () => {
+test('transportScenarioExecutors reports missing transport provisioning without guessing pairedSession', async () => {
   for (const scenario of PAIRED_SCENARIOS) {
     const executor = transportScenarioExecutors[scenario];
     assert.equal(typeof executor, 'function');
     const result = await executor({ transportFixture: {}, timeoutMs: 1000 });
     assert.equal(result.status, 'unverified');
-    assert.equal(result.barrierCode, 'PAIRED_FIXTURE_REQUIRED');
+    assert.equal(result.barrierCode, 'TRANSPORT_FIXTURE_REQUIRED');
   }
 });
 
@@ -373,11 +393,10 @@ test('paired route receipt schema uses camelCase afterSequence', async () => {
   assert.equal(receipt.after_sequence, undefined);
 });
 
-test('transportScenarioExecutors dispatches paired scenario and passes honestly when checks pass', async () => {
+test('transportScenarioExecutors refuses aggregate paired proof without real transport provisioning', async () => {
   const ctx = {
     timeoutMs: 1000,
     transportFixture: {
-      schema: 'ferryx-task9-transport-provider/1',
       paired: {
         backendSessionId: 'b-1',
         descriptor: { hostId: 'h-1', backendSessionId: 'b-1', target: { hostId: 'h-1' }, generation: 1 },
@@ -394,22 +413,12 @@ test('transportScenarioExecutors dispatches paired scenario and passes honestly 
         replayedWrites: 0, replayedSignals: 0,
       }),
     },
-    createTransportProvider: async () => ({
-      pairedOwner: {
-        bind: async () => ({ identity: { backendSessionId: 'b-1', daemonEpoch: '1', incarnation: 'inc-1' } }),
-        routeReceipt: async () => ({ selected: 'relay', websocket: true, loopback: true }),
-        ownerAudit: async () => ({ outcome: 'ok', daemonEpoch: '1', incarnation: 'inc-1', generation: 1 }),
-        dialAudit: async () => ({ identity: { backendSessionId: 'b-1', daemonEpoch: '1', incarnation: 'inc-1' }, pendingDial: false }),
-        waitState: async () => ({ state: 'owner_unavailable' }),
-        retry: async () => ({ admitted: true }),
-        dropLoopback: async () => ({ type: 'closeOk' }),
-        mutate: async () => ({ type: 'qaRemoteOwnerMutationOk' }),
-      },
-      close: async () => {},
-    }),
   };
 
   const result = await transportScenarioExecutors['paired-relay-loss'](ctx);
-  assert.equal(result.status, 'passed');
-  assert.deepEqual(result.assertions, ['real-route', 'same-owner', 'zero-create-spawn-close', 'zero-automatic-replay']);
+  assert.equal(result.status, 'unverified');
+  assert.equal(result.barrierCode, 'TRANSPORT_FIXTURE_REQUIRED');
+  assert.equal(result.required, 'ferryx-task9-transport-provider/1');
+  assert.deepEqual(result.assertions, []);
+  assert.deepEqual(result.observations, []);
 });

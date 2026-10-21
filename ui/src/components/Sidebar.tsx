@@ -19,16 +19,13 @@ import {
   Activity,
   CheckCheck,
   ChevronRight,
-  CircleSlash,
   Folder,
-  History,
-  Inbox,
+  MoreHorizontal,
   PanelLeftClose,
   Plus,
   Settings2,
-  Trash2,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 
 import { combineActivitySummaries, resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
@@ -38,6 +35,14 @@ import { projectRootWorktree } from "../lib/projectIdentity";
 import { groupProjects, isProjectGroupActive } from "../lib/projectGrouping";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import { useSshHosts } from "../lib/sshHosts";
+import { MACHINE_STATE_LABELS, pairedMachineStatus } from "../lib/machineStatus";
+import type { RemoteContext } from "../lib/machineNavigation";
+import {
+  getPairedHostReachability,
+  subscribePairedHostReachability,
+  usePairedHostReachability,
+  type PairedHostReachabilityView,
+} from "../lib/pairedHostReachability";
 import { remoteHostStore, type RemoteHostState } from "../state/remoteHostStore";
 import { worktreeListingFailureStore } from "../state/worktreeListingFailures";
 import { resolveWorktreeOwnerId } from "../lib/worktreeOwnership";
@@ -62,12 +67,16 @@ import {
 import { revealPath, type RegisteredProject } from "../lib/tauri";
 import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
 import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
-import { type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
+import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
 import { IconButton } from "./ui/IconButton";
-import { StatusDot } from "./ui/StatusDot";
+import { Input } from "./ui/input";
+import { SectionHeader } from "./ui/SectionHeader";
+import { SegmentedControl } from "./ui/SegmentedControl";
+import { SidebarStateSlot, type SidebarSlotState } from "./sidebar/SidebarStateSlot";
+import type { SectionId } from "./settings/types";
 import { EmptyWorktreesHint, fileManagerActionLabel, WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
 
 export {
@@ -115,7 +124,8 @@ type SidebarProps = {
   onManageDisk?: (project: RegisteredProject) => void;
   onOpenHistory?: (project: RegisteredProject) => void;
   onOpenCommandPalette?: () => void;
-  onOpenSettings?: () => void;
+  /** A remote context deep-links Settings > Remote to one machine (paired status slot). */
+  onOpenSettings?: (section?: SectionId, remoteContext?: RemoteContext) => void;
   onOpenResources?: () => void;
   onToggle?: () => void;
   onHide?: () => void;
@@ -128,7 +138,6 @@ export type SidebarAttention = {
   onOpen: (row: AttentionRow) => void;
   onDismiss: (row: AttentionRow) => void;
   onDismissAll: () => void;
-  openSessionCount: number;
   inboxOpen: boolean;
   onInboxOpenChange: (open: boolean) => void;
 };
@@ -241,6 +250,12 @@ export function Sidebar({
   const { hosts } = useSshHosts();
 
   const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
+  // Paired worktree rows read reachability non-reactively, so regroup whenever it changes.
+  const [reachabilityVersion, bumpReachabilityVersion] = useReducer((version: number) => version + 1, 0);
+  useEffect(() => {
+    const unsubscribe = subscribePairedHostReachability(bumpReachabilityVersion);
+    return () => { unsubscribe(); };
+  }, []);
   const naturalWorktreesByProject = useMemo(
     () => groupWorktreesByProject(
       worktrees,
@@ -250,7 +265,8 @@ export function Sidebar({
       hosts,
       remoteState,
     ),
-    [activeProjectId, hosts, inactiveProjectWorktrees, projects, worktrees, remoteState],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reachabilityVersion invalidates the store read inside
+    [activeProjectId, hosts, inactiveProjectWorktrees, projects, worktrees, remoteState, reachabilityVersion],
   );
   const worktreesByProject = useMemo(
     () => applyWorktreeOrder(naturalWorktreesByProject, worktreeOrder),
@@ -259,6 +275,17 @@ export function Sidebar({
   const projectSortableItems = useMemo(
     () => projectGroups.map((group) => projectSortableId(group.groupId)),
     [projectGroups],
+  );
+
+  // The filter is session-only UI state: never persisted.
+  const [filterQuery, setFilterQuery] = useState("");
+  const visibleProjectGroups = useMemo(
+    () => filterProjectGroups(projectGroups, worktreesByProject, filterQuery, hosts, remoteState),
+    [filterQuery, hosts, projectGroups, remoteState, worktreesByProject],
+  );
+  const statusFooterText = useMemo(
+    () => sidebarStatusFooterText(visibleProjectGroups.flatMap((entry) => entry.rows), activityByWorktreePath),
+    [activityByWorktreePath, visibleProjectGroups],
   );
 
   // The active row is highlighted in whichever project's group actually renders
@@ -452,27 +479,32 @@ export function Sidebar({
                   <CheckCheck className="size-3.5" />
                 </IconButton>
               ) : null}
-              <IconButton
-                data-shortcut="notifications.toggle"
-                label={attention.rows.length > 0 ? `Inbox (${attention.rows.length})` : "Inbox"}
-                aria-pressed={inboxOpen}
-                className={cn("no-drag relative", inboxOpen && "bg-white/[0.08] text-worktree-sidebar-foreground")}
-                size="sm"
-                onClick={() => attention.onInboxOpenChange(!inboxOpen)}
-              >
-                <Inbox className="size-3.5" />
-                {attention.rows.length > 0 ? (
-                  <span
-                    data-testid="sidebar-attention-badge"
-                    className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-warning px-1 text-[9px] font-semibold leading-none text-black"
-                  >
-                    {attention.rows.length > 9 ? "9+" : attention.rows.length}
-                  </span>
-                ) : null}
-              </IconButton>
             </div>
           ) : null}
         </div>
+
+        {attention ? (
+          <div className="shrink-0 px-2 pb-1">
+            <SegmentedControl
+              label="Sidebar view"
+              value={inboxOpen ? "inbox" : "worktrees"}
+              onChange={(view) => {
+                if ((view === "inbox") !== inboxOpen) attention.onInboxOpenChange(view === "inbox");
+              }}
+              options={[
+                { value: "worktrees", label: "Worktrees" },
+                {
+                  value: "inbox",
+                  label: "Inbox",
+                  ariaLabel: attention.rows.length > 0 ? `Inbox (${attention.rows.length})` : "Inbox",
+                  count: attention.rows.length > 0 ? (attention.rows.length > 9 ? "9+" : attention.rows.length) : undefined,
+                  countTestId: "sidebar-attention-badge",
+                  "data-shortcut": "notifications.toggle",
+                },
+              ]}
+            />
+          </div>
+        ) : null}
 
         {attention && inboxOpen ? (
           <AttentionInbox
@@ -487,7 +519,24 @@ export function Sidebar({
           hidden={inboxOpen || undefined}
           className={cn("min-h-0 flex-1 flex-col", inboxOpen ? "hidden" : "flex")}
         >
-          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pt-2 pb-2 scrollbar-sleek">
+          <div className="shrink-0 px-2 pt-1">
+            <Input
+              type="search"
+              value={filterQuery}
+              placeholder="Filter worktrees"
+              aria-label="Filter worktrees"
+              className="h-7 text-[12px] md:text-[12px]"
+              onChange={(event) => setFilterQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Escape" || filterQuery === "") return;
+                event.preventDefault();
+                event.stopPropagation();
+                setFilterQuery("");
+              }}
+            />
+          </div>
+          <SectionHeader title="Projects" count={projectGroups.length} className="shrink-0" />
+          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2 scrollbar-sleek">
             {projects.length === 0 ? (
               <p className="px-2 py-3 text-[11px] leading-relaxed text-muted-foreground">
                 No projects registered yet.
@@ -495,11 +544,10 @@ export function Sidebar({
             ) : null}
 
             <SortableContext items={projectSortableItems} strategy={verticalListSortingStrategy}>
-              {projectGroups.map((group) => {
+              {visibleProjectGroups.map(({ group, rows: projectWorktrees, forceExpanded }) => {
                 const project = group.primaryProject;
                 const active = isProjectGroupActive(group, activeProjectId);
-                const expanded = !collapsedProjects.has(group.groupId);
-                const projectWorktrees = worktreesByProject.get(project.workspaceId) ?? [];
+                const expanded = forceExpanded || !collapsedProjects.has(group.groupId);
                 const staleSummary = projectWorktrees.find((w) => w.stale || w.freshness?.stale)?.hostSummary;
                 const projectActivity = summarizeProjectActivity(
                   projectWorktrees,
@@ -532,7 +580,7 @@ export function Sidebar({
                     onToggle={() => toggleProject(group.groupId)}
                     onSelect={() => {
                       onSelectProject(project);
-                      toggleProject(group.groupId);
+                      if (!expanded) toggleProject(group.groupId);
                     }}
                     onCreateWorktree={() => onCreateWorktree(project)}
                     onRemoveProject={onRemoveProject ? () => onRemoveProject(project) : undefined}
@@ -540,6 +588,7 @@ export function Sidebar({
                     onOpenHistory={onOpenHistory && isLocal ? () => onOpenHistory(project) : undefined}
                     isStandaloneRemote={isStandaloneRemote || (project.target?.kind === "pairedDaemon" && group.memberProjects.length === 1)}
                     staleSummary={staleSummary}
+                    onOpenRemoteSettings={onOpenSettings ? (context) => onOpenSettings("remote", context) : undefined}
                   />
                 );
 
@@ -547,7 +596,7 @@ export function Sidebar({
                   <SortableProjectSection key={group.groupId} workspaceId={group.groupId} header={header}>
                     {expanded ? (
                       <div
-                        className="pl-5 pr-0.5 pt-0.5"
+                        className="ml-3 border-l border-worktree-sidebar-border pl-2 pr-0.5 pt-0.5"
                         onPointerDown={(event) => event.stopPropagation()}
                       >
                         <SortableContext
@@ -558,8 +607,10 @@ export function Sidebar({
                             <button
                               type="button"
                               className={cn(
-                                "group/worktree-row my-0.5 flex min-h-[28px] w-full items-center justify-between rounded-md border px-2 py-1 text-left text-xs transition-colors hover:bg-white/[0.04]",
-                                activeWorktreeOwnerId === project.workspaceId ? "border-[#6c6c6c] bg-[#3f3f3f]" : "border-transparent bg-transparent",
+                                "group/worktree-row relative my-0.5 flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-xs transition-colors",
+                                activeWorktreeOwnerId === project.workspaceId
+                                  ? "bg-worktree-sidebar-accent text-foreground"
+                                  : "bg-transparent hover:bg-white/[0.04]",
                               )}
                               aria-current={activeWorktreeOwnerId === project.workspaceId ? "true" : undefined}
                               title={`Remote worktree: ${project.repoRoot}${standaloneHostLabel ? ` (${standaloneHostLabel})` : ""}`}
@@ -567,30 +618,28 @@ export function Sidebar({
                               data-shortcut-workspace-id={project.workspaceId}
                               onClick={() => selectWorktree(standaloneRootWorktree)}
                             >
-                              <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                                {activityIndicator ? (
-                                  <StatusDot state={activityIndicator} />
-                                ) : (
-                                  <span className="size-2 shrink-0 rounded-full bg-status-idle" />
-                                )}
+                              {activeWorktreeOwnerId === project.workspaceId ? (
                                 <span
-                                  className={cn(
-                                    "truncate text-[12px] font-semibold leading-tight",
-                                    activeWorktreeOwnerId === project.workspaceId ? "text-[#fafafa]" : "text-worktree-sidebar-foreground",
-                                  )}
-                                >
-                                  {standaloneDisplayName}
-                                </span>
-                              </span>
-                              {standaloneHostLabel ? (
-                                <span
-                                  data-testid="remote-machine-badge"
-                                  title={standaloneHostLabel}
-                                  className="ml-auto max-w-[88px] shrink-0 truncate rounded bg-[#4a4a4a] px-1.5 py-px text-[10px] font-medium leading-none text-[#d8d8d8]"
-                                >
-                                  {standaloneHostLabel}
-                                </span>
+                                  aria-hidden="true"
+                                  data-testid="worktree-rail-active"
+                                  className="pointer-events-none absolute -left-[9px] top-1 bottom-1 w-px bg-worktree-sidebar-ring"
+                                />
                               ) : null}
+                              <span
+                                className={cn(
+                                  "min-w-0 truncate text-[12px] font-semibold leading-tight",
+                                  activeWorktreeOwnerId === project.workspaceId ? "text-foreground" : "text-worktree-sidebar-foreground",
+                                )}
+                              >
+                                {standaloneDisplayName}
+                              </span>
+                              <SidebarStateSlot
+                                state={activityIndicator}
+                                host={standaloneHostLabel}
+                                title={activityIndicator ? undefined : standaloneHostLabel}
+                                className="ml-auto min-w-0 truncate"
+                                data-testid={activityIndicator ? "worktree-status-dot" : "remote-machine-badge"}
+                              />
                             </button>
                           ) : <WorktreeList
                             worktrees={projectWorktrees}
@@ -628,16 +677,13 @@ export function Sidebar({
         </div>
 
         <div className="flex shrink-0 items-center justify-end gap-1 border-t border-worktree-sidebar-border px-2 py-1.5">
-          {attention ? (
-            <span className="mr-auto flex min-w-0 items-center gap-1.5 truncate pl-0.5 text-[10.5px] text-muted-foreground">
-              <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-status-success" />
-              {attention.openSessionCount} {attention.openSessionCount === 1 ? "session" : "sessions"} watched
-            </span>
-          ) : null}
+          <span data-testid="sidebar-status-footer" className="mr-auto min-w-0 truncate pl-0.5 text-[10px] text-muted-foreground">
+            {statusFooterText}
+          </span>
           <IconButton label="System resources" size="sm" onClick={onOpenResources}>
             <Activity className="size-3.5" />
           </IconButton>
-          <IconButton data-shortcut={onOpenSettings ? "settings.toggle" : undefined} label="Settings" size="sm" onClick={onOpenSettings}>
+          <IconButton data-shortcut={onOpenSettings ? "settings.toggle" : undefined} label="Settings" size="sm" onClick={() => onOpenSettings?.()}>
             <Settings2 className="size-3.5" />
           </IconButton>
         </div>
@@ -725,6 +771,7 @@ type ProjectHeaderProps = {
   inert?: boolean;
   isStandaloneRemote?: boolean;
   staleSummary?: string;
+  onOpenRemoteSettings?: (context: RemoteContext) => void;
 };
 
 function ProjectHeader({
@@ -742,9 +789,11 @@ function ProjectHeader({
   inert = false,
   isStandaloneRemote = true,
   staleSummary,
+  onOpenRemoteSettings,
 }: ProjectHeaderProps) {
   const { hosts } = useSshHosts();
   const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
+  const reachability = usePairedHostReachability(project.target?.kind === "pairedDaemon" ? project.target.hostId : "");
   const listingFailure = useSyncExternalStore(
     worktreeListingFailureStore.subscribe,
     worktreeListingFailureStore.getState,
@@ -760,6 +809,34 @@ function ProjectHeader({
     ? (isStandaloneRemote && hostLabel ? `${folderName} (${hostLabel})` : folderName)
     : project.workspaceId;
   const menuUnlistenRef = useRef<(() => void) | null>(null);
+  const slot = projectSlot({
+    listingFailure,
+    activity,
+    attentionState,
+    paired: remote?.kind === "pairedDaemon"
+      ? { staleSummary, ...pairedSlotStatus(remote.hostId, remoteState, reachability) }
+      : null,
+  });
+  const pairedHostId = remote?.kind === "pairedDaemon" ? remote.hostId : null;
+  const activateSlot = slot.kind === "paired" && !slot.connected && pairedHostId && onOpenRemoteSettings && !inert
+    ? () => onOpenRemoteSettings({
+        page: "machines",
+        filter: "all",
+        machine: { kind: "pairedDaemon", hostId: pairedHostId, generation: remoteState.hosts[pairedHostId]?.generation ?? "" },
+      })
+    : undefined;
+  const slotElement = slot.kind === "none" ? null : (
+    <SidebarStateSlot
+      state={slot.state}
+      label={slot.label}
+      title={slot.title}
+      className={slot.kind === "failure" ? "text-destructive" : undefined}
+      data-testid={slot.testId}
+      data-attention-state={slot.kind === "attention" ? slot.state ?? undefined : undefined}
+      onActivate={activateSlot}
+      ariaLabel={activateSlot ? `${slot.label}: open remote settings for ${hostLabel ?? projectLabel}` : undefined}
+    />
+  );
 
   useEffect(() => {
     return () => {
@@ -768,10 +845,7 @@ function ProjectHeader({
     };
   }, []);
 
-  const handleContextMenu = (event: React.MouseEvent) => {
-    if (inert) return;
-    event.preventDefault();
-    event.stopPropagation();
+  const openProjectMenu = (position: { x: number; y: number }) => {
     const items: NativeMenuEntry[] = [
       { kind: "item", id: "add-worktree", label: "Add Worktree", enabled: project.gitRoot !== null, icon: "add" },
       { kind: "item", id: "manage-disk", label: "Manage Worktree Disk…", enabled: !remote && project.gitRoot !== null, icon: "disk" },
@@ -787,7 +861,7 @@ function ProjectHeader({
     void openNativePopupMenu(
       "cmd_native_sidebar_context_menu",
       items,
-      { x: event.clientX, y: event.clientY },
+      position,
       (id) => {
         menuUnlistenRef.current?.();
         menuUnlistenRef.current = null;
@@ -811,6 +885,20 @@ function ProjectHeader({
       },
       controller.signal,
     ).catch((error: unknown) => console.warn("Could not open native project menu", error));
+  };
+
+  const handleContextMenu = (event: React.MouseEvent) => {
+    if (inert) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openProjectMenu({ x: event.clientX, y: event.clientY });
+  };
+
+  const handleMoreActions = (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (inert) return;
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    openProjectMenu({ x: rect.left, y: rect.bottom });
   };
 
   return (
@@ -842,41 +930,11 @@ function ProjectHeader({
           title={remote ? `SSH: ${hostLabel} - ${project.repoRoot}` : project.repoRoot}
           className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
         >
-          <span className="relative inline-flex shrink-0">
-            <Folder className="size-3.5" />
-            {listingFailure ? (
-              <span
-                data-testid="project-worktrees-unavailable"
-                role="img"
-                aria-label={`Couldn't load worktrees: ${listingFailure}`}
-                title={`Couldn't load worktrees: ${listingFailure}`}
-                className="absolute -bottom-1 -right-1 inline-flex rounded-full bg-worktree-sidebar"
-              >
-                <CircleSlash className="size-2.5 text-destructive" strokeWidth={3} />
-              </span>
-            ) : null}
-          </span>
+          <Folder className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{projectLabel}</span>
-          {remote?.kind === "pairedDaemon" ? <span className="text-[10px] text-status-idle">{staleSummary ?? pairedConnectionStatus(remote.hostId, remoteState)}</span> : null}
-          {activity.runningCount > 0 ? (
-            <span
-              data-testid="project-running-badge"
-              className="shrink-0 rounded-full bg-status-working/12 px-1.5 py-px text-[9px] font-medium leading-none text-status-working"
-            >
-              {activity.runningCount} running
-            </span>
-          ) : null}
-          {attentionState ? (
-            <span
-              data-testid="project-attention-indicator"
-              data-attention-state={attentionState}
-              title={attentionState === "waiting" ? "Agent needs attention" : "Unread activity"}
-              className="inline-flex size-3 shrink-0 items-center justify-center"
-            >
-              <StatusDot state={attentionState} />
-            </span>
-          ) : activity.hasWorking ? <StatusDot state="working" /> : null}
+          {activateSlot ? null : slotElement}
         </button>
+        {activateSlot ? slotElement : null}
         {project.gitRoot !== null ? (
           <IconButton
             label={`Add worktree to ${project.workspaceId}`}
@@ -889,45 +947,94 @@ function ProjectHeader({
             <Plus className="size-3.5" />
           </IconButton>
         ) : null}
-        {onOpenHistory ? (
-          <IconButton
-            label="Past conversations"
-            aria-label="Past conversations"
-            size="sm"
-            disabled={inert}
-            className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
-            onClick={onOpenHistory}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <History className="size-3" />
-          </IconButton>
-        ) : null}
-        {onRemoveProject ? (
-          <IconButton
-            label={`Remove project ${projectLabel}`}
-            size="sm"
-            disabled={inert}
-            className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100 hover:text-destructive"
-            onClick={onRemoveProject}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <Trash2 className="size-3" />
-          </IconButton>
-        ) : null}
+        <IconButton
+          label={`More actions for ${projectLabel}`}
+          size="sm"
+          disabled={inert}
+          className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
+          onClick={handleMoreActions}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <MoreHorizontal className="size-3.5" />
+        </IconButton>
       </div>
 
     </>
   );
 }
 
-function pairedConnectionStatus(hostId: string, state: RemoteHostState): string {
+type ProjectSlot =
+  | { kind: "none" }
+  | { kind: "failure" | "attention" | "working" | "paired"; state: SidebarSlotState; label?: string; title?: string; testId?: string; connected?: boolean };
+
+/**
+ * One status slot per project row (ui/DESIGN.md section 4 rule 7): listing failure > needs input >
+ * unseen completion > running > unread > paired machine state. An unseen completion outranks live
+ * work, as in resolveActivityIndicator, so a finished agent is never hidden behind a spinner.
+ */
+function projectSlot({ listingFailure, activity, attentionState, paired }: {
+  listingFailure: string | undefined;
+  activity: ActivitySummary;
+  attentionState: "waiting" | "done" | "unread" | null;
+  paired: { staleSummary?: string; label: string; connected: boolean; reason: string | null } | null;
+}): ProjectSlot {
+  if (listingFailure) {
+    return { kind: "failure", state: null, label: "Unavailable", title: `Couldn't load worktrees: ${listingFailure}`, testId: "project-worktrees-unavailable" };
+  }
+  if (attentionState && (attentionState === "waiting" || activity.hasDone || !activity.hasWorking)) {
+    return {
+      kind: "attention",
+      state: attentionState,
+      title: attentionState === "waiting" ? "Agent needs attention" : "Unread activity",
+      testId: "project-attention-indicator",
+    };
+  }
+  if (activity.hasWorking) {
+    return {
+      kind: "working",
+      state: "working",
+      label: activity.runningCount > 1 ? `${activity.runningCount} running` : undefined,
+      testId: "project-running-badge",
+    };
+  }
+  if (paired) {
+    const connected = paired.connected && !paired.staleSummary;
+    return {
+      kind: "paired",
+      state: null,
+      label: paired.staleSummary ?? paired.label,
+      title: connected ? undefined : paired.reason ?? undefined,
+      connected,
+    };
+  }
+  return { kind: "none" };
+}
+
+/**
+ * Paired machine text for the project slot and its worktree rows, from the shared remote status
+ * vocabulary, so the header and the rows never disagree.
+ */
+function pairedSlotStatus(
+  hostId: string,
+  state: RemoteHostState,
+  reachability: PairedHostReachabilityView,
+): { label: string; connected: boolean; reason: string | null } {
   const host = state.hosts[hostId];
-  if (state.machineFeaturesEnabled === false) return "Disabled";
-  if (state.nativeStatus !== "ready") return "Unavailable";
-  if (!host) return "Unavailable";
-  if (host.authStatus === "revoked") return "Revoked";
-  if (host.authStatus !== "paired" || host.grantScope !== "machine") return "Re-pair required";
-  return host.online ? `Online (${host.transport})` : "Offline";
+  if (state.machineFeaturesEnabled === false) return { label: MACHINE_STATE_LABELS.disabled, connected: false, reason: null };
+  // Native inventory still booting: not an error yet.
+  if (state.nativeStatus !== "ready") return { label: MACHINE_STATE_LABELS.checking, connected: false, reason: null };
+  if (!host) return { label: "Unavailable", connected: false, reason: null };
+  const status = pairedMachineStatus({
+    host,
+    nativeReady: true,
+    accountEnrolled: false,
+    reachability,
+  });
+  return { label: status.label, connected: status.state === "connected", reason: status.reason };
+}
+
+function pairedRowSummary(hostId: string, state: RemoteHostState | undefined): string {
+  return state ? pairedSlotStatus(hostId, state, getPairedHostReachability(hostId)).label : "Unavailable";
 }
 
 function projectAttentionState(activity: ActivitySummary): "waiting" | "done" | "unread" | null {
@@ -1063,13 +1170,13 @@ function groupWorktreesByProject(
               const isStale = Boolean(row.stale || row.freshness?.stale);
               const summary = isStale && row.hostSummary
                 ? row.hostSummary
-                : (remoteState ? pairedConnectionStatus(target.hostId, remoteState) : "Unavailable");
+                : pairedRowSummary(target.hostId, remoteState);
               bucket[i] = { ...row, workspaceId: member.workspaceId, hostLabel, hostSummary: summary };
             }
           }
         }
         if (existingIndex === -1) {
-          bucket.push({ ...projectRootWorktree(member, hostLabel), ...(target.kind === "pairedDaemon" ? { hostSummary: remoteState ? pairedConnectionStatus(target.hostId, remoteState) : "Unavailable" } : {}) });
+          bucket.push({ ...projectRootWorktree(member, hostLabel), ...(target.kind === "pairedDaemon" ? { hostSummary: pairedRowSummary(target.hostId, remoteState) } : {}) });
         } else {
           const row = bucket[existingIndex];
           const remoteFolder = target.kind === "ssh" && member.gitRoot !== null && member.gitRoot !== undefined &&
@@ -1182,5 +1289,90 @@ function seedCollapsedProjects(
   const next = new Set(collapsed);
   for (const group of seeded) next.add(group.groupId);
   return next;
+}
+
+type ProjectGroup = ReturnType<typeof groupProjects>[number];
+
+type VisibleProjectGroup = {
+  group: ProjectGroup;
+  rows: Worktree[];
+  /** True while a non-empty filter matched one of this project's worktrees. */
+  forceExpanded: boolean;
+};
+
+/** Mirrors ProjectHeader's visible label so the filter matches what the user reads. */
+function projectFilterLabels(
+  group: ProjectGroup,
+  hosts: Array<{ id: string; label: string }>,
+  remoteState: RemoteHostState,
+): string[] {
+  return group.memberProjects.flatMap((project) => {
+    const remote = project.target && project.target.kind !== "local" ? project.target : null;
+    if (!remote) return [project.workspaceId];
+    const hostLabel = remote.kind === "pairedDaemon"
+      ? (remoteState.hosts[remote.hostId]?.name ?? project.hostLabel ?? remote.hostId)
+      : (hosts.find((host) => host.id === remote.hostId)?.label ?? project.hostLabel ?? remote.hostId);
+    const folderName = project.repoRoot.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) ?? "/";
+    return [folderName, hostLabel];
+  });
+}
+
+function worktreeFilterLabel(worktree: Worktree): string {
+  return worktreeIdentity(worktree)?.slug ?? workspaceName(worktree);
+}
+
+/**
+ * Case-insensitive substring filter over project labels and worktree display names. A project
+ * whose label matches keeps all its rows; otherwise only matching rows stay and the project is
+ * forced open so they are visible.
+ */
+function filterProjectGroups(
+  groups: ProjectGroup[],
+  worktreesByProject: Map<string, Worktree[]>,
+  query: string,
+  hosts: Array<{ id: string; label: string }>,
+  remoteState: RemoteHostState,
+): VisibleProjectGroup[] {
+  const needle = query.trim().toLowerCase();
+  const entries = groups.map((group) => ({
+    group,
+    rows: worktreesByProject.get(group.primaryProject.workspaceId) ?? [],
+    forceExpanded: false,
+  }));
+  if (!needle) return entries;
+  return entries.flatMap((entry) => {
+    const matchingRows = entry.rows.filter((row) => worktreeFilterLabel(row).toLowerCase().includes(needle));
+    const projectMatches = projectFilterLabels(entry.group, hosts, remoteState)
+      .some((label) => label.toLowerCase().includes(needle));
+    if (projectMatches) return [{ ...entry, forceExpanded: matchingRows.length > 0 }];
+    if (matchingRows.length === 0) return [];
+    return [{ ...entry, rows: matchingRows, forceExpanded: true }];
+  });
+}
+
+/**
+ * Footer aggregate (ui/DESIGN.md section 4 rule 10): each worktree counts once, needs input
+ * outranking running as in the row state slot. Zero parts are omitted; both zero is empty.
+ */
+export function sidebarStatusFooterText(
+  worktrees: readonly Worktree[],
+  activityByWorktreePath: Record<string, ActivitySummary | undefined> | undefined,
+): string {
+  let running = 0;
+  let waiting = 0;
+  const seen = new Set<string>();
+  for (const worktree of worktrees) {
+    if (worktree.workspaceId?.startsWith("daemon:")) continue;
+    const key = `${worktree.workspaceId ?? ""}:${worktree.path}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const activity = activityByWorktreePath?.[worktree.path];
+    if (activity?.hasWaiting) waiting += 1;
+    else if (activity?.hasWorking) running += 1;
+  }
+  return [
+    running > 0 ? `${running} running` : null,
+    waiting > 0 ? `${waiting} needs input` : null,
+  ].filter(Boolean).join(" · ");
 }
 

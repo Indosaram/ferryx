@@ -495,7 +495,8 @@ describe("SettingsDialog", () => {
   it("navigates to Remote Access section, renders paired devices, and revokes device on confirmation", async () => {
     render(<SettingsDialog open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Remote" }));
-    fireEvent.click(screen.getByText("Access to This Machine", { selector: "summary" }));
+    // "Access to This Machine" is open by default under the This machine section.
+    expect(screen.getByText("Access to This Machine", { selector: "summary" }).closest("details")).toHaveAttribute("open");
 
     await waitFor(() => expect(native.listRemoteDevices).toHaveBeenCalled());
 
@@ -614,7 +615,7 @@ describe("SettingsDialog", () => {
   it("states that authorized browser profiles reconnect while Remote remains enabled and only require re-pairing when storage cleared, revoked, or profile changed", () => {
     render(<SettingsDialog open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Remote" }));
-    fireEvent.click(screen.getByText("Access to This Machine", { selector: "summary" }));
+    expect(screen.getByText("Access to This Machine", { selector: "summary" }).closest("details")).toHaveAttribute("open");
 
     const remote = screen.getByRole("region", { name: "Remote Access" });
     expect(remote).toHaveTextContent(/authorized browsers reconnect automatically while this stays on/i);

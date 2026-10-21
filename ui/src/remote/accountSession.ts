@@ -939,6 +939,8 @@ export interface AccountConnection {
   readonly deviceToken: string;
   openWebSocket(pathAndQuery: string): Promise<TunnelWebSocket>;
   close(): void;
+  /** True once this connection or its tunnel transport has closed (for example a relay idle drop). */
+  readonly isClosed: boolean;
 }
 
 export function createAccountConnection(params: {
@@ -992,6 +994,9 @@ export function createAccountConnection(params: {
         } catch {}
       }
       openSockets.clear();
+    },
+    get isClosed(): boolean {
+      return isClosed || params.httpTransport.isClosed === true;
     },
   };
 }

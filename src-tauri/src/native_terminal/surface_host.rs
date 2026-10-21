@@ -493,6 +493,28 @@ mod render_schedule_coordinator_tests {
         assert!(coordinator.abandon_render(owner));
         assert!(!coordinator.is_render_pending());
     }
+
+    #[test]
+    fn superseded_frame_finished_with_retry_keeps_one_renderable_follow_up() {
+        // A GPU completion that finds a newer active generation must not leave that
+        // generation unrendered: ending the frame with a retry yields exactly one
+        // follow-up whether or not output coalesced during the frame.
+        let coordinator = RenderScheduleCoordinator::new();
+        assert!(coordinator.schedule_render());
+        let owner = coordinator.begin_owned_render().unwrap();
+        assert!(coordinator.finish_owned_render(owner, true));
+        let follow_up = coordinator.begin_owned_render();
+        assert!(follow_up.is_some(), "the newest generation must get a frame");
+        assert!(!coordinator.finish_owned_render(follow_up.unwrap(), false));
+        assert!(!coordinator.is_render_pending(), "only one follow-up is scheduled");
+
+        let coalesced = RenderScheduleCoordinator::new();
+        assert!(coalesced.schedule_render());
+        let owner = coalesced.begin_owned_render().unwrap();
+        assert!(!coalesced.schedule_render(), "newer publish coalesces into the frame");
+        assert!(coalesced.finish_owned_render(owner, true));
+        assert!(coalesced.begin_owned_render().is_some());
+    }
 }
 
 pub struct NativeTerminalSession {
@@ -1129,13 +1151,194 @@ fn append_qa_frame_submission(dir: &std::path::Path, record: &serde_json::Value)
 }
 
 #[cfg(feature = "local-split-qa")]
+#[derive(Default)]
+struct GuiMutationState {
+    next_seq: u64,
+    requests: Vec<serde_json::Value>,
+    deliveries: Vec<serde_json::Value>,
+}
+
+#[cfg(feature = "local-split-qa")]
+static GUI_MUTATIONS: std::sync::OnceLock<std::sync::Mutex<GuiMutationState>> = std::sync::OnceLock::new();
+
+#[cfg(feature = "local-split-qa")]
+fn gui_mutations() -> &'static std::sync::Mutex<GuiMutationState> {
+    GUI_MUTATIONS.get_or_init(|| std::sync::Mutex::new(GuiMutationState::default()))
+}
+
+#[cfg(feature = "local-split-qa")]
+static GUI_CONTROL_STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+#[cfg(feature = "local-split-qa")]
+pub fn ensure_gui_owner_control_started() {
+    GUI_CONTROL_STARTED.get_or_init(|| {
+        if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
+            std::thread::Builder::new()
+                .name("ferryx-qa-gui-owner-control".into())
+                .spawn(move || run_gui_owner_control(channel))
+                .ok();
+        }
+    });
+}
+
+#[cfg(not(feature = "local-split-qa"))]
+pub fn ensure_gui_owner_control_started() {}
+
+#[cfg(feature = "local-split-qa")]
+fn run_gui_owner_control(channel: Arc<crate::ipc::qa_barrier::QaBarrierChannel>) {
+    let Ok(dir) = std::env::var("FERRYX_QA_BARRIER_DIR") else { return; };
+    if dir.trim().is_empty() { return; }
+    let dir = std::path::PathBuf::from(dir);
+    let mut baseline_seq: u64 = 0;
+    let mut last_command_seq: u64 = 0;
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let Some(op_id) = channel.operation_id() else { continue; };
+
+        // Process gui-owner-open command independently of frame arrival
+        let open_path = dir.join("gui-owner-open.request.json");
+        if let Ok(text) = std::fs::read_to_string(&open_path) {
+            if let Ok(req) = serde_json::from_str::<serde_json::Value>(&text) {
+                if req.get("runId").and_then(|v| v.as_str()) == Some(channel.run_id())
+                    && req.get("operationId").and_then(|v| v.as_str()) == Some(op_id.as_str()) {
+                    let cmd_seq = req.get("commandSeq").and_then(|v| v.as_u64()).unwrap_or(1);
+                    if cmd_seq > last_command_seq {
+                        last_command_seq = cmd_seq;
+                        baseline_seq = gui_mutations().lock().unwrap().next_seq;
+                        let ack = serde_json::json!({
+                            "commandId": format!("ack-gui-open-{cmd_seq}"),
+                            "accepted": true,
+                            "commandSeq": cmd_seq
+                        });
+                        let _ = crate::ipc::qa_barrier::write_json_atomic(&dir, &format!("gui-owner-open.ack.{cmd_seq}.json"), &ack);
+                    }
+                }
+            }
+        }
+
+        // Process gui-owner-read command independently of frame arrival
+        let read_path = dir.join("gui-owner-read.request.json");
+        if let Ok(text) = std::fs::read_to_string(&read_path) {
+            if let Ok(req) = serde_json::from_str::<serde_json::Value>(&text) {
+                if req.get("runId").and_then(|v| v.as_str()) == Some(channel.run_id())
+                    && req.get("operationId").and_then(|v| v.as_str()) == Some(op_id.as_str()) {
+                    let cmd_seq = req.get("commandSeq").and_then(|v| v.as_u64()).unwrap_or(2);
+                    if cmd_seq > last_command_seq {
+                        last_command_seq = cmd_seq;
+                        let audit_id = req.get("auditId").and_then(|v| v.as_str()).unwrap_or("audit-gui");
+                        let (interval_requests, interval_deliveries) = {
+                            let state = gui_mutations().lock().unwrap();
+                            let reqs: Vec<serde_json::Value> = state.requests.iter()
+                                .filter(|r| r["seq"].as_u64().unwrap_or(0) > baseline_seq)
+                                .cloned().collect();
+                            let dels: Vec<serde_json::Value> = state.deliveries.iter()
+                                .filter(|d| d["seq"].as_u64().unwrap_or(0) > baseline_seq)
+                                .cloned().collect();
+                            (reqs, dels)
+                        };
+                        let _ = write_gui_presentation_audit_packet(&channel, audit_id, &op_id, baseline_seq, interval_requests, interval_deliveries, false);
+                        let ack = serde_json::json!({
+                            "commandId": format!("ack-gui-read-{cmd_seq}"),
+                            "accepted": true,
+                            "commandSeq": cmd_seq
+                        });
+                        let _ = crate::ipc::qa_barrier::write_json_atomic(&dir, &format!("gui-owner-read.ack.{cmd_seq}.json"), &ack);
+                    }
+                }
+            }
+        }
+
+        // Process gui-owner-close command independently of frame arrival
+        let close_path = dir.join("gui-owner-close.request.json");
+        if let Ok(text) = std::fs::read_to_string(&close_path) {
+            if let Ok(req) = serde_json::from_str::<serde_json::Value>(&text) {
+                if req.get("runId").and_then(|v| v.as_str()) == Some(channel.run_id())
+                    && req.get("operationId").and_then(|v| v.as_str()) == Some(op_id.as_str()) {
+                    let cmd_seq = req.get("commandSeq").and_then(|v| v.as_u64()).unwrap_or(3);
+                    if cmd_seq > last_command_seq {
+                        last_command_seq = cmd_seq;
+                        let audit_id = req.get("auditId").and_then(|v| v.as_str()).unwrap_or("audit-gui");
+                        let (interval_requests, interval_deliveries) = {
+                            let state = gui_mutations().lock().unwrap();
+                            let reqs: Vec<serde_json::Value> = state.requests.iter()
+                                .filter(|r| r["seq"].as_u64().unwrap_or(0) > baseline_seq)
+                                .cloned().collect();
+                            let dels: Vec<serde_json::Value> = state.deliveries.iter()
+                                .filter(|d| d["seq"].as_u64().unwrap_or(0) > baseline_seq)
+                                .cloned().collect();
+                            (reqs, dels)
+                        };
+                        let _ = write_gui_presentation_audit_packet(&channel, audit_id, &op_id, baseline_seq, interval_requests, interval_deliveries, true);
+                        let ack = serde_json::json!({
+                            "commandId": format!("ack-gui-close-{cmd_seq}"),
+                            "accepted": true,
+                            "commandSeq": cmd_seq
+                        });
+                        let _ = crate::ipc::qa_barrier::write_json_atomic(&dir, &format!("gui-owner-close.ack.{cmd_seq}.json"), &ack);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Ingress request producer for GUI terminal input.
+#[cfg(feature = "local-split-qa")]
+pub fn record_gui_terminal_input_request(session_id: &str, data: &str) -> String {
+    ensure_gui_owner_control_started();
+    let mut state = gui_mutations().lock().unwrap();
+    state.next_seq += 1;
+    let seq = state.next_seq;
+    let mutation_id = format!("gui-req-{session_id}-{seq}");
+    let row = serde_json::json!({
+        "ownerId": format!("gui:{}", std::process::id()),
+        "pid": std::process::id(),
+        "executable": std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        "processStart": "gui-start",
+        "seq": seq,
+        "kind": "request",
+        "channel": "mutation",
+        "sessionId": session_id,
+        "mutationId": mutation_id,
+        "payload": {
+            "bytesLen": data.len()
+        }
+    });
+    state.requests.push(row);
+    mutation_id
+}
+
+/// Delivery producer for GUI terminal write acknowledging backend acceptance on the mutation channel.
+#[cfg(feature = "local-split-qa")]
+pub fn record_gui_terminal_write_delivery(session_id: &str, mutation_id: &str) {
+    let mut state = gui_mutations().lock().unwrap();
+    state.next_seq += 1;
+    let seq = state.next_seq;
+    let row = serde_json::json!({
+        "ownerId": format!("gui:{}", std::process::id()),
+        "pid": std::process::id(),
+        "executable": std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        "processStart": "gui-start",
+        "seq": seq,
+        "kind": "delivery",
+        "channel": "mutation",
+        "sessionId": session_id,
+        "mutationId": mutation_id,
+        "payload": {
+            "accepted": true
+        }
+    });
+    state.deliveries.push(row);
+}
+
+#[cfg(feature = "local-split-qa")]
 fn schedule_native_frame_submitted_qa(
     channel: &Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
     session_id: &str,
     covered_sequence: u64,
 ) {
-    // Read from the env rather than from the channel: the channel deliberately
-    // exposes no path accessor, and this is the same value it was built from.
+    ensure_gui_owner_control_started();
     let Ok(dir) = std::env::var("FERRYX_QA_BARRIER_DIR") else {
         return;
     };
@@ -1152,8 +1355,30 @@ fn schedule_native_frame_submitted_qa(
         covered_sequence,
     );
     let dir = std::path::PathBuf::from(dir);
+    let sess_id = session_id.to_string();
     tauri::async_runtime::spawn_blocking(move || {
         let _ = append_qa_frame_submission(&dir, &record);
+
+        // Record physical frame presentation delivery on separate presentation channel (never marks mutation input delivered)
+        let mut state = gui_mutations().lock().unwrap();
+        state.next_seq += 1;
+        let seq = state.next_seq;
+        let delivery_val = serde_json::json!({
+            "ownerId": format!("gui:{}", std::process::id()),
+            "pid": std::process::id(),
+            "executable": std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            "processStart": "gui-start",
+            "seq": seq,
+            "kind": "delivery",
+            "channel": "presentation",
+            "sessionId": sess_id,
+            "coveredSequence": covered_sequence,
+            "mutationId": format!("gui-pres-{sess_id}-{covered_sequence}"),
+            "payload": {
+                "rendered": true
+            }
+        });
+        state.deliveries.push(delivery_val);
     });
 }
 
@@ -1170,6 +1395,52 @@ fn schedule_native_qa_receipt(
     tauri::async_runtime::spawn_blocking(move || {
         channel.append_receipt(&name, &operation_id, payload);
     });
+}
+
+#[cfg(feature = "local-split-qa")]
+pub fn write_gui_presentation_audit_packet(
+    channel: &Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
+    audit_id: &str,
+    operation_id: &str,
+    baseline_seq: u64,
+    requests: Vec<serde_json::Value>,
+    deliveries: Vec<serde_json::Value>,
+    complete: bool,
+) -> Result<serde_json::Value, String> {
+    let Ok(dir) = std::env::var("FERRYX_QA_BARRIER_DIR") else {
+        return Err("Missing FERRYX_QA_BARRIER_DIR".into());
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let owner_id = format!("gui:{}:{}", channel.run_id(), std::process::id());
+    let end_seq = baseline_seq + (requests.len() + deliveries.len()) as u64;
+    let complete = complete && requests.iter().all(|req| {
+        req.get("mutationId").is_some_and(|token| {
+            deliveries.iter().any(|del| {
+                del.get("mutationId") == Some(token)
+                    && (req.get("channel").is_none() || del.get("channel") == req.get("channel"))
+            })
+        })
+    });
+    let packet = serde_json::json!({
+        "auditId": audit_id,
+        "owner": {
+            "ownerId": owner_id,
+            "pid": std::process::id(),
+            "executable": std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            "processStart": "gui-start".to_string(),
+            "component": "gui"
+        },
+        "baselineSeq": baseline_seq,
+        "endSeq": end_seq,
+        "complete": complete,
+        "runId": channel.run_id(),
+        "operationId": operation_id,
+        "requests": requests,
+        "deliveries": deliveries
+    });
+    crate::ipc::qa_barrier::write_json_atomic(&dir, "gui-owner-audit.json", &packet)
+        .map_err(|e| e.to_string())?;
+    Ok(packet)
 }
 
 fn dispatch_scheduled_render<R: Runtime>(
@@ -1591,10 +1862,22 @@ fn dispatch_owned_render_inner<R: Runtime>(
                 let cell_metrics = target.cell_metrics;
                 let completion_slot = target.leg.clone();
                 let Some(loan) = target.leg.lend_loan() else {
+                    #[cfg(feature = "local-split-qa")]
+                    if crate::ipc::qa_barrier::active_channel().is_some() {
+                        eprintln!(
+                            "[native_qa_predicates] session={session_id} gen={frame_generation} epoch={frame_epoch} stage=dispatch loan=false"
+                        );
+                    }
                     drop(hosts_guard);
                     coordinator.abandon_render(owner);
                     return;
                 };
+                #[cfg(feature = "local-split-qa")]
+                if crate::ipc::qa_barrier::active_channel().is_some() && frame_generation <= 5 {
+                    eprintln!(
+                        "[native_qa_predicates] session={session_id} gen={frame_generation} epoch={frame_epoch} stage=dispatch loan=true"
+                    );
+                }
                 // CRITICAL: Drop hosts lock before passing execution to the GPU worker thread.
                 // The global hosts mutex must not span GPU operations.
                 drop(hosts_guard);
@@ -1628,6 +1911,8 @@ fn dispatch_owned_render_inner<R: Runtime>(
                             render_input.selection.as_ref(),
                             render_input.scrollbar_overlay.as_ref(),
                             render_input.attention_frame,
+                            &session_id,
+                            frame_generation,
                         ))
                     } else {
                         // Bounds can advance the epoch without retiring the surface. Complete
@@ -1647,6 +1932,12 @@ fn dispatch_owned_render_inner<R: Runtime>(
                     let completion_window_for_closure = completion_window.clone();
                     if let Err(err) = dispatch_render_on_main_thread(&completion_window, move || {
                         if discard_retired_completion(&completion_slot) {
+                            #[cfg(feature = "local-split-qa")]
+                            if crate::ipc::qa_barrier::active_channel().is_some() {
+                                eprintln!(
+                                    "[native_qa_predicates] session={completion_session_id} gen={frame_generation} epoch={frame_epoch} stage=completion retired=true"
+                                );
+                            }
                             return;
                         }
                         let current_owner = completion_hosts
@@ -1657,7 +1948,44 @@ fn dispatch_owned_render_inner<R: Runtime>(
                                     && host.active_presentation_epoch() == Some(frame_epoch)
                             });
                         if !current_owner {
-                            completion_coordinator.abandon_render(owner);
+                            // A newer generation became active while this frame was on the GPU.
+                            // Abandoning would reset the coordinator to idle and drop the follow-up
+                            // the newer publish coalesced into this frame, leaving the newest
+                            // generation unrendered until unrelated output arrives. While the host
+                            // is still attached, end the superseded frame with exactly one
+                            // follow-up dispatch instead.
+                            let host_alive = completion_hosts
+                                .lock()
+                                .contains_key(&completion_session_id);
+                            let followup_scheduled =
+                                host_alive && completion_coordinator.finish_owned_render(owner, true);
+                            #[cfg(feature = "local-split-qa")]
+                            if crate::ipc::qa_barrier::active_channel().is_some() && frame_generation <= 5 {
+                                let active_gen = completion_hosts.lock().get(&completion_session_id).and_then(|h| h.active_presentation_generation());
+                                let active_epoch = completion_hosts.lock().get(&completion_session_id).and_then(|h| h.active_presentation_epoch());
+                                eprintln!(
+                                    "[native_qa_predicates] session={completion_session_id} gen={frame_generation} epoch={frame_epoch} stage=completion current_owner=false active_gen={active_gen:?} active_epoch={active_epoch:?} followup_scheduled={followup_scheduled}"
+                                );
+                            }
+                            if !host_alive {
+                                completion_coordinator.abandon_render(owner);
+                                return;
+                            }
+                            if followup_scheduled {
+                                let follow_up_delay = completion_coordinator.delay_before_retry();
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(follow_up_delay).await;
+                                    dispatch_owned_render(
+                                        follow_up_window,
+                                        completion_hosts,
+                                        completion_snapshot_slot,
+                                        completion_session_id,
+                                        completion_coordinator,
+                                        completion_gpu_worker,
+                                        owner.wrapping_add(1),
+                                    );
+                                });
+                            }
                             return;
                         }
                         let retry = gpu_completion_requires_retry(&receipt_result);
@@ -1705,6 +2033,8 @@ fn dispatch_owned_render_inner<R: Runtime>(
                         }
 
                         if receipt.presented && tuple_is_current {
+                            let mut publish_accepted = false;
+                            let mut finish_presentation_invoked = false;
                             let mut hosts_guard = completion_hosts.lock();
                             // The only place a caller can learn that this frame actually reached
                             // the screen: the direct render path always defers. Stale completions
@@ -1716,10 +2046,12 @@ fn dispatch_owned_render_inner<R: Runtime>(
                                 frame_attach_tuple.as_ref(),
                                 receipt,
                             );
+                            publish_accepted = accepted;
 
                             if accepted {
                                 if let Some(host) = hosts_guard.get_mut(&completion_session_id) {
                                     host.finish_presentation(&completion_host_window);
+                                    finish_presentation_invoked = true;
                                 }
                                 // The product's own receipt is the one value that
                                 // carries the authoritative seven-field tuple; the
@@ -1746,6 +2078,23 @@ fn dispatch_owned_render_inner<R: Runtime>(
                                         );
                                     }
                                 }
+                            }
+                            #[cfg(feature = "local-split-qa")]
+                            if crate::ipc::qa_barrier::active_channel().is_some() && frame_generation <= 5 {
+                                eprintln!(
+                                    "[native_qa_predicates] session={completion_session_id} gen={frame_generation} epoch={frame_epoch} stage=completion current_owner=true tuple_is_current=true presented={} suspended={} publish_accepted={publish_accepted} finish_presentation={finish_presentation_invoked}",
+                                    receipt.presented,
+                                    receipt.render_suspended
+                                );
+                            }
+                        } else {
+                            #[cfg(feature = "local-split-qa")]
+                            if crate::ipc::qa_barrier::active_channel().is_some() && frame_generation <= 5 {
+                                eprintln!(
+                                    "[native_qa_predicates] session={completion_session_id} gen={frame_generation} epoch={frame_epoch} stage=completion current_owner=true tuple_is_current={tuple_is_current} presented={} suspended={} publish_accepted=false finish_presentation=false",
+                                    receipt.presented,
+                                    receipt.render_suspended
+                                );
                             }
                         }
 
@@ -3064,6 +3413,27 @@ impl NativeTerminalSurfaceHostState {
         }
     }
 
+    /// Notifies every live session whose program enabled DEC mode 2031 that the color scheme
+    /// changed to `appearance`. Sessions without 2031, or replaying history, get nothing.
+    ///
+    /// Holding the sessions lock serializes this with history replay, which runs under the same
+    /// lock with PTY writes suppressed.
+    pub fn report_color_scheme_to_sessions(&self, appearance: crate::terminal::TerminalAppearance) {
+        let sessions = self.sessions.lock();
+        for (session_id, session) in sessions.iter() {
+            if session.output_stream_ended {
+                continue;
+            }
+            if let Err(error) = session.terminal.report_color_scheme_change(appearance) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    ?error,
+                    "color scheme report (DEC 2031) failed"
+                );
+            }
+        }
+    }
+
     /// Rejects geometry work for a session with no mounted compositor surface.
     ///
     /// Returns [`NativeTerminalError::SessionDetached`] for both a closed session and one that is
@@ -4355,6 +4725,7 @@ impl NativeTerminalSurfaceHostState {
                         generation,
                         failure,
                         replay_gap,
+                        descriptor,
                         ..
                     } => {
                         {
@@ -4377,6 +4748,7 @@ impl NativeTerminalSurfaceHostState {
                                     "generation": generation,
                                     "failure": failure,
                                     "replayGap": replay_gap,
+                                    "descriptor": descriptor,
                                 }),
                             ) {
                                 tracing::warn!(%error, "Failed to emit remote terminal status");
@@ -6016,6 +6388,14 @@ impl NativeSurfaceFrameTarget {
     // Runs only when a frame was actually presented: the no-frame path returns a receipt with
     // `presented` unset and must not touch AppKit, or a suspended surface would be revealed.
     fn finish_presentation<R: Runtime>(&mut self, window: &Window<R>) {
+        #[cfg(feature = "local-split-qa")]
+        if crate::ipc::qa_barrier::active_channel().is_some() {
+            let has_target = self.target.is_some();
+            let target_kind = self.target.as_ref().map(|t| t.descriptor().target_kind);
+            eprintln!(
+                "[native_qa_predicates] stage=finish_presentation has_target={has_target} kind={target_kind:?}"
+            );
+        }
         if let Some(target) = &mut self.target {
             target.reveal_after_present();
             target.restore_first_responder(window);
@@ -6033,6 +6413,8 @@ impl GpuLeg {
         selection: Option<&super::renderer::SelectionSnapshot>,
         scrollbar_overlay: Option<&ScrollbarOverlayState>,
         attention_frame: bool,
+        session_id: &str,
+        frame_generation: u64,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         if self.renderer.is_none() {
             self.renderer = Some(NativeTerminalRenderer::with_shared_surface_gpu(
@@ -6073,22 +6455,40 @@ impl GpuLeg {
             height: surface_size.height,
         };
 
+        let mut texture_outcome = "Unknown";
         let mut render_suspended = false;
         let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some(frame),
+            wgpu::CurrentSurfaceTexture::Success(frame) => {
+                texture_outcome = "Success";
+                Some(frame)
+            }
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                texture_outcome = "Suboptimal";
+                Some(frame)
+            }
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                texture_outcome = "LostOrOutdated";
                 self.format = renderer.configure_surface(
                     &self.surface,
                     surface_size.width,
                     surface_size.height,
                 )?;
                 match self.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(frame)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some(frame),
+                    wgpu::CurrentSurfaceTexture::Success(frame) => {
+                        texture_outcome = "ReconfigureSuccess";
+                        Some(frame)
+                    }
+                    wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                        texture_outcome = "ReconfigureSuboptimal";
+                        Some(frame)
+                    }
                     ref other => match classify_surface_error(other)? {
-                        SurfaceFrameAction::Retry => None,
+                        SurfaceFrameAction::Retry => {
+                            texture_outcome = "ReconfigureRetry";
+                            None
+                        }
                         SurfaceFrameAction::Suspend => {
+                            texture_outcome = "ReconfigureSuspend";
                             render_suspended = true;
                             None
                         }
@@ -6096,8 +6496,12 @@ impl GpuLeg {
                 }
             }
             ref other => match classify_surface_error(other)? {
-                SurfaceFrameAction::Retry => None,
+                SurfaceFrameAction::Retry => {
+                    texture_outcome = "Retry";
+                    None
+                }
                 SurfaceFrameAction::Suspend => {
+                    texture_outcome = "Suspend";
                     render_suspended = true;
                     None
                 }
@@ -6108,6 +6512,12 @@ impl GpuLeg {
             height_px: renderer.config().cell_height_px,
         };
         let Some(frame) = frame else {
+            #[cfg(feature = "local-split-qa")]
+            if crate::ipc::qa_barrier::active_channel().is_some() && frame_generation <= 5 {
+                eprintln!(
+                    "[native_qa_predicates] session={session_id} gen={frame_generation} stage=gpu_texture outcome={texture_outcome} presented=false suspended={render_suspended}"
+                );
+            }
             let mut receipt = NativeTerminalSurfaceReceipt::from_snapshot(
                 layout,
                 snapshot,
@@ -6134,6 +6544,12 @@ impl GpuLeg {
             attention_frame,
         )?;
         renderer.present(frame);
+        #[cfg(feature = "local-split-qa")]
+        if crate::ipc::qa_barrier::active_channel().is_some() && frame_generation <= 5 {
+            eprintln!(
+                "[native_qa_predicates] session={session_id} gen={frame_generation} stage=gpu_texture outcome={texture_outcome} presented=true suspended=false"
+            );
+        }
         Ok(NativeTerminalSurfaceReceipt {
             presented: true,
             ..NativeTerminalSurfaceReceipt::from_snapshot(
@@ -6969,6 +7385,7 @@ mod tests {
                 generation: 9,
                 failure: None,
                 replay_gap: None,
+                descriptor: None,
             })
             .await
             .unwrap();
@@ -6980,6 +7397,50 @@ mod tests {
         assert_eq!(payload["sessionId"], harness.request.session_id);
         assert_eq!(payload["state"], "reconnecting");
         assert_eq!(payload["generation"], 9);
+        assert!(payload["descriptor"].is_null());
+        harness._app.unlisten(listener);
+    }
+
+    #[tokio::test]
+    async fn paired_native_status_forwards_exact_descriptor_to_desktop() {
+        use tauri::Listener;
+        let harness = DirectRenderHarness::new(vec![]);
+        let descriptor = serde_json::json!({
+            "backendSessionId": harness.request.session_id,
+            "hostId": "paired-host",
+            "target": {
+                "machineId": "paired-host",
+                "daemonEpoch": "paired-epoch",
+                "sessionId": "paired-owner-session",
+            },
+            "daemonEpoch": "client-epoch",
+            "incarnation": "paired-incarnation",
+        });
+        let (sender, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let listener = harness._app.listen("terminal_remote_status", move |event| {
+            sender.send(event.payload().to_string()).unwrap();
+        });
+        harness
+            ._output
+            .send(DaemonStreamMessage::RemoteStatus {
+                session_id: harness.request.session_id.clone().into(),
+                state: crate::terminal::remote::RemoteConnectionState::Connected,
+                generation: 11,
+                failure: None,
+                replay_gap: None,
+                descriptor: Some(descriptor.clone()),
+            })
+            .await
+            .unwrap();
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(3), received.recv())
+            .await
+            .expect("native pump must forward paired descriptor")
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["sessionId"], harness.request.session_id);
+        assert_eq!(payload["state"], "connected");
+        assert_eq!(payload["generation"], 11);
+        assert_eq!(payload["descriptor"], descriptor);
         harness._app.unlisten(listener);
     }
 

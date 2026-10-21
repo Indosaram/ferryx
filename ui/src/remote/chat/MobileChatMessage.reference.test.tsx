@@ -82,6 +82,27 @@ describe("MobileChatMessage reference rich parts", () => {
     expect(container.textContent).toContain("Explore the repository");
   });
 
+  it("draws a rich turn's prose at the same size and color as the user bubble", () => {
+    render(
+      <>
+        <MobileChatMessage id="msg-user-size" role="user" content="question" />
+        <MobileChatMessage
+          id="msg-rich-size"
+          role="assistant"
+          content=""
+          referenceParts={[{ kind: "text", text: "Answer body." }]}
+        />
+      </>,
+    );
+
+    const bubble = screen.getByTestId("user-message-bubble");
+    const prose = screen.getByText("Answer body.").closest("div")!;
+    expect(bubble).toHaveClass("text-base");
+    expect(prose).toHaveClass("text-base", "text-chat-foreground");
+    expect(prose).not.toHaveClass("text-sm");
+    expect(prose).not.toHaveClass("text-chat-foreground-secondary");
+  });
+
   it("takes the turn's prose from its text parts and copies exactly that", async () => {
     const copySpy = vi.spyOn(clipboardModule, "copyTextToClipboard").mockResolvedValue(true);
 

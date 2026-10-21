@@ -112,6 +112,7 @@ describe("shell replacement", () => {
         backendSessionId: "live-backend-pty",
         lifecycle: "exited",
         daemonEpoch: "epoch-old",
+        incarnation: "inc-1",
       };
       const list = vi.fn().mockResolvedValue([
         {
@@ -155,7 +156,7 @@ describe("shell replacement", () => {
       ).toBe(false);
     });
 
-    it("falls back to openNewShell when backend session is not live on daemon", async () => {
+    it("does not fall back to openNewShell when backend session is absent or not running on daemon (zero spawn INV-1)", async () => {
       const session: TerminalSession = {
         id: "pane",
         workspaceId: "local-ws",
@@ -177,11 +178,11 @@ describe("shell replacement", () => {
         openNewShell,
       });
 
-      expect(openNewShell).toHaveBeenCalledWith("pane");
+      expect(openNewShell).not.toHaveBeenCalled();
       expect(dispatch).not.toHaveBeenCalled();
     });
 
-    it("falls back to openNewShell when list throws an error", async () => {
+    it("does not fall back to openNewShell when list throws an error (query error zero spawn)", async () => {
       const session: TerminalSession = {
         id: "pane",
         workspaceId: "local-ws",
@@ -201,7 +202,110 @@ describe("shell replacement", () => {
         openNewShell,
       });
 
+      expect(openNewShell).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it("falls back to openNewShell only when session has no backendSessionId (legitimate never-created session)", async () => {
+      const session: TerminalSession = {
+        id: "pane",
+        workspaceId: "local-ws",
+        cwd: "/repo",
+        worktree: null,
+        backendSessionId: null,
+        lifecycle: "exited",
+      };
+      const list = vi.fn().mockResolvedValue([]);
+      const dispatch = vi.fn();
+      const openNewShell = vi.fn();
+
+      await reconnectLocalSession("pane", {
+        getSessions: () => ({ pane: session }),
+        list,
+        dispatch,
+        openNewShell,
+      });
+
       expect(openNewShell).toHaveBeenCalledWith("pane");
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it("rejects an observed different incarnation rather than adopting it (identity conflict)", async () => {
+      const session: TerminalSession = {
+        id: "pane",
+        workspaceId: "local-ws",
+        cwd: "/repo",
+        worktree: null,
+        backendSessionId: "b-1",
+        incarnation: "inc-expected-1",
+        lifecycle: "working",
+      };
+      const list = vi.fn().mockResolvedValue([
+        { sessionId: "b-1", running: true, incarnation: "inc-different-2", daemonEpoch: "epoch-1" },
+      ]);
+      const dispatch = vi.fn();
+      const persist = vi.fn();
+
+      await reconnectLocalSession("pane", {
+        getSessions: () => ({ pane: session }),
+        list,
+        dispatch,
+        persist,
+      });
+
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(persist).not.toHaveBeenCalled();
+    });
+
+    it("fences rebind when session backendId changes post-query or post-persist", async () => {
+      let currentSession: TerminalSession = {
+        id: "pane",
+        workspaceId: "local-ws",
+        cwd: "/repo",
+        worktree: null,
+        backendSessionId: "b-1",
+        incarnation: "inc-1",
+        lifecycle: "working",
+      };
+      const list = vi.fn().mockImplementation(async () => {
+        currentSession = { ...currentSession, backendSessionId: "b-new-2" };
+        return [{ sessionId: "b-1", running: true, incarnation: "inc-1" }];
+      });
+      const dispatch = vi.fn();
+      const persist = vi.fn();
+
+      await reconnectLocalSession("pane", {
+        getSessions: () => ({ pane: currentSession }),
+        list,
+        dispatch,
+        persist,
+      });
+
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(persist).not.toHaveBeenCalled();
+    });
+
+    it("does not fall back to openNewShell when session has historically retained null backendSessionId", async () => {
+      const session: TerminalSession = {
+        id: "pane",
+        workspaceId: "local-ws",
+        cwd: "/repo",
+        worktree: null,
+        backendSessionId: null,
+        recoveryKey: "local:ws:b-old:inc-old",
+        remoteConnectionState: "reconnecting",
+        lifecycle: "working",
+      };
+      const dispatch = vi.fn();
+      const openNewShell = vi.fn();
+
+      await reconnectLocalSession("pane", {
+        getSessions: () => ({ pane: session }),
+        dispatch,
+        openNewShell,
+      });
+
+      expect(openNewShell).not.toHaveBeenCalled();
       expect(dispatch).not.toHaveBeenCalled();
     });
   });

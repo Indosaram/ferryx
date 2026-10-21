@@ -23,7 +23,102 @@ import {
   repoRoot,
 } from '../herdr-reference-fixtures.mjs';
 import { probeDarwin } from './native-remote-agent.mjs';
-import { TransportBarrier, pairedOwnerControls, TRANSPORT_PROVIDER_SCHEMA } from './transport-provider.mjs';
+import { TransportBarrier, pairedOwnerControls as basePairedOwnerControls, TRANSPORT_PROVIDER_SCHEMA } from './transport-provider.mjs';
+
+export function pairedOwnerControls(control, eventControl = control) {
+  const owner = basePairedOwnerControls(control);
+  const events = basePairedOwnerControls(eventControl);
+  return {
+    ...owner,
+    waitState: (...args) => events.waitState(...args),
+    async mutate(session, operation, data = Buffer.alloc(0), intentId) {
+      const { backendSessionId, daemonEpoch, incarnation, generation } = session.identity;
+      if (!intentId || !Number.isSafeInteger(generation)) {
+        throw new TransportBarrier('PAIRED_MUTATION_IDENTITY_REQUIRED', 'original intentId and actual controller generation');
+      }
+      const response = await control.call({ type: 'qaPairedMutation', backendSessionId,
+        daemonEpoch, incarnation, generation, operation, intentId,
+        data: Buffer.from(data).toString('base64') });
+      if (response.type !== 'qaPairedMutationOk' || response.intentId !== intentId) {
+        throw new TransportBarrier('PAIRED_MUTATION_UNAVAILABLE', JSON.stringify(response));
+      }
+      return response;
+    },
+  };
+}
+
+/**
+ * Client adapter for the authoritative host machine delivery observer.
+ * Operates over hostControl UDS connection with full concrete target identity,
+ * strict deviceId validation, concrete generation, armed+sealed finite fault interval,
+ * and expected multiplicity bounds.
+ */
+export function pairedHostDeliveryObserver(hostControl) {
+  function formatTarget(target) {
+    if (!target?.machineId || !target?.daemonEpoch || !target?.sessionId) {
+      throw new TransportBarrier('TARGET_IDENTITY_INCOMPLETE', 'target requires machineId, daemonEpoch, sessionId');
+    }
+    return {
+      machineId: String(target.machineId),
+      daemonEpoch: String(target.daemonEpoch),
+      sessionId: String(target.sessionId),
+    };
+  }
+
+  return {
+    async armFence({ target, deviceId, generation, expectedWriteMultiplicity, expectedSignalMultiplicity }) {
+      const concreteTarget = formatTarget(target);
+      if (typeof deviceId !== 'string' || !deviceId.trim().length) {
+        throw new TransportBarrier('DEVICE_IDENTITY_REQUIRED', 'armFence requires explicit non-empty deviceId');
+      }
+      if (generation === undefined || generation === null || String(generation).trim().length === 0) {
+        throw new TransportBarrier('GENERATION_REQUIRED', 'armFence requires explicit valid concrete generation');
+      }
+      const res = await hostControl.call({
+        type: 'qaPairedHostDeliveryArmFence',
+        target: concreteTarget,
+        deviceId: String(deviceId).trim(),
+        generation: String(generation).trim(),
+        expectedWriteMultiplicity: expectedWriteMultiplicity ?? null,
+        expectedSignalMultiplicity: expectedSignalMultiplicity ?? null,
+      });
+      if (res.type !== 'qaPairedHostDeliveryArmFenceOk' || !res.fenceId) {
+        throw new TransportBarrier('TRAFFIC_AUDITOR_PRODUCER_REQUIRED', `host arm fence failed: ${JSON.stringify(res)}`);
+      }
+      return res.fenceId;
+    },
+    async sealFence({ fenceId, target }) {
+      if (!fenceId) {
+        throw new TransportBarrier('FENCE_ID_REQUIRED', 'sealFence requires explicit fenceId');
+      }
+      const concreteTarget = formatTarget(target);
+      const res = await hostControl.call({
+        type: 'qaPairedHostDeliverySealFence',
+        fenceId,
+        target: concreteTarget,
+      });
+      if (res.type !== 'qaPairedHostDeliverySealFenceOk' || !res.fence) {
+        throw new TransportBarrier('TRAFFIC_AUDITOR_PRODUCER_REQUIRED', `host seal fence failed: ${JSON.stringify(res)}`);
+      }
+      return res.fence;
+    },
+    async audit({ target, fenceId }) {
+      if (!fenceId) {
+        throw new TransportBarrier('FENCE_ID_REQUIRED', 'audit requires explicit fenceId');
+      }
+      const concreteTarget = formatTarget(target);
+      const res = await hostControl.call({
+        type: 'qaPairedHostDeliveryAudit',
+        target: concreteTarget,
+        fenceId,
+      });
+      if (res.type !== 'qaPairedHostDeliveryAuditOk' || !res.audit) {
+        throw new TransportBarrier('TRAFFIC_AUDITOR_PRODUCER_REQUIRED', `host delivery audit failed: ${JSON.stringify(res)}`);
+      }
+      return res.audit;
+    },
+  };
+}
 
 /**
  * Probe live OS process identity (PID, executable path, processStart token).
@@ -140,7 +235,12 @@ export async function recordExactChild({ child, expectedBinary, role, probe, led
   if (!child || !Number.isSafeInteger(child.pid) || child.pid <= 0) {
     throw new TransportBarrier('OWNED_PROCESS_IDENTITY_UNAVAILABLE', 'Valid child process with positive PID required');
   }
-  const live = await probe(child.pid);
+  let live;
+  try {
+    live = await probe(child.pid);
+  } catch (error) {
+    throw new TransportBarrier('OWNED_PROCESS_IDENTITY_UNAVAILABLE', `OS process identity probe failed for PID ${child.pid}: ${error?.message ?? error}`);
+  }
   if (!live || live.exited || !live.processStart || !live.executable) {
     throw new TransportBarrier(
       'OWNED_PROCESS_IDENTITY_UNAVAILABLE',
@@ -511,6 +611,16 @@ export async function launchPairedIsolatedHarness(options = {}) {
       );
     }
 
+    // Exact authenticated device identity returned by this pairing exchange.
+    // Guessing via last active device is strictly prohibited.
+    const deviceId = pairRes.host?.deviceId ?? null;
+    if (!deviceId) {
+      throw new TransportBarrier(
+        'PAIRING_DEVICE_IDENTITY_SEAM_REQUIRED',
+        'pairedHostPair response lacks exact pairing receipt deviceId; minimal explicit additive response field deviceId on PairedHostPairOk or HostView required; last-device guess forbidden',
+      );
+    }
+
     const paired = {
       backendSessionId,
       daemonEpoch: String(outcome.daemonEpoch),
@@ -518,6 +628,7 @@ export async function launchPairedIsolatedHarness(options = {}) {
       descriptor,
       target,
       hostId: host.hostId,
+      deviceId,
       expectedRoute: 'relay',
       hostPid: hostChild.pid,
     };
@@ -637,6 +748,8 @@ export async function launchPairedIsolatedHarness(options = {}) {
       hostControl,
       clientControl,
       eventControl,
+      pairedOwner: pairedOwnerControls(clientControl, eventControl),
+      deliveryObserver: pairedHostDeliveryObserver(hostControl),
       restartClientDaemon,
       cleanup,
     };
@@ -698,6 +811,8 @@ export async function provisionIsolatedPairedSession(options = {}) {
   return {
     paired: harness.paired,
     pid: harness.pid,
+    pairedOwner: harness.pairedOwner,
+    deliveryObserver: harness.deliveryObserver,
     harness,
   };
 }

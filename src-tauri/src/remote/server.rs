@@ -1,5 +1,7 @@
 #[path = "machine_owner_socket.rs"]
 mod machine_owner_socket;
+#[path = "agent_control_service.rs"]
+pub(crate) mod agent_control_service;
 use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
 use crate::remote::browser_admission::AdmissionController;
@@ -1929,15 +1931,10 @@ async fn ws_terminal_handler(
         if let Some((cols, rows)) =
             requested_geometry.filter(|_| device.permission == DevicePermission::Control)
         {
-            if state.session_backend.recovery(&session_id).await?.is_none() {
-                if state
-                    .session_backend
-                    .resize(&session_id, cols, rows)
-                    .await
-                    .is_ok()
-                {
-                    initial_resized = true;
-                }
+            if state.session_backend.recovery(&session_id).await?.is_none()
+                && state.session_backend.resize(&session_id, cols, rows).await.is_ok()
+            {
+                initial_resized = true;
             }
         }
         state
@@ -1973,6 +1970,7 @@ async fn ws_terminal_handler(
 
 fn machine_socket_error(code: &str) -> (StatusCode, String) {
     let status = match code {
+
         "UNAUTHORIZED" => StatusCode::UNAUTHORIZED,
         "MACHINE_ACCESS_REQUIRED" => StatusCode::FORBIDDEN,
         "SESSION_NOT_FOUND" => StatusCode::NOT_FOUND,
@@ -2092,6 +2090,9 @@ pub(crate) mod machine_input_fixture;
 #[cfg(test)]
 #[path = "machine_input_probe.rs"]
 pub(crate) mod machine_input_probe;
+#[cfg(feature = "local-split-qa")]
+#[path = "machine_delivery_observer.rs"]
+pub(crate) mod machine_delivery_observer;
 
 fn machine_control_message(value: serde_json::Value) -> Message {
     Message::Text(value.to_string().into())
@@ -2579,10 +2580,15 @@ async fn handle_machine_terminal_socket(
             let operation = async {
                 match message {
                     Message::Binary(bytes) if bytes.len() <= 64 * 1024 => {
+                        #[cfg(feature = "local-split-qa")]
+                        let obs_seq = machine_delivery_observer::record_ingress(target, generation, "write", &bytes, None);
                         let input = pty.write_input_cancellable(&bytes);
                         #[cfg(test)]
                         let input = machine_input_probe::observe(&target.session_id, input);
-                        input.await.map_err(|error| error.to_string())
+                        let res = input.await.map_err(|error| error.to_string());
+                        #[cfg(feature = "local-split-qa")]
+                        machine_delivery_observer::record_delivery(obs_seq, res.is_ok(), res.as_ref().err().cloned());
+                        res
                     }
                     Message::Text(text) if text.len() <= 16 * 1024 => {
                         match serde_json::from_str::<MachineTerminalControl>(&text) {
@@ -2615,11 +2621,17 @@ async fn handle_machine_terminal_socket(
                             Ok(MachineTerminalControl::Signal {
                                 generation: supplied,
                                 signal,
+                                intent_id: _intent_id,
                             }) if supplied.0 == generation && signal == "interrupt" => {
-                                state
+                                #[cfg(feature = "local-split-qa")]
+                                let obs_seq = machine_delivery_observer::record_ingress(target, generation, "signal", signal.as_bytes(), _intent_id.as_deref());
+                                let res = state
                                     .session_backend
                                     .signal(&target.session_id, TerminalSignal::Interrupt)
-                                    .await
+                                    .await;
+                                #[cfg(feature = "local-split-qa")]
+                                machine_delivery_observer::record_delivery(obs_seq, res.is_ok(), res.as_ref().err().cloned());
+                                res
                             }
                             Ok(MachineTerminalControl::Ping) => {
                                 let control = machine_control(machine_control_message(
@@ -2975,6 +2987,25 @@ fn grid_text_message(frame: RemoteGridFrame) -> Message {
     Message::Text(text.into())
 }
 
+pub(crate) fn terminal_outcome_message(
+    session_id: &str,
+    outcome: crate::remote::backend::RemotePairedRecoveryOutcome,
+) -> Message {
+    Message::Text(serde_json::json!({
+        "type": "terminalOutcome",
+        "target": {
+            "sessionId": session_id,
+            "backendSessionId": outcome.backend_session_id,
+            "daemonEpoch": outcome.daemon_epoch,
+        },
+        "incarnation": outcome.incarnation,
+        "generation": outcome.generation.map(|generation| generation.to_string()),
+        "state": outcome.state,
+        "blockedReason": outcome.blocked_reason,
+        "exitCode": outcome.exit_code,
+    }).to_string().into())
+}
+
 fn enqueue_grid_operation<E>(
     mirror: &Arc<parking_lot::Mutex<RemoteTerminalMirror>>,
     outbound_tx: &mpsc::UnboundedSender<Message>,
@@ -2989,7 +3020,7 @@ fn enqueue_grid_operation<E>(
 }
 
 async fn handle_terminal_grid_socket(
-    socket: WebSocket,
+    mut socket: WebSocket,
     session_id: String,
     attachment: SessionAttachment,
     device: DeviceInfo,
@@ -2999,6 +3030,9 @@ async fn handle_terminal_grid_socket(
     resized: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let is_ssh = recovery_state.read().is_some();
+    if let Ok(Some(outcome)) = state.session_backend.paired_recovery_outcome(&session_id).await {
+        if outcome.backend_session_id == session_id && socket.send(terminal_outcome_message(&session_id, outcome)).await.is_err() { return; }
+    }
     let (mut sender, mut receiver) = socket.split();
     let SessionAttachment {
         snapshot,
@@ -3008,7 +3042,10 @@ async fn handle_terminal_grid_socket(
     let Ok(details) = state.session_backend.describe_session(&session_id).await else {
         return;
     };
-    let (cols, rows) = (details.cols, details.rows);
+    let (cols, rows) = (
+        details.cols.max(1).min(REMOTE_GRID_MAX_COLS),
+        details.rows.max(1).min(REMOTE_GRID_MAX_ROWS),
+    );
     let mirror = match RemoteTerminalMirror::new(cols, rows) {
         Ok(mirror) => Arc::new(parking_lot::Mutex::new(mirror)),
         Err(_) => return,
@@ -3036,9 +3073,38 @@ async fn handle_terminal_grid_socket(
     if sender.send(grid_text_message(initial_frame)).await.is_err() {
         return;
     }
+    if let Ok(Some(outcome)) = state.session_backend.paired_recovery_outcome(&session_id).await {
+        if outcome.backend_session_id == session_id
+            && !outcome.incarnation.is_empty()
+            && !outcome.daemon_epoch.is_empty()
+        {
+            if sender.send(terminal_outcome_message(&session_id, outcome)).await.is_err() {
+                return;
+            }
+        }
+    }
     let mut last_emitted_sequence = snapshot.history_end_sequence;
 
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Message>();
+    let outcome_backend = Arc::clone(&state.session_backend);
+    let outcome_session_id = session_id.clone();
+    let outcome_tx = outbound_tx.clone();
+    let mut outcome_task = std::pin::pin!(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let mut previous = None;
+        loop {
+            tick.tick().await;
+            let current = outcome_backend.paired_recovery_outcome(&outcome_session_id).await.ok().flatten();
+            if current == previous { continue; }
+            previous = current.clone();
+            if let Some(outcome) = current {
+                if outcome.backend_session_id == outcome_session_id
+                    && !outcome.daemon_epoch.is_empty() && !outcome.incarnation.is_empty()
+                    && outcome_tx.send(terminal_outcome_message(&outcome_session_id, outcome)).is_err()
+                { break; }
+            }
+        }
+    });
     let status_tx = outbound_tx.clone();
     let status_recovery_state = Arc::clone(&recovery_state);
     let mut status_task = std::pin::pin!(async move {
@@ -3099,14 +3165,78 @@ async fn handle_terminal_grid_socket(
                         // A gap invalidates even bytes waiting for the next grid tick.
                         pending_bytes.clear();
                         pending_end_sequence = None;
-                        if !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| {
-                            let (cols, rows) = mirror.dimensions()?;
-                            *mirror = RemoteTerminalMirror::new(cols, rows)?;
-                            mirror.full_frame()
-                        }) {
+                        let recovered = match recover_remote_terminal_attachment(
+                            &session_backend,
+                            &send_session_id,
+                            last_emitted_sequence,
+                        )
+                        .await
+                        {
+                            Ok(attachment) => attachment,
+                            Err(_) => break,
+                        };
+                        let mut recovered_receiver = recovered.receiver;
+                        let snapshot = recovered.snapshot;
+                        // Preserve already-published continuation across receiver replacement.
+                        let mut resumed_chunk = None;
+                        while let Ok(chunk) = recovered_receiver.try_recv() {
+                            if chunk.replay_gap.is_none()
+                                && chunk.sequence > snapshot.history_end_sequence.unwrap_or(0)
+                            {
+                                resumed_chunk = Some(chunk);
+                                break;
+                            }
+                        }
+                        let (cols, rows) = match session_backend.describe_session(&send_session_id).await {
+                            Ok(details) => (
+                                details.cols.max(1).min(REMOTE_GRID_MAX_COLS),
+                                details.rows.max(1).min(REMOTE_GRID_MAX_ROWS),
+                            ),
+                            Err(_) => break,
+                        };
+                        let mut replacement = match RemoteTerminalMirror::new(cols, rows) {
+                            Ok(mirror) => mirror,
+                            Err(_) => break,
+                        };
+                        // publish_gap clears the hub's pre-gap chunks, so a snapshot that starts after
+                        // this gap boundary holds only post-gap output: send the reset first, then that output.
+                        let post_gap_snapshot = snapshot
+                            .history_start_sequence
+                            .is_some_and(|start| start > chunk.sequence);
+                        if !post_gap_snapshot {
+                            if !snapshot.history_segments.is_empty() {
+                                if replacement.feed_segments(&snapshot.history_segments).is_err() { break; }
+                            } else if !snapshot.history.is_empty() && replacement.feed(&snapshot.history).is_err() {
+                                break;
+                            }
+                        }
+                        let chunk_covered = snapshot.history_end_sequence.is_some_and(|end| chunk.sequence <= end);
+                        if !chunk_covered && !chunk.bytes.is_empty() && replacement.feed(&chunk.bytes).is_err() {
                             break;
                         }
-                        last_emitted_sequence = Some(chunk.sequence);
+                        if replacement.dimensions().ok() != Some((cols, rows)) && replacement.resize(cols, rows).is_err() {
+                            break;
+                        }
+                        let frame = match replacement.full_frame() { Ok(frame) => frame, Err(_) => break };
+                        *send_mirror.lock() = replacement;
+                        if send_tx.send(grid_text_message(frame)).is_err() { break; }
+                        if post_gap_snapshot
+                            && !snapshot.history.is_empty()
+                            && !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| mirror.feed(&snapshot.history))
+                        {
+                            break;
+                        }
+                        last_emitted_sequence = Some(snapshot.history_end_sequence.unwrap_or(chunk.sequence).max(chunk.sequence));
+                        if let Some(resumed_chunk) = resumed_chunk {
+                            if resumed_chunk.sequence > last_emitted_sequence.unwrap_or(0) {
+                                if !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| mirror.feed(&resumed_chunk.bytes)) {
+                                    break;
+                                }
+                                last_emitted_sequence = Some(resumed_chunk.sequence);
+                            }
+                        }
+                        output_rx = recovered_receiver;
+                        next_emit = tokio::time::Instant::now() + frame_interval;
                         continue;
                     }
                     if latest_sequence.is_some_and(|last| chunk.sequence <= last) {
@@ -3132,7 +3262,10 @@ async fn handle_terminal_grid_socket(
                     let snapshot = recovered.snapshot;
                     let (cols, rows) =
                         match session_backend.describe_session(&send_session_id).await {
-                            Ok(d) => (d.cols, d.rows),
+                            Ok(d) => (
+                                d.cols.max(1).min(REMOTE_GRID_MAX_COLS),
+                                d.rows.max(1).min(REMOTE_GRID_MAX_ROWS),
+                            ),
                             Err(_) => break,
                         };
 
@@ -3329,6 +3462,7 @@ async fn handle_terminal_grid_socket(
         _ = &mut recv_task => {},
         _ = &mut writer_task => {},
         _ = &mut status_task => {},
+        _ = &mut outcome_task => {},
     };
 }
 
@@ -5322,6 +5456,7 @@ struct ReferenceStagedFile {
     target_key: String,
     dir: PathBuf,
     path: PathBuf,
+    preview: Option<Arc<reference_files::ReferencePreviewLease>>,
     display_name: String,
     receipt: AttachmentReceipt,
     staged_at_ms: u64,
@@ -5333,6 +5468,7 @@ struct ReferenceStagedFile {
     /// An accepted submit already sent this file's mention: it belongs to a finished turn and no
     /// longer counts against the next turn's bounds, though its bytes stay on disk for the TTL.
     referenced: bool,
+    submitting: usize,
 }
 
 /// Process-local state every reference-chat route shares.
@@ -5341,10 +5477,36 @@ struct ReferenceStagedFile {
 /// each other while they take the same per-target step, and a second queue instance would
 /// silently not order against the first. The answer ledger lives beside it for the same reason.
 #[derive(Default)]
-struct ReferenceChatRuntime {
+pub(crate) struct ReferenceChatRuntime {
     input: reference_input::ReferenceInputQueue,
     answers: reference_prompts::ReferencePromptAnswers,
     staged: parking_lot::Mutex<std::collections::HashMap<String, ReferenceStagedFile>>,
+    staging_sweep: tokio::sync::RwLock<()>,
+    #[cfg(test)]
+    pub(crate) submit_staging_entered: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    preview_budget: std::sync::OnceLock<Arc<tokio::sync::Semaphore>>,
+}
+
+impl ReferenceChatRuntime {
+    #[cfg(test)]
+    pub(crate) async fn hold_staging_sweep(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        self.staging_sweep.write().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn await_preview_capacity(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(self.preview_budget.get().expect("budget initialized"))
+            .acquire_many_owned(reference_files::REFERENCE_PREVIEW_HANDLE_LIMIT as u32)
+            .await.expect("budget remains open")
+    }
+
+    pub(crate) fn reserve_preview(&self) -> Result<tokio::sync::OwnedSemaphorePermit, ScopeErrorCode> {
+        Arc::clone(self.preview_budget.get_or_init(|| {
+            Arc::new(tokio::sync::Semaphore::new(reference_files::REFERENCE_PREVIEW_HANDLE_LIMIT))
+        }))
+        .try_acquire_owned()
+        .map_err(|_| ScopeErrorCode::ControlConflict)
+    }
 }
 
 fn reference_chat_runtime() -> &'static ReferenceChatRuntime {
@@ -5355,7 +5517,7 @@ fn reference_chat_runtime() -> &'static ReferenceChatRuntime {
 /// The query a reference-chat read binds its target with.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ReferenceChatReadQuery {
+pub(crate) struct ReferenceChatReadQuery {
     #[serde(default)]
     host_id: Option<String>,
     #[serde(default)]
@@ -5838,7 +6000,30 @@ async fn reference_chat_mutation_context<P>(
     reference_chat_ensure_live(state, session_id)
         .await
         .map_err(|error| reference_chat_refusal(&error))?;
+    reference_chat_ensure_provider(state, &target)
+        .map_err(|error| reference_chat_refusal(&error))?;
     Ok((device, target))
+}
+
+/// An explicit conversation identity cannot address a newer conversation in the same pane.
+fn reference_chat_ensure_provider(
+    state: &RemoteGatewayState,
+    target: &reference_types::ReferenceTargetRef,
+) -> Result<(), ScopeError> {
+    if let (Some(named), Some(current)) = (
+        target.provider_session_id.as_deref(),
+        state.machine_services.as_ref().and_then(|services| {
+            services.sessions.session_provider_session(&target.target.backend_session_id)
+        }),
+    ) {
+        if named != current.id {
+            return Err(reference_chat_scope(
+                ScopeErrorCode::TargetExpired,
+                "the pane's provider session changed; re-read its session rows",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The reauthorization a mutation re-runs before every write it dispatches.
@@ -5848,9 +6033,12 @@ async fn reference_chat_mutation_context<P>(
 fn reference_chat_authorize(
     state: &Arc<RemoteGatewayState>,
     headers: &HeaderMap,
+    target: &reference_types::ReferenceTargetRef,
 ) -> Box<dyn Fn() -> Result<(), ScopeError> + Send + Sync> {
     let token = extract_token(headers);
     let auth = Arc::clone(&state.auth_manager);
+    let state = Arc::clone(state);
+    let target = target.clone();
     Box::new(move || {
         let token = token.clone().ok_or_else(|| {
             reference_chat_scope(ScopeErrorCode::Unauthorized, "the caller's token is gone")
@@ -5867,7 +6055,7 @@ fn reference_chat_authorize(
                 "the caller's device may no longer control this machine",
             ));
         }
-        Ok(())
+        reference_chat_ensure_provider(&state, &target)
     })
 }
 
@@ -5995,10 +6183,25 @@ async fn reference_chat_prompt_session(
 }
 
 /// The tail of the original session file, when this host holds one for the target.
-async fn reference_chat_session_jsonl(
+pub(crate) async fn reference_chat_session_jsonl(
     state: &Arc<RemoteGatewayState>,
     identity: &reference_history::ReferenceHistoryIdentity,
 ) -> Option<String> {
+    reference_chat_session_jsonl_with_resolver(
+        state, identity, reference_history::resolve_reference_history_stream,
+    ).await
+}
+
+pub(crate) async fn reference_chat_session_jsonl_with_resolver<F>(
+    state: &Arc<RemoteGatewayState>,
+    identity: &reference_history::ReferenceHistoryIdentity,
+    resolver: F,
+) -> Option<String>
+where
+    F: FnOnce(&Path, &reference_history::ReferenceHistoryIdentity,
+        &[reference_history::ReferenceHistorySibling])
+        -> Result<reference_history::ReferenceHistoryStream, ScopeError> + Send + 'static,
+{
     // A remote session's store is on its own host: no local cwd or backend-id fallback may stand
     // in for it, or the prompt detectors plan from an unrelated session's records.
     if reference_chat_session_is_remote(state, &identity.target.target.backend_session_id).await {
@@ -6006,8 +6209,9 @@ async fn reference_chat_session_jsonl(
     }
     let home = reference_chat_history_home(state)?;
     let siblings = reference_chat_siblings(state, &identity.target.target.backend_session_id).await;
-    let stream =
-        reference_history::resolve_reference_history_stream(&home, identity, &siblings).ok()?;
+    let stream = reference_chat_resolve_history(
+        home, identity.clone(), siblings, resolver,
+    ).await.ok()?;
     let path = stream.file_path()?.to_path_buf();
     // Only the tail is read: the store has no size bound, and the prompt detectors need its end.
     let bounded = crate::ipc::run_blocking(move || {
@@ -6019,6 +6223,23 @@ async fn reference_chat_session_jsonl(
     // Lossy on purpose: the window may start mid-character, and the partial first record is not
     // a record the detectors may match anyway.
     Some(String::from_utf8_lossy(&bounded).into_owned())
+}
+
+pub(crate) async fn reference_chat_resolve_history<F>(
+    home: PathBuf,
+    identity: reference_history::ReferenceHistoryIdentity,
+    siblings: Vec<reference_history::ReferenceHistorySibling>,
+    resolver: F,
+) -> Result<reference_history::ReferenceHistoryStream, ScopeError>
+where
+    F: FnOnce(&Path, &reference_history::ReferenceHistoryIdentity,
+        &[reference_history::ReferenceHistorySibling])
+        -> Result<reference_history::ReferenceHistoryStream, ScopeError> + Send + 'static,
+{
+    // Keep resolver refusals as data: only a failed blocking task becomes an internal error.
+    crate::ipc::run_blocking(move || Ok(resolver(&home, &identity, &siblings)))
+        .await
+        .map_err(|error| reference_chat_scope(ScopeErrorCode::InventoryIncomplete, error.to_string()))?
 }
 
 /// What this route's own screen read says about a prompt the pane may be holding.
@@ -6140,6 +6361,7 @@ async fn reference_chat_prune_staged(
     worktree: &Path,
     ledger: Option<PathBuf>,
 ) {
+    let _sweep = runtime.staging_sweep.write().await;
     let now = reference_input::SystemReferenceClock.now_ms();
     let ttl = reference_files::reference_unreferenced_ttl_ms();
     let mut expired = Vec::new();
@@ -6227,6 +6449,23 @@ async fn reference_chat_history(
     query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
+    reference_chat_history_with_resolver(
+        state, session_id, query, headers, reference_history::resolve_reference_history_stream,
+    ).await
+}
+
+pub(crate) async fn reference_chat_history_with_resolver<F>(
+    state: Arc<RemoteGatewayState>,
+    session_id: String,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+    resolver: F,
+) -> Response
+where
+    F: FnOnce(&Path, &reference_history::ReferenceHistoryIdentity,
+        &[reference_history::ReferenceHistorySibling])
+        -> Result<reference_history::ReferenceHistoryStream, ScopeError> + Send + 'static,
+{
     let query = match reference_chat_read_query(query) {
         Ok(query) => query,
         Err(response) => return response,
@@ -6236,6 +6475,19 @@ async fn reference_chat_history(
         Ok(read) => read,
         Err(response) => return response,
     };
+    // The pane's agent rotated its conversation (e.g. /new) since the caller read its session
+    // rows: the caller's provider session is stale, never served in place of the current one.
+    if let (Some(named), Some(current)) = (
+        read.identity.provider_session_id(),
+        read.identity.agent_session_id.as_deref(),
+    ) {
+        if named != current {
+            return reference_chat_error(
+                ScopeErrorCode::TargetExpired,
+                "the pane's provider session changed; re-read its session rows",
+            );
+        }
+    }
     let limit = match reference_history::normalize_reference_history_limit(
         query
             .limit
@@ -6262,13 +6514,24 @@ async fn reference_chat_history(
         );
     };
     let siblings = reference_chat_siblings(&state, &session_id).await;
-    let stream = match reference_history::resolve_reference_history_stream(
-        &home,
-        &read.identity,
-        &siblings,
-    ) {
+    let stream = match reference_chat_resolve_history(
+        home,
+        read.identity.clone(),
+        siblings,
+        resolver,
+    ).await {
         Ok(stream) => stream,
-        Err(error) => return reference_chat_refusal(&error),
+        Err(error) => return (
+            reference_chat_status(error.code),
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({"error": {
+                "code": reference_chat_wire_code(error.code),
+                "message": error.message,
+                "retryable": error.retryable,
+                "details": error.details,
+                "requestId": uuid::Uuid::new_v4().to_string(),
+            }})),
+        ).into_response(),
     };
     match reference_history::read_reference_history_page(
         &stream,
@@ -6364,6 +6627,29 @@ pub(crate) async fn reference_chat_submit(
     AxumPath(session_id): AxumPath<String>,
     request: axum::extract::Request,
 ) -> Response {
+    reference_chat_submit_with_runtime(state, session_id, request, reference_chat_runtime()).await
+}
+
+pub(crate) async fn reference_chat_submit_with_runtime(
+    state: Arc<RemoteGatewayState>,
+    session_id: String,
+    request: axum::extract::Request,
+    runtime: &'static ReferenceChatRuntime,
+) -> Response {
+    reference_chat_submit_with_clock(
+        state, session_id, request, runtime, Arc::new(reference_input::SystemReferenceClock),
+    ).await
+}
+
+pub(crate) async fn reference_chat_submit_with_clock(
+    state: Arc<RemoteGatewayState>,
+    session_id: String,
+    request: axum::extract::Request,
+    runtime: &'static ReferenceChatRuntime,
+    clock: Arc<dyn reference_input::ReferenceInputClock>,
+) -> Response {
+    // Admission and staging waits spend the same arrival-relative budget as the input queue.
+    let arrived_at_ms = clock.now_ms();
     let (headers, body) = match reference_chat_mutation_body::<
         ReferenceChatMutation<reference_types::ReferenceSubmitPayload>,
     >(request, &state)
@@ -6383,7 +6669,6 @@ pub(crate) async fn reference_chat_submit(
             "a view-only device cannot type into a pane",
         );
     }
-    let runtime = reference_chat_runtime();
     // The pane's OWN bracketed-paste mode, as this host's output hub recorded it: the shaping in
     // input.rs is normative and must not assume a mode the pane never enabled.
     let hub = state.terminal_service.output_hub();
@@ -6406,12 +6691,41 @@ pub(crate) async fn reference_chat_submit(
     // another is typed after that one's Enter may have changed it.
     let paste_hub = Arc::clone(hub);
     let paste_session = session_id.clone();
-    let authorize = reference_chat_authorize(&state, &headers);
+    let authorize = reference_chat_authorize(&state, &headers, &target);
     let request_id = body.request_id.clone();
     // The transaction runs on its own task: a caller that disconnects drops this handler, and
     // must not cancel the transaction between its paste and its Enter.
     let transaction = tokio::spawn(async move {
-        let clock = reference_input::SystemReferenceClock;
+        #[cfg(test)]
+        if let Some(entered) = &runtime.submit_staging_entered {
+            entered.send(()).expect("staging observer");
+        }
+        let _staging = runtime.staging_sweep.read().await;
+        let target_key = reference_types::reference_draft_key(&target);
+        let reserved = {
+            let mut staged = runtime.staged.lock();
+            let mut keys = Vec::new();
+            for word in body.params.text.split_whitespace() {
+                let Some(path) = word.strip_prefix('@') else { continue };
+                let Some(relative) = path.strip_prefix(&format!("{}/", reference_files::REFERENCE_STAGING_DIR_NAME)) else { continue };
+                let Some((id, _)) = relative.split_once('/') else { continue };
+                let key = reference_chat_staged_key(&target, id);
+                if !staged.get(&key).is_some_and(|entry| {
+                    entry.target_key == target_key && !entry.pending
+                        && entry.mention_text.trim_end() == word
+                }) {
+                    return reference_input::ReferenceInputOutcome::NotTyped {
+                        error: reference_chat_scope(ScopeErrorCode::NotFound,
+                            "a mentioned staged file is no longer available; nothing was typed"),
+                    };
+                }
+                if !keys.contains(&key) { keys.push(key); }
+            }
+            for key in &keys {
+                if let Some(entry) = staged.get_mut(key) { entry.submitting += 1; }
+            }
+            keys
+        };
         let submit = reference_input::ReferenceSubmitRequest {
             target: &target,
             request_id: &body.request_id,
@@ -6420,7 +6734,7 @@ pub(crate) async fn reference_chat_submit(
             // The prompt guard reads the screen INSIDE the target's step (the probe below), so a
             // prompt that appears while this message waits behind earlier input is still seen.
             blocked_prompt: None,
-            arrived_at_ms: clock.now_ms(),
+            arrived_at_ms,
             last_typed_at_ms: None,
             authorize: &*authorize,
         };
@@ -6429,19 +6743,13 @@ pub(crate) async fn reference_chat_submit(
         let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
         let outcome = runtime
             .input
-            .submit_with_probe(&submit, probe, &writer, &clock)
+            .submit_with_probe(&submit, probe, &writer, clock.as_ref())
             .await;
-        if matches!(outcome, reference_input::ReferenceInputOutcome::Accepted { .. }) {
-            let target_key = reference_types::reference_draft_key(&target);
-            for entry in runtime.staged.lock().values_mut() {
-                let mention = entry.mention_text.trim_end();
-                if entry.target_key == target_key
-                    && !entry.pending
-                    && !mention.is_empty()
-                    && body.params.text.contains(mention)
-                {
-                    entry.referenced = true;
-                }
+        let mut staged = runtime.staged.lock();
+        for key in reserved {
+            if let Some(entry) = staged.get_mut(&key) {
+                entry.submitting -= 1;
+                entry.referenced |= !matches!(outcome, reference_input::ReferenceInputOutcome::NotTyped { .. });
             }
         }
         outcome
@@ -6475,7 +6783,7 @@ async fn reference_chat_stop(
         );
     }
     let runtime = reference_chat_runtime();
-    let authorize = reference_chat_authorize(&state, &headers);
+    let authorize = reference_chat_authorize(&state, &headers, &target);
     // Over HTTP the caller's liveness is the request itself: a caller that has gone does not
     // reach the write, and the reauthorization above is what a revoked caller trips.
     let alive = || true;
@@ -6496,7 +6804,7 @@ async fn reference_chat_stop(
 /// The answer runs inside the SAME per-target step as submit and Stop, through the one shared
 /// queue: the fresh screen read, the card's re-detection and every key are one operation, which
 /// is what keeps a Stop from landing between them.
-async fn reference_chat_answer(
+pub(crate) async fn reference_chat_answer(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath(session_id): AxumPath<String>,
     request: axum::extract::Request,
@@ -6523,7 +6831,7 @@ async fn reference_chat_answer(
     let runtime = reference_chat_runtime();
     let identity = reference_chat_identity(&state, &target, body.registry_id.as_deref()).await;
     let prompt_session = reference_chat_prompt_session(&state, &identity).await;
-    let authorize = reference_chat_authorize(&state, &headers);
+    let authorize = reference_chat_authorize(&state, &headers, &target);
     let request_id = body.request_id.clone();
     let agent = identity.registry_id.clone();
     // Owned by its own task, like a submit: a caller that disconnects must not leave a menu moved
@@ -6564,6 +6872,15 @@ pub(crate) async fn reference_chat_stage_file(
     AxumPath(session_id): AxumPath<String>,
     request: axum::extract::Request,
 ) -> Response {
+    reference_chat_stage_file_with_runtime(state, session_id, request, reference_chat_runtime()).await
+}
+
+pub(crate) async fn reference_chat_stage_file_with_runtime(
+    state: Arc<RemoteGatewayState>,
+    session_id: String,
+    request: axum::extract::Request,
+    runtime: &'static ReferenceChatRuntime,
+) -> Response {
     let (headers, body) = match reference_chat_mutation_body::<
         ReferenceChatMutation<reference_types::ReferenceFileStagePayload>,
     >(request, &state)
@@ -6593,7 +6910,6 @@ pub(crate) async fn reference_chat_stage_file(
              for it from this gateway",
         );
     }
-    let runtime = reference_chat_runtime();
     // The mention is resolved by the agent from the directory it runs in NOW, which a `cd` after
     // the spawn moves away from the session's spawn worktree. The live cwd of the pane's
     // foreground job (its process group on unix; the shell itself where there is none) is the
@@ -6637,6 +6953,12 @@ pub(crate) async fn reference_chat_stage_file(
     };
     let ledger = reference_chat_staging_ledger(&state);
     reference_chat_prune_staged(runtime, &worktree, ledger.clone()).await;
+    let preview_permit = match runtime.reserve_preview() {
+        Ok(permit) => permit,
+        Err(code) => return reference_chat_refusal(&reference_chat_scope(
+            code, "the gateway preview handle budget is full; retry after a preview lease expires",
+        )),
+    };
     let target_key = reference_types::reference_draft_key(&target);
     // Check and reserve under ONE lock, so concurrent stages cannot all observe a free slot.
     let reservation = format!("{target_key}\u{1f}pending-{}", uuid::Uuid::new_v4());
@@ -6664,6 +6986,7 @@ pub(crate) async fn reference_chat_stage_file(
                 target_key: target_key.clone(),
                 dir: PathBuf::new(),
                 path: PathBuf::new(),
+                preview: None,
                 display_name: String::new(),
                 receipt: AttachmentReceipt {
                     host_id: String::new(),
@@ -6676,6 +6999,7 @@ pub(crate) async fn reference_chat_stage_file(
                 pending: true,
                 mention_text: String::new(),
                 referenced: false,
+                submitting: 0,
             },
         );
     }
@@ -6688,7 +7012,7 @@ pub(crate) async fn reference_chat_stage_file(
         let stage_root = worktree.clone();
         let ledger_base = reference_files::reference_staging_base_dir(&worktree);
         let staged = crate::ipc::run_blocking(move || {
-            let staged = reference_files::stage_reference_file_in(&host_id, &stage_root, &payload);
+            let staged = reference_files::stage_reference_file_with_preview_in(&host_id, &stage_root, &payload);
             if let (Ok(_), Some(ledger)) = (&staged, ledger.as_deref()) {
                 if let Err(error) = reference_files::reference_record_staging_base(ledger, &ledger_base)
                 {
@@ -6698,8 +7022,8 @@ pub(crate) async fn reference_chat_stage_file(
             Ok::<_, crate::ipc::error::IpcError>(staged)
         })
         .await;
-        let receipt = match staged {
-            Ok(Ok(receipt)) => receipt,
+        let (receipt, preview) = match staged {
+            Ok(Ok(staged)) => staged,
             Ok(Err(code)) => {
                 runtime.staged.lock().remove(&reservation);
                 return Err(reference_chat_refusal(&reference_chat_scope(
@@ -6726,12 +7050,14 @@ pub(crate) async fn reference_chat_stage_file(
                 target_key,
                 dir,
                 path,
+                preview: Some(reference_files::ReferencePreviewLease::new(preview, preview_permit)),
                 display_name: receipt.display_name.clone(),
                 receipt: receipt.receipt.clone(),
                 staged_at_ms: reference_input::SystemReferenceClock.now_ms(),
                 pending: false,
                 mention_text: receipt.mention_text.clone(),
                 referenced: false,
+                submitting: 0,
             },
         );
         Ok(receipt)
@@ -6825,29 +7151,23 @@ async fn reference_chat_preview_file(
         staged
             .get(&reference_chat_staged_key(&read.target, &file_id))
             .filter(|entry| !entry.pending)
-            .map(|entry| {
-                (
-                    entry.path.clone(),
+            .and_then(|entry| {
+                Some((
+                    Arc::clone(entry.preview.as_ref()?),
                     entry.display_name.clone(),
                     entry.receipt.clone(),
-                )
+                ))
             })
     };
-    let Some((path, display_name, receipt)) = entry else {
+    let Some((preview, display_name, receipt)) = entry else {
         return reference_chat_error(
             ScopeErrorCode::NotFound,
             "no staged file of that id belongs to this target",
         );
     };
-    // The staged path sits in the pane's worktree, where the agent may have swapped it for a
-    // symlink or a device: the read refuses a non-regular file, caps the bytes, and requires the
-    // receipt's size.
-    let expected_size = receipt.size_bytes;
+    let expected_receipt = receipt.clone();
     let bytes = crate::ipc::run_blocking(move || {
-        Ok::<_, crate::ipc::error::IpcError>(reference_files::read_reference_staged_file(
-            &path,
-            expected_size,
-        ))
+        Ok::<_, crate::ipc::error::IpcError>(preview.read(&expected_receipt))
     })
     .await;
     let bytes = match bytes {
@@ -6919,15 +7239,31 @@ async fn reference_chat_delete_file(
     let entry = {
         let mut staged = runtime.staged.lock();
         match staged.get(&key) {
+            Some(entry) if entry.referenced || entry.submitting > 0 => {
+                return reference_chat_error(
+                    ScopeErrorCode::ControlConflict,
+                    "a submitted or in-flight file cannot be deleted by draft cleanup",
+                );
+            }
             Some(entry) if !entry.pending => staged.remove(&key),
-            _ => None,
+            Some(_) => {
+                return reference_chat_error(
+                    ScopeErrorCode::NotFound,
+                    "that staged file of this target is still being written",
+                );
+            }
+            None => None,
         }
     };
+    // The key is scoped to this target, so an id it does not hold (already deleted, or dropped by
+    // the TTL prune) is already gone from this target: the delete succeeds without touching any
+    // other target's file.
     let Some(entry) = entry else {
-        return reference_chat_error(
-            ScopeErrorCode::NotFound,
-            "no staged file of that id belongs to this target",
-        );
+        return (
+            StatusCode::NO_CONTENT,
+            [(header::CACHE_CONTROL, "no-store")],
+        )
+            .into_response();
     };
     let dir = entry.dir.clone();
     let removed = crate::ipc::run_blocking(move || {
@@ -7029,7 +7365,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )
         .route(
             "/api/v1/workspace/projects",
-            get(super::workspace_api::list)
+            get(super::workspace_api::list_scoped)
                 .post(register_project_boundary)
                 .layer(axum::extract::DefaultBodyLimit::max(
                     super::machine_protocol::MACHINE_JSON_MAX_BYTES,

@@ -232,6 +232,8 @@ test('host-down-descriptor-restore returns unverified when provider lacks cold d
 });
 
 test('host-down-descriptor-restore measures PID, incarnation, and cursor across both daemons when cold restart succeeds', async () => {
+  let attachedSubscribed = false;
+  let restoredRoute = false;
   const ctx = {
     timeoutMs: 1000,
     transportFixture: {
@@ -256,12 +258,17 @@ test('host-down-descriptor-restore measures PID, incarnation, and cursor across 
         waitState: async () => ({ state: 'owner_unavailable' }),
         dropLoopback: async () => ({ type: 'closeOk' }),
       },
+      createPairedFaultRoute: async () => ({
+        receipt: { selected: 'loopback', websocket: true, loopback: true },
+        closeRealUpstream: async () => {},
+        restoreRealUpstream: async () => { assert.equal(attachedSubscribed, true); restoredRoute = true; },
+      }),
       restartClientDaemon: async () => ({
         getClientPid: async () => 2002,
         pairedOwner: {
           restoreDescriptorCold: async () => ({ target: { hostId: 'h-1', incarnation: 'inc-host' }, generation: 1 }),
-          waitState: async () => ({ state: 'proxy_attached' }),
-          retry: async () => ({ admitted: true }),
+          waitState: async () => { attachedSubscribed = true; return { state: 'proxy_attached' }; },
+          retry: async () => { throw new Error('corrective wake forbidden'); },
           ownerAudit: async () => ({ outcome: 'ok', daemonEpoch: '1', incarnation: 'inc-host', generation: 1 }),
           dialAudit: async () => ({ identity: { backendSessionId: 'b-1', daemonEpoch: '1', incarnation: 'inc-host' }, pendingDial: false, replayCursor: 42 }),
         },
@@ -272,4 +279,59 @@ test('host-down-descriptor-restore measures PID, incarnation, and cursor across 
 
   const result = await runPairedScenario(ctx, 'host-down-descriptor-restore');
   assert.equal(result.status, 'passed');
+  assert.equal(restoredRoute, true);
+  assert.ok(result.observations.some((o) => o.check === 'cold-owner-automatic-recovery'));
+});
+
+test('runPairedScenario returns unverified and SIGNAL_INTENT_REPLAY_UNPROVEN when deliveryObserver audits without wire signal intent proof', async () => {
+  const target = { machineId: 'm-host-1', daemonEpoch: '1', sessionId: 'sess-1' };
+  const ctx = {
+    timeoutMs: 1000,
+    transportFixture: {
+      schema: 'ferryx-task9-transport-provider/1',
+      paired: {
+        backendSessionId: 'b-1',
+        descriptor: { hostId: 'h-1', backendSessionId: 'b-1', target, generation: 1 },
+        target,
+        hostId: 'h-1',
+        deviceId: 'dev-client-1',
+        daemonEpoch: '1',
+        incarnation: 'inc-1',
+        expectedRoute: 'relay',
+      },
+    },
+    createTransportProvider: async () => ({
+      pairedOwner: {
+        bind: async () => ({ identity: { backendSessionId: 'b-1', daemonEpoch: '1', incarnation: 'inc-1' } }),
+        routeReceipt: async () => ({ selected: 'relay', websocket: true, loopback: true }),
+        ownerAudit: async () => ({ outcome: 'ok', daemonEpoch: '1', incarnation: 'inc-1', generation: 1 }),
+        dialAudit: async () => ({ identity: { backendSessionId: 'b-1', daemonEpoch: '1', incarnation: 'inc-1' }, pendingDial: false }),
+        waitState: async () => ({ state: 'owner_unavailable' }),
+        retry: async () => ({ admitted: true }),
+        dropLoopback: async () => ({ type: 'closeOk' }),
+        mutate: async () => ({ type: 'qaRemoteOwnerMutationOk' }),
+      },
+      deliveryObserver: {
+        armFence: async () => 'fence-1',
+        sealFence: async () => ({ fenceId: 'fence-1', status: 'sealed' }),
+        audit: async () => ({
+          target,
+          interval: {
+            deliveredWrites: 1,
+            deliveredSignals: 1,
+            failedCount: 0,
+            replayViolations: [],
+            signalMultiplicityViolation: false,
+          },
+        }),
+      },
+      close: async () => {},
+    }),
+  };
+
+  const result = await runPairedScenario(ctx, 'paired-relay-loss');
+  assert.equal(result.status, 'unverified');
+  assert.equal(result.barrierCode, 'SIGNAL_INTENT_REPLAY_UNPROVEN');
+  assert.ok(result.requirements.includes('signal-intent-replay-proof-unverified'));
+  assert.ok(result.observations.some((o) => o.check === 'host-delivery-audit'));
 });

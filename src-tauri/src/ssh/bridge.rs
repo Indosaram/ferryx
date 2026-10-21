@@ -37,6 +37,15 @@ pub(crate) const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const DAG_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Mirrors the helper's own blocking-wait ceiling.
 pub const MAX_DAG_WAIT_MS: u64 = 10_000;
+/// Interval at which an otherwise idle control connection sends a no-op request.
+///
+/// The remote `bridge --stdio` exits after `BRIDGE_IDLE_TIMEOUT` without a request, which is
+/// what reaps bridges whose client vanished; this keeps a live but quiet session well inside it.
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
+const _: () = assert!(
+    KEEPALIVE_INTERVAL.as_secs() * 2
+        < crate::ssh::helper_runtime::process::BRIDGE_IDLE_TIMEOUT.as_secs()
+);
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 
 /// Remote process identifier on the SSH host.
@@ -161,6 +170,10 @@ pub struct SpawnParams {
     pub env: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
+    /// The daemon-held agent integration setting. `Some(false)` tells the helper to give the
+    /// pane no agent-state registration, port, or token; absent keeps the helper's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_integration: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1274,6 +1287,22 @@ impl BridgeConnection {
             .map_err(|e| BridgeError::Protocol(format!("Invalid handshake response: {e}")))
     }
 
+    /// Sends a no-op request so the remote bridge does not reap this connection as idle.
+    ///
+    /// Returns `false` once the connection can never carry another request. A paused
+    /// (mid-transfer) connection is left untouched: `request` would close it.
+    async fn keepalive(&mut self) -> bool {
+        if self.closed || self.poisoned || self.detached {
+            return false;
+        }
+        if self.paused {
+            return true;
+        }
+        self.request("handshake", json!({}), DEFAULT_RPC_TIMEOUT)
+            .await
+            .is_ok()
+    }
+
     /// Registers a project path on the remote helper.
     pub async fn project_register(&mut self, id: &str, path: &str) -> Result<String, BridgeError> {
         let val = self
@@ -1823,6 +1852,38 @@ pub struct SshBridgeClient {
 }
 
 impl SshBridgeClient {
+    /// Keeps both connections alive while they are quiet. A connection whose lock is held is
+    /// carrying a request already (the reader's `pty.read` long poll, a control RPC), so it
+    /// is skipped for that tick. The task ends with the last client clone or once a connection
+    /// fails, which the next real request then reports.
+    fn start_keepalive(&self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let connections = [Arc::downgrade(&self.control), Arc::downgrade(&self.reader)];
+        runtime.spawn(async move {
+            let mut ticker = tokio::time::interval_at(
+                tokio::time::Instant::now() + KEEPALIVE_INTERVAL,
+                KEEPALIVE_INTERVAL,
+            );
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                for connection in &connections {
+                    let Some(connection) = connection.upgrade() else {
+                        return;
+                    };
+                    let Ok(mut connection) = connection.try_lock() else {
+                        continue;
+                    };
+                    if !connection.keepalive().await {
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
     /// Connects to the remote helper over SSH, starting the daemon if necessary,
     /// establishing dual independent transport connections and validating identity.
     pub async fn connect(
@@ -1902,14 +1963,16 @@ impl SshBridgeClient {
             return Err(BridgeError::ConnectionClosed);
         }
 
-        Ok(Self {
+        let client = Self {
             host_id: handshake.host_id.clone(),
             owner_id: handshake.owner_id.clone(),
             epoch: handshake.epoch,
             handshake,
             control: Arc::new(Mutex::new(control)),
             reader: Arc::new(Mutex::new(reader)),
-        })
+        };
+        client.start_keepalive();
+        Ok(client)
     }
 
     /// Constructs an `SshBridgeClient` from existing dual connections and expected host ID.
@@ -1973,14 +2036,16 @@ impl SshBridgeClient {
             return Err(BridgeError::ConnectionClosed);
         }
 
-        Ok(Self {
+        let client = Self {
             host_id: handshake.host_id.clone(),
             owner_id: handshake.owner_id.clone(),
             epoch: handshake.epoch,
             handshake,
             control: Arc::new(Mutex::new(control)),
             reader: Arc::new(Mutex::new(reader)),
-        })
+        };
+        client.start_keepalive();
+        Ok(client)
     }
 
     pub fn host_id(&self) -> &str {
@@ -2324,14 +2389,16 @@ impl SshBridgeClient {
                 return Err(e);
             }
         };
-        Ok(Self {
+        let client = Self {
             host_id: state.host_id,
             owner_id: state.owner_id,
             epoch: state.epoch,
             handshake: state.handshake,
             control: Arc::new(Mutex::new(control)),
             reader: Arc::new(Mutex::new(reader)),
-        })
+        };
+        client.start_keepalive();
+        Ok(client)
     }
 }
 

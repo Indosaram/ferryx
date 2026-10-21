@@ -36,17 +36,41 @@ describe("workspaceStore backend failure reason", () => {
       worktree: { wsId: "ws-local", slug: "main" },
       backendSessionId: "backend-1",
       lifecycle: "working",
+      incarnation: "inc-1",
+      daemonEpoch: "epoch-1",
+      recoveryKey: "local:term-1:backend-1:inc-1",
+      recoveryToken: 1,
     };
 
     const next = workspaceReducer(createInitialState(session), {
       type: "SESSION_BACKEND_UNAVAILABLE",
       sessionId: "term-1",
       backendSessionId: "backend-1",
+      attemptKey: "local:term-1:backend-1:inc-1",
+      attemptToken: 1,
       reason: `CWD does not exist: ${POISONED_CWD}`,
     });
 
-    expect(next.sessions["term-1"].lifecycle).toBe("exited");
+    expect(next.sessions["term-1"].lifecycle).toBe("working");
     expect(next.sessions["term-1"].backendUnavailableReason).toBe(`CWD does not exist: ${POISONED_CWD}`);
+    expect(next.sessions["term-1"].recoveryState).toEqual({
+      phase: "recovering",
+      reason: `CWD does not exist: ${POISONED_CWD}`,
+    });
+
+    const exited = workspaceReducer(next, {
+      type: "SESSION_AFFIRMATIVE_EXIT",
+      sessionId: "term-1",
+      backendSessionId: "backend-1",
+      incarnation: "inc-1",
+      daemonEpoch: "epoch-1",
+      token: 1,
+      key: "local:term-1:backend-1:inc-1",
+      exitCode: 1,
+      reason: `CWD does not exist: ${POISONED_CWD}`,
+    });
+    expect(exited.sessions["term-1"].lifecycle).toBe("exited");
+    expect(exited.sessions["term-1"].backendUnavailableReason).toBe(`CWD does not exist: ${POISONED_CWD}`);
   });
 });
 

@@ -18,6 +18,7 @@ export type {
   NativeTerminalScrollbarPayload,
   NotificationBadgeResult,
   PreparedLocalSplit,
+  PairedRecoveryStatus,
   SetBadgeCountResult,
   SplitAttachAttempt,
   SplitOperationRequest,
@@ -47,6 +48,8 @@ import type {
   NativeTerminalTitlePayload,
   NotificationBadgeResult,
   PreparedLocalSplit,
+  PairedRecoveryStatus,
+  PairedSessionRetryResult,
   SetBadgeCountResult,
   SplitAttachAttempt,
   SplitOperationRequest,
@@ -180,6 +183,15 @@ export type SpawnTerminalResult = {
   };
 };
 
+export type RecoveryAuthorityEvidence = {
+  status: "running" | "affirmative_exit" | "owner_unavailable" | "unconfirmed" | string;
+  exitCode?: number | null;
+  exitReason?: string | null;
+  incarnation?: string | null;
+  daemonEpoch?: string | null;
+  isPairedProxy?: boolean | null;
+};
+
 export type TerminalDescribeResult = {
   sessionId: string;
   incarnation?: string | null;
@@ -199,6 +211,11 @@ export type TerminalDescribeResult = {
   kernelStopped?: boolean | null;
   registrySuspended?: boolean | null;
   suspensionSource?: string | null;
+  /** Affirmative process exit or recovery authority evidence (INV-2, INV-4). */
+  recoveryAuthority?: RecoveryAuthorityEvidence | null;
+  daemonEpoch?: string | null;
+  /** Whether this describes a paired proxy actor whose running=false is connection loss (INV-4). */
+  isPairedProxy?: boolean | null;
 };
 
 export function isTauriRuntime() {
@@ -207,6 +224,10 @@ export function isTauriRuntime() {
 
 export async function registerProject(request: { workspaceId: string; repoPath: string }) {
   return invokeCommand<RegisteredProject>("cmd_project_register", { request });
+}
+
+export async function syncDesktopLocalProjects(projects: readonly { workspaceId: string; repoRoot: string }[]): Promise<void> {
+  return invokeCommand<void>("cmd_sync_desktop_local_projects", { projects });
 }
 
 /** Desktop removal only detaches paired references; remote unregister is an explicit typed mutation. */
@@ -328,6 +349,14 @@ export async function applyTerminalOverrides(
       scrollback: overrides.scrollback ?? null,
     },
   });
+}
+
+/** Pushes the resolved app appearance so the native terminal follows it; returns the effective preferences. */
+export async function setTerminalAppearance(
+  appearance: "light" | "dark",
+): Promise<TerminalPreferences | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<TerminalPreferences>("cmd_terminal_set_appearance", { appearance });
 }
 
 export async function listWorktrees(workspaceId: string) {
@@ -670,6 +699,14 @@ export async function retryTerminalRemoteSession(sessionId: string): Promise<
   return invokeCommand("cmd_terminal_remote_retry", { sessionId });
 }
 
+export async function retryPairedSession(request: {
+  backendSessionId: string;
+  daemonEpoch: string;
+  incarnation: string;
+}): Promise<PairedSessionRetryResult> {
+  return invokeCommand<PairedSessionRetryResult>("cmd_retry_paired_session", request);
+}
+
 export async function writeTerminalRemote(request: { sessionId: string; generation: number; data: string }): Promise<void> {
   return invokeCommand("cmd_terminal_remote_write", request);
 }
@@ -691,6 +728,11 @@ export async function onTerminalOutput(handler: (payload: TerminalOutputPayload)
 export async function onTerminalLifecycle(handler: (payload: TerminalLifecyclePayload) => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<TerminalLifecyclePayload>("terminal_lifecycle", (event) => handler(event.payload));
+}
+
+export async function onPairedRecoveryStatus(handler: (status: PairedRecoveryStatus) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<PairedRecoveryStatus>("paired_session_recovery_status", (event) => handler(event.payload));
 }
 
 /**
@@ -1020,6 +1062,41 @@ export async function resetAgentState(sessionId: string): Promise<void> {
   await invokeCommand<void>("cmd_agent_state_reset", {
     sessionId,
   });
+}
+
+export interface AgentIntegrationStatus {
+  enabled: boolean;
+}
+
+export interface LocalRemovalReport {
+  removed: string[];
+  keptModified: string[];
+  failed: { path: string; error: string }[];
+}
+
+export interface DaemonSupervisorStatus {
+  supported: boolean;
+  enabled: boolean;
+}
+
+export async function getAgentIntegration(): Promise<AgentIntegrationStatus> {
+  return invokeCommand<AgentIntegrationStatus>("cmd_agent_integration_get");
+}
+
+export async function setAgentIntegration(enabled: boolean): Promise<AgentIntegrationStatus> {
+  return invokeCommand<AgentIntegrationStatus>("cmd_agent_integration_set", { enabled });
+}
+
+export async function removeLocalAgentIntegration(): Promise<LocalRemovalReport> {
+  return invokeCommand<LocalRemovalReport>("cmd_agent_integration_remove_local");
+}
+
+export async function getDaemonSupervisor(): Promise<DaemonSupervisorStatus> {
+  return invokeCommand<DaemonSupervisorStatus>("cmd_daemon_supervisor_get");
+}
+
+export async function setDaemonSupervisor(enabled: boolean): Promise<DaemonSupervisorStatus> {
+  return invokeCommand<DaemonSupervisorStatus>("cmd_daemon_supervisor_set", { enabled });
 }
 
 export type RemoteNetworkMode = "off" | "localNetwork" | "tailscale" | "relay";

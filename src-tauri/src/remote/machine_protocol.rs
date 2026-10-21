@@ -246,6 +246,8 @@ pub enum Completeness {
 pub struct Projects {
     pub revision: Epoch,
     pub completeness: Completeness,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub desktop_local_snapshot_exists: bool,
     pub projects: Vec<Project>,
     #[serde(deserialize_with = "text_list")]
     pub unavailable_workspace_ids: Vec<String>,

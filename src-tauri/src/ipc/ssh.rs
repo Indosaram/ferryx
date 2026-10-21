@@ -586,6 +586,26 @@ pub async fn cmd_ssh_prepare_integration(host: SshHost) -> Result<(), IpcError> 
     crate::ssh::direct::ensure_remote_extension_installed(&host).await
 }
 
+/// Deletes the Ferryx agent-state extension from the stored host `host_id`, file by file, only
+/// where it is still byte-for-byte a payload Ferryx wrote.
+#[tauri::command]
+pub async fn cmd_ssh_remove_integration<R: Runtime>(
+    app: AppHandle<R>,
+    host_id: String,
+) -> Result<crate::ssh::operations::RemoteRemovalReport, IpcError> {
+    let path = get_ssh_store_path(&app)?;
+    let host = run_blocking(move || {
+        load_store(&path)?
+            .hosts
+            .into_iter()
+            .find(|host| host.id == host_id)
+            .ok_or_else(|| IpcError::new(IpcErrorCode::InvalidArgument, "Unknown SSH host"))
+    })
+    .await?;
+    let environment = crate::ssh::runtime::detect(&host).await?;
+    crate::ssh::operations::remove_integration(&host, &environment).await
+}
+
 pub fn resolve_bundled_helper_binary(target_triple: &str) -> Result<PathBuf, IpcError> {
     let parsed_target = match target_triple {
         "x86_64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxX86_64,

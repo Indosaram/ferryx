@@ -37,10 +37,12 @@
 //! own from the same inherited env), so both halves of the marker receipt meet
 //! in the shared channel directory.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::mpsc as std_mpsc;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -49,7 +51,7 @@ use tokio::sync::{broadcast, mpsc};
 use super::service::auto_resume_suspension;
 use super::suspension::{classify_stop_source, resume_owned, SuspensionSource, SuspensionTarget};
 use super::{PtySession, TerminalService};
-use crate::ipc::qa_barrier::{self, QaBarrierChannel};
+use crate::ipc::qa_barrier::{self, write_json_atomic, QaBarrierChannel};
 
 pub(crate) const MARKER_OUTPUT_RECEIPT: &str = "marker-output";
 /// Receipt the runner awaits for the suspension ownership classification.
@@ -130,6 +132,681 @@ const SUSPENSION_CHECK_WINDOW_MS: u64 = 60_000;
 const QA_EVENT_QUEUE: usize = 1024;
 const MARKER_PRODUCER: &str = "terminal-qa-liveness";
 const SUSPENSION_PRODUCER: &str = "terminal-qa-suspension";
+const LOCAL_OWNER_COMPONENT: &str = "terminal-local-pty";
+const LOCAL_OWNER_PACKET_FILE: &str = "local-pty-owner-audit.json";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwnedProcessIdentity {
+    pub(crate) pid: u32,
+    pub(crate) incarnation: String,
+    pub(crate) executable: String,
+    pub(crate) process_start: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapturedProcessIdentity {
+    pub(crate) executable: String,
+    pub(crate) process_start: String,
+}
+
+pub(crate) fn capture_owned_identity(pid: u32) -> Result<CapturedProcessIdentity, String> {
+    let identity = owned_process_identity::capture(pid).map_err(|error| error.to_string())?;
+    Ok(CapturedProcessIdentity { executable: identity.executable, process_start: identity.process_start })
+}
+
+#[derive(Clone)]
+struct LocalOwnerAudit {
+    audit_id: String,
+    owner_id: String,
+    owner: Value,
+    baseline_seq: u64,
+    next_seq: u64,
+    requests: Vec<Value>,
+    deliveries: Vec<Value>,
+    pending: BTreeMap<String, OwnedProcessIdentity>,
+    closed: bool,
+    consumed_controls: HashSet<String>,
+    control_acks: HashMap<String, String>,
+    next_command_seq: u64,
+}
+
+static LOCAL_OWNER_AUDIT: OnceLock<Mutex<Option<LocalOwnerAudit>>> = OnceLock::new();
+static LOCAL_OWNER_CONTROL: OnceLock<Mutex<Option<LocalOwnerControl>>> = OnceLock::new();
+static LOCAL_OWNER_COMPLETE: OnceLock<Mutex<Option<Value>>> = OnceLock::new();
+
+struct LocalOwnerControl {
+    stop: std_mpsc::Sender<()>,
+    worker: JoinHandle<()>,
+}
+
+fn write_control_ack_values(dir: &Path, command: &str, command_id: &str, run_id: &str,
+    operation_id: &str, accepted: bool, packet_file: Option<&str>) -> Result<(), String> {
+    let mut ack = json!({"commandId": command_id, "runId": run_id,
+        "operationId": operation_id, "accepted": accepted});
+    if let Some(file) = packet_file { ack["packetFile"] = json!(file); }
+    let path = dir.join(format!("{command}.ack.{command_id}.json"));
+    write_json_atomic(dir, path.file_name().and_then(|name| name.to_str()).ok_or("invalid ack name")?, &ack)
+        .map_err(|error| error.to_string())
+}
+
+fn valid_local_owner_command_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 96
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn local_owner_identity_ack(request: &Value, owner: Option<LocalOwnerIdentity>) -> Value {
+    json!({"commandId":request["commandId"], "commandSeq":request["commandSeq"],
+        "runId":request["runId"], "operationId":request["operationId"],
+        "accepted":owner.is_some(), "owner":owner})
+}
+
+fn local_owner_audit() -> &'static Mutex<Option<LocalOwnerAudit>> {
+    LOCAL_OWNER_AUDIT.get_or_init(|| Mutex::new(None))
+}
+
+fn process_local_owner_audit_controls(channel: &QaBarrierChannel, controls: Vec<(&'static str, &'static str, Value)>) {
+    let Some(operation) = channel.operation_id() else { return; };
+                let Some(dir) = barrier_dir() else { return; };
+    for (command, action, request) in controls {
+        let command_id = request["commandId"].as_str().unwrap_or_default().to_string();
+        if action == "identity" {
+            let owner = local_owner_audit_identity(channel.run_id());
+            let ack = local_owner_identity_ack(&request, owner);
+            let file = format!("{command}.ack.{command_id}.json");
+            let _ = write_json_atomic(&dir, &file, &ack);
+            continue;
+        }
+        let Ok(mut state) = local_owner_audit().lock() else { continue; };
+        if state.as_ref().is_some_and(|audit| audit.consumed_controls.contains(&command_id)) {
+            let _ = write_control_ack_values(&dir, command, &command_id, channel.run_id(), &operation, true, None);
+            continue;
+        }
+        let command_seq = request["commandSeq"].as_u64().unwrap_or_default();
+        if action == "open" && state.as_ref().is_some_and(|audit| audit.audit_id != request["auditId"]) {
+            let _ = write_control_ack_values(&dir, command, &command_id, channel.run_id(), &operation, false, None);
+            continue;
+        }
+        if action == "open" && state.as_ref().is_some_and(|audit| audit.audit_id == request["auditId"]) {
+            if let Some(audit) = state.as_mut() {
+                if audit.accept_control(&command_id, command_seq) {
+                    audit.consumed_controls.insert(command_id.clone());
+                    drop(state);
+                    let _ = write_control_ack_values(&dir, command, &command_id, channel.run_id(), &operation, true, None);
+                    continue;
+                }
+            }
+            let _ = write_control_ack_values(&dir, command, &command_id, channel.run_id(), &operation, false, None);
+            continue;
+        }
+        if action != "open" && state.as_ref().is_none_or(|audit| audit.audit_id != request["auditId"]) {
+            let _ = write_control_ack_values(&dir, command, &command_id, channel.run_id(), &operation, false, None);
+            continue;
+        }
+        if let Some(audit) = state.as_mut() {
+            if !audit.accept_control(&command_id, command_seq) {
+                let _ = write_control_ack_values(&dir, command, &command_id, channel.run_id(), &operation, false, None);
+                continue;
+            }
+            audit.consumed_controls.insert(command_id.clone());
+        } else if action == "open" && command_seq != 1 {
+            let _ = write_control_ack_values(&dir, command, &command_id, channel.run_id(), &operation, false, None);
+            continue;
+        }
+        drop(state);
+        let audit_id = request["auditId"].as_str().unwrap_or_default().to_string();
+        match action {
+            "open" => {
+                if let Ok(completed) = LOCAL_OWNER_COMPLETE.get_or_init(|| Mutex::new(None)).lock() {
+                    if completed.as_ref().is_some_and(|packet| packet["auditId"] == audit_id) {
+                        let _ = write_control_ack_values(&dir, command, &command_id, channel.run_id(), &operation, true, None);
+                        continue;
+                    }
+                }
+                let Some(owner) = local_owner_audit_identity(channel.run_id()) else {
+                    let _ = write_control_ack_values(&dir, command, &command_id, channel.run_id(), &operation, false, None);
+                    continue;
+                };
+                let Ok(mut state) = local_owner_audit().lock() else { continue; };
+                if state.as_ref().is_some_and(|audit| audit.audit_id == audit_id) {
+                    if let Some(audit) = state.as_mut() {
+                        audit.consumed_controls.insert(command_id.clone());
+                    }
+                    drop(state);
+                    let _ = write_control_ack_values(&dir, command, &command_id, channel.run_id(), &operation, true, None);
+                    continue;
+                }
+                if state.is_some() { continue; }
+                let mut audit = LocalOwnerAudit {
+                    audit_id: audit_id.clone(),
+                    owner_id: owner.owner_id.clone(),
+                    owner: serde_json::to_value(&owner).unwrap_or(Value::Null),
+                    baseline_seq: 0,
+                    next_seq: 0,
+                    requests: Vec::new(),
+                    deliveries: Vec::new(),
+            pending: BTreeMap::new(),
+                    closed: false,
+                    consumed_controls: HashSet::new(),
+                    control_acks: HashMap::new(),
+                    next_command_seq: 2,
+                };
+                audit.control_acks.insert(command_id.clone(), command_seq.to_string());
+                audit.next_command_seq = command_seq + 1;
+                audit.consumed_controls.insert(command_id.clone());
+                *state = Some(audit);
+                drop(state);
+                let _ = write_control_ack_values(&dir, command, &command_id, channel.run_id(), &operation, true, None);
+            }
+            "read" | "close" => {
+                let packet = {
+                    let Ok(mut state) = local_owner_audit().lock() else { continue; };
+                    let Some(audit) = state.as_mut().filter(|audit| audit.audit_id == audit_id) else { continue; };
+                    if audit.closed { continue; }
+                    audit.next_command_seq = command_seq + 1;
+                    if action == "read" {
+                        Some(audit.packet(false, channel.run_id(), &operation))
+                    } else {
+                        let packet = audit.packet(audit.pending.is_empty(), channel.run_id(), &operation);
+                        if packet["complete"].as_bool() == Some(true) { audit.closed = true; }
+                        Some(packet)
+                    }
+                };
+                if let Some(packet) = packet {
+                    let file = if action == "read" { "local-pty-owner-read.receipt.json" } else { LOCAL_OWNER_PACKET_FILE };
+                    let packet_path = dir.join(file);
+                    let ack_path = dir.join(format!("{command}.ack.{command_id}.json"));
+                    let packet_copy = packet.clone();
+                    let command_id_copy = command_id.clone();
+                    let run_id = channel.run_id().to_string();
+                    let operation_copy = operation.clone();
+                    let file_copy = file.to_string();
+                    let packet_result = write_json_atomic(packet_path.parent().unwrap_or(Path::new(".")), &file_copy, &packet_copy);
+                    let ack_result = packet_result.as_ref().map_err(|error| error.to_string()).and_then(|_|
+                        write_control_ack_values(ack_path.parent().unwrap_or(Path::new(".")), command, &command_id_copy, &run_id, &operation_copy, true, Some(&file_copy)));
+                    if ack_result.is_ok() && action == "close" && packet["complete"].as_bool() == Some(true) {
+                        if let Ok(mut completed) = LOCAL_OWNER_COMPLETE.get_or_init(|| Mutex::new(None)).lock() { *completed = Some(packet); }
+                    }
+                    if ack_result.is_err() {
+                        if let Ok(mut state) = local_owner_audit().lock() {
+                            if let Some(audit) = state.as_mut().filter(|audit| audit.audit_id == audit_id) {
+                                audit.closed = false;
+                                audit.control_acks.remove(&command_id);
+                                audit.consumed_controls.remove(&command_id);
+                                audit.next_command_seq = command_seq;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn start_local_owner_control(channel: Arc<QaBarrierChannel>) {
+    let slot = LOCAL_OWNER_CONTROL.get_or_init(|| Mutex::new(None));
+    let Ok(mut slot) = slot.lock() else { return; };
+    if slot.is_some() { return; }
+    let (stop, stopped) = std_mpsc::channel();
+    let worker = thread::Builder::new().name("ferryx-qa-local-owner-control".into()).spawn(move || {
+        let Some(dir) = barrier_dir() else { return; };
+        let Some(operation) = channel.operation_id() else { return; };
+        let mut claim_seq = 0_u64;
+        loop {
+            if stopped.try_recv().is_ok() { break; }
+            let commands = [
+                ("local-pty-owner-identity", "identity"),
+                ("local-pty-owner-open", "open"),
+                ("local-pty-owner-read", "read"),
+                ("local-pty-owner-close", "close"),
+            ];
+            let mut ready = Vec::new();
+            for (command, action) in commands {
+                let path = dir.join(format!("{command}.request.json"));
+                claim_seq += 1;
+                let request_claimed = dir.join(format!("{command}.processing.{}.{claim_seq}.json", std::process::id()));
+                if std::fs::rename(&path, &request_claimed).is_err() { continue; }
+                let claimed = request_claimed;
+                let Ok(metadata) = std::fs::symlink_metadata(&claimed) else { let _ = std::fs::remove_file(&claimed); continue; };
+                if !metadata.file_type().is_file() { let _ = std::fs::remove_file(&claimed); continue; }
+                let Ok(text) = std::fs::read_to_string(&claimed) else { let _ = std::fs::remove_file(&claimed); continue; };
+                let Ok(request) = serde_json::from_str::<Value>(&text) else { let _ = std::fs::remove_file(&claimed); continue; };
+                let command_id = request.get("commandId").and_then(Value::as_str).unwrap_or_default();
+                if !valid_local_owner_command_id(command_id) {
+                    let _ = std::fs::remove_file(&claimed);
+                    continue;
+                }
+                let consumed = dir.join(format!("{command}.consumed.{command_id}"));
+                if std::fs::rename(&claimed, &consumed).is_err() { continue; }
+                if request.get("runId").and_then(Value::as_str) != Some(channel.run_id())
+                    || request.get("operationId").and_then(Value::as_str) != Some(operation.as_str())
+                    || (action != "identity" && request.get("auditId").and_then(Value::as_str).is_none_or(str::is_empty))
+                    || request.get("commandSeq").and_then(Value::as_u64).is_none() {
+                    let _ = write_control_ack_values(&dir, command, command_id, channel.run_id(), &operation, false, None);
+                    let _ = std::fs::remove_file(consumed);
+                    continue;
+                }
+                ready.push((command, action, request));
+            }
+            ready.sort_by_key(|(_, _, request)| request["commandSeq"].as_u64().unwrap_or(u64::MAX));
+            process_local_owner_audit_controls(&channel, ready);
+            match stopped.recv_timeout(Duration::from_millis(CONTROL_POLL_MS)) {
+                Ok(()) | Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    });
+    if let Ok(worker) = worker { *slot = Some(LocalOwnerControl { stop, worker }); }
+}
+
+pub(crate) fn stop_local_owner_control() {
+    let slot = LOCAL_OWNER_CONTROL.get_or_init(|| Mutex::new(None));
+    let Ok(mut slot) = slot.lock() else { return; };
+    if let Some(control) = slot.take() {
+        let _ = control.stop.send(());
+        let _ = control.worker.join();
+    }
+}
+
+pub(crate) fn ensure_local_owner_control() {
+    let Some(channel) = qa_barrier::active_channel() else { return; };
+    start_local_owner_control(channel);
+}
+
+#[cfg(test)]
+mod local_owner_command_tests {
+    use super::valid_local_owner_command_id;
+
+    #[test]
+    fn command_id_rejects_path_components_and_unbounded_values() {
+        assert!(valid_local_owner_command_id("cmd-01_A"));
+        assert!(!valid_local_owner_command_id("../cmd"));
+        assert!(!valid_local_owner_command_id(""));
+        assert!(!valid_local_owner_command_id(&"a".repeat(97)));
+    }
+}
+
+pub(crate) fn record_local_pty_event(
+    session: &PtySession,
+    operation: &str,
+    kind: &str,
+    payload: Value,
+    identity: Option<OwnedProcessIdentity>,
+    result: Result<(), String>,
+) -> Option<String> {
+    ensure_local_owner_control();
+    let Ok(mut state) = local_owner_audit().lock() else { return None; };
+    let Some(audit) = state.as_mut() else { return None; };
+    if audit.closed { return None; }
+    audit.record_lifecycle(session.id(), session.incarnation()?, operation, kind, payload, identity, result)
+}
+
+impl LocalOwnerAudit {
+fn record_lifecycle(&mut self, session_id: &str, incarnation: &str, operation: &str,
+    kind: &str, payload: Value, identity: Option<OwnedProcessIdentity>, result: Result<(), String>) -> Option<String> {
+    let audit = self;
+    if audit.closed { return None; }
+    let prefix = identity.as_ref().map(|identity| format!("{}:{}:{}:", session_id, identity.incarnation, operation));
+    let mutation_id = if kind == "delivery" {
+        payload.get("mutationId").and_then(Value::as_str).map(str::to_string)
+            .filter(|id| id.starts_with(&format!("{session_id}:{incarnation}:{operation}:")))
+            .filter(|id| audit.pending.contains_key(id) || (operation == "create" && audit.requests.iter().any(|row| row["mutationId"].as_str() == Some(id.as_str()))))
+    } else {
+        prefix.map(|prefix| format!("{prefix}{:020}", audit.next_seq + 1))
+    };
+    if kind == "request" {
+        if let (Some(id), Some(identity)) = (&mutation_id, identity.as_ref()) { audit.pending.insert(id.clone(), identity.clone()); }
+    }
+    if kind == "delivery" && operation == "create" {
+        if let (Some(id), Some(identity)) = (&mutation_id, identity.as_ref()) { audit.pending.insert(id.clone(), identity.clone()); }
+    }
+    if kind == "request" && identity.is_none() {
+        let mut event = json!({"sessionId": session_id, "incarnation": incarnation,
+            "runId": audit_run_id(), "operationId": audit_operation_id(), "payload": payload,
+            "error": "owned process identity unavailable", "pid":null, "executable":null, "processStart":null});
+        event["typedResult"] = json!("identity-unavailable");
+        audit.record(kind, operation, mutation_id.clone().map(Value::String), event);
+        return None;
+    }
+    let captured_identity = mutation_id.as_ref().and_then(|id| audit.pending.get(id));
+    let mut event = json!({"sessionId": session_id, "incarnation": incarnation,
+        "pid": captured_identity.map(|child| child.pid), "executable": captured_identity.map(|child| child.executable.as_str()),
+        "processStart": captured_identity.map(|child| child.process_start.as_str()), "runId": audit_run_id(),
+        "operationId": audit_operation_id(), "payload": payload});
+    event["mutationId"] = json!(mutation_id);
+    if kind == "delivery" {
+        if result.is_ok() && captured_identity.is_some() && mutation_id.is_some() {
+            audit.record(kind, operation, mutation_id.clone().map(Value::String), event);
+            if let Some(id) = mutation_id.as_ref() { audit.pending.remove(id); }
+        }
+    } else {
+        if let Err(error) = result { event["error"] = json!(error); }
+        audit.record(kind, operation, mutation_id.clone().map(Value::String), event);
+    }
+    mutation_id
+}
+}
+
+pub(crate) fn record_local_pty_missing_session(session_id: &str, operation: &str, result: Result<(), String>) {
+    let Ok(mut state) = local_owner_audit().lock() else { return; };
+    let Some(audit) = state.as_mut() else { return; };
+    if audit.closed { return; }
+    let mut event = json!({"sessionId": session_id, "runId": audit_run_id(),
+        "operationId": audit_operation_id(), "typedResult": "session-not-found",
+        "pid": null, "executable": null, "processStart": null});
+    if let Err(error) = result { event["error"] = json!(error); }
+    audit.record("request", operation, None, event);
+}
+
+pub(crate) fn record_local_pty_create_request(session_id: &str, incarnation: &str) -> Option<String> {
+    ensure_local_owner_control();
+    let Ok(mut state) = local_owner_audit().lock() else { return None; };
+    let audit = state.as_mut()?;
+    audit.record_create_request(session_id, incarnation)
+}
+
+impl LocalOwnerAudit {
+fn record_create_request(&mut self, session_id: &str, incarnation: &str) -> Option<String> {
+    let audit = self;
+    if audit.closed { return None; }
+    let token = format!("{session_id}:{incarnation}:create:{:020}", audit.next_seq + 1);
+    audit.record("request", "create", Some(json!(token)), json!({"sessionId":session_id,
+        "incarnation":incarnation, "pid":null, "executable":null, "processStart":null,
+        "typedResult":"not-yet-spawned"}));
+    Some(token)
+}
+}
+
+fn audit_run_id() -> Option<String> {
+    std::env::var("FERRYX_QA_RUN_ID").ok()
+}
+
+fn audit_operation_id() -> Option<String> {
+    std::env::var(crate::ipc::qa_barrier::OPERATION_ID_ENV).ok()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LocalOwnerIdentity {
+    pub(crate) owner_id: String,
+    pub(crate) pid: u32,
+    pub(crate) executable: String,
+    pub(crate) process_start: String,
+    pub(crate) component: String,
+}
+
+pub(crate) fn local_owner_audit_identity(run_id: &str) -> Option<LocalOwnerIdentity> {
+    if audit_run_id().as_deref() != Some(run_id) { return None; }
+    let process = owned_process_identity::capture(std::process::id()).ok()?;
+    let executable = std::env::current_exe().ok()?.to_string_lossy().into_owned();
+    Some(LocalOwnerIdentity {
+        owner_id: format!("{LOCAL_OWNER_COMPONENT}:{run_id}:{}", std::process::id()),
+        pid: std::process::id(),
+        executable,
+        process_start: process.process_start,
+        component: LOCAL_OWNER_COMPONENT.into(),
+    })
+}
+
+impl LocalOwnerAudit {
+    fn accept_control(&mut self, command_id: &str, command_seq: u64) -> bool {
+        if self.control_acks.contains_key(command_id) || self.closed || command_seq != self.next_command_seq {
+            return false;
+        }
+        self.control_acks.insert(command_id.to_string(), command_seq.to_string());
+        self.next_command_seq = command_seq + 1;
+        self.consumed_controls.insert(command_id.to_string())
+    }
+
+    fn record(&mut self, kind: &str, operation: &str, mutation_id: Option<Value>, payload: Value) {
+        self.next_seq += 1;
+        let mut row = json!({"kind": kind, "ownerId": self.owner_id, "pid": self.owner["pid"],
+            "executable": self.owner["executable"], "processStart": self.owner["processStart"],
+            "seq": self.next_seq, "operation": operation, "payload": payload});
+        row["runId"] = json!(audit_run_id());
+        row["operationId"] = json!(audit_operation_id());
+        if let Some(mutation_id) = mutation_id { row["mutationId"] = mutation_id; }
+        if let Some(session_id) = row.get("payload").and_then(|p| p.get("sessionId")).cloned() {
+            row["sessionId"] = session_id;
+        }
+        if let Some(incarnation) = row.get("payload").and_then(|p| p.get("incarnation")).cloned() {
+            row["incarnation"] = incarnation;
+        }
+        for field in ["runId", "operationId"] {
+            if let Some(value) = row.get("payload").and_then(|p| p.get(field)).cloned() {
+                row[field] = value;
+            }
+        }
+        if kind == "request" { self.requests.push(row); } else { self.deliveries.push(row); }
+    }
+
+    fn packet(&self, complete: bool, run_id: &str, operation_id: &str) -> Value {
+        let complete = complete && self.requests.iter().all(|request| {
+            request.get("mutationId").is_some_and(|token| self.deliveries.iter().any(|delivery| delivery.get("mutationId") == Some(token)))
+        });
+        json!({"auditId": self.audit_id, "owner": self.owner, "baselineSeq": self.baseline_seq,
+            "endSeq": self.next_seq, "complete": complete, "runId": run_id,
+            "operationId": operation_id, "requests": self.requests, "deliveries": self.deliveries})
+    }
+
+    #[cfg(test)]
+    fn pending_mutation_for(&self, session_id: &str, incarnation: &str, operation: &str) -> Option<String> {
+        let prefix = format!("{session_id}:{incarnation}:{operation}:");
+        let mut matches = self.pending.keys().filter(|key| key.starts_with(&prefix));
+        let first = matches.next()?.clone();
+        matches.next().is_none().then_some(first)
+    }
+}
+
+#[cfg(test)]
+mod local_owner_audit_tests {
+    use super::*;
+
+    fn audit() -> LocalOwnerAudit {
+        LocalOwnerAudit {
+            audit_id: "audit-1".into(),
+            owner_id: "terminal-local-pty:run-1:41".into(),
+            owner: json!({"ownerId":"terminal-local-pty:run-1:41", "pid":41,
+                "executable":"/ferryx", "processStart":"41:000001", "component":LOCAL_OWNER_COMPONENT}),
+            baseline_seq: 0,
+            next_seq: 0,
+            requests: Vec::new(),
+            deliveries: Vec::new(),
+            pending: BTreeMap::new(),
+            closed: false,
+            consumed_controls: HashSet::new(),
+            control_acks: HashMap::new(),
+            next_command_seq: 1,
+        }
+    }
+
+    #[test]
+    fn packet_preserves_owner_identity_bounds_and_ordered_requests_deliveries() {
+        let mut audit = audit();
+        audit.record("request", "write", Some(json!("mutation-1")), json!({"bytes":[65]}));
+        audit.record("delivery", "write", Some(json!("mutation-1")), json!({"accepted":true}));
+        let packet = audit.packet(true, "run-1", "operation-1");
+        assert_eq!(packet["auditId"], "audit-1");
+        assert_eq!(packet["owner"]["ownerId"], "terminal-local-pty:run-1:41");
+        assert_eq!(packet["owner"]["processStart"], "41:000001");
+        assert_eq!(packet["baselineSeq"], 0);
+        assert_eq!(packet["endSeq"], 2);
+        assert_eq!(packet["requests"][0]["seq"], 1);
+        assert_eq!(packet["requests"][0]["mutationId"], "mutation-1");
+        assert_eq!(packet["requests"][0]["payload"]["bytes"], json!([65]));
+        assert_eq!(packet["deliveries"][0]["seq"], 2);
+        assert_eq!(packet["runId"], "run-1");
+        assert_eq!(packet["operationId"], "operation-1");
+    }
+
+    #[test]
+    fn open_baseline_excludes_open_handshake_from_owner_interval() {
+        let mut audit = audit();
+        audit.record("request", "close", None, json!({}));
+        let packet = audit.packet(true, "run-1", "operation-1");
+        assert_eq!(packet["baselineSeq"], 0);
+        assert_eq!(packet["endSeq"], 1);
+        assert_eq!(packet["requests"][0]["seq"], 1);
+    }
+
+    #[test]
+    fn consumed_control_id_is_idempotent_and_does_not_reset_sequence() {
+        let mut audit = audit();
+        assert!(audit.accept_control("open-1", 1));
+        audit.record("request", "write", Some(json!("mutation-1")), json!({"bytes":[65]}));
+        let end = audit.next_seq;
+        assert!(!audit.accept_control("open-1", 1));
+        assert!(!audit.accept_control("stale-0", 1));
+        assert!(audit.accept_control("read-2", 2));
+        assert_eq!(audit.next_seq, end);
+        assert_eq!(audit.audit_id, "audit-1");
+    }
+
+    #[test]
+    fn control_sequence_rejects_out_of_order_command() {
+        let mut audit = audit();
+        assert!(audit.accept_control("open-1", 1));
+        assert!(!audit.accept_control("close-3", 3));
+        assert!(audit.accept_control("read-2", 2));
+        assert!(audit.accept_control("close-3", 3));
+    }
+
+    #[test]
+    fn completed_close_is_immutable_and_repeated_close_cannot_advance_sequence() {
+        let mut audit = audit();
+        assert!(audit.accept_control("open", 1));
+        audit.record("request", "write", Some(json!("m1")), json!({}));
+        audit.record("delivery", "write", Some(json!("m1")), json!({}));
+        audit.closed = true;
+        let completed = audit.packet(true, "run-1", "operation-1");
+        assert!(!audit.accept_control("close-retry", 2));
+        assert_eq!(audit.packet(true, "run-1", "operation-1"), completed);
+    }
+
+    #[test]
+    fn close_is_incomplete_until_every_request_has_successful_delivery() {
+        let mut audit = audit();
+        audit.pending.insert("session:inc:write".into(), OwnedProcessIdentity {
+            pid: 41, incarnation: "inc".into(), executable: "/shell".into(), process_start: "41:1".into(),
+        });
+        let close = audit.packet(audit.pending.is_empty(), "run-1", "operation-1");
+        assert_eq!(close["complete"], false);
+        audit.pending.clear();
+        assert_eq!(audit.packet(audit.pending.is_empty(), "run-1", "operation-1")["complete"], true);
+    }
+
+    #[test]
+    fn lifecycle_record_retains_child_process_identity_fields() {
+        let identity = OwnedProcessIdentity { pid: 41, incarnation: "inc-2".into(),
+            executable: "/bin/sh".into(), process_start: "41:000002".into() };
+        assert_eq!(identity.pid, 41);
+        assert_eq!(identity.executable, "/bin/sh");
+        assert_eq!(identity.process_start, "41:000002");
+        assert_eq!(identity.incarnation, "inc-2");
+    }
+
+    #[test]
+    fn concurrent_same_session_mutations_have_distinct_owner_sequences() {
+        let mut audit = audit();
+        let identity = OwnedProcessIdentity { pid: 41, incarnation: "inc".into(),
+            executable: "/shell".into(), process_start: "41:1".into() };
+        let id1 = format!("session:inc:write:{:020}", audit.next_seq + 1);
+        audit.pending.insert(id1.clone(), identity.clone());
+        audit.record("request", "write", Some(json!(id1)), json!({"sessionId":"session","incarnation":"inc"}));
+        let id2 = format!("session:inc:write:{:020}", audit.next_seq + 1);
+        audit.pending.insert(id2.clone(), identity);
+        audit.record("request", "write", Some(json!(id2)), json!({"sessionId":"session","incarnation":"inc"}));
+        assert_eq!(audit.pending.len(), 2);
+        assert_eq!(audit.requests[0]["seq"], 1);
+        assert_eq!(audit.requests[1]["seq"], 2);
+    }
+
+    #[test]
+    fn delivery_correlation_is_not_guessed_when_multiple_mutations_are_pending() {
+        let mut audit = audit();
+        for seq in [1, 2] {
+            audit.pending.insert(format!("session:inc:write:{seq:020}"), OwnedProcessIdentity {
+                pid: 41, incarnation: "inc".into(), executable: "/shell".into(), process_start: "41:1".into(),
+            });
+        }
+        assert_eq!(audit.pending_mutation_for("session", "inc", "write"), None);
+        audit.pending.remove("session:inc:write:00000000000000000001");
+        assert_eq!(audit.pending_mutation_for("session", "inc", "write").as_deref(), Some("session:inc:write:00000000000000000002"));
+    }
+
+    #[test]
+    fn operation_event_carries_exact_identity_at_top_level() {
+        let mut audit = audit();
+        audit.record("request", "signal", None, json!({"sessionId":"s-1", "incarnation":"inc-1",
+            "pid":41, "executable":"/bin/sh", "processStart":"41:1", "runId":"run-1", "operationId":"op-1"}));
+        let row = &audit.requests[0];
+        assert_eq!(row["sessionId"], "s-1");
+        assert_eq!(row["incarnation"], "inc-1");
+        assert_eq!(row["pid"], 41);
+        assert_eq!(row["runId"], "run-1");
+        assert_eq!(row["operationId"], "op-1");
+    }
+
+    #[test]
+    fn lifecycle_tokens_pair_out_of_order_success_and_retain_failed_request() {
+        let mut audit = audit();
+        let identity = OwnedProcessIdentity { pid:41, incarnation:"inc".into(),
+            executable:"/shell".into(), process_start:"41:1".into() };
+        let first = audit.record_lifecycle("s", "inc", "write", "request", json!({"bytes":[1]}), Some(identity.clone()), Ok(())).unwrap();
+        let second = audit.record_lifecycle("s", "inc", "write", "request", json!({"bytes":[2]}), Some(identity.clone()), Ok(())).unwrap();
+        audit.record_lifecycle("s", "inc", "write", "delivery", json!({"mutationId":second}), Some(identity.clone()), Ok(()));
+        assert_eq!(audit.deliveries[0]["mutationId"], second);
+        assert_eq!(audit.deliveries[0]["payload"]["pid"], 41);
+        assert!(audit.pending.contains_key(&first));
+        audit.record_lifecycle("s", "inc", "write", "delivery", json!({"mutationId":first}), Some(identity), Err("write failed".into()));
+        assert_eq!(audit.deliveries.len(), 1);
+        assert_eq!(audit.packet(true, "run-1", "op")["complete"], false);
+    }
+
+    #[test]
+    fn owner_serialization_matches_roster_and_packet_keys() {
+        let owner = LocalOwnerIdentity {owner_id:"terminal-local-pty:run-1:41".into(), pid:41,
+            executable:"/ferryx".into(), process_start:"41:1".into(), component:LOCAL_OWNER_COMPONENT.into()};
+        let value = serde_json::to_value(owner).unwrap();
+        assert_eq!(value["ownerId"], "terminal-local-pty:run-1:41");
+        assert_eq!(value["processStart"], "41:1");
+        assert!(value.get("owner_id").is_none());
+    }
+
+    #[test]
+    fn pre_open_identity_reply_preserves_control_correlation_and_owner() {
+        let request = json!({"runId":"run-1", "operationId":"op-1", "commandId":"identity-1", "commandSeq":1});
+        let owner = LocalOwnerIdentity {owner_id:"terminal-local-pty:run-1:41".into(), pid:41,
+            executable:"/ferryx".into(), process_start:"41:1".into(), component:LOCAL_OWNER_COMPONENT.into()};
+        let ack = local_owner_identity_ack(&request, Some(owner));
+        for key in ["runId", "operationId", "commandId", "commandSeq"] { assert_eq!(ack[key], request[key]); }
+        assert_eq!(ack["accepted"], true);
+        assert_eq!(ack["owner"]["pid"], 41);
+        assert_eq!(ack["owner"]["processStart"], "41:1");
+        assert_eq!(local_owner_identity_ack(&request, None)["accepted"], false);
+    }
+
+    #[test]
+    fn create_then_signal_and_close_preserve_captured_child_identity() {
+        let mut audit = audit();
+        let identity = OwnedProcessIdentity {pid:42, incarnation:"inc".into(),
+            executable:"/shell".into(), process_start:"42:2".into()};
+        let create = audit.record_create_request("s", "inc").unwrap();
+        assert!(audit.requests[0]["payload"]["pid"].is_null());
+        assert_eq!(audit.packet(true, "run-1", "op")["complete"], false);
+        audit.record_lifecycle("s", "inc", "create", "delivery", json!({"mutationId":create}), Some(identity.clone()), Ok(()));
+        for operation in ["signal", "kill", "close"] {
+            let token = audit.record_lifecycle("s", "inc", operation, "request", json!({}), Some(identity.clone()), Ok(())).unwrap();
+            audit.record_lifecycle("s", "inc", operation, "delivery", json!({"mutationId":token}), None, Ok(()));
+            let delivery = audit.deliveries.last().unwrap();
+            assert_eq!(delivery["pid"], 41);
+            assert_eq!(delivery["payload"]["pid"], 42);
+            assert_eq!(delivery["payload"]["processStart"], "42:2");
+            assert_eq!(delivery["incarnation"], "inc");
+        }
+        assert_eq!(audit.packet(true, "run-1", "op")["complete"], true);
+    }
+}
 
 #[derive(Default)]
 struct OwnedPtyAccounting {
@@ -179,8 +856,80 @@ pub(crate) fn pty_created_counts(session_id: &str) -> (u64, u64) {
 
 /// Called from the successful local spawn path only: an adopted transfer is not
 /// a creation, and nothing else may inflate the count.
-pub(crate) fn record_owned_pty_creation(session_id: &str) {
+pub(crate) fn record_owned_pty_creation(session: &Arc<PtySession>) {
+    let session_id = session.id();
     owned_pty_accounting().record_creation(session_id);
+    let Some(channel) = qa_barrier::active_channel() else { return; };
+    let Some(operation_id) = channel.operation_id() else { return; };
+    let Ok(handle) = tokio::runtime::Handle::try_current() else { return; };
+    let session_id = session_id.to_string();
+    let owned = session.qa_owned_child();
+    let session = Arc::clone(session);
+    handle.spawn(async move {
+        let result = crate::ipc::run_blocking(move || {
+            let capture = owned.as_ref().map_err(Clone::clone).and_then(|owned| {
+                if session.incarnation() != Some(owned.incarnation.as_str()) {
+                    return Err("session incarnation changed".into());
+                }
+                owned.capture(|pid| owned_process_identity::capture(pid).map(|identity| {
+                    (identity.executable, identity.process_start)
+                }).map_err(|error| error.to_string()))
+            });
+            let mut payload = owned_pty_creation_payload(
+                &session_id,
+                owned.as_ref().ok().map(|owned| owned.pid),
+                owned.as_ref().ok().map(|owned| owned.incarnation.as_str()),
+                capture.as_ref().ok().map(|(exe, start)| (exe.as_str(), start.as_str())),
+            );
+            if let Err(reason) = capture {
+                payload["ownershipUnavailableReason"] = json!(reason);
+            }
+            channel.append_receipt("owned-pty-creation", &operation_id, payload);
+            Ok(())
+        }).await;
+        if let Err(error) = result {
+            eprintln!("FERRYX_QA_PTY_OWNERSHIP_RECEIPT_FAILED: {error}");
+        }
+    });
+}
+
+#[path = "qa_liveness/owned_process_identity.rs"]
+mod owned_process_identity;
+
+pub fn run_exact_pid_probe(pid: u32) -> i32 {
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => { eprintln!("QA_PID_PROBE_FAILED: {error}"); return 2; }
+    };
+    match runtime.block_on(crate::ipc::run_blocking(move || {
+        owned_process_identity::capture(pid).map_err(crate::ipc::IpcError::internal)
+    })) {
+        Ok(identity) => {
+            println!("{}", json!({"exited": false, "executable": identity.executable, "processStart": identity.process_start}));
+            0
+        }
+        Err(error) => { eprintln!("QA_PID_PROBE_FAILED: {error}"); 2 }
+    }
+}
+
+fn owned_pty_creation_payload(
+    session_id: &str,
+    pid: Option<u32>,
+    incarnation: Option<&str>,
+    identity: Option<(&str, &str)>,
+) -> Value {
+    let complete = pid.is_some_and(|pid| pid > 0)
+        && incarnation.is_some_and(|value| !value.is_empty())
+        && identity.is_some_and(|(executable, start)| !executable.is_empty() && !start.is_empty());
+    json!({
+        "role": "pty", "backendSessionId": session_id, "pid": pid,
+        "incarnation": incarnation,
+        "executable": identity.map(|(executable, _)| executable),
+        "processStart": identity.map(|(_, start)| start),
+        "ownershipComplete": complete,
+        "ownershipUnavailableReason": if complete { None } else { Some("exact_child_identity_unavailable") },
+        "producerComponent": "terminal-qa-owned-pty-creation",
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -316,6 +1065,7 @@ pub(crate) fn start(service: TerminalService) {
     if STATE.set(QaLivenessState { events }).is_err() {
         return;
     }
+    start_local_owner_control(Arc::clone(&channel));
     handle.spawn(observer_loop(Arc::clone(&channel), receiver));
     handle.spawn(suspension_check_watch(service.clone(), Arc::clone(&channel)));
     handle.spawn(exercise_eof_watch(service, channel));
@@ -1084,6 +1834,27 @@ async fn end_owned_output_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_pty_receipt_requires_exact_spawn_identity() {
+        let incomplete = owned_pty_creation_payload("pty-a", Some(42), Some("inc-a"), None);
+        assert_eq!(incomplete["pid"], json!(42));
+        assert_eq!(incomplete["incarnation"], json!("inc-a"));
+        assert_eq!(incomplete["ownershipComplete"], json!(false));
+        assert_eq!(incomplete["executable"], Value::Null);
+        assert_eq!(incomplete["processStart"], Value::Null);
+        let complete = owned_pty_creation_payload("pty-a", Some(42), Some("inc-a"), Some(("/owned/shell", "start-42")));
+        assert_eq!(complete["ownershipComplete"], json!(true));
+        for (pid, incarnation, identity) in [
+            (None, Some("inc-a"), Some(("/owned/shell", "start-42"))),
+            (Some(0), Some("inc-a"), Some(("/owned/shell", "start-42"))),
+            (Some(42), None, Some(("/owned/shell", "start-42"))),
+            (Some(42), Some("inc-a"), Some(("", "start-42"))),
+            (Some(42), Some("inc-a"), Some(("/owned/shell", ""))),
+        ] {
+            assert_eq!(owned_pty_creation_payload("pty-a", pid, incarnation, identity)["ownershipComplete"], json!(false));
+        }
+    }
 
     fn observation(session_id: &str, sequence: u64) -> MarkerObservation {
         MarkerObservation {

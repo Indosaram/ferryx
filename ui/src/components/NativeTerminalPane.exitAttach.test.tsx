@@ -141,7 +141,7 @@ describe("NativeTerminalPane abnormal exit attach handling", () => {
     expect(onUnavailable).toHaveBeenCalledWith(
       "dead-backend-session",
       "daemon-attach-affirmative-exit",
-      "dead-backend-session:epoch-1:0:",
+      "dead-backend-session:epoch-1:0::inc-1",
     );
   });
 

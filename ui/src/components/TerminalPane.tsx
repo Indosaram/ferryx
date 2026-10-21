@@ -21,6 +21,7 @@ import {
 } from "../lib/sessionLifecycle";
 import { toIpcError } from "../lib/tauri";
 import type { TerminalSession } from "../lib/types";
+import type { LocalRecoveryAdmissionResult } from "../state/workspaceStore";
 import { NativeTerminalPane } from "./NativeTerminalPane";
 import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
 import { DagPaneBadge } from "./dag/DagPaneBadge";
@@ -35,7 +36,7 @@ type TerminalPaneProps = {
   searchOpen?: boolean;
   onCloseSearch?: () => void;
   onReconnect?: (sessionId: string) => Promise<void> | void;
-  onRefreshSessionIdentity?: (sessionId: string) => Promise<TerminalSession | null | void> | void;
+  onRefreshSessionIdentity?: (sessionId: string, onResult: (result: LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => Promise<void> | void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -106,6 +107,14 @@ export function TerminalPane({
   const titleId = useId();
   const descId = useId();
   const autoResumeKeyRef = useRef<string | null>(null);
+  const admissionDisposeRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      admissionDisposeRef.current?.();
+      admissionDisposeRef.current = null;
+    };
+  }, [session.id, session.backendSessionId]);
   const sleepingSessionIds = useSleepingSessionIds();
 
   const splitIntent = localSplitIntent(session);
@@ -114,15 +123,20 @@ export function TerminalPane({
   const isSshSession = isRemoteWorkspaceId(session.workspaceId);
   const isSpawning = session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "validating";
   const remoteState = session.remoteConnectionState;
-  const isSshReconnecting = isSshSession && (remoteState === "reconnecting" || isSpawning);
+  const recoveryState = session.recoveryState;
+  const isSshReconnecting = isSshSession && recoveryState?.phase !== "blocked" && recoveryState?.phase !== "exited" &&
+    (recoveryState?.phase === "recovering" || remoteState === "reconnecting" || isSpawning);
   // `missing` means the daemon we queried does not know this session (a draining predecessor may
   // still own it, or restore has not completed). That is a recoverable transport-level outage, so
   // it takes the same recoverable branch as `disconnected` and never the terminal expired branch.
   const isSshDisconnected =
-    isSshSession && !isSpawning && (remoteState === "disconnected" || remoteState === "missing" || (!remoteState && (session.backendSessionId === null || session.lifecycle === "exited")));
-  const isSshExpired = isSshSession && !isSpawning && remoteState === "expired";
-  const isSshLegacyLost = isSshSession && !isSpawning && remoteState === "legacyLost";
-  const showSshOverlay = isSshSession && (isSshReconnecting || isSshDisconnected || isSshExpired || isSshLegacyLost);
+    isSshSession && recoveryState?.phase !== "recovering" && recoveryState?.phase !== "blocked" && recoveryState?.phase !== "exited" && !isSpawning && (remoteState === "disconnected" || remoteState === "missing" || (!remoteState && (session.backendSessionId === null || session.lifecycle === "exited")));
+  const isSshExpired = isSshSession && recoveryState?.phase !== "recovering" && recoveryState?.phase !== "blocked" && !isSpawning && remoteState === "expired";
+  const isSshLegacyLost = isSshSession && recoveryState?.phase !== "recovering" && recoveryState?.phase !== "blocked" && recoveryState?.phase !== "exited" && !isSpawning && remoteState === "legacyLost";
+  const isRecoveryRecovering = recoveryState?.phase === "recovering";
+  const isRecoveryBlocked = recoveryState?.phase === "blocked";
+  const isRecoveryExited = recoveryState?.phase === "exited";
+  const showSshOverlay = isSshSession && (isRecoveryRecovering || isRecoveryBlocked || isRecoveryExited || isSshReconnecting || isSshDisconnected || isSshExpired || isSshLegacyLost);
 
   const affordance = getAgentReconnectAffordance(session, sessions);
   // A daemon that has not answered yet is a transport-level outage, not a dead shell. Treat it as
@@ -130,16 +144,16 @@ export function TerminalPane({
   // in-flight reconnect transaction (`affordance.isReconnecting`) already owns its own progress
   // affordance, so it is excluded here and keeps rendering the disabled retry button.
   const isLocalReconnecting =
-    !isSshSession && !affordance.isReconnecting && (remoteState === "reconnecting" || isSpawning);
-  const isLocalDisconnected = !isSshSession && !isSpawning && (remoteState === "disconnected" || remoteState === "missing");
-  const isLocalExited = !isSshSession && (splitIntent ? session.lifecycle === "exited" : (
+    !isSshSession && !affordance.isReconnecting && !isRecoveryBlocked && !isRecoveryExited && (remoteState === "reconnecting" || isSpawning || isRecoveryRecovering);
+  const isLocalDisconnected = !isSshSession && !isRecoveryRecovering && !isRecoveryBlocked && !isSpawning && (remoteState === "disconnected" || remoteState === "missing");
+  const isLocalExited = !isSshSession && (isRecoveryExited || (!isRecoveryBlocked && !isRecoveryRecovering && (splitIntent ? session.lifecycle === "exited" : (
     isLocalReconnecting ||
     isLocalDisconnected ||
     session.backendSessionId === null ||
     isStandbyBackendSessionId(session.backendSessionId) ||
     session.lifecycle === "exited"
-  ));
-  const isExited = isSshSession ? showSshOverlay : isLocalExited;
+  ))));
+  const isExited = isSshSession ? showSshOverlay : isRecoveryBlocked || isRecoveryRecovering || isLocalExited;
   const isSuspended =
     !isExited && (sleepingSessionIds.has(session.id) || session.processState === "suspended");
   const isAgentSession = Boolean(
@@ -171,17 +185,40 @@ export function TerminalPane({
     !isStandbyBackendSessionId(session.backendSessionId) &&
     onReconnect
   );
+  const canRetryRecovery =
+    (recoveryState?.phase === "recovering" || recoveryState?.phase === "blocked") &&
+    Boolean(onRefreshSessionIdentity) &&
+    Boolean(session.backendSessionId);
   const affordanceDescription = resolveAffordanceErrorDescription(affordance);
   const errorDescription =
     replacementError ??
     (isSshSession
-      ? session.remoteFailure?.message ?? null
+      ? isRecoveryBlocked ? null : recoveryState?.reason ?? session.remoteFailure?.message ?? null
       : isAgentSession
         ? affordanceDescription ?? session.backendUnavailableReason ?? null
         : session.backendUnavailableReason ?? affordanceDescription ?? null);
 
   const handleReconnect = async () => {
-    if (isPending) return;
+    if (isPending && !canRetryRecovery) return;
+    if (canRetryRecovery) {
+      if (onRefreshSessionIdentity) {
+        admissionDisposeRef.current?.();
+        const dispose = onRefreshSessionIdentity(session.id, () => undefined);
+        admissionDisposeRef.current = typeof dispose === "function" ? dispose : null;
+        return;
+      }
+      if (!onReconnect) return;
+      setPendingLocal(true);
+      setReplacementError(null);
+      try {
+        await onReconnect(session.id);
+      } catch (error) {
+        setReplacementError(toIpcError(error).message);
+      } finally {
+        setPendingLocal(false);
+      }
+      return;
+    }
     if (isSshSession) {
       if (!onReconnect) return;
       setPendingLocal(true);
@@ -244,7 +281,7 @@ export function TerminalPane({
   }, [active, activity?.state, isExited, session]);
 
   useEffect(() => {
-    if (splitIntent || !isExited || isPending || isSshSession || !isSessionSleeping(session.id) || isSessionAutoResumeHeld(session.id)) return;
+    if (splitIntent || !isExited || isPending || isRecoveryBlocked || isRecoveryExited || isSshSession || !isSessionSleeping(session.id) || isSessionAutoResumeHeld(session.id)) return;
     const key = `${session.id}:${session.backendSessionId ?? "none"}:${session.reconnectLifecycle ?? "idle"}`;
     if (autoResumeKeyRef.current === key) return;
     if (isAgentSession) {
@@ -266,7 +303,7 @@ export function TerminalPane({
       .then(() => setSessionSleeping(session.id, false))
       .catch((error) => setReplacementError(toIpcError(error).message))
       .finally(() => setPendingLocal(false));
-  }, [active, affordance.canReconnect, isAgentSession, isExited, isPending, isSshSession, onOpenNewShell, onReconnect, session.backendSessionId, session.id, session.reconnectLifecycle]);
+  }, [active, affordance.canReconnect, isAgentSession, isExited, isPending, isRecoveryBlocked, isRecoveryExited, isSshSession, onOpenNewShell, onReconnect, session.backendSessionId, session.id, session.reconnectLifecycle]);
 
   // If the native paired proxy session has not been established or expired,
   // do not mount local path/PTY tooling or offer SSH/agent respawn.
@@ -433,7 +470,11 @@ export function TerminalPane({
 
             <h2 id={titleId} className="text-sm font-medium text-foreground">
               {isSshSession
-                ? isSshReconnecting
+                ? isRecoveryBlocked
+                  ? "Session recovery blocked"
+                  : isRecoveryExited
+                    ? "Remote session exited"
+                    : isSshReconnecting
                   ? "Reconnecting SSH..."
                   : isSshExpired
                     ? "Remote session expired"
@@ -444,7 +485,9 @@ export function TerminalPane({
                   ? session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "binding"
                     ? "Starting shell..."
                     : "Reconnecting session..."
-                  : isStandbyShell
+                  : isRecoveryBlocked
+                    ? "Session recovery blocked"
+                    : isStandbyShell
                     ? replacementError
                       ? "Couldn't start shell"
                       : isPending
@@ -467,11 +510,64 @@ export function TerminalPane({
 
             {isSshSession ? (
               <div className="mt-4 flex w-full flex-col items-center gap-2">
-                {isSshReconnecting ? (
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
-                    <span>Reconnecting to remote session...</span>
-                  </div>
+                {isRecoveryBlocked ? (
+                  <>
+                    <p role="status" className="text-xs text-muted-foreground">{recoveryState?.reason ?? "Recovery is blocked."}</p>
+                    <div className="flex w-full flex-col items-center gap-2">
+                      {canRetryRecovery ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled={isPending}
+                          aria-busy={isPending}
+                          aria-label="Retry session recovery"
+                          onClick={handleReconnect}
+                          className="w-full max-w-[220px]"
+                        >
+                          <RefreshCw className="size-3.5" aria-hidden="true" />
+                          <span>Retry</span>
+                        </Button>
+                      ) : null}
+                      {onOpenNewShell ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={canRetryRecovery ? "ghost" : "secondary"}
+                          disabled={isPending}
+                          aria-label="Open new shell"
+                          onClick={handleOpenNewShell}
+                          className="w-full max-w-[220px]"
+                        >
+                          <span>Open new shell</span>
+                        </Button>
+                      ) : null}
+                    </div>
+                  </>
+                ) : isRecoveryExited ? (
+                  <>
+                    <p role="status" className="text-xs text-muted-foreground">The remote owner confirmed this session exited.</p>
+                    {onOpenNewShell ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        aria-label="Open new shell"
+                        onClick={handleOpenNewShell}
+                        className="w-full max-w-[220px]"
+                      >
+                        <span>Open new shell</span>
+                      </Button>
+                    ) : null}
+                  </>
+                ) : isSshReconnecting ? (
+                  <>
+                    <div role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
+                      <span>Reconnecting to remote session...</span>
+                    </div>
+                    {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
+                  </>
                 ) : isSshExpired ? (
                   <p className="text-xs text-muted-foreground">
                     The remote process has exited or is no longer available on the host.
@@ -503,12 +599,49 @@ export function TerminalPane({
               </div>
             ) : isAgentSession ? (
               <div className="mt-4 flex w-full flex-col items-center gap-2">
-                {isLocalReconnecting ? (
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
-                    <span>Reconnecting session...</span>
-                  </div>
-                ) : affordance.canReconnect ? (
+                {isRecoveryBlocked ? (
+                  <>
+                    <p role="status" className="text-xs text-muted-foreground">{recoveryState?.reason ?? "Recovery is blocked."}</p>
+                    <div className="flex w-full flex-col items-center gap-2">
+                      {canRetryRecovery ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled={isPending}
+                          aria-busy={isPending}
+                          aria-label="Retry session recovery"
+                          onClick={handleReconnect}
+                          className="w-full max-w-[220px]"
+                        >
+                          <RefreshCw className="size-3.5" aria-hidden="true" />
+                          <span>Retry</span>
+                        </Button>
+                      ) : null}
+                      {onOpenNewShell ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={canRetryRecovery ? "ghost" : "secondary"}
+                          disabled={isPending}
+                          aria-label="Open new shell"
+                          onClick={handleOpenNewShell}
+                          className="w-full max-w-[220px]"
+                        >
+                          <span>Open new shell</span>
+                        </Button>
+                      ) : null}
+                    </div>
+                  </>
+                ) : isLocalReconnecting ? (
+                  <>
+                    <div role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
+                      <span>{recoveryState?.reason ?? "Reconnecting session..."}</span>
+                    </div>
+                    {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
+                  </>
+                ) : canRetryRecovery || affordance.canReconnect ? (
                   <Button
                     type="button"
                     size="sm"
@@ -518,7 +651,7 @@ export function TerminalPane({
                     aria-label={
                       isPending
                         ? `Reconnecting ${agentName} session`
-                        : affordance.canRetry
+                        : canRetryRecovery || affordance.canRetry
                           ? `Retry ${agentName} session`
                           : `Reconnect ${agentName} session`
                     }
@@ -530,7 +663,7 @@ export function TerminalPane({
                         <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
                         <span>Reconnecting session...</span>
                       </>
-                    ) : affordance.canRetry ? (
+                    ) : canRetryRecovery || affordance.canRetry ? (
                       <>
                         <RefreshCw className="size-3.5" aria-hidden="true" />
                         <span>Retry</span>
@@ -591,11 +724,48 @@ export function TerminalPane({
               </div>
             ) : (
               <div className="mt-4 flex w-full flex-col items-center gap-2">
-                {isLocalReconnecting ? (
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
-                    <span>Reconnecting to session...</span>
-                  </div>
+                {isRecoveryBlocked ? (
+                  <>
+                    <p role="status" className="text-xs text-muted-foreground">{recoveryState?.reason ?? "Recovery is blocked."}</p>
+                    <div className="flex w-full flex-col items-center gap-2">
+                      {canRetryRecovery ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled={isPending}
+                          aria-busy={isPending}
+                          aria-label="Retry session recovery"
+                          onClick={handleReconnect}
+                          className="w-full max-w-[220px]"
+                        >
+                          <RefreshCw className="size-3.5" aria-hidden="true" />
+                          <span>Retry</span>
+                        </Button>
+                      ) : null}
+                      {onOpenNewShell ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={canRetryRecovery ? "ghost" : "secondary"}
+                          disabled={isPending}
+                          aria-label="Open new shell"
+                          onClick={handleOpenNewShell}
+                          className="w-full max-w-[220px]"
+                        >
+                          <span>Open new shell</span>
+                        </Button>
+                      ) : null}
+                    </div>
+                  </>
+                ) : isLocalReconnecting ? (
+                  <>
+                    <div role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
+                      <span>{recoveryState?.reason ?? "Reconnecting to session..."}</span>
+                    </div>
+                    {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
+                  </>
                 ) : isStandbyShell && isPending ? (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
@@ -603,14 +773,14 @@ export function TerminalPane({
                   </div>
                 ) : (
                   <>
-                    {canReattach ? (
+                    {canReattach || canRetryRecovery ? (
                       <Button
                         type="button"
                         size="sm"
                         variant="secondary"
                         disabled={isPending}
                         aria-busy={isPending}
-                        aria-label={isPending ? "Reconnecting shell" : "Reconnect shell"}
+                        aria-label={isPending ? "Reconnecting shell" : canRetryRecovery ? "Retry session recovery" : "Reconnect shell"}
                         onClick={handleReconnect}
                         className="w-full max-w-[220px]"
                       >
@@ -622,7 +792,7 @@ export function TerminalPane({
                         ) : (
                           <>
                             <RefreshCw className="size-3.5" aria-hidden="true" />
-                            <span>Reconnect shell</span>
+                            <span>{canRetryRecovery ? "Retry" : "Reconnect shell"}</span>
                           </>
                         )}
                       </Button>
@@ -630,7 +800,7 @@ export function TerminalPane({
                     <Button
                       type="button"
                       size="sm"
-                      variant={canReattach ? "ghost" : "secondary"}
+                      variant={canReattach || canRetryRecovery ? "ghost" : "secondary"}
                       disabled={isPending || !onOpenNewShell}
                       aria-label={isStandbyShell ? "Start shell" : "Open new shell"}
                       onClick={handleOpenNewShell}

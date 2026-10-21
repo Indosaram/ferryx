@@ -47,6 +47,8 @@ pub mod supervisor_linux;
 // control channel is used, and the owner is never ended without the user's exact-count consent.
 pub mod update_pending;
 pub mod workspace_service;
+#[cfg(test)]
+pub mod recovery_consistency_tests;
 
 /// Shared headless authority supplied only by the session-owning daemon.
 pub struct MachineServices {

@@ -1,8 +1,8 @@
 use ferryx_lib::cli::{
     parse_account_cli, parse_browser_cli, parse_direct_trust_cli, parse_handover_from,
     parse_launch_mode, parse_open_cli, parse_pair_cli, parse_remote_cli, print_browser_cli_error,
-    run_account_cli, run_browser_cli, run_daemon_headless, run_direct_trust_cli, run_open_cli,
-    run_pair_cli, run_remote_cli, LaunchMode,
+    run_account_cli, run_browser_cli, run_daemon_headless, run_daemon_supervisor,
+    run_direct_trust_cli, run_open_cli, run_pair_cli, run_remote_cli, LaunchMode,
 };
 
 fn main() {
@@ -14,6 +14,9 @@ fn main() {
         std::process::exit(code);
     }
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "agents") {
+        std::process::exit(ferryx_lib::agent_control::run_agents_cli(&args));
+    }
     if args.get(1).is_some_and(|arg| arg == "open") {
         let outcome = std::env::current_dir()
             .map_err(|e| format!("failed to determine current directory: {e}"))
@@ -98,5 +101,6 @@ fn main() {
             eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <account <enroll|login>|pair|remote|direct-trust|browser|--daemon>");
             std::process::exit(1);
         }
+        LaunchMode::DaemonSupervisor => std::process::exit(run_daemon_supervisor(&args)),
     }
 }

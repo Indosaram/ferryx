@@ -158,7 +158,7 @@ describe("MobileSheet", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
-  it("traps Tab and Shift+Tab inside the dialog, wrapping at both edges", () => {
+  it("ui-shell-sheets-2: traps Tab and Shift+Tab inside the dialog, wrapping at both edges", () => {
     render(
       <>
         <button type="button" data-testid="outside">Outside</button>

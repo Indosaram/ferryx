@@ -1,5 +1,5 @@
 import { act, renderHook } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { TerminalSession } from "../lib/types";
 import { createLayoutState } from "./layout";
@@ -7,15 +7,19 @@ import {
   clearWorkspaceSnapshot,
   getWorkspaceSnapshot,
   setWorkspaceSnapshot,
+  subscribeWorkspaceSnapshots,
 } from "./workspaceSnapshotCache";
 import {
   requestLocalRecoveryAdmission,
+  resetLocalRecoveryForTests,
+  setLocalRecoveryClockForTests,
   setLocalRecoveryPersistence,
   workspaceReducer,
   type LocalRecoveryAdmissionResult,
   type WorkspaceState,
   useWorkspaceStore,
 } from "./workspaceStore";
+import type { RecoveryClock } from "../lib/sessionRecovery";
 
 const describeTerminalMock = vi.fn();
 vi.mock("../lib/tauri", async (importOriginal) => ({
@@ -67,6 +71,61 @@ function stateWith(sessions: TerminalSession[], workspaceId = "local"): Workspac
   };
 }
 
+function virtualRecoveryClock(): RecoveryClock & {
+  advanceBy(ms: number): void;
+  waitForTimer(ms: number): Promise<void>;
+  waitForSignal(signal: (resolve: () => void) => void): Promise<void>;
+} {
+  let now = 0;
+  let nextId = 0;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  const delayWaiters = new Map<number, Array<() => void>>();
+  return {
+    now: () => now,
+    setTimeout(callback, ms) {
+      const id = ++nextId;
+      const delay = Math.max(0, ms);
+      timers.set(id, { at: now + delay, callback });
+      for (const resolve of delayWaiters.get(delay) ?? []) resolve();
+      delayWaiters.delete(delay);
+      return id;
+    },
+    clearTimeout(handle) {
+      timers.delete(handle as number);
+    },
+    advanceBy(ms) {
+      const target = now + ms;
+      while (true) {
+        const due = [...timers.entries()]
+          .filter(([, timer]) => timer.at <= target)
+          .sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        const [id, timer] = due;
+        timers.delete(id);
+        now = timer.at;
+        timer.callback();
+      }
+      now = target;
+    },
+    waitForTimer(ms) {
+      return new Promise((resolve) => {
+        const waiters = delayWaiters.get(ms) ?? [];
+        waiters.push(resolve);
+        delayWaiters.set(ms, waiters);
+      });
+    },
+    waitForSignal(signal) {
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("timed out waiting for virtual recovery signal")), 5_000);
+        signal(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    },
+  };
+}
+
 describe("LOCAL_SESSIONS_RECONCILED", () => {
   it("clears reconnecting on a live local session and adopts the live epoch", () => {
     const state = stateWith([session("s1", "local", "b1")]);
@@ -90,6 +149,21 @@ describe("LOCAL_SESSIONS_RECONCILED", () => {
       live: new Map([["b1", { daemonEpoch: "epoch-old", running: true, incarnation: "incarnation-1" }]]),
     });
     expect(next.sessions.s1).toMatchObject({ lifecycle: "running", lastOutputSequence: "450" });
+  });
+
+  it("reconciles a loaded retrying session only when authoritative identity proof arrives", () => {
+    const initial = { ...session("loaded", "local", "backend-loaded"), incarnation: "inc-1", remoteConnectionState: "reconnecting" as const };
+    const next = workspaceReducer(stateWith([initial]), {
+      type: "LOCAL_SESSIONS_RECONCILED",
+      live: new Map([["backend-loaded", { daemonEpoch: "epoch-2", running: true, incarnation: "inc-1" }]]),
+    });
+    expect(next.sessions.loaded).toMatchObject({
+      backendSessionId: "backend-loaded",
+      incarnation: "inc-1",
+      daemonEpoch: "epoch-2",
+      lifecycle: "running",
+    });
+    expect(next.sessions.loaded.remoteConnectionState).toBeUndefined();
   });
 
   it("preserves a missing local session identity as retryable uncertainty", () => {
@@ -151,7 +225,125 @@ describe("LOCAL_SESSIONS_RECONCILED", () => {
   });
 });
 
+afterEach(() => {
+  resetLocalRecoveryForTests();
+  clearWorkspaceSnapshot();
+});
+
+function waitForSnapshotUpdate(
+  predicate: () => boolean,
+  timeoutMs = 5_000,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      unsubscribe();
+      reject(new Error("timed out waiting for workspace snapshot update"));
+    }, timeoutMs);
+    const unsubscribe = subscribeWorkspaceSnapshots(() => {
+      if (predicate()) {
+        clearTimeout(timer);
+        unsubscribe();
+        resolve();
+      }
+    });
+    if (predicate()) {
+      clearTimeout(timer);
+      unsubscribe();
+      resolve();
+    }
+  });
+}
+
 describe("local recovery retry identity_conflict revalidation", () => {
+  it("retries a background-loaded session beyond thirty virtual seconds and recovers the retained identity", async () => {
+    resetLocalRecoveryForTests();
+    const clock = virtualRecoveryClock();
+    const retained = session("loaded-s1", "local", "backend-loaded-1");
+    retained.incarnation = "incarnation-1";
+    retained.remoteConnectionState = "reconnecting";
+    setWorkspaceSnapshot("local", stateWith([retained]));
+    setLocalRecoveryClockForTests(clock);
+    let probeCount = 0;
+    let resolveProbe: ((value: unknown) => void) | undefined;
+    let notifyProbeStarted: (() => void) | undefined;
+    describeTerminalMock.mockReset();
+    describeTerminalMock.mockImplementation(() => {
+      probeCount += 1;
+      const started = notifyProbeStarted;
+      const result = new Promise((resolve) => { resolveProbe = resolve; });
+      if (started) notifyProbeStarted = undefined;
+      started?.();
+      return result;
+    });
+    const delays = [250, 500, 1_000, 2_000, 4_000, 4_000, 4_000, 4_000, 4_000, 4_000, 4_000];
+    let virtualElapsed = 0;
+    const firstProbe = clock.waitForSignal((resolve) => { notifyProbeStarted = resolve; });
+    const firstTimer = clock.waitForTimer(250);
+    setLocalRecoveryPersistence(async () => {});
+    await firstProbe;
+    resolveProbe?.(null);
+    await firstTimer;
+    let probeStarted = new Promise<void>((resolve) => { notifyProbeStarted = resolve; });
+    clock.advanceBy(250);
+    await probeStarted;
+    virtualElapsed += 250;
+    for (let index = 1; index < delays.length; index += 1) {
+      const delay = delays[index];
+      const timerScheduled = clock.waitForTimer(delay);
+      resolveProbe?.(null);
+      await timerScheduled;
+      const nextProbeStarted = clock.waitForSignal((resolve) => { notifyProbeStarted = resolve; });
+      clock.advanceBy(delay);
+      probeStarted = nextProbeStarted;
+      await probeStarted;
+      virtualElapsed += delay;
+    }
+    expect(virtualElapsed).toBeGreaterThan(30_000);
+    const ready = clock.waitForSignal((resolve) => {
+      const unsubscribe = subscribeWorkspaceSnapshots(() => {
+        const current = getWorkspaceSnapshot("local")?.sessions["loaded-s1"];
+        if (current?.backendSessionId === "backend-loaded-1" && current.daemonEpoch === "epoch-new" &&
+            current.incarnation === "incarnation-1") {
+          unsubscribe();
+          resolve();
+        }
+      });
+      if (getWorkspaceSnapshot("local")?.sessions["loaded-s1"]?.daemonEpoch === "epoch-new") {
+        unsubscribe();
+        resolve();
+      }
+    });
+    let onAdmissionResult: (result: LocalRecoveryAdmissionResult) => void = () => {};
+    const admissionResult = new Promise<LocalRecoveryAdmissionResult>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out waiting for loaded-session admission result")), 5_000);
+      onAdmissionResult = (result) => {
+        if (result.kind !== "pending") {
+          clearTimeout(timer);
+          resolve(result);
+        }
+      };
+    });
+    requestLocalRecoveryAdmission("local", "loaded-s1", false, (result) => {
+      onAdmissionResult(result);
+    });
+    resolveProbe?.({
+      sessionId: "backend-loaded-1", incarnation: "incarnation-1", daemonEpoch: "epoch-new", running: true,
+      recoveryAuthority: { status: "running", incarnation: "incarnation-1", daemonEpoch: "epoch-new" },
+    });
+    await ready;
+    expect(await admissionResult).toMatchObject({ kind: "ready", session: {
+      backendSessionId: "backend-loaded-1", incarnation: "incarnation-1", daemonEpoch: "epoch-new",
+    } });
+    const recovered = getWorkspaceSnapshot("local")?.sessions["loaded-s1"];
+    expect(recovered).toMatchObject({ backendSessionId: "backend-loaded-1", incarnation: "incarnation-1", daemonEpoch: "epoch-new" });
+    expect(recovered?.remoteConnectionState).toBeUndefined();
+    expect(recovered?.lifecycle).toBe("running");
+    expect(probeCount).toBe(delays.length + 1);
+    resetLocalRecoveryForTests();
+    clearWorkspaceSnapshot("local");
+    describeTerminalMock.mockReset();
+  });
+
   it("passive admission without revalidate returns blocked on identity conflict without probing", () => {
     describeTerminalMock.mockReset();
     const s = session("s1", "local", "b1");
@@ -182,11 +374,14 @@ describe("local recovery retry identity_conflict revalidation", () => {
         daemonEpoch: "epoch-new",
       },
     });
+    const updated = waitForSnapshotUpdate(() => {
+      const current = getWorkspaceSnapshot("local")?.sessions.s1;
+      return Boolean(current && current.backendUnavailableReason !== "identity_conflict");
+    });
     const results: LocalRecoveryAdmissionResult[] = [];
     requestLocalRecoveryAdmission("local", "s1", true, (r) => results.push(r));
     expect(results).toEqual([{ kind: "pending" }]);
-    await Promise.resolve();
-    await Promise.resolve();
+    await updated;
     expect(describeTerminalMock).toHaveBeenCalledWith("b1");
     const current = getWorkspaceSnapshot("local")?.sessions.s1;
     expect(current?.backendSessionId).toBe("b1");
@@ -214,10 +409,22 @@ describe("local recovery retry identity_conflict revalidation", () => {
       },
     });
     const results: LocalRecoveryAdmissionResult[] = [];
-    requestLocalRecoveryAdmission("local", "s1", true, (r) => results.push(r));
+    let onSettled: () => void = () => {};
+    const settled = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error("timed out waiting for admission decision"));
+      }, 5_000);
+      onSettled = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    requestLocalRecoveryAdmission("local", "s1", true, (r) => {
+      results.push(r);
+      if (r.kind !== "pending") onSettled();
+    });
     expect(results).toEqual([{ kind: "pending" }]);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settled;
     expect(results).toEqual([{ kind: "pending" }, { kind: "blocked", reason: "identity_conflict" }]);
     const current = getWorkspaceSnapshot("local")?.sessions.s1;
     expect(current?.backendSessionId).toBe("b1");
@@ -246,10 +453,22 @@ describe("local recovery retry identity_conflict revalidation", () => {
       },
     });
     const results: LocalRecoveryAdmissionResult[] = [];
-    requestLocalRecoveryAdmission("local", "s1", true, (r) => results.push(r));
+    let onSettled: () => void = () => {};
+    const settled = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error("timed out waiting for admission decision"));
+      }, 5_000);
+      onSettled = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    requestLocalRecoveryAdmission("local", "s1", true, (r) => {
+      results.push(r);
+      if (r.kind !== "pending") onSettled();
+    });
     expect(results).toEqual([{ kind: "pending" }]);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settled;
     expect(results).toEqual([{ kind: "pending" }, { kind: "blocked", reason: "identity_conflict" }]);
     const current = getWorkspaceSnapshot("local")?.sessions.s1;
     expect(current?.backendSessionId).toBe("b1");
@@ -287,6 +506,11 @@ describe("local recovery retry identity_conflict revalidation", () => {
       },
     });
 
+    const updated = waitForSnapshotUpdate(() => {
+      const snap = getWorkspaceSnapshot("local");
+      return Boolean(snap?.sessions.s1 && snap.sessions.s1.backendUnavailableReason !== "identity_conflict");
+    });
+
     // Now resolve probe affirmatively:
     resolveProbe({
       sessionId: "b1",
@@ -300,9 +524,7 @@ describe("local recovery retry identity_conflict revalidation", () => {
       },
     });
 
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await updated;
 
     // Verify s1 was admitted without clobbering s2:
     const finalSnapshot = getWorkspaceSnapshot("local")!;
@@ -320,18 +542,39 @@ describe("local recovery retry identity_conflict revalidation", () => {
     const s = session("s1", "local", "b1");
     s.backendUnavailableReason = "identity_conflict";
     s.incarnation = "incarnation-1";
-    s.recoveryToken = 1;
-    s.recoveryKey = "test-key";
     setWorkspaceSnapshot("local", stateWith([s]));
-    setLocalRecoveryPersistence(async () => {});
 
     let resolveProbe: (value: unknown) => void = () => {};
+    let resolveProbeStarted!: () => void;
+    const probeStarted = new Promise<void>((resolve) => { resolveProbeStarted = resolve; });
     const heldProbe = new Promise((resolve) => { resolveProbe = resolve; });
-    describeTerminalMock.mockReturnValueOnce(heldProbe);
+    describeTerminalMock.mockImplementationOnce(() => {
+      resolveProbeStarted();
+      return heldProbe;
+    });
 
     const results: LocalRecoveryAdmissionResult[] = [];
-    requestLocalRecoveryAdmission("local", "s1", true, (r) => results.push(r));
+    let notifyResult: ((result: LocalRecoveryAdmissionResult) => void) | undefined;
+    const cancelResult = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out waiting for token-change cancellation")), 5_000);
+      notifyResult = (r) => {
+        if (r.kind === "cancelled") {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+    });
+    setLocalRecoveryPersistence(async () => {});
+    requestLocalRecoveryAdmission("local", "s1", true, (r) => {
+      results.push(r);
+      notifyResult?.(r);
+    });
     expect(results).toEqual([{ kind: "pending" }]);
+    await probeStarted;
+
+    const tokenChanged = waitForSnapshotUpdate(() =>
+      getWorkspaceSnapshot("local")?.sessions.s1?.incarnation === "incarnation-replaced",
+    );
 
     // While probe is held, external event replaces the token on s1:
     const current = getWorkspaceSnapshot("local")!;
@@ -339,9 +582,11 @@ describe("local recovery retry identity_conflict revalidation", () => {
       ...current,
       sessions: {
         ...current.sessions,
-        s1: { ...current.sessions.s1, recoveryToken: 42 },
+        s1: { ...current.sessions.s1, incarnation: "incarnation-replaced" },
       },
     });
+
+    await tokenChanged;
 
     // Resolve probe:
     resolveProbe({
@@ -356,9 +601,7 @@ describe("local recovery retry identity_conflict revalidation", () => {
       },
     });
 
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await cancelResult;
 
     // Must be cancelled / rejected because owner token changed:
     expect(results).toContainEqual({ kind: "cancelled" });
@@ -410,6 +653,9 @@ describe("local recovery retry identity_conflict revalidation", () => {
           type: "SESSION_REMOTE_STATUS",
           status: {
             sessionId: "backend-ssh-1",
+            daemonEpoch: "epoch-1",
+            incarnation: "inc-1",
+            target: { kind: "ssh", hostId: "server-1" },
             state: "reconnecting",
             generation: 1,
             failure: null,
@@ -428,6 +674,9 @@ describe("local recovery retry identity_conflict revalidation", () => {
           type: "SESSION_REMOTE_STATUS",
           status: {
             sessionId: "backend-ssh-1",
+            daemonEpoch: "epoch-1",
+            incarnation: "inc-1",
+            target: { kind: "ssh", hostId: "server-1" },
             state: "connected",
             generation: 2,
             failure: null,
@@ -462,6 +711,9 @@ describe("local recovery retry identity_conflict revalidation", () => {
           type: "SESSION_REMOTE_STATUS",
           status: {
             sessionId: "backend-ssh-2",
+            daemonEpoch: "epoch-1",
+            incarnation: "inc-2",
+            target: { kind: "ssh", hostId: "server-1" },
             state: "reconnecting",
             generation: 1,
             failure: null,

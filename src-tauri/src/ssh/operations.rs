@@ -2,6 +2,7 @@ use super::runtime::{
     error, parse_fields, powershell_data, RemoteEnvironment, RemotePlatform, POWERSHELL_GIT,
 };
 use super::{direct, SshHost};
+use crate::daemon::agent_extension::{extension_source_for, EXTENSION_AGENTS, EXTENSION_FILE_NAME};
 use crate::ipc::{IpcError, IpcErrorCode};
 use crate::terminal::shell::ShellCommandPlan;
 use std::time::Duration;
@@ -256,36 +257,173 @@ pub(crate) async fn upload_with(
     Ok(fields[0].into())
 }
 
-const POSIX_INTEGRATION_SCRIPT: &str =
-    "set -e; d=\"$HOME/.omo/agent/extensions\"; mkdir -p \"$d\"; \
-     tmp=$(mktemp \"$d/.ferryx-agent-state.XXXXXX\"); \
-     stage=; trap 'rm -f \"$tmp\"; [ -z \"$stage\" ] || rm -f \"$stage\"' EXIT; cat > \"$tmp\"; \
-     for b in \"$HOME/.omo\" \"$HOME/.pi\" \"$HOME/.omp\"; do \
-         if [ -d \"$b\" ]; then mkdir -p \"$b/agent/extensions\"; \
-             target=\"$b/agent/extensions/ferryx-agent-state.ts\"; \
-             stage=$(mktemp \"$b/agent/extensions/.ferryx-agent-state.XXXXXX\"); \
-             cp \"$tmp\" \"$stage\"; mv -f \"$stage\" \"$target\"; stage=; fi; done";
+/// Installs the extension for one agent directory (`.omo`, `.pi` or `.omp`), whose own payload
+/// arrives on stdin. A missing agent directory is left alone: Ferryx never creates one.
+pub fn posix_install_script(dir: &str) -> String {
+    format!(
+        "set -e; b=\"$HOME/\"{dir}; \
+         if [ ! -d \"$b\" ]; then cat > /dev/null; exit 0; fi; \
+         d=\"$b/agent/extensions\"; mkdir -p \"$d\"; \
+         stage=$(mktemp \"$d/.ferryx-agent-state.XXXXXX\"); \
+         trap '[ -z \"$stage\" ] || rm -f \"$stage\"' EXIT; \
+         cat > \"$stage\"; mv -f \"$stage\" \"$d/{EXTENSION_FILE_NAME}\"; stage=",
+        dir = direct::quote_posix(dir)
+    )
+}
 
-pub async fn prepare_integration(
+fn windows_install_script(dir: &str) -> String {
+    format!(
+        "$b=Join-Path $homeRoot {dir}; \
+         if ([IO.Directory]::Exists($b)) {{ \
+             $d=Join-Path $b 'agent/extensions'; [void][IO.Directory]::CreateDirectory($d); \
+             $p=Join-Path $d '{EXTENSION_FILE_NAME}'; $tmp=$p+'.'+[Guid]::NewGuid().ToString()+'.tmp'; \
+             try {{ [IO.File]::WriteAllBytes($tmp,$bytes); \
+                 if ([IO.File]::Exists($p)) {{ [IO.File]::Replace($tmp,$p,[NullString]::Value) }} else {{ [IO.File]::Move($tmp,$p) }} \
+             }} finally {{ if ([IO.File]::Exists($tmp)) {{ [IO.File]::Delete($tmp) }} }} \
+         }}",
+        dir = powershell_data(dir)
+    )
+}
+
+/// Removes one agent directory's extension file when it is byte-for-byte one of the candidate
+/// payloads, which arrive concatenated on stdin with their byte `lengths` in order. Prints one
+/// line: `removed|kept_modified|absent <agent>`. Only the file is ever deleted.
+pub fn posix_removal_script(dir: &str, agent: &str, lengths: &[usize]) -> String {
+    let lengths = lengths
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "set -e; agent={agent}; t=\"$HOME/\"{dir}\"/agent/extensions/{EXTENSION_FILE_NAME}\"; \
+         base=\"${{TMPDIR:-/tmp}}\"; base=\"${{base%/}}\"; c=; \
+         all=$(mktemp \"$base/.ferryx-remove.XXXXXX\"); \
+         trap 'rm -f \"$all\"; [ -z \"$c\" ] || rm -f \"$c\"' EXIT; cat > \"$all\"; \
+         if [ -L \"$t\" ]; then printf 'kept_modified %s\\n' \"$agent\"; exit 0; fi; \
+         if [ ! -e \"$t\" ]; then printf 'absent %s\\n' \"$agent\"; exit 0; fi; \
+         if [ ! -f \"$t\" ]; then printf 'kept_modified %s\\n' \"$agent\"; exit 0; fi; \
+         c=$(mktemp \"$base/.ferryx-candidate.XXXXXX\"); off=0; \
+         for n in {lengths}; do \
+             dd if=\"$all\" of=\"$c\" bs=1 skip=\"$off\" count=\"$n\" 2>/dev/null; \
+             if cmp -s \"$t\" \"$c\"; then rm -f \"$t\"; printf 'removed %s\\n' \"$agent\"; exit 0; fi; \
+             off=$((off + n)); \
+         done; \
+         printf 'kept_modified %s\\n' \"$agent\"",
+        agent = direct::quote_posix(agent),
+        dir = direct::quote_posix(dir),
+    )
+}
+
+fn windows_removal_script(dir: &str, agent: &str, lengths: &[usize]) -> String {
+    let lengths = lengths
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "$agent={agent}; $t=Join-Path (Join-Path $homeRoot {dir}) 'agent/extensions/{EXTENSION_FILE_NAME}'; \
+         $item=Get-Item -LiteralPath $t -Force -ErrorAction SilentlyContinue; \
+         if (!$item) {{ $state='absent' }} \
+         elseif ($item.PSIsContainer -or $item.LinkType) {{ $state='kept_modified' }} \
+         else {{ $file=[IO.File]::ReadAllBytes($t); $state='kept_modified'; $off=0; \
+             foreach ($n in @({lengths})) {{ \
+                 if ($file.Length -eq $n) {{ $same=$true; \
+                     for ($i=0; $i -lt $n; $i++) {{ if ($file[$i] -ne $bytes[$off+$i]) {{ $same=$false; break }} }}; \
+                     if ($same) {{ [IO.File]::Delete($t); $state='removed'; break }} \
+                 }}; \
+                 $off+=$n \
+             }} \
+         }}; \
+         [Console]::Write($state+' '+$agent+\"`n\")",
+        agent = powershell_data(agent),
+        dir = powershell_data(dir),
+    )
+}
+
+/// What a remote removal did, by agent id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteRemovalReport {
+    pub removed: Vec<String>,
+    /// Present but not a byte-exact Ferryx payload (user-modified, a directory or a symlink).
+    pub kept_modified: Vec<String>,
+    pub absent: Vec<String>,
+}
+
+impl RemoteRemovalReport {
+    fn record(&mut self, agent: &str, output: &[u8]) -> Result<(), IpcError> {
+        let text = String::from_utf8_lossy(output);
+        let line = text.lines().map(str::trim).rfind(|line| !line.is_empty());
+        let slot = match line.and_then(|line| line.split_once(' ')) {
+            Some(("removed", reported)) if reported == agent => &mut self.removed,
+            Some(("kept_modified", reported)) if reported == agent => &mut self.kept_modified,
+            Some(("absent", reported)) if reported == agent => &mut self.absent,
+            _ => {
+                return Err(error(
+                    IpcErrorCode::ParseError,
+                    "integration_removal",
+                    "The remote host returned an unexpected removal result",
+                ))
+            }
+        };
+        slot.push(agent.to_string());
+        Ok(())
+    }
+}
+
+fn agent_payload(agent: &str) -> Result<String, IpcError> {
+    extension_source_for(agent).ok_or_else(|| {
+        error(
+            IpcErrorCode::InternalError,
+            "integration",
+            "The bundled extension no longer declares its agent identity",
+        )
+    })
+}
+
+/// Every payload Ferryx may have written, `agent`'s own first, concatenated, with their lengths.
+fn removal_candidates(agent: &str) -> Result<(Vec<u8>, Vec<usize>), IpcError> {
+    let mut order = vec![agent];
+    order.extend(
+        EXTENSION_AGENTS
+            .iter()
+            .map(|(_, other)| *other)
+            .filter(|other| *other != agent),
+    );
+    let mut bytes = Vec::new();
+    let mut lengths = Vec::new();
+    for candidate in order {
+        let payload = agent_payload(candidate)?;
+        lengths.push(payload.len());
+        bytes.extend_from_slice(payload.as_bytes());
+    }
+    Ok((bytes, lengths))
+}
+
+/// The agent-state forwarding a new SSH pane gets: none at all while the integration is off.
+pub fn integration_forwarding<'a>(
+    enabled: bool,
+    agent_socket: Option<&'a str>,
+    state_endpoint: Option<&'a super::state_bridge::StateEndpoint>,
+) -> (
+    Option<&'a str>,
+    Option<&'a super::state_bridge::StateEndpoint>,
+) {
+    if enabled {
+        (agent_socket, state_endpoint)
+    } else {
+        (None, None)
+    }
+}
+
+async fn run_integration_script(
     host: &SshHost,
     environment: &RemoteEnvironment,
-) -> Result<(), IpcError> {
+    script: &str,
+    bytes: Vec<u8>,
+    stage: &str,
+) -> Result<Vec<u8>, IpcError> {
     environment.platform.validate_path(&environment.home)?;
-    let script = match environment.platform {
-        RemotePlatform::Posix => POSIX_INTEGRATION_SCRIPT.into(),
-        RemotePlatform::Windows => String::from(
-            "foreach ($name in @('.omo','.pi','.omp')) { \
-                 $b=Join-Path $homeRoot $name; \
-                 if ($name -eq '.omo' -or [IO.Directory]::Exists($b)) { \
-                     $d=Join-Path $b 'agent/extensions'; [void][IO.Directory]::CreateDirectory($d); \
-                     $p=Join-Path $d 'ferryx-agent-state.ts'; $tmp=$p+'.'+[Guid]::NewGuid().ToString()+'.tmp'; \
-                     try { [IO.File]::WriteAllBytes($tmp,$bytes); \
-                         if ([IO.File]::Exists($p)) { [IO.File]::Replace($tmp,$p,[NullString]::Value) } else { [IO.File]::Move($tmp,$p) } \
-                     } finally { if ([IO.File]::Exists($tmp)) { [IO.File]::Delete($tmp) } } \
-                 } \
-             }"
-        ),
-    };
     let script = match environment.platform {
         RemotePlatform::Posix => {
             format!("HOME={}; {script}", direct::quote_posix(&environment.home))
@@ -294,23 +432,51 @@ pub async fn prepare_integration(
             format!("$homeRoot={}; {script}", powershell_data(&environment.home))
         }
     };
-    data_output(
-        host,
-        environment,
-        &script,
-        crate::daemon::agent_extension::EXTENSION_SOURCE
-            .as_bytes()
-            .to_vec(),
-        Duration::from_secs(20),
-    )
-    .await
-    .map_err(|mut err| {
-        if let Some(details) = err.details.as_mut() {
-            details["stage"] = "integration".into();
-        }
-        err
-    })?;
+    data_output(host, environment, &script, bytes, Duration::from_secs(20))
+        .await
+        .map_err(|mut err| {
+            if let Some(details) = err.details.as_mut() {
+                details["stage"] = stage.into();
+            }
+            err
+        })
+}
+
+/// Installs each agent's own payload into each agent directory that already exists on the host.
+pub async fn prepare_integration(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+) -> Result<(), IpcError> {
+    for (dir, agent) in EXTENSION_AGENTS {
+        let payload = agent_payload(agent)?;
+        let script = match environment.platform {
+            RemotePlatform::Posix => posix_install_script(dir),
+            RemotePlatform::Windows => windows_install_script(dir),
+        };
+        run_integration_script(host, environment, &script, payload.into_bytes(), "integration")
+            .await?;
+    }
     Ok(())
+}
+
+/// Deletes the extension from each agent directory where it is still exactly a Ferryx payload.
+pub async fn remove_integration(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+) -> Result<RemoteRemovalReport, IpcError> {
+    let mut report = RemoteRemovalReport::default();
+    for (dir, agent) in EXTENSION_AGENTS {
+        let (bytes, lengths) = removal_candidates(agent)?;
+        let script = match environment.platform {
+            RemotePlatform::Posix => posix_removal_script(dir, agent, &lengths),
+            RemotePlatform::Windows => windows_removal_script(dir, agent, &lengths),
+        };
+        let output =
+            run_integration_script(host, environment, &script, bytes, "integration_removal")
+                .await?;
+        report.record(agent, &output)?;
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -346,12 +512,156 @@ mod drop_upload_tests {
     }
 }
 
+#[cfg(test)]
+mod forwarding_tests {
+    use super::*;
+
+    fn host() -> SshHost {
+        SshHost {
+            id: "host-one".into(),
+            label: "Test host".into(),
+            hostname: "example.test".into(),
+            username: Some("user".into()),
+            port: Some(2200),
+            identity_file: Some("~/.ssh/id_ed25519".into()),
+            jump_host: None,
+            source: crate::ssh::SshHostSource::Manual,
+            auth_method: crate::ssh::SshAuthMethod::Key,
+            disabled: None,
+        }
+    }
+
+    fn environment(platform: RemotePlatform) -> RemoteEnvironment {
+        let (executor, home) = match platform {
+            RemotePlatform::Posix => (super::super::runtime::RemoteExecutor::Sh, "/home/user"),
+            RemotePlatform::Windows => {
+                (super::super::runtime::RemoteExecutor::Powershell, r"C:\Users\user")
+            }
+        };
+        RemoteEnvironment {
+            platform,
+            executor,
+            version: "test".into(),
+            home: home.into(),
+            temp: "/tmp".into(),
+            git: true,
+        }
+    }
+
+    fn decoded_powershell(command: &str) -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let encoded = command
+            .split_whitespace()
+            .skip_while(|part| *part != "-EncodedCommand")
+            .nth(1)
+            .expect("an encoded PowerShell command");
+        let bytes = STANDARD.decode(encoded).unwrap();
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16(&units).unwrap()
+    }
+
+    #[test]
+    fn disabled_integration_omits_socket_forwarding() {
+        let endpoint = super::super::state_bridge::StateEndpoint {
+            port: 41_234,
+            token: "token-abc".into(),
+            process_id: 7,
+        };
+        let (socket, state) =
+            integration_forwarding(false, Some("/tmp/local-agent.sock"), Some(&endpoint));
+        assert!(socket.is_none() && state.is_none());
+
+        let posix = environment(RemotePlatform::Posix);
+        let plan = shell_plan(&host(), &posix, "/srv/repo", "session-123", socket, state).unwrap();
+        assert!(!plan.args.iter().any(|arg| arg == "-R"), "{:?}", plan.args);
+        assert!(!plan.args.iter().any(|arg| arg.contains("StreamLocalBindUnlink")));
+        let remote = plan.args.last().unwrap();
+        assert!(!remote.contains("FERRYX_AGENT_STATE_SOCKET"), "{remote}");
+        assert!(remote.contains("FERRYX_SESSION_ID"), "{remote}");
+
+        let windows = environment(RemotePlatform::Windows);
+        let plan =
+            shell_plan(&host(), &windows, r"C:\repo", "session-123", socket, state).unwrap();
+        let script = decoded_powershell(plan.args.last().unwrap());
+        assert!(script.contains("$env:FERRYX_AGENT_STATE_PORT=$null"), "{script}");
+        assert!(script.contains("$env:FERRYX_AGENT_STATE_TOKEN=$null"), "{script}");
+        assert!(!script.contains("41234") && !script.contains("token-abc"), "{script}");
+
+        let (socket, state) =
+            integration_forwarding(true, Some("/tmp/local-agent.sock"), Some(&endpoint));
+        assert_eq!(socket, Some("/tmp/local-agent.sock"));
+        assert_eq!(state.map(|endpoint| endpoint.port), Some(41_234));
+        let plan = shell_plan(&host(), &posix, "/srv/repo", "session-123", socket, state).unwrap();
+        assert!(plan.args.iter().any(|arg| arg == "-R"), "{:?}", plan.args);
+    }
+
+    #[test]
+    fn removal_report_rejects_a_result_for_another_agent() {
+        let mut report = RemoteRemovalReport::default();
+        report.record("pi", b"removed pi\n").unwrap();
+        report.record("omp", b"absent omp\n").unwrap();
+        report.record("omo", b"kept_modified omo\r\n").unwrap();
+        assert_eq!(report.removed, ["pi"]);
+        assert_eq!(report.absent, ["omp"]);
+        assert_eq!(report.kept_modified, ["omo"]);
+        assert!(report.record("omo", b"removed pi\n").is_err());
+        assert!(report.record("omo", b"").is_err());
+    }
+}
+
 #[cfg(all(test, unix))]
 mod installer_tests {
-    use super::POSIX_INTEGRATION_SCRIPT;
+    use super::{posix_install_script, posix_removal_script, removal_candidates};
+    use crate::daemon::agent_extension::{
+        extension_source_for, EXTENSION_AGENTS, EXTENSION_FILE_NAME,
+    };
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
-    use std::process::{Command, Stdio};
+    use std::path::Path;
+    use std::process::{Command, Output, Stdio};
+
+    fn run(script: &str, home: &Path, path: Option<String>, input: &[u8]) -> Output {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", script])
+            .env("HOME", home)
+            .env("TMPDIR", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let mut child = command.spawn().unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    fn install(home: &Path, dir: &str, agent: &str) -> Output {
+        let payload = extension_source_for(agent).unwrap();
+        run(&posix_install_script(dir), home, None, payload.as_bytes())
+    }
+
+    fn remove(home: &Path, dir: &str, agent: &str) -> String {
+        let (bytes, lengths) = removal_candidates(agent).unwrap();
+        let output = run(&posix_removal_script(dir, agent, &lengths), home, None, &bytes);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn extension_file(home: &Path, dir: &str) -> std::path::PathBuf {
+        home.join(dir).join("agent/extensions").join(EXTENSION_FILE_NAME)
+    }
+
+    fn assert_no_staging_left(home: &Path) {
+        for entry in std::fs::read_dir(home).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(!name.starts_with(".ferryx-"), "leftover {name}");
+        }
+    }
 
     #[test]
     fn failed_copy_stops_installation_and_removes_staging_files() {
@@ -360,42 +670,24 @@ mod installer_tests {
         let bin = fixture.path().join("bin");
         let extensions = home.join(".omo/agent/extensions");
         std::fs::create_dir_all(&extensions).unwrap();
-        std::fs::create_dir_all(home.join(".pi")).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
-        let target = extensions.join("ferryx-agent-state.ts");
+        let target = extensions.join(EXTENSION_FILE_NAME);
         std::fs::write(&target, b"original").unwrap();
-        let cp = bin.join("cp");
-        std::fs::write(
-            &cp,
-            "#!/bin/sh\ncase \"$2\" in \"$HOME\"/.omo/*) exit 17;; esac\nexec /bin/cp \"$@\"\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&cp, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut child = Command::new("sh")
-            .args(["-c", POSIX_INTEGRATION_SCRIPT])
-            .env("HOME", &home)
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"replacement")
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
+        let mv = bin.join("mv");
+        std::fs::write(&mv, "#!/bin/sh\nexit 17\n").unwrap();
+        std::fs::set_permissions(&mv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = run(
+            &posix_install_script(".omo"),
+            &home,
+            Some(format!("{}:/usr/bin:/bin", bin.display())),
+            b"replacement",
+        );
         assert!(
             !output.status.success(),
             "a failed copy must not report success"
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"original");
         assert_eq!(std::fs::read_dir(&extensions).unwrap().count(), 1);
-        assert!(!home
-            .join(".pi/agent/extensions/ferryx-agent-state.ts")
-            .exists());
     }
 
     #[test]
@@ -404,29 +696,118 @@ mod installer_tests {
         for name in [".omo", ".pi", ".omp"] {
             std::fs::create_dir(fixture.path().join(name)).unwrap();
         }
-        let mut child = Command::new("sh")
-            .args(["-c", POSIX_INTEGRATION_SCRIPT])
-            .env("HOME", fixture.path())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(b"extension").unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        for name in [".omo", ".pi", ".omp"] {
+            let output = run(&posix_install_script(name), fixture.path(), None, b"extension");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         for name in [".omo", ".pi", ".omp"] {
             let directory = fixture.path().join(name).join("agent/extensions");
             assert_eq!(
-                std::fs::read(directory.join("ferryx-agent-state.ts")).unwrap(),
+                std::fs::read(directory.join(EXTENSION_FILE_NAME)).unwrap(),
                 b"extension"
             );
             assert_eq!(std::fs::read_dir(directory).unwrap().count(), 1);
         }
+    }
+
+    #[test]
+    fn install_writes_each_agents_own_identity() {
+        let fixture = tempfile::tempdir().unwrap();
+        for (dir, _) in EXTENSION_AGENTS {
+            std::fs::create_dir(fixture.path().join(dir)).unwrap();
+        }
+        for (dir, agent) in EXTENSION_AGENTS {
+            let output = install(fixture.path(), dir, agent);
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
+        for (dir, agent) in EXTENSION_AGENTS {
+            let written = std::fs::read_to_string(extension_file(fixture.path(), dir)).unwrap();
+            assert_eq!(written, extension_source_for(agent).unwrap());
+            assert!(
+                written.contains(&format!("// FERRYX_INTEGRATION_ID={agent}\n")),
+                "{dir} must declare {agent}"
+            );
+            assert!(written.contains(&format!("const AGENT_ID = \"{agent}\";")));
+            let directory = fixture.path().join(dir).join("agent/extensions");
+            assert_eq!(std::fs::read_dir(directory).unwrap().count(), 1);
+        }
+        assert_no_staging_left(fixture.path());
+    }
+
+    #[test]
+    fn install_does_not_create_missing_omo_dir() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::create_dir(fixture.path().join(".pi")).unwrap();
+        for (dir, agent) in EXTENSION_AGENTS {
+            let output = install(fixture.path(), dir, agent);
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
+        assert!(!fixture.path().join(".omo").exists(), "a missing .omo must stay missing");
+        assert!(!fixture.path().join(".omp").exists());
+        assert_eq!(
+            std::fs::read_to_string(extension_file(fixture.path(), ".pi")).unwrap(),
+            extension_source_for("pi").unwrap()
+        );
+    }
+
+    #[test]
+    fn removal_deletes_matching_files_only() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path();
+        for (dir, _) in EXTENSION_AGENTS {
+            std::fs::create_dir_all(home.join(dir).join("agent/extensions")).unwrap();
+        }
+        std::fs::write(extension_file(home, ".omo"), extension_source_for("omo").unwrap()).unwrap();
+        // A file written with another agent's identity is still a Ferryx payload.
+        std::fs::write(extension_file(home, ".pi"), extension_source_for("omo").unwrap()).unwrap();
+        std::fs::write(extension_file(home, ".omp"), extension_source_for("omp").unwrap()).unwrap();
+        let neighbour = home.join(".omp/agent/extensions/user-extension.ts");
+        std::fs::write(&neighbour, extension_source_for("omp").unwrap()).unwrap();
+
+        for (dir, agent) in EXTENSION_AGENTS {
+            assert_eq!(remove(home, dir, agent), format!("removed {agent}\n"));
+            assert!(!extension_file(home, dir).exists(), "{dir}");
+            assert!(home.join(dir).join("agent/extensions").is_dir(), "directories stay");
+        }
+        assert!(neighbour.is_file(), "only the Ferryx file name is ever deleted");
+        assert_no_staging_left(home);
+    }
+
+    #[test]
+    fn removal_reports_kept_modified() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path();
+        std::fs::create_dir_all(home.join(".omo/agent/extensions")).unwrap();
+        let edited = format!("{}\n// user edit\n", extension_source_for("omo").unwrap());
+        std::fs::write(extension_file(home, ".omo"), &edited).unwrap();
+        let pi = extension_source_for("pi").unwrap();
+        let truncated = &pi.as_bytes()[..64];
+        std::fs::create_dir_all(home.join(".pi/agent/extensions")).unwrap();
+        std::fs::write(extension_file(home, ".pi"), truncated).unwrap();
+        std::fs::create_dir_all(extension_file(home, ".omp")).unwrap();
+
+        assert_eq!(remove(home, ".omo", "omo"), "kept_modified omo\n");
+        assert_eq!(std::fs::read_to_string(extension_file(home, ".omo")).unwrap(), edited);
+        assert_eq!(remove(home, ".pi", "pi"), "kept_modified pi\n");
+        assert_eq!(std::fs::read(extension_file(home, ".pi")).unwrap(), truncated);
+        assert_eq!(remove(home, ".omp", "omp"), "kept_modified omp\n");
+        assert!(extension_file(home, ".omp").is_dir(), "a directory is never deleted");
+        assert_no_staging_left(home);
+    }
+
+    #[test]
+    fn removal_reports_absent() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path();
+        std::fs::create_dir_all(home.join(".pi/agent/extensions")).unwrap();
+        assert_eq!(remove(home, ".omo", "omo"), "absent omo\n");
+        assert_eq!(remove(home, ".pi", "pi"), "absent pi\n");
+        assert!(!home.join(".omo").exists(), "removal never creates directories");
+        assert_no_staging_left(home);
     }
 }
 
