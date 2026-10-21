@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SCENARIO_IDS, newSummary, selectScenarios, assertion, settle, block, applyQ00Gate, computeExitCode, validateSummary } from './lib/summary.mjs';
 import { readFileSync } from 'node:fs';
-import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths, selfTestExitCode, SELF_TEST_PATCH, teardownRun, runWithTeardown, prepareSelfTestWorktree, teardownExtras, releaseOwnerFile, releaseContinuity } from './run.mjs';
+import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths, selfTestExitCode, SELF_TEST_PATCH, teardownRun, runWithTeardown, prepareSelfTestWorktree, teardownExtras, releaseOwnerFile, releaseContinuity, prepareBaselineDist } from './run.mjs';
 import { hostFor } from './lib/hosts.mjs';
 import { confirmOwner, ownerStartMatches, ownerIdentity, parseStarting, awaitPendingStart, retireOwner, freshOwner, STARTING_WINDOW_MS } from './scenarios/common.mjs';
 import { Q06, killLaunchedGui } from './scenarios/q04-q06.mjs';
@@ -483,4 +483,36 @@ test('owner confirmation rejects a reused pid whose live start time differs from
   const fresh = ownerWorld({ owner: 1, publish: [{ pid: 9, alive: true }] });
   fresh.w.ownerStartTime = 1;
   await assert.rejects(freshOwner(fresh.ctx, { name: 'A' }), (e) => e.code === 'OWNER_UNCONFIRMED' && e.detail.pid === 9);
+});
+
+test('baseline step gets an empty ui/dist in its own worktree, idempotently, on every platform', async () => {
+  const { mkdtempSync, writeFileSync: wf, readdirSync, readFileSync: rf, rmSync, statSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  // Host paths: each platform joins ui/dist under the given worktree with its own separator.
+  const seen = [];
+  const fake = { call: async (op, a) => { seen.push({ op, ...a }); return { status: 0, stdout: '', stderr: '' }; } };
+  assert.equal(await prepareBaselineDist({ host: hostFor('windows'), agent: fake, worktree: 'C:\\wt\\base' }), 'C:\\wt\\base\\ui\\dist');
+  assert.equal(await prepareBaselineDist({ host: hostFor('linux'), agent: fake, worktree: '/wt/base' }), '/wt/base/ui/dist');
+  assert.equal(await prepareBaselineDist({ host: hostFor('mac'), agent: fake, worktree: '/wt/base' }), '/wt/base/ui/dist');
+  assert.deepEqual(seen.map((c) => [c.op, c.command, c.args.at(-1)]), [['exec', 'node', 'C:\\wt\\base\\ui\\dist'], ['exec', 'node', '/wt/base/ui/dist'], ['exec', 'node', '/wt/base/ui/dist']]);
+  // A failing mkdir is a typed refusal, not a silent pass into the cargo step.
+  const failing = { call: async () => ({ status: 1, stdout: '', stderr: 'EACCES' }) };
+  await assert.rejects(prepareBaselineDist({ host: hostFor('linux'), agent: failing, worktree: '/wt/base' }), (e) => e.code === 'BASELINE_DIST_FAILED');
+  // The exact command it sends really creates the dir, twice in a row, and leaves an existing dist untouched.
+  const root = mkdtempSync(join(tmpdir(), 'qa-baseline-dist-'));
+  try {
+    const local = { call: async (op, a) => { const r = spawnSync(process.execPath, a.args, { encoding: 'utf8' }); return { status: r.status, stdout: r.stdout, stderr: r.stderr }; } };
+    const host = hostFor(process.platform === 'win32' ? 'windows' : 'linux');
+    const dir = await prepareBaselineDist({ host, agent: local, worktree: root });
+    assert.equal(statSync(dir).isDirectory(), true);
+    assert.deepEqual(readdirSync(dir), []);
+    wf(join(dir, 'index.html'), 'kept');
+    await prepareBaselineDist({ host, agent: local, worktree: root });
+    assert.equal(rf(join(dir, 'index.html'), 'utf8'), 'kept');
+    assert.deepEqual(readdirSync(root), ['ui']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
