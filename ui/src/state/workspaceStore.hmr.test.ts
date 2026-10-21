@@ -73,4 +73,4 @@ it("disposes and reinstalls the actual snapshot owner without closing retained P
   expect(persist).toHaveBeenCalledTimes(1);
   expect(probes.close).not.toHaveBeenCalled();
   expect(probes.listeners.size).toBe(1);
-}, 1000);
+});

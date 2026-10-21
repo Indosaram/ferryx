@@ -296,6 +296,7 @@ describe("FilePreviewDialog", () => {
     expect(openExternalFile).toHaveBeenCalledWith({
       path: REQUEST.path,
       backendSessionId: SOURCE.backendSessionId,
+      workspaceId: "workspace-1",
       line: REQUEST.line,
       col: REQUEST.col,
     });
