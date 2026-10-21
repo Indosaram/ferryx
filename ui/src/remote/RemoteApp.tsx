@@ -12,10 +12,8 @@ import {
   getRemoteAuthToken,
   setRemoteAuthToken,
 } from "../lib/remoteClient";
-import { remoteHostKey, remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
-import { getOrCreateInstallationId } from "../lib/storageKeys";
+import { remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
 import { MobileHostDrawer } from "./MobileHostDrawer";
-import { suggestDeviceName } from "./deviceIdentity";
 import {
   contextName,
   getRemoteDocumentTitle,
@@ -358,16 +356,15 @@ function directCandidate(type: "lan" | "tailscale", value: unknown): CandidateEn
 }
 
 /**
- * Reads direct-endpoint hints from the current URL first (a freshly scanned pairing
- * link carries the desktop's addresses) and falls back to the last hints this device
- * stored. Any hint found in the URL is persisted so later loads keep the fast path.
+ * Reads direct-endpoint hints from the current URL query first and falls back to the last
+ * hints this device stored. Any hint found in the URL is persisted so later loads keep the
+ * fast path.
  */
 function readDirectCandidateHints(hostId: string, readUrl: boolean): CandidateEndpoint[] {
   const storageKey = `${DIRECT_HINT_STORAGE_KEY}_${hostId}`;
   const params = new URLSearchParams(readUrl ? window.location.search : "");
-  const fragment = new URLSearchParams(readUrl ? window.location.hash.slice(1) : "");
   const fromUrl = [
-    ...(fragment.get("hints") ?? params.get("hints") ?? "").split(",").map((value) => {
+    ...(params.get("hints") ?? "").split(",").map((value) => {
       const origin = normalizeDirectCandidateOrigin(value);
       const type = origin && /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(new URL(origin).hostname)
         ? "tailscale" : "lan";
@@ -997,7 +994,6 @@ async function readChatHistory(args: {
 
 export const RemoteApp: React.FC = () => {
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
-  const [pairingHash, setPairingHash] = useState(window.location.hash);
   const [magicLinkOverridden, setMagicLinkOverridden] = useState(() => hasMagicLinkCode());
   // The mode the user asked for lives here, ABOVE the keyed connection below: the key is the
   // host identity, so a pairing adoption or a host switch remounts that subtree. Chat stays the
@@ -1005,23 +1001,17 @@ export const RemoteApp: React.FC = () => {
   // remount instead of being discarded with the component that held it. Nothing is persisted and
   // no store is involved - the owner is simply the first component that does not remount.
   const [viewMode, setViewMode] = useState<"chat" | "terminal" | "browser">("chat");
-  useEffect(() => {
-    const onHashChange = () => setPairingHash(window.location.hash);
-    window.addEventListener("hashchange", onHashChange);
-    return () => window.removeEventListener("hashchange", onHashChange);
-  }, []);
-  const pairingRequested = /^#pair=([0-9a-fA-F]{32}|[0-9]{6})(?:&|$)/i.test(pairingHash);
-  const bypassSavedHost = pairingRequested || magicLinkOverridden;
+  const bypassSavedHost = magicLinkOverridden;
   const host = bypassSavedHost ? null : selectActiveHost(state);
   const hostId = (bypassSavedHost ? null : state.activeHostId) ?? `local:${window.location.origin}`;
   const address = host?.address ?? window.location.origin;
   const relayUrl = new URL(address.includes("://") ? address : `http://${address}`).origin;
   return (
     <RemoteHostConnection
-      key={`${hostId}:${relayUrl}:${pairingRequested ? pairingHash : ""}`}
+      key={`${hostId}:${relayUrl}`}
       hostId={hostId}
       relayUrl={relayUrl}
-      readUrlHints={pairingRequested || state.activeHostId === null || magicLinkOverridden}
+      readUrlHints={state.activeHostId === null || magicLinkOverridden}
       viewMode={viewMode}
       onViewModeChange={setViewMode}
       initialMagicLinkRequested={magicLinkOverridden}
@@ -1091,7 +1081,6 @@ export const RemoteHostConnection: React.FC<{
   const [magicLinkActive, setMagicLinkActive] = useState(initialMagicLinkRequested);
   const [token, setToken] = useState<string | null>(() => {
     if (initialMagicLinkRequested) return null;
-    if (readUrlHints && /^#pair=([0-9a-fA-F]{32}|[0-9]{6})(?:&|$)/i.test(window.location.hash)) return null;
     const storedHost = remoteHostStore.getState().hosts[hostId];
     const scoped = storedHost?.deviceToken ?? getRemoteAuthToken(hostId);
     if (scoped || !readUrlHints) return scoped;
@@ -1193,7 +1182,6 @@ export const RemoteHostConnection: React.FC<{
   const [transport, setTransport] = useState<CandidateEndpoint>(() => relayEndpoint(relayUrl));
   const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const activeHost = remoteHostState.hosts[hostId] ?? null;
-  const pairingBaseUrl = hostTransportUrl(activeHost, relayUrl);
   const [optimisticSessionId, setOptimisticSessionId] = useState<string | null>(null);
   const [terminalRetryGeneration, setTerminalRetryGeneration] = useState(0);
   const pendingSelectionRef = useRef<RemoteContextOption | null>(null);
@@ -1596,30 +1584,6 @@ export const RemoteHostConnection: React.FC<{
     desktopSyncTick,
   ]);
 
-  const handlePaired = useCallback((newToken: string, metadata?: { machineId?: unknown; displayName?: unknown }) => {
-    const machineId = optionalString(metadata?.machineId);
-    const displayName = optionalString(metadata?.displayName);
-    if (machineId && displayName) {
-      remoteHostStore.upsertHost({
-        machineId,
-        displayName,
-        relayOrigin: relayUrl,
-        deviceToken: newToken,
-        lastSeenAt: Date.now(),
-        directHints,
-      });
-      remoteHostStore.setActiveHost(remoteHostKey(relayUrl, machineId));
-      clearRemoteAuthToken(hostId);
-      return;
-    }
-    const host = remoteHostStore.getState().hosts[hostId];
-    if (host) {
-      remoteHostStore.upsertHost({ ...host, deviceToken: newToken, lastSeenAt: Date.now(), authStatus: "paired" });
-      clearRemoteAuthToken(hostId);
-    } else setRemoteAuthToken(newToken, hostId);
-    setToken(newToken);
-  }, [directHints, hostId, relayUrl]);
-
   const rollbackTransport = useCallback(() => {
     setTransport((current) => current.url === relayUrl ? current : relayEndpoint(relayUrl));
   }, [relayUrl]);
@@ -1833,45 +1797,6 @@ export const RemoteHostConnection: React.FC<{
     }, 150);
   }, [refreshWorkspace]);
   scheduleInventoryRefreshRef.current = scheduleInventoryRefresh;
-
-  useEffect(() => {
-    const hash = window.location.hash;
-    if (!readUrlHints || !hash.startsWith("#pair=")) return;
-
-    const code = new URLSearchParams(hash.slice(1)).get("pair");
-    if (!code || !/^([0-9a-fA-F]{32}|[0-9]{6})$/i.test(code)) return;
-    let cancelled = false;
-    const installationId = getOrCreateInstallationId();
-    fetch(apiUrl(pairingBaseUrl, "/api/v1/pair/exchange"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        code,
-        deviceName: suggestDeviceName(),
-        installationId,
-      }),
-    })
-      .then((response) => {
-        if (!response.ok) throw new Error(`Pairing failed (${response.status})`);
-        return response.json();
-      })
-      .then((data) => {
-        if (cancelled || typeof data.token !== "string") return;
-        handlePaired(data.token, data);
-        if (window.history && typeof window.history.replaceState === "function") {
-          window.history.replaceState(null, "", window.location.pathname + window.location.search);
-        }
-        window.location.hash = "";
-      })
-      .catch((error) => {
-        console.warn("QR pairing failed", error);
-        if (window.history && typeof window.history.replaceState === "function") {
-          window.history.replaceState(null, "", window.location.pathname + window.location.search);
-        }
-        window.location.hash = "";
-      });
-    return () => { cancelled = true; };
-  }, [handlePaired, readUrlHints, pairingBaseUrl]);
 
   useEffect(() => {
     if (token) void refreshWorkspace();
