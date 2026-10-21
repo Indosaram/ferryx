@@ -413,6 +413,14 @@ export function useAccountWorktrees(
           headers: { Authorization: `Bearer ${pair.token}` },
         });
         sessionsRequest.catch(() => undefined);
+        /* The desktop snapshot lists local members only; SSH-host projects come from the
+           gateway's workspace state. Its failure only hides SSH rows, never the machine. */
+        const stateRequest = desktopLocalSnapshotExists
+          ? localTunnel.transport.fetchLike("/api/v1/workspace/state", {
+              headers: { Authorization: `Bearer ${pair.token}` },
+            })
+          : null;
+        stateRequest?.catch(() => undefined);
         await Promise.all(Array.from({ length: Math.min(4, validProjects.length) }, worktreeWorker));
 
         for (const [index, proj] of validProjects.entries()) {
@@ -450,6 +458,40 @@ export function useAccountWorktrees(
           }
         }
 
+        const memberWorkspaceIds = (projsData.projects ?? []).map((p) => p.workspaceId);
+        if (stateRequest) {
+          try {
+            const stateRes = await stateRequest;
+            if (stateRes.status >= 200 && stateRes.status < 300) {
+              const stateData = JSON.parse(new TextDecoder().decode(stateRes.body)) as {
+                projects?: Array<{ workspaceId?: unknown; hostLabel?: unknown; worktrees?: Array<{ worktreeLabel?: unknown }> }>;
+              };
+              for (const project of Array.isArray(stateData?.projects) ? stateData.projects : []) {
+                const wsId = project.workspaceId;
+                if (typeof wsId !== "string" || !wsId.startsWith("ssh:") || memberWorkspaceIds.includes(wsId)) continue;
+                const rawLabel = project.worktrees?.[0]?.worktreeLabel;
+                // Only the final path segment is shown; absolute paths never reach the picker.
+                const folder = (typeof rawLabel === "string" ? rawLabel : "")
+                  .split(/[\\/]/).filter(Boolean).at(-1) ?? wsId;
+                const hostLabel = typeof project.hostLabel === "string" && project.hostLabel.trim()
+                  ? project.hostLabel.trim()
+                  : null;
+                const projectLabel = hostLabel ? `${folder} (${hostLabel})` : folder;
+                memberWorkspaceIds.push(wsId);
+                projectLabels[wsId] = projectLabel;
+                machineOpts.push({
+                  workspaceId: wsId, worktreeSlug: null, worktreeLabel: folder, projectLabel,
+                  machineId: machine.machineId, machineDisplayName: machineName,
+                  machinePlatform: machine.platform || "remote", machineOnline: machine.online !== false,
+                });
+              }
+            }
+          } catch {
+            // SSH projects stay hidden; local discovery is unaffected.
+          }
+          if (!isGenerationAlive()) return;
+        }
+
         const sessRes = await sessionsRequest;
 
         if (sessRes.status < 200 || sessRes.status >= 300) {
@@ -472,7 +514,7 @@ export function useAccountWorktrees(
           setMachineStatuses((prev) => ({
             ...prev,
             [machine.machineId]: { machine, status: "ready", options: machineOpts, projectLabels,
-              desktopLocalSnapshotExists, memberWorkspaceIds: (projsData.projects ?? []).map((p) => p.workspaceId) },
+              desktopLocalSnapshotExists, memberWorkspaceIds },
           }));
         }
       } catch (err) {

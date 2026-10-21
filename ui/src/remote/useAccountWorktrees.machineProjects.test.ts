@@ -361,4 +361,82 @@ describe("useAccountWorktrees machine projects discovery", () => {
     const conn = await result.current.acquireConnection(machine.machineId);
     expect(conn?.deviceToken).toBe("device-2");
   });
+
+  const sshMachine = (machineId: string): AccountMachineView => ({
+    machineId, machineRecordId: "record", publicKey: "pub", attachPublicKey: "attach",
+    relayOrigin: relayUrl, displayName: "Desktop", platform: "macos", online: true,
+    enrollmentEpoch: "1", lastSeenAt: 1,
+  });
+  const mockPairing = (machine: AccountMachineView) => {
+    vi.mocked(listMachines).mockResolvedValue([machine]);
+    vi.mocked(allocateSession).mockResolvedValue({ sessionId: "ssh-session" });
+    vi.mocked(requestGrant).mockResolvedValue({ grantId: "g", machineId: machine.machineId,
+      relayOrigin: relayUrl, machineAttachPublicKey: "attach", pairingToken: "p", grantScope: "machine", expiresAt: 1 });
+    vi.mocked(redeemInTunnel).mockResolvedValue({ token: "token", device: { id: "d", name: "D" },
+      machineId: machine.machineId, displayName: "Desktop" });
+  };
+  const sshJson = (value: unknown): TunnelResponse => ({ status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify(value)) });
+  const SSH_ID = "ssh:f41f0c2a";
+
+  it("lists SSH-host projects from workspace state and keeps their running sessions", async () => {
+    const machine = sshMachine("ssh-desktop");
+    mockPairing(machine);
+    const fetchLike = vi.fn(async (path: string) => {
+      if (path === "/api/v1/workspace/projects") return sshJson({ desktopLocalSnapshotExists: true, projects: [] });
+      if (path === "/api/v1/workspace/projects?scope=desktopLocal") return sshJson({ desktopLocalSnapshotExists: true,
+        projects: [{ workspaceId: "member", availability: "ready" }] });
+      if (path === "/api/v1/workspace/worktrees?workspaceId=member") return sshJson({ worktrees: [{ workspaceId: "member", identity: null, branch: "main" }] });
+      if (path === "/api/v1/workspace/state") return sshJson({
+        context: { workspaceId: "member" },
+        projects: [
+          { workspaceId: "member", worktrees: [{ worktreeSlug: null, worktreeLabel: "main" }] },
+          { workspaceId: SSH_ID, hostLabel: "omarchy", worktrees: [{ worktreeSlug: null, worktreeLabel: "mhc" }] },
+        ],
+      });
+      if (path === "/api/v1/sessions") return sshJson({ revision: "1", completeness: "complete", sessions: [
+        { workspaceId: SSH_ID, sessionId: "ssh-sess-1", running: true, title: "zsh",
+          target: { machineId: machine.machineId, sessionId: "ssh-sess-1", daemonEpoch: 7 } },
+      ] });
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.mocked(openTunnel).mockImplementation(async () => ({ transport: { fetchLike, openWebSocket: vi.fn(), close: vi.fn() }, close: vi.fn() }));
+    const { result } = renderHook(() => useAccountWorktrees(relayUrl, sessionToken, true));
+    await waitFor(() => expect(result.current.machineStatuses[machine.machineId]?.status).toBe("ready"));
+    await waitFor(() => expect(result.current.accountOptions.some((option) => option.sessionId === "ssh-sess-1")).toBe(true));
+    const root = result.current.accountOptions.find((option) => option.workspaceId === SSH_ID && !option.sessionId);
+    expect(root).toMatchObject({ worktreeSlug: null, worktreeLabel: "mhc", projectLabel: "mhc (omarchy)" });
+    expect(root?.unavailable).toBeFalsy();
+    const session = result.current.accountOptions.find((option) => option.sessionId === "ssh-sess-1");
+    expect(session).toMatchObject({ workspaceId: SSH_ID, worktreeLabel: "mhc", projectLabel: "mhc (omarchy)", running: true });
+    expect(result.current.accountOptions.some((option) => option.workspaceId === "member" && option.worktreeLabel === "main")).toBe(true);
+    expect(fetchLike).not.toHaveBeenCalledWith(expect.stringContaining(`/api/v1/workspace/worktrees?workspaceId=${encodeURIComponent(SSH_ID)}`), expect.anything());
+    expect(fetchLike).not.toHaveBeenCalledWith(expect.stringContaining("workspaceId=ssh"), expect.anything());
+  });
+
+  it("keeps local rows and a ready machine when workspace state fails", async () => {
+    const machine = sshMachine("ssh-state-fail");
+    mockPairing(machine);
+    const fetchLike = vi.fn(async (path: string) => {
+      if (path === "/api/v1/workspace/projects") return sshJson({ desktopLocalSnapshotExists: true, projects: [] });
+      if (path === "/api/v1/workspace/projects?scope=desktopLocal") return sshJson({ desktopLocalSnapshotExists: true,
+        projects: [{ workspaceId: "member", availability: "ready" }] });
+      if (path === "/api/v1/workspace/worktrees?workspaceId=member") return sshJson({ worktrees: [{ workspaceId: "member", identity: null, branch: "main" }] });
+      if (path === "/api/v1/workspace/state") return { status: 500, headers: {}, body: new TextEncoder().encode("SSH inventory unavailable") };
+      if (path === "/api/v1/sessions") return sshJson({ revision: "1", completeness: "complete", sessions: [
+        { workspaceId: "member", sessionId: "local-sess", running: true, worktree: { wsId: "member", slug: null },
+          target: { machineId: machine.machineId, sessionId: "local-sess", daemonEpoch: 7 } },
+        { workspaceId: SSH_ID, sessionId: "ssh-sess-1", running: true,
+          target: { machineId: machine.machineId, sessionId: "ssh-sess-1", daemonEpoch: 7 } },
+      ] });
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.mocked(openTunnel).mockImplementation(async () => ({ transport: { fetchLike, openWebSocket: vi.fn(), close: vi.fn() }, close: vi.fn() }));
+    const { result } = renderHook(() => useAccountWorktrees(relayUrl, sessionToken, true));
+    await waitFor(() => expect(result.current.machineStatuses[machine.machineId]?.status).toBe("ready"));
+    await waitFor(() => expect(result.current.accountOptions.some((option) => option.sessionId === "local-sess")).toBe(true));
+    expect(fetchLike).toHaveBeenCalledWith("/api/v1/workspace/state", expect.anything());
+    expect(result.current.machineStatuses[machine.machineId]?.error).toBeUndefined();
+    expect(result.current.accountOptions.map((option) => option.workspaceId).sort()).toEqual(["member", "member"]);
+    expect(result.current.accountOptions.some((option) => option.workspaceId === SSH_ID)).toBe(false);
+  });
 });

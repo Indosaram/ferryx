@@ -19,6 +19,7 @@ import { isMonochromeAgentLogo, resolveAgentLogo } from "../lib/agentIcon";
 import { cn } from "../lib/cn";
 import {
   RemoteInventoryProjectRow,
+  RemoteInventoryRail,
   RemoteInventorySessionRow,
   RemoteInventoryWorktreeRow,
   touchStatusLabel,
@@ -579,6 +580,16 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   useEffect(() => {
     if (!selectorOpen) setInboxOpen(false);
   }, [selectorOpen]);
+  // Projects start expanded, like the desktop sidebar; only the ones the user folds are tracked.
+  const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleProject = (key: string) => {
+    setCollapsedProjects((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   const renderPaneRow = (tab: RemoteTerminalTabInfo, siblingWorktreeLabel: string | null | undefined) => {
     const logo = resolveAgentLogo(tab.agentType);
@@ -604,8 +615,8 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         onClick={() => selectPane(tab)}
         className={cn(
           rowDensity === "touch"
-            ? "flex min-h-11 w-full items-center gap-1.5 rounded-md py-0.5 pl-6 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
-            : "flex min-h-[24px] w-full items-center gap-1.5 rounded-md py-0.5 pl-6 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60",
+            ? "flex min-h-11 w-full items-center gap-1.5 rounded-md py-0.5 pl-4 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+            : "flex min-h-[24px] w-full items-center gap-1.5 rounded-md py-0.5 pl-4 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60",
           caption ? "pr-16" : null,
           paneActive ? "bg-white/[0.06] text-foreground" : "text-worktree-sidebar-foreground/85 hover:bg-white/[0.04]",
         )}
@@ -706,13 +717,11 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         <RemoteInventoryWorktreeRow
           label={optionName(selectable)}
           visibleLabel={visibleLabel}
-          isRootWorktree={worktree.isRootWorktree}
           active={worktree.active}
           disabled={pending !== null || selectable.unavailable === true}
           busy={isPendingOption(selectable)}
           activity={worktree.activity}
           density={rowDensity}
-          hasSessions={worktree.entries.length > 0}
           onSelect={() => {
             onSelectorOpenChange(false);
             selectSelection(worktree.selection);
@@ -822,23 +831,30 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                 </p>
               )
             ) : (
-              inventory.projects.map((project) => (
-                <section
-                  key={project.key}
-                  data-project-key={project.key}
-                  className="mb-0.5 last:mb-0"
-                  aria-label={project.workspaceId}
-                >
-                  <RemoteInventoryProjectRow
-                    label={project.label}
-                    activity={project.activity}
-                    density={rowDensity}
-                  />
-                  <div data-testid="remote-project-worktrees">
-                    {project.worktrees.map((worktree) => renderWorktree(worktree))}
-                  </div>
-                </section>
-              ))
+              inventory.projects.map((project) => {
+                const expanded = !collapsedProjects.has(project.key);
+                return (
+                  <section
+                    key={project.key}
+                    data-project-key={project.key}
+                    className="mb-0.5 last:mb-0"
+                    aria-label={project.workspaceId}
+                  >
+                    <RemoteInventoryProjectRow
+                      label={project.label}
+                      activity={project.activity}
+                      expanded={expanded}
+                      onToggle={() => toggleProject(project.key)}
+                      density={rowDensity}
+                    />
+                    {expanded ? (
+                      <RemoteInventoryRail>
+                        {project.worktrees.map((worktree) => renderWorktree(worktree))}
+                      </RemoteInventoryRail>
+                    ) : null}
+                  </section>
+                );
+              })
             )}
             {inventory.orphanPanes.length > 0 ? (
               <section className="mb-0.5 last:mb-0" aria-label="Other panes">

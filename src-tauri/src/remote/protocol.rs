@@ -283,6 +283,9 @@ pub struct RemoteTerminalSession {
 pub struct RemoteProjectInfo {
     pub workspace_id: String,
     pub worktrees: Vec<RemoteWorktreeInfo>,
+    /// Display label of the SSH host that owns this project; absent for local projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

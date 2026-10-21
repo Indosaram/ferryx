@@ -1,9 +1,21 @@
 use super::state::RemoteGatewayState;
 use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
 use crate::ssh::projects::{self, RemoteProject};
+use crate::ssh::SshHost;
 use std::collections::BTreeMap;
 
 pub(super) async fn projects(state: &RemoteGatewayState) -> Result<Vec<RemoteProject>, IpcError> {
+    Ok(labeled_projects(state)
+        .await?
+        .into_iter()
+        .map(|(project, _)| project)
+        .collect())
+}
+
+/// Enabled SSH projects paired with their host's sanitized display label.
+pub(super) async fn labeled_projects(
+    state: &RemoteGatewayState,
+) -> Result<Vec<(RemoteProject, Option<String>)>, IpcError> {
     let Some(store) = state.ssh_store_path.read().clone() else {
         return Ok(Vec::new());
     };
@@ -18,7 +30,7 @@ pub(super) async fn projects(state: &RemoteGatewayState) -> Result<Vec<RemotePro
         let mut enabled = Vec::new();
         for id in saved.keys() {
             match projects::resolve(&store, id) {
-                Ok((project, _)) => enabled.push(project),
+                Ok((project, host)) => enabled.push((project, host_label(&host))),
                 Err(error) if error.code == IpcErrorCode::WorkspaceNotFound => {}
                 Err(error) => return Err(error),
             }
@@ -26,6 +38,11 @@ pub(super) async fn projects(state: &RemoteGatewayState) -> Result<Vec<RemotePro
         Ok(enabled)
     })
     .await
+}
+
+fn host_label(host: &SshHost) -> Option<String> {
+    let label = host.label.trim();
+    (!label.is_empty() && !label.chars().any(char::is_control)).then(|| label.to_owned())
 }
 
 pub(super) fn label(project: &RemoteProject) -> String {

@@ -591,6 +591,7 @@ impl WorkspaceSnapshotCache {
             .iter()
             .map(|w| RemoteProjectInfo {
                 workspace_id: w.workspace_id.clone(),
+                host_label: None,
                 worktrees: w
                     .worktrees
                     .iter()
@@ -903,7 +904,7 @@ async fn get_workspace_state(
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
-    let ssh_projects = super::ssh::projects(&state).await.map_err(|_| {
+    let ssh_projects = super::ssh::labeled_projects(&state).await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "SSH inventory unavailable".into(),
@@ -914,18 +915,19 @@ async fn get_workspace_state(
             !crate::ssh::projects::is_remote(id)
                 || ssh_projects
                     .iter()
-                    .any(|project| project.workspace_id == id)
+                    .any(|(project, _)| project.workspace_id == id)
         })
     });
     let active_selection_for_epoch = active_selection.clone();
     let mut projects = cache.projects(active_selection.as_ref());
-    projects.extend(ssh_projects.iter().map(|project| RemoteProjectInfo {
+    projects.extend(ssh_projects.iter().map(|(project, host_label)| RemoteProjectInfo {
         workspace_id: project.workspace_id.clone(),
         worktrees: vec![RemoteWorktreeInfo {
             worktree_slug: None,
             worktree_label: Some(super::ssh::label(project)),
             attention: None,
         }],
+        host_label: host_label.clone(),
     }));
     let mut active_ws = active_selection
         .as_ref()
@@ -1104,7 +1106,8 @@ async fn get_workspace_state(
     }
 
     let worktrees = cache.worktrees_for(&active_ws, active_selection.as_ref());
-    let mut sessions = get_active_running_sessions(&state, &cache, &ssh_projects).await;
+    let ssh_rows: Vec<_> = ssh_projects.iter().map(|(project, _)| project.clone()).collect();
+    let mut sessions = get_active_running_sessions(&state, &cache, &ssh_rows).await;
 
     if let Some(ref session_id) = active_context.session_id {
         if let Some(s) = sessions.iter_mut().find(|s| &s.session_id == session_id) {
