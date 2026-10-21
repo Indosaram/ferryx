@@ -132,7 +132,7 @@ const logger = createSwitchDebugLogger({
   runId,
   now: Date.now,
   sink: (entry) => {
-    console.info("[ferryx:switch]", entry);
+    if (debugEnabled) console.info("[ferryx:switch]", entry);
     if (!isTauri) return;
     if (pendingSinkCount >= MAX_PENDING_SINK_ENTRIES) {
       console.warn("[ferryx:switch] log sink dropped: queue full");

@@ -22,7 +22,10 @@ pub const MAX_LOG_FILE_BYTES: u64 = 5 * 1024 * 1024;
 
 static DEBUG_SINK_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static DEBUG_SINK_DROPS: AtomicU64 = AtomicU64::new(0);
-static SINK_ROTATION_LOCK: Mutex<()> = Mutex::new(());
+/// Open append handles plus bytes written, keyed by log path. Holding the lock also serializes
+/// rotation. Tracking the size in memory avoids a `metadata` call per entry.
+static SINK_FILES: Mutex<Option<HashMap<std::path::PathBuf, (std::fs::File, u64)>>> =
+    Mutex::new(None);
 
 static NATIVE_DEBUG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static NATIVE_DEBUG_RUN_ID: Mutex<Option<String>> = Mutex::new(None);
@@ -464,22 +467,51 @@ fn append_switch_debug_entry(
     }
 
     let path = switch_debug_path(root, file_name);
-    let _rotation_guard = SINK_ROTATION_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut sink_files = SINK_FILES.lock().unwrap_or_else(|p| p.into_inner());
+    let files = sink_files.get_or_insert_with(HashMap::new);
 
-    if let Ok(metadata) = std::fs::metadata(&path) {
-        if metadata.len() >= MAX_LOG_FILE_BYTES {
-            let rotated_path = root.join(format!("{file_name}.1"));
-            let _ = std::fs::rename(&path, &rotated_path);
-        }
+    let open = |path: &std::path::Path| -> Result<(std::fs::File, u64), IpcError> {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|error| IpcError::internal(format!("open switch debug log: {error}")))?;
+        let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        Ok((file, len))
+    };
+
+    if !files.contains_key(&path) {
+        let opened = open(&path)?;
+        files.insert(path.clone(), opened);
+    }
+    if files.get(&path).is_some_and(|(_, len)| *len >= MAX_LOG_FILE_BYTES) {
+        files.remove(&path);
+        let rotated_path = root.join(format!("{file_name}.1"));
+        let _ = std::fs::rename(&path, &rotated_path);
+        let opened = open(&path)?;
+        files.insert(path.clone(), opened);
     }
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| IpcError::internal(format!("open switch debug log: {error}")))?;
-    writeln!(file, "{serialized}")
-        .map_err(|error| IpcError::internal(format!("write switch debug log: {error}")))
+    let Some((file, len)) = files.get_mut(&path) else {
+        return Err(IpcError::internal("switch debug log handle missing"));
+    };
+    match writeln!(file, "{serialized}") {
+        Ok(()) => {
+            *len += serialized.len() as u64 + 1;
+            Ok(())
+        }
+        Err(error) => {
+            // Drop the handle so the next entry reopens the log.
+            files.remove(&path);
+            Err(IpcError::internal(format!("write switch debug log: {error}")))
+        }
+    }
+}
+
+/// Drops every cached sink handle so tests can rewrite or delete log files out of band.
+#[cfg(test)]
+fn close_cached_switch_debug_files() {
+    *SINK_FILES.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
 #[tauri::command]
@@ -718,6 +750,7 @@ mod tests {
             .map(|line| serde_json::from_str(line).expect("JSONL record"))
             .collect();
         assert_eq!(entries, vec![wire.clone(), wire]);
+        close_cached_switch_debug_files();
         root.close().expect("remove owned sink");
     }
 
@@ -853,6 +886,7 @@ mod tests {
         assert!(main.contains("worktree.select.requested") && !main.contains("vt_consumed"));
         assert!(render_log.contains("vt_consumed") && !render_log.contains("worktree.select"));
 
+        close_cached_switch_debug_files();
         std::fs::write(
             root.path().join(SWITCH_DEBUG_RENDER_FILE),
             vec![b'x'; MAX_LOG_FILE_BYTES as usize],
@@ -862,6 +896,7 @@ mod tests {
         assert!(root.path().join(format!("{SWITCH_DEBUG_RENDER_FILE}.1")).exists());
         let main_after = std::fs::read_to_string(root.path().join(SWITCH_DEBUG_FILE)).expect("main log");
         assert_eq!(main_after, main, "render rotation must not touch the lifecycle log");
+        close_cached_switch_debug_files();
         root.close().expect("remove owned sink");
     }
 
@@ -947,6 +982,7 @@ mod pane_liveness_diagnostics_tests {
         let err = append_switch_debug_entry(root.path(), SWITCH_DEBUG_FILE, &oversized_entry);
         assert!(err.is_err());
         assert_eq!(debug_sink_drop_count(), 1);
+        close_cached_switch_debug_files();
         root.close().expect("remove owned sink");
     }
 

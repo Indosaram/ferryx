@@ -1613,27 +1613,59 @@ where
     // per-session input queue open for the whole main-thread rendezvous, so the NEXT keystroke
     // could not start until this one's receipt arrived. Deliver it out of band instead: the write
     // is already durable, and the anchor updates a moment later.
+    //
+    // Coalesced per session: one delivery task runs at a time and a burst of keystrokes only marks
+    // it dirty, so it loops once more and reads the latest receipt instead of queueing one main
+    // thread rendezvous and emit per keystroke. One task per session keeps emits in order.
+    {
+        let mut pending = PENDING_INPUT_RECEIPTS.lock();
+        let pending = pending.get_or_insert_with(std::collections::HashMap::new);
+        if let Some(dirty) = pending.get_mut(session_id) {
+            *dirty = true;
+            return Ok(());
+        }
+        pending.insert(session_id.to_string(), true);
+    }
     let receipt_app = app.clone();
     let receipt_state = state.clone();
     let receipt_session = session_id.to_string();
     tauri::async_runtime::spawn(async move {
-        match dispatch_native_terminal_receipt(&receipt_app, &receipt_state, &receipt_session).await
-        {
-            Ok(receipt) => {
-                let _ = receipt_app.emit(NATIVE_TERMINAL_INPUT_RECEIPT_EVENT, receipt);
+        loop {
+            {
+                let mut pending = PENDING_INPUT_RECEIPTS.lock();
+                let pending = pending.get_or_insert_with(std::collections::HashMap::new);
+                match pending.get_mut(&receipt_session) {
+                    Some(dirty) if *dirty => *dirty = false,
+                    _ => {
+                        pending.remove(&receipt_session);
+                        break;
+                    }
+                }
             }
-            Err(error) => {
-                // A missed anchor update is cosmetic; the keystroke already landed.
-                tracing::debug!(
-                    session_id = %receipt_session,
-                    %error,
-                    "Native terminal input receipt unavailable; IME anchor keeps its last value"
-                );
+            match dispatch_native_terminal_receipt(&receipt_app, &receipt_state, &receipt_session)
+                .await
+            {
+                Ok(receipt) => {
+                    let _ = receipt_app.emit(NATIVE_TERMINAL_INPUT_RECEIPT_EVENT, receipt);
+                }
+                Err(error) => {
+                    // A missed anchor update is cosmetic; the keystroke already landed.
+                    tracing::debug!(
+                        session_id = %receipt_session,
+                        %error,
+                        "Native terminal input receipt unavailable; IME anchor keeps its last value"
+                    );
+                }
             }
         }
     });
     Ok(())
 }
+
+/// Sessions with an input-receipt delivery task in flight; the flag is true when another
+/// keystroke landed since the task last read the receipt.
+static PENDING_INPUT_RECEIPTS: parking_lot::Mutex<Option<std::collections::HashMap<String, bool>>> =
+    parking_lot::Mutex::new(None);
 
 pub async fn send_native_terminal_input_with_stage_logging<R: Runtime, F, Fut>(
     app: &AppHandle<R>,
