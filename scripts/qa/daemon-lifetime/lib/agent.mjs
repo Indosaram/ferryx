@@ -252,8 +252,9 @@ export function createAgent({ platform, runId, runDir, allowRoots = [], home = o
     sha256: async ({ file }) => createHash('sha256').update(readFileSync(file)).digest('hex'),
     stat: async ({ file }) => { const s = statSync(file); return { size: s.size, mtimeMs: s.mtimeMs }; },
     // ---- daemon clients; each connection is a handle ----
-    dataOpen: async ({ runtimeDir, version = 5, allowMismatch = false }) => {
-      const { conn, handshake } = await connectData(runtimeDir, platform, { version, allowMismatch });
+    dataOpen: async ({ runtimeDir, version = 5, allowMismatch = false, socketPath = null }) => {
+      if (socketPath) inRun(socketPath);
+      const { conn, handshake } = await connectData(runtimeDir, platform, { version, allowMismatch, socketPath });
       const handle = nextHandle++;
       const output = new Map();
       const waiters = new Set();
@@ -325,11 +326,16 @@ export function createAgent({ platform, runId, runDir, allowRoots = [], home = o
       }
     },
     // Resolves when the file's content matches pattern (directory change events plus a bounded poll).
-    waitLog: async ({ file, pattern, flags = '', deadlineMs = 30_000 }) => {
+    // fromLine skips that many non-empty lines (receipts.mjs receiptCount), so a wait is scoped to
+    // lines appended after an offset recorded before the operation, never matched by an earlier one.
+    waitLog: async ({ file, pattern, flags = '', fromLine = 0, deadlineMs = 30_000 }) => {
       const re = new RegExp(pattern, flags);
       const dir = path.dirname(file);
       mkdirSync(dir, { recursive: true });
-      const read = () => readLogText(file);
+      const read = () => {
+        const text = readLogText(file);
+        return fromLine > 0 ? text.split(/\r?\n/).filter((line) => line.trim()).slice(fromLine).join('\n') : text;
+      };
       const matched = await waitForContent({ read, re, deadlineMs, subscribe: (test) => { const w = watch(dir, test); return () => w.close(); } });
       return matched === null ? { matched: null, timedOut: true } : { matched };
     },

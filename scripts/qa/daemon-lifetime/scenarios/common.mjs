@@ -365,10 +365,13 @@ export async function nonceRoundTrip(ctx, conn, sessionId, result, label) {
   const w = await conn.call(D.write(sessionId, echoCommand(ctx.platform, marker)));
   const out = await conn.waitOutput(sessionId, marker, 15_000);
   assertion(result, `${label}: write accepted`, w.type === 'writeOk', w);
-  const ok = assertion(result, `${label}: nonce ${marker} echoed exactly once`, !out.timedOut && out.count === 1, { count: out.count, timedOut: Boolean(out.timedOut) });
+  const passed = !out.timedOut && out.count === 1;
+  const text = String(out.text ?? '');
+  // On failure: did the tty echo the Ctrl-C and the typed command (input reached the terminal)?
+  const failure = { count: out.count, timedOut: Boolean(out.timedOut), sawInterruptEcho: text.includes('^C'), sawCommandEcho: text.includes(marker.slice(0, Math.floor(marker.length / 2))), length: text.length, tail: text.slice(-600) };
+  const ok = assertion(result, `${label}: nonce ${marker} echoed exactly once`, passed, passed ? { count: out.count, timedOut: false } : failure);
   if (!ok) {
     // Diagnosable failure (Q01 count 0 in run-q00fix-all): what the session sent, and the daemon's view.
-    const text = String(out.text ?? '');
     let describe;
     try { describe = await conn.describe(); } catch (error) { describe = { error: String(error?.message ?? error) }; }
     await evidence(ctx, result, `nonce-${marker}.json`, { label, sessionId, marker, dsrReplies: out.dsrReplies ?? null, receivedBytes: text.length, receivedTail: text.slice(-SEED_TEXT_TAIL), describe });
@@ -409,11 +412,17 @@ export async function retireOwner(ctx, { depth = 0 } = {}) {
     if (depth > 0) return { retired: false, pid: pending.pid, reason: 'another pending start published an owner while retiring', pending };
     return { ...(await retireOwner(ctx, { depth: depth + 1 })), pending };
   }
-  if (ctx.state.conn) {
-    const desc = await ctx.state.conn.describe().catch(() => ({ sessions: [] }));
-    for (const s of desc.sessions ?? []) await ctx.state.conn.call({ type: 'close', sessionId: s.backendId }).catch(() => {});
-    await ctx.state.conn.close().catch(() => {});
-    ctx.state.conn = null;
+  // A fresh connection to the current owner: ctx.state.conn may still name a generation that has
+  // since handed over (rerun2: Q08's after-record recovery made B the owner while the scenario
+  // connection was C's), and closing through it leaves the owner's sessions open, so
+  // RetireWhenIdle answers live:1 and never exits.
+  if (ctx.state.conn) await ctx.state.conn.close().catch(() => {});
+  ctx.state.conn = null;
+  const conn = await dataConn(ctx).catch(() => null);
+  if (conn) {
+    const desc = await conn.describe().catch(() => ({ sessions: [] }));
+    for (const s of desc.sessions ?? []) await conn.call({ type: 'close', sessionId: s.backendId }).catch(() => {});
+    await conn.close().catch(() => {});
   }
   const ctl = await controlConn(ctx);
   if (!ctl) return { retired: false, pid: owner.pid, reason: 'no control endpoint' };

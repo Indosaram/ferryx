@@ -317,6 +317,11 @@ export async function runWithTeardown({ summary, work, teardown, stop, writeSumm
   }
 }
 
+/** The QA daemons' own log: FERRYX_DATA_DIR (layout.data, guards.mjs isolationEnv) + logs/daemon.log. */
+export function daemonLogFile(platform, layout) {
+  return joinFor(platform, layout.data, 'logs', 'daemon.log');
+}
+
 /**
  * Teardown for every exit path of a run, including a build or setup failure before any scenario.
  * Recorded pids only, QA-named jobs only, the run's own dirs only. A failing step is recorded in
@@ -341,6 +346,15 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
     for (const name of JSON.parse(listed.stdout || '[]')) {
       try { await copyLog(name); } catch (error) { if (/EBUSY/.test(String(error?.message ?? error))) locked.push(name); else throw error; }
     }
+  });
+  // Every QA daemon writes <FERRYX_DATA_DIR>/logs/daemon.log (daemon/logging.rs open_log), outside
+  // layout.logs: run-int1 and run-q08 lost the only record of the Q08 handover aborts this way.
+  await step('copy-daemon-log', async () => {
+    // A layout without a data dir (no isolation layout yet) has no daemon log to copy.
+    if (!layout.data) return;
+    const file = daemonLogFile(host.platform, layout);
+    const text = await agent.call('readFile', { file });
+    if (text !== null) writeFileSync(path.join(localEvidence, 'runlog-daemon.log'), text);
   });
   // The private sshd's remote-helper daemon outlives the session that started it (it daemonises
   // outside the run dirs): record any not yet recorded before the kill, remove its root after.

@@ -1363,6 +1363,95 @@ fn remove_stale_socket_after_lock(path: &Path) -> Result<(), String> {
     }
 }
 
+#[cfg(test)]
+mod endpoint_artifact_tests {
+    use super::*;
+
+    fn publish(path: &Path, contents: &str) {
+        #[cfg(unix)]
+        {
+            let _ = contents;
+            // A replaced socket is renamed aside, not unlinked, so its inode stays allocated and
+            // the new bind cannot reuse it: the replacement has a different identity for sure.
+            if path.exists() {
+                fs::rename(path, path.with_extension("replaced")).unwrap();
+            }
+            // A bound socket, then its listener closed: the path stays, as after a retire.
+            drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+        }
+        #[cfg(not(unix))]
+        fs::write(path, contents).unwrap();
+    }
+
+    /// A clean exit removes the endpoint file this owner published (run-r6d: a daemon.port
+    /// left behind kept every later GUI from starting an owner) and never one a later owner
+    /// replaced at the same path.
+    #[test]
+    fn only_endpoint_files_that_still_name_this_owner_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join("daemon.endpoint");
+        let replaced = dir.path().join("control.endpoint");
+        publish(&own, "51970");
+        publish(&replaced, "51971");
+        let recorded: Vec<EndpointArtifact> = [&own, &replaced]
+            .iter()
+            .map(|path| EndpointArtifact { path: path.to_path_buf(), identity: endpoint_artifact_identity(path).unwrap() })
+            .collect();
+        // A later owner publishes its own endpoint at the second path.
+        publish(&replaced, "53058");
+        assert_eq!(remove_owned_endpoint_artifacts(&recorded), vec![own.clone()]);
+        assert!(!own.exists(), "this owner's endpoint must be gone");
+        assert!(replaced.exists(), "a later owner's endpoint must survive");
+    }
+}
+
+/// What makes a public endpoint file this owner's: on Unix the socket inode it bound (a later
+/// owner binds a new one), elsewhere the port or token the file carries (a later owner writes
+/// its own).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EndpointIdentity {
+    #[cfg(unix)]
+    Inode { dev: u64, ino: u64 },
+    #[cfg(not(unix))]
+    Contents(String),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EndpointArtifact {
+    pub path: PathBuf,
+    pub identity: EndpointIdentity,
+}
+
+pub(crate) fn endpoint_artifact_identity(path: &Path) -> Option<EndpointIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::symlink_metadata(path).ok()?;
+        Some(EndpointIdentity::Inode { dev: meta.dev(), ino: meta.ino() })
+    }
+    #[cfg(not(unix))]
+    {
+        fs::read_to_string(path).ok().map(EndpointIdentity::Contents)
+    }
+}
+
+/// Removes each recorded endpoint file that still names this daemon; a file a later owner
+/// replaced is left alone. Returns the removed paths. Blocking.
+pub(crate) fn remove_owned_endpoint_artifacts(artifacts: &[EndpointArtifact]) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    for artifact in artifacts {
+        if endpoint_artifact_identity(&artifact.path).as_ref() != Some(&artifact.identity) {
+            continue;
+        }
+        match fs::remove_file(&artifact.path) {
+            Ok(()) => removed.push(artifact.path.clone()),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(%error, path = %artifact.path.display(), "Failed to remove endpoint artifact"),
+        }
+    }
+    removed
+}
+
 /// Runtime file carrying this boot's daemon transport token, beside the `daemon.port` file the
 /// loopback listener publishes. A loopback TCP port has no filesystem ownership check, so the
 /// published port alone must not be enough to drive the daemon.
@@ -1660,6 +1749,9 @@ pub struct DaemonServer {
     /// authenticate a client.
     #[cfg(not(unix))]
     transport_token: String,
+    /// Public endpoint files this daemon published or serves, removed on a clean exit while it
+    /// is still the owner (shutdown_gracefully).
+    published_endpoints: Mutex<Vec<EndpointArtifact>>,
     #[cfg(test)]
     helper_home: Option<String>,
     remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
@@ -3286,6 +3378,7 @@ impl DaemonServer {
             agent_integration,
             #[cfg(not(unix))]
             transport_token: generate_transport_token(),
+            published_endpoints: Mutex::new(Vec::new()),
             #[cfg(test)]
             helper_home: isolated_dir
                 .as_ref()
@@ -3676,13 +3769,10 @@ impl DaemonServer {
         Some(tokio::spawn(async move {
             let mut clients = tokio::task::JoinSet::new();
             loop {
-                if !manager.accept_gate_open() {
-                    manager.wait_accept_open().await;
-                    continue;
-                }
-                let accepted = tokio::select! {
-                    accepted = listener.accept() => accepted,
-                    () = manager.wait_accept_closed() => continue,
+                // None: the listener belongs to the successor now; close this copy.
+                let Some(accepted) = manager.gated_accept(|| listener.accept()).await else {
+                    drop(listener);
+                    break;
                 };
                 let Ok((stream, _)) = accepted else {
                     continue;
@@ -3931,6 +4021,26 @@ impl DaemonServer {
             .await
         {
             tracing::error!(%message, "Failed to persist remote sessions while shutting down");
+        }
+        // A clean exit takes its public endpoint with it, so the next launcher sees Missing.
+        // Only an owner (it still holds the daemon locks) published the files on disk; a
+        // draining predecessor handed its locks and listeners to the successor and leaves them.
+        if self.handover_manager.holds_lock_files() {
+            let artifacts = self.published_endpoints.lock().clone();
+            let removed =
+                crate::ipc::run_blocking(move || Ok(remove_owned_endpoint_artifacts(&artifacts))).await;
+            tracing::info!(?removed, "Removed this owner's public endpoint artifacts");
+        }
+    }
+
+    /// Records a public endpoint file this owner serves (data/control socket, or on loopback
+    /// transports the port and token files), with the identity it has right now.
+    pub(crate) fn note_published_endpoint(&self, path: &Path) {
+        if let Some(identity) = endpoint_artifact_identity(path) {
+            self.published_endpoints.lock().push(EndpointArtifact {
+                path: path.to_path_buf(),
+                identity,
+            });
         }
     }
 
@@ -4698,6 +4808,9 @@ impl DaemonServer {
         #[cfg(unix)]
         fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
             .map_err(|error| format!("Failed to secure daemon socket: {error}"))?;
+        self.note_published_endpoint(&socket_path);
+        #[cfg(not(unix))]
+        self.note_published_endpoint(&get_transport_token_path());
 
         tracing::info!("rorca daemon listening on {}", socket_path.display());
 
@@ -4745,14 +4858,15 @@ impl DaemonServer {
 
         loop {
             // Public accepts stop while a commit is decided and forever once this daemon has
-            // handed its listener to a successor (todo 8); the legacy socket is not gated.
-            if !self.handover_manager.accept_gate_open() {
-                self.handover_manager.wait_accept_open().await;
-                continue;
-            }
-            let accepted = tokio::select! {
-                accepted = listener.accept() => accepted,
-                () = self.handover_manager.wait_accept_closed() => continue,
+            // handed its listener to a successor (todo 8); the legacy socket is not gated. Once
+            // handed over, this copy is closed: a draining predecessor that kept it left the
+            // path connectable with nobody accepting after the successor retired (run-int1
+            // Q08b), and it keeps serving its retained sessions on the legacy socket until
+            // check_retirement_if_empty exits the process.
+            let Some(accepted) = self.handover_manager.gated_accept(|| listener.accept()).await else {
+                drop(listener);
+                std::future::pending::<()>().await;
+                unreachable!("pending never resolves");
             };
             match accepted {
                 Ok((stream, _)) => {

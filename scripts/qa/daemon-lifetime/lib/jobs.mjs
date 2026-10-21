@@ -147,7 +147,8 @@ ${envXml}
       // QA root because its name carries this run id.
       if (unitName.endsWith('.service')) {
         if (!unitName.startsWith(`${base}-`) && unitName !== `${base}.service`) throw new Error(`refusing to delete non-QA unit file ${unitName}`);
-        await agent.call('exec', { command: 'sh', args: ['-c', 'rm -f -- "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$1"', 'sh', unitName] });
+        // The QA env prefix drop-in (installQaEnvDropIn) carries the run id in its name too.
+        await agent.call('exec', { command: 'sh', args: ['-c', 'd="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"; rm -f -- "$d/$1"; rm -rf -- "$d/$2"', 'sh', unitName, `${base}-.service.d`] });
       }
       return true;
     }
@@ -156,5 +157,32 @@ ${envXml}
     return true;
   }
 
-  return { inspect, windowsTree, listQaJobs, start, installLegacy, remove, jobName, label, unit, task, base };
+  /**
+   * Linux: a systemd prefix drop-in (`<base>-.service.d`, applied to every `<base>-*.service`)
+   * giving each generation unit of this run its QA-only variables. The
+   * handover_v1_rev build (24cbfd25) renders its units without them (its forwarded_env predates
+   * d9dd5334's QA_NAME_KEYS), so its daemon runs isolated without a QA supervisor name,
+   * supervisor::supported() is false, and RequestUpgrade answers UPGRADE_REFUSED ("No daemon
+   * supervisor is supported in this runtime"). HEAD forwards the same variables itself.
+   */
+  async function installQaEnvDropIn(_key, env) {
+    if (platform !== 'linux') throw new Error('QA env drop-ins are a Linux unit feature');
+    const name = `${base}-.service`;
+    return agent.call('exec', {
+      command: 'sh',
+      args: ['-c', 'umask 022; d="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$1.d"; mkdir -p "$d" && cat > "$d/qa-env.conf"', 'sh', name],
+      input: qaEnvDropIn(env),
+    });
+  }
+
+  return { inspect, windowsTree, listQaJobs, start, installLegacy, installQaEnvDropIn, remove, jobName, label, unit, task, base };
+}
+
+/** QA-only variables a QA-named unit needs (HEAD supervisor_linux QA_NAME_KEYS + QA_BARRIER_KEYS). */
+export const QA_UNIT_ENV_KEYS = ['FERRYX_DAEMON_SUPERVISOR_NAME', 'FERRYX_QA_BARRIER_DIR', 'FERRYX_QA_RUN_ID', 'FERRYX_QA_SSH_KNOWN_HOSTS'];
+
+export function qaEnvDropIn(env) {
+  const lines = QA_UNIT_ENV_KEYS.filter((k) => env[k]).map((k) => `Environment="${k}=${env[k]}"`);
+  if (!lines.some((l) => l.startsWith('Environment="FERRYX_DAEMON_SUPERVISOR_NAME='))) throw new Error('QA env drop-in needs FERRYX_DAEMON_SUPERVISOR_NAME');
+  return `[Service]\n${lines.join('\n')}\n`;
 }

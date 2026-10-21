@@ -224,6 +224,8 @@ export async function Q11(ctx, result) {
   ctx.sshd = ctx.sshd ?? await startSshd(ctx);
   if (ctx.sshd.unavailable) return block(result, 'SSHD_UNAVAILABLE', ctx.sshd.unavailable);
   const conn = ctx.state.conn;
+  // An earlier scenario that failed before handing back a data connection leaves none.
+  if (!conn) return block(result, 'NO_DATA_CONNECTION', 'no data connection from the previous scenario');
   const spawned = await conn.call(D.spawnSsh({ clientRequestId: `qa-q11-${nonce('R')}`, workspaceId: ctx.sshd.workspaceId, hostStorePath: ctx.sshd.hostStorePath }), 60_000);
   assertion(result, 'SSH session spawned against the private sshd', spawned.type === 'spawnOk', spawned);
   if (spawned.type !== 'spawnOk') return;
@@ -319,6 +321,7 @@ export async function Q11(ctx, result) {
 export async function Q12(ctx, result) {
   if (!requireOwner(ctx, result)) return;
   const conn = ctx.state.conn;
+  if (!conn) return block(result, 'NO_DATA_CONNECTION', 'no data connection from the previous scenario');
   // exited local entry
   const spawned = await conn.call(D.spawnLocal({ clientRequestId: `qa-q12-${nonce('R')}`, workspaceId: ctx.workspaceId, cwd: ctx.repoDir }));
   const exited = spawned.sessionId;
