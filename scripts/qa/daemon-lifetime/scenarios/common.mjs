@@ -28,8 +28,35 @@ export function nonce(prefix = 'QA') {
 
 /** Shell line that prints a counter every 100ms, per platform. */
 export function counterCommand(platform, tag) {
+  // Windows sessions are spawned with seedShell('windows') = powershell (see below), so this
+  // PowerShell syntax always meets the shell it was written for.
   if (platform === 'windows') return `for($i=0;;$i++){"${tag}_TICK_$i";Start-Sleep -Milliseconds 100}\r\n`;
   return `i=0; while :; do i=$((i+1)); echo ${tag}_TICK_$i; sleep 0.1; done\n`;
+}
+
+/**
+ * Shell named in the harness's local Spawn. With shell null the daemon picks pwsh.exe when it is on
+ * PATH, else powershell.exe (src-tauri/src/terminal/shell.rs:315-319); cmd.exe only on an explicit
+ * "cmd" preference (shell.rs:302-305). The request's shell field (daemon/protocol.rs:535) goes
+ * straight to resolve_startup_command (daemon/session_service.rs:2442-2443), so naming powershell
+ * pins powershell.exe (shell.rs:298-301) and the Windows commands above never depend on PATH.
+ */
+export function seedShell(platform) {
+  return platform === 'windows' ? 'powershell' : null;
+}
+
+/** Wait for a fresh shell's first output (prompt), and for the counter's second tick. */
+export const SHELL_READY_TIMEOUT_MS = 30_000;
+export const COUNTER_TIMEOUT_MS = 15_000;
+/** Received-text tail kept in a seed failure. */
+export const SEED_TEXT_TAIL = 4_000;
+
+export class SeedError extends Error {
+  constructor(message, detail) {
+    super(`${message}: ${JSON.stringify(detail)}`);
+    this.code = 'SEED_FAILED';
+    this.detail = detail;
+  }
 }
 
 export function echoCommand(platform, marker) {
@@ -57,7 +84,7 @@ export async function dataConn(ctx, runtimeDir = ctx.layout.runtime, opts = {}) 
     handshake: opened.handshake,
     call,
     describe: async () => (await call(D.describeLiveSessions())),
-    waitOutput: (sessionId, marker, deadlineMs) => ctx.agent.call('waitOutput', { handle: opened.handle, sessionId, marker, deadlineMs }),
+    waitOutput: (sessionId, marker, deadlineMs, { visible = false } = {}) => ctx.agent.call('waitOutput', { handle: opened.handle, sessionId, marker, visible, deadlineMs }),
     close: () => ctx.agent.call('close', { handle: opened.handle }),
   };
 }
@@ -191,21 +218,47 @@ export async function invalidateOwnerState(ctx) {
   if (conn) await conn.close().catch(() => {});
 }
 
-/** Registers the QA workspace once and spawns a local session running a counter. */
+/**
+ * On a seed timeout: the bounded tail of what the session sent and the daemon's live sessions,
+ * written as evidence and carried in the thrown error.
+ */
+async function seedFailure(ctx, conn, { tag, stage, sessionId, marker, waited, deadlineMs }) {
+  const text = String(waited?.text ?? '');
+  let describe;
+  try { describe = await conn.describe(); } catch (error) { describe = { error: String(error?.message ?? error) }; }
+  const detail = {
+    tag, stage, sessionId, marker, deadlineMs, shell: seedShell(ctx.platform),
+    dsrReplies: waited?.dsrReplies ?? null, replyErrors: waited?.replyErrors ?? [],
+    receivedBytes: text.length, receivedTail: text.slice(-SEED_TEXT_TAIL), describe,
+  };
+  const file = path.posix.join(ctx.evidenceDir, `seed-${tag}-${stage}.json`);
+  await ctx.writeEvidence(file, JSON.stringify(detail, null, 2));
+  detail.evidence = file;
+  return new SeedError(`counter ${tag}: ${stage} timed out`, detail);
+}
+
+/**
+ * Registers the QA workspace once and spawns a local session running a counter. The counter is
+ * written only after the shell's first visible output (its prompt), so input never races shell
+ * startup. ConPTY's cursor query (ESC[6n) is answered by the agent's output route
+ * (lib/agent.mjs createOutputRoute) and is not visible text, so it never counts as the prompt.
+ */
 export async function seedLocalSession(ctx, conn, tag) {
   if (!ctx.workspaceRegistered) {
     const reg = await conn.call(D.registerWorkspace(ctx.workspaceId, ctx.repoDir));
     if (reg.type !== 'registerWorkspaceOk') throw new Error(`registerWorkspace: ${JSON.stringify(reg)}`);
     ctx.workspaceRegistered = true;
   }
-  const spawned = await conn.call(D.spawnLocal({ clientRequestId: `qa-${tag}-${nonce('R')}`, workspaceId: ctx.workspaceId, cwd: ctx.repoDir }), 60_000);
+  const spawned = await conn.call(D.spawnLocal({ clientRequestId: `qa-${tag}-${nonce('R')}`, workspaceId: ctx.workspaceId, cwd: ctx.repoDir, shell: seedShell(ctx.platform) }), 60_000);
   if (spawned.type !== 'spawnOk') throw new Error(`spawn: ${JSON.stringify(spawned)}`);
   const attached = await conn.call(D.attach(spawned.sessionId, 0));
   if (attached.type !== 'attachOk') throw new Error(`attach: ${JSON.stringify(attached)}`);
+  const ready = await conn.waitOutput(spawned.sessionId, '', SHELL_READY_TIMEOUT_MS, { visible: true });
+  if (ready.timedOut) throw await seedFailure(ctx, conn, { tag, stage: 'shell-ready', sessionId: spawned.sessionId, marker: '', waited: ready, deadlineMs: SHELL_READY_TIMEOUT_MS });
   const write = await conn.call(D.write(spawned.sessionId, counterCommand(ctx.platform, tag)));
   if (write.type !== 'writeOk') throw new Error(`write: ${JSON.stringify(write)}`);
-  const first = await conn.waitOutput(spawned.sessionId, `${tag}_TICK_2`, 15_000);
-  if (first.timedOut) throw new Error(`counter ${tag} produced no output`);
+  const first = await conn.waitOutput(spawned.sessionId, `${tag}_TICK_2`, COUNTER_TIMEOUT_MS);
+  if (first.timedOut) throw await seedFailure(ctx, conn, { tag, stage: 'counter', sessionId: spawned.sessionId, marker: `${tag}_TICK_2`, waited: first, deadlineMs: COUNTER_TIMEOUT_MS });
   return spawned.sessionId;
 }
 
