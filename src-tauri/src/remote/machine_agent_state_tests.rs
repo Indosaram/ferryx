@@ -506,3 +506,115 @@ async fn loopback_relay_round_trips_agent_control_list_send_and_read() {
     fixture.close().await;
     outcome.unwrap();
 }
+
+/// G1. One list across the loopback host, a host that fails, and a host that hangs.
+/// The hung host returns the seeded cache and is marked stale. The failure stays an entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loopback_fleet_lists_a_live_host_a_failure_and_a_stale_cache() {
+    let root = tempfile::tempdir().unwrap();
+    let host_root = root.path().join("remote-workspace");
+    std::fs::create_dir_all(&host_root).unwrap();
+    let host_root = std::fs::canonicalize(&host_root).unwrap();
+    let fixture = Fixture::new(root.path()).await.unwrap();
+    let outcome = async {
+        let host_view = fixture.pair().await?;
+        let workspace_id = register_workspace(&fixture.host_state, &host_root).await?;
+        let machine_client = MachineClient::new();
+        let created = machine_client
+            .execute(
+                &fixture.paired_service,
+                OperationRequest {
+                    host_id: host_view.host_id.clone(),
+                    generation: host_view.generation,
+                    operation: Operation::CreateSession {
+                        request: m::CreateSessionRequest {
+                            request_id: uuid::Uuid::new_v4().to_string(),
+                            workspace_id,
+                            worktree: None,
+                            cols: 80,
+                            rows: 24,
+                            inherit_from_session_id: None,
+                            cwd_relative: None,
+                            startup: m::Startup::Shell,
+                        },
+                    },
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("create session: {error:?}"))?;
+        let session = match created.result {
+            OperationResult::CreateSession(session) => session,
+            other => anyhow::bail!("expected a session, got {other:?}"),
+        };
+        let control = LiveAndFakeHosts {
+            live_host: host_view.host_id.clone(),
+            generation: host_view.generation,
+            client: machine_client,
+            service: &fixture.paired_service,
+        };
+        let mut cache = std::collections::HashMap::new();
+        cache.insert("hung".into(), vec![serde_json::json!({"sessionId": "cached-before-hang"})]);
+        let entries = ferryx_hub::fleet::list_hosts(
+            &control,
+            &[host_view.host_id.clone(), "missing-host".into(), "hung".into()],
+            std::time::Duration::from_secs(5),
+            &mut cache,
+        )
+        .await;
+        assert!(
+            entries[0].sessions.iter().any(|entry| entry["sessionId"] == session.target.session_id),
+            "live host lists the pane: {entries:?}"
+        );
+        assert!(entries[0].error.is_none());
+        assert!(!entries[0].stale);
+        assert!(entries[1].error.as_ref().unwrap().contains("missing-host"));
+        assert!(!entries[1].stale);
+        assert!(entries[2].stale, "a hung host serves the cache");
+        assert_eq!(entries[2].sessions[0]["sessionId"], "cached-before-hang");
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    fixture.close().await;
+    outcome.unwrap();
+}
+
+struct LiveAndFakeHosts<'a> {
+    live_host: String,
+    generation: crate::scoped_contracts::Epoch,
+    client: MachineClient,
+    service: &'a crate::paired_host::service::PairedHostService,
+}
+
+#[async_trait::async_trait]
+impl ferryx_hub::agent_control::AgentControl for LiveAndFakeHosts<'_> {
+    async fn execute(
+        &self,
+        host_id: Option<&str>,
+        op: ferryx_hub::agent_control::AgentOp,
+    ) -> Result<serde_json::Value, ferryx_hub::HubError> {
+        let host = host_id.unwrap_or("local");
+        if host == "hung" {
+            std::future::pending::<()>().await;
+        }
+        if host != self.live_host {
+            return Err(ferryx_hub::HubError::message(format!("host {host} failed")));
+        }
+        let request = crate::hub_runtime::to_agent_control_op(&op).map_err(ferryx_hub::HubError::message)?;
+        let response = self
+            .client
+            .execute(
+                self.service,
+                OperationRequest {
+                    host_id: self.live_host.clone(),
+                    generation: self.generation,
+                    operation: Operation::AgentControl { op: request },
+                },
+            )
+            .await
+            .map_err(|error| ferryx_hub::HubError::message(format!("{error:?}")))?;
+        match response.result {
+            OperationResult::AgentControl(value) => Ok(value),
+            other => Err(ferryx_hub::HubError::message(format!("unexpected {other:?}"))),
+        }
+    }
+}

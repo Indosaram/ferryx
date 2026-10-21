@@ -1,0 +1,409 @@
+//! stdio MCP server. One JSON-RPC message per line.
+//! Tools: agents.list/read/wait/send/answer/stop, lane.*, tracker.*, cron.*, chat.reply.
+use std::sync::Arc;
+
+use serde_json::{json, Value};
+use sqlx::SqlitePool;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use crate::agent_control::{AgentControl, AgentOp, TaskLauncher};
+use crate::chat::reply::chat_reply;
+use crate::chat::session::SessionKey;
+use crate::cron::{self, CronJob, CronTarget};
+use crate::error::Result;
+use crate::lanes::runner::LaneRunner;
+use crate::lanes::state::{self, transition, LaneStatus};
+use crate::tracker::Tracker;
+
+pub struct McpContext {
+    pub control: Arc<dyn AgentControl>,
+    pub launcher: Arc<dyn TaskLauncher>,
+    pub pool: SqlitePool,
+    pub meta_session_id: String,
+    pub tracker_token: String,
+}
+
+pub async fn serve(context: Arc<McpContext>) -> Result<()> {
+    let stdin = tokio::io::stdin();
+    let mut lines = BufReader::new(stdin).lines();
+    let mut stdout = tokio::io::stdout();
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let response = match serde_json::from_str::<Value>(&line) {
+            Ok(request) => dispatch(&context, &request).await,
+            Err(error) => {
+                json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":error.to_string()}})
+            }
+        };
+        stdout.write_all(response.to_string().as_bytes()).await?;
+        stdout.write_all(b"\n").await?;
+        stdout.flush().await?;
+    }
+    Ok(())
+}
+
+pub async fn dispatch(context: &McpContext, request: &Value) -> Value {
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+    let result = match method {
+        "initialize" => Ok(json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "ferryx-hub", "version": env!("CARGO_PKG_VERSION")},
+            "capabilities": {"tools": {}}
+        })),
+        "tools/list" => Ok(json!({"tools": tool_list()})),
+        "tools/call" => {
+            let name = request
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let args = request
+                .pointer("/params/arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            call_tool(context, name, &args)
+                .await
+                .map(|value| json!({"content":[{"type":"text","text": value.to_string()}]}))
+        }
+        _ => Err(format!("unknown method {method}")),
+    };
+    match result {
+        Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+        Err(message) => json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":message}}),
+    }
+}
+
+fn tool_list() -> Vec<Value> {
+    [
+        "agents.list",
+        "agents.read",
+        "agents.wait",
+        "agents.send",
+        "agents.answer",
+        "agents.stop",
+        "lane.list",
+        "lane.transition",
+        "lane.drive",
+        "tracker.issues",
+        "cron.list",
+        "cron.run",
+        "chat.reply",
+    ]
+    .into_iter()
+    .map(|name| json!({"name": name, "inputSchema": {"type": "object"}}))
+    .collect()
+}
+
+async fn call_tool(
+    context: &McpContext,
+    name: &str,
+    args: &Value,
+) -> std::result::Result<Value, String> {
+    let host = args.get("host").and_then(Value::as_str);
+    match name {
+        "agents.list" => {
+            if let Some(hosts) = args.get("hosts").and_then(Value::as_array) {
+                let hosts: Vec<String> = hosts
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+                let fleet = crate::fleet::Fleet::new(
+                    Arc::clone(&context.control),
+                    std::time::Duration::from_secs(5),
+                );
+                let entries = fleet.list(&hosts).await;
+                return Ok(json!(entries
+                    .into_iter()
+                    .map(|entry| json!({
+                        "hostId": entry.host_id,
+                        "sessions": entry.sessions,
+                        "error": entry.error,
+                        "stale": entry.stale,
+                    }))
+                    .collect::<Vec<_>>()));
+            }
+            context
+                .control
+                .execute(host, AgentOp::List)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "agents.read" => {
+            let session_id = required(args, "sessionId")?;
+            context
+                .control
+                .execute(host, AgentOp::Read { session_id })
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "agents.wait" => {
+            let session_id = required(args, "sessionId")?;
+            context
+                .control
+                .execute(
+                    host,
+                    AgentOp::Wait {
+                        session_id,
+                        until: args
+                            .get("until")
+                            .and_then(Value::as_str)
+                            .unwrap_or("any")
+                            .to_owned(),
+                        after_revision: args
+                            .get("revision")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        after: args.get("after").and_then(Value::as_u64).unwrap_or(0),
+                        timeout_ms: args
+                            .get("timeoutMs")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(30_000),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "agents.send" => {
+            let session_id = required(args, "sessionId")?;
+            let text = required(args, "text")?;
+            let request_id = required(args, "requestId")?;
+            context
+                .control
+                .execute(
+                    host,
+                    AgentOp::Send {
+                        session_id,
+                        text,
+                        request_id,
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "agents.answer" => {
+            let session_id = required(args, "sessionId")?;
+            let prompt_id = required(args, "promptId")?;
+            let screen_revision = required(args, "screenRevision")?;
+            let request_id = required(args, "requestId")?;
+            let answer = args
+                .get("answer")
+                .cloned()
+                .unwrap_or_else(|| json!({"optionIndex": 0}));
+            context
+                .control
+                .execute(
+                    host,
+                    AgentOp::Answer {
+                        session_id,
+                        prompt_id,
+                        screen_revision,
+                        answer,
+                        request_id,
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "agents.stop" => {
+            let session_id = required(args, "sessionId")?;
+            let request_id = required(args, "requestId")?;
+            context
+                .control
+                .execute(
+                    host,
+                    AgentOp::Stop {
+                        session_id,
+                        request_id,
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "lane.list" => {
+            let rows: Vec<(String, String, Option<String>)> =
+                sqlx::query_as("SELECT key, status, omo_thread_id FROM lanes ORDER BY key")
+                    .fetch_all(&context.pool)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            Ok(json!(rows
+                .into_iter()
+                .map(|(key, status, pane)| json!({"key": key, "status": status, "pane": pane}))
+                .collect::<Vec<_>>()))
+        }
+        "lane.transition" => {
+            let key = required(args, "key")?;
+            let to = required(args, "status")?;
+            let status: LaneStatus = to
+                .parse()
+                .map_err(|error: state::UnknownLaneStatus| error.to_string())?;
+            let reason = args.get("reason").and_then(Value::as_str);
+            transition(&context.pool, &key, status, reason)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(json!({"key": key, "status": status.as_str()}))
+        }
+        "lane.drive" => {
+            let key = required(args, "key")?;
+            let runner = LaneRunner {
+                pool: context.pool.clone(),
+                control: Arc::clone(&context.control),
+                launcher: Arc::clone(&context.launcher),
+                judge: crate::judge::Judge::fallback_yes(),
+                load: crate::lanes::guard::HostLoad {
+                    load: 0.0,
+                    mem_free_pct: 100,
+                    disk_free_gb: 100,
+                    active_lanes: 0,
+                },
+                thresholds: crate::lanes::guard::GuardThresholds {
+                    load_alert: 1000.0,
+                    mem_free_min_pct: 0,
+                    disk_free_min_gb: 0,
+                    lanes_max: 100,
+                },
+            };
+            let report = runner
+                .drive(&key)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(json!({"sessionId": report.session_id, "status": report.status.as_str()}))
+        }
+        "tracker.issues" => {
+            let tracker = Tracker::new(context.pool.clone(), context.tracker_token.clone());
+            if let Some(title) = args.get("title").and_then(Value::as_str) {
+                let id = tracker
+                    .create(
+                        title,
+                        args.get("body").and_then(Value::as_str).unwrap_or(""),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(json!({"id": id}))
+            } else {
+                tracker
+                    .list()
+                    .await
+                    .map(|issues| json!({"issues": issues}))
+                    .map_err(|error| error.to_string())
+            }
+        }
+        "cron.list" => {
+            let jobs = cron::list_jobs(&context.pool)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(json!(jobs
+                .into_iter()
+                .map(|job| json!({"id": job.id, "target": job.target.as_str(), "name": job.name}))
+                .collect::<Vec<_>>()))
+        }
+        "cron.run" => {
+            let id = required(args, "id")?;
+            if args.get("script").is_some() {
+                let target = CronTarget::parse(
+                    args.get("target")
+                        .and_then(Value::as_str)
+                        .unwrap_or("shell"),
+                )
+                .map_err(|error| error.to_string())?;
+                cron::insert_job(
+                    &context.pool,
+                    &CronJob {
+                        id: id.clone(),
+                        name: args
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&id)
+                            .to_owned(),
+                        target,
+                        script: args
+                            .get("script")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        schedule: String::new(),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            }
+            let output = cron::execute(
+                &context.pool,
+                &id,
+                context.control.as_ref(),
+                context.launcher.as_ref(),
+                &context.meta_session_id,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            Ok(json!({"output": output}))
+        }
+        "chat.reply" => {
+            let platform = args
+                .get("platform")
+                .and_then(Value::as_str)
+                .unwrap_or("slack");
+            let channel = required(args, "channelId")?;
+            let user = args.get("userId").and_then(Value::as_str).unwrap_or("");
+            let text = required(args, "text")?;
+            let session = SessionKey::new(platform, None::<String>, channel, None::<String>, user);
+            let id = chat_reply(&context.pool, &session, &text, None)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(json!({"id": id, "sessionKey": session.storage_key()}))
+        }
+        other => Err(format!("unknown tool {other}")),
+    }
+}
+
+fn required(args: &Value, key: &str) -> std::result::Result<String, String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("missing {key}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_control::{FixedLauncher, RecordingControl};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn tools_call_agents_list_and_chat_reply() {
+        let control = Arc::new(RecordingControl::default());
+        *control.result.lock().unwrap() = json!({"sessions": []});
+        let context = McpContext {
+            control,
+            launcher: Arc::new(FixedLauncher::new("pane")),
+            pool: crate::storage::memory().await.unwrap(),
+            meta_session_id: "meta".into(),
+            tracker_token: "t".into(),
+        };
+        let listed = dispatch(
+            &context,
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agents.list","arguments":{}}}),
+        )
+        .await;
+        assert!(listed["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("sessions"));
+        let reply = dispatch(
+            &context,
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"chat.reply","arguments":{"channelId":"C1","text":"ok"}}}),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "{reply}");
+        let names = dispatch(
+            &context,
+            &json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+        )
+        .await;
+        let tools = names["result"]["tools"].as_array().unwrap();
+        assert!(tools.iter().any(|tool| tool["name"] == "lane.drive"));
+        assert!(tools.iter().any(|tool| tool["name"] == "agents.stop"));
+    }
+}

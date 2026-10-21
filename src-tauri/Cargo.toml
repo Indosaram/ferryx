@@ -67,8 +67,14 @@ native-terminal = [
     "dep:bytemuck",
     "dep:pollster",
 ]
+# Hub connectors. Off in the default daemon. Discord and voice stay off unless requested.
+hub-slack = ["ferryx-hub/hub-slack"]
+hub-discord = ["ferryx-hub/hub-discord"]
+hub-voice = ["ferryx-hub/hub-voice"]
 
 [dependencies]
+ferryx-hub = { path = "../crates/ferryx-hub" }
+async-trait = "0.1"
 tauri = { version = "2", features = ["macos-private-api", "test", "unstable", "image-png", "devtools"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }

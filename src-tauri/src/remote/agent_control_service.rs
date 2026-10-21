@@ -1170,4 +1170,41 @@ mod tests {
         assert_eq!(tail["gap"], false, "{tail}");
         assert!(!tail["events"].as_array().unwrap().is_empty());
     }
+
+    const CODEX_APPROVAL: &str = include_str!("reference_chat/fixtures/codex/approval-command.txt");
+
+    /// A Slack approval click answers the card that is on the pane. The click carries the
+    /// prompt id and the screen revision the owner saw, and the answer goes through the
+    /// same handler as every other agent-control answer.
+    #[tokio::test]
+    async fn a_slack_approval_answers_a_claude_card_and_a_codex_card() {
+        for (session_id, screen) in [
+            ("slack-approval-claude", CLAUDE_APPROVAL),
+            ("slack-approval-codex", CODEX_APPROVAL),
+        ] {
+            let (backend, state) = pane(session_id, screen);
+            let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() })
+                .await
+                .expect("read");
+            let prompt_id = read["session"]["pending"]["id"].as_str().unwrap_or_else(|| panic!("pending prompt: {read}")).to_string();
+            let revision = read["session"]["screenRevision"].as_str().unwrap_or_else(|| panic!("revision: {read}")).to_string();
+            let payload = serde_json::json!({
+                "type": "block_actions",
+                "user": {"id": "UOWNER"},
+                "actions": [{
+                    "value": format!("ferryx:approval:{session_id}:{prompt_id}:{revision}:0:once")
+                }]
+            });
+            let op = ferryx_hub::chat::approval::slack_approval_op(&payload, "UOWNER")
+                .expect("owner click")
+                .expect("an approval op");
+            let mapped = crate::hub_runtime::to_agent_control_op(&op).expect("daemon op");
+            let result = handle(&state, mapped).await.expect("the slack approval is typed");
+            assert_eq!(result["receipt"]["stage"], "accepted", "{result}");
+            assert!(
+                !backend.writes.lock().expect("writes").is_empty(),
+                "{session_id} typed the approval"
+            );
+        }
+    }
 }
