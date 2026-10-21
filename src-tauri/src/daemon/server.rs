@@ -3143,6 +3143,7 @@ impl DaemonServer {
             handover_manager: Arc::downgrade(&handover_manager),
             remote_event_tx: remote_event_tx.clone(),
             agent_states: Arc::new(AgentStateHub::default()),
+            agent_watch: parking_lot::Mutex::new(None),
             spawn_idempotency_cache: Arc::new(Mutex::new(HashMap::new())),
             spawn_lock: Arc::new(tokio::sync::Mutex::new(())),
             split_admission: Mutex::new(HashMap::new()),
@@ -3202,6 +3203,11 @@ impl DaemonServer {
                 .unwrap_or_else(|_| unreachable!("gateway not published yet"))
                 .with_machine_services(Arc::clone(&session_service)),
         );
+        remote_state.agent_observers.attach(
+            session_service.agent_state_hub(),
+            Arc::clone(&session_service.workspace_service.machine_events),
+        );
+        session_service.install_agent_watch(Arc::clone(&remote_state.agent_observers));
 
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
         remote_state
@@ -5426,7 +5432,10 @@ impl DaemonServer {
                 Ok(DaemonRequest::Write { session_id, data }) if self.serves_paired_here(&session_id) => {
                     match self.terminal_service.write_input_operation(&session_id, 0, data) {
                         Ok(pending) => match pending.await {
-                            Ok(()) => DaemonResponse::WriteOk,
+                            Ok(()) => {
+                                crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
+                                DaemonResponse::WriteOk
+                            }
                             Err(e) => daemon_error(e.to_string()),
                         },
                         Err(e) => daemon_error(e.to_string()),
@@ -5449,6 +5458,7 @@ impl DaemonServer {
                             Ok(()) => {
                                 #[cfg(feature = "local-split-qa")]
                                 super::qa_producers::record_daemon_mutation_delivery(&session_id, "write", &tok);
+                                crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
                                 DaemonResponse::WriteOk
                             }
                             Err(e) => daemon_error(e.to_string(),),
@@ -5458,6 +5468,7 @@ impl DaemonServer {
                             Ok(()) => {
                                 #[cfg(feature = "local-split-qa")]
                                 super::qa_producers::record_daemon_mutation_delivery(&session_id, "write", &tok);
+                                crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
                                 DaemonResponse::WriteOk
                             }
                             Err(message) => daemon_error(message),
@@ -5999,6 +6010,7 @@ impl DaemonServer {
                     #[cfg(unix)]
                     capabilities.push("sessionOwnershipTransferV1".into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
+                    capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
@@ -6525,10 +6537,23 @@ impl DaemonServer {
                         Err(message) => daemon_error(message),
                     }
                 }
-                Ok(DaemonRequest::AgentControl { request }) => {
-                    match crate::remote::server::agent_control_service::handle(&self.remote_state, request).await {
-                        Ok(result) => DaemonResponse::AgentControlOk { result },
-                        Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                Ok(DaemonRequest::AgentControl { request, host_id }) => {
+                    match host_id {
+                        None => match crate::remote::server::agent_control_service::handle(&self.remote_state, request).await {
+                            Ok(result) => DaemonResponse::AgentControlOk { result },
+                            Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                        },
+                        // One execute, on the caller's request id. A lost answer stays outcome-unknown
+                        // and is not issued again.
+                        Some(host_id) => {
+                            crate::remote::server::agent_control_service::forward_daemon(
+                                &self.remote_state,
+                                &self.paired_hosts,
+                                host_id,
+                                request,
+                            )
+                            .await
+                        }
                     }
                 }
                 Err(e) => daemon_error(format!("Malformed request: {e}"),),

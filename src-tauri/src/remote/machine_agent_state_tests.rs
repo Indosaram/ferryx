@@ -382,3 +382,127 @@ async fn machine_terminal_websocket_publishes_authoritative_agent_state_and_igno
     root.close().unwrap();
     outcome.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loopback_relay_round_trips_agent_control_list_send_and_read() {
+    let root = tempfile::tempdir().unwrap();
+    let host_root = root.path().join("remote-workspace");
+    std::fs::create_dir_all(&host_root).unwrap();
+    let host_root = std::fs::canonicalize(&host_root).unwrap();
+
+    let fixture = Fixture::new(root.path()).await.unwrap();
+    let outcome = async {
+        let host_view = fixture.pair().await?;
+        let workspace_id = register_workspace(&fixture.host_state, &host_root).await?;
+        let machine_client = MachineClient::new();
+        let created = machine_client
+            .execute(
+                &fixture.paired_service,
+                OperationRequest {
+                    host_id: host_view.host_id.clone(),
+                    generation: host_view.generation,
+                    operation: Operation::CreateSession {
+                        request: m::CreateSessionRequest {
+                            request_id: uuid::Uuid::new_v4().to_string(),
+                            workspace_id,
+                            worktree: None,
+                            cols: 80,
+                            rows: 24,
+                            inherit_from_session_id: None,
+                            cwd_relative: None,
+                            startup: m::Startup::Shell,
+                        },
+                    },
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("create session: {error:?}"))?;
+        let session = match created.result {
+            OperationResult::CreateSession(session) => session,
+            other => anyhow::bail!("expected a session, got {other:?}"),
+        };
+
+        let listed = machine_client
+            .execute(
+                &fixture.paired_service,
+                OperationRequest {
+                    host_id: host_view.host_id.clone(),
+                    generation: host_view.generation,
+                    operation: Operation::AgentControl {
+                        op: crate::agent_control::AgentControlOp::List,
+                    },
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("agent list: {error:?}"))?;
+        let listed = match listed.result {
+            OperationResult::AgentControl(value) => value,
+            other => anyhow::bail!("expected agent list, got {other:?}"),
+        };
+        let sessions = listed["sessions"].as_array().expect("sessions");
+        assert!(
+            sessions
+                .iter()
+                .any(|entry| entry["sessionId"] == session.target.session_id),
+            "the created pane is visible over agent control: {listed}"
+        );
+
+        let sent = machine_client
+            .execute(
+                &fixture.paired_service,
+                OperationRequest {
+                    host_id: host_view.host_id.clone(),
+                    generation: host_view.generation,
+                    operation: Operation::AgentControl {
+                        op: crate::agent_control::AgentControlOp::Send {
+                            session_id: session.target.session_id.clone(),
+                            text: "echo ferryx-agent-control".into(),
+                            request_id: Some("relay-agent-send-1".into()),
+                        },
+                    },
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("agent send: {error:?}"))?;
+        match sent.result {
+            OperationResult::AgentControl(value) => {
+                assert_eq!(value["receipt"]["stage"], "accepted", "{value}");
+            }
+            other => anyhow::bail!("expected agent send, got {other:?}"),
+        }
+
+        let read = machine_client
+            .execute(
+                &fixture.paired_service,
+                OperationRequest {
+                    host_id: host_view.host_id.clone(),
+                    generation: host_view.generation,
+                    operation: Operation::AgentControl {
+                        op: crate::agent_control::AgentControlOp::Read {
+                            session_id: session.target.session_id.clone(),
+                        },
+                    },
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("agent read: {error:?}"))?;
+        let read = match read.result {
+            OperationResult::AgentControl(value) => value,
+            other => anyhow::bail!("expected agent read, got {other:?}"),
+        };
+        assert_eq!(read["session"]["sessionId"], session.target.session_id);
+
+        let audit = fixture.host_state.agent_control_audit.recent();
+        assert!(
+            audit
+                .iter()
+                .any(|record| record.op == "send" && record.device_id != "owner"),
+            "the remote send is audited with the paired device id: {audit:?}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    fixture.close().await;
+    outcome.unwrap();
+}

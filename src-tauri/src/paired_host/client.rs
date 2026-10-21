@@ -80,6 +80,10 @@ pub enum Operation {
     DagStream {
         workspace_id: String,
     },
+    /// Agent control on the paired host. Send/Answer/Stop are mutations and are not retried.
+    AgentControl {
+        op: crate::agent_control::AgentControlOp,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +111,7 @@ pub enum OperationResult {
     Operation(m::Operation),
     PasteUploadChunk(m::PasteUploadChunkResult),
     FileRead(m::FileReadResult),
+    AgentControl(serde_json::Value),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -196,7 +201,10 @@ fn project_remote_error(error: m::MachineError) -> m::MachineError {
         | "STALE_EPOCH"
         | "STALE_GENERATION"
         | "NOT_FOUND"
-        | "METHOD_NOT_ALLOWED" => error.code.as_str(),
+        | "METHOD_NOT_ALLOWED"
+        | "UNSUPPORTED"
+        | "FORBIDDEN"
+        | "INVENTORY_INCOMPLETE" => error.code.as_str(),
         _ => "PAIRED_HOST_REMOTE_ERROR",
     };
     let mut details = serde_json::Map::new();
@@ -266,9 +274,14 @@ struct Route {
     response_limit: usize,
     /// Safe to resend over the relay after a direct transport loss.
     idempotent: bool,
+    /// Overrides the default HTTP budget. `wait` needs up to five minutes.
+    budget_secs: Option<u64>,
 }
 impl Operation {
     pub fn is_mutation(&self) -> bool {
+        if let Self::AgentControl { op } = self {
+            return op.is_input_mutation();
+        }
         matches!(
             self,
             Self::RegisterProject { .. }
@@ -278,6 +291,17 @@ impl Operation {
                 | Self::CreateSession { .. }
                 | Self::CloseSession { .. }
         )
+    }
+
+    /// The caller-supplied id of an agent-control mutation, when it has one.
+    ///
+    /// This is not a workspace-journal id: agent control must not enter that journal, because a
+    /// pending record there becomes an `OutcomeUnknown` workspace operation on restart.
+    pub fn agent_control_mutation_id(&self) -> Option<String> {
+        match self {
+            Self::AgentControl { op } if op.is_input_mutation() => op.mutation_request_id(),
+            _ => None,
+        }
     }
 
     fn route(&self) -> Result<Route> {
@@ -290,8 +314,9 @@ impl Operation {
             request_id: None,
             response_limit: m::MACHINE_JSON_MAX_BYTES,
             idempotent: true,
+            budget_secs: None,
         };
-        let path;
+        let mut path;
         match self {
             Self::Capabilities => {
                 path = "capabilities";
@@ -367,6 +392,47 @@ impl Operation {
                 path = "capabilities";
                 r.capability = Some(crate::remote::dag_api::DAG_STREAM_CAPABILITY);
             }
+            Self::AgentControl { op } => {
+                path = "agent-control/sessions";
+                r.capability = Some(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+                match op {
+                    crate::agent_control::AgentControlOp::List => {}
+                    crate::agent_control::AgentControlOp::Read { session_id }
+                    | crate::agent_control::AgentControlOp::Send { session_id, .. }
+                    | crate::agent_control::AgentControlOp::Answer { session_id, .. }
+                    | crate::agent_control::AgentControlOp::Stop { session_id, .. }
+                    | crate::agent_control::AgentControlOp::Wait { session_id, .. } => {
+                        if !crate::agent_transcript::is_valid_session_id(session_id) {
+                            return Err(ClientError::local("INVALID_REQUEST"));
+                        }
+                    }
+                    crate::agent_control::AgentControlOp::Events { after } => {
+                        path = "agent-control/events";
+                        r.query.push(("after".into(), after.to_string()));
+                    }
+                }
+                if let crate::agent_control::AgentControlOp::Wait {
+                    until,
+                    after_revision,
+                    after,
+                    timeout_ms,
+                    ..
+                } = op
+                {
+                    if !crate::agent_control::events::until_is_known(until) || *timeout_ms == 0 {
+                        return Err(ClientError::local("INVALID_REQUEST"));
+                    }
+                    let timeout_ms = (*timeout_ms)
+                        .min(crate::agent_control::policy::AGENT_CONTROL_TIMEOUT_MAX_MS);
+                    r.query.push(("until".into(), until.clone()));
+                    r.query.push(("after".into(), after.to_string()));
+                    r.query.push(("timeoutMs".into(), timeout_ms.to_string()));
+                    if let Some(revision) = after_revision {
+                        r.query.push(("revision".into(), revision.clone()));
+                    }
+                    r.budget_secs = Some(timeout_ms.div_ceil(1000).saturating_add(15).min(315));
+                }
+            }
         }
         r.segments = path.split('/').map(str::to_owned).collect();
         match self {
@@ -374,6 +440,26 @@ impl Operation {
             Self::Session { session_id, .. } | Self::CloseSession { session_id, .. } => {
                 r.segments.push(session_id.clone())
             }
+            Self::AgentControl { op } => match op {
+                crate::agent_control::AgentControlOp::Read { session_id }
+                | crate::agent_control::AgentControlOp::Send { session_id, .. }
+                | crate::agent_control::AgentControlOp::Answer { session_id, .. }
+                | crate::agent_control::AgentControlOp::Stop { session_id, .. }
+                | crate::agent_control::AgentControlOp::Wait { session_id, .. } => {
+                    r.segments.push(session_id.clone());
+                    if matches!(op, crate::agent_control::AgentControlOp::Wait { .. }) {
+                        r.segments.push("wait".into());
+                    } else if matches!(op, crate::agent_control::AgentControlOp::Send { .. }) {
+                        r.segments.push("send".into());
+                    } else if matches!(op, crate::agent_control::AgentControlOp::Answer { .. }) {
+                        r.segments.push("answer".into());
+                    } else if matches!(op, crate::agent_control::AgentControlOp::Stop { .. }) {
+                        r.segments.push("stop".into());
+                    }
+                }
+                crate::agent_control::AgentControlOp::List
+                | crate::agent_control::AgentControlOp::Events { .. } => {}
+            },
             Self::Operation { request_id } => {
                 if uuid::Uuid::parse_str(request_id).is_err() {
                     return Err(ClientError::local("INVALID_REQUEST"));
@@ -404,6 +490,15 @@ impl Operation {
                 r.method = Method::POST;
                 r.body = Some(
                     serde_json::to_vec(request)
+                        .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
+            }
+            Self::AgentControl { op } if op.is_input_mutation() => {
+                r.method = Method::POST;
+                // The request id stays off `route.request_id` so the workspace journal is not
+                // consulted. Transport loss is relabeled from `agent_control_mutation_id`.
+                r.body = Some(
+                    serde_json::to_vec(&agent_control_body(op))
                         .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
                 );
             }
@@ -970,7 +1065,11 @@ impl MachineClient {
         // Read-only machine operations ride the relay tunnel, whose round trips can
         // legitimately exceed 10s under tunnel churn; mutation budget is larger because
         // remote git/filesystem calls on enterprise repos can take tens of seconds.
-        let budget = if route.body.is_some() { 60 } else { 45 };
+        // `wait` overrides this: its caller timeout is clamped to five minutes.
+        let budget = route
+            .budget_secs
+            .unwrap_or(if route.body.is_some() { 60 } else { 45 });
+        request = request.timeout(Duration::from_secs(budget));
         tokio::select! { biased;
             _=cancellation.changed()=>Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
             result=tokio::time::timeout(Duration::from_secs(budget),async {
@@ -1172,6 +1271,18 @@ impl MachineClient {
                 Err(mut e) => {
                     if let Some(id) = &route.request_id {
                         e.relabel_transport_uncertainty(id);
+                    } else if let Some(id) = request.operation.agent_control_mutation_id() {
+                        // Same id the caller sent. Do not mint another and do not call execute again.
+                        e.relabel_transport_uncertainty(&id);
+                        if e.machine_error.is_none() {
+                            e.code = "OPERATION_OUTCOME_UNKNOWN".into();
+                        }
+                    } else if request.operation.is_mutation()
+                        && matches!(request.operation, Operation::AgentControl { .. })
+                        && e.machine_error.is_none()
+                    {
+                        e.ambiguous = true;
+                        e.code = "OPERATION_OUTCOME_UNKNOWN".into();
                     }
                     return Err(e);
                 }
@@ -1390,7 +1501,34 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
         // The capability probe returns this host's advertised capabilities; the stream
         // is opened separately over a socket.
         Operation::DagStream { .. } => OperationResult::Capabilities(decode(bytes)?),
+        Operation::AgentControl { .. } => OperationResult::AgentControl(decode(bytes)?),
     })
+}
+
+fn agent_control_body(op: &crate::agent_control::AgentControlOp) -> serde_json::Value {
+    match op {
+        crate::agent_control::AgentControlOp::Send {
+            text, request_id, ..
+        } => {
+            serde_json::json!({ "text": text, "requestId": request_id })
+        }
+        crate::agent_control::AgentControlOp::Answer {
+            prompt_id,
+            screen_revision,
+            answer,
+            request_id,
+            ..
+        } => serde_json::json!({
+            "promptId": prompt_id,
+            "screenRevision": screen_revision,
+            "answer": answer,
+            "requestId": request_id,
+        }),
+        crate::agent_control::AgentControlOp::Stop { request_id, .. } => {
+            serde_json::json!({ "requestId": request_id })
+        }
+        _ => serde_json::Value::Null,
+    }
 }
 #[cfg(test)]
 #[path = "client_tests.rs"]

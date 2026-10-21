@@ -109,6 +109,45 @@ fn reference_chat_mutation(method: &Method, path: &str) -> bool {
         )
 }
 
+/// Send, answer and stop type into a pane. A dropped reply is outcome-unknown, never "unsent".
+/// Wait and events are reads: a dropped reply stays a gateway timeout.
+fn agent_control_mutation(method: &Method, path: &str) -> bool {
+    let route = path.split('?').next().unwrap_or_default();
+    *method == Method::POST
+        && matches!(
+            route
+                .strip_prefix("/api/v1/")
+                .map(|route| route.split('/').collect::<Vec<_>>())
+                .as_deref(),
+            Some(["agent-control", "sessions", _, "send" | "answer" | "stop"])
+        )
+}
+
+fn outcome_unknown_mutation(method: &Method, path: &str) -> bool {
+    reference_chat_mutation(method, path) || agent_control_mutation(method, path)
+}
+
+/// A `wait` may block for the clamped timeout. The relay budget covers that plus a margin,
+/// and never more than five minutes plus that margin.
+fn agent_control_wait_budget(path: &str) -> Option<Duration> {
+    let (route, query) = path.split_once('?')?;
+    let parts = route
+        .strip_prefix("/api/v1/")?
+        .split('/')
+        .collect::<Vec<_>>();
+    if !matches!(parts.as_slice(), ["agent-control", "sessions", _, "wait"]) {
+        return None;
+    }
+    let timeout_ms = query.split('&').find_map(|field| {
+        let (key, value) = field.split_once('=')?;
+        (key == "timeoutMs")
+            .then(|| value.parse::<u64>().ok())
+            .flatten()
+    })?;
+    let clamped = timeout_ms.min(crate::agent_control::policy::AGENT_CONTROL_TIMEOUT_MAX_MS);
+    Some(Duration::from_millis(clamped) + Duration::from_secs(15))
+}
+
 /// The frozen ScopeResult failure a forwarded reference-chat mutation answers with when the
 /// relay lost the host's answer: the host may have typed it, so it is never retried as unsent.
 fn reference_chat_outcome_unknown(request_id: &str) -> Response {
@@ -1995,6 +2034,12 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["reference-chat", _, "history" | "screen" | "prompt" | "files"])
             | ("POST", ["reference-chat", _, "submit" | "stop" | "answer" | "files"])
             | ("GET" | "DELETE", ["reference-chat", _, "files", _])
+            // Agent control. Reads and mutations are separate paths so a dropped mutation
+            // reply is outcome-unknown and a dropped wait stays a timeout.
+            | ("GET", ["agent-control", "sessions" | "events"])
+            | ("GET", ["agent-control", "sessions", _])
+            | ("GET", ["agent-control", "sessions", _, "wait"])
+            | ("POST", ["agent-control", "sessions", _, "send" | "answer" | "stop"])
             | ("GET", ["attach"])
     )
 }
@@ -2087,6 +2132,8 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         ["reference-chat", _, "history" | "screen" | "prompt"] => reference_chat_read_fields,
         ["reference-chat", _, "files"] => reference_chat_read_fields,
         ["reference-chat", _, "files", _] => reference_chat_read_fields,
+        ["agent-control", "events"] => &["after"],
+        ["agent-control", "sessions", _, "wait"] => &["until", "after", "timeoutMs", "revision"],
         _ => &[],
     };
     let mut seen = std::collections::HashSet::new();
@@ -2199,7 +2246,7 @@ async fn proxy_http(
         raw.extend_from_slice(b"\r\n");
     }
     raw.extend_from_slice(b"\r\n");
-    let mutation = reference_chat_mutation(&method, path);
+    let mutation = outcome_unknown_mutation(&method, path);
     let request_id = if mutation {
         serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
@@ -2266,9 +2313,10 @@ async fn proxy_http(
     // A reference-chat mutation may wait behind earlier input for the host's own
     // REFERENCE_SUBMIT_DEADLINE_MS before it types, so its budget covers that wait.
     let budget = if mutation {
-        Duration::from_millis(
-            crate::remote::reference_chat::input::REFERENCE_SUBMIT_DEADLINE_MS,
-        ) + Duration::from_secs(15)
+        Duration::from_millis(crate::remote::reference_chat::input::REFERENCE_SUBMIT_DEADLINE_MS)
+            + Duration::from_secs(15)
+    } else if let Some(wait) = agent_control_wait_budget(path) {
+        wait
     } else {
         Duration::from_secs(40)
     };
@@ -3789,6 +3837,110 @@ mod tests {
         assert_eq!(body["requestId"], "req-1");
         state.unregister_control_channel("submit-host", generation);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_forwarded_agent_control_send_whose_answer_is_lost_reports_outcome_unknown() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, mut notices, _grants) =
+            state.register_control_channel("agent-host".into());
+        let path = "/api/v1/agent-control/sessions/s-1/send";
+        let http = proxy_http(
+            &state,
+            "agent-host",
+            Some(generation),
+            Method::POST,
+            path,
+            HeaderMap::new(),
+            br#"{"text":"hi","requestId":"agent-req-1"}"#.to_vec(),
+        );
+        let peer = async {
+            let notice = notices.recv().await.unwrap();
+            let (mut data, _) = tokio_tungstenite::connect_async(format!(
+                "{base}/tunnel/data/{}",
+                notice.session_id
+            ))
+            .await
+            .unwrap();
+            let request = data.next().await.unwrap().unwrap().into_data();
+            assert!(request.starts_with(b"POST /api/v1/agent-control/sessions/s-1/send"));
+            data.close(None).await.unwrap();
+        };
+        let (response, ()) = timeout(Duration::from_secs(10), async { tokio::join!(http, peer) })
+            .await
+            .unwrap();
+        let response = response.expect("a lost agent-control send is not a bare 502");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "OPERATION_OUTCOME_UNKNOWN");
+        assert_eq!(body["error"]["retryable"], false);
+        assert_eq!(body["requestId"], "agent-req-1");
+        state.unregister_control_channel("agent-host", generation);
+        server.abort();
+    }
+
+    #[test]
+    fn agent_control_routes_join_the_allowlist_without_loosening_it() {
+        assert!(allowed_http_route(&Method::GET, "agent-control/sessions"));
+        assert!(allowed_http_route(&Method::GET, "agent-control/events"));
+        assert!(allowed_http_route(
+            &Method::GET,
+            "agent-control/sessions/s-1"
+        ));
+        assert!(allowed_http_route(
+            &Method::GET,
+            "agent-control/sessions/s-1/wait"
+        ));
+        assert!(allowed_http_route(
+            &Method::POST,
+            "agent-control/sessions/s-1/send"
+        ));
+        assert!(allowed_http_route(
+            &Method::POST,
+            "agent-control/sessions/s-1/answer"
+        ));
+        assert!(allowed_http_route(
+            &Method::POST,
+            "agent-control/sessions/s-1/stop"
+        ));
+        for (method, path) in [
+            (Method::GET, "reference-chat/session-1"),
+            (Method::GET, "reference-chat/x/secret"),
+            (Method::GET, "workspace/file-read"),
+            (Method::POST, "admin"),
+            (Method::DELETE, "agent-control/sessions/s-1"),
+            (Method::GET, "agent-control/sessions/s-1/send"),
+        ] {
+            assert!(
+                !allowed_http_route(&method, path),
+                "{method} {path} stays refused"
+            );
+        }
+        assert!(validate_http_query("agent-control/events", Some("after=3")).is_ok());
+        assert!(validate_http_query("agent-control/events", Some("secret=1")).is_err());
+        assert!(validate_http_query(
+            "agent-control/sessions/s-1/wait",
+            Some("until=idle&after=1&timeoutMs=1000&revision=rev")
+        )
+        .is_ok());
+        assert!(!agent_control_mutation(
+            &Method::GET,
+            "/api/v1/agent-control/events"
+        ));
+        assert!(!agent_control_mutation(
+            &Method::GET,
+            "/api/v1/agent-control/sessions/s-1/wait?timeoutMs=1000"
+        ));
+        assert!(agent_control_mutation(
+            &Method::POST,
+            "/api/v1/agent-control/sessions/s-1/answer"
+        ));
+        assert!(reference_chat_mutation(
+            &Method::POST,
+            "/api/v1/reference-chat/sess-1/submit"
+        ));
     }
 
     async fn reference_chat_partial_response_case(method: Method, suffix: &str, partial: &[u8]) {

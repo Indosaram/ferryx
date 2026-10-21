@@ -528,6 +528,14 @@ impl ReferenceInputQueue {
         typed.insert(backend_session_id.to_string(), at_ms);
     }
 
+    /// When raw keystrokes last reached this pane, if any stamp is still held.
+    ///
+    /// Stamps survive until the next note prunes them, so a supervisor can refuse input for
+    /// [`crate::agent_control::policy::HUMAN_TYPING_WINDOW_MS`] after a person typed.
+    pub fn last_raw_input_ms(&self, backend_session_id: &str) -> Option<u64> {
+        self.raw_typed_at.lock().get(backend_session_id).copied()
+    }
+
     /// Type one composer message into its original pane, then its Enter.
     ///
     /// The whole transaction - reauthorize, write the shaped text, wait the gap, reauthorize, write

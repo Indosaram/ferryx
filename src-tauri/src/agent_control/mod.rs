@@ -15,8 +15,17 @@ use serde_json::Value;
 
 use crate::remote::reference_chat::types::ReferencePromptAnswer;
 
-/// Capability string the daemon advertises in `GetCapabilities`.
+pub mod events;
+pub mod policy;
+
+/// Capability string the daemon advertises in `GetCapabilities` for local agent control.
 pub const AGENT_CONTROL_CAPABILITY: &str = "agentControlV1";
+
+/// Capability for relay routes, `wait`/`events`, and control of another host.
+///
+/// A peer that only advertises [`AGENT_CONTROL_CAPABILITY`] keeps the original local
+/// list/read/send/answer/stop contract. Nothing here bumps the daemon protocol version.
+pub const AGENT_CONTROL_REMOTE_CAPABILITY: &str = "agentControlRemoteV1";
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_INVALID: i32 = 2;
@@ -51,6 +60,68 @@ pub enum AgentControlOp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Block until the observer publishes a matching reading, or the log reports a gap.
+    ///
+    /// `timeout_ms` is clamped to five minutes by the handler. `after` is the event sequence
+    /// already seen. `after_revision` skips a reading whose screen revision the caller already has.
+    Wait {
+        session_id: String,
+        until: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_revision: Option<String>,
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        after: u64,
+        timeout_ms: u64,
+    },
+    /// Replay observer readings after `after`. A cursor that fell out of the log is a gap.
+    Events {
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        after: u64,
+    },
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+impl AgentControlOp {
+    /// Send, Answer and Stop type into the pane. They are never retried with a new request id.
+    pub fn is_input_mutation(&self) -> bool {
+        matches!(
+            self,
+            Self::Send { .. } | Self::Answer { .. } | Self::Stop { .. }
+        )
+    }
+
+    pub fn mutation_request_id(&self) -> Option<String> {
+        match self {
+            Self::Send { request_id, .. }
+            | Self::Answer { request_id, .. }
+            | Self::Stop { request_id, .. } => request_id.clone().filter(|id| !id.is_empty()),
+            _ => None,
+        }
+    }
+}
+
+/// The capability a peer must advertise before this operation is sent.
+///
+/// Local list/read/send/answer/stop stay on `agentControlV1`. Anything that crosses a host,
+/// or that reads the observer stream, requires `agentControlRemoteV1`.
+pub fn required_capability(op: &AgentControlOp, host_id: Option<&str>) -> &'static str {
+    if host_id.is_some()
+        || matches!(
+            op,
+            AgentControlOp::Wait { .. } | AgentControlOp::Events { .. }
+        )
+    {
+        AGENT_CONTROL_REMOTE_CAPABILITY
+    } else {
+        AGENT_CONTROL_CAPABILITY
+    }
+}
+
+pub fn capability_advertised(capabilities: &[String], required: &str) -> bool {
+    capabilities.iter().any(|name| name == required)
 }
 
 /// How faithful control of a session is.
@@ -157,7 +228,7 @@ pub fn exit_code_for(code: &str) -> i32 {
     }
 }
 
-pub const AGENTS_USAGE: &str = "usage: ferryx-cli agents list [--json]\n       ferryx-cli agents read <session> [--json]\n       ferryx-cli agents send <session> <text> [--request-id <id>] [--json]\n       ferryx-cli agents answer <session> --prompt <id> --revision <rev> (--option <n> | --options <n,m> | --text <t>) [--request-id <id>] [--json]\n       ferryx-cli agents stop <session> [--request-id <id>] [--json]";
+pub const AGENTS_USAGE: &str = "usage: ferryx-cli agents list [--host <id>] [--json]\n       ferryx-cli agents read <session> [--host <id>] [--json]\n       ferryx-cli agents send <session> <text> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents answer <session> --prompt <id> --revision <rev> (--option <n> | --options <n,m> | --text <t>) [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents stop <session> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents wait <session> --until <working|blocked|idle|prompt|any> [--after <seq>] [--revision <rev>] [--timeout-ms <ms>] [--host <id>] [--json]\n       ferryx-cli agents events [--after <seq>] [--host <id>] [--json]";
 
 /// A CLI usage error: always exit 2, never contacts the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,8 +254,15 @@ fn session_arg(args: &[String]) -> Result<String, UsageError> {
     Ok(session.clone())
 }
 
+/// One parsed `ferryx-cli agents` invocation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedAgents {
+    pub op: AgentControlOp,
+    pub host_id: Option<String>,
+}
+
 /// Parse `ferryx-cli agents ...` (`args[0]` is the binary, `args[1]` is `agents`).
-pub fn parse_agents_cli(args: &[String]) -> Result<AgentControlOp, UsageError> {
+pub fn parse_agents_cli(args: &[String]) -> Result<ParsedAgents, UsageError> {
     if args.get(1).map(String::as_str) != Some("agents") {
         return Err(UsageError(AGENTS_USAGE.into()));
     }
@@ -192,6 +270,7 @@ pub fn parse_agents_cli(args: &[String]) -> Result<AgentControlOp, UsageError> {
     // JSON is the only output format; --json is accepted so callers can state it explicitly.
     let mut rest: Vec<String> = args.iter().skip(3).filter(|arg| *arg != "--json").cloned().collect();
     let request_id = take_flag(&mut rest, "--request-id")?;
+    let host_id = take_flag(&mut rest, "--host")?;
     let op = match command.as_str() {
         "list" => AgentControlOp::List,
         "read" => AgentControlOp::Read { session_id: session_arg(&rest)? },
@@ -230,13 +309,78 @@ pub fn parse_agents_cli(args: &[String]) -> Result<AgentControlOp, UsageError> {
             };
             AgentControlOp::Answer { session_id: session_arg(&rest)?, prompt_id, screen_revision, answer, request_id: request_id.clone() }
         }
-        "stop" => AgentControlOp::Stop { session_id: session_arg(&rest)?, request_id: request_id.clone() },
+        "stop" => AgentControlOp::Stop {
+            session_id: session_arg(&rest)?,
+            request_id: request_id.clone(),
+        },
+        "wait" => {
+            let until = take_flag(&mut rest, "--until")?
+                .ok_or_else(|| UsageError("--until is required".into()))?;
+            if !events::until_is_known(&until) {
+                return Err(UsageError(
+                    "--until must be working, blocked, idle, prompt or any".into(),
+                ));
+            }
+            let after = match take_flag(&mut rest, "--after")? {
+                Some(value) => value
+                    .parse::<u64>()
+                    .map_err(|_| UsageError("--after must be a number".into()))?,
+                None => 0,
+            };
+            let after_revision = take_flag(&mut rest, "--revision")?;
+            let timeout_ms = match take_flag(&mut rest, "--timeout-ms")? {
+                Some(value) => value
+                    .parse::<u64>()
+                    .map_err(|_| UsageError("--timeout-ms must be a number".into()))?,
+                None => 30_000,
+            };
+            AgentControlOp::Wait {
+                session_id: session_arg(&rest)?,
+                until,
+                after_revision,
+                after,
+                timeout_ms,
+            }
+        }
+        "events" => {
+            let after = match take_flag(&mut rest, "--after")? {
+                Some(value) => value
+                    .parse::<u64>()
+                    .map_err(|_| UsageError("--after must be a number".into()))?,
+                None => 0,
+            };
+            if !rest.is_empty() {
+                return Err(UsageError(AGENTS_USAGE.into()));
+            }
+            AgentControlOp::Events { after }
+        }
         _ => return Err(UsageError(AGENTS_USAGE.into())),
     };
-    if matches!(op, AgentControlOp::List | AgentControlOp::Read { .. }) && request_id.is_some() {
-        return Err(UsageError("--request-id applies to send, answer and stop only".into()));
+    if request_id.is_some() && !op.is_input_mutation() {
+        return Err(UsageError(
+            "--request-id applies to send, answer and stop only".into(),
+        ));
     }
-    Ok(op)
+    if let Some(host_id) = host_id.as_deref() {
+        if host_id.trim().is_empty() {
+            return Err(UsageError("--host needs a host id".into()));
+        }
+    }
+    Ok(ParsedAgents { op, host_id })
+}
+
+fn cli_timeout(op: &AgentControlOp) -> std::time::Duration {
+    let budget = match op {
+        AgentControlOp::Wait { timeout_ms, .. } => std::time::Duration::from_millis(
+            (*timeout_ms)
+                .min(policy::AGENT_CONTROL_TIMEOUT_MAX_MS)
+                .saturating_add(5_000),
+        ),
+        _ => std::time::Duration::from_secs(60),
+    };
+    budget
+        .max(std::time::Duration::from_secs(60))
+        .min(std::time::Duration::from_secs(310))
 }
 
 /// The JSON a failed command prints, and its exit code.
@@ -277,7 +421,10 @@ async fn connect_daemon() -> Result<tokio::net::TcpStream, (Value, i32)> {
 }
 
 /// Send one operation to the running daemon. Connect-only: never spawns, upgrades or retries.
-pub async fn request_daemon(op: AgentControlOp) -> (Value, i32) {
+///
+/// A lost answer is `OPERATION_OUTCOME_UNKNOWN` and is not sent again. A peer that lacks the
+/// capability required by `op` is refused before the request is written.
+pub async fn request_daemon(op: AgentControlOp, host_id: Option<String>) -> (Value, i32) {
     use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let stream = match connect_daemon().await {
@@ -311,16 +458,41 @@ pub async fn request_daemon(op: AgentControlOp) -> (Value, i32) {
         Ok(other) => return failure("UNSUPPORTED", &format!("unexpected handshake response: {other:?}")),
         Err(message) => return failure("INTERNAL", &message),
     }
+    let required = required_capability(&op, host_id.as_deref());
     // Gate on the advertised capability: an older daemon never sees a request it cannot parse.
-    match exchange(&mut reader, &mut write_half, &DaemonRequest::GetCapabilities).await {
-        Ok(DaemonResponse::CapabilitiesOk { capabilities }) if capabilities.iter().any(|name| name == AGENT_CONTROL_CAPABILITY) => {}
+    match exchange(
+        &mut reader,
+        &mut write_half,
+        &DaemonRequest::GetCapabilities,
+    )
+    .await
+    {
+        Ok(DaemonResponse::CapabilitiesOk { capabilities })
+            if capability_advertised(&capabilities, required) => {}
         Ok(DaemonResponse::CapabilitiesOk { .. }) => {
-            return failure("UNSUPPORTED", "this daemon does not support agent control (agentControlV1)")
+            return failure(
+                "UNSUPPORTED",
+                &format!("this daemon does not advertise {required}"),
+            )
         }
-        Ok(other) => return failure("INTERNAL", &format!("unexpected capabilities response: {other:?}")),
+        Ok(other) => {
+            return failure(
+                "INTERNAL",
+                &format!("unexpected capabilities response: {other:?}"),
+            )
+        }
         Err(message) => return failure("INTERNAL", &message),
     }
-    match exchange(&mut reader, &mut write_half, &DaemonRequest::AgentControl { request: op }).await {
+    match exchange(
+        &mut reader,
+        &mut write_half,
+        &DaemonRequest::AgentControl {
+            request: op,
+            host_id,
+        },
+    )
+    .await
+    {
         Ok(DaemonResponse::AgentControlOk { result }) => {
             let mut value = serde_json::json!({ "ok": true });
             if let (Some(out), Value::Object(fields)) = (value.as_object_mut(), result) {
@@ -344,15 +516,18 @@ pub fn run_agents_cli(args: &[String]) -> i32 {
             let (value, _) = failure("INVALID_REQUEST", &message);
             (value, EXIT_INVALID)
         }
-        Ok(op) => match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(ParsedAgents { op, host_id }) => {
+            let timeout = cli_timeout(&op);
+            match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime.block_on(async {
-                match tokio::time::timeout(std::time::Duration::from_secs(60), request_daemon(op)).await {
+                match tokio::time::timeout(timeout, request_daemon(op, host_id)).await {
                     Ok(result) => result,
-                    Err(_) => failure("TIMEOUT", "the daemon did not answer within 60s; the outcome is unknown"),
+                    Err(_) => failure("TIMEOUT", "the daemon did not answer before the wait budget elapsed; the outcome is unknown"),
                 }
             }),
             Err(error) => failure("INTERNAL", &error.to_string()),
-        },
+        }
+        }
     };
     println!("{value}");
     code
@@ -374,12 +549,26 @@ mod tests {
     #[test]
     fn the_request_round_trips_on_the_daemon_wire() {
         let request = crate::daemon::protocol::DaemonRequest::AgentControl {
-            request: AgentControlOp::Send { session_id: "s-1".into(), text: "hi".into(), request_id: Some("r".into()) },
+            request: AgentControlOp::Send {
+                session_id: "s-1".into(),
+                text: "hi".into(),
+                request_id: Some("r".into()),
+            },
+            host_id: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert_eq!(json, r#"{"type":"agentControl","request":{"op":"send","sessionId":"s-1","text":"hi","requestId":"r"}}"#);
         let back: crate::daemon::protocol::DaemonRequest = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, crate::daemon::protocol::DaemonRequest::AgentControl { request } if request == AgentControlOp::Send { session_id: "s-1".into(), text: "hi".into(), request_id: Some("r".into()) }));
+        assert!(
+            matches!(back, crate::daemon::protocol::DaemonRequest::AgentControl { request, host_id: None } if request == AgentControlOp::Send { session_id: "s-1".into(), text: "hi".into(), request_id: Some("r".into()) })
+        );
+        let remote: crate::daemon::protocol::DaemonRequest = serde_json::from_str(
+            r#"{"type":"agentControl","request":{"op":"list"},"hostId":"host-a"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(remote, crate::daemon::protocol::DaemonRequest::AgentControl { host_id: Some(host), .. } if host == "host-a")
+        );
     }
 
     #[test]
@@ -408,13 +597,44 @@ mod tests {
 
     #[test]
     fn the_cli_parses_every_operation() {
-        assert_eq!(parse_agents_cli(&argv(&["agents", "list", "--json"])).unwrap(), AgentControlOp::List);
         assert_eq!(
-            parse_agents_cli(&argv(&["agents", "send", "s-1", "echo", "hi", "--request-id", "r1"])).unwrap(),
-            AgentControlOp::Send { session_id: "s-1".into(), text: "echo hi".into(), request_id: Some("r1".into()) }
+            parse_agents_cli(&argv(&["agents", "list", "--json"]))
+                .unwrap()
+                .op,
+            AgentControlOp::List
         );
         assert_eq!(
-            parse_agents_cli(&argv(&["agents", "answer", "s-1", "--prompt", "p", "--revision", "r", "--options", "0,2"])).unwrap(),
+            parse_agents_cli(&argv(&[
+                "agents",
+                "send",
+                "s-1",
+                "echo",
+                "hi",
+                "--request-id",
+                "r1"
+            ]))
+            .unwrap()
+            .op,
+            AgentControlOp::Send {
+                session_id: "s-1".into(),
+                text: "echo hi".into(),
+                request_id: Some("r1".into())
+            }
+        );
+        assert_eq!(
+            parse_agents_cli(&argv(&[
+                "agents",
+                "answer",
+                "s-1",
+                "--prompt",
+                "p",
+                "--revision",
+                "r",
+                "--options",
+                "0,2"
+            ]))
+            .unwrap()
+            .op,
             AgentControlOp::Answer {
                 session_id: "s-1".into(),
                 prompt_id: "p".into(),
@@ -423,7 +643,76 @@ mod tests {
                 request_id: None,
             }
         );
-        assert_eq!(parse_agents_cli(&argv(&["agents", "stop", "s-1"])).unwrap(), AgentControlOp::Stop { session_id: "s-1".into(), request_id: None });
+        assert_eq!(
+            parse_agents_cli(&argv(&["agents", "stop", "s-1"]))
+                .unwrap()
+                .op,
+            AgentControlOp::Stop {
+                session_id: "s-1".into(),
+                request_id: None
+            }
+        );
+        let waited = parse_agents_cli(&argv(&[
+            "agents",
+            "wait",
+            "s-1",
+            "--until",
+            "idle",
+            "--after",
+            "4",
+            "--timeout-ms",
+            "1500",
+            "--host",
+            "hub",
+        ]))
+        .unwrap();
+        assert_eq!(waited.host_id.as_deref(), Some("hub"));
+        assert_eq!(
+            waited.op,
+            AgentControlOp::Wait {
+                session_id: "s-1".into(),
+                until: "idle".into(),
+                after_revision: None,
+                after: 4,
+                timeout_ms: 1500
+            }
+        );
+        assert_eq!(
+            parse_agents_cli(&argv(&["agents", "events", "--after", "9"]))
+                .unwrap()
+                .op,
+            AgentControlOp::Events { after: 9 }
+        );
+    }
+
+    #[test]
+    fn a_v1_only_peer_keeps_local_control_and_refuses_remote_and_wait() {
+        let advertised = vec![AGENT_CONTROL_CAPABILITY.to_string()];
+        assert!(capability_advertised(
+            &advertised,
+            required_capability(&AgentControlOp::List, None)
+        ));
+        assert!(!capability_advertised(
+            &advertised,
+            required_capability(&AgentControlOp::List, Some("other-host"))
+        ));
+        assert!(!capability_advertised(
+            &advertised,
+            required_capability(
+                &AgentControlOp::Wait {
+                    session_id: "s-1".into(),
+                    until: "idle".into(),
+                    after_revision: None,
+                    after: 0,
+                    timeout_ms: 1_000,
+                },
+                None,
+            )
+        ));
+        assert!(capability_advertised(
+            &[AGENT_CONTROL_REMOTE_CAPABILITY.to_string()],
+            required_capability(&AgentControlOp::Events { after: 0 }, None)
+        ));
     }
 
     #[test]

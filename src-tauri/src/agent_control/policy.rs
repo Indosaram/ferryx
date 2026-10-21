@@ -1,0 +1,263 @@
+//! Who may drive agent control, and the audit line each remote operation leaves.
+//!
+//! The grant is the existing machine-scope Control permission. There is no new scope variant.
+//! `enabled` is the per-device "allow agent control" switch: it defaults on for every device that
+//! already holds that grant, and a deployment or a test can turn it off for one device or for all
+//! of them. The workspace operation journal is not reused. Its records become `OutcomeUnknown`
+//! workspace operations on restart, which would mix supervisor keystrokes into worktree recovery.
+//! This log keeps the device id, the operation and the outcome beside that journal instead.
+
+use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use parking_lot::{Mutex, RwLock};
+use serde::Serialize;
+
+use crate::remote::auth::{DeviceAccessScope, DeviceInfo, DevicePermission};
+use crate::scoped_contracts::{ScopeError, ScopeErrorCode};
+
+use super::AgentControlOp;
+
+/// The largest JSON body an agent-control mutation route accepts.
+pub const AGENT_CONTROL_HTTP_BODY_MAX: usize = 64 * 1024;
+
+/// A person who typed in the pane inside this window blocks supervisor input.
+pub const HUMAN_TYPING_WINDOW_MS: u64 = 3_000;
+
+/// `wait` never blocks longer than this, whatever the caller asked.
+pub const AGENT_CONTROL_TIMEOUT_MAX_MS: u64 = 300_000;
+
+#[derive(Debug)]
+pub struct AgentControlPolicy {
+    enabled: AtomicBool,
+    /// `None` allows every device that passes the scope and permission checks.
+    /// `Some` allows only those device ids.
+    restricted: RwLock<Option<HashSet<String>>>,
+}
+
+impl Default for AgentControlPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: AtomicBool::new(true),
+            restricted: RwLock::new(None),
+        }
+    }
+}
+
+impl AgentControlPolicy {
+    pub fn permits(&self, device_id: &str) -> bool {
+        if !self.enabled.load(Ordering::Acquire) {
+            return false;
+        }
+        match self.restricted.read().as_ref() {
+            None => true,
+            Some(allowed) => allowed.contains(device_id),
+        }
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
+    }
+
+    pub fn restrict_to<I, S>(&self, ids: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        *self.restricted.write() = Some(ids.into_iter().map(Into::into).collect());
+    }
+}
+
+/// Whether this device may call agent control right now.
+///
+/// Mirror is refused for reads and mutations. View is refused for mutations. A device whose
+/// agent-control capability is off is refused for both. The caller re-runs this on every write
+/// with a freshly validated token, so a revoke between the two checks is a refusal.
+pub fn authorize_agent_control(
+    device: &DeviceInfo,
+    mutation: bool,
+    agent_control_allowed: bool,
+) -> Result<(), ScopeError> {
+    if device.access_scope != DeviceAccessScope::Machine {
+        return Err(refusal(
+            ScopeErrorCode::Forbidden,
+            "a mirror device cannot use agent control",
+        ));
+    }
+    if mutation && device.permission != DevicePermission::Control {
+        return Err(refusal(
+            ScopeErrorCode::Forbidden,
+            "a view-only device cannot type into an agent pane",
+        ));
+    }
+    if !agent_control_allowed {
+        return Err(refusal(
+            ScopeErrorCode::Forbidden,
+            "this device is not allowed to control agents",
+        ));
+    }
+    Ok(())
+}
+
+pub fn refusal(code: ScopeErrorCode, message: impl Into<String>) -> ScopeError {
+    ScopeError {
+        code,
+        message: message.into(),
+        retryable: false,
+        details: serde_json::Value::Null,
+    }
+}
+
+/// Clamp a wait budget. Zero is rejected. Anything above five minutes becomes five minutes.
+pub fn clamp_wait_timeout(timeout_ms: u64) -> Result<u64, ScopeError> {
+    if timeout_ms == 0 {
+        return Err(refusal(
+            ScopeErrorCode::InvalidRequest,
+            "timeout must be at least 1ms and is clamped to 300000ms",
+        ));
+    }
+    Ok(timeout_ms.min(AGENT_CONTROL_TIMEOUT_MAX_MS))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditRecord {
+    pub device_id: String,
+    pub op: String,
+    pub session_id: Option<String>,
+    pub request_id: Option<String>,
+    pub code: String,
+}
+
+#[derive(Debug, Default)]
+pub struct AgentControlAudit {
+    records: Mutex<VecDeque<AuditRecord>>,
+}
+
+impl AgentControlAudit {
+    pub fn record(&self, record: AuditRecord) {
+        let mut records = self.records.lock();
+        records.push_back(record);
+        while records.len() > 1024 {
+            records.pop_front();
+        }
+    }
+
+    pub fn recent(&self) -> Vec<AuditRecord> {
+        self.records.lock().iter().cloned().collect()
+    }
+}
+
+pub fn audit_op_name(op: &AgentControlOp) -> &'static str {
+    match op {
+        AgentControlOp::List => "list",
+        AgentControlOp::Read { .. } => "read",
+        AgentControlOp::Send { .. } => "send",
+        AgentControlOp::Answer { .. } => "answer",
+        AgentControlOp::Stop { .. } => "stop",
+        AgentControlOp::Wait { .. } => "wait",
+        AgentControlOp::Events { .. } => "events",
+    }
+}
+
+pub fn audit_session(op: &AgentControlOp) -> Option<String> {
+    match op {
+        AgentControlOp::Read { session_id }
+        | AgentControlOp::Send { session_id, .. }
+        | AgentControlOp::Answer { session_id, .. }
+        | AgentControlOp::Stop { session_id, .. }
+        | AgentControlOp::Wait { session_id, .. } => Some(session_id.clone()),
+        AgentControlOp::List | AgentControlOp::Events { .. } => None,
+    }
+}
+
+pub fn audit_request(op: &AgentControlOp) -> Option<String> {
+    match op {
+        AgentControlOp::Send { request_id, .. }
+        | AgentControlOp::Answer { request_id, .. }
+        | AgentControlOp::Stop { request_id, .. } => request_id.clone(),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::auth::AuthManager;
+
+    fn device(permission: DevicePermission, scope: DeviceAccessScope) -> DeviceInfo {
+        DeviceInfo {
+            id: "dev-1".into(),
+            name: "phone".into(),
+            permission,
+            access_scope: scope,
+            created_at: 0,
+            last_seen_at: 0,
+            revoked: false,
+            installation_id: None,
+            attach_public_key: None,
+        }
+    }
+
+    #[test]
+    fn mirror_is_refused_and_view_cannot_mutate_and_a_disabled_capability_is_refused() {
+        let mirror = device(DevicePermission::Control, DeviceAccessScope::Mirror);
+        assert_eq!(
+            authorize_agent_control(&mirror, false, true)
+                .unwrap_err()
+                .code,
+            ScopeErrorCode::Forbidden
+        );
+        let view = device(DevicePermission::View, DeviceAccessScope::Machine);
+        assert!(authorize_agent_control(&view, false, true).is_ok());
+        assert_eq!(
+            authorize_agent_control(&view, true, true).unwrap_err().code,
+            ScopeErrorCode::Forbidden
+        );
+        let control = device(DevicePermission::Control, DeviceAccessScope::Machine);
+        assert_eq!(
+            authorize_agent_control(&control, true, false)
+                .unwrap_err()
+                .code,
+            ScopeErrorCode::Forbidden
+        );
+        assert!(authorize_agent_control(&control, true, true).is_ok());
+    }
+
+    #[test]
+    fn a_revoked_token_fails_the_next_authorization_check() {
+        let auth = AuthManager::new();
+        let pin = auth
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+            .expect("machine control pin");
+        let (token, device) = auth.exchange_pairing_code(&pin, "hub").expect("exchange");
+        let check = || {
+            let device = auth
+                .validate_token(&token)
+                .map_err(|_| refusal(ScopeErrorCode::Unauthorized, "revoked"))?;
+            authorize_agent_control(&device, true, true)
+        };
+        assert!(check().is_ok());
+        auth.revoke_device(&device.id).expect("revoke");
+        assert_eq!(check().unwrap_err().code, ScopeErrorCode::Unauthorized);
+    }
+
+    #[test]
+    fn the_policy_can_exclude_one_device_and_timeouts_clamp_at_five_minutes() {
+        let policy = AgentControlPolicy::default();
+        assert!(policy.permits("dev-1"));
+        policy.restrict_to(["other"]);
+        assert!(!policy.permits("dev-1"));
+        policy.set_enabled(false);
+        policy.restrict_to(Vec::<String>::new());
+        assert!(!policy.permits("other"));
+        assert_eq!(
+            clamp_wait_timeout(600_000).unwrap(),
+            AGENT_CONTROL_TIMEOUT_MAX_MS
+        );
+        assert_eq!(
+            clamp_wait_timeout(0).unwrap_err().code,
+            ScopeErrorCode::InvalidRequest
+        );
+    }
+}

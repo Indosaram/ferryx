@@ -3846,6 +3846,8 @@ async fn get_capabilities(
             if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok()) {
                 capabilities.push(super::dag_api::DAG_STREAM_CAPABILITY);
             }
+            capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
             capabilities
         } else { vec![] },
         "browser": {
@@ -7365,6 +7367,40 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/reference-chat/{sessionId}/files/{fileId}",
             get(reference_chat_preview_file).delete(reference_chat_delete_file),
+        )
+        .route(
+            "/api/v1/agent-control/sessions",
+            get(agent_control_service::http_sessions),
+        )
+        .route(
+            "/api/v1/agent-control/events",
+            get(agent_control_service::http_events),
+        )
+        .route(
+            "/api/v1/agent-control/sessions/{sessionId}",
+            get(agent_control_service::http_session),
+        )
+        .route(
+            "/api/v1/agent-control/sessions/{sessionId}/wait",
+            get(agent_control_service::http_wait),
+        )
+        .route(
+            "/api/v1/agent-control/sessions/{sessionId}/send",
+            post(agent_control_service::http_send).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
+            "/api/v1/agent-control/sessions/{sessionId}/answer",
+            post(agent_control_service::http_answer).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
+            "/api/v1/agent-control/sessions/{sessionId}/stop",
+            post(agent_control_service::http_stop).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
         )
         .route(
             "/api/v1/workspace/projects",
