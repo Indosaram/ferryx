@@ -1,6 +1,7 @@
 import { ChevronDown } from "lucide-react";
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Toaster } from "../components/ui/sonner";
+import { createCoalescedRunner } from "./coalescedRunner";
 import {
   DEFAULT_PROBE_TIMEOUT_MS,
   normalizeDirectCandidateOrigin,
@@ -1330,7 +1331,6 @@ export const RemoteHostConnection: React.FC<{
   /* The machine inventory is read from effects and socket callbacks that are declared
      before the derived model below, so it is mirrored into a ref every render. */
   const inventoryRef = useRef<RemoteSessionInventory | null>(null);
-  const inventoryRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scheduleInventoryRefreshRef = useRef<() => void>(() => {});
   // Re-arms the read-only desktop-context sync when a same-machine inventory refresh
   // (session started/exited boundary) lands: same-context tab changes are re-read
@@ -1860,16 +1860,22 @@ export const RemoteHostConnection: React.FC<{
     return next;
   }, [loadWorkspace]);
 
-  /* An inventory boundary can arrive in bursts while worktrees change; coalescing keeps
-     one workspace read in flight instead of one per frame. */
-  const scheduleInventoryRefresh = useCallback(() => {
-    if (inventoryRefreshTimerRef.current !== null) return;
-    inventoryRefreshTimerRef.current = setTimeout(() => {
-      inventoryRefreshTimerRef.current = null;
-      void refreshWorkspace();
-    }, 150);
-  }, [refreshWorkspace]);
-  scheduleInventoryRefreshRef.current = scheduleInventoryRefresh;
+  /* An inventory boundary can arrive in bursts (a busy watched tree republishes several
+     times a second). Every tunnel request shares one serial queue, so a read per boundary
+     would starve a selection's own requests past its confirmation deadline. At most one
+     refresh cycle (workspace read, then the desktop-context sync it re-arms) is in flight;
+     boundaries landing meanwhile collapse into a single trailing cycle. */
+  const refreshWorkspaceRef = useRef(refreshWorkspace);
+  refreshWorkspaceRef.current = refreshWorkspace;
+  const [inventoryRefresher] = useState(() =>
+    createCoalescedRunner(
+      () => refreshWorkspaceRef.current(),
+      150,
+      () => setDesktopSyncTick((tick) => tick + 1),
+    ),
+  );
+  useEffect(() => () => inventoryRefresher.cancel(), [inventoryRefresher]);
+  scheduleInventoryRefreshRef.current = inventoryRefresher.trigger;
 
   useEffect(() => {
     const hash = window.location.hash;
@@ -2062,7 +2068,6 @@ export const RemoteHostConnection: React.FC<{
         if (inventoryEvent.kind === "inventory") {
           applyInventoryEvent(activeTunnelConnection.machine.machineId, text);
           scheduleInventoryRefreshRef.current();
-          setDesktopSyncTick((tick) => tick + 1);
         }
         if (inventoryEvent.kind === "ignored" && inventoryEvent.type === "desktopSelectionChanged") {
           setDesktopFollowTick((tick) => tick + 1);
@@ -2328,6 +2333,11 @@ export const RemoteHostConnection: React.FC<{
         }
 
         if (!targetSession) {
+          /* The machine API cannot start a terminal on an SSH-host project (the desktop
+             answers INVALID_PATH); say so instead of surfacing a bare status code. */
+          if (option.workspaceId.startsWith("ssh:")) {
+            throw new Error("No running terminal on this SSH project. Open one from the desktop first.");
+          }
           if (!isComplete) {
             throw new Error("Cannot create machine session: session inventory is incomplete");
           }
