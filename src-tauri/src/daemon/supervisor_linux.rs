@@ -206,6 +206,12 @@ const QA_BARRIER_KEYS: [&str; 3] = ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID",
 #[cfg(not(feature = "local-split-qa"))]
 const QA_BARRIER_KEYS: [&str; 0] = [];
 
+/// The QA unit name itself, forwarded into a QA-named unit on every build (launchd.rs QA_JOB_ENV,
+/// supervisor_windows.rs FORWARDED_ENV). The job's daemon runs in an isolated runtime
+/// (FERRYX_DATA_DIR set), so without its own QA name `supervisor::supported()` is false there and
+/// RequestUpgrade refuses to start the successor generation's unit.
+const QA_NAME_KEYS: [&str; 1] = [crate::daemon::supervisor::SUPERVISOR_NAME_ENV];
+
 fn qa_named(vars: &[(OsString, OsString)]) -> bool {
     vars.iter().any(|(key, value)| {
         key.to_str() == Some(crate::daemon::supervisor::SUPERVISOR_NAME_ENV) && !value.is_empty()
@@ -235,7 +241,9 @@ fn filtered_env(vars: &[(OsString, OsString)], keep: fn(&str) -> bool) -> Vec<(S
 pub(crate) fn forwarded_env(vars: &[(OsString, OsString)]) -> Vec<(String, String)> {
     let mut forwarded = filtered_env(vars, forwarded_key);
     if qa_named(vars) {
-        forwarded.extend(filtered_env(vars, |key| QA_BARRIER_KEYS.contains(&key)));
+        forwarded.extend(filtered_env(vars, |key| {
+            QA_NAME_KEYS.contains(&key) || QA_BARRIER_KEYS.contains(&key)
+        }));
         forwarded.sort();
     }
     forwarded
@@ -935,9 +943,9 @@ mod tests {
         ]);
         let keys: Vec<String> = forwarded_env(&qa).into_iter().map(|(key, _)| key).collect();
         if cfg!(feature = "local-split-qa") {
-            assert_eq!(keys, ["FERRYX_DATA_DIR", "FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"]);
+            assert_eq!(keys, ["FERRYX_DAEMON_SUPERVISOR_NAME", "FERRYX_DATA_DIR", "FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"]);
         } else {
-            assert_eq!(keys, ["FERRYX_DATA_DIR"]);
+            assert_eq!(keys, ["FERRYX_DAEMON_SUPERVISOR_NAME", "FERRYX_DATA_DIR"]);
         }
         // The rendered unit is what systemd hands the daemon: the barrier env is an Environment=
         // line of a QA-named unit only.
@@ -946,6 +954,29 @@ mod tests {
         assert_eq!(unit.contains(line), cfg!(feature = "local-split-qa"), "{unit}");
         let unit = render_unit(Path::new("/opt/ferryx/ferryx"), &plain).unwrap();
         assert!(!unit.contains("FERRYX_QA_"), "{unit}");
+    }
+
+    /// T12 Q08 (run-9a5db442): the daemon of a QA-named unit runs in an isolated runtime, so it
+    /// may manage (and start a handover candidate's) unit only when it sees the QA name itself.
+    /// The name reaches a QA-named unit on every build, and a plain unit never gets one.
+    #[test]
+    fn qa_unit_carries_its_supervisor_name_so_its_daemon_can_start_a_successor() {
+        let qa = vars(&[("FERRYX_DATA_DIR", "/qa"), ("FERRYX_DAEMON_SUPERVISOR_NAME", "ferryx-qa-r1")]);
+        let unit = render_unit(Path::new("/opt/ferryx/ferryx"), &qa).unwrap();
+        assert!(unit.contains("Environment=\"FERRYX_DAEMON_SUPERVISOR_NAME=ferryx-qa-r1\"\n"), "{unit}");
+        // What the unit's daemon then sees: Environment= lines are its whole FERRYX_* env.
+        let daemon_env: Vec<(OsString, OsString)> = forwarded_env(&qa)
+            .into_iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect();
+        let lookup = |key: &str| daemon_env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        assert!(
+            crate::daemon::supervisor::non_empty(&lookup, crate::daemon::supervisor::SUPERVISOR_NAME_ENV).is_some(),
+            "the unit's daemon must see its QA name: {unit}"
+        );
+        let plain = vars(&[("FERRYX_DATA_DIR", "/qa"), ("FERRYX_DAEMON_SUPERVISOR_NAME", "")]);
+        let unit = render_unit(Path::new("/opt/ferryx/ferryx"), &plain).unwrap();
+        assert!(!unit.contains("FERRYX_DAEMON_SUPERVISOR_NAME"), "{unit}");
     }
 
     /// Q11: the QA daemon's ssh must trust the private sshd's pinned key, so a QA-named unit of a

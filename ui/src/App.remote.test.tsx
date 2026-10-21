@@ -126,6 +126,8 @@ async function mount() { await act(async () => { render(<App />); }); }
 // 7e8fdfb7 uses detailed spawn for new tabs so their durable identity is available immediately.
 beforeEach(() => {
   localStorage.clear(); resetWorkspaceRestore(); vi.clearAllMocks(); hosts.current = [];
+  // clearAllMocks keeps implementations; a connected status from one test must not settle the next.
+  native.getTerminalRemoteStatus.mockReset();
   native.isTauriRuntime.mockReturnValue(false);
   const remoteStatusListeners = new Set<(status: import("./lib/types").TerminalRemoteStatus) => void>();
   native.onTerminalRemoteStatus.mockImplementation(async (handler: (status: import("./lib/types").TerminalRemoteStatus) => void) => {
@@ -205,6 +207,100 @@ describe("App SSH project lifecycle", () => {
       remoteConnectionState: "connected", remoteGeneration: 4,
     } });
     expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+  });
+  const connectedDetails = (backendSessionId: string, generation: number): import("./lib/types").RemoteSessionStatusResponse => ({
+    type: "remoteSessionDetailsOk", legacyDirectSsh: false,
+    details: {
+      state: "connected", generation, failure: null, replayGap: null, attempts: 0, pid: 1234,
+      descriptor: {
+        backendSessionId,
+        target: { hostId: "build", ownerId: "owner", backendSessionId: "remote-process", epoch: "1" },
+        config: {}, clientRequestId: "request", remoteCursor: "0", cols: 80, rows: 24,
+      },
+    },
+  });
+  it("settles SSH identity Retry from the current status when the daemon already holds the session connected", async () => {
+    seed([remote]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const retained = Object.values((await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!.sessions)[0];
+    // Retry on a connected session is a daemon no-op: no terminal_remote_status event ever follows.
+    native.retryTerminalRemoteSession.mockResolvedValue({ type: "retryRemoteSessionOk" });
+    native.getTerminalRemoteStatus.mockResolvedValue(connectedDetails(retained.backendSessionId!, 7));
+    const results: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
+    await act(async () => { native.refresh!(retained.id, result => results.push(result)); });
+    await act(async () => { await Promise.resolve(); });
+    expect(native.getTerminalRemoteStatus).toHaveBeenCalledWith(retained.backendSessionId);
+    expect(results).toEqual([{ kind: "pending" }, { kind: "ready", session: expect.objectContaining({
+      id: retained.id, backendSessionId: retained.backendSessionId,
+      remoteConnectionState: "connected", remoteGeneration: 7,
+    }) }]);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+  });
+  it("settles SSH identity Retry exactly once when the status event races the current-status read", async () => {
+    seed([remote]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const retained = Object.values((await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!.sessions)[0];
+    native.retryTerminalRemoteSession.mockResolvedValue({ type: "retryRemoteSessionOk" });
+    const status = deferred<import("./lib/types").RemoteSessionStatusResponse>();
+    native.getTerminalRemoteStatus.mockReturnValue(status.promise);
+    const results: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
+    await act(async () => { native.refresh!(retained.id, result => results.push(result)); });
+    expect(native.getTerminalRemoteStatus).toHaveBeenCalledTimes(1);
+    await act(async () => { native.remoteStatusHandler!({ sessionId: retained.backendSessionId!, state: "connected", generation: 5, failure: null, replayGap: null }); });
+    await act(async () => { status.resolve(connectedDetails(retained.backendSessionId!, 9)); await status.promise; });
+    expect(results.filter(result => result.kind === "ready")).toHaveLength(1);
+    expect(results.at(-1)).toMatchObject({ kind: "ready", session: { remoteGeneration: 5 } });
+  });
+  it("keeps waiting for the status event when the current status after Retry is not connected", async () => {
+    seed([remote]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const retained = Object.values((await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!.sessions)[0];
+    native.retryTerminalRemoteSession.mockResolvedValue({ type: "retryRemoteSessionOk" });
+    const reconnecting = connectedDetails(retained.backendSessionId!, 7);
+    native.getTerminalRemoteStatus.mockResolvedValue({ ...reconnecting, details: { ...reconnecting.details!, state: "reconnecting" } });
+    const results: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
+    await act(async () => { native.refresh!(retained.id, result => results.push(result)); });
+    await act(async () => { await Promise.resolve(); });
+    expect(native.getTerminalRemoteStatus).toHaveBeenCalledTimes(1);
+    expect(results).toEqual([{ kind: "pending" }]);
+    await act(async () => { native.remoteStatusHandler!({ sessionId: retained.backendSessionId!, state: "connected", generation: 8, failure: null, replayGap: null }); });
+    expect(results).toEqual([{ kind: "pending" }, { kind: "ready", session: expect.objectContaining({ remoteConnectionState: "connected", remoteGeneration: 8 }) }]);
+  });
+  it("keeps waiting for the status event when the current-status read after Retry fails", async () => {
+    seed([remote]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const retained = Object.values((await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!.sessions)[0];
+    native.retryTerminalRemoteSession.mockResolvedValue({ type: "retryRemoteSessionOk" });
+    native.getTerminalRemoteStatus.mockRejectedValue({ code: "DAEMON_UNAVAILABLE", message: "status read failed" });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const results: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
+    await act(async () => { native.refresh!(retained.id, result => results.push(result)); });
+    await act(async () => { await Promise.resolve(); });
+    expect(warn).toHaveBeenCalledWith("SSH status read after retry failed; waiting for status event", { code: "DAEMON_UNAVAILABLE", message: "status read failed" });
+    warn.mockRestore();
+    expect(results).toEqual([{ kind: "pending" }]);
+    await act(async () => { native.remoteStatusHandler!({ sessionId: retained.backendSessionId!, state: "connected", generation: 6, failure: null, replayGap: null }); });
+    expect(results).toEqual([{ kind: "pending" }, { kind: "ready", session: expect.objectContaining({ remoteConnectionState: "connected", remoteGeneration: 6 }) }]);
+  });
+  it("never settles a Retry cancelled while its current-status read is in flight", async () => {
+    seed([remote]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const retained = Object.values((await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!.sessions)[0];
+    native.retryTerminalRemoteSession.mockResolvedValue({ type: "retryRemoteSessionOk" });
+    const status = deferred<import("./lib/types").RemoteSessionStatusResponse>();
+    native.getTerminalRemoteStatus.mockReturnValue(status.promise);
+    const results: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
+    let cancel!: () => void;
+    await act(async () => { cancel = native.refresh!(retained.id, result => results.push(result)); });
+    expect(native.getTerminalRemoteStatus).toHaveBeenCalledTimes(1);
+    cancel();
+    await act(async () => { status.resolve(connectedDetails(retained.backendSessionId!, 9)); await status.promise; });
+    expect(results).toEqual([{ kind: "pending" }]);
   });
   it("suppresses a cancelled SSH Retry callback and cancels when its owner tuple changes", async () => {
     seed([remote]);

@@ -80,8 +80,37 @@ export async function startSshd(ctx) {
   const repoRoot = hjoin(ctx.layout.root, 'ssh-repo');
   await ctx.agent.call('mkdir', { dir: repoRoot });
   await ctx.agent.call('exec', { command: 'git', args: ['init', '-q', repoRoot] });
-  const inv = sshInventory({ hostId: `qa-sshd-${ctx.runId}`, port, user, identityFile: clientKey, repoRoot });
+  const hostId = `qa-sshd-${ctx.runId}`;
+  const inv = sshInventory({ hostId, port, user, identityFile: clientKey, repoRoot });
   await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.data, 'ssh_hosts.json'), content: JSON.stringify(inv.hosts) });
   await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.data, 'remote_projects.json'), content: JSON.stringify(inv.projects) });
-  return { pid: entry.pid, port, user, clientKey, knownHosts, workspaceId: inv.workspaceId, hostStorePath: hjoin(ctx.layout.data, 'ssh_hosts.json'), repoRoot };
+  return { pid: entry.pid, port, user, clientKey, knownHosts, hostId, workspaceId: inv.workspaceId, hostStorePath: hjoin(ctx.layout.data, 'ssh_hosts.json'), repoRoot };
+}
+
+/**
+ * The GUI's own restore path onto an existing SSH backend: a saved workspace session whose SSH
+ * workspace (target ssh/hostId) holds one tab bound to backendSessionId. App.tsx recovers the
+ * project from it (recoverProjectBootstrap) and the restored pane re-admits and attaches that
+ * session (sessionPersistence.ts keeps an SSH backendSessionId). Fields outside workspaces (the
+ * daemon's durable remote records) are kept from the existing file.
+ */
+export function sshRestoreSession(existing, { workspaceId, hostId, repoRoot, backendSessionId, daemonEpoch, incarnation, localSessionId, tabId, now }) {
+  const base = existing && typeof existing === 'object' ? existing : {};
+  return {
+    ...base,
+    version: 2,
+    timestamp: now,
+    activeWorkspaceId: workspaceId,
+    workspaces: {
+      [workspaceId]: {
+        workspaceId, repoRoot, gitRoot: repoRoot, target: { kind: 'ssh', hostId },
+        worktrees: [{ path: repoRoot, branch: '', head: '', isMain: true, isLocked: false }],
+        activeWorktreePath: repoRoot,
+        layout: { tabs: [{ id: tabId, label: 'shell', sessionId: localSessionId }], activeTabId: tabId, splitMode: 'none', primaryTabId: tabId, secondaryTabId: null },
+        terminalSessions: {
+          [localSessionId]: { sessionId: localSessionId, localSessionId, backendSessionId, cwd: repoRoot, worktreePath: repoRoot, createdAt: now, daemonEpoch, incarnation },
+        },
+      },
+    },
+  };
 }

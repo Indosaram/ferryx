@@ -7,9 +7,9 @@ import { assertion, block } from '../lib/summary.mjs';
 import { data as D, isLive, liveSessions } from '../lib/wire.mjs';
 import {
   evidence, dataConn, controlConn, ownerIdentity, nonceRoundTrip, assertSameOwner, retireOwner, freshOwner, nonce,
-  echoCommand, interrupt, DAEMON_READY_TIMEOUT_MS,
+  echoCommand, interrupt, setAsideHeadCatalog, DAEMON_READY_TIMEOUT_MS,
 } from './common.mjs';
-import { startSshd } from '../lib/sshd.mjs';
+import { startSshd, sshRestoreSession } from '../lib/sshd.mjs';
 import { legacyLogFiles } from '../lib/jobs.mjs';
 
 export const OPTOUT_FILE = 'daemon-supervisor.optout'; // supervisor.rs OPTOUT_FILE_NAME, in <FERRYX_DATA_DIR>/remote
@@ -39,20 +39,56 @@ const autostarts = (reg) => reg.runAtLoad ?? reg.enabled ?? reg.logonTrigger;
  */
 export const SUPERVISOR_SWITCH_TABS = 1 + 9 + 3;
 
-/** Drives the real settings toggle through MahoRD; the product writes the marker as its receipt. */
-async function toggleAutostartOffThroughSettings(ctx, optout) {
+/** GUI log line of cmd_daemon_supervisor_get (ipc/agent_integration.rs), which General calls on mount. */
+export const SETTINGS_OPENED_RECEIPT = 'Daemon supervisor status read';
+export const SETTINGS_OPEN_ATTEMPTS = 3;
+export const SETTINGS_OPEN_DEADLINE_MS = 10_000;
+
+/** A pattern that matches once the log holds at least `count` receipt lines. */
+export function nthReceiptPattern(receipt, count) {
+  return `(?:${receipt}[\\s\\S]*?){${count}}`;
+}
+
+/**
+ * Opens Settings with its shortcut and proves it opened: each press must add one
+ * SETTINGS_OPENED_RECEIPT line to the GUI log (General mounts and reads the supervisor status).
+ * run-9a5db442 pressed the shortcut into a webview that had not rendered yet and toggled blind.
+ * A press with no new receipt within the deadline did not open the dialog, so pressing again is
+ * safe; a receipt that arrives late only means a later press closes the dialog, which the next
+ * press then reopens with its own receipt. Bounded by SETTINGS_OPEN_ATTEMPTS.
+ */
+export async function openSettings(ctx, logFile) {
+  const attempts = [];
+  const count = async () => (((await ctx.agent.call('readFile', { file: logFile })) ?? '').split(SETTINGS_OPENED_RECEIPT).length - 1);
+  for (let i = 0; i < SETTINGS_OPEN_ATTEMPTS; i += 1) {
+    const before = await count();
+    await ctx.mahord.hotkey(['Control', ',']);
+    const seen = await ctx.agent.call('waitLog', { file: logFile, pattern: nthReceiptPattern(SETTINGS_OPENED_RECEIPT, before + 1), deadlineMs: SETTINGS_OPEN_DEADLINE_MS });
+    attempts.push({ before, opened: Boolean(seen.matched) });
+    if (seen.matched) return { opened: true, attempts };
+  }
+  return { opened: false, attempts };
+}
+
+/**
+ * Drives the real settings toggle through MahoRD; the product writes the marker as its receipt.
+ * Nothing is toggled unless Settings provably opened.
+ */
+async function toggleAutostartOffThroughSettings(ctx, optout, logFile) {
   if (!ctx.mahord) throw new Error('the settings toggle needs MahoRD on remote hosts');
-  await ctx.mahord.hotkey(['Control', ',']);
-  // The switch renders only after cmd_daemon_supervisor_get answers; give the dialog that long
-  // before walking focus, so Space never lands on the CLI launcher button that follows it.
-  await new Promise((resolve) => setTimeout(resolve, 3_000));
+  const opened = await openSettings(ctx, logFile);
+  if (!opened.opened) {
+    return { opened, marker: false, before: null, after: await ctx.mahord.screenshot().catch(() => null) };
+  }
+  // The receipt is logged when cmd_daemon_supervisor_get answers, which is what renders the switch,
+  // so focus is walked only after the switch exists.
   for (let i = 0; i < SUPERVISOR_SWITCH_TABS; i += 1) await ctx.mahord.key('Tab');
   const before = await ctx.mahord.screenshot().catch(() => null);
   await ctx.mahord.key('Space');
   const marker = await ctx.agent.call('waitPath', { file: optout, deadlineMs: 30_000 });
   const after = await ctx.mahord.screenshot().catch(() => null);
   await ctx.mahord.key('Escape');
-  return { marker, before, after };
+  return { opened, marker, before, after };
 }
 
 /** remove_autostart runs right after the marker write in the same command: wait for its effect. */
@@ -70,8 +106,6 @@ export async function Q10(ctx, result) {
   const key = ctx.keys.A;
   const owner = await ownerIdentity(ctx);
   const optout = hjoin(ctx.layout.data, 'remote', OPTOUT_FILE);
-  const regBefore = await loginRegistration(ctx, key);
-  assertion(result, 'newest generation registered for login before opt-out', autostarts(regBefore) === true, regBefore.raw?.slice?.(0, 400) ?? regBefore.raw);
   // Toggle through the product: Settings > General > "Restart background service automatically"
   // calls cmd_daemon_supervisor_set(false) (ipc/agent_integration.rs:100-102), which writes the
   // marker and then calls remove_autostart. Writing the marker directly only skips future
@@ -79,14 +113,21 @@ export async function Q10(ctx, result) {
   // A fresh GUI holds keyboard focus, so the shortcut reaches its window.
   await ctx.gui.quit(ctx.state.gui);
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A);
-  const settled = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.logs, `gui-${ctx.state.gui.tag}.log`), pattern: 'Daemon supervisor armed', deadlineMs: DAEMON_READY_TIMEOUT_MS });
-  const toggle = await toggleAutostartOffThroughSettings(ctx, optout);
+  const guiLog = hjoin(ctx.layout.logs, `gui-${ctx.state.gui.tag}.log`);
+  const settled = await ctx.agent.call('waitLog', { file: guiLog, pattern: 'Daemon supervisor armed', deadlineMs: DAEMON_READY_TIMEOUT_MS });
+  // Read after this A GUI armed: its setup reconciles login registration (owner_admission.rs
+  // ensure_if_absent_with), which is what registers A. Before that, the last GUI of another build
+  // (Q08b's v1bump) may legitimately hold the registration.
+  const regBefore = await loginRegistration(ctx, key);
+  assertion(result, 'newest generation registered for login before opt-out', autostarts(regBefore) === true, regBefore.raw?.slice?.(0, 400) ?? regBefore.raw);
+  const toggle = await toggleAutostartOffThroughSettings(ctx, optout, guiLog);
   if (toggle.before) await evidence(ctx, result, 'settings-before-space.png.b64', toggle.before.toString('base64'));
   if (toggle.after) await evidence(ctx, result, 'settings-after-space.png.b64', toggle.after.toString('base64'));
+  assertion(result, 'Settings opened (cmd_daemon_supervisor_get receipt) before the toggle', toggle.opened.opened, toggle.opened.attempts);
   assertion(result, 'settings toggle wrote the opt-out marker (product receipt)', toggle.marker === true, optout);
   const regAfter = toggle.marker ? await waitAutostartRemoved(ctx, key) : await loginRegistration(ctx, key);
   const ownerAfter = await ownerIdentity(ctx);
-  await evidence(ctx, result, 'toggle.json', { regBefore, regAfter, settled, marker: toggle.marker, owner, ownerAfter });
+  await evidence(ctx, result, 'toggle.json', { regBefore, regAfter, settled, opened: toggle.opened, marker: toggle.marker, owner, ownerAfter });
   assertion(result, 'opt-out removed login autostart', autostarts(regAfter) === false, regAfter.raw?.slice?.(0, 400) ?? regAfter.raw);
   assertSameOwner(result, owner, ownerAfter, 'opt-out toggle never stops the running owner');
   if (ctx.platform === 'windows') {
@@ -160,8 +201,19 @@ export async function Q10b(ctx, result) {
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A);
 }
 
+/** native_receipts_dir: <barrier dir parent>/receipts (qa_barrier.rs native_receipts_dir). */
+export function nativeEventsFile(layout) {
+  return hjoin(path.posix.dirname(layout.barriers.replace(/\\/g, '/')), 'receipts', 'native-events.jsonl');
+}
+
+/** One native-events line of kind "attached" whose attach tuple names this backend session. */
+export function attachedPattern(sessionId) {
+  return `^(?=[^\\n]*"kind":"attached")(?=[^\\n]*"backendSessionId":"${sessionId}")[^\\n]*$`;
+}
+
 export async function Q11(ctx, result) {
   if (!ctx.hooks.writeAckHoldArm?.present) return block(result, 'HOOK_MISSING', ctx.hooks.writeAckHoldArm.owner);
+  if (!ctx.mahord) return block(result, 'GUI_INPUT_UNAVAILABLE', 'Q11 types the marker through the GUI with MahoRD');
   ctx.sshd = ctx.sshd ?? await startSshd(ctx);
   if (ctx.sshd.unavailable) return block(result, 'SSHD_UNAVAILABLE', ctx.sshd.unavailable);
   const conn = ctx.state.conn;
@@ -169,6 +221,7 @@ export async function Q11(ctx, result) {
   assertion(result, 'SSH session spawned against the private sshd', spawned.type === 'spawnOk', spawned);
   if (spawned.type !== 'spawnOk') return;
   const sid = spawned.sessionId;
+  const incarnation = spawned.session?.incarnation ?? null;
   const input = hjoin(ctx.sshd.repoRoot, 'ssh-input.log');
   await conn.call(D.attach(sid, 0));
   await conn.call(D.write(sid, `cat >> ${input}\n`));
@@ -176,19 +229,51 @@ export async function Q11(ctx, result) {
   const sBefore = before.sessions.find((s) => s.backendId === sid);
   await evidence(ctx, result, 'before.json', before);
   assertion(result, 'SSH session live with a host-scoped remote pid', sBefore?.connected && sBefore?.remotePid != null && sBefore?.localChildPid == null, sBefore);
-  // Arm the hold, type the marker through the GUI, wait for write-applied, quit while held.
+  // Plan line 225: the marker is typed through the GUI. The GUI reaches an existing SSH backend
+  // only through its own restore path: a saved session whose SSH workspace holds a tab bound to
+  // that backend id (App.tsx recoverProjectBootstrap; sessionPersistence.ts keeps an SSH
+  // backendSessionId and re-admits it). Quit the running GUI first so its save cannot overwrite it.
+  if (ctx.state.gui) { await ctx.gui.quit(ctx.state.gui); ctx.state.gui = null; }
+  const sessionFile = hjoin(ctx.layout.sessions, 'session_state.json');
+  const existingText = await ctx.agent.call('readFile', { file: sessionFile });
+  let existing = null;
+  try { existing = existingText ? JSON.parse(existingText) : null; } catch { existing = null; }
+  const seeded = sshRestoreSession(existing, {
+    workspaceId: ctx.sshd.workspaceId, hostId: ctx.sshd.hostId, repoRoot: ctx.sshd.repoRoot,
+    backendSessionId: sid, daemonEpoch: String(spawned.epoch), incarnation,
+    localSessionId: `q11-pane-${ctx.runId}`, tabId: `q11-tab-${ctx.runId}`, now: Date.now(),
+  });
+  await ctx.agent.call('mkdir', { dir: ctx.layout.sessions });
+  await ctx.agent.call('writeFile', { file: sessionFile, content: JSON.stringify(seeded) });
+  await evidence(ctx, result, 'restore-session.json', seeded);
+  // The operation id lets the GUI write its native attach receipts (qa_barrier.rs validate_native_tuple).
   const op = `q11-${ctx.runId}`;
+  ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A, { env: { FERRYX_QA_OPERATION_ID: op } });
+  const attached = await ctx.agent.call('waitLog', { file: nativeEventsFile(ctx.layout), pattern: attachedPattern(sid), flags: 'm', deadlineMs: 60_000 });
+  let tuple = null;
+  try { tuple = attached.matched ? JSON.parse(attached.matched).attachTuple : null; } catch { tuple = null; }
+  if (!assertion(result, 'a GUI tab is attached to the SSH session (native attach receipt)', tuple?.backendSessionId === sid && tuple?.incarnation === incarnation, { tuple, incarnation, attached })) return;
+  // Type the marker into that tab. The remote tty echoes it, which proves the keystrokes reached
+  // this session; cat has not read it yet (canonical mode holds the line until Enter).
+  const marker = nonce('UNCERTAIN').replace('_', '');
+  await ctx.mahord.type(marker);
+  const echoed = await conn.waitOutput(sid, marker, 15_000);
+  if (!assertion(result, 'the marker typed through the GUI reached the SSH session', !echoed.timedOut && echoed.count >= 1, echoed)) return;
+  // Arm the hold only now: the GUI input queue is serialized, so a held keystroke would block the
+  // rest of the marker. Enter is the uncertain write that commits the marker line to cat.
+  const receipts = hjoin(ctx.layout.barriers, 'write-ack-hold.receipt.jsonl');
   await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barriers, 'write-ack-hold.request.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
-  // Typed through MahoRD on remote hosts, which drops '_' on maho-win: letters and digits only.
-  const marker = nonce('UNCERTAIN').replace(/_/g, '');
-  await ctx.typeIntoSession(ctx.state.gui, sid, `${marker}\n`);
-  const applied = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.barriers, 'write-ack-hold.receipt.jsonl'), pattern: `"write-applied"[^\\n]*"${sid}"`, deadlineMs: 30_000 });
-  assertion(result, 'write-applied observed while the ack is held', Boolean(applied.matched), applied);
+  const armed = await ctx.agent.call('waitLog', { file: receipts, pattern: `"armed"[^\\n]*"${sid}"`, deadlineMs: 10_000 });
+  assertion(result, 'write-ack hold armed for the SSH session', Boolean(armed.matched), armed);
+  await ctx.mahord.key('Enter');
+  const applied = await ctx.agent.call('waitLog', { file: receipts, pattern: `"write-applied"[^\\n]*"${sid}"`, deadlineMs: 30_000 });
+  assertion(result, 'write-applied observed for the GUI write while the ack is held', Boolean(applied.matched), applied);
+  const atQuit = (await ctx.agent.call('readFile', { file: receipts })) ?? '';
+  assertion(result, 'the ack was still held when the GUI quit', Boolean(applied.matched) && !new RegExp(`"released"[^\\n]*"${sid}"`).test(atQuit), atQuit);
   const quit = await ctx.gui.quit(ctx.state.gui);
-  // The held WriteOk went down with the quit GUI's connection; release the arm so later writes
-  // to this session (the interrupt below) are acknowledged normally.
+  ctx.state.gui = null;
   await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barriers, 'write-ack-hold.release.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
-  const released = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.barriers, 'write-ack-hold.receipt.jsonl'), pattern: `"released"[^\\n]*"${sid}"`, deadlineMs: 10_000 });
+  const released = await ctx.agent.call('waitLog', { file: receipts, pattern: `"released"[^\\n]*"${sid}"`, deadlineMs: 10_000 });
   assertion(result, 'write-ack hold released after the GUI quit', Boolean(released.matched), released);
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A);
   const conn2 = await dataConn(ctx);
@@ -201,6 +286,7 @@ export async function Q11(ctx, result) {
   await evidence(ctx, result, 'ssh-input.log', log.stdout);
   const count = log.stdout.split(marker).length - 1;
   assertion(result, 'remote log contains the marker exactly once (no replay of the uncertain write)', count === 1, count);
+  assertion(result, 'remote log holds only the committed marker line (the held Enter was not replayed)', log.stdout === `${marker}\n`, JSON.stringify(log.stdout));
   await conn2.call(D.close(sid));
   await ctx.state.conn.close().catch(() => {});
   ctx.state.conn = conn2;
@@ -275,6 +361,8 @@ export async function Q13(ctx, result) {
   if (!ctx.artifacts.baseline) return block(result, 'ARTIFACT_MISSING', 'pre-plan baseline daemon binary not built');
   const retired = await retireOwner(ctx);
   assertion(result, 'QA generation owner retired', retired.retired, retired);
+  // The pre-plan baseline only reads a version-1 catalog; the HEAD owners wrote version 2.
+  await evidence(ctx, result, 'catalog-set-aside.json', await setAsideHeadCatalog(ctx, 'Q13'));
   const legacyEnv = { FERRYX_DATA_DIR: ctx.layout.data, FERRYX_RUNTIME_DIR: ctx.layout.runtime, FERRYX_SESSION_DIR: ctx.layout.sessions };
   const installed = await ctx.jobs.installLegacy({ executable: ctx.artifacts.baseline.daemonExecutable, env: legacyEnv });
   await evidence(ctx, result, 'legacy-install.json', installed);
@@ -291,9 +379,10 @@ export async function Q13(ctx, result) {
   const legacyExe = (await ctx.agent.call('probe', { pid: legacyPid }))?.executable;
   await ctx.agent.call('record', { pid: legacyPid, role: 'daemon-legacy', executable: legacyExe });
   assertion(result, 'legacy daemon has no control endpoint', (await controlConn(ctx)) === null, null);
-  await conn.call(D.registerWorkspace(ctx.workspaceId, ctx.repoDir));
+  const reg = await conn.call(D.registerWorkspace(ctx.workspaceId, ctx.repoDir));
+  if (!assertion(result, 'legacy daemon registered the QA workspace', reg?.type === 'registerWorkspaceOk', reg)) return;
   const sp = await conn.call(D.spawnLocal({ clientRequestId: `qa-q13-${nonce('R')}`, workspaceId: ctx.workspaceId, cwd: ctx.repoDir }));
-  assertion(result, 'legacy daemon spawned a live session', sp.type === 'spawnOk', sp);
+  if (!assertion(result, 'legacy daemon spawned a live session', sp.type === 'spawnOk', sp)) return;
   const legacyBefore = await ctx.agent.call('probe', { pid: legacyPid });
   // New GUI meets the legacy owner.
   const gui = await ctx.gui.launch(ctx.artifacts.A);
@@ -332,7 +421,7 @@ export async function Q13(ctx, result) {
   await conn.call(D.shutdown()).catch(() => null);
   const exited = await exit;
   assertion(result, 'legacy daemon exited after the zero-session Shutdown', !exited.timedOut, exited);
-  const fresh = await freshOwner(ctx, ctx.artifacts.A);
+  const fresh = await freshOwner(ctx, ctx.artifacts.A, { expectKey: ctx.keys.A });
   const jobs = await ctx.jobs.listQaJobs();
   await evidence(ctx, result, 'after-migration.json', { fresh, jobs });
   assertion(result, 'newest generation started on the next admission', fresh.hello?.generation_key === ctx.keys.A, fresh.hello);

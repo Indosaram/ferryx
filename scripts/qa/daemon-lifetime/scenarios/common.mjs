@@ -208,14 +208,41 @@ export async function awaitPendingStart(ctx, fromPid, runtimeDir = ctx.layout.ru
   return { state: 'unknown', reason: `a start by launcher pid ${again.record.launcherPid} replaced the pending one`, starting: again.record };
 }
 
-/** Drops the scenario's owner state after its owner retired: that connection is dead. */
+/**
+ * Drops the scenario's owner state after its owner retired: that connection is dead, and the
+ * next owner has not seen this run's registerWorkspace (seedLocalSession registers again).
+ */
 export async function invalidateOwnerState(ctx) {
   const conn = ctx.state.conn;
   ctx.state.conn = null;
   ctx.state.daemon = null;
   ctx.state.localA = null;
+  ctx.workspaceRegistered = false;
   // The daemon behind this handle exited; closing only releases the agent-side handle.
   if (conn) await conn.close().catch(() => {});
+}
+
+/** <FERRYX_DATA_DIR>/remote/machine-workspaces.v1.json (server.rs catalog_path, auth.rs canonical_remote_dir). */
+export function workspaceCatalogFile(ctx) {
+  return hjoin(ctx.layout.data, 'remote', 'machine-workspaces.v1.json');
+}
+
+/**
+ * Before an older-revision daemon (v1bump, the pre-plan baseline) owns this run's data dir: the
+ * HEAD owners of the earlier scenarios wrote the workspace catalog as version 2, which an older
+ * daemon refuses (its workspace_catalog::load accepts version 1 only, deny_unknown_fields) and then
+ * fails every registerWorkspace. A real older owner predates that write, so the catalog is set
+ * aside into the run dir (kept as evidence) and the workspace is registered afresh.
+ */
+export async function setAsideHeadCatalog(ctx, label) {
+  const file = workspaceCatalogFile(ctx);
+  const text = await ctx.agent.call('readFile', { file });
+  ctx.workspaceRegistered = false;
+  if (text === null) return { file, setAside: null };
+  const kept = hjoin(ctx.layout.root, 'set-aside', `${label}-machine-workspaces.v1.json`);
+  await ctx.agent.call('writeFile', { file: kept, content: text });
+  await ctx.agent.call('remove', { target: file });
+  return { file, setAside: kept, version: (() => { try { return JSON.parse(text).version ?? null; } catch { return null; } })() };
 }
 
 /**
@@ -333,7 +360,7 @@ export async function retireOwner(ctx, { depth = 0 } = {}) {
 }
 
 /** Launches a GUI, waits for a new owner and seeds one local session; records the daemon pid. */
-export async function freshOwner(ctx, artifact, { env = {}, tag = 'QA_A', dataVersion = 5 } = {}) {
+export async function freshOwner(ctx, artifact, { env = {}, tag = 'QA_A', dataVersion = 5, expectKey = null } = {}) {
   const before = await ctx.agent.call('readFile', { file: hjoin(ctx.layout.runtime, 'owner.json') });
   const fromPid = before ? JSON.parse(before).pid : null;
   const gui = await ctx.gui.launch(artifact, { env });
@@ -344,9 +371,73 @@ export async function freshOwner(ctx, artifact, { env = {}, tag = 'QA_A', dataVe
   // Seed only a confirmed owner; a published record whose pid already died is OWNER_GONE.
   const confirmed = confirmOwner(identity);
   if (!confirmed.ok) throw new OwnerStateError(confirmed.code, { ...confirmed.detail, artifact: artifact.name, seen: changed.seen });
+  // run-9a5db442 Q13: an enabled generation unit left by an earlier scenario won the lock and
+  // became the "fresh" owner. With expectKey only the launched artifact's generation is accepted.
+  if (expectKey && identity.hello?.generation_key !== expectKey) {
+    throw new OwnerStateError('OWNER_WRONG_GENERATION', { pid: identity.pid, expected: expectKey, actual: identity.hello?.generation_key ?? null, artifact: artifact.name, seen: changed.seen });
+  }
   await ctx.agent.call('record', { pid: identity.pid, role: `daemon-${artifact.name}`, executable: identity.os.executable });
   ctx.state.daemon = identity;
   ctx.state.conn = await dataConn(ctx, ctx.layout.runtime, { version: dataVersion });
   ctx.state.localA = await seedLocalSession(ctx, ctx.state.conn, tag);
   return identity;
+}
+
+/**
+ * After a scenario threw: end its GUI (registry kill of the recorded pid), close every session the
+ * owner still has through a fresh connection at the owner's own protocol, retire that owner
+ * (RetireWhenIdle) and start a fresh owner from `artifact`, so a leftover owner of the failed
+ * scenario (Q08b's v1bump owner in run-9a5db442) never becomes the next scenario's owner.
+ * Returns { ok, ... }; it never throws.
+ */
+export async function recoverOwnerAfterException(ctx, artifact) {
+  const out = { ok: false, gui: null, closed: [], retired: null, killed: null, fresh: null };
+  try {
+    if (ctx.state.gui) {
+      out.gui = await ctx.gui.kill(ctx.state.gui).catch((e) => ({ error: String(e?.message ?? e) }));
+      ctx.state.gui = null;
+    }
+    await invalidateOwnerState(ctx);
+    const owner = await ownerIdentity(ctx);
+    if (owner.pid && owner.os) {
+      const version = owner.hello?.protocol_version ?? 5;
+      const opened = await ctx.agent.call('dataOpen', { runtimeDir: ctx.layout.runtime, version, allowMismatch: true }).catch(() => null);
+      if (opened?.handshake?.type === 'handshakeOk') {
+        // ListSessionsOk.sessions is Vec<String> (protocol.rs ListSessionsOk): bare backend ids.
+        // run-r5c read s.sessionId, sent close(undefined) and closed nothing.
+        const listed = await ctx.agent.call('call', { handle: opened.handle, frame: D.listSessions() }).catch(() => null);
+        for (const id of listed?.sessions ?? []) {
+          const resp = await ctx.agent.call('call', { handle: opened.handle, frame: D.close(id) }).catch((e) => ({ error: String(e?.message ?? e) }));
+          out.closed.push({ id, resp });
+        }
+      }
+      if (opened) await ctx.agent.call('close', { handle: opened.handle }).catch(() => {});
+    }
+    out.retired = await retireOwner(ctx);
+    if (!out.retired.retired && out.retired.pid && owner.pid === out.retired.pid) {
+      // The owner still reports live sessions past its retire deadline. It is this run's QA owner,
+      // recorded at start, so end it by that recorded pid (the registry refuses any other pid).
+      out.killed = await killRecordedOwner(ctx, out.retired.pid);
+      if (out.killed.exited) out.retired = { ...(await retireOwner(ctx)), after: 'killed by recorded pid' };
+    }
+    if (!out.retired.retired) return { ...out, code: 'OWNER_STATE_UNRECOVERABLE' };
+    out.fresh = (await freshOwner(ctx, artifact)).pid;
+    out.ok = true;
+    return out;
+  } catch (error) {
+    return { ...out, code: error?.code ?? null, error: String(error?.message ?? error) };
+  }
+}
+
+/** SIGTERM, then SIGKILL, a recorded QA owner pid; each step bounded by waitExit. */
+export async function killRecordedOwner(ctx, pid) {
+  const steps = [];
+  for (const signal of ['SIGTERM', 'SIGKILL']) {
+    let sent;
+    try { sent = await ctx.agent.call('kill', { pid, signal }); } catch (e) { steps.push({ signal, refused: e?.code ?? null, error: String(e?.message ?? e) }); return { pid, exited: false, steps }; }
+    const exit = await ctx.agent.call('waitExit', { pid, deadlineMs: 10_000 });
+    steps.push({ signal, sent, exit });
+    if (!exit?.timedOut) return { pid, exited: true, steps };
+  }
+  return { pid, exited: false, steps };
 }
