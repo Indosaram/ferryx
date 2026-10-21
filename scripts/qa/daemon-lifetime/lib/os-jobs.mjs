@@ -40,6 +40,28 @@ export function windowsTaskTree(rows, { watchdogPid }) {
   return { watchdog, daemon };
 }
 
+const isWatchdog = (r) => /--daemon-supervisor/.test(r.commandLine ?? '');
+const isDaemon = (r) => /--daemon(\s|$)/.test(r.commandLine ?? '') && !isWatchdog(r);
+
+/**
+ * The generation tree whose daemon is the owner. Several --daemon-supervisor watchdogs can run under
+ * the staged root at once (GUI relaunches arm the supervisor again), so "the first watchdog" is not
+ * an identity: the watchdog is the owner pid's parent. Without an owner pid, exactly one watchdog
+ * with a daemon child is required; anything else reports every candidate instead of guessing.
+ */
+export function selectWindowsTree(rows, { ownerPid = null } = {}) {
+  const watchdogs = rows.filter(isWatchdog);
+  if (ownerPid) {
+    const daemon = rows.find((r) => r.pid === ownerPid && isDaemon(r)) ?? null;
+    const watchdog = daemon ? watchdogs.find((w) => w.pid === daemon.ppid) ?? null : null;
+    if (daemon && watchdog) return { watchdog, daemon, watchdogs };
+    return { watchdog: null, daemon: null, watchdogs, reason: daemon ? 'owner parent is not a watchdog under the staged root' : 'owner pid is not a daemon under the staged root' };
+  }
+  const trees = watchdogs.map((w) => ({ watchdog: w, daemon: rows.find((r) => r.ppid === w.pid && isDaemon(r)) ?? null })).filter((t) => t.daemon);
+  if (trees.length === 1) return { ...trees[0], watchdogs };
+  return { watchdog: null, daemon: null, watchdogs, reason: trees.length ? 'ambiguous: several watchdogs have a daemon child' : 'no watchdog with a daemon child' };
+}
+
 /** Get-ScheduledTask output (ConvertTo-Json of TaskName, TaskPath, State). Empty/garbled = unknown. */
 export function parseScheduledTaskState(stdout = '') {
   const text = String(stdout).trim();

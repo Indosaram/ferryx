@@ -131,9 +131,56 @@ export const RUN_DIALOG_FOCUS_PATTERN = '^\\{"kind":"focus","focusHwnd":[1-9]\\d
 
 /** waitLog pattern: the latched Edit read back the expected text, or focus left its dialog first. */
 export const TYPED_OUTCOME_PATTERN = '^\\{"kind":"(text","match":true|lost)[^\\r\\n]*$';
-/** The .cmd the Run dialog executes: its first action is the "Run dialog executed me" receipt. */
-export function windowsLaunchCmdContent({ cmdStarted, command }) {
-  return `@echo off\r\necho started> "${cmdStarted}"\r\nstart "" ${command}\r\n`;
+/** Seconds a batch .cmd waits for its go file before giving up (ping -n 2 is about one second). */
+export const GO_WAIT_SECONDS = 120;
+
+/**
+ * The .cmd the Run dialog executes: its first action is the "Run dialog executed me" receipt. With
+ * goFile (gui.launchBatch), it then waits, bounded, for that file before starting the launcher, so
+ * the typing of a batch is serialized while its GUIs still cold-start together.
+ */
+export function windowsLaunchCmdContent({ cmdStarted, command, goFile = null }) {
+  const wait = goFile
+    ? `set n=0\r\n:wait\r\nif exist "${goFile}" goto go\r\nset /a n+=1\r\nif %n% geq ${GO_WAIT_SECONDS} exit /b 1\r\nping -n 2 127.0.0.1 >nul\r\ngoto wait\r\n:go\r\n`
+    : '';
+  return `@echo off\r\necho started> "${cmdStarted}"\r\n${wait}start "" ${command}\r\n`;
+}
+
+/** The last focus/foreground/lost record of an observer events file, or null. */
+export function lastObserverRecord(text) {
+  const lines = String(text ?? '').split(/\r?\n/).filter((l) => l.trim());
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    try {
+      const r = JSON.parse(lines[i]);
+      if (['focus', 'foreground', 'lost'].includes(r.kind)) return r;
+    } catch { /* a partial last line */ }
+  }
+  return null;
+}
+
+/** An explorer dialog (#32770: the Run box or its error message box) holds the foreground. */
+export function isExplorerDialogForeground(record) {
+  return Boolean(record) && record.processName === 'explorer.exe' && record.rootClass === '#32770' && record.foreground === true;
+}
+
+/** Stages after Win+R whose leftovers (Run box, error box) are dismissed with Escape. */
+export const DISMISS_STAGES = Object.freeze(['run-dialog-not-identified', 'observer-not-latched', 'typed-text-not-confirmed']);
+/** Stages retried once, only when nothing executed and the dismissal was confirmed. */
+export const RETRY_STAGES = Object.freeze(['run-dialog-not-identified', 'typed-text-not-confirmed']);
+
+/** Windows "normal quit" request: the launcher sends WM_CLOSE (CloseMainWindow) to the GUI it started. */
+export function windowsCloseFiles(layout, tag) {
+  return { request: `${layout.root}\\gui-${tag}.close.request`, receipt: `${layout.root}\\gui-${tag}.closed.json` };
+}
+
+/** Request/answer of the launcher's main-window rect query (fixtures/windows-gui-launcher.ps1). */
+export function windowsRectFiles(layout, tag) {
+  return { request: `${layout.root}\\gui-${tag}.rect.request`, answer: `${layout.root}\\gui-${tag}.rect.json` };
+}
+
+/** Title bar point of a window rect: left part of the caption, clear of the caption buttons. */
+export function titleBarPoint(rect) {
+  return { x: rect.left + Math.min(200, Math.floor((rect.right - rect.left) / 4)), y: rect.top + 12 };
 }
 
 /** A Windows launch that stopped at a named stage; receipt is what was written to logs\. */
@@ -148,21 +195,136 @@ export class WindowsLaunchError extends Error {
 
 /** The observer fixture, read from this checkout so the run uses exactly the reviewed source. */
 const OBSERVER_SCRIPT = () => readFileSync(new URL('../fixtures/windows-focus-observer.ps1', import.meta.url), 'utf8');
+/** The dialog-sweep fixture (preflight before the first Win+R of a run). */
+const SWEEP_SCRIPT = () => readFileSync(new URL('../fixtures/windows-dialog-sweep.ps1', import.meta.url), 'utf8');
+
+/**
+ * Titles of the explorer dialogs a launch can leave behind, as measured on maho-win (ko-KR) with
+ * the en-US equivalents: the Run box, and explorer's "location is not available" error box. The
+ * "cannot find" box is titled with the typed path itself, so a title that is a path under this
+ * run root's parent (long or 8.3 form) is ours too. Nothing else is ever selected.
+ */
+export const SWEEP_TITLES = Object.freeze({ run: Object.freeze(['실행', 'Run']), error: Object.freeze(['위치를 사용할 수 없습니다.', 'Location is not available']) });
+
+/** Paths under which a path-titled explorer error box is a QA leftover: the run root's parent, long and 8.3. */
+export function sweepPathPrefixes(runRootParent, shortParent = null) {
+  return [runRootParent, shortParent].filter(Boolean).map((p) => `${String(p).replace(/\\+$/, '')}\\`.toLowerCase());
+}
+
+/**
+ * Report-only list of the visible, titled non-QA windows the sweep saw (foreground first): what
+ * could take focus from a QA launch (run-r6b Q05). Nothing here is closed or killed.
+ */
+export function foreignWindows(candidates) {
+  const all = (candidates?.visibleWindows ?? []).filter((w) => !/^ferryx/i.test(String(w.processName ?? '')));
+  return [...all.filter((w) => w.foreground), ...all.filter((w) => !w.foreground)]
+    .map(({ hwnd, processName, className, title, foreground }) => ({ hwnd, processName, className, title, foreground: Boolean(foreground) }));
+}
+
+export function selectSweepTargets(windows, { pathPrefixes = [] } = {}) {
+  const close = [];
+  const kept = [];
+  for (const w of windows ?? []) {
+    const title = String(w.title ?? '');
+    let why = null;
+    if (String(w.processName ?? '').toLowerCase() !== 'explorer.exe') why = 'not explorer.exe';
+    else if (w.className !== '#32770' || w.topLevel !== true) why = 'not a top-level #32770';
+    else if (!Number.isInteger(w.hwnd) || w.hwnd === 0) why = 'no hwnd';
+    const kind = SWEEP_TITLES.run.includes(title) ? 'run-dialog'
+      : SWEEP_TITLES.error.includes(title) ? 'error-box'
+        : pathPrefixes.some((p) => title.toLowerCase().startsWith(p)) ? 'error-box-path' : null;
+    if (!why && !kind) why = 'title is neither the Run dialog nor an explorer error box';
+    if (why) kept.push({ hwnd: w.hwnd ?? null, processName: w.processName ?? null, reason: why });
+    else close.push({ hwnd: w.hwnd, kind, title, foreground: w.foreground === true });
+  }
+  return { close, kept };
+}
 
 export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forbidden, mahord = null, guiEnv = {} }) {
   const platform = host.platform;
   const bundleId = qaBundleIdentifier(runId);
   let launches = 0;
+  let batches = 0;
+  let rectQueries = 0;
+  // One interactive desktop, one Run dialog: the keyboard section of every Windows launch (taskbar
+  // click .. cmd-started) runs alone. Two launches typing into one dialog concatenated their paths
+  // (run-q00fix-all runlog-launch-g10-failure.png).
+  let inputQueue = Promise.resolve();
+  const withInput = (fn) => {
+    const run = inputQueue.then(fn, fn);
+    inputQueue = run.catch(() => {});
+    return run;
+  };
+  /**
+   * Preflight, once per run before the first Win+R: closes leftover explorer Run dialogs and error
+   * boxes (run-r6: two dialogs from an earlier run kept the foreground and every launch failed).
+   * A per-run task lists visible top-level #32770 windows in the interactive session; only those
+   * selectSweepTargets accepts get WM_CLOSE, each on its exact hwnd after re-verification. The
+   * receipt (logs\dialog-sweep.receipt.json) is the evidence; a failed sweep never throws, the
+   * launch then fails on its own observed stage.
+   */
+  async function sweepExplorerDialogs() {
+    const logs = layout.logs;
+    const files = {
+      script: `${layout.root}\\dialog-sweep.ps1`, candidates: `${logs}\\dialog-sweep.candidates.json`,
+      close: `${logs}\\dialog-sweep.close.json`, result: `${logs}\\dialog-sweep.result.json`,
+      error: `${logs}\\dialog-sweep.err`, receipt: `${logs}\\dialog-sweep.receipt.json`,
+    };
+    const task = `Ferryx\\${qaSupervisorName(runId)}-sweep`;
+    const receipt = { task, candidates: null, selected: [], kept: [], result: null, error: null, cleanup: {} };
+    try {
+      await agent.call('writeFile', { file: files.script, content: SWEEP_SCRIPT() });
+      const made = await agent.call('exec', { command: 'schtasks', args: ['/Create', '/TN', task, '/SC', 'ONLOGON', '/TR', `conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File ${files.script}`, '/F'] });
+      if (made.status !== 0) throw new Error(`schtasks /Create ${task} exited ${made.status}: ${made.stderr || made.stdout}`);
+      const ran = await agent.call('exec', { command: 'schtasks', args: ['/Run', '/TN', task] });
+      if (ran.status !== 0) throw new Error(`schtasks /Run ${task} exited ${ran.status}: ${ran.stderr || ran.stdout}`);
+      const listed = await Promise.race([
+        agent.call('waitPath', { file: files.candidates, deadlineMs: 60_000 }).then((ok) => (ok ? 'listed' : 'timeout')),
+        agent.call('waitPath', { file: files.error, deadlineMs: 60_000 }).then((ok) => (ok ? 'error' : new Promise(() => {}))),
+      ]);
+      if (listed === 'error') throw new Error(`sweep failed: ${await agent.call('readFile', { file: files.error })}`);
+      if (listed !== 'listed') throw new Error(`no ${files.candidates} within 60000ms`);
+      const candidates = receipt.candidates = JSON.parse(await agent.call('readFile', { file: files.candidates }));
+      if (!Number.isInteger(candidates.sessionId) || candidates.sessionId === 0 || candidates.sessionId !== candidates.activeConsoleSessionId) {
+        throw new Error(`sweep ran in session ${candidates.sessionId}, the active console session is ${candidates.activeConsoleSessionId}`);
+      }
+      const parent = layout.root.replace(/\\[^\\]+$/, '');
+      const short = await windowsShortPath(agent, files.script).then((s) => s.replace(/\\[^\\]+\\[^\\]+$/, '')).catch(() => null);
+      const { close, kept } = selectSweepTargets(candidates.windows, { pathPrefixes: sweepPathPrefixes(parent, short) });
+      receipt.selected = close;
+      receipt.kept = kept;
+      receipt.foregroundStealers = foreignWindows(candidates);
+      await agent.call('writeFile', { file: files.close, content: JSON.stringify({ hwnds: close.map((c) => c.hwnd) }) });
+      if (!await agent.call('waitPath', { file: files.result, deadlineMs: 45_000 })) throw new Error(`no ${files.result} within 45000ms`);
+      receipt.result = JSON.parse(await agent.call('readFile', { file: files.result }));
+    } catch (error) {
+      receipt.error = String(error?.message ?? error);
+    } finally {
+      for (const verb of ['/End', '/Delete']) {
+        try {
+          receipt.cleanup[verb] = (await agent.call('exec', { command: 'schtasks', args: verb === '/End' ? [verb, '/TN', task] : [verb, '/TN', task, '/F'] })).status;
+        } catch (error) {
+          receipt.cleanup[verb] = String(error?.message ?? error);
+        }
+      }
+      try { await agent.call('writeFile', { file: files.receipt, content: JSON.stringify(receipt, null, 2) }); } catch (error) { receipt.receiptError = String(error?.message ?? error); }
+    }
+    return receipt;
+  }
 
   async function verifiedBundle(appPath) {
     const r = await agent.call('exec', { command: '/usr/libexec/PlistBuddy', args: ['-c', 'Print :CFBundleIdentifier', hjoin(appPath, 'Contents', 'Info.plist')] });
     assertBundleIdentifier(r.stdout.trim(), runId);
   }
 
-  async function launch(artifact, { env, tag = `g${++launches}`, noBreakaway = false } = {}) {
+  function launchSpec(artifact, { env, tag = `g${++launches}`, noBreakaway = false } = {}) {
     const exe = artifact.guiExecutable;
     assertQaExecutable(exe, { allowedRoots, forbidden, platform });
-    const fullEnv = { ...guiEnv, ...env };
+    return { exe, fullEnv: { ...guiEnv, ...env }, tag, noBreakaway };
+  }
+
+  async function launch(artifact, options = {}) {
+    const { exe, fullEnv, tag, noBreakaway } = launchSpec(artifact, options);
     if (platform === 'mac') {
       await verifiedBundle(artifact.appPath);
       const entry = await agent.call('spawn', { command: exe, args: [], env: fullEnv, role: `gui-${tag}`, executable: exe, logFile: hjoin(layout.logs, `gui-${tag}.log`) });
@@ -179,7 +341,43 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
       const entry = await agent.call('record', { pid: spawned.pid, role: `gui-${tag}`, executable: exe });
       return { tag, pid: entry.pid, executable: exe, startTime: entry.startTime, scope: unit, scopeReady: Boolean(ready.matched) };
     }
-    return launchWindows({ exe, fullEnv, tag, noBreakaway });
+    return (await withInput(() => typeWindowsWithRetry({ exe, fullEnv, tag, noBreakaway }))).finish();
+  }
+
+  /**
+   * Concurrent cold starts (Q06). items: [{ artifact, options }]; resolves like Promise.allSettled.
+   * Windows types each launch alone (input mutex) into a .cmd that waits for one shared go file,
+   * writes go once every typed launch has executed, then waits for all launchers together.
+   */
+  async function launchBatch(items) {
+    if (platform !== 'windows') return Promise.allSettled(items.map(({ artifact, options }) => launch(artifact, options)));
+    const goFile = `${layout.root}\\launchbatch${++batches}.go`;
+    const typed = [];
+    for (const { artifact, options } of items) {
+      try {
+        const spec = launchSpec(artifact, options);
+        typed.push({ ok: true, value: await withInput(() => typeWindowsWithRetry({ ...spec, goFile })) });
+      } catch (error) {
+        typed.push({ ok: false, error });
+      }
+    }
+    await agent.call('writeFile', { file: goFile, content: '1' });
+    return Promise.allSettled(typed.map((t) => (t.ok ? t.value.finish() : Promise.reject(t.error))));
+  }
+
+  /** One bounded retry of the keyboard section, only when it executed nothing and the desktop is clear. */
+  async function typeWindowsWithRetry(spec) {
+    try {
+      return await typeWindows({ ...spec, attempt: 1, prior: [] });
+    } catch (error) {
+      const r = error?.receipt;
+      if (!(error instanceof WindowsLaunchError) || !RETRY_STAGES.includes(error.stage) || r?.dismissal?.clear !== true) throw error;
+      const f = windowsLaunchFiles(layout, spec.tag);
+      if (await agent.call('exists', { file: f.cmdStarted })) throw error;
+      // A fresh observer reports from seq 1 again; its files must not carry the first attempt's records.
+      for (const file of [f.observerReady, f.observerEvents, f.observerArm, f.observerStop, f.observerError]) await agent.call('remove', { target: file });
+      return typeWindows({ ...spec, attempt: 2, prior: [{ failedStage: r.failedStage, stages: r.stages, dismissal: r.dismissal, screenshot: r.screenshot ?? null }] });
+    }
   }
 
   /**
@@ -204,26 +402,46 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
    * stage writes logs\launch-<tag>.receipt.json and one MahoRD screenshot, then throws
    * WindowsLaunchError naming the stage.
    */
-  async function launchWindows({ exe, fullEnv, tag, noBreakaway }) {
+  async function typeWindows({ exe, fullEnv, tag, noBreakaway, goFile = null, attempt = 1, prior = [] }) {
     if (!mahord) throw new Error('Windows GUI launch needs MahoRD');
     const D = WINDOWS_LAUNCH_DEADLINES;
     const f = windowsLaunchFiles(layout, tag);
-    const receipt = { tag, stages: [], failedStage: null, observer: null };
+    const receipt = { tag, attempt, priorAttempts: prior, stages: [], failedStage: null, observer: null, dismissal: null };
     const mark = (stage, detail) => receipt.stages.push({ stage, ok: true, at: new Date().toISOString(), detail });
     const writeReceipt = () => agent.call('writeFile', { file: f.receipt, content: JSON.stringify(receipt, null, 2) });
+    let armedObserver = false;
+    // Escape only while the observer's newest record is a foreground explorer #32770, and only as
+    // far as the observer confirms a following record each time; never a blind key.
+    const dismiss = async () => {
+      const d = { escapes: [], clear: false, last: null };
+      for (let i = 0; i < 3; i += 1) {
+        const last = d.last = lastObserverRecord(await agent.call('readFile', { file: f.observerEvents }));
+        if (!last) return d;
+        if (!isExplorerDialogForeground(last)) { d.clear = true; return d; }
+        await mahord.key('Escape');
+        const next = await agent.call('waitLog', { file: f.observerEvents, pattern: `,"seq":${last.seq + 1}\\}\\r?$`, flags: 'm', deadlineMs: 3_000 });
+        d.escapes.push({ record: last, followed: Boolean(next.matched) });
+        if (!next.matched) return d;
+      }
+      return d;
+    };
     const fail = async (stage, detail) => {
       receipt.stages.push({ stage, ok: false, at: new Date().toISOString(), detail });
       receipt.failedStage = stage;
+      const shot = attempt > 1 ? f.screenshot.replace('-failure', `-failure${attempt}`) : f.screenshot;
       try {
         const png = await mahord.screenshot();
         if (png) {
-          await agent.call('writeFile', { file: f.screenshot, content: png.toString('base64') });
-          receipt.screenshot = f.screenshot;
+          await agent.call('writeFile', { file: shot, content: png.toString('base64') });
+          receipt.screenshot = shot;
         } else {
           receipt.screenshotError = 'remote_take_screenshot returned no image';
         }
       } catch (error) {
         receipt.screenshotError = String(error?.message ?? error);
+      }
+      if (armedObserver && DISMISS_STAGES.includes(stage)) {
+        try { receipt.dismissal = await dismiss(); } catch (error) { receipt.dismissal = { clear: false, error: String(error?.message ?? error) }; }
       }
       try { await writeReceipt(); } catch (error) { receipt.receiptError = String(error?.message ?? error); }
       throw new WindowsLaunchError(stage, detail, receipt);
@@ -235,7 +453,7 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     // MahoRD remote_type_text drops '-' and '_' on maho-win (RunMRU proof, 2026-10-17), and the
     // launcher command is full of both. Write it into a .cmd in the run dir and type only that
     // file's 8.3 short path, which carries neither (runRoot is chosen so its 8.3 form has none).
-    await agent.call('writeFile', { file: f.launchCmd, content: windowsLaunchCmdContent({ cmdStarted: f.cmdStarted, command }) });
+    await agent.call('writeFile', { file: f.launchCmd, content: windowsLaunchCmdContent({ cmdStarted: f.cmdStarted, command, goFile }) });
     const short = await windowsShortPath(agent, f.launchCmd);
 
     const task = windowsObserverTask(runId, tag);
@@ -301,6 +519,7 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
       await agent.call('writeFile', { file: f.observerArm, content: nonce });
       const armed = await agent.call('waitLog', { file: f.observerEvents, pattern: '^\\{"kind":"armed",', flags: 'm', deadlineMs: D.observerArmed });
       if (!armed.matched) await fail('observer-not-armed', `no armed record within ${D.observerArmed}ms`);
+      armedObserver = true;
       mark('observer-armed', {});
 
       await mahord.hotkey(['Meta', 'r']);
@@ -334,6 +553,14 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
       await fail('cmd-not-executed', `the Run dialog did not execute ${short}: no ${f.cmdStarted} within ${D.cmdStarted}ms`);
     }
     mark('cmd-executed', { file: f.cmdStarted });
+    return { finish: () => finishWindows({ exe, tag, f, receipt, mark, fail, writeReceipt, goFile }) };
+  }
+
+  /** After cmd-started (outside the input mutex): launcher started, GUI published and recorded. */
+  async function finishWindows({ exe, tag, f, receipt, mark, fail, writeReceipt, goFile }) {
+    const D = WINDOWS_LAUNCH_DEADLINES;
+    // A batch launcher starts only after go; its wait counts from there, not from typing.
+    if (goFile) mark('go', { file: goFile });
     if (!await agent.call('waitPath', { file: f.launcherStarted, deadlineMs: D.launcherStarted })) {
       await fail('launcher-not-started', `${f.launchCmd} ran but launcher.ps1 wrote no ${f.launcherStarted} within ${D.launcherStarted}ms`);
     }
@@ -354,23 +581,61 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     return { tag, pid: entry.pid, executable: exe, startTime: entry.startTime, jobAssigned: info.jobAssigned, noBreakaway: info.noBreakaway === true };
   }
 
-  /** Normal quit; resolves with the exit event of the recorded pid. */
+  /**
+   * Windows: make the recorded GUI's main window the foreground before MahoRD keys go to it. A GUI
+   * started from the Run dialog's .cmd can open behind the console that started it (run-q11
+   * only-q11-q13-r2: Escape went to that console, the setup wizard stayed open). The launcher
+   * reports the window rect and the foreground hwnd; if they differ, its own title bar is clicked
+   * and the query repeated. Other platforms need no focus step.
+   */
+  async function focus(gui) {
+    if (platform !== 'windows') return { skipped: platform };
+    if (!mahord) throw new Error('Windows GUI focus needs MahoRD');
+    const f = windowsRectFiles(layout, gui.tag);
+    const query = async () => {
+      const seq = ++rectQueries;
+      await agent.call('writeFile', { file: f.request, content: String(seq) });
+      const seen = await agent.call('waitLog', { file: f.answer, pattern: `"seq":${seq},`, deadlineMs: 10_000 });
+      if (!seen.matched) throw new Error(`launcher ${gui.tag} answered no rect query ${seq} within 10000ms`);
+      return JSON.parse(await agent.call('readFile', { file: f.answer }));
+    };
+    const before = await query();
+    if (!before.ok || !before.hwnd) return { focused: false, before };
+    if (before.foreground === before.hwnd) return { focused: true, clicked: null, before };
+    const point = titleBarPoint(before);
+    await mahord.click(point.x, point.y);
+    const after = await query();
+    return { focused: after.foreground === after.hwnd, clicked: point, before, after };
+  }
+
+  /**
+   * Normal quit; resolves with the exit event of the recorded pid ({ skipped } without a GUI).
+   * Windows asks the launcher that started this GUI to send WM_CLOSE to its main window
+   * (CloseMainWindow, the path of a user's close button) instead of a global Alt+F4, which closes
+   * whatever window holds the foreground (Q01 run-q00fix-all: the GUI never exited).
+   */
   async function quit(gui) {
+    if (!gui?.pid) return { skipped: 'no GUI' };
     const exited = agent.call('waitExit', { pid: gui.pid, deadlineMs: 30_000 });
     if (platform === 'mac') {
       await agent.call('exec', { command: '/usr/bin/osascript', args: ['-e', macQuitScript(bundleId)] });
+    } else if (platform === 'windows') {
+      await agent.call('writeFile', { file: windowsCloseFiles(layout, gui.tag).request, content: '1' });
     } else {
       if (!mahord) throw new Error('remote GUI quit needs MahoRD');
-      // MahoRD remote_key_press takes one key; chords go through remote_hotkey. Windows closes the
-      // focused window with Alt+F4; omarchy's Hyprland binds SUPER+Q to close window
+      // MahoRD remote_key_press takes one key; chords go through remote_hotkey. omarchy's Hyprland
+      // binds SUPER+Q to close window
       // (~/.config/hypr/bindings.lua:52) and Ferryx has no Ctrl+Q quit on Linux (shortcuts.ts:453 is macOS only).
-      await mahord.hotkey(platform === 'windows' ? ['Alt', 'F4'] : ['Meta', 'q']);
+      await mahord.hotkey(['Meta', 'q']);
     }
-    return exited;
+    const out = await exited;
+    if (platform !== 'windows') return out;
+    return { ...out, close: await agent.call('readFile', { file: windowsCloseFiles(layout, gui.tag).receipt }) };
   }
 
   /** Q02: SIGKILL / Stop-Process of the recorded GUI pid only. */
   async function kill(gui) {
+    if (!gui?.pid) return { skipped: 'no GUI' };
     const exited = agent.call('waitExit', { pid: gui.pid, deadlineMs: 30_000 });
     await agent.call('kill', { pid: gui.pid, signal: 'SIGKILL' });
     return exited;
@@ -378,6 +643,7 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
 
   /** Q03: OS-attributed termination. */
   async function forceTerminate(gui) {
+    if (!gui?.pid) return { skipped: 'no GUI' };
     const exited = agent.call('waitExit', { pid: gui.pid, deadlineMs: 30_000 });
     let detail;
     if (platform === 'mac') {
@@ -393,5 +659,5 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     return { exited: await exited, detail };
   }
 
-  return { launch, quit, kill, forceTerminate, bundleId };
+  return { launch, launchBatch, focus, quit, kill, forceTerminate, sweepExplorerDialogs, bundleId };
 }

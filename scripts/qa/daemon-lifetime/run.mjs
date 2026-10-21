@@ -31,13 +31,14 @@ import { createGuiDriver, macGuiExecutable } from './lib/gui.mjs';
 import { assembleDaemonHelper } from '../../macos-daemon-helper.mjs';
 import { finalizeMacosBundle } from '../../lib/release-platforms.mjs';
 import { connectMahord } from './lib/mahord.mjs';
+import { createAppReplacer } from './lib/replace.mjs';
 import { sshHostId } from './lib/sshd.mjs';
 import { run } from './lib/proc.mjs';
 import * as g1 from './scenarios/q00-q03.mjs';
 import * as g2 from './scenarios/q04-q06.mjs';
 import * as g3 from './scenarios/q07-q09.mjs';
 import * as g4 from './scenarios/q10-q13.mjs';
-import { recoverOwnerAfterException } from './scenarios/common.mjs';
+import { recoverOwnerAfterException, invalidateOwnerState } from './scenarios/common.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '../../..');
@@ -243,11 +244,46 @@ export function teardownExtras(live, summary) {
  */
 export async function recoverAfterScenarioException(ctx, result, { writeFileSync: write, localEvidence, recover = recoverOwnerAfterException }) {
   const recovery = await recover(ctx, ctx.artifacts.A);
+  if (!recovery.ok) {
+    // No confirmed owner: later scenarios block on requireOwner (OWNER_UNAVAILABLE) instead of
+    // dereferencing a half-restored state.
+    await invalidateOwnerState(ctx);
+    ctx.state.ownerLost = `${result.id} threw and owner recovery failed: ${recovery.code ?? recovery.error ?? 'unknown'}`;
+  }
   const file = path.join(localEvidence, `${result.id}-exception-recovery.json`);
   write(file, `${JSON.stringify(recovery, null, 2)}\n`);
   result.evidence.push(file);
   result.assertions.push({ name: 'owner of the failed scenario retired and a fresh QA owner started', ok: recovery.ok === true, detail: recovery });
   return recovery;
+}
+
+/** Recorded pids of this run's GUIs (registry roles gui-<tag>). */
+export async function recordedGuiPids(agent) {
+  return new Set((await agent.call('recorded')).filter((e) => String(e.role).startsWith('gui-')).map((e) => e.pid));
+}
+
+/**
+ * Per-scenario cleanup, on every exit path: each GUI the scenario recorded that is still alive and
+ * is not the run's current GUI (ctx.state.gui) ends through the agent's identity-checked registry
+ * kill of its recorded pid. A leftover is evidence, never a silent kill (run-q00fix-all: g1 from
+ * Q01 was still running at Q10b).
+ */
+export async function endScenarioGuis(ctx, result, before, { writeFileSync: write, localEvidence }) {
+  const keep = ctx.state.gui?.pid ?? null;
+  const ended = [];
+  for (const e of await ctx.agent.call('recorded')) {
+    if (!String(e.role).startsWith('gui-') || before.has(e.pid) || e.pid === keep) continue;
+    if ((await ctx.agent.call('check', { pid: e.pid })) !== 'match') continue;
+    const exit = ctx.agent.call('waitExit', { pid: e.pid, deadlineMs: 30_000 });
+    const killed = await ctx.agent.call('kill', { pid: e.pid, signal: 'SIGKILL' }).catch((error) => ({ error: String(error?.message ?? error) }));
+    ended.push({ pid: e.pid, role: e.role, killed, exit: await exit });
+  }
+  if (ended.length) {
+    const file = path.join(localEvidence, `${result.id}-leftover-guis.json`);
+    write(file, `${JSON.stringify(ended, null, 2)}\n`);
+    result.evidence.push(file);
+  }
+  return ended;
 }
 
 /**
@@ -281,6 +317,11 @@ export async function runWithTeardown({ summary, work, teardown, stop, writeSumm
   }
 }
 
+/** The QA daemons' own log: FERRYX_DATA_DIR (layout.data, guards.mjs isolationEnv) + logs/daemon.log. */
+export function daemonLogFile(platform, layout) {
+  return joinFor(platform, layout.data, 'logs', 'daemon.log');
+}
+
 /**
  * Teardown for every exit path of a run, including a build or setup failure before any scenario.
  * Recorded pids only, QA-named jobs only, the run's own dirs only. A failing step is recorded in
@@ -294,12 +335,26 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
   };
   // The run dir (and its logs/) is removed below: copy every log into the evidence first, so a
   // FAIL keeps the GUI and daemon logs that explain it (r3 Q00 lost gui-g1.log this way).
+  // A log its live writer holds exclusively (Windows sshd -E: EBUSY) is copied after the kill.
+  const locked = [];
+  const copyLog = async (name) => {
+    const text = await agent.call('readFile', { file: joinFor(host.platform, layout.logs, name) });
+    if (text !== null) writeFileSync(path.join(localEvidence, `runlog-${name}`), text);
+  };
   await step('copy-logs', async () => {
     const listed = await agent.call('exec', { command: 'node', args: ['-e', 'try{console.log(JSON.stringify(require("fs").readdirSync(process.argv[1])))}catch{console.log("[]")}', layout.logs] });
     for (const name of JSON.parse(listed.stdout || '[]')) {
-      const text = await agent.call('readFile', { file: joinFor(host.platform, layout.logs, name) });
-      if (text !== null) writeFileSync(path.join(localEvidence, `runlog-${name}`), text);
+      try { await copyLog(name); } catch (error) { if (/EBUSY/.test(String(error?.message ?? error))) locked.push(name); else throw error; }
     }
+  });
+  // Every QA daemon writes <FERRYX_DATA_DIR>/logs/daemon.log (daemon/logging.rs open_log), outside
+  // layout.logs: run-int1 and run-q08 lost the only record of the Q08 handover aborts this way.
+  await step('copy-daemon-log', async () => {
+    // A layout without a data dir (no isolation layout yet) has no daemon log to copy.
+    if (!layout.data) return;
+    const file = daemonLogFile(host.platform, layout);
+    const text = await agent.call('readFile', { file });
+    if (text !== null) writeFileSync(path.join(localEvidence, 'runlog-daemon.log'), text);
   });
   // The private sshd's remote-helper daemon outlives the session that started it (it daemonises
   // outside the run dirs): record any not yet recorded before the kill, remove its root after.
@@ -311,6 +366,7 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
     summary.teardown.killed = t.killed.map((e) => ({ pid: e.pid, role: e.role }));
     summary.teardown.refused = t.refused;
   });
+  if (locked.length) await step('copy-locked-logs', async () => { for (const name of locked) await copyLog(name); });
   await step('remove-ssh-helper-roots', async () => {
     const r = await agent.call('removeSshHelperRoots');
     summary.teardown.dirsRemoved.push(...(r?.removed ?? []).map((h) => h.root));
@@ -485,6 +541,11 @@ async function main() {
     if (host.platform === 'windows') {
       const launcher = await import('node:fs').then((fs) => fs.readFileSync(path.join(HERE, 'fixtures', 'windows-gui-launcher.ps1'), 'utf8'));
       await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'launcher.ps1'), content: launcher });
+      // Preflight before the first Win+R: leftover explorer Run dialogs / error boxes would hold the
+      // foreground (run-r6). The receipt is kept as run evidence; a failed sweep is recorded, never fatal.
+      summary.dialogSweep = await gui.sweepExplorerDialogs();
+      writeFileSync(path.join(localEvidence, 'dialog-sweep.json'), `${JSON.stringify(summary.dialogSweep, null, 2)}\n`);
+      log({ dialogSweep: { selected: summary.dialogSweep.selected.length, kept: summary.dialogSweep.kept.length, error: summary.dialogSweep.error } });
     }
     const repoDir = joinFor(host.platform, runDir, 'repo');
     await agent.call('mkdir', { dir: repoDir });
@@ -498,18 +559,9 @@ async function main() {
       hostUser: host.transport.user ?? os.userInfo().username, sshPort: 20000 + (Number(runId.slice(-5, -1)) % 20000),
       evidenceDir: localEvidence.split(path.sep).join('/'), state: {}, carry: [], sshd: null,
       writeEvidence: async (file, content) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, content); },
-      replaceAppOnDisk: async (from, to) => {
-        // The on-disk app at A's path is replaced by B's bytes (same version, different build).
-        if (host.platform === 'mac') {
-          await agent.call('exec', { command: 'rm', args: ['-rf', from.appPath] });
-          await agent.call('exec', { command: 'ditto', args: [to.appPath, from.appPath] });
-        } else {
-          await agent.call('exec', host.platform === 'windows'
-            ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', `Copy-Item -Force '${to.guiExecutable}' '${from.guiExecutable}'`] }
-            : { command: 'cp', args: ['-f', to.guiExecutable, from.guiExecutable] });
-        }
-        return { artifact: { ...from, name: to.name, sha256: await agent.call('sha256', { file: from.guiExecutable }) } };
-      },
+      // The on-disk app at A's path is replaced by B's bytes (same version, different build); A's
+      // original is kept under artifacts/pristine so Q07 can put A back (lib/replace.mjs).
+      replaceAppOnDisk: createAppReplacer({ platform: host.platform, agent, pristineRoot: joinFor(host.platform, runDir, 'artifacts', 'pristine') }),
     };
 
     const ordered = summary.scenarios.filter((s) => selected.includes(s.id));
@@ -525,6 +577,7 @@ async function main() {
       result.startedAt = new Date().toISOString();
       const t0 = Date.now();
       log({ scenario: result.id, title: scenarioById(result.id).title });
+      const guisBefore = await recordedGuiPids(agent);
       try {
         await RUNNERS[result.id](ctx, result);
       } catch (error) {
@@ -532,6 +585,10 @@ async function main() {
         writeFileSync(path.join(localEvidence, `${result.id}-exception.log`), String(error?.stack ?? error));
         result.evidence.push(path.join(localEvidence, `${result.id}-exception.log`));
         await recoverAfterScenarioException(ctx, result, { writeFileSync, localEvidence });
+      } finally {
+        await endScenarioGuis(ctx, result, guisBefore, { writeFileSync, localEvidence }).catch((error) => {
+          result.assertions.push({ name: 'scenario GUIs ended', ok: false, detail: String(error?.stack ?? error) });
+        });
       }
       result.durationMs = Date.now() - t0;
       settle(result);

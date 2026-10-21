@@ -35,7 +35,10 @@ pub(crate) enum LockState {
 pub(crate) enum Endpoint {
     /// Any frame came back, including a protocol mismatch or DAEMON_RETIRED.
     Answers,
-    /// The connection succeeded but no frame arrived within the probe window.
+    /// Nothing answered within the probe window: the connection succeeded but no frame arrived,
+    /// or the connect itself did not complete (a Windows loopback connect to a closed port is
+    /// refused only after about 2 s, run-r6d rootcause-a-loopback-refusal.txt, so a 500 ms
+    /// connect times out). Never proof of an owner: see row 4.
     Silent,
     /// Connection refused, or no socket / port file exists.
     Missing,
@@ -108,7 +111,12 @@ fn record_owner_alive(probe: &dyn OwnerProbe, record: &OwnerRecord) -> bool {
 /// 1. lock Error or any probe error -> Unknown
 /// 2. Held + record pid alive with equal start time -> Alive
 /// 3. Held otherwise -> Unknown
-/// 4. Free + endpoint Answers or Silent -> Unknown
+/// 4. Free + endpoint Answers -> Unknown. Free + Silent continues as Missing: the lock is the
+///    primary signal (plan todo 1, "primary = the persistent daemon lock ... and the legacy
+///    lock"), a live owner always holds it (rows 2/3, evaluated first), and an endpoint that
+///    answers nothing is a stale path a retired or killed owner left behind (run-int1 Q08b,
+///    run-r6d Q06). Rows 5-5c still refuse a start while a recorded owner, a pending start or
+///    a watchdog is alive.
 /// 5. Free + Missing + record pid alive with equal start time -> Unknown
 ///    5b. Free + Missing + starting.json younger than 2 x DAEMON_READY_TIMEOUT -> Unknown
 ///    5c. (Windows only) Free + Missing + the record's watchdog alive with equal start time ->
@@ -174,7 +182,7 @@ pub(crate) fn classify_owner_with(probe: &dyn OwnerProbe, watchdog_row: bool) ->
     }
 
     // Row 4.
-    if endpoint != Endpoint::Missing {
+    if endpoint == Endpoint::Answers {
         return OwnerState::Unknown {
             reason: format!("daemon lock is free but the endpoint is {endpoint:?}"),
         };
@@ -684,6 +692,16 @@ fn frame_or_silence(read: std::io::Result<usize>) -> Endpoint {
     }
 }
 
+/// Endpoint for a connect that failed: refused or absent is Missing, a connect that did not
+/// complete within the probe window is Silent (nothing answered). Anything else is a probe error.
+fn unanswered_connect(kind: ErrorKind) -> Option<Endpoint> {
+    match kind {
+        ErrorKind::NotFound | ErrorKind::ConnectionRefused => Some(Endpoint::Missing),
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => Some(Endpoint::Silent),
+        _ => None,
+    }
+}
+
 #[cfg(unix)]
 fn probe_endpoint(socket: &Path) -> Result<Endpoint, String> {
     use std::io::Read as _;
@@ -691,12 +709,10 @@ fn probe_endpoint(socket: &Path) -> Result<Endpoint, String> {
 
     let mut stream = match UnixStream::connect(socket) {
         Ok(stream) => stream,
-        Err(error)
-            if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) =>
-        {
-            return Ok(Endpoint::Missing)
+        Err(error) => {
+            return unanswered_connect(error.kind())
+                .ok_or_else(|| format!("Failed to probe {}: {error}", socket.display()))
         }
-        Err(error) => return Err(format!("Failed to probe {}: {error}", socket.display())),
     };
     stream
         .set_read_timeout(Some(ENDPOINT_FRAME_WAIT))
@@ -721,10 +737,10 @@ fn probe_endpoint(port_file: &Path) -> Result<Endpoint, String> {
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = match TcpStream::connect_timeout(&address, ENDPOINT_FRAME_WAIT) {
         Ok(stream) => stream,
-        Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
-            return Ok(Endpoint::Missing)
+        Err(error) => {
+            return unanswered_connect(error.kind())
+                .ok_or_else(|| format!("Failed to probe daemon port {port}: {error}"))
         }
-        Err(error) => return Err(format!("Failed to probe daemon port {port}: {error}")),
     };
     stream
         .set_read_timeout(Some(ENDPOINT_FRAME_WAIT))
@@ -1099,8 +1115,52 @@ mod tests {
     }
 
     #[test]
-    fn row4_free_lock_with_silent_endpoint_is_unknown() {
+    fn row4_free_lock_with_silent_endpoint_is_absent() {
         let probe = FakeProbe::new(LockState::Free, Endpoint::Silent);
+        assert_eq!(classify_owner(&probe), OwnerState::Absent);
+    }
+
+    /// A silent endpoint never outranks the lock: held stays Alive or Unknown, and a free lock
+    /// still honours rows 5 and 5b.
+    #[test]
+    fn silent_endpoint_is_missing_only_behind_a_free_lock() {
+        let held_alive = FakeProbe::new(LockState::Held, Endpoint::Silent)
+            .with_record(10, 100)
+            .with_process(10, 100);
+        assert_eq!(classify_owner(&held_alive), OwnerState::Alive { pid: 10, start_time: 100 });
+        assert!(is_unknown(&classify_owner(&FakeProbe::new(LockState::Held, Endpoint::Silent))));
+        let free_alive_record = FakeProbe::new(LockState::Free, Endpoint::Silent)
+            .with_record(10, 100)
+            .with_process(10, 100);
+        assert!(is_unknown(&classify_owner(&free_alive_record)));
+        let pending = FakeProbe::new(LockState::Free, Endpoint::Silent).with_starting_age_ms(0);
+        assert!(is_unknown(&classify_owner(&pending)));
+    }
+
+    /// A connect that does not complete in the window (the Windows loopback case) is Silent, not
+    /// a probe error: a probe error is row 1 Unknown and blocks every start for good.
+    #[test]
+    fn timed_out_connect_is_silent_and_refused_is_missing() {
+        assert_eq!(unanswered_connect(ErrorKind::TimedOut), Some(Endpoint::Silent));
+        assert_eq!(unanswered_connect(ErrorKind::WouldBlock), Some(Endpoint::Silent));
+        assert_eq!(unanswered_connect(ErrorKind::ConnectionRefused), Some(Endpoint::Missing));
+        assert_eq!(unanswered_connect(ErrorKind::NotFound), Some(Endpoint::Missing));
+        assert_eq!(unanswered_connect(ErrorKind::PermissionDenied), None);
+    }
+
+    /// The run-int1 Q08b shape on a real socket: a bound listener that nobody accepts on. Behind
+    /// a free lock it is Absent (a start is allowed); behind a held lock it is never Absent.
+    #[cfg(unix)]
+    #[test]
+    fn stale_listener_that_never_answers_admits_only_while_the_lock_is_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let _listener = std::os::unix::net::UnixListener::bind(&paths.endpoint).unwrap();
+        let probe = RuntimeProbe { paths: &paths };
+        assert_eq!(probe.endpoint().unwrap(), Endpoint::Silent);
+        assert_eq!(classify_owner(&probe), OwnerState::Absent);
+        let file = crate::daemon::server::open_secure_lock_file(&paths.legacy_lock).unwrap();
+        let _held = crate::daemon::server::DaemonLockFile::try_lock(file).unwrap();
         assert!(is_unknown(&classify_owner(&probe)));
     }
 
@@ -1789,7 +1849,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let ops = RecordingOps::default();
-        let probe = FakeProbe::new(LockState::Free, Endpoint::Silent);
+        let probe = FakeProbe::new(LockState::Free, Endpoint::Answers);
         assert!(!ensure_if_absent_with(&paths, &probe, &ops, Duration::ZERO, Duration::ZERO).unwrap());
         assert_eq!(ops.starts.get(), 0);
         assert_eq!(ops.registrations.get(), 1);
@@ -1868,7 +1928,7 @@ mod tests {
                 vec!["migrate:alive:locked=true", "register"],
             ),
             (
-                FakeProbe::new(LockState::Free, Endpoint::Silent),
+                FakeProbe::new(LockState::Free, Endpoint::Answers),
                 vec!["migrate:unknown:locked=true", "register"],
             ),
             (

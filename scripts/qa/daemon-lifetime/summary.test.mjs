@@ -334,6 +334,7 @@ function ownerWorld({ owner = null, alive = [], starting = null, publish = [], s
     quit: async (g) => { if (g) w.quits.push(g.pid); return { pid: g?.pid, exitedAt: 1 }; },
     kill: async (g) => { w.kills.push(g.pid); return { pid: g.pid, exitedAt: 1 }; },
   };
+  gui.launchBatch = (items) => Promise.allSettled(items.map(({ artifact, options }) => gui.launch(artifact, options)));
   const evidenceFiles = [];
   const ctx = {
     agent, gui, platform: 'linux', runId: RUN, layout: { runtime: RT, logs: '/r/logs' }, evidenceDir: '/e',
@@ -398,6 +399,19 @@ test('retireOwner never reports a stale owner as retired while a start is pendin
   assert.equal(p.retired, true);
   assert.equal(p.pid, 9);
   assert.equal(pending.w.alive.has(9), false);
+
+  // rerun2 Q08b: ctx.state.conn named a generation that had handed over; the owner's sessions are
+  // closed through a fresh connection to the current owner, never through that stale one.
+  const stale = ownerWorld({ owner: 1, alive: [1], sessions: ['live'] });
+  const staleCloses = [];
+  stale.ctx.state.conn = { describe: async () => ({ sessions: [{ backendId: 'old' }] }), call: async (f) => { staleCloses.push(f.sessionId); }, close: async () => {} };
+  const real = stale.ctx.agent.call;
+  stale.ctx.agent.call = async (m, p) => (m === 'call' && p.frame?.type === 'describeLiveSessions' ? { type: 'describeLiveSessionsOk', sessions: [...stale.w.sessions].map((backendId) => ({ backendId })) } : real(m, p));
+  const retiredStale = await retireOwner(stale.ctx);
+  assert.deepEqual(staleCloses, [], 'nothing is closed through the stale connection');
+  assert.deepEqual(stale.w.sessionCloses, ['live']);
+  assert.equal(retiredStale.retired, true);
+  assert.equal(stale.ctx.state.conn, null);
 });
 
 test('freshOwner with expectKey refuses an owner of another generation (run-9a5db442 Q13 got B)', async () => {
@@ -896,9 +910,9 @@ test('Settings counts as open only on a new cmd_daemon_supervisor_get receipt, w
  * MahoRD keystrokes are the only path that commits the marker line. Variants inject the defects
  * each assertion exists to catch.
  */
-function q11World({ replayOnRelaunch = false, resendOnReconnect = false, releaseBeforeQuit = false, wrongAttach = false } = {}) {
+function q11World({ replayOnRelaunch = false, resendOnReconnect = false, releaseBeforeQuit = false, wrongAttach = false, setupWizard = false, behindConsole = false, platform = 'linux', noWizardEvent = false } = {}) {
   const sid = 'SSH1';
-  const w = { log: '', line: '', echo: '', receipts: [], events: [], sessionFile: null, launches: [], quits: [], quitWhileHeld: null, writesByHandle: {}, typedBy: [], held: false };
+  const w = { log: '', line: '', echo: '', receipts: [], events: [], sessionFile: null, launches: [], quits: [], quitWhileHeld: null, writesByHandle: {}, typedBy: [], held: false, escapes: 0, wizardOpen: false, pendingAttach: null, focused: true, focusCalls: 0, lostKeys: 0, appender: false, debug: [], debugDir: null, wizardArmed: false };
   const call = async (method, params = {}) => {
     switch (method) {
       case 'writeFile':
@@ -909,9 +923,17 @@ function q11World({ replayOnRelaunch = false, resendOnReconnect = false, release
       case 'readFile':
         if (params.file.endsWith('write-ack-hold.receipt.jsonl')) return w.receipts.join('\n');
         if (params.file.endsWith('session_state.json')) return w.sessionFile;
+        // Windows Add-Content writes CRLF; the remote file is read where it lies.
+        if (params.file.endsWith('ssh-input.log')) return platform === 'windows' ? w.log.replace(/\n/g, '\r\n') : w.log;
         return null;
       case 'mkdir': return true;
       case 'waitLog': {
+        // The GUI's switch-debug log, written under its TEMP (Windows): absent unless Q11 redirected TEMP there.
+        if (params.file.endsWith('ferryx-switch-debug.jsonl')) {
+          const text = w.debugDir && params.file.startsWith(w.debugDir) ? w.debug.join('\n') : '';
+          const d = new RegExp(params.pattern, params.flags ?? '').exec(text);
+          return d ? { matched: d[0] } : { matched: null, timedOut: true };
+        }
         const text = params.file.endsWith('native-events.jsonl') ? w.events.join('\n') : w.receipts.join('\n');
         const r = new RegExp(params.pattern, params.flags ?? '').exec(text);
         return r ? { matched: r[0] } : { matched: null, timedOut: true };
@@ -928,14 +950,21 @@ function q11World({ replayOnRelaunch = false, resendOnReconnect = false, release
             w.line = '';
             // A harness resend of the marker on the reconnected handle reaches the session too.
             if (resendOnReconnect && w.lastMarker) w.log += `${w.lastMarker}\n`;
-          } else if (!text.startsWith('cat >> ')) {
+          } else if (text.startsWith('cat >> ')) {
+            // The SSH session's shell: a POSIX shell runs cat; Windows cmd.exe has none (run-q11 r4).
+            w.appender = platform !== 'windows';
+          } else if (text.startsWith('powershell ')) {
+            w.appender = platform === 'windows' && text.endsWith('\r');
+            if (w.appender) w.echo += 'Q11APPENDREADY\r\n';
+          } else {
             w.log += text;
           }
           return { type: 'writeOk' };
         }
         return { type: `${f.type}Ok` };
       }
-      case 'waitOutput': { const n = w.echo.split(params.marker).length - 1; return n > 0 ? { count: n, text: w.echo } : { timedOut: true, count: 0 }; }
+      case 'waitOutput': { const text = w.echo.slice(params.since ?? 0); const n = text.split(params.marker).length - 1; return n > 0 ? { count: n, text } : { timedOut: true, count: 0 }; }
+      case 'outputOf': return w.echo;
       case 'close': return true;
       case 'exec': return { status: 0, stdout: w.log, stderr: '' };
       // build-log branch: Q11 records this run's SSH remote-helper pids for teardown.
@@ -943,35 +972,67 @@ function q11World({ replayOnRelaunch = false, resendOnReconnect = false, release
       default: throw new Error(`unexpected agent call ${method}`);
     }
   };
-  const conn = { handle: 'h0', call: (frame) => call('call', { handle: 'h0', frame }), describe: () => call('call', { handle: 'h0', frame: { type: 'describeLiveSessions' } }), waitOutput: (s, marker) => call('waitOutput', { marker }), close: async () => {} };
+  const conn = { handle: 'h0', call: (frame) => call('call', { handle: 'h0', frame }), describe: () => call('call', { handle: 'h0', frame: { type: 'describeLiveSessions' } }), waitOutput: (s, marker, _ms, { since = 0 } = {}) => call('waitOutput', { marker, since }), outputLength: async () => (await call('outputOf', {})).length, close: async () => {} };
   const restoredTab = () => {
     const doc = w.sessionFile ? JSON.parse(w.sessionFile) : null;
     const ws = doc && Object.values(doc.workspaces).find((x) => x.target?.kind === 'ssh');
     return ws && Object.values(ws.terminalSessions).find((s) => s.backendSessionId === sid);
   };
+  const typeChar = (ch) => { if (!w.typedBy.includes(w.launches.at(-1))) w.typedBy.push(w.launches.at(-1)); w.line += ch; w.echo += ch; };
+  // Windows first run (run-q11 all): the wizard opens from a 1.2 s timer, after the tab attached, and
+  // covers the pane: a key that arrives while it is up never reaches the terminal.
+  const coveredByWizard = () => { if (!w.wizardArmed) return false; w.lostKeys += 1; return true; };
+  // Windows first run (run-q11 Q11-attach-screenshot.png): the setup wizard is a role="dialog" that
+  // hides native surfaces off macOS, so the restored tab attaches only after Escape closes it.
+  const flushAttach = () => { if (w.pendingAttach) { w.events.push(w.pendingAttach); w.pendingAttach = null; } };
   const ctx = {
-    agent: { call }, runId: RUN, platform: 'linux', hooks: { writeAckHoldArm: { present: true } },
+    agent: { call }, runId: RUN, platform, hooks: { writeAckHoldArm: { present: true } },
     sshd: { hostId: 'qa-sshd-x', workspaceId: 'ssh:x', hostStorePath: '/d/ssh_hosts.json', repoRoot: '/r/ssh-repo', clientKey: '/k', knownHosts: '/kh', port: 2, user: 'u' },
-    layout: { runtime: '/r/run', barriers: '/r/barriers', sessions: '/r/sessions' }, evidenceDir: '/e', writeEvidence: async () => {},
+    layout: { root: '/r', runtime: '/r/run', barriers: '/r/barriers', sessions: '/r/sessions' }, evidenceDir: '/e', writeEvidence: async () => {},
+    // MahoRD keys one at a time (lib/typeverified.mjs): each printable key reaches the line and its
+    // echo; Enter commits the line. A whole-text burst is not used (MahoRD drops keys from it).
     mahord: {
-      type: async (text) => { w.typedBy.push(w.launches.at(-1)); w.line += text; w.echo += text; w.lastMarker = text; },
+      // A GUI behind the console that started it (Windows run-q11 r2) gets no key until focused.
+      hotkey: async (keys) => { assert.equal(keys[0], 'Shift'); if (!w.focused) { w.lostKeys += 1; return; } if (coveredByWizard()) return; typeChar(keys[1].toUpperCase()); },
       key: async (key) => {
-        assert.equal(key, 'Enter');
+        if (!w.focused) { w.lostKeys += 1; return; }
+        if (key === 'Escape') {
+          w.escapes += 1;
+          w.wizardOpen = false;
+          if (w.wizardArmed) { w.wizardArmed = false; w.debug.push(`{"event":"terminal.surface.input.gate.state","details":{"paneIdentity":"q11-pane-${RUN}","visible":true}}`); }
+          flushAttach();
+          return;
+        }
+        if (coveredByWizard()) return;
+        assert.equal(w.wizardOpen, false, 'a key reached the GUI while the setup wizard owned the input');
+        if (key !== 'Enter') { typeChar(key); return; }
+        w.lastMarker = w.line;
         // The GUI writes the Enter; the line reaches cat's log and the daemon parks the ack.
-        w.log += `${w.line}\n`; w.line = '';
+        if (w.appender) w.log += `${w.line}\n`;
+        w.line = '';
         w.receipts.push(`{"event":"write-applied","sessionId":"${sid}","seq":1}`);
         if (releaseBeforeQuit) w.receipts.push(`{"event":"released","sessionId":"${sid}"}`);
       },
     },
     gui: {
+      focus: async () => { w.focusCalls += 1; w.focused = true; return { focused: true }; },
       quit: async (g) => { w.quits.push(g.pid); if (w.receipts.some((r) => r.includes('write-applied'))) w.quitWhileHeld ??= w.held; return { code: 0 }; },
       launch: async (_artifact, { env } = {}) => {
         const pid = 10 + w.launches.length;
         w.launches.push(pid);
+        w.focused = !behindConsole;
         const tab = restoredTab();
         if (tab && env?.FERRYX_QA_OPERATION_ID) {
           const tuple = { backendSessionId: wrongAttach ? 'OTHER' : tab.backendSessionId, incarnation: tab.incarnation, daemonEpoch: tab.daemonEpoch, frontendSessionId: tab.localSessionId, paneIdentity: tab.localSessionId, bindingKey: 'k', attemptGeneration: 0 };
-          w.events.push(JSON.stringify({ runId: RUN, operationId: env.FERRYX_QA_OPERATION_ID, kind: 'attached', attachTuple: tuple }));
+          w.pendingAttach = JSON.stringify({ runId: RUN, operationId: env.FERRYX_QA_OPERATION_ID, kind: 'attached', attachTuple: tuple });
+          w.wizardOpen = setupWizard;
+          if (!setupWizard) flushAttach();
+          // Windows: the wizard always opens on a fresh QA profile; the pane logs it to the GUI's TEMP.
+          if (platform === 'windows') {
+            w.wizardArmed = true;
+            w.debugDir = env.TEMP ?? null;
+            if (!noWizardEvent) w.debug.push(`{"event":"terminal.surface.skipped","details":{"localSessionId":"${tab.localSessionId}","reason":"surfaceVisible=false yielding=1 which=dialog:Welcome to Ferryx"}}`);
+          }
         }
         // A product that replays the uncertain write after relaunch.
         if (replayOnRelaunch && w.launches.length > 1 && w.lastMarker) w.log += `${w.lastMarker}\n`;
@@ -1001,6 +1062,7 @@ test('Q11 types the marker through a GUI tab restored onto the SSH session and q
   assert.deepEqual(w.typedBy, [10], 'the marker is typed into the GUI that attached the restored tab');
   assert.equal(w.quitWhileHeld, true);
   assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+  assert.equal(w.escapes, 0, 'no Escape when the tab attached without a setup wizard');
   // No data connection writes the marker: only the cat command and the closing interrupt.
   for (const writes of Object.values(w.writesByHandle)) for (const text of writes) assert.ok(!text.includes('UNCERTAIN'), text);
 });
@@ -1025,4 +1087,67 @@ test('Q11 never types when no GUI tab is attached to the SSH session', async () 
   assert.deepEqual(failed, ['a GUI tab is attached to the SSH session (native attach receipt)']);
   assert.deepEqual(w.typedBy, []);
   assert.equal(w.log, '');
+});
+
+test('Q11 closes a first-run setup wizard with one Escape, then the restored tab attaches (Windows run-q11)', async () => {
+  const { w, result, failed } = await runQ11({ setupWizard: true });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.equal(w.escapes, 1);
+  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+  assert.equal(result.assertions.find((a) => a.name.startsWith('a GUI tab is attached')).detail.attached.escapeSent, true);
+});
+
+test('Q11 focuses the GUI before its Escape and before typing when it opened behind another window (Windows run-q11 r2)', async () => {
+  const { w, result, failed } = await runQ11({ setupWizard: true, behindConsole: true });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.deepEqual([w.escapes, w.lostKeys], [1, 0]);
+  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+});
+
+test('Q11 focuses a GUI that attached behind another window before typing the marker, without an Escape', async () => {
+  const { w, result, failed } = await runQ11({ behindConsole: true });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.deepEqual([w.escapes, w.lostKeys], [0, 0]);
+  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+});
+
+test('Q11 on Windows appends through a PowerShell line loop (cmd.exe has no cat) and reads the CRLF file (run-q11 r4)', async () => {
+  const { w, result, failed } = await runQ11({ platform: 'windows' });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+  assert.ok(result.assertions.some((a) => a.name === 'the remote line appender is running in the SSH session' && a.ok));
+});
+
+test('Q11 on Windows closes the setup wizard that opens after the tab attached before typing a key (run-q11 all)', async () => {
+  const { w, result, failed } = await runQ11({ platform: 'windows' });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.deepEqual([w.escapes, w.lostKeys], [1, 0], 'one Escape, and no key was swallowed by the wizard');
+  const wizard = result.assertions.find((a) => a.name === 'the first-run setup wizard opened and was closed before any key was typed');
+  assert.deepEqual([wizard?.ok, wizard?.detail.opened, wizard?.detail.closed], [true, true, true]);
+  assert.ok(wizard.detail.focus.length === 1, 'the GUI is focused before its Escape');
+});
+
+test('Q11 on Windows never types when the setup wizard event never shows', async () => {
+  const { w, failed } = await runQ11({ platform: 'windows', noWizardEvent: true });
+  assert.deepEqual(failed, ['the first-run setup wizard opened and was closed before any key was typed']);
+  assert.deepEqual([w.typedBy, w.escapes], [[], 0]);
+});
+
+test('Q11 on Windows focuses a GUI that opened behind the console before the wizard Escape (run-q11 r2)', async () => {
+  const { w, result, failed } = await runQ11({ platform: 'windows', behindConsole: true });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.deepEqual([w.escapes, w.lostKeys], [1, 0], 'the Escape reached the GUI, not the console');
+});
+
+test('Q11 waits for the setup wizard only on Windows', async () => {
+  const { expectsSetupWizard, wizardOpenPattern, wizardClosedPattern } = await import('./scenarios/q10-q13.mjs');
+  assert.deepEqual(['windows', 'linux', 'mac'].map(expectsSetupWizard), [true, false, false]);
+  // Lines as the GUI wrote them on maho-win (run-q11 all/Q11-switch-debug.jsonl).
+  const pane = 'q11-pane-20261021t220833z';
+  const skipped = `{"event":"terminal.surface.skipped","details":{"localSessionId":"${pane}","reason":"surfaceVisible=false element=true tauri=true target=true yielding=1 which=dialog:Welcome to Ferryx"}}`;
+  const visible = `{"event":"terminal.surface.input.gate.state","details":{"paneIdentity":"${pane}","backendSessionId":"x","visible":true,"interactive":true}}`;
+  assert.ok(new RegExp(wizardOpenPattern(pane)).test(skipped));
+  assert.ok(!new RegExp(wizardOpenPattern('other-pane')).test(skipped));
+  assert.ok(!new RegExp(wizardClosedPattern(pane)).test(`${visible}\n${skipped}`), 'a visible gate before the wizard is not its close');
+  assert.ok(new RegExp(wizardClosedPattern(pane)).test(`${visible}\n${skipped}\n${visible}`));
 });
