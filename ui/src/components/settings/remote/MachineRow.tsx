@@ -104,9 +104,11 @@ interface MachineRowProps {
   onDetails: () => void;
   rowRef: (node: HTMLDivElement | null) => void;
   detailsRef: (node: HTMLButtonElement | null) => void;
+  /** The "More actions" trigger; a drawer opened from the menu returns focus here. */
+  menuTriggerRef?: (node: HTMLButtonElement | null) => void;
 }
 
-export function MachineRow({ rowKey, name, actionName, kindLabel, pathChip, status, statusTitle, selected, primary, disabledReason, note, menuItems, onDetails, rowRef, detailsRef }: MachineRowProps) {
+export function MachineRow({ rowKey, name, actionName, kindLabel, pathChip, status, statusTitle, selected, primary, disabledReason, note, menuItems, onDetails, rowRef, detailsRef, menuTriggerRef }: MachineRowProps) {
   const reasonId = `machine-reason-${rowKey.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   const destructive = menuItems.filter(item => item.destructive);
   const regular = menuItems.filter(item => !item.destructive);
@@ -143,7 +145,7 @@ export function MachineRow({ rowKey, name, actionName, kindLabel, pathChip, stat
               modal menu closing while that Dialog mounts can leave body pointer-events:none. */}
           <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
-              <Button type="button" variant="ghost" size="sm" className="size-8 p-0" aria-label={`More actions for ${actionName}`}>
+              <Button type="button" variant="ghost" size="sm" className="size-8 p-0" ref={menuTriggerRef} aria-label={`More actions for ${actionName}`}>
                 <MoreHorizontal className="size-4" aria-hidden="true" />
               </Button>
             </DropdownMenuTrigger>
@@ -174,10 +176,13 @@ export interface PairedMachineRowProps extends PairedStatusInput {
   onAddProject: () => void;
   onConnect: () => void;
   onDetails: () => void;
+  /** Details chosen from the "More actions" menu; defaults to onDetails. */
+  onMenuDetails?: () => void;
   onCheck: () => void;
   onForget: () => void;
   rowRef: (node: HTMLDivElement | null) => void;
   detailsRef: (node: HTMLButtonElement | null) => void;
+  menuTriggerRef?: (node: HTMLButtonElement | null) => void;
 }
 
 export function PairedMachineRow(props: PairedMachineRowProps) {
@@ -201,13 +206,14 @@ export function PairedMachineRow(props: PairedMachineRowProps) {
         : { kind: "add", disabled, onClick: props.onAddProject }}
       disabledReason={reason}
       menuItems={[
-        { label: "Details", onSelect: props.onDetails },
+        { label: "Details", onSelect: props.onMenuDetails ?? props.onDetails },
         { label: "Check capabilities", onSelect: props.onCheck, disabled: busy || !host.generation || !nativeReady },
         { label: "Forget credentials…", onSelect: props.onForget, disabled: busy || !host.generation, destructive: true },
       ]}
       onDetails={props.onDetails}
       rowRef={props.rowRef}
       detailsRef={props.detailsRef}
+      menuTriggerRef={props.menuTriggerRef}
     />
   );
 }
@@ -223,11 +229,14 @@ export interface SshMachineRowProps {
   busy: boolean;
   onAddProject: () => void;
   onDetails: () => void;
+  /** Details chosen from the "More actions" menu; defaults to onDetails. */
+  onMenuDetails?: () => void;
   onEdit: () => void;
   onToggleDisable: () => void;
   onDelete: () => void;
   rowRef: (node: HTMLDivElement | null) => void;
   detailsRef: (node: HTMLButtonElement | null) => void;
+  menuTriggerRef?: (node: HTMLButtonElement | null) => void;
 }
 
 export function sshRowStatus(props: Pick<SshMachineRowProps, "host" | "target" | "discoveryRefreshing" | "test" | "prepared" | "canOpenProject">): MachineStatus {
@@ -262,7 +271,7 @@ export function SshMachineRow(props: SshMachineRowProps) {
         <p role="note" className="break-words text-[12px] text-muted-foreground">{target.diagnostic.details?.stage ?? target.diagnostic.code}: {target.diagnostic.message}</p>
       ) : null}
       menuItems={[
-        { label: "Details", onSelect: props.onDetails },
+        { label: "Details", onSelect: props.onMenuDetails ?? props.onDetails },
         { label: "Edit…", onSelect: props.onEdit, disabled: busy },
         { label: host.disabled ? "Enable" : "Disable", onSelect: props.onToggleDisable, disabled: busy },
         { label: "Delete machine…", onSelect: props.onDelete, disabled: busy, destructive: true },
@@ -270,6 +279,7 @@ export function SshMachineRow(props: SshMachineRowProps) {
       onDetails={props.onDetails}
       rowRef={props.rowRef}
       detailsRef={props.detailsRef}
+      menuTriggerRef={props.menuTriggerRef}
     />
   );
 }

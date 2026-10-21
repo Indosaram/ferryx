@@ -69,24 +69,35 @@ const bastion: SshHost = {
 
 const posixEnvironment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
 
-type CommandHandler = (args?: any) => unknown;
+/** IPC args as the fixture reads them; every field is optional because each command sends a different subset. */
+interface CommandArgs {
+  host?: SshHost;
+  id?: string;
+  configPath?: string | null;
+  [key: string]: unknown;
+}
+
+type CommandHandler = (args: CommandArgs) => unknown;
 
 /** Installs the IPC fixture: `hosts` is the saved SSH inventory; handlers override single commands. */
 function mockIpc(hosts: SshHost[], handlers: Record<string, CommandHandler> = {}) {
   let current = hosts;
-  invokeMock.mockImplementation(async (command: string, args?: any) => {
+  invokeMock.mockImplementation(async (command: string, rawArgs?: Record<string, unknown>) => {
+    const args = (rawArgs ?? {}) as CommandArgs;
     if (handlers[command]) return handlers[command](args);
     switch (command) {
       case "cmd_ssh_list_hosts": return current;
       case "cmd_agent_integration_get": return { enabled: true };
       case "cmd_ssh_read_system_config": return { path: "", exists: false, rawText: "", hosts: [] };
       case "cmd_ssh_test_connection":
-        return { host: args?.host, reachable: true, checkedAt: 1, environment: posixEnvironment };
-      case "cmd_ssh_update_host":
-        current = current.some(h => h.id === args.host.id)
-          ? current.map(h => (h.id === args.host.id ? args.host : h))
-          : [...current, args.host];
+        return { host: args.host, reachable: true, checkedAt: 1, environment: posixEnvironment };
+      case "cmd_ssh_update_host": {
+        const host = args.host as SshHost;
+        current = current.some(h => h.id === host.id)
+          ? current.map(h => (h.id === host.id ? host : h))
+          : [...current, host];
         return current;
+      }
       case "cmd_ssh_delete_host":
         current = current.filter(h => h.id !== args.id);
         return current;
@@ -177,7 +188,7 @@ describe("RemoteSection SSH machine actions", () => {
     it("shows the detected runtime and prepares integration only on explicit action", async () => {
       const environment = { platform: "windows", executor: "powershell", version: "5.1", home: "C:\\Users\\qa", temp: "C:\\Temp", git: false };
       mockIpc([devServer], {
-        cmd_ssh_test_connection: (args) => ({ host: args.host, reachable: true, checkedAt: 1, environment }),
+        cmd_ssh_test_connection: ({ host }) => ({ host, reachable: true, checkedAt: 1, environment }),
       });
       await renderSection();
       openDetails("Dev Server");
@@ -274,9 +285,9 @@ describe("RemoteSection SSH machine actions", () => {
     it("shows the in-flight test, then a success and a failure per host", async () => {
       const first = deferred<SshTargetSummary>();
       mockIpc([devServer, bastion], {
-        cmd_ssh_test_connection: (args) => args.host.id === "host-1"
+        cmd_ssh_test_connection: ({ host }) => host?.id === "host-1"
           ? first.promise
-          : { host: args.host, reachable: false, lastError: "Connection timed out (port 2222)", checkedAt: 1 },
+          : { host, reachable: false, lastError: "Connection timed out (port 2222)", checkedAt: 1 },
       });
       await renderSection();
 
@@ -449,8 +460,8 @@ describe("RemoteSection SSH machine actions", () => {
       const workHost: SshHost = { ...devServer, id: "ssh-work-box", label: "work-box", hostname: "work.example", source: "config" };
       openDialogMock.mockResolvedValue("/tmp/work-ssh-config");
       mockIpc([devServer], {
-        cmd_ssh_read_system_config: (args) => args?.configPath === "/tmp/work-ssh-config"
-          ? { path: args.configPath, exists: true, rawText: "Host work-box\n  HostName work.example\n", hosts: [workHost] }
+        cmd_ssh_read_system_config: ({ configPath }) => configPath === "/tmp/work-ssh-config"
+          ? { path: configPath, exists: true, rawText: "Host work-box\n  HostName work.example\n", hosts: [workHost] }
           : { path: "/Users/test/.ssh/config", exists: true, rawText: "Host dev\n  HostName dev.example\n", hosts: [devServer] },
       });
       await renderSection();
@@ -468,8 +479,8 @@ describe("RemoteSection SSH machine actions", () => {
     it("restores the previously selected config file and can revert to the default", async () => {
       localStorage.setItem(SSH_CONFIG_PATH_STORAGE_KEY, "/tmp/work-ssh-config");
       mockIpc([devServer], {
-        cmd_ssh_read_system_config: (args) => ({
-          path: args?.configPath ?? "/Users/test/.ssh/config",
+        cmd_ssh_read_system_config: ({ configPath }) => ({
+          path: configPath ?? "/Users/test/.ssh/config",
           exists: true,
           rawText: "Host dev\n  HostName dev.example\n",
           hosts: [devServer],
@@ -531,7 +542,8 @@ describe("RemoteSection SSH machine actions", () => {
       expect(probeCalls()).toHaveLength(1);
 
       await act(async () => {
-        pendingProbe.resolve({ host: probeCalls()[0][1].host, reachable: true, checkedAt: 1, environment: posixEnvironment });
+        const probeArgs = probeCalls()[0][1] as { host: SshHost };
+        pendingProbe.resolve({ host: probeArgs.host, reachable: true, checkedAt: 1, environment: posixEnvironment });
       });
       expect(probeCalls()).toHaveLength(1);
       expect(invokeMock.mock.calls.filter(([command]) => command === "cmd_ssh_update_host")).toHaveLength(1);

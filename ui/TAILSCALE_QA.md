@@ -31,17 +31,19 @@ Settings > Remote renders these sections in this order. Check every scenario aga
 
 ## Status vocabulary
 
-Paired and SSH machines use one vocabulary from `ui/src/lib/machineStatus.ts`. The row shows the label as text; the status element carries the code in `data-code` (`machine-status` on rows, `machine-drawer-status` in the drawer).
+Paired and SSH machines use one vocabulary from `ui/src/lib/machineStatus.ts`. The row shows the label as text; the status element carries the code in `data-code` (`machine-status` on rows, `machine-drawer-status` in the drawer). The label is the state's label unless the row names another one.
 
 | Label | State | Codes |
 | --- | --- | --- |
-| Connected | `connected` | `READY`, `REACHABLE` |
-| Offline | `offline` | `OFFLINE` |
-| Checking… | `checking` | `CHECKING`, `UNCHECKED` (paired check in flight), `TESTING`, `CONNECTING` |
-| Needs access | `needsAccess` | `MACHINE_GRANT_REQUIRED` (missing grant or revoked credential) |
-| Setting up | `settingUp` | Tailscale peer that needs setup; a paired host not yet checked shows "Unchecked" (`UNCHECKED`); an untested SSH host shows "Not checked" (`UNCHECKED`) |
-| Error | `error` | `NATIVE_CONTEXT_REQUIRED`, `ERROR`, a failed capability check code (for example `UNSUPPORTED_CAPABILITY`, `STALE_HOST_GENERATION`, `PAIRED_HOST_UNAVAILABLE`), or a Tailscale diagnostic code |
+| Connected | `connected` | `READY` (paired machine; provisioned Tailscale machine; SSH machine with agent integration prepared), `REACHABLE` (SSH connection test passed) |
+| Offline | `offline` | `OFFLINE` (paired reachability reports offline, the legacy online flag is off, or the capability check returned `OFFLINE`; Tailscale peer not reachable) |
+| Checking… | `checking` | `CHECKING` (paired reachability has no online result for the current credential generation), `UNCHECKED` (paired capability check in flight), `TESTING` (SSH connection test in flight), `CONNECTING` (Tailscale discovery running before the peer is known) |
+| Needs access | `needsAccess` | `MACHINE_GRANT_REQUIRED` (credential not paired with a machine grant, revoked credential, or the capability check returned it) |
+| Setting up | `settingUp` | SSH only. A reachable Tailscale peer whose helper is not provisioned, or a Tailscale SSH machine that tested reachable but is not provisioned; the code stays the SSH test value (`UNCHECKED`, `TESTING`, `REACHABLE`, `READY` or `ERROR`). An untested SSH machine shows "Not checked" (`UNCHECKED`). |
+| Error | `error` | `NATIVE_CONTEXT_REQUIRED`, `ERROR` (SSH connection test failed), any other failed capability check code (for example `UNSUPPORTED_CAPABILITY`, `STALE_HOST_GENERATION`, `PAIRED_HOST_UNAVAILABLE`), or a Tailscale diagnostic code |
 | Disabled | `disabled` | `DISABLED` |
+
+The row layer adds one case on top of this table. `usePairedRowStatus` in `ui/src/components/settings/remote/MachineRow.tsx` shows a paired machine that is not enrolled on the signed-in account and has no capability check for its current generation as "Unchecked" (`settingUp`, `UNCHECKED`), where `machineStatus.ts` alone would report Connected. While that check runs, the same machine shows "Checking…" (`checking`, `UNCHECKED`).
 
 ## Executed frontend checks
 
