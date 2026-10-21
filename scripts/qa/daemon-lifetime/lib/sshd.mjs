@@ -45,6 +45,44 @@ export function sshInventory({ hostId, port, user, identityFile, repoRoot }) {
   return { workspaceId, hosts, projects };
 }
 
+/** helper_setup.rs host_digest(): the first 32 hex chars of sha256(host_id). */
+export function sshHelperDigest(hostId) {
+  return createHash('sha256').update(hostId).digest('hex').slice(0, 32);
+}
+
+/**
+ * The remote-helper daemons the private sshd's SSH sessions start for hostId (helper_setup.rs
+ * qualified_location: <home>/.ferryx/versions/<tag>/bin/ferryx-remote-helper[.exe] running
+ * `daemon --root <home>/.ferryx/r/<tag>/<digest(hostId)> --host-id <hostId>`). A row matches only
+ * when its executable, root and host id are exactly those paths; returns [{ pid, executable, root }].
+ */
+export function findSshHelpers(rows, { platform, home, hostId }) {
+  const win = platform === 'windows';
+  const sep = win ? '\\' : '/';
+  const base = home.replace(win ? /[\\/]+$/ : /\/+$/, '');
+  const rootBase = [base, '.ferryx', 'r', ''].join(sep);
+  const digest = sshHelperDigest(hostId);
+  const same = (a, b) => (win ? a.toLowerCase() === b.toLowerCase() : a === b);
+  const out = [];
+  for (const row of rows) {
+    const m = /(?:^|\s)"?daemon"?\s+"?--root"?\s+"?([^"]+?)"?\s+"?--host-id"?\s+"?([^"\s]+)"?\s*$/.exec(row.commandLine ?? '');
+    if (!m || m[2] !== hostId || !row.executable) continue;
+    const root = m[1];
+    if (!same(root.slice(0, rootBase.length), rootBase)) continue;
+    const rest = root.slice(rootBase.length).split(sep);
+    if (rest.length !== 2 || !rest[0] || rest[0].includes('/') || rest[1] !== digest) continue;
+    const exe = [base, '.ferryx', 'versions', rest[0], 'bin', win ? 'ferryx-remote-helper.exe' : 'ferryx-remote-helper'].join(sep);
+    if (!same(row.executable, exe)) continue;
+    out.push({ pid: row.pid, executable: row.executable, root });
+  }
+  return out;
+}
+
+/** Records this run's SSH remote-helper daemon pids and roots for teardown (agent recordSshHelper). */
+export async function recordSshHelper(ctx) {
+  return ctx.agent.call('recordSshHelper', { hostId: ctx.sshd.hostId });
+}
+
 /** Starts sshd under the agent and records its pid. Returns null + reason when unavailable. */
 export async function startSshd(ctx) {
   const bin = SSHD_BINARIES[ctx.platform];
@@ -80,8 +118,14 @@ export async function startSshd(ctx) {
   const repoRoot = hjoin(ctx.layout.root, 'ssh-repo');
   await ctx.agent.call('mkdir', { dir: repoRoot });
   await ctx.agent.call('exec', { command: 'git', args: ['init', '-q', repoRoot] });
-  const inv = sshInventory({ hostId: `qa-sshd-${ctx.runId}`, port, user, identityFile: clientKey, repoRoot });
+  const hostId = sshHostId(ctx.runId);
+  const inv = sshInventory({ hostId, port, user, identityFile: clientKey, repoRoot });
   await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.data, 'ssh_hosts.json'), content: JSON.stringify(inv.hosts) });
   await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.data, 'remote_projects.json'), content: JSON.stringify(inv.projects) });
-  return { pid: entry.pid, port, user, clientKey, knownHosts, workspaceId: inv.workspaceId, hostStorePath: hjoin(ctx.layout.data, 'ssh_hosts.json'), repoRoot };
+  return { pid: entry.pid, hostId, port, user, clientKey, knownHosts, workspaceId: inv.workspaceId, hostStorePath: hjoin(ctx.layout.data, 'ssh_hosts.json'), repoRoot };
+}
+
+/** The private sshd's host id: unique per run, so its helper is this run's own. */
+export function sshHostId(runId) {
+  return `qa-sshd-${runId}`;
 }

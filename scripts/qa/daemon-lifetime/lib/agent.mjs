@@ -8,12 +8,14 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, watch, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, watch, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import os from 'node:os';
 import { GuardError, ProcessRegistry, isInside, assertRunId } from './guards.mjs';
-import { run, probeIdentity, signalPid, subscribeExit, processTable, withDeadline } from './proc.mjs';
+import { run, runToFd, tailOfFile, LOG_TAIL_LINES, probeIdentity, signalPid, subscribeExit, processTable, withDeadline } from './proc.mjs';
 import { connectData, connectControl } from './client.mjs';
+import { findSshHelpers, sshHostId } from './sshd.mjs';
 
 export function parseAgentArgs(argv) {
   const out = { platform: null, runId: null, runDir: null, allowRoots: [] };
@@ -31,10 +33,12 @@ export function parseAgentArgs(argv) {
   return out;
 }
 
-export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
+export function createAgent({ platform, runId, runDir, allowRoots = [], home = os.homedir(), table = () => processTable(platform), probe = (pid) => probeIdentity(pid, platform), signal = (pid, sig) => signalPid(pid, sig, platform) }) {
   const ctx = { runId, platform };
   const roots = [runDir, ...allowRoots];
-  const registry = new ProcessRegistry({ platform, probe: (pid) => probeIdentity(pid, platform), signal: (pid, sig) => signalPid(pid, sig, platform) });
+  const registry = new ProcessRegistry({ platform, probe, signal });
+  // Remote-helper daemons of this run's private sshd: pid (in the registry) and exact root dir.
+  const sshHelpers = new Map();
   const handles = new Map();
   const children = new Map();
   let nextHandle = 1;
@@ -49,6 +53,28 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
     exec: async ({ command, args = [], env, cwd, input = null, deadlineMs = 120_000 }) => {
       const r = await run(command, args, { ctx, env: env ? { ...process.env, ...env } : undefined, cwd, input, deadlineMs });
       return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+    },
+    // Long, chatty commands (QA builds): stdout and stderr go straight to logFile on this host and
+    // the real exit (status, signal, timedOut) is written to the statusFile sidecar. Only the exit,
+    // the byte count and a bounded tail come back over the agent channel; the controller copies
+    // the full log back as a file (run.mjs runBuildStep).
+    execLogged: async ({ command, args = [], env, cwd, logFile, statusFile, tailLines = LOG_TAIL_LINES, deadlineMs = 120_000 }) => {
+      inRun(logFile);
+      inRun(statusFile);
+      mkdirSync(path.dirname(logFile), { recursive: true });
+      mkdirSync(path.dirname(statusFile), { recursive: true });
+      const startedAt = new Date().toISOString();
+      const fd = openSync(logFile, 'w');
+      let outcome;
+      try {
+        outcome = await runToFd(command, args, { ctx, env: env ? { ...process.env, ...env } : undefined, cwd, fd, deadlineMs });
+      } finally {
+        closeSync(fd);
+      }
+      const { tail, bytes } = tailOfFile(logFile, tailLines);
+      const record = { command, args, cwd: cwd ?? null, ...outcome, startedAt, finishedAt: new Date().toISOString(), logFile, bytes };
+      writeFileSync(statusFile, `${JSON.stringify(record, null, 2)}\n`);
+      return { status: outcome.status, signal: outcome.signal, timedOut: outcome.timedOut, error: outcome.error, pid: outcome.pid, bytes, tail, logFile, statusFile };
     },
     // Spawns a long-lived process this run owns, records it by pid + executable, and streams its
     // exit as an event. stdout lines are appended to logFile (inside the run dir).
@@ -239,6 +265,36 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
         } catch (error) {
           out.refused.push({ ...entry, reason: error.message });
         }
+      }
+      return out;
+    },
+    // Records the remote-helper daemon(s) started for this run's private sshd host id: the pid by
+    // its exact executable, the root by its exact path. Only this run's host id is accepted.
+    recordSshHelper: async ({ hostId }) => {
+      if (hostId !== sshHostId(runId)) throw new GuardError('SSH_HELPER_NOT_OURS', `${hostId} is not this run's sshd host id`);
+      const out = [];
+      for (const h of findSshHelpers(await table(), { platform, home, hostId })) {
+        try {
+          if (!registry.has(h.pid)) await registry.record(h.pid, { role: 'ssh-helper', executable: h.executable });
+        } catch (error) {
+          if (error?.code !== 'PID_GONE') throw error;
+        }
+        sshHelpers.set(h.root, h.pid);
+        out.push(h);
+      }
+      return out;
+    },
+    // After teardownRecorded: removes each recorded helper root once its recorded pid has exited.
+    removeSshHelperRoots: async ({ deadlineMs = 15_000 } = {}) => {
+      const out = { removed: [], kept: [] };
+      for (const [root, pid] of sshHelpers) {
+        const sub = subscribeExit(pid, platform);
+        // The waiter's exit only wakes us; the pid's own probe decides that it is gone.
+        if ((await probe(pid)) !== null) await withDeadline(sub.exited, deadlineMs, `exit of ssh helper ${pid}`).catch(() => {});
+        sub.cancel();
+        if ((await probe(pid)) !== null) { out.kept.push({ root, pid, reason: 'helper pid still running' }); continue; }
+        rmSync(root, { recursive: true, force: true });
+        (existsSync(root) ? out.kept : out.removed).push({ root, pid });
       }
       return out;
     },

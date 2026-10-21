@@ -368,7 +368,21 @@ fn supervisor_program(program_override: Option<&Path>) -> io::Result<PathBuf> {
     if let Some(program) = std::env::var_os(ENV_SUPERVISOR_PROGRAM) {
         return Ok(PathBuf::from(program));
     }
-    std::env::current_exe()
+    own_executable()
+}
+
+/// The program that re-runs this process's own image. Linux: `/proc/self/exe`, which the kernel
+/// resolves to the running image even after the file at its path was replaced or deleted (an app
+/// update or bundle replacement while the daemon keeps running). `current_exe()` reads the same
+/// link as text there and then returns "<path> (deleted)", a path that does not exist, so every
+/// later supervised spawn failed with ENOENT (T12 Q08, run 20261021t123034z). Elsewhere:
+/// `current_exe()`.
+fn own_executable() -> io::Result<PathBuf> {
+    if cfg!(target_os = "linux") {
+        Ok(PathBuf::from("/proc/self/exe"))
+    } else {
+        std::env::current_exe()
+    }
 }
 
 fn supervisor_command(program: &Path, spec: &str, libtest_entry: bool) -> StdCommand {
@@ -612,4 +626,38 @@ fn validate_pipe_fd(fd: RawFd) -> io::Result<()> {
         return Err(io::Error::other("not a pipe"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod own_executable_tests {
+    use super::*;
+
+    /// T12 Q08: a daemon whose executable was replaced on disk must still start supervisors.
+    /// Linux names the image through `/proc/self/exe`; a copy of a program is started, its file is
+    /// replaced the way `cp -f` replaces a busy binary (unlink, then a new file at the same path),
+    /// and the text path the old `current_exe()` returned no longer exists while the image is
+    /// still runnable through its `/proc/<pid>/exe` link.
+    #[test]
+    fn supervisor_program_survives_replacement_of_the_running_executable() {
+        if !cfg!(target_os = "linux") {
+            assert_eq!(own_executable().unwrap(), std::env::current_exe().unwrap());
+            return;
+        }
+        assert_eq!(own_executable().unwrap(), PathBuf::from("/proc/self/exe"));
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("ferryx");
+        std::fs::copy("/bin/sleep", &program).unwrap();
+        let mut running = StdCommand::new(&program).arg("30").spawn().unwrap();
+        let link = PathBuf::from(format!("/proc/{}/exe", running.id()));
+        std::fs::remove_file(&program).unwrap();
+        std::fs::write(&program, b"replacement bytes").unwrap();
+        let text = std::fs::read_link(&link).unwrap();
+        let text = text.to_string_lossy().into_owned();
+        assert!(text.ends_with(" (deleted)"), "{text}");
+        assert!(!Path::new(&text).exists(), "{text}");
+        let status = StdCommand::new(&link).arg("0").status().unwrap();
+        assert!(status.success(), "{status:?}");
+        running.kill().unwrap();
+        running.wait().unwrap();
+    }
 }

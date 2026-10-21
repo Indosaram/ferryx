@@ -10,7 +10,7 @@ import {
   retireOwner, freshOwner, nonce, counterCommand, interrupt, DAEMON_READY_TIMEOUT_MS, RESPAWN_BACKOFF_MS,
 } from './common.mjs';
 import { surviveGuiEnd } from './q00-q03.mjs';
-import { startSshd } from '../lib/sshd.mjs';
+import { startSshd, recordSshHelper } from '../lib/sshd.mjs';
 import { AUTHORITY_ARM, AUTHORITY_STAGE, HANDOVER_FAULT_REQUEST, receiptFile, authorityStages, authorityInvariant, receiptCount, stagePattern } from '../lib/receipts.mjs';
 
 /** Arms the handover-authority receipts for one upgrade; the daemon acks it on its next stage. */
@@ -66,6 +66,7 @@ async function seedPair(ctx, conn, tag) {
   await conn.call(D.write(local, counterCommand(ctx.platform, `${tag}_L`)));
   const spawned = await conn.call(D.spawnSsh({ clientRequestId: `qa-ssh-${nonce('R')}`, workspaceId: ctx.sshd.workspaceId, hostStorePath: ctx.sshd.hostStorePath }), 60_000);
   if (spawned.type !== 'spawnOk') throw new Error(`ssh spawn: ${JSON.stringify(spawned)}`);
+  await recordSshHelper(ctx);
   await conn.call(D.attach(spawned.sessionId, 0));
   await conn.call(D.write(spawned.sessionId, counterCommand('linux', `${tag}_S`)));
   const lo = await conn.waitOutput(local, `${tag}_L_TICK_3`, 15_000);
