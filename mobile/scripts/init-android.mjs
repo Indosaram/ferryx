@@ -23,6 +23,34 @@ patch("app/build.gradle.kts", s => s
   .replace(/lifecycle-process:[\d.]+/, "lifecycle-process:2.8.7"));
 patch("gradle.properties", s => s
   .replace(/^org.gradle.jvmargs=.*$/m, "org.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m")
-  + "\norg.gradle.workers.max=1\nkotlin.compiler.execution.strategy=in-process\norg.gradle.daemon=false\n");
+  + "\nandroid.useAndroidX=true\norg.gradle.workers.max=1\nkotlin.compiler.execution.strategy=in-process\norg.gradle.daemon=false\n");
+
+// Edge-to-edge keeps the WebView full height under the soft keyboard and system bars,
+// so focused inputs end up hidden. Pad the content view by the IME/system-bar insets
+// instead; the WebView then shrinks and its visual viewport tracks the keyboard.
+patch("app/src/main/java/com/ferryx/mobile/MainActivity.kt", () => `package com.ferryx.mobile
+
+import android.os.Bundle
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+
+class MainActivity : TauriActivity() {
+  override fun onCreate(savedInstanceState: Bundle?) {
+    enableEdgeToEdge(SystemBarStyle.dark(0xFF23262D.toInt()), SystemBarStyle.dark(0xFF23262D.toInt()))
+    super.onCreate(savedInstanceState)
+    val content = findViewById<android.view.View>(android.R.id.content)
+    // Inset padding exposes the window background; match the app shell instead of a light strip.
+    content.setBackgroundColor(0xFF23262D.toInt())
+    ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
+      val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+      val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+      view.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
+      WindowInsetsCompat.CONSUMED
+    }
+  }
+}
+`);
 
 patch("buildSrc/src/main/java/com/ferryx/mobile/kotlin/BuildTask.kt", s => s.replace('listOf("tauri", "android", "android-studio-script")', `listOf("${cli.replaceAll("\\", "/")}", "android", "android-studio-script")`));
