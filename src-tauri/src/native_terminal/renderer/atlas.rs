@@ -1,6 +1,8 @@
 //! Bounded glyph atlas texture management and UV coordinates cache.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 use super::rasterizer::{rasterize_glyph_with_scale, RasterizedGlyph};
 use super::types::{GlyphAtlasStats, RendererConfig};
@@ -14,6 +16,44 @@ pub struct GlyphKey {
     pub bold: bool,
     pub italic: bool,
 }
+
+/// Borrowed view of a [`GlyphKey`] so lookups need no `String` allocation. Hash and equality
+/// match the derived `GlyphKey` impls field for field, as `Borrow` requires.
+pub trait GlyphKeyView {
+    fn view(&self) -> (&str, bool, bool);
+}
+
+impl GlyphKeyView for GlyphKey {
+    fn view(&self) -> (&str, bool, bool) {
+        (&self.text, self.bold, self.italic)
+    }
+}
+
+impl GlyphKeyView for (&str, bool, bool) {
+    fn view(&self) -> (&str, bool, bool) {
+        *self
+    }
+}
+
+impl<'a> Borrow<dyn GlyphKeyView + 'a> for GlyphKey {
+    fn borrow(&self) -> &(dyn GlyphKeyView + 'a) {
+        self
+    }
+}
+
+impl Hash for dyn GlyphKeyView + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.view().hash(state);
+    }
+}
+
+impl PartialEq for dyn GlyphKeyView + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.view() == other.view()
+    }
+}
+
+impl Eq for dyn GlyphKeyView + '_ {}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AtlasEntry {
@@ -219,12 +259,9 @@ impl GlyphAtlas {
     }
 
     pub fn get_entry(&self, text: &str, bold: bool, italic: bool) -> Option<AtlasEntry> {
-        let key = GlyphKey {
-            text: text.to_string(),
-            bold,
-            italic,
-        };
-        self.entries.get(&key).copied()
+        self.entries
+            .get(&(text, bold, italic) as &dyn GlyphKeyView)
+            .copied()
     }
 
     pub fn get_or_insert(

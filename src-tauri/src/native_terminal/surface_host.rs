@@ -1811,7 +1811,9 @@ fn dispatch_owned_render_inner<R: Runtime>(
         let frame_epoch = frame.attachment_epoch;
         let frame_generation = frame.generation;
         let frame_attach_tuple = frame.attach_tuple.clone();
-        let render_input = frame.input.clone();
+        // Shares the published frame instead of deep-copying its snapshot grid.
+        let render_frame = Arc::clone(&frame);
+        let render_input = &render_frame.input;
 
         // Blocker 1: Resurrection prevention TOCTOU check.
         // If the session was detached while waiting for hosts_guard, do NOT create or update any host!
@@ -1901,6 +1903,7 @@ fn dispatch_owned_render_inner<R: Runtime>(
                 let submission_coordinator = Arc::clone(&coordinator);
                 let worker_snapshot_slot = Arc::clone(&slot);
                 if !gpu_worker.enqueue(move |gpu| {
+                    let render_input = &render_frame.input;
                     let mut loan = loan;
                     let receipt_result = if worker_snapshot_slot.is_attached_with_epoch(frame_epoch) {
                         run_gpu_frame(|| loan.render_snapshot(
@@ -1931,6 +1934,7 @@ fn dispatch_owned_render_inner<R: Runtime>(
                     let dispatch_failure_coordinator = Arc::clone(&completion_coordinator);
                     let completion_window_for_closure = completion_window.clone();
                     if let Err(err) = dispatch_render_on_main_thread(&completion_window, move || {
+                        let render_input = &render_frame.input;
                         if discard_retired_completion(&completion_slot) {
                             #[cfg(feature = "local-split-qa")]
                             if crate::ipc::qa_barrier::active_channel().is_some() {
@@ -4282,11 +4286,19 @@ impl NativeTerminalSurfaceHostState {
                 let now = std::time::Instant::now();
                 (now, now)
             });
+            // Only this task feeds the terminal or defers agent detection once it runs, so idle
+            // ticks skip the global sessions lock unless a handled message may have changed either.
+            let mut deadline = None;
+            let mut refresh_deadline = true;
+            let mut agent_detect_maybe_pending = false;
             loop {
-                let deadline = sessions
-                    .lock()
-                    .get(&session_id_owned)
-                    .and_then(|session| session.terminal.synchronized_output_deadline());
+                if refresh_deadline {
+                    deadline = sessions
+                        .lock()
+                        .get(&session_id_owned)
+                        .and_then(|session| session.terminal.synchronized_output_deadline());
+                }
+                refresh_deadline = true;
                 let received = tokio::select! {
                     biased;
                     _ = async {
@@ -4343,10 +4355,14 @@ impl NativeTerminalSurfaceHostState {
                         break;
                     }
                     Err(_) => {
+                        refresh_deadline = false;
                         // Burst went quiet: re-run any detection the throttle skipped so the
                         // final frame of a burst (often the agent's last word before it blocks
                         // on input) still produces a state transition.
-                        let (detected, events) = {
+                        let (detected, events) = if !agent_detect_maybe_pending {
+                            (false, Vec::new())
+                        } else {
+                            agent_detect_maybe_pending = false;
                             let mut sessions_guard = sessions.lock();
                             match sessions_guard.get_mut(&session_id_owned) {
                                 Some(sess)
@@ -4408,17 +4424,6 @@ impl NativeTerminalSurfaceHostState {
                                 }
                                 sess.last_sequence = Some(sequence);
                                 sess.publish_frame();
-                                crate::ipc::debug::log_native_switch_debug(serde_json::json!({
-                                    "event": "terminal.render.vt_consumed",
-                                    "details": {
-                                        "sessionId": session_id_owned,
-                                        "consumedSequence": sequence,
-                                        "renderedAt": std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .ok()
-                                            .map(|d| d.as_secs_f64() * 1000.0),
-                                    }
-                                }));
                                 (
                                     true,
                                     take_native_terminal_events(sess, &session_id_owned, false),
@@ -4428,6 +4433,20 @@ impl NativeTerminalSurfaceHostState {
                             }
                         };
 
+                        if session_exists {
+                            agent_detect_maybe_pending = true;
+                            crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+                                "event": "terminal.render.vt_consumed",
+                                "details": {
+                                    "sessionId": session_id_owned,
+                                    "consumedSequence": sequence,
+                                    "renderedAt": std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .ok()
+                                        .map(|d| d.as_secs_f64() * 1000.0),
+                                }
+                            }));
+                        }
                         for event in events {
                             emit_native_terminal_event(app_handle.as_ref(), &event_sink, event);
                         }
