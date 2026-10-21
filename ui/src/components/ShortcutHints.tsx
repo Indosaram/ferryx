@@ -37,11 +37,17 @@ export function ShortcutHints(props: ShortcutHintsProps) {
     let shown = false;
     let composing = false;
     let modifiers = "";
+    // Layout changes dismiss rather than leave labels at stale target coordinates.
+    // Observed only while hints are shown, so idle DOM churn costs nothing.
+    const observer = new MutationObserver((records) => {
+      if (records.some((record) => record.target instanceof Element && !record.target.closest("[data-shortcut-hints]"))) clear();
+    });
     const clear = () => {
       clearTimeout(timer);
       timer = undefined;
       shown = false;
       modifiers = "";
+      observer.disconnect();
       setHints((current) => current.length ? [] : current);
     };
     const show = (event: KeyboardEvent) => {
@@ -120,6 +126,12 @@ export function ShortcutHints(props: ShortcutHintsProps) {
           next.push({ action: shortcut.id, label, target: target.getAttribute("aria-label") ?? target.textContent ?? "", left, top, width });
         }
       }
+      if (!shown) {
+        observer.observe(document.body, {
+          childList: true, subtree: true, attributes: true,
+          attributeFilter: ["disabled", "hidden", "aria-hidden", "aria-disabled", "inert", "data-shortcut-scope-active", "data-tab-index"],
+        });
+      }
       shown = true;
       setHints(next);
     };
@@ -152,14 +164,6 @@ export function ShortcutHints(props: ShortcutHintsProps) {
     window.addEventListener("compositionstart", startComposition, true);
     window.addEventListener("compositionend", endComposition, true);
     document.addEventListener("visibilitychange", clear);
-    // Layout changes dismiss rather than leave labels at stale target coordinates.
-    const observer = new MutationObserver((records) => {
-      if (records.some((record) => record.target instanceof Element && !record.target.closest("[data-shortcut-hints]"))) clear();
-    });
-    observer.observe(document.body, {
-      childList: true, subtree: true, attributes: true,
-      attributeFilter: ["disabled", "hidden", "aria-hidden", "aria-disabled", "inert", "data-shortcut-scope-active", "data-tab-index"],
-    });
     return () => {
       clearTimeout(timer);
       observer.disconnect();

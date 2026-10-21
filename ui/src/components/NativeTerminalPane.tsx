@@ -657,6 +657,9 @@ export function NativeTerminalPane({
     kind?: TerminalLinkHintKind;
   } | null>(null);
   const linkHoverRevision = useRef(0);
+  const linkHoverCellRef = useRef<string | null>(null);
+  const linkPointerCellRef = useRef<string | null>(null);
+  const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
   const [linkPointer, setLinkPointer] = useState<{ x: number; y: number } | null>(null);
   const cmdClickDownRef = useRef<{ clientX: number; clientY: number; shiftKey: boolean } | null>(null);
   const scrollbarHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -970,7 +973,8 @@ export function NativeTerminalPane({
   const updateScrollbar = useCallback((metrics: NativeTerminalScrollbarPayload | undefined) => {
     if (!metrics) return;
     scrollbarRevisionRef.current += 1;
-    setScrollbar({ total: metrics.total, offset: metrics.offset, len: metrics.len });
+    const { total, offset, len } = metrics;
+    setScrollbar((prev) => prev && prev.total === total && prev.offset === offset && prev.len === len ? prev : { total, offset, len });
   }, []);
 
   const refreshScrollbar = useCallback(() => {
@@ -981,7 +985,8 @@ export function NativeTerminalPane({
     })
       .then((metrics) => {
         if (reqRevision === scrollbarRevisionRef.current && metrics) {
-          setScrollbar({ total: metrics.total, offset: metrics.offset, len: metrics.len });
+          const { total, offset, len } = metrics;
+          setScrollbar((prev) => prev && prev.total === total && prev.offset === offset && prev.len === len ? prev : { total, offset, len });
         }
       })
       .catch((error: unknown) => {
@@ -1120,19 +1125,28 @@ export function NativeTerminalPane({
   );
 
   useEffect(() => {
-    const revision = ++linkHoverRevision.current;
-    setLinkHover(null);
     const point = linkPointer;
     const viewport = viewportRef.current;
-    if (!isCmdHeld || !visible || !targetSessionId || !point || !viewport) return;
+    if (!isCmdHeld || !visible || !targetSessionId || !point || !viewport) {
+      linkHoverCellRef.current = null;
+      linkHoverRevision.current++;
+      setLinkHover(null);
+      return;
+    }
     const rect = viewport.getBoundingClientRect();
     const scale = scaleFactorRef.current || 1;
     const width = (cellSizeRef.current?.width ?? 8 * scale) / scale;
     const height = (cellSizeRef.current?.height ?? 16 * scale) / scale;
     const col = Math.floor((point.x - rect.left) / width);
     const row = Math.floor((point.y - rect.top) / height);
+    const cellKey = `${targetSessionId}:${col}:${row}`;
+    if (cellKey === linkHoverCellRef.current) return;
+    linkHoverCellRef.current = cellKey;
+    const revision = ++linkHoverRevision.current;
+    setLinkHover(null);
     if (col < 0 || row < 0 || point.x >= rect.right || point.y >= rect.bottom) return;
 
+    let settled = false;
     void (async () => {
       try {
         let token: TerminalToken | null = null;
@@ -1224,11 +1238,15 @@ export function NativeTerminalPane({
         }
       } catch {
         if (revision === linkHoverRevision.current) setLinkHover(null);
+      } finally {
+        settled = true;
       }
     })();
 
     return () => {
       linkHoverRevision.current++;
+      // An unfinished lookup is now stale; let the same cell resolve again.
+      if (!settled) linkHoverCellRef.current = null;
     };
   }, [isCmdHeld, linkPointer, session?.workspaceId, targetSessionId, visible]);
 
@@ -2299,6 +2317,9 @@ export function NativeTerminalPane({
       const isMac = isMacShortcutPlatform();
       const held = isMac ? event.metaKey : event.ctrlKey;
       setIsCmdHeld(held);
+      // Pressing the modifier over a still pointer must still resolve the hovered link.
+      const point = lastPointerRef.current;
+      if (held && point) setLinkPointer((current) => current ?? point);
     };
     const handleBlur = () => setIsCmdHeld(false);
 
@@ -3654,13 +3675,37 @@ export function NativeTerminalPane({
       }}
       onPointerMove={(event) => {
         if (!visible) return;
-        setLinkPointer(event.buttons === 0 ? { x: event.clientX, y: event.clientY } : null);
-        setIsCmdHeld(isMacShortcutPlatform() ? event.metaKey : event.ctrlKey);
-        setLinkHover(null);
-        linkHoverRevision.current++;
+        const cmdHeld = isMacShortcutPlatform() ? event.metaKey : event.ctrlKey;
+        lastPointerRef.current = event.buttons === 0 ? { x: event.clientX, y: event.clientY } : null;
+        if (!cmdHeld || event.buttons !== 0) {
+          linkPointerCellRef.current = null;
+          setLinkPointer(null);
+          setLinkHover(null);
+          linkHoverRevision.current++;
+        } else {
+          const viewport = viewportRef.current;
+          let cellKey: string | null = null;
+          if (viewport) {
+            const rect = viewport.getBoundingClientRect();
+            const scale = scaleFactorRef.current || 1;
+            const width = (cellSizeRef.current?.width ?? 8 * scale) / scale;
+            const height = (cellSizeRef.current?.height ?? 16 * scale) / scale;
+            cellKey = `${Math.floor((event.clientX - rect.left) / width)}:${Math.floor((event.clientY - rect.top) / height)}`;
+          }
+          if (cellKey === null || cellKey !== linkPointerCellRef.current) {
+            linkPointerCellRef.current = cellKey;
+            setLinkPointer({ x: event.clientX, y: event.clientY });
+            setLinkHover(null);
+            linkHoverRevision.current++;
+          }
+        }
+        setIsCmdHeld(cmdHeld);
+        // Each move re-arms the hide timer; revealing again bails out in React when already shown.
         triggerScrollbarReveal();
       }}
       onPointerLeave={() => {
+        lastPointerRef.current = null;
+        linkPointerCellRef.current = null;
         setLinkPointer(null);
         linkHoverRevision.current++;
         setLinkHover(null);
@@ -3675,6 +3720,9 @@ export function NativeTerminalPane({
           window.dispatchEvent(new CustomEvent("ferryx:session-interacted", { detail: { sessionId: paneIdentity } }));
         }
         linkHoverRevision.current++;
+        // The cleared hover must re-resolve on the next move, even within the same cell.
+        linkPointerCellRef.current = null;
+        linkHoverCellRef.current = null;
         setLinkHover(null);
         if (error) {
           retryAttach();
