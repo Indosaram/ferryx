@@ -178,6 +178,34 @@ if (!globalThis.cancelAnimationFrame) {
   });
 }
 
+// Tests never reach a real server. jsdom's WebSocket dials the URL for real, and under the
+// Bun runtime its `ws` transport surfaces the refused connection as an uncaught error. A test
+// that drives a socket stubs its own (vi.stubGlobal), which takes precedence over this one.
+if (typeof window !== "undefined") {
+  class OfflineWebSocket extends EventTarget {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
+    readonly url: string;
+    readyState = OfflineWebSocket.CONNECTING;
+    binaryType = "blob";
+    onopen: ((event: Event) => void) | null = null;
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+    constructor(url: string | URL) {
+      super();
+      this.url = String(url);
+    }
+    send() {}
+    close() {
+      this.readyState = OfflineWebSocket.CLOSED;
+    }
+  }
+  Object.defineProperty(globalThis, "WebSocket", { configurable: true, writable: true, value: OfflineWebSocket });
+}
+
 const { beforeEach: setupBeforeEach } = await import("vitest");
 const { clearHmrWorkspaceState } = await import("../state/hmrWorkspaceState");
 const { clearWorkspaceSnapshot } = await import("../state/workspaceSnapshotCache");

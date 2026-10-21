@@ -1102,7 +1102,7 @@ export async function buildHost({
       execFileSync("cp", ["-R", isolatedGhostty, ghosttyTargetDir]);
 
       // Stamp versions
-      execFileSync("node", ["scripts/sync-version.mjs", "--tag", plan.tag], {
+      execFileSync("bun", ["scripts/sync-version.mjs", "--tag", plan.tag], {
         cwd: isolatedSource,
         stdio: "pipe",
       });

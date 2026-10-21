@@ -94,6 +94,8 @@ Multiple agent sessions may share this single working tree at the same time. Unc
 - **Active Desktop Lock**: Axum WebSocket endpoint binds to current desktop session; switching focus disconnects remote client.
 
 ## COMMANDS
+JS/TS runs on Bun only: never invoke `node`, `npx`, `npm`, or `NODE_OPTIONS`. Use `bun install`, `bun run`, `bunx`, and run Node-shebang tools on the Bun runtime with `bun --bun <tool>` (the `ui` scripts already do this).
+
 ```bash
 # Frontend Dev / Build / Test
 bun run --cwd ui dev
