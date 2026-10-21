@@ -134,8 +134,16 @@ import {
   clearAccountLastSelectedTarget,
   logoutAccountSession,
   createAccountConnection,
+  getStoredAccountEntitlementSnapshot,
+  storeAccountEntitlementSnapshot,
+  clearStoredAccountEntitlementSnapshot,
+  planLimitStateFromError,
+  planLimitStateFromCloseEvent,
+  planLimitStateWithEntitlement,
   type AccountConnection,
+  type PlanLimitState,
 } from "./accountSession";
+import { PlanLimitNotice } from "./PlanLimitNotice";
 import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 
 const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT = "remote_active_selection_changed";
@@ -1276,6 +1284,37 @@ export const RemoteHostConnection: React.FC<{
     return () => activeTunnelConnection.close();
   }, [activeTunnelConnection]);
 
+  const [planLimitNotice, setPlanLimitNotice] = useState<PlanLimitState | null>(null);
+  const planLimitSuspendedRef = useRef(false);
+  planLimitSuspendedRef.current = planLimitNotice !== null;
+
+  const clearPendingSelectionRef = useRef<(retryFailedSocket?: boolean) => void>(() => {});
+
+  const handlePlanLimit = useCallback((state: PlanLimitState) => {
+    // Billing limits only exist for account relay connections; paired and local
+    // sessions keep their existing behavior untouched.
+    if (!accountSessionToken) return;
+    const merged = planLimitStateWithEntitlement(state, getStoredAccountEntitlementSnapshot(relayUrl));
+    storeAccountEntitlementSnapshot(relayUrl, {
+      plan: merged.plan,
+      status: merged.status,
+      graceEndsAt: merged.graceEndsAt,
+      stoppedAt: merged.stoppedAt,
+    });
+    setPlanLimitNotice(merged);
+    // Explicitly drop active connections and clear tokens immediately so that the UI
+    // transitions synchronously out of any active terminal or workspace view. The terminal
+    // pane's socket rides the account tunnel, so closing the tunnel closes it too.
+    clearPendingSelectionRef.current();
+    setInitialAccountTarget(null);
+    if (activeTunnelConnection) {
+      activeTunnelConnection.close();
+      setActiveTunnelConnection(null);
+    }
+    setToken(null);
+    workspaceRefreshVersionRef.current += 1;
+  }, [accountSessionToken, relayUrl, activeTunnelConnection]);
+
   const disconnect = useCallback(() => {
     if (activeTunnelConnection) {
       activeTunnelConnection.close();
@@ -1309,9 +1348,11 @@ export const RemoteHostConnection: React.FC<{
     clearStoredAccountSessionToken();
     clearAccountPreferredSessions();
     clearAccountLastSelectedTarget();
+    clearStoredAccountEntitlementSnapshot(relayUrl);
     setAccountSessionToken(null);
+    setPlanLimitNotice(null);
     disconnect();
-  }, [disconnect]);
+  }, [disconnect, relayUrl]);
 
   const handleSignOut = useCallback(() => {
     if (accountSessionToken) {
@@ -1324,8 +1365,9 @@ export const RemoteHostConnection: React.FC<{
   const accountDiscovery = useAccountWorktrees(
     relayUrl,
     accountSessionToken,
-    Boolean(accountSessionToken),
+    Boolean(accountSessionToken) && planLimitNotice === null,
     handleLogout,
+    handlePlanLimit,
   );
   const {
     applyParsedInventoryEvent,
@@ -1924,6 +1966,22 @@ export const RemoteHostConnection: React.FC<{
     optimisticSocketClosedRef.current = false;
   }, []);
 
+  // A limited or suspended account must not keep retrying: drop the account connection (and
+  // with it the tunnelled terminal socket), stop the workspace refresh, and let the discovery
+  // hook (disabled by planLimitNotice) close every retained tunnel. Recovery is the notice's
+  // explicit retry.
+  useEffect(() => {
+    if (!planLimitNotice) return;
+    clearPendingSelection();
+    setInitialAccountTarget(null);
+    if (activeTunnelConnection) {
+      activeTunnelConnection.close();
+      setActiveTunnelConnection(null);
+    }
+    setToken(null);
+    workspaceRefreshVersionRef.current += 1;
+  }, [activeTunnelConnection, clearPendingSelection, planLimitNotice]);
+
   // Switching the active host is a connection change: any pending selection or optimistic
   // terminal socket belonged to the previous connection and must be dropped before the
   // workspace state for the newly active host is loaded. The initial mount is skipped since
@@ -1993,6 +2051,7 @@ export const RemoteHostConnection: React.FC<{
 
   useEffect(() => {
     if (!token) return;
+    if (planLimitNotice) return;
     if (!activeTunnelConnection && typeof WebSocket === "undefined") return;
     let socket: WebSocket | TunnelWebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
@@ -2058,6 +2117,11 @@ export const RemoteHostConnection: React.FC<{
         }
       } catch (error) {
         if (disposed) return;
+        const limitState = planLimitStateFromError(error);
+        if (limitState) {
+          handlePlanLimit(limitState);
+          return;
+        }
         if (!activeTunnelConnection && transport.url !== relayUrl) rollbackTransport();
         else {
           console.warn("Event socket connection failed", error);
@@ -2093,9 +2157,14 @@ export const RemoteHostConnection: React.FC<{
           }
         });
       }
-      current.onclose = () => {
+      current.onclose = (event?: unknown) => {
         if (disposed || socket !== current) return;
         socket = null;
+        const limitState = planLimitStateFromCloseEvent(event);
+        if (limitState) {
+          handlePlanLimit(limitState);
+          return;
+        }
         if (!activeTunnelConnection && transport.url !== relayUrl) {
           rollbackTransport();
           return;
@@ -2124,7 +2193,9 @@ export const RemoteHostConnection: React.FC<{
       window.removeEventListener("online", recover);
       document.removeEventListener("visibilitychange", recover);
     };
-  }, [activeTunnelConnection, clearPendingSelection, confirmSelection, refreshWorkspace, token, transport.url, transportBaseUrl, relayUrl, rollbackTransport]);
+  }, [activeTunnelConnection, clearPendingSelection, confirmSelection, refreshWorkspace, token, transport.url, transportBaseUrl, relayUrl, rollbackTransport, handlePlanLimit, planLimitNotice]);
+
+  clearPendingSelectionRef.current = clearPendingSelection;
 
   // A desktop that never republishes a matching selection (stale listener,
   // closed window) must not strand the picker: every chip is disabled while a
@@ -4083,6 +4154,7 @@ export const RemoteHostConnection: React.FC<{
 
   const selectAccountOption = async (accountOpt: AccountWorktreeOption): Promise<boolean> => {
     if (accountAcquireInFlightRef.current || pendingSelectionRef.current) return false;
+    if (planLimitSuspendedRef.current) return false;
     // A new pick supersedes a timed-out attempt before the effect issues the new selection.
     lateSelectionRef.current = null;
     accountSelectionGenerationRef.current += 1;
@@ -4139,6 +4211,10 @@ export const RemoteHostConnection: React.FC<{
           conn.close();
         } catch {}
       }
+      return false;
+    }
+    if (planLimitSuspendedRef.current) {
+      conn?.close();
       return false;
     }
 
@@ -4403,7 +4479,17 @@ export const RemoteHostConnection: React.FC<{
         onCreateWorktree={createWorktree}
         creationError={initialAccountTarget || accountPreselection ? null : creationError}
       >
-        {accountPreselection ? (
+        {planLimitNotice ? (
+          <PlanLimitNotice
+            state={planLimitNotice}
+            onRetry={() => {
+              // Clearing the notice re-enables discovery, so this retry is a full
+              // rediscovery for both the machine-less and the machine-scoped refusal.
+              setPlanLimitNotice(null);
+              workspaceRefreshVersionRef.current += 1;
+            }}
+          />
+        ) : accountPreselection ? (
           <div data-testid="remote-account-empty-body" className="flex-1 flex flex-col items-center justify-center gap-2 p-6 text-center">
             <p className="text-xs text-muted-foreground">
               Choose a worktree to open its terminal.

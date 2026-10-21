@@ -7,6 +7,8 @@
 // `E0275: overflow evaluating the requirement validation::NumericDimension: Sync`
 // while `cargo check` passes. The bound is a compile-time resolution depth, not
 // runtime behaviour, and a normal build reaches none of this code.
+// The Send/Sync auto-trait check of the remote server startup future also exceeds the default
+// depth of 128; 512 covers both.
 #![recursion_limit = "512"]
 
 pub mod account;

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MailerError {
@@ -27,8 +28,47 @@ impl From<std::io::Error> for MailerError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingNoticeType {
+    GraceStarted,
+    DayBefore,
+    Stopped,
+    Recovered,
+}
+
+impl BillingNoticeType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BillingNoticeType::GraceStarted => "grace_started",
+            BillingNoticeType::DayBefore => "day_before",
+            BillingNoticeType::Stopped => "stopped",
+            BillingNoticeType::Recovered => "recovered",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingMessage {
+    pub to: String,
+    pub notice_type: BillingNoticeType,
+    pub subject: String,
+    pub body_text: String,
+    pub body_html: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portal_url: Option<String>,
+}
+
 pub trait Mailer: Send + Sync {
     fn send_magic_link(&self, to: &str, url: &str) -> Result<(), MailerError>;
+
+    fn send_billing_notice(&self, message: &BillingMessage) -> Result<(), MailerError> {
+        let _ = message;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -125,11 +165,79 @@ impl Mailer for FileMailer {
 
         Ok(())
     }
+
+    fn send_billing_notice(&self, message: &BillingMessage) -> Result<(), MailerError> {
+        let dir = self.resolve_dir()?;
+
+        if !dir.exists() {
+            if let Some(parent) = dir.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    return Err(MailerError::mail_failed(format!(
+                        "Parent directory does not exist: {}",
+                        parent.display()
+                    )));
+                }
+            }
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| MailerError::mail_failed(format!("Failed to create mail directory: {e}")))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+
+        if !dir.is_dir() {
+            return Err(MailerError::mail_failed(format!(
+                "Path is not a directory: {}",
+                dir.display()
+            )));
+        }
+
+        let file_name = format!(
+            "billing-notice-{}-{}-{}.json",
+            message.notice_type.as_str(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            uuid::Uuid::new_v4()
+        );
+        let file_path = dir.join(file_name);
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let json_bytes = serde_json::to_vec_pretty(message)
+            .map_err(|e| MailerError::mail_failed(format!("Failed to serialize billing message: {e}")))?;
+
+        use std::io::Write as _;
+        let mut file = options
+            .open(&file_path)
+            .map_err(|e| MailerError::mail_failed(format!("Failed to create file: {e}")))?;
+
+        file.write_all(&json_bytes)
+            .map_err(|e| MailerError::mail_failed(format!("Failed to write content: {e}")))?;
+
+        file.flush()
+            .map_err(|e| MailerError::mail_failed(format!("Failed to flush file: {e}")))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| MailerError::mail_failed(format!("Failed to set permissions: {e}")))?;
+        }
+
+        Ok(())
+    }
 }
 
-/// Runs the async HTTP send future from the synchronous `Mailer` trait method.
-/// Uses the active Tokio runtime when present (`block_in_place`), otherwise
-/// builds a minimal current-thread runtime for the single request.
 fn block_on_send(
     fut: impl std::future::Future<Output = Result<(), MailerError>>,
 ) -> Result<(), MailerError> {
@@ -144,6 +252,14 @@ fn block_on_send(
     }
 }
 
+fn make_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default()
+}
+
 fn resend_payload(from_address: &str, to: &str, url: &str) -> serde_json::Value {
     serde_json::json!({
         "from": from_address,
@@ -153,8 +269,31 @@ fn resend_payload(from_address: &str, to: &str, url: &str) -> serde_json::Value 
     })
 }
 
+fn resend_billing_payload(from_address: &str, message: &BillingMessage) -> serde_json::Value {
+    serde_json::json!({
+        "from": from_address,
+        "to": [&message.to],
+        "subject": &message.subject,
+        "html": &message.body_html,
+        "text": &message.body_text,
+    })
+}
+
 fn webhook_payload(to: &str, url: &str) -> serde_json::Value {
     serde_json::json!({ "to": to, "url": url })
+}
+
+fn webhook_billing_payload(message: &BillingMessage) -> serde_json::Value {
+    serde_json::json!({
+        "event": "billing_notice",
+        "to": &message.to,
+        "noticeType": message.notice_type.as_str(),
+        "subject": &message.subject,
+        "bodyText": &message.body_text,
+        "bodyHtml": &message.body_html,
+        "deadline": message.deadline,
+        "portalUrl": &message.portal_url,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -169,7 +308,7 @@ impl ResendMailer {
         Self {
             api_key: api_key.into(),
             from_address: from_address.into(),
-            client: reqwest::Client::new(),
+            client: make_http_client(),
         }
     }
 }
@@ -177,6 +316,29 @@ impl ResendMailer {
 impl Mailer for ResendMailer {
     fn send_magic_link(&self, to: &str, url: &str) -> Result<(), MailerError> {
         let payload = resend_payload(&self.from_address, to, url);
+        let fut = async {
+            let resp = self
+                .client
+                .post("https://api.resend.com/emails")
+                .bearer_auth(&self.api_key)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| MailerError::mail_failed(e.to_string()))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(MailerError::mail_failed(format!(
+                    "Resend API error {status}: {body}"
+                )));
+            }
+            Ok(())
+        };
+        block_on_send(fut)
+    }
+
+    fn send_billing_notice(&self, message: &BillingMessage) -> Result<(), MailerError> {
+        let payload = resend_billing_payload(&self.from_address, message);
         let fut = async {
             let resp = self
                 .client
@@ -211,7 +373,7 @@ impl WebhookMailer {
         Self {
             url: url.into(),
             token: token.filter(|t| !t.trim().is_empty()),
-            client: reqwest::Client::new(),
+            client: make_http_client(),
         }
     }
 }
@@ -239,11 +401,31 @@ impl Mailer for WebhookMailer {
         };
         block_on_send(fut)
     }
+
+    fn send_billing_notice(&self, message: &BillingMessage) -> Result<(), MailerError> {
+        let payload = webhook_billing_payload(message);
+        let fut = async {
+            let mut req = self.client.post(&self.url).json(&payload);
+            if let Some(token) = &self.token {
+                req = req.bearer_auth(token);
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| MailerError::mail_failed(e.to_string()))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(MailerError::mail_failed(format!(
+                    "Webhook API error {status}: {body}"
+                )));
+            }
+            Ok(())
+        };
+        block_on_send(fut)
+    }
 }
 
-/// Picks the mail transport from the environment:
-/// `RESEND_API_KEY` -> Resend, else `FERRYX_MAIL_WEBHOOK_URL` -> webhook,
-/// else a `FileMailer` rooted at `fallback_dir` (default `mail/`).
 pub fn create_production_mailer(fallback_dir: Option<PathBuf>) -> Arc<dyn Mailer> {
     if let Ok(key) = std::env::var("RESEND_API_KEY") {
         if !key.is_empty() {
@@ -295,6 +477,55 @@ mod tests {
         let file_path = entries[0].path();
         let content = std::fs::read_to_string(&file_path).expect("read file");
         assert_eq!(content, test_url, "One file contains the exact URL");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&file_path).expect("metadata");
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
+                0o600,
+                "File permissions must be 0600"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn file_mailer_writes_billing_notice() {
+        let temp_dir = std::env::temp_dir().join(format!("ferryx-test-mail-notice-{}", uuid::Uuid::new_v4()));
+        let mailer = FileMailer::with_dir(&temp_dir);
+
+        let msg = BillingMessage {
+            to: "alice@example.com".into(),
+            notice_type: BillingNoticeType::GraceStarted,
+            subject: "Action Required: Grace Period Started".into(),
+            body_text: "Your grace period has started.".into(),
+            body_html: "<p>Your grace period has started.</p>".into(),
+            deadline: Some(1700000000),
+            portal_url: Some("https://portal.example.com".into()),
+        };
+
+        let res = mailer.send_billing_notice(&msg);
+        assert!(res.is_ok(), "send_billing_notice should succeed");
+
+        let entries: Vec<_> = std::fs::read_dir(&temp_dir)
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .collect();
+
+        assert_eq!(entries.len(), 1, "Exactly one notice file should be created");
+        let file_path = entries[0].path();
+        let file_name = file_path.file_name().unwrap().to_string_lossy();
+        assert!(file_name.starts_with("billing-notice-grace_started-"), "File name must include notice type prefix");
+
+        let content = std::fs::read_to_string(&file_path).expect("read file");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse json");
+        assert_eq!(parsed["to"], "alice@example.com");
+        assert_eq!(parsed["noticeType"], "grace_started");
+        assert_eq!(parsed["deadline"], 1700000000);
+        assert_eq!(parsed["portalUrl"], "https://portal.example.com");
 
         #[cfg(unix)]
         {
@@ -411,10 +642,51 @@ mod tests {
     }
 
     #[test]
+    fn resend_billing_payload_generation() {
+        let msg = BillingMessage {
+            to: "bob@example.com".into(),
+            notice_type: BillingNoticeType::DayBefore,
+            subject: "Urgent: 24 Hours Remaining".into(),
+            body_text: "Notice body plain text".into(),
+            body_html: "<p>Notice body html</p>".into(),
+            deadline: Some(1700000000),
+            portal_url: Some("https://portal.example.com".into()),
+        };
+        let payload = resend_billing_payload("Ferryx <billing@checka.cc>", &msg);
+        assert_eq!(payload["from"], "Ferryx <billing@checka.cc>");
+        assert_eq!(payload["to"], serde_json::json!(["bob@example.com"]));
+        assert_eq!(payload["subject"], "Urgent: 24 Hours Remaining");
+        assert_eq!(payload["text"], "Notice body plain text");
+        assert_eq!(payload["html"], "<p>Notice body html</p>");
+    }
+
+    #[test]
     fn webhook_payload_generation() {
         let payload = webhook_payload("bob@example.com", "https://relay.checka.cc/auth/magic?token=xyz");
         assert_eq!(payload["to"], "bob@example.com");
         assert_eq!(payload["url"], "https://relay.checka.cc/auth/magic?token=xyz");
+    }
+
+    #[test]
+    fn webhook_billing_payload_generation() {
+        let msg = BillingMessage {
+            to: "carol@example.com".into(),
+            notice_type: BillingNoticeType::Stopped,
+            subject: "Account Suspended".into(),
+            body_text: "Service suspended text".into(),
+            body_html: "<p>Service suspended html</p>".into(),
+            deadline: None,
+            portal_url: Some("https://portal.example.com/manage".into()),
+        };
+        let payload = webhook_billing_payload(&msg);
+        assert_eq!(payload["event"], "billing_notice");
+        assert_eq!(payload["to"], "carol@example.com");
+        assert_eq!(payload["noticeType"], "stopped");
+        assert_eq!(payload["subject"], "Account Suspended");
+        assert_eq!(payload["bodyText"], "Service suspended text");
+        assert_eq!(payload["bodyHtml"], "<p>Service suspended html</p>");
+        assert_eq!(payload["deadline"], serde_json::Value::Null);
+        assert_eq!(payload["portalUrl"], "https://portal.example.com/manage");
     }
 
     #[test]

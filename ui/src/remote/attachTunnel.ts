@@ -74,6 +74,37 @@ export interface TunnelCloseEvent {
   wasClean: boolean;
 }
 
+/** WebSocket close code (1008 Policy Violation) the relay uses to refuse an attach. */
+export const ATTACH_REFUSAL_CLOSE_CODE = 1008;
+
+/** Exact close reasons the relay sends with 1008; mirrors the account-service codes. */
+export type AttachTunnelRefusalCode = "REMOTE_SUSPENDED" | "PLAN_LIMIT_REACHED";
+
+/**
+ * Maps a pre-handshake close to a structured plan refusal. Only close code 1008 with a
+ * reason exactly equal to a contract code matches; any other close stays a premature close.
+ */
+export function attachTunnelRefusalCode(
+  event: Partial<TunnelCloseEvent> | null | undefined,
+): AttachTunnelRefusalCode | null {
+  if (!event || event.code !== ATTACH_REFUSAL_CLOSE_CODE) return null;
+  if (event.reason === "REMOTE_SUSPENDED" || event.reason === "PLAN_LIMIT_REACHED") {
+    return event.reason;
+  }
+  return null;
+}
+
+/** Rejection for a relay refusal; `code` is the structured contract code callers branch on. */
+export class AttachTunnelRefusedError extends Error {
+  readonly code: AttachTunnelRefusalCode;
+
+  constructor(code: AttachTunnelRefusalCode) {
+    super(`ATTACH_TUNNEL_REFUSED: ${code}`);
+    this.name = "AttachTunnelRefusedError";
+    this.code = code;
+  }
+}
+
 export interface TunnelErrorEvent {
   error?: unknown;
   message?: string;
@@ -1206,11 +1237,16 @@ export async function openAccountTunnel(
       enqueueIncoming(() => failTerminal(err));
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event: TunnelCloseEvent) => {
       if (!handshakeComplete) {
         if (timeoutId) clearTimeout(timeoutId);
         isClosed = true;
-        reject(new Error("PREMATURE_CLOSE: socket closed before handshake completed"));
+        const refusal = attachTunnelRefusalCode(event);
+        reject(
+          refusal
+            ? new AttachTunnelRefusedError(refusal)
+            : new Error("PREMATURE_CLOSE: socket closed before handshake completed"),
+        );
         return;
       }
       enqueueIncoming(() => failTerminal(null));

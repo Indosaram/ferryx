@@ -3,10 +3,12 @@ import {
   allocateSession,
   listMachines,
   openTunnel,
+  planLimitStateFromError,
   redeemInTunnel,
   requestGrant,
   AccountSessionError,
   type AccountMachineView,
+  type PlanLimitState,
 } from "./accountSession";
 import { getOrCreateAttachKey, type AttachKeyPair } from "./accountAttach";
 import type { TunnelTransport } from "./attachTunnel";
@@ -148,6 +150,7 @@ export function useAccountWorktrees(
   accountSessionToken: string | null,
   enabled: boolean,
   onUnauthorized?: () => void,
+  onPlanLimit?: (state: PlanLimitState) => void,
 ): UseAccountWorktreesResult {
   const [machines, setMachines] = useState<AccountMachineView[]>([]);
   const [loading, setLoading] = useState(() => enabled && Boolean(accountSessionToken));
@@ -175,6 +178,8 @@ export function useAccountWorktrees(
   // the discovery effect deps stops every connection change from restarting discovery.
   const onUnauthorizedRef = useRef(onUnauthorized);
   onUnauthorizedRef.current = onUnauthorized;
+  const onPlanLimitRef = useRef(onPlanLimit);
+  onPlanLimitRef.current = onPlanLimit;
 
   const closeAllExcept = useCallback((keepMachineId: string | null) => {
     tunnelsRef.current.forEach((t, mid) => {
@@ -533,6 +538,8 @@ export function useAccountWorktrees(
             : typeof err === "object" && err !== null && "code" in err && typeof (err as { code: unknown }).code === "string"
             ? (err as { code: string }).code
             : undefined;
+          const limitState = planLimitStateFromError(err);
+          if (limitState) onPlanLimitRef.current?.(limitState);
           setMachineStatuses((prev) => ({
             ...prev,
             [machine.machineId]: {
@@ -558,6 +565,9 @@ export function useAccountWorktrees(
 
   useEffect(() => {
     if (!enabled || !accountSessionToken) {
+      // retryMachine checks only this counter, so disabling discovery must bump it too:
+      // otherwise a retry probe started before the suspension can still land its tunnel.
+      activeGenerationRef.current += 1;
       closeAllExcept(null);
       setMachines([]);
       setMachineStatuses({});
@@ -610,6 +620,8 @@ export function useAccountWorktrees(
       })
       .catch((err) => {
         if (!isGenerationAlive()) return;
+        const limitState = planLimitStateFromError(err);
+        if (limitState) onPlanLimitRef.current?.(limitState);
         if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "UNAUTHORIZED") {
           onUnauthorizedRef.current?.();
           return;
@@ -746,6 +758,8 @@ export function useAccountWorktrees(
           deviceToken: link.deviceToken,
         };
       } catch (err) {
+        const limitState = planLimitStateFromError(err);
+        if (limitState) onPlanLimitRef.current?.(limitState);
         console.warn("Account tunnel acquisition failed", err);
         return null;
       }

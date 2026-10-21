@@ -67,6 +67,7 @@ export default defineConfig({
           label: 'Getting Started',
           items: [
             { label: 'Introduction', slug: 'docs/introduction' },
+            { label: 'Pricing & Plans', slug: 'docs/pricing' },
             { label: 'Self-hosted relay', slug: 'docs/self-hosted-relay' },
           ],
         },
