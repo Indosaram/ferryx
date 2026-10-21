@@ -55,7 +55,8 @@ pub const FORWARDED_ENV: [&str; 4] = [
 /// QA barrier channel of a `local-split-qa` build (todo 12), forwarded beside [`FORWARDED_ENV`]
 /// only into a QA-named task.
 #[cfg(feature = "local-split-qa")]
-pub const QA_FORWARDED_ENV: [&str; 2] = ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"];
+pub const QA_FORWARDED_ENV: [&str; 3] =
+    ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID", crate::ssh::direct::QA_SSH_KNOWN_HOSTS_ENV];
 #[cfg(not(feature = "local-split-qa"))]
 pub const QA_FORWARDED_ENV: [&str; 0] = [];
 

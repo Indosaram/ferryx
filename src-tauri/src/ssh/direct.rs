@@ -58,6 +58,50 @@ pub fn quote_posix(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// `local-split-qa` only: the known_hosts file of the QA harness's private sshd. Production builds
+/// never read it, so their ssh keeps the user's own known_hosts under `StrictHostKeyChecking=yes`.
+#[cfg(feature = "local-split-qa")]
+pub(crate) const QA_SSH_KNOWN_HOSTS_ENV: &str = "FERRYX_QA_SSH_KNOWN_HOSTS";
+
+/// The pinned file named by [`QA_SSH_KNOWN_HOSTS_ENV`]: `None` when unset, an error when it is not
+/// an absolute path free of whitespace, quotes and control characters (ssh splits option values).
+#[cfg(feature = "local-split-qa")]
+pub(crate) fn qa_known_hosts(value: Option<std::ffi::OsString>) -> Result<Option<String>, IpcError> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match value.into_string() {
+        Ok(file)
+            if std::path::Path::new(&file).is_absolute()
+                && !file
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '\'') =>
+        {
+            Ok(Some(file))
+        }
+        _ => Err(invalid(
+            "FERRYX_QA_SSH_KNOWN_HOSTS must be an absolute path without whitespace or quotes",
+        )),
+    }
+}
+
+/// Makes `file` the only known_hosts ssh consults. Host-key checking stays strict: an unpinned or
+/// changed key still fails. Windows paths are passed with `/` so no `\` reaches ssh's option parser.
+#[cfg(feature = "local-split-qa")]
+pub(crate) fn pin_known_hosts(args: &mut Vec<String>, file: &str) {
+    let file = if cfg!(windows) { file.replace('\\', "/") } else { file.to_string() };
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    args.splice(
+        0..0,
+        [
+            "-o".to_string(),
+            format!("UserKnownHostsFile={file}"),
+            "-o".to_string(),
+            format!("GlobalKnownHostsFile={null}"),
+        ],
+    );
+}
+
 pub fn ssh_plan(
     host: &SshHost,
     command: String,
@@ -103,6 +147,12 @@ pub fn ssh_plan(
     }
     for option in options {
         args.splice(0..0, ["-o".to_string(), option.to_string()]);
+    }
+    #[cfg(feature = "local-split-qa")]
+    {
+        if let Some(file) = qa_known_hosts(std::env::var_os(QA_SSH_KNOWN_HOSTS_ENV))? {
+            pin_known_hosts(&mut args, &file);
+        }
     }
     args.push(command);
     Ok(ShellCommandPlan {

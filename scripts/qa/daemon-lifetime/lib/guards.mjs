@@ -146,10 +146,19 @@ export function isolationLayout(runDir, platform, { runtimeDir = null } = {}) {
     xdgData: mod.join(runDir, 'home', 'data'),
     launchAgents: mod.join(runDir, 'LaunchAgents'),
     logs: mod.join(runDir, 'logs'),
-    barrier: mod.join(runDir, 'barrier'),
+    barriers: mod.join(runDir, 'barriers'),
     evidence: mod.join(runDir, 'evidence'),
   };
   return dirs;
+}
+
+/**
+ * The private sshd's known_hosts (lib/sshd.mjs writes it). A file, not a layout dir: run.mjs
+ * mkdirs every layout value.
+ */
+export function sshKnownHostsFile(layout) {
+  const mod = /^[A-Za-z]:[\\/]/.test(layout.root) ? path.win32 : path.posix;
+  return mod.join(layout.root, 'sshd', 'known_hosts');
 }
 
 /**
@@ -166,7 +175,10 @@ export function isolationEnv({ runId, layout, platform, base = {} }) {
     FERRYX_SESSION_DIR: layout.sessions,
     FERRYX_DAEMON_SUPERVISOR_NAME: qaSupervisorName(runId),
     FERRYX_QA_RUN_ID: runId,
-    FERRYX_QA_BARRIER_DIR: layout.barrier,
+    FERRYX_QA_BARRIER_DIR: layout.barriers,
+    // local-split-qa only (ssh/direct.rs): the daemon's ssh trusts exactly the private sshd's pinned
+    // key. The file is written by startSshd; ssh reads it per connection, so it may appear later.
+    FERRYX_QA_SSH_KNOWN_HOSTS: sshKnownHostsFile(layout),
   };
   if (platform === 'mac') env.FERRYX_DAEMON_PLIST_PATH = layout.launchAgents;
   if (platform === 'mac') env.HOME = layout.home;

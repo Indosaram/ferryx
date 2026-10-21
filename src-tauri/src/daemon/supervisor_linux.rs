@@ -200,9 +200,9 @@ fn forwarded_key(key: &str) -> bool {
 }
 
 /// QA barrier channel of a `local-split-qa` build (todo 12): forwarded only into a QA-named unit,
-/// so the job's daemon installs the runner's QA channel.
+/// so the job's daemon installs the runner's QA channel and pins the private sshd's host key.
 #[cfg(feature = "local-split-qa")]
-const QA_BARRIER_KEYS: [&str; 2] = ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"];
+const QA_BARRIER_KEYS: [&str; 3] = ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID", crate::ssh::direct::QA_SSH_KNOWN_HOSTS_ENV];
 #[cfg(not(feature = "local-split-qa"))]
 const QA_BARRIER_KEYS: [&str; 0] = [];
 
@@ -946,6 +946,21 @@ mod tests {
         assert_eq!(unit.contains(line), cfg!(feature = "local-split-qa"), "{unit}");
         let unit = render_unit(Path::new("/opt/ferryx/ferryx"), &plain).unwrap();
         assert!(!unit.contains("FERRYX_QA_"), "{unit}");
+    }
+
+    /// Q11: the QA daemon's ssh must trust the private sshd's pinned key, so a QA-named unit of a
+    /// `local-split-qa` build carries FERRYX_QA_SSH_KNOWN_HOSTS; a plain unit or a production build
+    /// never does.
+    #[test]
+    fn qa_ssh_known_hosts_reaches_only_a_qa_named_unit_of_a_qa_build() {
+        let pin = ("FERRYX_QA_SSH_KNOWN_HOSTS", "/qa/sshd/known_hosts");
+        let plain = vars(&[("FERRYX_DATA_DIR", "/qa"), pin]);
+        let unit = render_unit(Path::new("/opt/ferryx/ferryx"), &plain).unwrap();
+        assert!(!unit.contains("FERRYX_QA_SSH_KNOWN_HOSTS"), "{unit}");
+        let qa = vars(&[("FERRYX_DATA_DIR", "/qa"), ("FERRYX_DAEMON_SUPERVISOR_NAME", "ferryx-qa-r1"), pin]);
+        let unit = render_unit(Path::new("/opt/ferryx/ferryx"), &qa).unwrap();
+        let line = "Environment=\"FERRYX_QA_SSH_KNOWN_HOSTS=/qa/sshd/known_hosts\"\n";
+        assert_eq!(unit.contains(line), cfg!(feature = "local-split-qa"), "{unit}");
     }
 
     #[test]

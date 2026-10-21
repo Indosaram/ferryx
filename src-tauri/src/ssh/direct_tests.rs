@@ -198,6 +198,50 @@ fn automated_commands_disable_tty_even_when_ssh_config_requests_one() {
     assert!(!plan.args.iter().any(|arg| arg == "-tt"));
 }
 
+/// Host-key checking stays strict in every build; the QA known_hosts pin is the only addition.
+#[test]
+fn ssh_plan_keeps_strict_host_key_checking() {
+    for interactive in [false, true] {
+        let plan = ssh_plan(&host(), "true".into(), interactive).unwrap();
+        assert!(plan.args.windows(2).any(|args| args == ["-o", "StrictHostKeyChecking=yes"]));
+        if !cfg!(feature = "local-split-qa") {
+            assert!(!plan.args.iter().any(|arg| arg.contains("KnownHostsFile")), "{:?}", plan.args);
+        }
+    }
+}
+
+/// Q11: FERRYX_QA_SSH_KNOWN_HOSTS (local-split-qa only) names the private sshd's pinned
+/// known_hosts; anything ssh would split or misread is refused rather than passed through.
+#[cfg(feature = "local-split-qa")]
+#[test]
+fn qa_known_hosts_pin_is_strict_and_validated() {
+    use std::ffi::OsString;
+    assert_eq!(qa_known_hosts(None).unwrap(), None);
+    assert_eq!(qa_known_hosts(Some(OsString::new())).unwrap(), None);
+    let file = if cfg!(windows) { r"C:\qa\sshd\known_hosts" } else { "/qa/sshd/known_hosts" };
+    assert_eq!(qa_known_hosts(Some(file.into())).unwrap().as_deref(), Some(file));
+    for bad in ["relative/known_hosts", "/qa/with space", "/qa/quo'te", "/qa/quo\"te", "/qa/new\nline"] {
+        let error = qa_known_hosts(Some(bad.into())).unwrap_err();
+        assert_eq!(error.code, IpcErrorCode::InvalidPath, "{bad}");
+    }
+
+    let mut args = vec!["-o".to_string(), "StrictHostKeyChecking=yes".to_string(), "-T".to_string()];
+    pin_known_hosts(&mut args, file);
+    let (pinned, null) = if cfg!(windows) { ("C:/qa/sshd/known_hosts", "NUL") } else { (file, "/dev/null") };
+    assert_eq!(
+        args,
+        [
+            "-o".to_string(),
+            format!("UserKnownHostsFile={pinned}"),
+            "-o".to_string(),
+            format!("GlobalKnownHostsFile={null}"),
+            "-o".to_string(),
+            "StrictHostKeyChecking=yes".to_string(),
+            "-T".to_string(),
+        ]
+    );
+}
+
 #[test]
 fn startup_plan_honors_saved_options_and_quotes_remote_root() {
     let h = host();

@@ -1,5 +1,5 @@
 // todo 8 QA receipts the harness consumes, named exactly as daemon/qa_producers.rs writes them.
-// Every line of <barrier>/<name>.receipt.jsonl carries runId, operationId, producerPid and the
+// Every line of <barriers>/<name>.receipt.jsonl carries runId, operationId, producerPid and the
 // settlement fields of its producer.
 
 import path from 'node:path';
@@ -23,7 +23,7 @@ export const PRE_COMMIT_STAGES = Object.freeze(['candidate-admitted', 'sessions-
 export const LISTENER_ROLES = Object.freeze(['canonical', 'control', 'agentState']);
 
 export function receiptFile(layout, name) {
-  return path.join(layout.barrier, `${name}.receipt.jsonl`);
+  return path.join(layout.barriers, `${name}.receipt.jsonl`);
 }
 
 export function parseReceipts(text, runId) {

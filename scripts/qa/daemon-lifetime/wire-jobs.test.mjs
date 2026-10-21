@@ -12,6 +12,9 @@ import { remoteWorkspaceId, sshdConfig } from './lib/sshd.mjs';
 import { readFileSync } from 'node:fs';
 import { AUTHORITY_STAGE, HANDOVER_FAULT_REQUEST, HANDOVER_TRANSFER, ROLLBACK_RELINQUISHMENT, CANDIDATE_STAGES, PREDECESSOR_STAGES, PRE_COMMIT_STAGES, LISTENER_ROLES, authorityStages, authorityInvariant, stagePattern, DAEMON_CLIENT_BUSY, busyReceiptPattern, busyVerdict, aliveOwnerPid } from './lib/receipts.mjs';
 import { newSummary, settle } from './lib/summary.mjs';
+import { awaitLegacyReady } from './scenarios/q10-q13.mjs';
+import { createJobs, legacyLogFiles } from './lib/jobs.mjs';
+import { isolationEnv as qaIsolationEnv, isolationLayout as qaIsolationLayout, sshKnownHostsFile } from './lib/guards.mjs';
 
 const RUN = '20261019t064512z';
 
@@ -139,8 +142,8 @@ test('Q08 runs todo 8 four transfer failure variants from the product, plus the 
 });
 
 test('Q04 stall arm outlasts the GUI wait and Windows launcher forbids breakaway on request', () => {
-  const arm = armFile({ barrier: '/r/barrier' }, LISTENER_STALL, RUN, 'op', { deadlineMs: LISTENER_STALL_DEADLINE_MS });
-  assert.equal(arm.file, '/r/barrier/daemon-listener-stall.arm.json');
+  const arm = armFile({ barriers: '/r/barriers' }, LISTENER_STALL, RUN, 'op', { deadlineMs: LISTENER_STALL_DEADLINE_MS });
+  assert.equal(arm.file, '/r/barriers/daemon-listener-stall.arm.json');
   assert.deepEqual(JSON.parse(arm.content), { name: 'daemon-listener-stall', runId: RUN, operationId: 'op', deadlineMs: LISTENER_STALL_DEADLINE_MS });
   assert.ok(LISTENER_STALL_DEADLINE_MS > 35_000);
   const cmd = windowsLauncherCommand({ root: 'C:\\r', exe: 'C:\\r\\ferryx.exe', envFile: 'C:\\r\\e.json', tag: 'q06w', noBreakaway: true });
@@ -208,7 +211,7 @@ function q04Harness({ busyText, guiLog = '', pidDuring = 4242 }) {
   const conn = { close: async () => {} };
   const ctx = {
     runId: RUN, platform: 'linux', keys: { A: 'a' }, artifacts: { A: {} }, evidenceDir: '/e',
-    layout: { barrier: '/r/barrier', runtime: '/r/runtime', logs: '/r/logs' },
+    layout: { barriers: '/r/barriers', runtime: '/r/runtime', logs: '/r/logs' },
     agent: { call }, writeEvidence: async () => {},
     jobs: { inspect: async () => ({ pid: pids.shift() }) },
     gui: { quit: async () => ({}), launch: async () => ({ tag: 'q04' }) },
@@ -223,7 +226,7 @@ test('Q04 passes only on the correlated busy receipt and keeps every no-start/re
   const good = q04Harness({ busyText: busyLine() });
   await Q04(good.ctx, good.result);
   assert.equal(settle(good.result).status, 'PASS', JSON.stringify(failing(good.result)));
-  assert.ok(good.files.has('/r/barrier/daemon-listener-stall.release.json'), 'the stall is released after the busy checks');
+  assert.ok(good.files.has('/r/barriers/daemon-listener-stall.release.json'), 'the stall is released after the busy checks');
   for (const name of ['job pid unchanged during the stall', 'zero supervisor mutations in the GUI log', 'after release: daemon pid and start time unchanged', 'original session after release: nonce']) {
     assert.ok(good.result.assertions.some((a) => a.name.startsWith(name)), name);
   }
@@ -535,4 +538,92 @@ test('launcher and observer receipt file names match the names gui.mjs waits for
   assert.equal(f.observerReady, 'C:\\r\\logs\\observer-TAG.ready.json');
   assert.equal(f.observerEvents, 'C:\\r\\logs\\observer-TAG.events.jsonl');
   assert.equal(f.observerTarget(42), 'C:\\r\\logs\\observer-TAG.target-42');
+});
+
+test('Q11: the QA daemon env pins the private sshd known_hosts that startSshd writes', () => {
+  for (const [platform, root] of [['mac', '/tmp/qa/' + RUN], ['linux', '/home/q/.qaruns/' + RUN], ['windows', 'C:\\q\\qaruns\\' + RUN]]) {
+    const layout = qaIsolationLayout(root, platform);
+    const env = qaIsolationEnv({ runId: RUN, layout, platform });
+    const sep = platform === 'windows' ? '\\' : '/';
+    assert.equal(env.FERRYX_QA_SSH_KNOWN_HOSTS, [root, 'sshd', 'known_hosts'].join(sep), platform);
+    assert.equal(sshKnownHostsFile(layout), env.FERRYX_QA_SSH_KNOWN_HOSTS);
+    assert.ok(!Object.values(layout).includes(env.FERRYX_QA_SSH_KNOWN_HOSTS), 'a file, never mkdir-ed as a layout dir');
+  }
+  const sshd = readFileSync(new URL('./lib/sshd.mjs', import.meta.url), 'utf8');
+  assert.match(sshd, /const knownHosts = sshKnownHostsFile\(ctx\.layout\)/);
+});
+
+/** Q13 readiness against an in-memory host: what the job's stdout log and the data socket say. */
+function legacyWorld({ ready = true, handshake = { type: 'handshakeOk', version: 5, pid: 77 }, refuse = null }) {
+  const w = { calls: [], closed: 0 };
+  const ctx = {
+    layout: { runtime: '/r/run', logs: '/r/logs' },
+    agent: {
+      call: async (method, params = {}) => {
+        w.calls.push({ method, params });
+        if (method === 'waitLog') return ready ? { matched: 'FERRYX_DAEMON_READY' } : { matched: null, timedOut: true };
+        if (method === 'readFile') return params.file === '/r/logs/legacy.stderr.log' ? 'boom' : null;
+        if (method === 'dataOpen') { if (refuse) throw new Error(refuse); return { handle: 'h1', handshake }; }
+        if (method === 'close') { w.closed++; return true; }
+        throw new Error(`unexpected agent call ${method}`);
+      },
+    },
+  };
+  return { w, ctx };
+}
+
+test('Q13 readiness: a stale daemon.sock never passes; only the READY line plus an accepted v5 handshake does', async () => {
+  // Stale socket of the retired owner: no READY line yet, so no connect is even attempted.
+  const stale = legacyWorld({ ready: false });
+  const r1 = await awaitLegacyReady(stale.ctx, { retiredPid: 9 });
+  assert.equal(r1.reason, 'NO_READY_LINE');
+  assert.equal(r1.stderr, 'boom', 'the legacy stderr log is surfaced');
+  assert.ok(!stale.w.calls.some((c) => c.method === 'dataOpen' || c.method === 'waitPath'));
+  const wait = stale.w.calls.find((c) => c.method === 'waitLog').params;
+  assert.equal(wait.file, '/r/logs/legacy.stdout.log');
+  assert.ok(new RegExp(wait.pattern, wait.flags).test('booting\nFERRYX_DAEMON_READY\n'));
+  assert.ok(!new RegExp(wait.pattern, wait.flags).test('FERRYX_DAEMON_READY_EXTRA\n'));
+  assert.equal(wait.deadlineMs, 30_000);
+
+  const refused = await awaitLegacyReady(legacyWorld({ refuse: 'connect ECONNREFUSED /r/run/daemon.sock' }).ctx);
+  assert.equal(refused.reason, 'HANDSHAKE_FAILED');
+  assert.match(refused.error, /ECONNREFUSED/);
+
+  for (const handshake of [{ type: 'protocolMismatch', expectedVersion: 4 }, { type: 'handshakeOk', version: 6, pid: 77 }, { type: 'handshakeOk', version: 5, pid: 9 }]) {
+    const odd = legacyWorld({ handshake });
+    const r = await awaitLegacyReady(odd.ctx, { retiredPid: 9 });
+    assert.equal(r.reason, 'HANDSHAKE_NOT_LEGACY_V5', JSON.stringify(handshake));
+    assert.equal(odd.w.closed, 1, 'a refused handshake connection is closed');
+  }
+
+  const good = legacyWorld({});
+  const ok = await awaitLegacyReady(good.ctx, { retiredPid: 9 });
+  assert.equal(ok.conn.handshake.pid, 77);
+  assert.deepEqual(good.w.calls.find((c) => c.method === 'dataOpen').params, { runtimeDir: '/r/run', version: 5 });
+});
+
+test('Q13 legacy job captures the daemon stdout/stderr on every platform', async () => {
+  for (const platform of ['mac', 'linux', 'windows']) {
+    const layout = platform === 'windows' ? { root: 'C:\\r', logs: 'C:\\r\\logs', launchAgents: 'C:\\r\\LA' } : { root: '/r', logs: '/r/logs', launchAgents: '/r/LA' };
+    const logs = legacyLogFiles(layout);
+    const written = [];
+    const agent = { call: async (method, p) => {
+      if (method === 'writeFile') written.push(p.content);
+      if (method === 'exec' && p.input) written.push(p.input);
+      if (method === 'exec' && p.command === 'sh' && !p.input) return { status: 0, stdout: '/home/q' };
+      return { status: 0, stdout: '' };
+    } };
+    const jobs = createJobs({ host: { platform }, agent, runId: RUN, layout, uid: 501 });
+    await jobs.installLegacy({ executable: platform === 'windows' ? 'C:\\t\\ferryx.exe' : '/t/ferryx', env: { FERRYX_DATA_DIR: '/d' } });
+    const text = written.join('\n');
+    if (platform === 'linux') {
+      assert.match(text, new RegExp(`^StandardOutput=append:${logs.stdout}$`, 'm'));
+      assert.match(text, new RegExp(`^StandardError=append:${logs.stderr}$`, 'm'));
+      assert.ok(text.indexOf('StandardError=') < text.indexOf('[Install]'), 'inside [Service]');
+    } else if (platform === 'mac') {
+      assert.ok(text.includes(`<string>${logs.stdout}</string>`) && text.includes(`<string>${logs.stderr}</string>`));
+    } else {
+      assert.ok(text.includes(`--daemon 1>>"${logs.stdout}" 2>>"${logs.stderr}"`), text);
+    }
+  }
 });
