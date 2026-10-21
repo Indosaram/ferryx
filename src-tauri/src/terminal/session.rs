@@ -511,6 +511,9 @@ pub struct PtySession {
     output_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     worktree_path: Option<PathBuf>,
     reader_finished: Arc<AtomicBool>,
+    /// Signalled once right after `reader_finished` is set, so the lifecycle watcher wakes
+    /// immediately instead of on its next poll.
+    reader_finished_notify: Arc<tokio::sync::Notify>,
     /// Set when this session begins closing, so its reader stops instead of issuing another
     /// blocking read. Deliberately separate from `reader_finished`, which means "the reader thread
     /// has returned" and is consumed by the lifecycle watcher.
@@ -587,6 +590,8 @@ impl PtySession {
         let metrics_session_id = config.id.clone();
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
+        let reader_finished_notify = Arc::new(tokio::sync::Notify::new());
+        let reader_finished_notify_task = Arc::clone(&reader_finished_notify);
         let reader_stop_requested = Arc::new(AtomicBool::new(false));
         let reader_stop_requested_task = Arc::clone(&reader_stop_requested);
         let reader_last_output_at = Arc::new(AtomicU64::new(0));
@@ -604,7 +609,7 @@ impl PtySession {
         let reader_phase_task = Arc::clone(&reader_phase);
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = reader;
-            let mut buf = [0u8; 4096];
+            let mut buf = [0u8; 16 * 1024];
             loop {
                 // A requested stop ends the loop once the pipe has nothing left to deliver. It is a
                 // variable rather than an immediate `break` because one read carries at most one
@@ -672,6 +677,7 @@ impl PtySession {
                 }
             }
             reader_finished_task.store(true, Ordering::Release);
+            reader_finished_notify_task.notify_one();
             reader_phase_task.store(PtyReaderPhase::Finished.as_raw(), Ordering::Release);
         });
 
@@ -692,6 +698,7 @@ impl PtySession {
             output_tx,
             worktree_path: config.worktree_path,
             reader_finished,
+            reader_finished_notify,
             reader_stop_requested,
             reader_phase,
             last_output_at,
@@ -1418,6 +1425,11 @@ impl PtySession {
         self.reader_finished.load(Ordering::Acquire)
     }
 
+    /// Woken once after the reader thread has set `reader_finished`.
+    pub(crate) fn reader_finished_notify(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.reader_finished_notify)
+    }
+
     pub(crate) fn output_receiver_closed(&self) -> bool {
         self.output_tx
             .lock()
@@ -1683,6 +1695,8 @@ impl PtySession {
             .map_err(|error| PtyError::IoError(error.to_string()))?;
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
+        let reader_finished_notify = Arc::new(tokio::sync::Notify::new());
+        let reader_finished_notify_task = Arc::clone(&reader_finished_notify);
         let reader_stop_requested = Arc::new(AtomicBool::new(false));
         let reader_stop_requested_task = Arc::clone(&reader_stop_requested);
         let reader_last_output_at = Arc::new(AtomicU64::new(0));
@@ -1701,7 +1715,7 @@ impl PtySession {
 
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = reader;
-            let mut buf = [0u8; 4096];
+            let mut buf = [0u8; 16 * 1024];
             loop {
                 // A requested stop ends the loop once the pipe has nothing left to deliver. It is a
                 // variable rather than an immediate `break` because one read carries at most one
@@ -1766,6 +1780,7 @@ impl PtySession {
                 }
             }
             reader_finished_task.store(true, Ordering::Release);
+            reader_finished_notify_task.notify_one();
             reader_phase_task.store(PtyReaderPhase::Finished.as_raw(), Ordering::Release);
         });
 
@@ -1793,6 +1808,7 @@ impl PtySession {
             output_tx,
             worktree_path: snapshot.worktree_path,
             reader_finished,
+            reader_finished_notify,
             reader_stop_requested,
             reader_phase,
             last_output_at,

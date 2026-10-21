@@ -711,7 +711,13 @@ impl PtyManager {
                     }
                 }
 
-                tokio::time::sleep(LIFECYCLE_POLL_INTERVAL).await;
+                // The reader's end wakes the watcher at once; the poll stays the fallback for
+                // exits only the child reports (adopted and Windows children).
+                let reader_finished = session.reader_finished_notify();
+                tokio::select! {
+                    _ = reader_finished.notified() => {}
+                    _ = tokio::time::sleep(LIFECYCLE_POLL_INTERVAL) => {}
+                }
             }
         });
     }

@@ -3851,6 +3851,10 @@ impl DaemonServer {
                     })
                     .collect();
                 transitions.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
+                // No live session means nothing to classify: skip the process listing.
+                if sessions.is_empty() {
+                    continue;
+                }
                 let observations = crate::ipc::run_blocking(move || {
                     // One process listing per tick. On Windows that listing is a full
                     // PowerShell enumeration, so capturing it per session multiplied the
@@ -7258,7 +7262,7 @@ impl DaemonServer {
         session_id: String,
         rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
         hub: Arc<TerminalOutputHub>,
-        mut writer: W,
+        writer: W,
         agent_rx: Option<AgentStateSubscription>,
         client_reader: Option<R>,
     ) where
@@ -7276,6 +7280,7 @@ impl DaemonServer {
             );
             tokio::pin!(pump);
             let mut lines = BufReader::new(input).lines();
+            let mut writer = BufWriter::new(writer);
             loop {
                 let outcome = updates.borrow_and_update().clone();
                 if outcome.backend_session_id != initial.backend_session_id
@@ -7321,12 +7326,15 @@ impl DaemonServer {
                 if writer.write_all(frame.as_bytes()).await.is_err() || writer.flush().await.is_err() { return; }
                 loop {
                     tokio::select! {
-                        _ = &mut pump => return,
-                        changed = updates.changed() => { if changed.is_err() { return; } break; },
+                        _ = &mut pump => { let _ = writer.flush().await; return; },
+                        changed = updates.changed() => { if changed.is_err() { let _ = writer.flush().await; return; } break; },
                         line = lines.next_line() => {
-                            let Ok(Some(mut line)) = line else { return; };
+                            let Ok(Some(mut line)) = line else { let _ = writer.flush().await; return; };
                             line.push('\n');
-                            if writer.write_all(line.as_bytes()).await.is_err() || writer.flush().await.is_err() { return; }
+                            if writer.write_all(line.as_bytes()).await.is_err() { return; }
+                            // Flush once no further complete line is already buffered from the
+                            // pump, so a burst goes out in one write and nothing waits unflushed.
+                            if !lines.get_ref().buffer().contains(&b'\n') && writer.flush().await.is_err() { return; }
                         }
                     }
                 }
@@ -7355,6 +7363,7 @@ impl DaemonServer {
         );
         tokio::pin!(pump);
         let mut lines = BufReader::new(input).lines();
+        let mut writer = BufWriter::new(writer);
         loop {
             let details = updates.borrow_and_update().clone();
             let status = DaemonStreamMessage::RemoteStatus {
@@ -7373,12 +7382,15 @@ impl DaemonServer {
             }
             loop {
                 tokio::select! {
-                    _ = &mut pump => return,
-                    changed = updates.changed() => { if changed.is_err() { return; } break; },
+                    _ = &mut pump => { let _ = writer.flush().await; return; },
+                    changed = updates.changed() => { if changed.is_err() { let _ = writer.flush().await; return; } break; },
                     line = lines.next_line() => {
-                        let Ok(Some(mut line)) = line else { return; };
+                        let Ok(Some(mut line)) = line else { let _ = writer.flush().await; return; };
                         line.push('\n');
-                        if writer.write_all(line.as_bytes()).await.is_err() || writer.flush().await.is_err() { return; }
+                        if writer.write_all(line.as_bytes()).await.is_err() { return; }
+                        // Flush once no further complete line is already buffered from the
+                        // pump, so a burst goes out in one write and nothing waits unflushed.
+                        if !lines.get_ref().buffer().contains(&b'\n') && writer.flush().await.is_err() { return; }
                     }
                 }
             }

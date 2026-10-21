@@ -73,7 +73,7 @@ describe("remote terminal agent state bridge", () => {
     vi.restoreAllMocks();
   });
 
-  it("forwards string frames to the agent-state listener without decoding them as grid data", async () => {
+  it("forwards non-grid string frames to the agent-state listener and keeps grid frames out of it", async () => {
     const frames: string[] = [];
     render(
       <RemoteTerminal
@@ -103,7 +103,7 @@ describe("remote terminal agent state bridge", () => {
     act(() => {
       socket.onmessage?.({ data: gridFrame(2, 20) });
     });
-    expect(frames).toEqual([agentState, gridFrame(2, 20)]);
+    expect(frames).toEqual([agentState]);
     expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
   });
 

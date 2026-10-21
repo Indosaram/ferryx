@@ -6159,14 +6159,23 @@ async fn reference_chat_snapshot_screen(
         .attach_with_sequence(session_id, None)
         .await
         .map_err(|message| reference_chat_scope(ScopeErrorCode::Timeout, message))?;
-    let mut mirror = RemoteTerminalMirror::new(details.cols, details.rows)
-        .map_err(|error| reference_chat_scope(ScopeErrorCode::Unsupported, error.to_string()))?;
     // History that lost output to a replay gap, with no full-screen reset since, is not the
     // whole screen even on a full attach: it is read as gapped.
-    let segments = (attachment.snapshot.gap.is_none() && !attachment.snapshot.history_incomplete)
-        .then_some(attachment.snapshot.history_segments.as_slice());
-    reference_screen::snapshot_reference_screen_segments(&mut mirror, segments)
-        .map_err(|message| reference_chat_scope(ScopeErrorCode::Unsupported, message))
+    let whole = attachment.snapshot.gap.is_none() && !attachment.snapshot.history_incomplete;
+    let history_segments = attachment.snapshot.history_segments;
+    // The VT replay is synchronous CPU work over the whole retained history: off the reactor.
+    crate::ipc::run_blocking(move || {
+        Ok::<_, crate::ipc::error::IpcError>((|| -> Result<_, ScopeError> {
+            let mut mirror = RemoteTerminalMirror::new(details.cols, details.rows).map_err(
+                |error| reference_chat_scope(ScopeErrorCode::Unsupported, error.to_string()),
+            )?;
+            let segments = whole.then_some(history_segments.as_slice());
+            reference_screen::snapshot_reference_screen_segments(&mut mirror, segments)
+                .map_err(|message| reference_chat_scope(ScopeErrorCode::Unsupported, message))
+        })())
+    })
+    .await
+    .map_err(|error| reference_chat_scope(ScopeErrorCode::Unsupported, error.message))?
 }
 
 /// The original session's own record for the prompt detectors.
@@ -6181,6 +6190,31 @@ async fn reference_chat_prompt_session(
     });
     ReferenceChatPromptSession {
         jsonl: reference_chat_session_jsonl(state, identity).await,
+        agent_status,
+    }
+}
+
+/// [reference_chat_prompt_session] for a detector about to read `screen` for `agent`.
+///
+/// Only the OmO arm reads the session file, and only when the screen carries its form marker
+/// (`omo_card`), so the tail is read under that same condition and skipped otherwise.
+async fn reference_chat_prompt_session_for_screen(
+    state: &Arc<RemoteGatewayState>,
+    identity: &reference_history::ReferenceHistoryIdentity,
+    agent: &str,
+    screen: &str,
+) -> ReferenceChatPromptSession {
+    use crate::remote::reference_chat::prompt_omo::{omo_form_on_screen, omo_reads_forms};
+    if omo_reads_forms(agent) && omo_form_on_screen(screen) {
+        return reference_chat_prompt_session(state, identity).await;
+    }
+    let agent_status = state.machine_services.as_ref().and_then(|services| {
+        services
+            .sessions
+            .session_activity_state(&identity.target.target.backend_session_id)
+    });
+    ReferenceChatPromptSession {
+        jsonl: None,
         agent_status,
     }
 }
@@ -6281,7 +6315,8 @@ async fn reference_chat_blocked_prompt(
         ));
     }
     let identity = reference_chat_identity(state, target, Some(agent)).await;
-    let session = reference_chat_prompt_session(state, &identity).await;
+    let session =
+        reference_chat_prompt_session_for_screen(state, &identity, agent, &snapshot.text).await;
     match reference_prompts::detect_reference_prompt_in_session(
         agent,
         &snapshot.text,
@@ -6601,8 +6636,10 @@ async fn reference_chat_prompt(
             "the pane's screen could not be reconstructed, so no card may be answered from it",
         );
     }
-    let session = reference_chat_prompt_session(&state, &read.identity).await;
     let agent = read.identity.registry_id.clone();
+    let session =
+        reference_chat_prompt_session_for_screen(&state, &read.identity, &agent, &snapshot.text)
+            .await;
     let prompt = reference_prompts::detect_reference_prompt_in_session(
         &agent,
         &snapshot.text,

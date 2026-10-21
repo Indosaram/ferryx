@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronLeft } from "lucide-react";
 
 import { MobileKeyDock } from "../components/MobileKeyDock";
@@ -23,6 +23,7 @@ import {
   parseGridFrame,
   type GridColor,
   type GridCursor,
+  type GridLine,
   type GridRun,
   type TerminalGridState,
 } from "./terminalGridProtocol";
@@ -344,6 +345,38 @@ function runStyle(
   }
   return style;
 }
+
+type GridLineViewProps = {
+  readonly line: GridLine;
+  readonly cols: number;
+  readonly cellWidth: number;
+  readonly cellHeight: number;
+  readonly fg: string;
+  readonly bg: string;
+};
+
+// Unchanged rows keep their line object across grid diffs, so memoizing skips re-rendering them.
+const GridLineView = memo(function GridLineView({ line, cols, cellWidth, cellHeight, fg, bg }: GridLineViewProps) {
+  return (
+    <span
+      data-grid-line={line.index}
+      style={{
+        display: "block",
+        minWidth: cellWidth > 0 ? `${cols * cellWidth}px` : `${cols}ch`,
+        height: cellHeight > 0 ? `${cellHeight}px` : "1em",
+      }}
+    >
+      {line.runs.map((run, runIndex) => (
+        <span
+          key={runIndex}
+          style={runStyle(run, fg, bg, cellWidth > 0 ? cellWidth : null)}
+        >
+          {run.text}
+        </span>
+      ))}
+    </span>
+  );
+});
 
 function cursorOverlayStyle(cursor: GridCursor, cell: CellMetrics, color: string): CSSProperties {
   const left = cursor.x * cell.width;
@@ -989,7 +1022,8 @@ export function RemoteTerminal({
         socket.onmessage = (event: any) => {
           if (disposed || sequence !== dialSequence || socketRef.current !== socket || outcomeGatesRetry) return;
           const rawData = event.data;
-          if (typeof rawData === "string") onAgentStateFrame?.(rawData);
+          // Grid frames are never agent state: serde writes the type tag first, as the guard below relies on.
+          if (typeof rawData === "string" && !rawData.startsWith('{"type":"grid')) onAgentStateFrame?.(rawData);
           const data = typeof rawData === "string"
             ? rawData
             : rawData instanceof Uint8Array
@@ -2001,24 +2035,15 @@ export function RemoteTerminal({
           }}
         />
         {grid?.lines.map((line) => (
-          <span
+          <GridLineView
             key={line.index}
-            data-grid-line={line.index}
-            style={{
-              display: "block",
-              minWidth: cellMetrics.width > 0 ? `${grid.cols * cellMetrics.width}px` : `${grid.cols}ch`,
-              height: cellMetrics.height > 0 ? `${cellMetrics.height}px` : "1em",
-            }}
-          >
-            {line.runs.map((run, runIndex) => (
-              <span
-                key={runIndex}
-                style={runStyle(run, settings.theme.foreground, settings.theme.background, cellMetrics.width > 0 ? cellMetrics.width : null)}
-              >
-                {run.text}
-              </span>
-            ))}
-          </span>
+            line={line}
+            cols={grid.cols}
+            cellWidth={cellMetrics.width}
+            cellHeight={cellMetrics.height}
+            fg={settings.theme.foreground}
+            bg={settings.theme.background}
+          />
         ))}
         {grid?.cursor.visible && cellMetrics.width > 0 && cellMetrics.height > 0 ? (
           <span

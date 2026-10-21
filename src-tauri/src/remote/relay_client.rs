@@ -618,11 +618,16 @@ impl RelayClient {
                     if let Ok(delivery) = serde_json::from_str::<AccountGrantOfferDelivery>(&text) {
                         if delivery.machine_id == self.pairing.machine_id {
                             let now = crate::account::store::now_secs();
-                            let ack = match crate::account::offer_sink::apply_envelope_for_this_machine(
-                                &self.pairing.auth,
-                                &delivery.envelope,
-                                now,
-                            ) {
+                            let auth = self.pairing.auth.clone();
+                            let envelope = delivery.envelope;
+                            let applied = crate::ipc::run_blocking(move || {
+                                Ok(crate::account::offer_sink::apply_envelope_for_this_machine(
+                                    &auth, &envelope, now,
+                                ))
+                            })
+                            .await
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            let ack = match applied {
                                 Ok(ack) => AccountGrantOfferDelivered {
                                     grant_id: Some(ack.grant_id),
                                     status: ack.status,
@@ -691,14 +696,21 @@ impl RelayClient {
             return proxy_ws_to_tcp(ws, gateway).await;
         }
 
-        let attach = crate::remote::attach_identity::load_or_generate_canonical_attach_identity()
-            .map_err(|error| anyhow::anyhow!(error))?;
+        let (attach, enrollment_record) = crate::ipc::run_blocking(|| {
+            Ok((
+                crate::remote::attach_identity::load_or_generate_canonical_attach_identity(),
+                crate::account::enroll_client::load_enrollment_record(),
+            ))
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let attach = attach.map_err(|error| anyhow::anyhow!(error))?;
         let machine_id = self
             .identity
             .as_ref()
             .map(|identity| identity.machine_id.clone())
             .unwrap_or_default();
-        let enrollment_epoch = crate::account::enroll_client::load_enrollment_record()
+        let enrollment_epoch = enrollment_record
             .map(|record| record.enrollment_epoch)
             .unwrap_or_default();
         let auth = self.pairing.auth.clone();
@@ -915,7 +927,8 @@ async fn proxy_ws_to_tcp(
     };
 
     let tcp_to_ws = async {
-        let mut buf = [0u8; 8192];
+        // 64 KiB matches the relay data channel's per-message cap (relay_server MAX_MESSAGE_SIZE).
+        let mut buf = vec![0u8; 64 * 1024];
         loop {
             match tcp_rx.read(&mut buf).await {
                 Ok(0) | Err(_) => break,

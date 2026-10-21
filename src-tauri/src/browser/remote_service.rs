@@ -201,7 +201,7 @@ impl BrowserRemoteService {
         let mut broadcasters = self.frame_broadcaster.lock();
         let tx = broadcasters
             .entry(browser_id.to_string())
-            .or_insert_with(|| tokio::sync::broadcast::channel(32).0);
+            .or_insert_with(|| tokio::sync::broadcast::channel(4).0);
         tx.subscribe()
     }
 

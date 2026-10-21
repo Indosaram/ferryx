@@ -1205,7 +1205,7 @@ impl BridgeConnection {
             }
         };
 
-        let response = match read_frame_async(reader, timeout_dur).await {
+        let mut response = match read_frame_async(reader, timeout_dur).await {
             Ok(Some(v)) => v,
             Ok(None) => {
                 #[cfg(test)]
@@ -1258,7 +1258,10 @@ impl BridgeConnection {
         if ok {
             // Restore usability ONLY after a complete, valid response frame is parsed
             self.poisoned = false;
-            Ok(response.get("data").cloned().unwrap_or(Value::Null))
+            Ok(response
+                .as_object_mut()
+                .and_then(|m| m.remove("data"))
+                .unwrap_or(Value::Null))
         } else {
             // A structured remote error was cleanly received; framing is intact
             self.poisoned = false;

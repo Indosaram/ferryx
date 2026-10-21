@@ -49,6 +49,21 @@ pub const IDLE_TTL: Duration = Duration::from_secs(60);
 /// Watcher rescan interval. The consumer is woken immediately on change, so this
 /// only bounds detection latency inside the helper, never client round trips.
 const WATCH_INTERVAL: Duration = Duration::from_millis(120);
+/// Full content-hash sweep interval. Between sweeps the watcher only probes a
+/// checkpoint whose (len, mtime, inode) changed; the sweep still catches a
+/// rewrite that preserves all three.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+
+type Stamp = (u64, Option<std::time::SystemTime>, u64);
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some((meta.len(), meta.modified().ok(), inode))
+}
 
 /// Connection id used by callers that are not bound to a live connection
 /// (in-process tests); such subscriptions are released only by explicit
@@ -560,6 +575,8 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
 }
 
 fn watch(subscription: Arc<Subscription>) {
+    let mut stamps: HashMap<String, Stamp> = HashMap::new();
+    let mut last_sweep = std::time::Instant::now();
     loop {
         {
             let Ok(state) = subscription.state.lock() else {
@@ -570,6 +587,11 @@ fn watch(subscription: Arc<Subscription>) {
             }
         }
 
+        let sweep = last_sweep.elapsed() >= SWEEP_INTERVAL;
+        if sweep {
+            last_sweep = std::time::Instant::now();
+        }
+        let mut seen: HashMap<String, Stamp> = HashMap::new();
         let mut observed: Vec<(String, u64)> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&subscription.runs_dir) {
             for entry in entries.flatten() {
@@ -580,11 +602,24 @@ fn watch(subscription: Arc<Subscription>) {
                 let Some(name) = path.file_name().and_then(|n| n.to_str()).map(String::from) else {
                     continue;
                 };
+                let current = stamp(&path);
+                if !sweep {
+                    if let Some(unchanged) = current.filter(|c| stamps.get(&name) == Some(c)) {
+                        seen.insert(name, unchanged);
+                        continue;
+                    }
+                }
                 if let Some(probed) = probe(&path) {
+                    // Stamp only what was actually probed, so an unreadable file
+                    // is retried on the next scan rather than at the next sweep.
+                    if let Some(current) = current {
+                        seen.insert(name.clone(), current);
+                    }
                     observed.push((name, probed.hash));
                 }
             }
         }
+        stamps = seen;
 
         {
             let Ok(mut state) = subscription.state.lock() else {

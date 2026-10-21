@@ -205,10 +205,17 @@ pub fn save_session_to_path(
                 format!("Failed to read pre-migration session: {e}"),
             )
         })?;
-        match serde_json::from_slice::<serde_json::Value>(&original) {
+        // Only the schema version decides migration; every other field is skipped unparsed.
+        #[derive(Deserialize)]
+        struct VersionOnly {
+            #[serde(default)]
+            version: Option<serde_json::Value>,
+        }
+        match serde_json::from_slice::<VersionOnly>(&original) {
             Ok(previous) => {
                 let version = previous
-                    .get("version")
+                    .version
+                    .as_ref()
                     .and_then(serde_json::Value::as_u64)
                     .ok_or_else(|| {
                         IpcError::new(IpcErrorCode::ParseError, "Missing session version")
@@ -264,6 +271,14 @@ pub fn save_session_to_path(
                             })?;
                     }
                 }
+            }
+            // Well-formed JSON of the wrong shape (no object) was always a version error, not
+            // corruption; only syntactically unreadable bytes are preserved and replaced.
+            Err(e) if e.classify() == serde_json::error::Category::Data => {
+                return Err(IpcError::new(
+                    IpcErrorCode::ParseError,
+                    "Missing session version",
+                ));
             }
             Err(e) => {
                 // Unreadable bytes (mixed/truncated publish, disk fault) must not block
