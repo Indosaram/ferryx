@@ -735,8 +735,8 @@ impl BrowserWsSession {
         } else {
             0
         };
-        match queue.enqueue_frame(seq, frame_bytes.clone(), now) {
-            crate::remote::browser_admission::AdmissionOutcome::Admit => {
+        match queue.enqueue_frame(seq, frame_bytes, now) {
+            crate::remote::browser_admission::AdmissionOutcome::Admit(frame_bytes) => {
                 self.record_sent_frame(&frame_bytes, seq, now);
                 Some(frame_bytes)
             }

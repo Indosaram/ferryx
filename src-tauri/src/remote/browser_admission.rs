@@ -30,7 +30,8 @@ pub const CONTROL_QUEUE_MAX_BYTES: usize = 1024 * 1024; // 1 MiB
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdmissionOutcome {
-    Admit,
+    /// Carries the admitted frame back so the caller sends it without cloning.
+    Admit(Vec<u8>),
     PermanentDrop(String),
     Backpressured(String),
     Closed,
@@ -221,7 +222,7 @@ impl SubscriberQueue {
         if self.unacked_seq.is_none() {
             self.unacked_seq = Some(seq);
             self.unacked_sent_at = Some(now);
-            AdmissionOutcome::Admit
+            AdmissionOutcome::Admit(frame_bytes)
         } else {
             // Latest-only pending slot: overwrites previous pending frame
             self.pending_frame = Some((seq, frame_bytes));
@@ -601,6 +602,9 @@ impl AdmissionController {
             };
             if let Some(ref sub) = target_sub {
                 if let Some(entry) = browser_viewers.get_mut(sub) {
+                    if entry.stalled == stalled {
+                        return;
+                    }
                     entry.stalled = stalled;
                     paused = entry.paused;
                     found = true;
@@ -693,7 +697,7 @@ pub mod tests {
 
         // 1st frame enqueued: immediately admitted to in-flight
         let res1 = queue.enqueue_frame(1, vec![1, 2, 3], now);
-        assert_eq!(res1, AdmissionOutcome::Admit);
+        assert_eq!(res1, AdmissionOutcome::Admit(vec![1, 2, 3]));
         assert_eq!(queue.unacked_seq, Some(1));
 
         // 2nd frame enqueued while 1st is unacked: placed in pending slot (backpressured)

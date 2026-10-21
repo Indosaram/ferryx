@@ -327,12 +327,13 @@ pub(crate) async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, bytes: &[
     if bytes.len() > MAX_ATTACH_FRAME {
         return Err(AttachError::FrameTooLarge(bytes.len()));
     }
+    // One buffer -> one WebSocket message on the byte-stream adapters; 4 + MAX_ATTACH_FRAME
+    // stays under the relay's 64 KiB per-message cap. Readers reassemble the byte stream.
+    let mut framed = Vec::with_capacity(4 + bytes.len());
+    framed.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    framed.extend_from_slice(bytes);
     stream
-        .write_all(&(bytes.len() as u32).to_be_bytes())
-        .await
-        .map_err(|_| AttachError::StreamClosed)?;
-    stream
-        .write_all(bytes)
+        .write_all(&framed)
         .await
         .map_err(|_| AttachError::StreamClosed)?;
     stream.flush().await.map_err(|_| AttachError::StreamClosed)?;
