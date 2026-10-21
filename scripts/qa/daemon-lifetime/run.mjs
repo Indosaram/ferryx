@@ -140,6 +140,20 @@ function joinFor(platform, ...parts) {
   return platform === 'windows' ? path.win32.join(...parts) : path.posix.join(...parts);
 }
 
+/**
+ * The baseline step is a plain cargo build (no tauri beforeBuildCommand), but tauri_build still
+ * requires frontendDist (../ui/dist) to exist. The daemon-only baseline binary needs no real UI,
+ * so create an empty, gitignored <worktree>/ui/dist on the host (mkdir -p: idempotent, never
+ * touches tracked files or an existing dist). Runs through exec because the agent's mkdir is
+ * confined to the run dir.
+ */
+export async function prepareBaselineDist({ host, agent, worktree }) {
+  const dir = joinFor(host.platform, worktree, 'ui', 'dist');
+  const r = await agent.call('exec', { command: 'node', args: ['-e', 'require("fs").mkdirSync(process.argv[1],{recursive:true})', dir] });
+  if (r.status !== 0) throw new GuardError('BASELINE_DIST_FAILED', `mkdir ${dir} exited ${r.status}: ${r.stderr}`);
+  return dir;
+}
+
 /** Artifact descriptor for a built QA bundle (per platform layout of cargo tauri build --debug). */
 export function artifactPaths({ platform, targetDir, productName, name }) {
   const dbg = joinFor(platform, targetDir, 'debug');
@@ -355,6 +369,7 @@ async function main() {
       const step = plan[name];
       if (!step) continue;
       assertQaBuild(step);
+      if (name === 'baseline') await prepareBaselineDist({ host, agent, worktree: step.cwd });
       const built = await agent.call('exec', { command: step.command, args: step.args, cwd: step.cwd, env: step.env, deadlineMs: 4 * 3_600_000 });
       writeFileSync(path.join(localEvidence, `build-${name}.log`), `exit ${built.status}\n${built.stdout}\n${built.stderr}`);
       if (built.status !== 0) throw new GuardError('BUILD_FAILED', `${name} exited ${built.status}`);
