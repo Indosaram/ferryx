@@ -642,6 +642,25 @@ function withChatWarning(warnings: readonly string[], added: string): readonly s
   return warnings.includes(added) ? warnings : [...warnings, added];
 }
 
+/** Everything a reference turn draws, as one string, cached per message object. */
+const chatTurnSignatures = new WeakMap<MobileChatMessageProps, string>();
+function chatTurnSignature(message: MobileChatMessageProps): string {
+  let signature = chatTurnSignatures.get(message);
+  if (signature === undefined) {
+    signature = JSON.stringify([
+      message.role,
+      message.content,
+      message.timestamp ?? null,
+      message.durationLabel ?? null,
+      message.referenceSource ?? null,
+      message.referenceAbandoned ?? null,
+      message.referenceParts ?? null,
+    ]);
+    chatTurnSignatures.set(message, signature);
+  }
+  return signature;
+}
+
 function newChatRequestId(): string {
   return (
     globalThis.crypto?.randomUUID?.() ??
@@ -1309,7 +1328,7 @@ export const RemoteHostConnection: React.FC<{
     handleLogout,
   );
   const {
-    applyInventoryEvent,
+    applyParsedInventoryEvent,
     noteSessionActivity,
     noteSessionsPayload,
   } = accountDiscovery;
@@ -1991,7 +2010,7 @@ export const RemoteHostConnection: React.FC<{
       if (activeTunnelConnection) {
         const inventoryEvent = parseInventoryEvent(activeTunnelConnection.machine.machineId, text);
         if (inventoryEvent.kind === "inventory") {
-          applyInventoryEvent(activeTunnelConnection.machine.machineId, text);
+          applyParsedInventoryEvent(activeTunnelConnection.machine.machineId, inventoryEvent);
           scheduleInventoryRefreshRef.current();
         }
         if (inventoryEvent.kind === "ignored" && inventoryEvent.type === "desktopSelectionChanged") {
@@ -3050,7 +3069,20 @@ export const RemoteHostConnection: React.FC<{
         const liveTarget = chatTargetRef.current;
         if (liveTarget === null || !sameReferenceTarget(liveTarget, read.fence.target)) return;
         chatFenceRef.current = read.fence;
-        setChatPage(read.page);
+        // An unchanged page keeps its object, so the disclosure derived from it is not recomputed.
+        setChatPage((prev) =>
+          prev !== null &&
+          prev.generation === read.page.generation &&
+          prev.source === read.page.source &&
+          prev.availability === read.page.availability &&
+          prev.hasMore === read.page.hasMore &&
+          (prev.unavailableReason ?? null) === (read.page.unavailableReason ?? null) &&
+          prev.turns.length === read.page.turns.length &&
+          (prev.cursor?.streamId ?? null) === (read.page.cursor?.streamId ?? null) &&
+          (prev.cursor?.offset ?? null) === (read.page.cursor?.offset ?? null)
+            ? prev
+            : read.page,
+        );
         const start = read.page.cursor ?? null;
         const anchor = chatNewestStartRef.current;
         const mapped = mapReferenceTurns(read.page);
@@ -3118,9 +3150,20 @@ export const RemoteHostConnection: React.FC<{
             }
             return true;
           });
-          const { messages: capped, truncated } = capRetainedMessages([...mapped, ...kept]);
+          // A turn that reads the same as the one on screen keeps its object, so it is not redrawn.
+          const previousById = new Map<string, MobileChatMessageProps>();
+          for (const message of prev) previousById.set(message.id, message);
+          const reused = mapped.map((turn) => {
+            const previous = previousById.get(turn.id);
+            return previous !== undefined && chatTurnSignature(previous) === chatTurnSignature(turn)
+              ? previous
+              : turn;
+          });
+          const { messages: capped, truncated } = capRetainedMessages([...reused, ...kept]);
           if (truncated) chatRetentionTruncatedRef.current = true;
-          return capped;
+          return capped.length === prev.length && capped.every((message, index) => message === prev[index])
+            ? prev
+            : capped;
         });
         setChatWarnings((prev) => {
           // The page's own disclosure is drawn by the page banner from `chatPage`, which follows
@@ -3132,9 +3175,10 @@ export const RemoteHostConnection: React.FC<{
               warning !== CHAT_NO_READER_WARNING &&
               warning !== CHAT_RETENTION_WARNING,
           );
-          return chatRetentionTruncatedRef.current
+          const next = chatRetentionTruncatedRef.current
             ? withChatWarning(cleared, CHAT_RETENTION_WARNING)
             : cleared;
+          return next.length === prev.length && next.every((warning, index) => warning === prev[index]) ? prev : next;
         });
       } catch (error) {
         if (cancelled) return;
@@ -3222,6 +3266,11 @@ export const RemoteHostConnection: React.FC<{
         const prompt = parseChatPrompt(body);
         const promptId = prompt?.id ?? null;
         const revision = prompt === null ? null : parseChatScreenRevision(body);
+        // The same occurrence on the same screen is the card already drawn; it is not replaced.
+        const promptUnchanged =
+          promptId === chatPromptIdRef.current &&
+          revision === chatPromptRevisionRef.current &&
+          (prompt === null || revision !== null);
         // Each occurrence owns its typed answer and error, even if the provider reuses an id.
         if (promptId !== chatPromptIdRef.current || revision !== chatPromptRevisionRef.current) {
           chatPromptGenerationRef.current += 1;
@@ -3230,9 +3279,12 @@ export const RemoteHostConnection: React.FC<{
         }
         chatPromptIdRef.current = promptId;
         chatPromptRevisionRef.current = revision;
-        setChatPrompt(prompt);
+        if (!promptUnchanged) setChatPrompt(prompt);
         setChatScreenRevision(revision);
-        setChatWarnings((prev) => prev.filter((warning) => warning !== CHAT_HELD_WARNING));
+        setChatWarnings((prev) => {
+          const next = prev.filter((warning) => warning !== CHAT_HELD_WARNING);
+          return next.length === prev.length ? prev : next;
+        });
       } catch {
         /* a transient prompt read keeps the card the user is looking at */
       } finally {

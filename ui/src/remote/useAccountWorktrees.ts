@@ -20,6 +20,7 @@ import {
   parseInventoryEvent,
   parseSessionsPayload,
   workspaceLabelsFromCatalog,
+  type InventoryEvent,
   type RemoteSessionInventory,
   type SessionActivityObservation,
 } from "./remoteSessionInventory";
@@ -76,6 +77,8 @@ export interface UseAccountWorktreesResult {
    * complete boundary replaces the machine's inventory, a partial one only adds.
    */
   applyInventoryEvent: (machineId: string, raw: unknown) => void;
+  /** Same as `applyInventoryEvent`, for a frame the caller has already parsed. */
+  applyParsedInventoryEvent: (machineId: string, event: InventoryEvent) => void;
   /** Merges a fetched `/api/v1/sessions` payload into the machine's inventory. */
   noteSessionsPayload: (machineId: string, raw: unknown) => void;
   /** Records observed agent activity for one session without inventing rows. */
@@ -623,14 +626,17 @@ export function useAccountWorktrees(
     };
   }, [accountSessionToken, closeAllExcept, enabled, probeMachine, relayUrl]);
 
-  const applyInventoryEvent = useCallback((machineId: string, raw: unknown) => {
-    const event = parseInventoryEvent(machineId, raw);
+  const applyParsedInventoryEvent = useCallback((machineId: string, event: InventoryEvent) => {
     if (event.kind !== "inventory") return;
     setSessionInventories((prev) => ({
       ...prev,
       [machineId]: mergeSessionInventory(prev[machineId] ?? null, event.inventory),
     }));
   }, []);
+
+  const applyInventoryEvent = useCallback((machineId: string, raw: unknown) => {
+    applyParsedInventoryEvent(machineId, parseInventoryEvent(machineId, raw));
+  }, [applyParsedInventoryEvent]);
 
   const noteSessionActivity = useCallback((machineId: string, observation: SessionActivityObservation) => {
     setSessionInventories((prev) => {
@@ -823,6 +829,7 @@ export function useAccountWorktrees(
     accountOptions,
     sessionInventories,
     applyInventoryEvent,
+    applyParsedInventoryEvent,
     noteSessionsPayload,
     noteSessionActivity,
     noteContextTabs,
