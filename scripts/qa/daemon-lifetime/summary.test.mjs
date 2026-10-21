@@ -334,6 +334,7 @@ function ownerWorld({ owner = null, alive = [], starting = null, publish = [], s
     quit: async (g) => { if (g) w.quits.push(g.pid); return { pid: g?.pid, exitedAt: 1 }; },
     kill: async (g) => { w.kills.push(g.pid); return { pid: g.pid, exitedAt: 1 }; },
   };
+  gui.launchBatch = (items) => Promise.allSettled(items.map(({ artifact, options }) => gui.launch(artifact, options)));
   const evidenceFiles = [];
   const ctx = {
     agent, gui, platform: 'linux', runId: RUN, layout: { runtime: RT, logs: '/r/logs' }, evidenceDir: '/e',

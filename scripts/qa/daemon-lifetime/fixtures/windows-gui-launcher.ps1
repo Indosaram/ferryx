@@ -3,7 +3,9 @@
 # only limit is KILL_ON_JOB_CLOSE, so the job forbids breakaway: Q06w's detach guard), starts the
 # QA GUI with the run's env and its stderr/stdout copied to logs\gui-<tag>.log, assigns it to the
 # job, publishes gui.json, then waits for the harness to ask for TerminateJobObject (Q03) through
-# terminate.request in the run dir. It never touches any process other than the one it started.
+# terminate.request in the run dir, or for a normal close (lib/gui.mjs quit) through close.request:
+# CloseMainWindow() posts WM_CLOSE to that process's main window only, and gui-<tag>.closed.json
+# records its return value. It never touches any process other than the one it started.
 # Receipts for lib/gui.mjs launchWindows: its first statement writes logs\launcher-<tag>.started,
 # and any terminating error writes logs\launcher-<tag>.err (the window is hidden, so nothing else
 # would show it). teardown copies both into the evidence.
@@ -56,8 +58,10 @@ $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 foreach ($p in $vars.PSObject.Properties) { $psi.EnvironmentVariables[$p.Name] = [string]$p.Value }
 $job = [QaJob]::CreateJobObject([IntPtr]::Zero, "ferryx-qa-gui-$Tag")
-$noBreakaway = $false
-if ($NoBreakaway) { $noBreakaway = [QaJob]::ForbidBreakaway($job) }
+# PowerShell variable names are case-insensitive: a local named $noBreakaway would overwrite the
+# -NoBreakaway switch before it is read (run-r6c Q06w: noBreakaway false with the switch passed).
+$forbidden = $false
+if ($NoBreakaway) { $forbidden = [QaJob]::ForbidBreakaway($job) }
 $proc = [System.Diagnostics.Process]::Start($psi)
 $handle = [QaJob]::OpenProcess(0x1F0FFF, $false, $proc.Id)
 $assigned = [QaJob]::AssignProcessToJobObject($job, $handle)
@@ -67,10 +71,12 @@ $log = Join-Path $logs "gui-$Tag.log"
 [QaJob]::Pipe($proc.StandardError, $log)
 [QaJob]::Pipe($proc.StandardOutput, $log)
 $out = Join-Path $RunDir "gui-$Tag.json"
-[ordered]@{ pid = $proc.Id; path = $Exe; start = $proc.StartTime.ToFileTimeUtc(); jobAssigned = $assigned; noBreakaway = $noBreakaway; launcherPid = $PID } | ConvertTo-Json -Compress | Set-Content -Path "$out.tmp"
+[ordered]@{ pid = $proc.Id; path = $Exe; start = $proc.StartTime.ToFileTimeUtc(); jobAssigned = $assigned; noBreakaway = $forbidden; launcherPid = $PID } | ConvertTo-Json -Compress | Set-Content -Path "$out.tmp"
 Move-Item -Force "$out.tmp" $out
 $request = Join-Path $RunDir "gui-$Tag.terminate.request"
-$watcher = New-Object System.IO.FileSystemWatcher $RunDir, "gui-$Tag.terminate.request"
+$closeRequest = Join-Path $RunDir "gui-$Tag.close.request"
+$closeHandled = $false
+$watcher = New-Object System.IO.FileSystemWatcher $RunDir, "gui-$Tag.*.request"
 $watcher.EnableRaisingEvents = $true
 while (-not $proc.HasExited) {
   if (Test-Path $request) {
@@ -78,7 +84,14 @@ while (-not $proc.HasExited) {
     Set-Content -Path (Join-Path $RunDir "gui-$Tag.terminated.json") -Value (@{ terminateJobObject = $ok } | ConvertTo-Json -Compress)
     break
   }
-  $null = $watcher.WaitForChanged([System.IO.WatcherChangeTypes]::Created, 60000)
+  if (-not $closeHandled -and (Test-Path $closeRequest)) {
+    $closeHandled = $true
+    $proc.Refresh()
+    $sent = $proc.CloseMainWindow()
+    Set-Content -Path (Join-Path $RunDir "gui-$Tag.closed.json") -Value ([ordered]@{ closeMainWindow = $sent; mainWindowHandle = [int64]$proc.MainWindowHandle } | ConvertTo-Json -Compress)
+  }
+  # Bounded wait: a request written between Test-Path and here is seen on the next pass.
+  $null = $watcher.WaitForChanged([System.IO.WatcherChangeTypes]::Created, 1000)
 }
 } catch {
   [System.IO.File]::WriteAllText((Join-Path $receiptDir "launcher-$Tag.err"), ($_ | Out-String) + $_.ScriptStackTrace)

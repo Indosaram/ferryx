@@ -7,7 +7,8 @@ import { assertion, block } from '../lib/summary.mjs';
 import { data as D, isLive, liveSessions } from '../lib/wire.mjs';
 import {
   evidence, dataConn, controlConn, ownerIdentity, nonceRoundTrip, assertSameOwner, retireOwner, freshOwner, nonce,
-  echoCommand, interrupt, setAsideHeadCatalog, DAEMON_READY_TIMEOUT_MS,
+  echoCommand, interrupt, setAsideHeadCatalog, requireOwner, SHELL_READY_TIMEOUT_MS, DAEMON_READY_TIMEOUT_MS,
+  enterKey,
 } from './common.mjs';
 import { startSshd, sshRestoreSession, recordSshHelper } from '../lib/sshd.mjs';
 import { legacyLogFiles } from '../lib/jobs.mjs';
@@ -103,6 +104,7 @@ async function waitAutostartRemoved(ctx, key, deadlineMs = 30_000) {
 }
 
 export async function Q10(ctx, result) {
+  if (!requireOwner(ctx, result)) return;
   const key = ctx.keys.A;
   const owner = await ownerIdentity(ctx);
   const optout = hjoin(ctx.layout.data, 'remote', OPTOUT_FILE);
@@ -175,6 +177,9 @@ export async function Q10b(ctx, result) {
   const jobPid = ctx.platform === 'windows' ? (await ctx.jobs.windowsTree(ctx.stagedRoot)).daemon?.pid : job.pid;
   assertion(result, 'control Hello answers within DAEMON_READY_TIMEOUT', hello?.ok === true, hello);
   assertion(result, 'Hello pid equals the QA job pid', hello?.pid === jobPid, { hello: hello?.pid, jobPid });
+  // No Hello means no headless owner to use: fail cleanly with what was observed (run-r6b threw a
+  // TypeError here on hello.pid) and let the scenario finally/recovery handle teardown.
+  if (!hello?.pid) return block(result, 'OWNER_UNAVAILABLE', { stage: 'Q10b headless Hello', ownerChange: changed, hello, jobPid });
   await ctx.agent.call('record', { pid: hello.pid, role: 'daemon-headless', executable: (await ctx.agent.call('probe', { pid: hello.pid })).executable });
   // The QA build's own CLI client entry point: `ferryx agents list` (agent_control) against the QA runtime.
   const cliEnv = ctx.isolationEnv;
@@ -212,6 +217,7 @@ export function attachedPattern(sessionId) {
 }
 
 export async function Q11(ctx, result) {
+  if (!requireOwner(ctx, result)) return;
   if (!ctx.hooks.writeAckHoldArm?.present) return block(result, 'HOOK_MISSING', ctx.hooks.writeAckHoldArm.owner);
   if (!ctx.mahord) return block(result, 'GUI_INPUT_UNAVAILABLE', 'Q11 types the marker through the GUI with MahoRD');
   ctx.sshd = ctx.sshd ?? await startSshd(ctx);
@@ -294,17 +300,27 @@ export async function Q11(ctx, result) {
 }
 
 export async function Q12(ctx, result) {
+  if (!requireOwner(ctx, result)) return;
   const conn = ctx.state.conn;
   // exited local entry
   const spawned = await conn.call(D.spawnLocal({ clientRequestId: `qa-q12-${nonce('R')}`, workspaceId: ctx.workspaceId, cwd: ctx.repoDir }));
   const exited = spawned.sessionId;
   await conn.call(D.attach(exited, 0));
+  // Prompt first: exit typed while the shell is still starting can be lost (common.mjs seedLocalSession).
+  const prompt = await conn.waitOutput(exited, null, SHELL_READY_TIMEOUT_MS, { visible: true });
+  assertion(result, 'exited-entry shell printed its prompt before exit was typed', !prompt.timedOut, { timedOut: Boolean(prompt.timedOut), bytes: String(prompt.text ?? '').length });
   const child = (await conn.describe()).sessions.find((s) => s.backendId === exited)?.localChildPid;
   // Subscribe to the shell's exit before asking it to exit, then read the inventory once.
   const gone = child ? ctx.agent.call('waitExit', { pid: child, deadlineMs: 15_000 }) : Promise.resolve({ timedOut: true });
-  await conn.call(D.write(exited, ctx.platform === 'windows' ? 'exit\r\n' : 'exit\n'));
+  // The daemon removes the entry only after its lifecycle poll and reader shutdown (pty.rs:19-20,
+  // finalize_natural_exit); the stream's Exit message (server.rs:7666) is sent once the session's
+  // output channel closes, so the inventory is read after that event, not after the child pid.
+  const ended = conn.waitSessionExit(exited, SESSION_EXIT_TIMEOUT_MS);
+  await conn.call(D.write(exited, `exit${enterKey(ctx.platform)}`));
   const childExit = await gone;
   assertion(result, 'exited session child process is gone', !childExit.timedOut, { child, childExit });
+  const streamExit = await ended;
+  assertion(result, 'attached stream delivered the session Exit message', !streamExit.timedOut, streamExit);
   const desc = await conn.describe();
   const entry = desc.sessions.find((s) => s.backendId === exited);
   assertion(result, 'exited local PTY reports readerOpen=false (or is gone)', !entry || entry.readerOpen === false, entry);
@@ -358,6 +374,38 @@ export async function awaitLegacyReady(ctx, { retiredPid = null } = {}) {
   return { conn, logs };
 }
 
+/** Bound of Q12's wait for the stream Exit message: lifecycle poll 250 ms + 2 x READER_SHUTDOWN_TIMEOUT 2 s (pty.rs:19-20), with margin. */
+export const SESSION_EXIT_TIMEOUT_MS = 10_000;
+
+const sameExe = (a, b) => String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase();
+
+/** Process-table rows of the legacy daemon: exactly the baseline executable, run with --daemon. */
+export function legacyDaemonRows(rows, executable) {
+  return rows.filter((r) => sameExe(r.executable, executable) && /--daemon(\s|$|")/.test(r.commandLine ?? '') && !/--daemon-supervisor/.test(r.commandLine ?? ''));
+}
+
+/**
+ * Records the legacy job's daemon as soon as the OS job starts it: the one baseline --daemon row
+ * that was not running before the install, recorded through the agent's identity check. The OS job
+ * starts asynchronously, so the table is re-read every intervalMs up to deadlineMs.
+ */
+export async function recordLegacyJobProcess(ctx, executable, prior, { deadlineMs = 15_000, intervalMs = 500 } = {}) {
+  const until = Date.now() + deadlineMs;
+  for (;;) {
+    const fresh = legacyDaemonRows(await ctx.agent.call('table'), executable).filter((r) => !prior.has(r.pid));
+    if (fresh.length === 1) {
+      try {
+        return { recorded: await ctx.agent.call('record', { pid: fresh[0].pid, role: 'daemon-legacy', executable }) };
+      } catch (error) {
+        return { recorded: null, pid: fresh[0].pid, error: String(error?.message ?? error) };
+      }
+    }
+    if (fresh.length > 1) return { recorded: null, ambiguous: fresh.map((r) => r.pid) };
+    if (Date.now() >= until) return { recorded: null, reason: `no new ${executable} --daemon within ${deadlineMs}ms` };
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 export async function Q13(ctx, result) {
   if (!ctx.artifacts.baseline) return block(result, 'ARTIFACT_MISSING', 'pre-plan baseline daemon binary not built');
   const retired = await retireOwner(ctx);
@@ -365,9 +413,15 @@ export async function Q13(ctx, result) {
   // The pre-plan baseline only reads a version-1 catalog; the HEAD owners wrote version 2.
   await evidence(ctx, result, 'catalog-set-aside.json', await setAsideHeadCatalog(ctx, 'Q13'));
   const legacyEnv = { FERRYX_DATA_DIR: ctx.layout.data, FERRYX_RUNTIME_DIR: ctx.layout.runtime, FERRYX_SESSION_DIR: ctx.layout.sessions };
-  const installed = await ctx.jobs.installLegacy({ executable: ctx.artifacts.baseline.daemonExecutable, env: legacyEnv });
+  const legacyExecutable = ctx.artifacts.baseline.daemonExecutable;
+  const priorLegacy = new Set(legacyDaemonRows(await ctx.agent.call('table'), legacyExecutable).map((r) => r.pid));
+  const installed = await ctx.jobs.installLegacy({ executable: legacyExecutable, env: legacyEnv });
   await evidence(ctx, result, 'legacy-install.json', installed);
   if (!assertion(result, 'legacy QA job installed and started', installed?.status === 0, installed)) return;
+  // Recorded at job start, before readiness: a daemon that never gets ready is still this run's to
+  // end (run-q00fix-all left pid 3856 behind because it was recorded only after the handshake).
+  const started = await recordLegacyJobProcess(ctx, legacyExecutable, priorLegacy);
+  await evidence(ctx, result, 'legacy-recorded.json', started);
   const ready = await awaitLegacyReady(ctx, { retiredPid: retired.pid });
   if (!ready.conn) {
     await evidence(ctx, result, 'legacy-not-ready.json', { ...ready, job: await ctx.jobs.inspect(null).catch((e) => String(e)) });

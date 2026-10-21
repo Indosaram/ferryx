@@ -3,8 +3,8 @@
 import path from 'node:path';
 import { hjoin } from '../lib/hostpath.mjs';
 import { randomBytes } from 'node:crypto';
-import { data as D, control as C, liveSessions, compareInventories, identityOf, isLive } from '../lib/wire.mjs';
-import { assertion } from '../lib/summary.mjs';
+import { data as D, control as C, liveSessions, compareInventories, identityOf, isLive, visibleText } from '../lib/wire.mjs';
+import { assertion, block } from '../lib/summary.mjs';
 
 export const SUPERVISED_START_WAIT_MS = 5_000; // client.rs SUPERVISED_START_WAIT
 export const DAEMON_READY_TIMEOUT_MS = 30_000; // client.rs DAEMON_READY_TIMEOUT
@@ -26,12 +26,25 @@ export function nonce(prefix = 'QA') {
   return `${prefix}_${randomBytes(6).toString('hex').toUpperCase()}`;
 }
 
+/**
+ * Line terminator for input typed into a session's shell. Windows: Enter is CR alone. ConPTY turns
+ * each input byte into a key event (InputStateMachineEngine::_DoControlCharacter), so a trailing
+ * LF arrives as a second key, Ctrl+Enter, which PSReadLine 2.0 binds to InsertLineAbove: it stays
+ * queued while a command runs and, once Ctrl+C returns to a prompt, opens an empty continuation
+ * line (`>>`). The next typed command is then appended under it and its CR only adds another line,
+ * so it never runs. Measured on maho-win: w5-qa/windows/run-r6c/q01-probe/result.json
+ * (CR+LF: `>>`, nonce not echoed; CR: no `>>`, nonce echoed once).
+ */
+export function enterKey(platform) {
+  return platform === 'windows' ? '\r' : '\n';
+}
+
 /** Shell line that prints a counter every 100ms, per platform. */
 export function counterCommand(platform, tag) {
   // Windows sessions are spawned with seedShell('windows') = powershell (see below), so this
   // PowerShell syntax always meets the shell it was written for.
-  if (platform === 'windows') return `for($i=0;;$i++){"${tag}_TICK_$i";Start-Sleep -Milliseconds 100}\r\n`;
-  return `i=0; while :; do i=$((i+1)); echo ${tag}_TICK_$i; sleep 0.1; done\n`;
+  if (platform === 'windows') return `for($i=0;;$i++){"${tag}_TICK_$i";Start-Sleep -Milliseconds 100}${enterKey(platform)}`;
+  return `i=0; while :; do i=$((i+1)); echo ${tag}_TICK_$i; sleep 0.1; done${enterKey(platform)}`;
 }
 
 /**
@@ -62,8 +75,8 @@ export class SeedError extends Error {
 export function echoCommand(platform, marker) {
   const half = Math.floor(marker.length / 2);
   // Split so the echoed input line never contains the marker itself; only the output does.
-  if (platform === 'windows') return `Write-Output ('${marker.slice(0, half)}' + '${marker.slice(half)}')\r\n`;
-  return `printf '%s%s\\n' '${marker.slice(0, half)}' '${marker.slice(half)}'\n`;
+  if (platform === 'windows') return `Write-Output ('${marker.slice(0, half)}' + '${marker.slice(half)}')${enterKey(platform)}`;
+  return `printf '%s%s\\n' '${marker.slice(0, half)}' '${marker.slice(half)}'${enterKey(platform)}`;
 }
 
 /** Writes raw evidence for a scenario and links it into the result. */
@@ -84,7 +97,9 @@ export async function dataConn(ctx, runtimeDir = ctx.layout.runtime, opts = {}) 
     handshake: opened.handshake,
     call,
     describe: async () => (await call(D.describeLiveSessions())),
-    waitOutput: (sessionId, marker, deadlineMs, { visible = false } = {}) => ctx.agent.call('waitOutput', { handle: opened.handle, sessionId, marker, visible, deadlineMs }),
+    waitOutput: (sessionId, marker, deadlineMs, { visible = false, promptAfter = null } = {}) => ctx.agent.call('waitOutput', { handle: opened.handle, sessionId, marker, visible, promptAfter, deadlineMs }),
+    outputOf: (sessionId) => ctx.agent.call('outputOf', { handle: opened.handle, sessionId }),
+    waitSessionExit: (sessionId, deadlineMs) => ctx.agent.call('waitSessionExit', { handle: opened.handle, sessionId, deadlineMs }),
     close: () => ctx.agent.call('close', { handle: opened.handle }),
   };
 }
@@ -222,6 +237,18 @@ export async function invalidateOwnerState(ctx) {
   if (conn) await conn.close().catch(() => {});
 }
 
+/**
+ * A scenario that needs the run's owner connection blocks (OWNER_UNAVAILABLE) instead of throwing
+ * on null when an earlier scenario retired that owner and could not restore one (Q07/Q10 in
+ * run-q00fix-all dereferenced null). Returns true when the owner state is usable.
+ */
+export function requireOwner(ctx, result) {
+  // conn and daemon are set together (freshOwner) and dropped together (invalidateOwnerState).
+  if (ctx.state.conn) return true;
+  block(result, 'OWNER_UNAVAILABLE', { conn: Boolean(ctx.state.conn), daemon: ctx.state.daemon?.pid ?? null, reason: ctx.state.ownerLost ?? 'no confirmed QA owner connection' });
+  return false;
+}
+
 /** <FERRYX_DATA_DIR>/remote/machine-workspaces.v1.json (server.rs catalog_path, auth.rs canonical_remote_dir). */
 export function workspaceCatalogFile(ctx) {
   return hjoin(ctx.layout.data, 'remote', 'machine-workspaces.v1.json');
@@ -294,6 +321,17 @@ export async function interrupt(conn, sessionId) {
   return conn.call({ type: 'write', sessionId, data: Buffer.from('\u0003').toString('base64') });
 }
 
+/** Wait for the shell's fresh prompt after Ctrl+C (Windows: PowerShell prompt; elsewhere none). */
+export const PROMPT_AFTER_INTERRUPT_MS = 10_000;
+
+/** Wait for a never-prompted Windows session's first prompt before Ctrl+C (pwsh cold start). */
+export const FIRST_PROMPT_MS = 30_000;
+
+/** True once the session's output has shown a PowerShell prompt line (`PS <path>>`) anywhere. */
+export function hasShownPrompt(text) {
+  return /^PS [^>\r\n]*>/m.test(visibleText(String(text ?? '')).replace(/\r/g, ''));
+}
+
 /**
  * Fresh nonce echoed exactly once in one session (input accepted, output delivered, no replay).
  * The daemon sends output only on a connection that attached the session (server.rs Attach ->
@@ -303,12 +341,37 @@ export async function interrupt(conn, sessionId) {
 export async function nonceRoundTrip(ctx, conn, sessionId, result, label) {
   const attached = await conn.call(D.attach(sessionId, 0));
   assertion(result, `${label}: attach accepted`, attached?.type === 'attachOk', attached?.type === 'attachOk' ? 'attachOk' : attached);
-  await interrupt(conn, sessionId);
+  let idleAtFirstPrompt = false;
+  if (ctx.platform === 'windows' && !hasShownPrompt(await conn.outputOf(sessionId))) {
+    // A Ctrl+C that reaches pwsh before its first prompt ends the shell (run-r6d q13-probe
+    // out-task-noprompt-30000: exit 270 ms after Ctrl+C, then SESSION_NOT_FOUND on the write),
+    // which is Q13's "legacy session not found". Only a session that never prompted waits here.
+    const first = await conn.waitOutput(sessionId, '', FIRST_PROMPT_MS, { promptAfter: 0 });
+    assertion(result, `${label}: first prompt before Ctrl+C`, !first.timedOut, { timedOut: Boolean(first.timedOut), tail: visibleText(String(first.text ?? '')).slice(-200) });
+    // Its first prompt means nothing runs: no counter to interrupt, and a Ctrl+C there echoes
+    // nothing to wait on (run-r6d q13-only: empty tail, then the echo passed). Type directly.
+    idleAtFirstPrompt = !first.timedOut;
+  }
+  const before = ctx.platform === 'windows' ? String(await conn.outputOf(sessionId) ?? '').length : 0;
+  if (!idleAtFirstPrompt) await interrupt(conn, sessionId);
+  if (ctx.platform === 'windows' && !idleAtFirstPrompt) {
+    // Type the echo only at a fresh prompt: the Ctrl+C has ended the counter and PowerShell is
+    // reading a new line (run-r6b Q01/Q02 typed into the loop's tail and hit a `>>` line).
+    const prompt = await conn.waitOutput(sessionId, '', PROMPT_AFTER_INTERRUPT_MS, { promptAfter: before });
+    assertion(result, `${label}: fresh prompt after Ctrl+C`, !prompt.timedOut, { timedOut: Boolean(prompt.timedOut), tail: visibleText(String(prompt.text ?? '').slice(before)).slice(-200) });
+  }
   const marker = nonce('NONCE');
   const w = await conn.call(D.write(sessionId, echoCommand(ctx.platform, marker)));
   const out = await conn.waitOutput(sessionId, marker, 15_000);
   assertion(result, `${label}: write accepted`, w.type === 'writeOk', w);
-  assertion(result, `${label}: nonce ${marker} echoed exactly once`, !out.timedOut && out.count === 1, { count: out.count, timedOut: Boolean(out.timedOut) });
+  const ok = assertion(result, `${label}: nonce ${marker} echoed exactly once`, !out.timedOut && out.count === 1, { count: out.count, timedOut: Boolean(out.timedOut) });
+  if (!ok) {
+    // Diagnosable failure (Q01 count 0 in run-q00fix-all): what the session sent, and the daemon's view.
+    const text = String(out.text ?? '');
+    let describe;
+    try { describe = await conn.describe(); } catch (error) { describe = { error: String(error?.message ?? error) }; }
+    await evidence(ctx, result, `nonce-${marker}.json`, { label, sessionId, marker, dsrReplies: out.dsrReplies ?? null, receivedBytes: text.length, receivedTail: text.slice(-SEED_TEXT_TAIL), describe });
+  }
   return marker;
 }
 
