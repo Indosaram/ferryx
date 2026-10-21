@@ -236,14 +236,19 @@ pub fn start_managed_pump_token<R: Runtime>(
         let epoch_str = epoch.to_string();
         let mut buffer = Vec::with_capacity(BATCH_MAX_BYTES);
         let mut last_seq: Option<u64> = None;
+        // Fixed per batch: armed when the batch receives its first bytes, never pushed out by
+        // later messages, so a steady trickle cannot postpone the 10 ms flush.
+        let mut flush_deadline = tokio::time::Instant::now();
 
         loop {
             let next = if buffer.is_empty() {
-                messages.recv().await
+                let msg = messages.recv().await;
+                flush_deadline = tokio::time::Instant::now() + BATCH_FLUSH_INTERVAL;
+                msg
             } else {
                 tokio::select! {
                     msg = messages.recv() => msg,
-                    _ = tokio::time::sleep(BATCH_FLUSH_INTERVAL) => {
+                    _ = tokio::time::sleep_until(flush_deadline) => {
                         let bindings = PUMP_BINDINGS.lock();
                         if bindings.as_ref().and_then(|map| map.get(&session_id_clone)).copied() != Some(token) {
                             return;
