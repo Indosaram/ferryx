@@ -935,7 +935,8 @@ function q11World({ replayOnRelaunch = false, resendOnReconnect = false, release
         }
         return { type: `${f.type}Ok` };
       }
-      case 'waitOutput': { const n = w.echo.split(params.marker).length - 1; return n > 0 ? { count: n, text: w.echo } : { timedOut: true, count: 0 }; }
+      case 'waitOutput': { const text = w.echo.slice(params.since ?? 0); const n = text.split(params.marker).length - 1; return n > 0 ? { count: n, text } : { timedOut: true, count: 0 }; }
+      case 'outputOf': return w.echo;
       case 'close': return true;
       case 'exec': return { status: 0, stdout: w.log, stderr: '' };
       // build-log branch: Q11 records this run's SSH remote-helper pids for teardown.
@@ -943,20 +944,24 @@ function q11World({ replayOnRelaunch = false, resendOnReconnect = false, release
       default: throw new Error(`unexpected agent call ${method}`);
     }
   };
-  const conn = { handle: 'h0', call: (frame) => call('call', { handle: 'h0', frame }), describe: () => call('call', { handle: 'h0', frame: { type: 'describeLiveSessions' } }), waitOutput: (s, marker) => call('waitOutput', { marker }), close: async () => {} };
+  const conn = { handle: 'h0', call: (frame) => call('call', { handle: 'h0', frame }), describe: () => call('call', { handle: 'h0', frame: { type: 'describeLiveSessions' } }), waitOutput: (s, marker, _ms, { since = 0 } = {}) => call('waitOutput', { marker, since }), outputLength: async () => (await call('outputOf', {})).length, close: async () => {} };
   const restoredTab = () => {
     const doc = w.sessionFile ? JSON.parse(w.sessionFile) : null;
     const ws = doc && Object.values(doc.workspaces).find((x) => x.target?.kind === 'ssh');
     return ws && Object.values(ws.terminalSessions).find((s) => s.backendSessionId === sid);
   };
+  const typeChar = (ch) => { if (!w.typedBy.includes(w.launches.at(-1))) w.typedBy.push(w.launches.at(-1)); w.line += ch; w.echo += ch; };
   const ctx = {
     agent: { call }, runId: RUN, platform: 'linux', hooks: { writeAckHoldArm: { present: true } },
     sshd: { hostId: 'qa-sshd-x', workspaceId: 'ssh:x', hostStorePath: '/d/ssh_hosts.json', repoRoot: '/r/ssh-repo', clientKey: '/k', knownHosts: '/kh', port: 2, user: 'u' },
     layout: { runtime: '/r/run', barriers: '/r/barriers', sessions: '/r/sessions' }, evidenceDir: '/e', writeEvidence: async () => {},
+    // MahoRD keys one at a time (lib/typeverified.mjs): each printable key reaches the line and its
+    // echo; Enter commits the line. A whole-text burst is not used (MahoRD drops keys from it).
     mahord: {
-      type: async (text) => { w.typedBy.push(w.launches.at(-1)); w.line += text; w.echo += text; w.lastMarker = text; },
+      hotkey: async (keys) => { assert.equal(keys[0], 'Shift'); typeChar(keys[1].toUpperCase()); },
       key: async (key) => {
-        assert.equal(key, 'Enter');
+        if (key !== 'Enter') { typeChar(key); return; }
+        w.lastMarker = w.line;
         // The GUI writes the Enter; the line reaches cat's log and the daemon parks the ack.
         w.log += `${w.line}\n`; w.line = '';
         w.receipts.push(`{"event":"write-applied","sessionId":"${sid}","seq":1}`);

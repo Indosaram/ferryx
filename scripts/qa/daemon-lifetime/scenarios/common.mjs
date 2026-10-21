@@ -84,7 +84,8 @@ export async function dataConn(ctx, runtimeDir = ctx.layout.runtime, opts = {}) 
     handshake: opened.handshake,
     call,
     describe: async () => (await call(D.describeLiveSessions())),
-    waitOutput: (sessionId, marker, deadlineMs, { visible = false } = {}) => ctx.agent.call('waitOutput', { handle: opened.handle, sessionId, marker, visible, deadlineMs }),
+    waitOutput: (sessionId, marker, deadlineMs, { visible = false, since = 0 } = {}) => ctx.agent.call('waitOutput', { handle: opened.handle, sessionId, marker, visible, since, deadlineMs }),
+    outputLength: async (sessionId) => (await ctx.agent.call('outputOf', { handle: opened.handle, sessionId })).length,
     close: () => ctx.agent.call('close', { handle: opened.handle }),
   };
 }

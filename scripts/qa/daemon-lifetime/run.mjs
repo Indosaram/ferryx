@@ -31,6 +31,7 @@ import { createGuiDriver, macGuiExecutable } from './lib/gui.mjs';
 import { assembleDaemonHelper } from '../../macos-daemon-helper.mjs';
 import { finalizeMacosBundle } from '../../lib/release-platforms.mjs';
 import { connectMahord } from './lib/mahord.mjs';
+import { createAppReplacer } from './lib/replace.mjs';
 import { sshHostId } from './lib/sshd.mjs';
 import { run } from './lib/proc.mjs';
 import * as g1 from './scenarios/q00-q03.mjs';
@@ -498,18 +499,9 @@ async function main() {
       hostUser: host.transport.user ?? os.userInfo().username, sshPort: 20000 + (Number(runId.slice(-5, -1)) % 20000),
       evidenceDir: localEvidence.split(path.sep).join('/'), state: {}, carry: [], sshd: null,
       writeEvidence: async (file, content) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, content); },
-      replaceAppOnDisk: async (from, to) => {
-        // The on-disk app at A's path is replaced by B's bytes (same version, different build).
-        if (host.platform === 'mac') {
-          await agent.call('exec', { command: 'rm', args: ['-rf', from.appPath] });
-          await agent.call('exec', { command: 'ditto', args: [to.appPath, from.appPath] });
-        } else {
-          await agent.call('exec', host.platform === 'windows'
-            ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', `Copy-Item -Force '${to.guiExecutable}' '${from.guiExecutable}'`] }
-            : { command: 'cp', args: ['-f', to.guiExecutable, from.guiExecutable] });
-        }
-        return { artifact: { ...from, name: to.name, sha256: await agent.call('sha256', { file: from.guiExecutable }) } };
-      },
+      // The on-disk app at A's path is replaced by B's bytes (same version, different build); A's
+      // original is kept under artifacts/pristine so Q07 can put A back (lib/replace.mjs).
+      replaceAppOnDisk: createAppReplacer({ platform: host.platform, agent, pristineRoot: joinFor(host.platform, runDir, 'artifacts', 'pristine') }),
     };
 
     const ordered = summary.scenarios.filter((s) => selected.includes(s.id));
