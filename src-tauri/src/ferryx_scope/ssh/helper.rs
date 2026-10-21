@@ -814,7 +814,7 @@ impl Runtime {
                             state.chunks.iter().filter(|(seq, _)| *seq > after)
                         {
                             let b64 = BASE64_STANDARD.encode(chunk_bytes);
-                            let chunk_est = b64.len() + chunk_bytes.len() * 4 + 80;
+                            let chunk_est = b64.len() + 80;
                             if !response_chunks.is_empty()
                                 && current_size_estimate + chunk_est > max_response_len
                             {
@@ -826,7 +826,6 @@ impl Runtime {
                                 "cursor": seq.to_string(),
                                 "sequence": seq,
                                 "data": b64,
-                                "bytes": chunk_bytes,
                             }));
                         }
 
