@@ -12,7 +12,8 @@ use crate::daemon::server::get_runtime_dir;
 use crate::ipc::error::{IpcError, IpcErrorCode};
 use crate::ipc::run_blocking;
 
-/// Past the cap we skip (not truncate): a hung client must not lose earlier stages.
+/// Past the cap the log rotates once to `boot-trace.log.1`, so a long-running GUI keeps
+/// recording native presentation evidence instead of going silent for the rest of its life.
 const BOOT_TRACE_MAX_BYTES: u64 = 1024 * 1024;
 
 #[derive(Deserialize)]
@@ -56,7 +57,14 @@ pub(crate) fn append_boot_trace(
     if path.exists() {
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or_default();
         if size > max_bytes {
-            return Ok(());
+            let mut rotated = path.as_os_str().to_owned();
+            rotated.push(".1");
+            std::fs::rename(path, PathBuf::from(rotated)).map_err(|error| {
+                IpcError::new(
+                    IpcErrorCode::InternalError,
+                    format!("boot trace rotation failed: {error}"),
+                )
+            })?;
         }
     }
     let wall_time_ms = SystemTime::now()
@@ -110,15 +118,20 @@ mod tests {
     }
 
     #[test]
-    fn skips_append_past_size_cap() {
+    fn rotates_past_size_cap_and_keeps_appending() {
         let dir =
             std::env::temp_dir().join(format!("ferryx-boot-trace-cap-{}", std::process::id()));
         let path = dir.join("boot-trace.log");
+        let rotated = dir.join("boot-trace.log.1");
         std::fs::create_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_file(&rotated);
         std::fs::write(&path, "x".repeat(2048)).unwrap();
-        append_boot_trace(&path, "should.skip", &json!(null), 1024).unwrap();
+        append_boot_trace(&path, "after.cap", &json!(null), 1024).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(!body.contains("should.skip"));
+        assert!(body.contains("after.cap"), "a full trace must keep recording");
+        assert!(!body.contains("xxxx"), "the full trace moves aside instead of growing");
+        assert_eq!(std::fs::read_to_string(&rotated).unwrap(), "x".repeat(2048));
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rotated);
     }
 }

@@ -45,7 +45,12 @@ export function isReleasePersistedInputEvent(event: string): boolean {
     || event.startsWith("terminal.open.")
     || event.startsWith("project.register.")
     || event.startsWith("terminal.surface.attach.")
-    || event === "terminal.surface.bounds.error"
+    // Geometry, teardown and the macOS cover state are the only record of why a pane that
+    // reported `presented` can still show nothing; they fire per pane change, not per frame.
+    || event.startsWith("terminal.surface.bounds.")
+    || event.startsWith("terminal.surface.detach.")
+    || event === "terminal.surface.skipped"
+    || event === "terminal.surface.cover"
     // Worktree selection and workspace swaps/restores: rare, user-driven, and the only record of
     // which project's state a sidebar row or "New Terminal" acted on. Renders stay debug-only.
     || event.startsWith("worktree.")

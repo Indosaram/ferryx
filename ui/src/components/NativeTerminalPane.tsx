@@ -713,6 +713,16 @@ export function NativeTerminalPane({
     readonly bindingKey: string | null;
   } | null>(null);
   const retainedPresentation = presentation?.paneIdentity === paneIdentity ? presentation : null;
+  const covered = !(surfaceVisible && !suspended && retainedPresentation !== null);
+  useEffect(() => {
+    switchDebug("terminal.surface.cover", {
+      paneIdentity,
+      backendSessionId: targetSessionId,
+      covered,
+      surfaceVisible,
+      suspended,
+    });
+  }, [covered, paneIdentity, surfaceVisible, suspended, targetSessionId]);
   const surfaceSessionId = targetSessionId ?? (isExited && !suspended && isMacShortcutPlatform() ? retainedPresentation?.backendSessionId ?? null : null);
   // Exiting stops input, not the presented surface's attachment lifetime.
   // Keep its exact identity even if the exited session drops epoch/generation metadata.
