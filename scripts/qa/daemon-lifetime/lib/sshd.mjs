@@ -4,6 +4,7 @@
 
 import { createHash } from 'node:crypto';
 import { hjoin } from './hostpath.mjs';
+import { sshKnownHostsFile } from './guards.mjs';
 
 export const SSHD_BINARIES = Object.freeze({
   mac: '/usr/sbin/sshd',
@@ -73,7 +74,8 @@ export async function startSshd(ctx) {
   const listening = await ctx.agent.call('waitLog', { file: logFile, pattern: `Server listening on 127\\.0\\.0\\.1 port ${port}`, deadlineMs: 15_000 });
   if (!listening.matched) return { unavailable: 'sshd did not report listening', pid: entry.pid };
   const hostPub = (await ctx.agent.call('readFile', { file: `${hostKey}.pub` })).trim().split(' ').slice(0, 2).join(' ');
-  const knownHosts = hjoin(dir, 'known_hosts');
+  // The same file isolationEnv hands the QA daemon as FERRYX_QA_SSH_KNOWN_HOSTS.
+  const knownHosts = sshKnownHostsFile(ctx.layout);
   await ctx.agent.call('writeFile', { file: knownHosts, content: `[127.0.0.1]:${port} ${hostPub}\n` });
   const repoRoot = hjoin(ctx.layout.root, 'ssh-repo');
   await ctx.agent.call('mkdir', { dir: repoRoot });

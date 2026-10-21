@@ -14,11 +14,11 @@ export const PROBE_FAULTS = Object.freeze(['inspect-denied', 'start-time-mismatc
 
 /** Barrier arm file for one named QA fixture (qa_barrier.rs runner contract). */
 export function armFile(layout, name, runId, operationId, extra = {}) {
-  return { file: hjoin(layout.barrier, `${name}.arm.json`), content: JSON.stringify({ name, runId, operationId, ...extra }) };
+  return { file: hjoin(layout.barriers, `${name}.arm.json`), content: JSON.stringify({ name, runId, operationId, ...extra }) };
 }
 
 export function releaseFile(layout, name, runId, operationId) {
-  return { file: hjoin(layout.barrier, `${name}.release.json`), content: JSON.stringify({ name, runId, operationId }) };
+  return { file: hjoin(layout.barriers, `${name}.release.json`), content: JSON.stringify({ name, runId, operationId }) };
 }
 
 /** GUI tracing logs with ANSI styling (lib.rs fmt()); escapes sit between field names and values. */
@@ -46,7 +46,7 @@ export async function Q04(ctx, result) {
   // the QA job) reads this arm on every accepted data connection and holds the handshake.
   const arm = armFile(ctx.layout, LISTENER_STALL, ctx.runId, op, { deadlineMs: LISTENER_STALL_DEADLINE_MS });
   await ctx.agent.call('writeFile', arm);
-  const held = hjoin(ctx.layout.barrier, `${LISTENER_STALL}.held.json`);
+  const held = hjoin(ctx.layout.barriers, `${LISTENER_STALL}.held.json`);
   // A fresh data connection makes the daemon enter the stall (accept, no handshake answer).
   const probe = ctx.agent.call('dataOpen', { runtimeDir: ctx.layout.runtime }).catch((e) => ({ error: e.message }));
   const stalled = await ctx.agent.call('waitPath', { file: held, deadlineMs: 15_000 });
@@ -56,7 +56,7 @@ export async function Q04(ctx, result) {
   ctx.state.gui = gui;
   // The GUI's data connection meets the stall without touching the job: client.rs answers the
   // silent handshake with DAEMON_BUSY and appends a receipt correlated to this stall's operation.
-  const busyFile = hjoin(ctx.layout.barrier, `${DAEMON_CLIENT_BUSY}.receipt.jsonl`);
+  const busyFile = hjoin(ctx.layout.barriers, `${DAEMON_CLIENT_BUSY}.receipt.jsonl`);
   const busy = await ctx.agent.call('waitLog', { file: busyFile, pattern: busyReceiptPattern(ctx.runId, op), deadlineMs: DAEMON_READY_TIMEOUT_MS + SUPERVISED_START_WAIT_MS + 15_000 });
   const pidDuring = await jobPid(ctx, ctx.keys.A);
   const verdict = busyVerdict((await ctx.agent.call('readFile', { file: busyFile })) ?? '', { runId: ctx.runId, operationId: op, pidBefore });

@@ -2,10 +2,17 @@
 
 import { parseLaunchctlPrint, launchctlProgram, parseSystemctlShow, windowsTaskTree, parseScheduledTaskState } from './os-jobs.mjs';
 import { qaSupervisorName } from './guards.mjs';
+import { hjoin } from './hostpath.mjs';
+
+/** stdout/stderr of the Q13 legacy daemon job, on every platform (the baseline prints FERRYX_DAEMON_READY to stdout). */
+export function legacyLogFiles(layout) {
+  return { stdout: hjoin(layout.logs, 'legacy.stdout.log'), stderr: hjoin(layout.logs, 'legacy.stderr.log') };
+}
 
 export function createJobs({ host, agent, runId, layout, uid = null }) {
   const platform = host.platform;
   const base = qaSupervisorName(runId);
+  const legacyLogs = legacyLogFiles(layout);
 
   const label = (key) => (key ? `${base}.${key}` : base);
   const unit = (key) => (key ? `${base}-${key}` : base);
@@ -88,9 +95,9 @@ ${envXml}
     <key>AbandonProcessGroup</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>${layout.logs}/legacy.stdout.log</string>
+    <string>${legacyLogs.stdout}</string>
     <key>StandardErrorPath</key>
-    <string>${layout.logs}/legacy.stderr.log</string>
+    <string>${legacyLogs.stderr}</string>
 </dict>
 </plist>
 `;
@@ -103,7 +110,9 @@ ${envXml}
       const envLines = Object.entries(env).map(([k, v]) => `Environment="${k}=${v}"`).join('\n');
       // Not 'install -D /dev/stdin': the agent's stdin is a socket, and opening /dev/stdin on a
       // socket fails with ENXIO (measured on omarchy), so the unit file was never written.
-      const written = await agent.call('exec', { command: 'sh', args: ['-c', 'umask 022; mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', file], input: `[Unit]\nDescription=Ferryx QA legacy daemon ${runId}\n\n[Service]\nType=simple\nExecStart=${executable} --daemon\nKillMode=process\nRestart=on-failure\n${envLines}\n\n[Install]\nWantedBy=default.target\n` });
+      // Same capture as the mac plist: a baseline daemon crash leaves its stderr in the run's logs.
+      const output = `StandardOutput=append:${legacyLogs.stdout}\nStandardError=append:${legacyLogs.stderr}`;
+      const written = await agent.call('exec', { command: 'sh', args: ['-c', 'umask 022; mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', file], input: `[Unit]\nDescription=Ferryx QA legacy daemon ${runId}\n\n[Service]\nType=simple\nExecStart=${executable} --daemon\nKillMode=process\nRestart=on-failure\n${envLines}\n${output}\n\n[Install]\nWantedBy=default.target\n` });
       if (written.status !== 0) return written;
       await agent.call('exec', { command: 'systemctl', args: ['--user', 'daemon-reload'] });
       await agent.call('exec', { command: 'systemctl', args: ['--user', 'enable', `${base}.service`] });
@@ -114,7 +123,7 @@ ${envXml}
     // schtasks /TR is limited to 261 characters, and inline `set` chains with three run-dir paths
     // plus the baseline exe exceed it. A launcher script in the run dir keeps /TR short.
     const launcher = `${layout.root}\\legacy-daemon.cmd`;
-    const script = ['@echo off', ...Object.entries(env).map(([k, v]) => `set "${k}=${v}"`), `"${executable}" --daemon`, ''].join('\r\n');
+    const script = ['@echo off', ...Object.entries(env).map(([k, v]) => `set "${k}=${v}"`), `"${executable}" --daemon 1>>"${legacyLogs.stdout}" 2>>"${legacyLogs.stderr}"`, ''].join('\r\n');
     await agent.call('writeFile', { file: launcher, content: script });
     await agent.call('exec', { command: 'schtasks', args: ['/Create', '/TN', task(null), '/SC', 'ONLOGON', '/TR', launcher, '/F'] });
     return agent.call('exec', { command: 'schtasks', args: ['/Run', '/TN', task(null)] });

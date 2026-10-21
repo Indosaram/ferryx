@@ -10,6 +10,7 @@ import {
   echoCommand, interrupt, DAEMON_READY_TIMEOUT_MS,
 } from './common.mjs';
 import { startSshd } from '../lib/sshd.mjs';
+import { legacyLogFiles } from '../lib/jobs.mjs';
 
 export const OPTOUT_FILE = 'daemon-supervisor.optout'; // supervisor.rs OPTOUT_FILE_NAME, in <FERRYX_DATA_DIR>/remote
 
@@ -177,17 +178,17 @@ export async function Q11(ctx, result) {
   assertion(result, 'SSH session live with a host-scoped remote pid', sBefore?.connected && sBefore?.remotePid != null && sBefore?.localChildPid == null, sBefore);
   // Arm the hold, type the marker through the GUI, wait for write-applied, quit while held.
   const op = `q11-${ctx.runId}`;
-  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barrier, 'write-ack-hold.request.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
+  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barriers, 'write-ack-hold.request.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
   // Typed through MahoRD on remote hosts, which drops '_' on maho-win: letters and digits only.
   const marker = nonce('UNCERTAIN').replace(/_/g, '');
   await ctx.typeIntoSession(ctx.state.gui, sid, `${marker}\n`);
-  const applied = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.barrier, 'write-ack-hold.receipt.jsonl'), pattern: `"write-applied"[^\\n]*"${sid}"`, deadlineMs: 30_000 });
+  const applied = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.barriers, 'write-ack-hold.receipt.jsonl'), pattern: `"write-applied"[^\\n]*"${sid}"`, deadlineMs: 30_000 });
   assertion(result, 'write-applied observed while the ack is held', Boolean(applied.matched), applied);
   const quit = await ctx.gui.quit(ctx.state.gui);
   // The held WriteOk went down with the quit GUI's connection; release the arm so later writes
   // to this session (the interrupt below) are acknowledged normally.
-  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barrier, 'write-ack-hold.release.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
-  const released = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.barrier, 'write-ack-hold.receipt.jsonl'), pattern: `"released"[^\\n]*"${sid}"`, deadlineMs: 10_000 });
+  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barriers, 'write-ack-hold.release.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
+  const released = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.barriers, 'write-ack-hold.receipt.jsonl'), pattern: `"released"[^\\n]*"${sid}"`, deadlineMs: 10_000 });
   assertion(result, 'write-ack hold released after the GUI quit', Boolean(released.matched), released);
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A);
   const conn2 = await dataConn(ctx);
@@ -245,6 +246,31 @@ export async function Q12(ctx, result) {
   await ctl.close();
 }
 
+/**
+ * Q13 readiness. A daemon.sock path proves nothing: the retired owner's socket file can outlive it
+ * (r3c: ECONNREFUSED right after the path check). The baseline prints FERRYX_DAEMON_READY only
+ * after its listener is bound (cli.rs, ready_rx), so wait for that line in the job's stdout log
+ * (fs.watch event, bounded), then require one accepted protocol-5 handshake from a new pid.
+ */
+export async function awaitLegacyReady(ctx, { retiredPid = null } = {}) {
+  const logs = legacyLogFiles(ctx.layout);
+  const announced = await ctx.agent.call('waitLog', { file: logs.stdout, pattern: '^FERRYX_DAEMON_READY$', flags: 'm', deadlineMs: DAEMON_READY_TIMEOUT_MS });
+  const stderr = async () => (await ctx.agent.call('readFile', { file: logs.stderr })) ?? null;
+  if (!announced.matched) return { conn: null, reason: 'NO_READY_LINE', logs, stderr: await stderr() };
+  let conn;
+  try {
+    conn = await dataConn(ctx, ctx.layout.runtime, { version: 5 });
+  } catch (error) {
+    return { conn: null, reason: 'HANDSHAKE_FAILED', error: String(error?.message ?? error), logs, stderr: await stderr() };
+  }
+  const hs = conn.handshake;
+  if (hs?.type !== 'handshakeOk' || hs.version !== 5 || !hs.pid || hs.pid === retiredPid) {
+    await conn.close().catch(() => {});
+    return { conn: null, reason: 'HANDSHAKE_NOT_LEGACY_V5', handshake: hs, logs };
+  }
+  return { conn, logs };
+}
+
 export async function Q13(ctx, result) {
   if (!ctx.artifacts.baseline) return block(result, 'ARTIFACT_MISSING', 'pre-plan baseline daemon binary not built');
   const retired = await retireOwner(ctx);
@@ -253,9 +279,14 @@ export async function Q13(ctx, result) {
   const installed = await ctx.jobs.installLegacy({ executable: ctx.artifacts.baseline.daemonExecutable, env: legacyEnv });
   await evidence(ctx, result, 'legacy-install.json', installed);
   if (!assertion(result, 'legacy QA job installed and started', installed?.status === 0, installed)) return;
-  const ready = await ctx.agent.call('waitPath', { file: ctx.platform === 'windows' ? hjoin(ctx.layout.runtime, 'daemon.port') : hjoin(ctx.layout.runtime, 'daemon.sock'), deadlineMs: DAEMON_READY_TIMEOUT_MS });
-  assertion(result, 'legacy daemon published its endpoint', ready, null);
-  const conn = await dataConn(ctx);
+  const ready = await awaitLegacyReady(ctx, { retiredPid: retired.pid });
+  if (!ready.conn) {
+    await evidence(ctx, result, 'legacy-not-ready.json', { ...ready, job: await ctx.jobs.inspect(null).catch((e) => String(e)) });
+    assertion(result, 'legacy daemon accepted a protocol-5 handshake', false, ready);
+    return;
+  }
+  const conn = ready.conn;
+  assertion(result, 'legacy daemon accepted a protocol-5 handshake', true, conn.handshake);
   const legacyPid = conn.handshake.pid;
   const legacyExe = (await ctx.agent.call('probe', { pid: legacyPid }))?.executable;
   await ctx.agent.call('record', { pid: legacyPid, role: 'daemon-legacy', executable: legacyExe });

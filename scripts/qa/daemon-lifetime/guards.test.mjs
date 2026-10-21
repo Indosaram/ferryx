@@ -6,6 +6,8 @@ import {
 } from './lib/guards.mjs';
 import { probeIdentity, windowsProbeScript } from './lib/proc.mjs';
 import { ownerStartMatches } from './scenarios/common.mjs';
+import { hostFor } from './lib/hosts.mjs';
+import path from 'node:path';
 
 const RUN = '20261019t064512z';
 const OTHER = '20261019t064513z';
@@ -70,6 +72,24 @@ test('isolation env points every daemon location into the run dir', () => {
   const { FERRYX_SESSION_DIR, ...missing } = env;
   assert.ok(FERRYX_SESSION_DIR);
   assert.throws(() => assertIsolatedEnv(missing, { runId: RUN, forbidden, platform: 'mac' }), /ENV_NOT_ISOLATED/);
+});
+
+// lib.rs qa_primary_window_profile: the QA GUI panics unless FERRYX_QA_BARRIER_DIR is an existing
+// dir named exactly `barriers` whose parent is named the run id. run.mjs builds runDir as
+// <storageRoot ?? runRoot>/<runId> and mkdirs every layout dir before any GUI launch.
+test('QA barriers dir: basename barriers, parent basename the run id, created with the layout, on every host', () => {
+  for (const platform of ['mac', 'linux', 'windows']) {
+    const host = hostFor(platform);
+    const mod = platform === 'windows' ? path.win32 : path.posix;
+    const runDir = mod.join(host.storageRoot ?? host.runRoot, RUN);
+    const runtimeDir = host.storageRoot ? mod.join(host.runRoot, RUN, 'run') : null;
+    const layout = isolationLayout(runDir, platform, runtimeDir ? { runtimeDir } : {});
+    const dir = isolationEnv({ runId: RUN, layout, platform }).FERRYX_QA_BARRIER_DIR;
+    assert.equal(dir, layout.barriers, platform);
+    assert.equal(mod.basename(dir), 'barriers', platform);
+    assert.equal(mod.basename(mod.dirname(dir)), RUN, platform);
+    assert.ok(Object.values(layout).includes(dir), `${platform}: run.mjs creates every layout dir, so the barriers dir exists before launch`);
+  }
 });
 
 test('OS-job commands: reads allowed, mutations only on QA jobs, kills never', () => {

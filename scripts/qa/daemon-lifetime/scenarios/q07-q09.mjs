@@ -16,7 +16,7 @@ import { AUTHORITY_ARM, AUTHORITY_STAGE, HANDOVER_FAULT_REQUEST, receiptFile, au
 /** Arms the handover-authority receipts for one upgrade; the daemon acks it on its next stage. */
 async function armAuthority(ctx, tag) {
   const operationId = `${tag}-${ctx.runId}`;
-  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barrier, `${AUTHORITY_ARM}.arm.json`), content: JSON.stringify({ name: AUTHORITY_ARM, runId: ctx.runId, operationId }) });
+  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barriers, `${AUTHORITY_ARM}.arm.json`), content: JSON.stringify({ name: AUTHORITY_ARM, runId: ctx.runId, operationId }) });
   const text = await ctx.agent.call('readFile', { file: receiptFile(ctx.layout, AUTHORITY_STAGE) });
   return { operationId, from: receiptCount(text) };
 }
@@ -164,7 +164,7 @@ async function upgradeStep(ctx, result, artifact, pair, tag) {
 async function faultVariant(ctx, result, fault, artifact, pair) {
   const pred = await ownerIdentity(ctx);
   const op = `fault-${fault}-${ctx.runId}`;
-  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barrier, HANDOVER_FAULT_REQUEST), content: JSON.stringify({ runId: ctx.runId, operationId: op, fault }) });
+  await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barriers, HANDOVER_FAULT_REQUEST), content: JSON.stringify({ runId: ctx.runId, operationId: op, fault }) });
   const authority = await armAuthority(ctx, `F_${fault}`);
   const staged = await stageGeneration(ctx, artifact);
   const ctl = await controlConn(ctx);
@@ -204,7 +204,7 @@ async function faultVariant(ctx, result, fault, artifact, pair) {
   await conn.close();
   await ctl.close();
   // The request selects only this handover: a later upgrade (Q08b) must run fault-free.
-  await ctx.agent.call('remove', { target: hjoin(ctx.layout.barrier, HANDOVER_FAULT_REQUEST) });
+  await ctx.agent.call('remove', { target: hjoin(ctx.layout.barriers, HANDOVER_FAULT_REQUEST) });
 }
 
 export async function Q08(ctx, result) {

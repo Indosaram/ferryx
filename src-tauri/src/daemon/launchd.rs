@@ -369,7 +369,8 @@ pub(crate) mod generation {
     /// QA barrier channel of a `local-split-qa` build, forwarded with the isolation variables so
     /// the job's daemon installs the runner's QA channel (listener stall, write-ack hold).
     #[cfg(feature = "local-split-qa")]
-    pub(crate) const QA_JOB_BARRIER_ENV: [&str; 2] = ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"];
+    pub(crate) const QA_JOB_BARRIER_ENV: [&str; 3] =
+        ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID", crate::ssh::direct::QA_SSH_KNOWN_HOSTS_ENV];
     #[cfg(not(feature = "local-split-qa"))]
     pub(crate) const QA_JOB_BARRIER_ENV: [&str; 0] = [];
 
