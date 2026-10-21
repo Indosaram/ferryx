@@ -923,12 +923,16 @@ export function useWorkspaceStore({
         ? { ...action, observed: (getNativeWindowFocused() ?? isWindowForegroundFocused()) && hasRecentObservationInteraction() }
         : action;
       const nextState = workspaceReducer(previous, contextualAction);
+      // A no-op reduction has nothing to publish; React still reduces the action (id minting).
+      const changed = nextState !== previous;
       stateRef.current = nextState;
       const owningWorkspaceId = nextState.workspaceId ?? mountedWorkspaceIdRef.current;
-      setHmrWorkspaceState(owningWorkspaceId, nextState);
-      setWorkspaceSnapshot(owningWorkspaceId, nextState);
+      if (changed) {
+        setHmrWorkspaceState(owningWorkspaceId, nextState);
+        setWorkspaceSnapshot(owningWorkspaceId, nextState);
+      }
       reactDispatch(contextualAction);
-      if (action.type === "SESSION_TITLE_ACTIVITY" || action.type === "SESSION_SCREEN_ACTIVITY") {
+      if (changed && (action.type === "SESSION_TITLE_ACTIVITY" || action.type === "SESSION_SCREEN_ACTIVITY")) {
         emitActivityChanges(previous, nextState);
       }
 
