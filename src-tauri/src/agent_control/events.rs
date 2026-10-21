@@ -97,6 +97,9 @@ pub enum AgentReplay {
 
 struct Log {
     revision: u64,
+    /// Highest sequence that fell out of `retained`. A cursor below it missed an observation.
+    /// Sequences are shared with other machine events, so a hole in `retained` is not a gap.
+    evicted_through: u64,
     retained: VecDeque<AgentObservation>,
     latest: HashMap<String, AgentObservation>,
     capacity: usize,
@@ -118,6 +121,7 @@ impl AgentEventBus {
         Self {
             log: Mutex::new(Log {
                 revision: 0,
+                evicted_through: 0,
                 retained: VecDeque::new(),
                 latest: HashMap::new(),
                 capacity,
@@ -164,7 +168,9 @@ impl AgentEventBus {
                 .insert(observation.session_id.clone(), observation.clone());
             log.retained.push_back(observation.clone());
             while log.retained.len() > log.capacity {
-                log.retained.pop_front();
+                if let Some(evicted) = log.retained.pop_front() {
+                    log.evicted_through = log.evicted_through.max(evicted.sequence);
+                }
             }
         }
         let _ = self.tx.send(observation.clone());
@@ -195,15 +201,23 @@ impl AgentEventBus {
         *sequence
     }
 
+    /// Newest sequence issued in the shared domain, agent observation or not.
+    fn domain_head(&self) -> u64 {
+        let attached = self.machine_events.lock().clone();
+        match attached {
+            Some(events) => events.sequence(),
+            None => *self.local_sequence.lock(),
+        }
+    }
+
     pub fn replay(&self, after: u64) -> AgentReplay {
+        let head = self.domain_head();
         let log = self.log.lock();
         let snapshot = snapshot_of(&log.latest);
-        if after > log.revision
-            || log
-                .retained
-                .front()
-                .is_some_and(|event| after.saturating_add(1) < event.sequence)
-        {
+        // A cursor past every issued sequence belongs to another daemon run. A cursor inside
+        // the domain but past the last agent observation is current, not a gap: other machine
+        // events share these numbers.
+        if after > head.max(log.revision) || after < log.evicted_through {
             return AgentReplay::Gap {
                 snapshot,
                 after_sequence: log.revision,
@@ -216,7 +230,8 @@ impl AgentEventBus {
                 .filter(|event| event.sequence > after)
                 .cloned()
                 .collect(),
-            after_sequence: log.revision,
+            // Never the domain head: an observation can hold a sequence before it is logged.
+            after_sequence: log.revision.max(after),
         }
     }
 }
@@ -470,6 +485,26 @@ mod tests {
                 );
             }
             AgentReplay::Gap { .. } => panic!("a cursor still inside the tail is not a gap"),
+        }
+    }
+
+    #[test]
+    fn a_fresh_cursor_is_not_a_gap_when_other_machine_events_took_the_first_sequences() {
+        let bus = AgentEventBus::new(8);
+        // Simulate the shared machine-events domain: agent observations start at 4.
+        *bus.local_sequence.lock() = 3;
+        let first = bus.publish(draft("s", AgentControlState::Idle));
+        *bus.local_sequence.lock() = first.sequence + 5;
+        let second = bus.publish(draft("s", AgentControlState::Working));
+        match bus.replay(0) {
+            AgentReplay::Events { events, .. } => {
+                assert_eq!(events.iter().map(|event| event.sequence).collect::<Vec<_>>(), vec![first.sequence, second.sequence]);
+            }
+            AgentReplay::Gap { .. } => panic!("nothing was evicted, so a cursor of 0 is not a gap"),
+        }
+        match bus.replay(first.sequence + 2) {
+            AgentReplay::Events { events, .. } => assert_eq!(events.len(), 1),
+            AgentReplay::Gap { .. } => panic!("a hole made by other machine events is not a gap"),
         }
     }
 

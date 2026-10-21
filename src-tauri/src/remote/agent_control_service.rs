@@ -123,7 +123,18 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         }
         _ => None,
     };
-    let status = derive_status(provider.as_ref(), detection.map(|found| found.state), pending.is_some());
+    let mut status = derive_status(provider.as_ref(), detection.map(|found| found.state), pending.is_some());
+    // The observer's quiet timer is the only thing that can call a quiet screen idle. When it
+    // has already judged this exact screen, read and list report the same state events did.
+    if status.state == AgentControlState::Unknown && pending.is_none() {
+        let revision = screen.as_ref().map(|snapshot| snapshot.revision.as_str());
+        if let Some(seen) = state.agent_events.latest(session_id) {
+            if revision.is_some() && seen.screen_revision.as_deref() == revision {
+                status.state = seen.state;
+                status.source = seen.state_source;
+            }
+        }
+    }
     let entry = serde_json::json!({
         "sessionId": session_id,
         "running": details.running,
