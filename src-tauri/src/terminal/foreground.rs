@@ -200,9 +200,9 @@ fn is_shell(command: &str) -> bool {
 /// sample multiplies that cost by the pane count: capture once, then hand the same snapshot
 /// to every [`inspect_with_snapshot`] call in the tick.
 pub(crate) struct ProcessSnapshot {
-    /// Unix decides ownership from the session's own foreground process group, so it shares
-    /// nothing between sessions and this listing stays empty there.
-    #[cfg(windows)]
+    /// On Unix this is one `ps` listing; each session filters it by its own foreground
+    /// process group instead of forking `ps` per session.
+    #[cfg(any(unix, windows))]
     processes: Vec<platform::Process>,
 }
 
@@ -211,13 +211,13 @@ pub(crate) struct ProcessSnapshot {
 /// A failed capture is unknown ownership for every session in that tick: report no
 /// foreground evidence rather than an absent agent.
 pub(crate) fn capture_process_snapshot() -> std::io::Result<ProcessSnapshot> {
-    #[cfg(windows)]
+    #[cfg(any(unix, windows))]
     {
         Ok(ProcessSnapshot {
             processes: platform::sample()?,
         })
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(unix, windows)))]
     {
         Ok(ProcessSnapshot {})
     }
@@ -238,11 +238,45 @@ pub(crate) fn inspect_with_snapshot(
 #[cfg(unix)]
 mod platform {
     use super::*;
+    pub(super) struct Process {
+        pid: Option<u32>,
+        parent: Option<u32>,
+        pgid: Option<u32>,
+        command: String,
+    }
+
+    /// One `ps` listing for the whole tick. ps is available on both macOS and Linux. Do not
+    /// assume /proc exists.
+    pub(super) fn sample() -> std::io::Result<Vec<Process>> {
+        let output = std::process::Command::new("ps")
+            .args(["-axo", "pid=,ppid=,pgid=,args="])
+            .output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other("foreground process snapshot failed"));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(text
+            .lines()
+            .map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid = fields.next().and_then(|s| s.parse::<u32>().ok());
+                let parent = fields.next().and_then(|s| s.parse::<u32>().ok());
+                let pgid = fields.next().and_then(|s| s.parse::<u32>().ok());
+                let command = fields.collect::<Vec<_>>().join(" ");
+                Process {
+                    pid,
+                    parent,
+                    pgid,
+                    command,
+                }
+            })
+            .collect())
+    }
+
     pub(super) fn inspect_with_snapshot(
         session: &PtySession,
-        // Ownership comes from this session's own foreground process group, so the tick's
-        // shared listing is unused here and `ps` stays per-session as it always was.
-        _: &ProcessSnapshot,
+        // The tick's shared listing, filtered by this session's own foreground process group.
+        snapshot: &ProcessSnapshot,
     ) -> std::io::Result<Option<Foreground>> {
         let Some(shell) = session.pid() else {
             return Ok(None);
@@ -250,36 +284,34 @@ mod platform {
         let Some(group) = session.foreground_process_group()? else {
             return Ok(None);
         };
-        // ps is available on both macOS and Linux. Do not assume /proc exists.
-        let output = std::process::Command::new("ps")
-            .args(["-axo", "pid=,ppid=,pgid=,args="])
-            .output()?;
-        if !output.status.success() {
-            return Err(std::io::Error::other("foreground process snapshot failed"));
+        let mut shell_foreground = false;
+        // The foreground group always has a member; a shared listing taken before the group
+        // formed has none, and that mixed snapshot is unknown rather than an Other edge.
+        let mut group_listed = false;
+        let mut agent = None;
+        for process in &snapshot.processes {
+            let (pid, parent, pgid, command) =
+                (process.pid, process.parent, process.pgid, process.command.as_str());
+            group_listed |= pgid == Some(group);
+            // A suspended/background agent is still alive: do not call shell ownership exit.
+            if (pgid == Some(group) || parent == Some(shell)) && is_agent(command) {
+                agent = Some(pid);
+                break;
+            }
+            if pid == Some(shell) && pgid == Some(group) && is_shell(command) {
+                shell_foreground = true;
+            }
         }
-        // Ownership can change while ps takes its snapshot. A mixed snapshot is
+        // Ownership can change while this session is classified. A mixed snapshot is
         // unknown, not an Other edge that would erase the observed agent.
         if session.foreground_process_group()? != Some(group) {
             return Ok(None);
         }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let mut shell_foreground = false;
-        for line in text.lines() {
-            let mut fields = line.split_whitespace();
-            let pid = fields.next().and_then(|s| s.parse::<u32>().ok());
-            let parent = fields.next().and_then(|s| s.parse::<u32>().ok());
-            let pgid = fields.next().and_then(|s| s.parse::<u32>().ok());
-            let command = fields.collect::<Vec<_>>().join(" ");
-            if pgid == Some(group) && is_agent(&command) {
-                return Ok(pid.map(Foreground::Agent));
-            }
-            // A suspended/background agent is still alive: do not call shell ownership exit.
-            if parent == Some(shell) && is_agent(&command) {
-                return Ok(pid.map(Foreground::Agent));
-            }
-            if pid == Some(shell) && pgid == Some(group) && is_shell(&command) {
-                shell_foreground = true;
-            }
+        if let Some(pid) = agent {
+            return Ok(pid.map(Foreground::Agent));
+        }
+        if !group_listed {
+            return Ok(None);
         }
         Ok(Some(if shell_foreground {
             Foreground::Shell
