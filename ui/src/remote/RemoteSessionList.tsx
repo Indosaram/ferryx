@@ -402,6 +402,8 @@ export function normalizeRemoteWorkspaceState(value: unknown): RemoteWorkspaceMo
 export function contextName(context: Pick<RemoteContext, "workspaceId" | "worktreeLabel" | "worktreeSlug">) {
   const workspace = context.workspaceId ?? "No workspace selected";
   const worktree = context.worktreeLabel ?? context.worktreeSlug;
+  // An SSH-host project id is an opaque hash; its root label is the project folder name.
+  if (worktree && context.workspaceId?.startsWith("ssh:")) return worktree;
   return worktree ? `${workspace} / ${worktree}` : workspace;
 }
 

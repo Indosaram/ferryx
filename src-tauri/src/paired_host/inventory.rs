@@ -341,7 +341,7 @@ impl Inventory {
                 } else {
                     row.auth_status
                 },
-                online: !self.fenced && self.online.get(id).copied().unwrap_or(true),
+                online: !self.fenced && self.online.get(id).copied().unwrap_or(false),
                 ssh_host_id: row.ssh_host_id.clone(),
                 device_id: row.device_id.clone(),
             })

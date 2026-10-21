@@ -323,6 +323,24 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Details for Linux Build Box" })));
   });
 
+  it("returns focus to the row's More actions trigger when a drawer opened from that menu closes", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+    await act(async () => { render(<RemoteSection store={store} inventory={inventory} />); });
+
+    const trigger = await screen.findByRole("button", { name: "More actions for Dev Server" });
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    const edit = await screen.findByRole("menuitem", { name: "Edit…" });
+    await act(async () => { fireEvent.click(edit); });
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeInTheDocument();
+
+    pressEscape();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "More actions for Dev Server" })));
+  });
+
   it("authenticates SSH with a separate password before probing and never saves it in the host", async () => {
     const { store, inventory } = createTestInventory();
     await inventory.refresh();

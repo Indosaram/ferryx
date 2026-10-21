@@ -240,15 +240,19 @@ export function RemoteSection({
     handleStartEditSsh, handleSaveEditSsh,
   } = useSshActions({ sshHosts, busy, setBusy, setActionError });
 
-  // Details drawer: the open row key, and the Details buttons that receive focus back on close.
+  // Details drawer: the open row key, and the control that receives focus back on close: the row's
+  // Details button, or its "More actions" trigger when the drawer was opened from that menu.
   const [drawerKey, setDrawerKey] = useState<string | null>(null);
   const lastDrawerKeyRef = useRef<string | null>(null);
+  const drawerOpenedFromMenuRef = useRef(false);
   const detailsRefs = useRef(new Map<string, HTMLButtonElement>());
+  const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
   // Namespaced row refs to avoid ID collisions; used to reveal the row named by initialContext.
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
   const pendingRevealRef = useRef(Boolean(initialContext?.machine));
-  const openDrawer = (key: string) => {
+  const openDrawer = (key: string, fromMenu = false) => {
     lastDrawerKeyRef.current = key;
+    drawerOpenedFromMenuRef.current = fromMenu;
     setDrawerKey(key);
   };
 
@@ -446,6 +450,10 @@ export function RemoteSection({
     if (node) detailsRefs.current.set(key, node);
     else detailsRefs.current.delete(key);
   };
+  const bindMenuTrigger = (key: string) => (node: HTMLButtonElement | null) => {
+    if (node) menuTriggerRefs.current.set(key, node);
+    else menuTriggerRefs.current.delete(key);
+  };
 
   // Reveal the machine named by initialContext once its row exists.
   useEffect(() => {
@@ -548,7 +556,15 @@ export function RemoteSection({
       >
         {filteredItems.map((item) => {
           const key = `${item.kind}:${item.id}`;
-          const common = { selected: selectedKey === key, busy, onDetails: () => openDrawer(key), rowRef: bindRow(key), detailsRef: bindDetails(key) };
+          const common = {
+            selected: selectedKey === key,
+            busy,
+            onDetails: () => openDrawer(key),
+            onMenuDetails: () => openDrawer(key, true),
+            rowRef: bindRow(key),
+            detailsRef: bindDetails(key),
+            menuTriggerRef: bindMenuTrigger(key),
+          };
           if (item.kind === "paired") {
             const host = item.host;
             return (
@@ -564,7 +580,7 @@ export function RemoteSection({
                 onAddProject={() => handleOpenProject({ kind: "pairedDaemon", hostId: host.hostId, generation: host.generation! })}
                 onConnect={() => void handleConnectAccountMachine(host)}
                 onCheck={() => void handleCheckPaired(host)}
-                onForget={() => { openDrawer(key); setConfirmForget({ hostId: host.hostId, generation: host.generation! }); }}
+                onForget={() => { openDrawer(key, true); setConfirmForget({ hostId: host.hostId, generation: host.generation! }); }}
               />
             );
           }
@@ -575,9 +591,9 @@ export function RemoteSection({
               {...common}
               {...sshStatusInput(host)}
               onAddProject={() => handleOpenProject({ kind: "ssh", hostId: host.id })}
-              onEdit={() => { openDrawer(key); handleStartEditSsh(host); }}
+              onEdit={() => { openDrawer(key, true); handleStartEditSsh(host); }}
               onToggleDisable={() => void handleToggleDisableSsh(host)}
-              onDelete={() => { openDrawer(key); setConfirmDeleteSshId(host.id); }}
+              onDelete={() => { openDrawer(key, true); setConfirmDeleteSshId(host.id); }}
             />
           );
         })}
@@ -611,7 +627,11 @@ export function RemoteSection({
         content={drawerContent}
         error={actionError}
         onClose={() => setDrawerKey(null)}
-        returnFocusTo={() => (lastDrawerKeyRef.current ? detailsRefs.current.get(lastDrawerKeyRef.current) : null)}
+        returnFocusTo={() => {
+          const key = lastDrawerKeyRef.current;
+          if (!key) return null;
+          return (drawerOpenedFromMenuRef.current ? menuTriggerRefs.current : detailsRefs.current).get(key);
+        }}
       />
 
       {/* ONE Add Machine opens the method-first wizard: enrollment code, SSH, or config import */}

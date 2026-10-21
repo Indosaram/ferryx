@@ -598,6 +598,29 @@ describe("App SSH project lifecycle", () => {
     expect(screen.getByRole("combobox", { name: "Paired machine" })).toBeDisabled();
   });
 
+  it("opens a plain Add Project after a paired one from Settings is closed", async () => {
+    seed([]);
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: "Add Project" }));
+    fireEvent.click(screen.getByTestId("project-type-remote"));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("configure-ssh-settings"));
+      await import("./components/SettingsDialog");
+    });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Open paired project" })); });
+    expect(screen.getByRole("combobox", { name: "Paired machine" })).toBeDisabled();
+
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Cancel" })); });
+    expect(screen.queryByRole("dialog", { name: "Add Paired Daemon Project" })).not.toBeInTheDocument();
+
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Add Project" })); });
+    // A stale pairedDaemon target would reopen the locked paired form instead of the location chooser.
+    expect(screen.getByRole("dialog", { name: "Add Project" })).toBeInTheDocument();
+    expect(screen.getByTestId("project-type-local")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Add Paired Daemon Project" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Paired machine" })).not.toBeInTheDocument();
+  });
+
   it("adopts the server's canonical host-qualified ID and path before new tabs and splits", async () => {
     seed([{ ...remote, workspaceId: "alias", repoRoot: "/srv/input" }]);
     await mount();

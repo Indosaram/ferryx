@@ -205,6 +205,9 @@ use super::inventory::{
     Pairing,
 };
 use super::direct_connect::stop_direct;
+use super::reachability::{
+    now_ms, HostReachability, ReachabilityBook, ReachabilitySink, ReachabilityState,
+};
 use super::direct_route::GLOBAL_DIRECT_ROUTES;
 use crate::scoped_contracts::Epoch;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -318,6 +321,8 @@ pub struct PairedHostService {
     inventory: Arc<Mutex<Owner>>,
     http: reqwest::Client,
     pub(crate) event_sink: Option<InventoryEventSink>,
+    pub(crate) reachability: Arc<Mutex<ReachabilityBook>>,
+    pub(crate) reachability_sink: Option<ReachabilitySink>,
     authority_changes: tokio::sync::watch::Sender<(u64, String)>,
     #[cfg(test)]
     verification_gate: Arc<Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>>,
@@ -343,6 +348,8 @@ impl PairedHostService {
                 .build()
                 .expect("native HTTP client"),
             event_sink: None,
+            reachability: Arc::new(Mutex::new(ReachabilityBook::default())),
+            reachability_sink: None,
             authority_changes: tokio::sync::watch::channel((0, String::new())).0,
             #[cfg(test)]
             verification_gate: Arc::new(Mutex::new(None)),
@@ -352,6 +359,75 @@ impl PairedHostService {
     }
     pub fn set_event_sink(&mut self, sink: InventoryEventSink) {
         self.event_sink = Some(sink);
+    }
+    /// Receives one `HostReachability` per state change (never for a repeated state).
+    pub fn set_reachability_sink(&mut self, sink: ReachabilitySink) {
+        self.reachability_sink = Some(sink);
+    }
+    /// Test/audit hook: whether a production reachability sink was installed.
+    pub fn has_reachability_sink(&self) -> bool {
+        self.reachability_sink.is_some()
+    }
+    /// Records a reachability observation for one exact host generation and keeps the
+    /// legacy `HostView.online` flag equal to `state == Online`. An observation for a
+    /// generation that is no longer current (re-paired, forgotten, revoked) is dropped
+    /// silently and returns false. The sink fires only when the state changed, inside the
+    /// inventory gate, so events leave in the same order the book records them.
+    pub async fn record_reachability(
+        &self,
+        host_id: String,
+        generation: Epoch,
+        state: ReachabilityState,
+        last_error: Option<String>,
+    ) -> bool {
+        let book = Arc::clone(&self.reachability);
+        let sink = self.reachability_sink.clone();
+        // Validation, the legacy flag, the book update, the timestamp and the publish all
+        // share the inventory gate (a blocking thread, no .await inside). Two racing records
+        // therefore publish in book order, and the later event always carries the later
+        // checked_at_ms, so the UI cannot keep a state the book has already replaced.
+        self.run(move |store| {
+            store.set_online(&host_id, generation, state == ReachabilityState::Online)?;
+            let mut book = book.lock().map_err(|_| InventoryError::Unavailable)?;
+            let entry = HostReachability {
+                host_id,
+                generation,
+                state,
+                checked_at_ms: now_ms(),
+                last_error,
+            };
+            if book.record(entry.clone()) {
+                if let Some(sink) = &sink {
+                    sink(entry);
+                }
+            }
+            Ok(())
+        })
+        .await
+        .is_ok()
+    }
+    /// One entry per listed paired host; a host with no observation for its current
+    /// generation reports `Checking`, never `Online`.
+    pub async fn reachability_list(&self) -> Result<Vec<HostReachability>> {
+        let book = Arc::clone(&self.reachability);
+        self.run(move |store| {
+            let book = book.lock().map_err(|_| InventoryError::Unavailable)?;
+            Ok(store
+                .list()
+                .into_iter()
+                .map(|host| {
+                    book.get(&host.host_id, host.generation)
+                        .cloned()
+                        .unwrap_or_else(|| HostReachability::checking(host.host_id, host.generation))
+                })
+                .collect())
+        })
+        .await
+    }
+    fn drop_reachability(&self, host_id: &str) {
+        if let Ok(mut book) = self.reachability.lock() {
+            book.remove(host_id);
+        }
     }
     pub(crate) fn subscribe_authority(&self) -> tokio::sync::watch::Receiver<(u64, String)> {
         self.authority_changes.subscribe()
@@ -476,6 +552,7 @@ impl PairedHostService {
             .await?;
         // Synchronously drop the forgotten credential's direct worker and route.
         stop_direct(&GLOBAL_DIRECT_ROUTES, &host_id_clone, expected.0);
+        self.drop_reachability(&host_id_clone);
         self.authority_changed(&host_id_clone);
         if let Some(sink) = &self.event_sink {
             sink(InventoryChangeEvent {
@@ -502,6 +579,7 @@ impl PairedHostService {
             .await
         };
         if let Ok(view) = view {
+            self.drop_reachability(&host_id);
             self.authority_changed(&host_id);
             // Only the revoked (captured) generation is stopped; a newer worker survives.
             stop_direct(&GLOBAL_DIRECT_ROUTES, &host_id, generation.0);
@@ -623,7 +701,7 @@ impl PairedHostService {
         })
     }
     pub async fn pair(&self, request: PairRequest) -> Result<HostView> {
-        let host = tokio::time::timeout(Duration::from_secs(30), self.pair_inner(request))
+        let mut host = tokio::time::timeout(Duration::from_secs(30), self.pair_inner(request))
             .await
             .map_err(|_| ServiceError {
                 code: "TIMEOUT".into(),
@@ -631,6 +709,13 @@ impl PairedHostService {
                 details: None,
                 retryable: Some(true),
             })??;
+        // The authenticate round-trip just reached the host.
+        if self
+            .record_reachability(host.host_id.clone(), host.generation, ReachabilityState::Online, None)
+            .await
+        {
+            host.online = true;
+        }
         // Re-pair supersedes every older credential generation; keep the fresh one.
         stop_direct(
             &GLOBAL_DIRECT_ROUTES,
@@ -704,11 +789,18 @@ impl PairedHostService {
         .await
     }
     pub async fn migrate_legacy(&self, request: MigrationRequest) -> Result<MigrationReceipt> {
-        let (receipt, view) =
+        let (receipt, mut view) =
             tokio::time::timeout(Duration::from_secs(20), self.migrate_inner(request))
                 .await
                 .map_err(|_| ServiceError::migration())?
                 .map_err(|_| ServiceError::migration())?;
+        // The authenticate round-trip just reached the host.
+        if self
+            .record_reachability(receipt.host_id.clone(), receipt.generation, ReachabilityState::Online, None)
+            .await
+        {
+            view.online = true;
+        }
         // A same-generation receipt (already migrated) keeps its current route.
         stop_direct(
             &GLOBAL_DIRECT_ROUTES,

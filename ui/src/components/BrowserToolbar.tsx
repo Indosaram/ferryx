@@ -142,7 +142,8 @@ export function BrowserToolbar({
       void Promise.resolve()
         .then(() => getBrowserSnapshotCapability(tab.browserId))
         .then((capability) => {
-          if (!disposed) setSnapshotCapability(capability);
+          // A backend that answers without a capability object is as unknown as one without the command.
+          if (!disposed) setSnapshotCapability(capability ?? null);
         })
         .catch(() => {
           // Older backends do not expose the capability command; leave the control untouched.

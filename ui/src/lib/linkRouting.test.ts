@@ -301,6 +301,9 @@ describe("openTerminalToken", () => {
     expect(invoke).toHaveBeenCalledWith("cmd_open_file_path", {
       path: "src/main.rs",
       cwd: "/Users/user/project",
+      sessionId: undefined,
+      workspaceId: null,
+      editor: undefined,
       line: 42,
       col: 5,
     });
@@ -374,6 +377,7 @@ describe("openTerminalToken", () => {
       path: "src/main.rs",
       cwd: "/Users/user/project",
       sessionId: "back-1",
+      workspaceId: "ws-1",
       editor: "vscode",
       line: 42,
       col: 5,

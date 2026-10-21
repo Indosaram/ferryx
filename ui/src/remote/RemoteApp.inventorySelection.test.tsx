@@ -409,39 +409,31 @@ function awaitSignal<T>(promise: Promise<T>, description: string, timeoutMs = 20
 
 const r25Cleanups = new Set<() => void>();
 
+/* R25 waits are event-driven and carry no wall-clock deadline of their own: a transition that
+   never happens leaves the test pending until vitest's per-test timeout fails it, and afterEach
+   disposes every still-armed observer. A private 2000ms race made load, not behavior, the
+   failure signal. */
 function r25State(matches: () => boolean): Promise<void> {
-  const promise = new Promise<void>((resolve, reject) => {
+  return new Promise<void>((resolve) => {
     const observer = new MutationObserver(() => { if (matches()) finish(); });
-    const finish = () => {
-      clearTimeout(timer);
+    const dispose = () => {
       observer.disconnect();
-      r25Cleanups.delete(finish);
+      r25Cleanups.delete(dispose);
+    };
+    const finish = () => {
+      dispose();
       resolve();
     };
-    const timer = setTimeout(() => {
-      clearTimeout(timer);
-      observer.disconnect();
-      r25Cleanups.delete(finish);
-      reject(new Error("Missing R25 DOM transition"));
-    }, 2000);
-    r25Cleanups.add(finish);
+    r25Cleanups.add(dispose);
     observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
     if (matches()) finish();
   });
-  return promise;
 }
 
 function r25Signal<T>() {
   let publish: (value: T) => void = () => { throw new Error("R25 signal not initialized"); };
-  const promise = new Promise<T>((resolve, reject) => {
-    const dispose = () => {
-      clearTimeout(timer);
-      r25Cleanups.delete(dispose);
-    };
-    const timer = setTimeout(() => {
-      dispose();
-      reject(new Error("Missing R25 boundary event"));
-    }, 2000);
+  const promise = new Promise<T>((resolve) => {
+    const dispose = () => { r25Cleanups.delete(dispose); };
     r25Cleanups.add(dispose);
     publish = (value) => { dispose(); resolve(value); };
   });
@@ -525,6 +517,12 @@ describe("RemoteApp machine inventory selection", () => {
     terminalRead = terminalReady;
     await act(async () => { fireEvent.click(screen.getByTestId("remote-view-mode-terminal")); });
     const socket = await terminalReady.promise;
+    /* Complete the machine attach handshake the real daemon sends. Since c7fbfab3 an online wake
+       redials any socket that has not reached readiness (RemoteTerminal recover()), and frames on
+       the abandoned socket are ignored, so an unattached fixture socket loses every later frame. */
+    await act(async () => socket.onmessage?.({ data: JSON.stringify({
+      type: "attached", target: { machineId: MACHINE_ID, sessionId: SID_SECOND, daemonEpoch: EPOCH }, generation: "1",
+    }) }));
     const frame = (state: string, agent: string, mismatch = "matching") => JSON.stringify({
       type: "agent_state", state, agent,
       target: {

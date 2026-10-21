@@ -282,7 +282,8 @@ export type MachineDrawerContent =
 
 /**
  * Details live in a right-anchored Sheet that overlays the list, so opening it never reflows the
- * rows. Radix returns focus to the trigger captured by the parent (the row's Details button).
+ * rows. On close, focus goes to the control the parent returns from returnFocusTo: the row's Details
+ * button, or its "More actions" trigger when the drawer was opened from that menu.
  */
 export function MachineDrawer({ content, error, onClose, returnFocusTo }: {
   content: MachineDrawerContent | null;

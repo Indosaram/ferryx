@@ -196,10 +196,12 @@ async fn restart(root: &Path) -> anyhow::Result<()> {
         let bytes = fs::read(root.join("data/paired-hosts.v1.json"))?;
         let disk: serde_json::Value = serde_json::from_slice(&bytes)?;
         let token = disk["hosts"][&host.host_id]["deviceToken"].as_str().context("private stored credential")?.to_owned();
+        // A restarted daemon has probed nothing yet, so it truthfully reports the host not online.
+        let restarted_host = HostView { online: false, ..host.clone() };
         with_process(root, async |client| {
-            ensure!(client.paired_host_list().await.map_err(|e| anyhow::anyhow!(e.code))? == vec![host.clone()], "restart lost record");
+            ensure!(client.paired_host_list().await.map_err(|e| anyhow::anyhow!(e.code))? == vec![restarted_host.clone()], "restart lost record");
             let read = client.paired_host_read(MigrationReceipt { host_id: host.host_id.clone(), generation: host.generation }).await.map_err(|e| anyhow::anyhow!(e.code))?;
-            ensure!(read == host, "restart exact readback mismatch");
+            ensure!(read == restarted_host, "restart exact readback mismatch");
             let receipt = client.paired_host_migrate_legacy(crate::paired_host::service::MigrationRequest {
                 relay_origin: origin.clone(), machine_id: host.machine_id.clone(), display_label: host.display_label.clone(), device_token: Secret(token.clone()),
             }).await.map_err(|e| anyhow::anyhow!(e.code))?;

@@ -136,7 +136,9 @@ describe("remote settings follow-ups", () => {
     expect(screen.queryByTestId("machine-drawer-repair-reason")).toBeNull();
   });
 
-  it("opening Details from the row menu and closing the drawer leaves the page interactive", async () => {
+  // Smoke test of the flow only. jsdom cannot reproduce the Radix body pointer-events lock that
+  // modal={false} on the row menu prevents, so this test does not guard that fix.
+  it("smoke-tests row menu -> Details -> drawer -> Close", async () => {
     render(<RowWithDrawer />);
     const trigger = screen.getByRole("button", { name: "More actions for Build Box" });
     trigger.focus();
@@ -150,6 +152,5 @@ describe("remote settings follow-ups", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    await waitFor(() => expect(document.body.style.pointerEvents).not.toBe("none"));
   });
 });

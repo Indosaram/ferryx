@@ -2266,7 +2266,9 @@ mod paired_host_native_tests {
             let receipt = MigrationReceipt { host_id: repaired.host_id.clone(), generation: repaired.generation };
             ensure!(client.paired_host_read(receipt).await.map_err(|e| anyhow::anyhow!(e.code))? == repaired, "durable readback mismatch");
             let restart = crate::paired_host::service::PairedHostService::open_test_loopback(data.clone());
-            ensure!(restart.list().await.map_err(|e| anyhow::anyhow!(e.code))? == vec![repaired.clone()], "restart persistence mismatch");
+            // A restarted service has probed nothing yet, so it truthfully reports the host not online.
+            let restarted = crate::paired_host::inventory::HostView { online: false, ..repaired.clone() };
+            ensure!(restart.list().await.map_err(|e| anyhow::anyhow!(e.code))? == vec![restarted], "restart persistence mismatch");
             drop(restart);
             let migration = crate::paired_host::service::MigrationRequest { relay_origin: origin.clone(), machine_id: repaired.machine_id.clone(), display_label: repaired.display_label.clone(), device_token: Secret(token.clone()) };
             ensure!(client.paired_host_migrate_legacy(migration).await.unwrap_err().code == "PAIRED_HOST_MIGRATION_PENDING", "old credential replaced re-pair");
@@ -2584,6 +2586,32 @@ mod live_inventory_paired_tests {
         }
         let retained = live_entry(&legacy, &id).await;
         assert!(retained.connected, "{retained:?}");
+        teardown(host, accept, daemon, &id).await;
+    }
+
+    /// A committed predecessor that keeps a paired session (Draining) stops its paired-host
+    /// probe loop, so it never revokes or rewrites the inventory its successor now owns.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn draining_predecessor_stops_its_paired_host_probe_loop() {
+        let root = tempfile::tempdir().unwrap();
+        let host = mock_host().await;
+        let (daemon, socket, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
+        let client = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
+        let (id, _generation) = client.paired_terminal_reattach(descriptor).await.unwrap();
+        let probe = daemon.spawn_paired_host_probe(Duration::from_millis(20));
+        // The loop exits only once its predicate reads false, so while it reads true the
+        // loop is still running and the bounded wait below measures the commit alone.
+        assert!(DaemonServer::owns_paired_host_inventory(&Arc::downgrade(&daemon)));
+        assert!(!probe.is_finished());
+        commit_predecessor_keeping_retained(&daemon, root.path()).await;
+        assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Draining);
+        assert!(!DaemonServer::owns_paired_host_inventory(&Arc::downgrade(&daemon)));
+        // The test and the accept task still hold the server, so only the handover state
+        // can end the loop.
+        tokio::time::timeout(Duration::from_secs(5), probe)
+            .await
+            .expect("the probe loop must stop once this daemon is draining")
+            .unwrap();
         teardown(host, accept, daemon, &id).await;
     }
 
@@ -3208,6 +3236,16 @@ impl DaemonServer {
                     payload,
                 });
             }));
+            // Reachability changes ride the same broadcast; the GUI bridge forwards the raw
+            // JSON under this event name, and an older GUI simply has no listener for it.
+            let reachability_sink_tx = remote_event_tx.clone();
+            paired_hosts.set_reachability_sink(Arc::new(move |entry| {
+                let payload = serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null);
+                let _ = reachability_sink_tx.send(DaemonRemoteEvent {
+                    event: crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CHANGED_EVENT.to_string(),
+                    payload,
+                });
+            }));
         }
 
         let remote_handle_for_handover: Arc<
@@ -3760,6 +3798,31 @@ impl DaemonServer {
                 });
             }
         }))
+    }
+
+    /// Probes every machine-granted paired host at start and then every `interval`
+    /// (production passes PROBE_INTERVAL). It holds only a weak server reference and stops
+    /// with the daemon, or as soon as a committed handover leaves this daemon Draining or
+    /// Retired: the successor owns paired-hosts.v1.json from then on, and a probe here could
+    /// revoke a host and rewrite that file under the successor (which then fences itself).
+    fn spawn_paired_host_probe(self: &Arc<Self>, interval: Duration) -> tokio::task::JoinHandle<()> {
+        let server = Arc::downgrade(self);
+        let service = self.paired_hosts.clone();
+        tokio::spawn(crate::paired_host::client::run_probe_loop(
+            service,
+            interval,
+            move || Self::owns_paired_host_inventory(&server),
+        ))
+    }
+
+    /// True while the server is alive and has not handed its authority to a successor.
+    fn owns_paired_host_inventory(server: &std::sync::Weak<Self>) -> bool {
+        server.upgrade().is_some_and(|server| {
+            !matches!(
+                server.handover_manager.status(),
+                super::handover::HandoverStatus::Draining | super::handover::HandoverStatus::Retired
+            )
+        })
     }
 
     fn spawn_foreground_observer(self: &Arc<Self>) {
@@ -4656,6 +4719,7 @@ impl DaemonServer {
         // that pane with no endpoint for its whole lifetime.
         let agent_state_ingress = self.spawn_agent_state_listener();
         self.spawn_foreground_observer();
+        self.spawn_paired_host_probe(crate::paired_host::client::PROBE_INTERVAL);
         crate::daemon::agent_extension::install_agent_state_extension_if_enabled(
             &self.agent_integration,
         );
@@ -5905,6 +5969,10 @@ impl DaemonServer {
                     Ok(hosts) => DaemonResponse::PairedHostListOk { hosts },
                     Err(error) => DaemonResponse::PairedHostError { error },
                 },
+                Ok(DaemonRequest::PairedHostReachabilityList) => match self.paired_hosts.reachability_list().await {
+                    Ok(entries) => DaemonResponse::PairedHostReachabilityListOk { entries },
+                    Err(error) => DaemonResponse::PairedHostError { error },
+                },
                 Ok(DaemonRequest::PairedHostPair { request }) => match self.paired_hosts.pair(request).await {
                     Ok(host) => DaemonResponse::PairedHostPairOk { host },
                     Err(error) => DaemonResponse::PairedHostError { error },
@@ -5923,7 +5991,10 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::GetCapabilities) => {
                     let mut capabilities = vec!["machinePairingV1".into(), "sshPasswordV1".into(), "dagStreamingV1".into()];
-                    if self.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1".into()); }
+                    if self.paired_hosts.available().await {
+                        capabilities.push("pairedHostInventoryV1".into());
+                        capabilities.push(crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY.into());
+                    }
                     capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY.into());
                     #[cfg(unix)]
                     capabilities.push("sessionOwnershipTransferV1".into());
@@ -8061,6 +8132,10 @@ mod tests {
         assert!(
             server.paired_hosts.has_event_sink(),
             "daemon-owned PairedHostService must have a production event sink wired"
+        );
+        assert!(
+            server.paired_hosts.has_reachability_sink(),
+            "daemon-owned PairedHostService must publish reachability changes"
         );
     }
 

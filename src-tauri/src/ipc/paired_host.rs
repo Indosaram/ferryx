@@ -111,6 +111,30 @@ pub async fn paired_host_list(daemon: State<'_, Arc<DaemonClient>>) -> Result<Ve
     daemon.paired_host_list().await
 }
 
+/// Mirrors `PairedHostReachabilityList` in ui/src/lib/pairedHostReachability.ts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairedHostReachabilityList {
+    pub supported: bool,
+    pub entries: Vec<crate::paired_host::reachability::HostReachability>,
+}
+
+/// An older daemon without `pairedHostReachabilityV1` yields `supported: false`, never an
+/// error, so the renderer falls back to the legacy `online` flag.
+pub async fn reachability_list_view(daemon: &DaemonClient) -> Result<PairedHostReachabilityList> {
+    Ok(match daemon.paired_host_reachability_list().await? {
+        Some(entries) => PairedHostReachabilityList { supported: true, entries },
+        None => PairedHostReachabilityList { supported: false, entries: Vec::new() },
+    })
+}
+
+#[tauri::command]
+pub async fn paired_host_reachability_list(
+    daemon: State<'_, Arc<DaemonClient>>,
+) -> Result<PairedHostReachabilityList> {
+    reachability_list_view(&daemon).await
+}
+
 #[tauri::command]
 pub async fn paired_host_pair<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,

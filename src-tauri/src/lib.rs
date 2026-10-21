@@ -1568,6 +1568,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::account::cmd_account_enrollment_status,
         crate::ipc::account::cmd_account_enroll_this_machine,
         crate::ipc::paired_host::paired_host_list,
+        crate::ipc::paired_host::paired_host_reachability_list,
         crate::ipc::paired_host::paired_host_operation,
         crate::ipc::paired_host::paired_host_capabilities,
         crate::ipc::paired_host::paired_host_read,
