@@ -93,6 +93,29 @@ async fn registered_ssh_project_is_listed_without_a_focused_terminal() {
 }
 
 #[tokio::test]
+async fn workspace_state_labels_ssh_projects_with_their_host_only() {
+    let (_dir, state, id) = fixture();
+    let (status, body) = request(state, "GET", "/api/v1/workspace/state", None).await;
+    assert_eq!(status, 200);
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let row = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["workspaceId"] == id.as_str())
+        .expect("ssh project row");
+    assert_eq!(row["hostLabel"], "Build");
+
+    let local = crate::remote::protocol::RemoteProjectInfo {
+        workspace_id: "local".into(),
+        worktrees: vec![],
+        host_label: None,
+    };
+    let local = serde_json::to_value(local).unwrap();
+    assert!(local.get("hostLabel").is_none());
+}
+
+#[tokio::test]
 async fn registered_ssh_project_can_be_selected_without_local_registration() {
     let (_dir, state, id) = fixture();
     let mut events = state.event_tx.subscribe();

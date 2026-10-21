@@ -1,7 +1,8 @@
-import { Check, GitBranch, LoaderCircle, Terminal as TerminalIcon } from "lucide-react";
+import { ChevronRight, Folder, LoaderCircle, Terminal as TerminalIcon } from "lucide-react";
 import React from "react";
 import { resolveAgentLogo, isMonochromeAgentLogo } from "../lib/agentIcon";
 import { cn } from "../lib/cn";
+import { SidebarStateSlot } from "../components/sidebar/SidebarStateSlot";
 import { StatusDot } from "../components/ui/StatusDot";
 import type { RemoteInventoryActivityState } from "./remoteInventoryView";
 
@@ -82,32 +83,68 @@ export function RemoteInventoryActivityGlyph({ state, testId, className }: Activ
 export type RemoteInventoryProjectRowProps = {
   label: string;
   activity: RemoteInventoryActivityState | null;
+  expanded: boolean;
+  onToggle: () => void;
   density?: RemoteInventoryRowDensity;
 };
 
+/** Project header with the desktop ProjectHeader anatomy (ui/src/components/Sidebar.tsx): a
+ * chevron toggle, a Folder glyph, the 12px project label and one trailing SidebarStateSlot. */
 export function RemoteInventoryProjectRow({
   label,
   activity,
+  expanded,
+  onToggle,
   density = "compact",
 }: RemoteInventoryProjectRowProps) {
-  const caption = density === "touch" ? touchStatusLabel(activity) : null;
+  const touch = density === "touch";
+  const caption = touch ? touchStatusLabel(activity) : null;
   return (
     <div
       className={cn(
-        density === "touch"
-          ? "relative flex min-h-9 items-center gap-1.5 border-b border-worktree-sidebar-border px-2 pb-1.5 pt-2 text-[12px] font-medium text-chat-foreground-secondary"
-          : "flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-worktree-sidebar-foreground/65",
+        touch
+          ? "relative flex min-h-11 items-center gap-0.5 border-b border-worktree-sidebar-border pr-2 text-[12px] font-medium text-chat-foreground-secondary"
+          : "flex h-7 w-full items-center gap-0.5 rounded-md pr-1 text-[12px] text-worktree-sidebar-foreground/65",
         caption ? "pr-16" : null,
       )}
     >
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        aria-label={`${expanded ? "Collapse" : "Expand"} ${label}`}
+        className={cn(
+          "flex shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          touch ? "size-11" : "size-5",
+        )}
+      >
+        <ChevronRight
+          aria-hidden="true"
+          className={cn(touch ? "size-4" : "size-3", "shrink-0 transition-transform", expanded && "rotate-90")}
+        />
+      </button>
+      <Folder aria-hidden="true" className={cn(touch ? "size-4" : "size-3.5", "shrink-0")} />
       <h3 className="min-w-0 flex-1 truncate" title={label}>
         {label}
       </h3>
-      <RemoteInventoryActivityGlyph
+      <SidebarStateSlot
         state={activity}
-        testId={`project-${activity ?? "idle"}-indicator`}
+        label={caption ? "" : undefined}
+        data-testid="project-state-slot"
       />
       {caption ? <TouchStatusCaption activity={activity} /> : null}
+    </div>
+  );
+}
+
+/** Indented guide rail that nests a project's worktrees and sessions, as in the desktop sidebar. */
+export function RemoteInventoryRail({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      data-testid="remote-project-worktrees"
+      className="ml-3 border-l border-worktree-sidebar-border pl-2 pr-0.5 pt-0.5"
+    >
+      {children}
     </div>
   );
 }
@@ -117,29 +154,28 @@ export type RemoteInventoryWorktreeRowProps = {
   label: string;
   /** Visible row text: the worktree name alone, since the project header owns the project name. */
   visibleLabel?: string;
-  isRootWorktree: boolean;
   active: boolean;
   disabled: boolean;
   busy: boolean;
   activity: RemoteInventoryActivityState | null;
-  hasSessions: boolean;
   onSelect: () => void;
   density?: RemoteInventoryRowDensity;
 };
 
+/** One-line worktree row with the desktop WorktreeList anatomy: name plus one trailing state slot,
+ * no git data (ui/DESIGN.md section 4 rule 6), and the active rail segment on the guide rail. */
 export const RemoteInventoryWorktreeRow: React.FC<RemoteInventoryWorktreeRowProps> = ({
   label,
   visibleLabel,
-  isRootWorktree,
   active,
   disabled,
   busy,
   activity,
-  hasSessions,
   onSelect,
   density = "compact",
 }) => {
-  const caption = density === "touch" ? touchStatusLabel(activity) : null;
+  const touch = density === "touch";
+  const caption = touch ? touchStatusLabel(activity) : null;
   const row = (
     <button
       type="button"
@@ -148,74 +184,46 @@ export const RemoteInventoryWorktreeRow: React.FC<RemoteInventoryWorktreeRowProp
       disabled={disabled}
       onClick={onSelect}
       className={cn(
-        density === "touch"
-          ? "flex min-h-11 w-full items-center gap-1.5 rounded-md py-1 pl-3 pr-2 text-left transition-colors"
-          : "flex h-7 w-full items-center gap-1.5 rounded-md py-1 pl-3 pr-2 text-left transition-colors",
+        touch
+          ? "relative my-0.5 flex min-h-11 w-full items-center gap-1.5 rounded-md px-2 text-left transition-colors"
+          : "relative my-0.5 flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left transition-colors",
         caption ? "pr-16" : null,
         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60",
         active
           ? "bg-worktree-sidebar-accent text-foreground"
-          : "text-worktree-sidebar-foreground hover:bg-white/[0.04]",
+          : "bg-transparent text-worktree-sidebar-foreground hover:bg-white/[0.04]",
       )}
     >
-      {busy ? (
-        <LoaderCircle
-          className={
-            density === "touch"
-              ? "size-4 shrink-0 animate-spin motion-reduce:animate-none"
-              : "size-3 shrink-0 animate-spin motion-reduce:animate-none"
-          }
+      {active ? (
+        <span
           aria-hidden="true"
+          data-testid="worktree-rail-active"
+          className="pointer-events-none absolute -left-[9px] top-1 bottom-1 w-px bg-worktree-sidebar-ring"
         />
-      ) : (
-        <RemoteInventoryActivityGlyph
-          state={activity}
-          testId={`worktree-${activity ?? "idle"}-indicator`}
-          className={
-            density === "touch" ? "size-4 justify-center" : "size-3 justify-center"
-          }
-        />
-      )}
-      {activity === null && !busy ? (
-        hasSessions ? (
-          <TerminalIcon
-            className={
-              density === "touch"
-                ? "size-4 shrink-0 opacity-70"
- : "size-3 shrink-0 opacity-70"
-            }
-            aria-hidden="true"
-          />
-        ) : (
-          <GitBranch
-            className={
-              density === "touch"
-                ? "size-4 shrink-0 opacity-70"
-                : "size-3 shrink-0 opacity-70"
-            }
-            aria-hidden="true"
-          />
-        )
       ) : null}
       <span
         data-testid="worktree-label-text"
-        className={
-          density === "touch"
-            ? "min-w-0 flex-1 truncate text-[14px] font-semibold leading-tight"
-            : "min-w-0 flex-1 truncate text-[12px] font-semibold leading-tight"
-        }
+        className={cn(
+          "min-w-0 truncate font-semibold leading-tight",
+          touch ? "text-[14px]" : "text-[12px]",
+          active ? "text-foreground" : "text-worktree-sidebar-foreground",
+        )}
       >
         {visibleLabel ?? label}
       </span>
-      {isRootWorktree ? (
-        <span
-          data-testid="worktree-primary-badge"
-          className="shrink-0 rounded-sm border border-worktree-sidebar-border px-1 text-[9px] font-medium uppercase tracking-wide text-worktree-sidebar-foreground/65"
-        >
-          primary
-        </span>
-      ) : null}
-      {active ? <Check className="size-3 shrink-0" aria-label="Active" /> : null}
+      {busy ? (
+        <LoaderCircle
+          className="ml-auto size-3 shrink-0 animate-spin text-muted-foreground motion-reduce:animate-none"
+          aria-hidden="true"
+        />
+      ) : (
+        <SidebarStateSlot
+          state={activity}
+          label={caption ? "" : undefined}
+          className="ml-auto min-w-0 truncate"
+          data-testid="worktree-status-dot"
+        />
+      )}
     </button>
   );
   if (density === "compact") return row;
@@ -261,8 +269,8 @@ export const RemoteInventorySessionRow: React.FC<RemoteInventorySessionRowProps>
       onClick={onSelect}
       className={cn(
         density === "touch"
-          ? "flex min-h-11 w-full items-center gap-1.5 rounded-md py-0.5 pl-6 pr-2 text-left transition-colors"
-          : "flex min-h-[24px] w-full items-center gap-1.5 rounded-md py-0.5 pl-6 pr-2 text-left transition-colors",
+          ? "flex min-h-11 w-full items-center gap-1.5 rounded-md py-0.5 pl-4 pr-2 text-left transition-colors"
+          : "flex min-h-[24px] w-full items-center gap-1.5 rounded-md py-0.5 pl-4 pr-2 text-left transition-colors",
         caption ? "pr-16" : null,
         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60",
         active ? "bg-white/[0.06] text-foreground" : "text-worktree-sidebar-foreground/85 hover:bg-white/[0.04]",

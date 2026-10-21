@@ -149,8 +149,7 @@ function worktreeRowSummaries(root: HTMLElement): string[] {
       const visible = row
         ? within(row).getByTestId("worktree-label-text").textContent ?? ""
         : "";
-      const primary = row?.querySelector('[data-testid="worktree-primary-badge"]') ? "primary" : "-";
-      return `${aria}|${visible}|${primary}`;
+      return `${aria}|${visible}`;
     })
     .sort();
 }
@@ -179,26 +178,92 @@ describe("remote session inventory rows", () => {
       ].sort(),
     );
     expect(within(dialog).getAllByTestId("remote-session-row")).toHaveLength(4);
-    expect(within(dialog).getAllByTestId("worktree-primary-badge")).toHaveLength(1);
+    // Sidebar rows carry no git data (ui/DESIGN.md section 4 rule 6): no primary badge anywhere.
+    expect(within(dialog).queryAllByTestId("worktree-primary-badge")).toHaveLength(0);
 
     expect(dialog.textContent).not.toMatch(/mach-macos-primary-01|mach-linux-headless-02/);
     expect(within(dialog).queryByRole("button", { name: "Machines" })).toBeNull();
   });
 
-  it("labels worktree rows with the worktree name and marks only the root row as primary", () => {
+  it("labels worktree rows with the worktree name alone and no git decoration", () => {
     renderMirror();
     const dialog = screen.getByRole("dialog", { name: "Workspace context" });
 
     // Accessible names keep the full project/worktree identity; the visible text carries the
-    // worktree name alone, and the root worktree is never named after the active context.
+    // worktree name alone, and the root worktree is never named after the active context. The
+    // root row is told apart by its "root" label, not a badge.
     expect(worktreeRowSummaries(dialog)).toEqual(
       [
-        "ws-docs / main|main|-",
-        "ws-ferryx-core / ferryx-core (root)|root|primary",
-        "ws-ferryx-core / main|main|-",
-        "ws-ferryx-core / main|main|-",
+        "ws-docs / main|main",
+        "ws-ferryx-core / ferryx-core (root)|root",
+        "ws-ferryx-core / main|main",
+        "ws-ferryx-core / main|main",
       ].sort(),
     );
+    for (const group of within(dialog).getAllByTestId("remote-worktree-group")) {
+      const [row] = within(group).getAllByRole("button");
+      expect(row.querySelector(".lucide-git-branch, .lucide-check")).toBeNull();
+      expect(within(row).queryByLabelText("Active")).toBeNull();
+    }
+  });
+
+  it("nests worktrees behind the project guide rail and marks only the active row on it", () => {
+    desktopViewport();
+    renderMirror();
+    const sidebar = screen.getByTestId("remote-desktop-sidebar");
+
+    for (const group of within(sidebar).getAllByTestId("remote-worktree-group")) {
+      const rail = group.closest('[data-testid="remote-project-worktrees"]');
+      expect(rail).not.toBeNull();
+      expect(rail).toHaveClass("ml-3", "border-l", "border-worktree-sidebar-border", "pl-2");
+      const [row] = within(group).getAllByRole("button");
+      const railMarker = row.querySelector('[data-testid="worktree-rail-active"]');
+      if (row.getAttribute("aria-current") === "true") {
+        expect(railMarker).not.toBeNull();
+        expect(row).toHaveClass("bg-worktree-sidebar-accent");
+      } else {
+        expect(railMarker).toBeNull();
+      }
+    }
+    expect(within(sidebar).getAllByTestId("worktree-rail-active")).toHaveLength(1);
+  });
+
+  it("renders project headers with a chevron toggle and folder that collapse the rail", () => {
+    desktopViewport();
+    renderMirror();
+    const sidebar = screen.getByTestId("remote-desktop-sidebar");
+    const section = sidebar.querySelector('section[aria-label="ws-docs"]') as HTMLElement;
+    expect(section).not.toBeNull();
+    const header = section.firstElementChild as HTMLElement;
+    expect(header).toHaveClass("h-7");
+    expect(header.className).toContain("text-[12px]");
+    expect(header.querySelector(".lucide-folder")).not.toBeNull();
+
+    const toggle = within(section).getByRole("button", { name: "Collapse ws-docs" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveClass("size-5");
+    expect(within(section).getAllByTestId("remote-worktree-group")).toHaveLength(1);
+
+    fireEvent.click(toggle);
+    expect(within(section).queryAllByTestId("remote-worktree-group")).toHaveLength(0);
+    const expand = within(section).getByRole("button", { name: "Expand ws-docs" });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(expand);
+    expect(within(section).getAllByTestId("remote-worktree-group")).toHaveLength(1);
+  });
+
+  it("shows worktree activity through the sidebar state slot", () => {
+    desktopViewport();
+    renderMirror();
+    const sidebar = screen.getByTestId("remote-desktop-sidebar");
+    const rootRow = within(sidebar).getByRole("button", { name: "ws-ferryx-core / ferryx-core (root)" });
+    const slot = within(rootRow).getByTestId("worktree-status-dot");
+    expect(slot).toHaveClass("ml-auto");
+    expect(slot.querySelector('[data-status-state="done"]')).not.toBeNull();
+
+    const docsRow = within(sidebar).getByRole("button", { name: "ws-docs / main" });
+    expect(within(docsRow).queryByTestId("worktree-status-dot")).toBeNull();
   });
 
   it("selects an existing session with machine, epoch, workspace and session identity and never creates a terminal", () => {
@@ -400,6 +465,11 @@ describe("remote session inventory rows", () => {
     expect(header.className).toContain("text-chat-foreground-secondary");
     expect(header.className).toContain("border-b");
     expect(header.className).not.toContain("uppercase");
+    // Same anatomy as the desktop header, with a thumb-sized toggle.
+    expect(header).toHaveClass("min-h-11");
+    expect(header.querySelector(".lucide-folder")).not.toBeNull();
+    expect(within(header).getByRole("button", { name: "Collapse ws-ferryx-core" })).toHaveClass("size-11");
+    expect(within(dialog).queryAllByTestId("worktree-primary-badge")).toHaveLength(0);
   });
 
   it("labels touch rows with the T3 status vocabulary as a caption outside the row button", () => {

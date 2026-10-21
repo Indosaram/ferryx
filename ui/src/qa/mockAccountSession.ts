@@ -37,8 +37,8 @@ export function readQaHarnessState(): QaHarnessState {
   return raw as QaHarnessState;
 }
 
-type FakeWorktree = { slug: string; label: string };
-type FakeProject = { workspaceId: string; repoRoot: string; worktrees: FakeWorktree[] };
+type FakeWorktree = { slug: string; label: string; worktreeSlug?: null; worktreeLabel?: string };
+type FakeProject = { workspaceId: string; repoRoot: string; worktrees: FakeWorktree[]; hostLabel?: string };
 type FakeHostState = {
   projects: FakeProject[];
   activeContext: { workspaceId: string; worktreeSlug: string; worktreeLabel: string; sessionId: string };
@@ -120,10 +120,17 @@ function initialHostState(): FakeHostState {
         repoRoot: "/Users/qa/relay",
         worktrees: [{ slug: "dev", label: "dev" }],
       },
+      {
+        workspaceId: "ssh:qa-omarchy-mhc",
+        repoRoot: "/home/qa/mhc",
+        hostLabel: "omarchy",
+        worktrees: [{ slug: "", label: "mhc", worktreeSlug: null, worktreeLabel: "mhc" }],
+      },
     ],
     activeContext: { workspaceId: "ws-ferryx", worktreeSlug: "main", worktreeLabel: "main", sessionId: "qa-sess-main" },
     sessions: [
       { sessionId: "qa-sess-main", daemonEpoch: "qa-epoch-1", running: true, title: "zsh", workspaceId: "ws-ferryx" },
+      { sessionId: "qa-sess-ssh-mhc", daemonEpoch: "qa-epoch-1", running: true, title: "claude", workspaceId: "ssh:qa-omarchy-mhc" },
     ],
   };
 }
@@ -267,6 +274,28 @@ function createFakeDesktop(machineId: string) {
     if (!authorized(init)) return json(401, { code: "UNAUTHORIZED" });
 
     if (pathAndQuery.startsWith("/api/v1/workspace/state")) return json(200, host);
+    /* Machine-account routes RemoteApp's inventory reads: the desktop-local catalog (local
+       projects only, as the real desktop syncs it), per-project worktrees, and SSH-host
+       projects that only appear in workspace state. */
+    if (pathAndQuery.startsWith("/api/v1/workspace/projects")) {
+      const local = host.projects.filter((p) => !p.workspaceId.startsWith("ssh:"));
+      return json(200, {
+        desktopLocalSnapshotExists: true,
+        projects: local.map((p) => ({ workspaceId: p.workspaceId, repoRoot: p.repoRoot, availability: "ready" })),
+      });
+    }
+    if (pathAndQuery.startsWith("/api/v1/workspace/worktrees")) {
+      const wsId = new URLSearchParams(pathAndQuery.split("?")[1] ?? "").get("workspaceId") ?? "";
+      const project = host.projects.find((p) => p.workspaceId === wsId && !wsId.startsWith("ssh:"));
+      if (!project) return json(400, { code: "INVALID_REQUEST" });
+      return json(200, {
+        worktrees: project.worktrees.map((w, i) => ({
+          workspaceId: wsId,
+          identity: i === 0 ? null : { wsId, slug: w.slug },
+          branch: w.label,
+        })),
+      });
+    }
     if (pathAndQuery.startsWith("/api/v1/sessions")) return json(200, { sessions: host.sessions });
 
     if (pathAndQuery.startsWith("/api/v1/workspace/select")) {
