@@ -25,17 +25,19 @@ import { newSummary, selectScenarios, settle, block, applyQ00Gate, computeExitCo
 import { hostFor, buildPlan, assertQaBuild, worktreePaths } from './lib/hosts.mjs';
 import { probeHooks, missingHooksFor } from './lib/hooks.mjs';
 import { generationKey, assertDistinctKeys } from './lib/wire.mjs';
-import { startAgent } from './lib/remote.mjs';
+import { startAgent, fetchHostFile } from './lib/remote.mjs';
 import { createJobs } from './lib/jobs.mjs';
-import { mahordTypable, createGuiDriver, macGuiExecutable } from './lib/gui.mjs';
+import { createGuiDriver, macGuiExecutable } from './lib/gui.mjs';
 import { assembleDaemonHelper } from '../../macos-daemon-helper.mjs';
 import { finalizeMacosBundle } from '../../lib/release-platforms.mjs';
 import { connectMahord } from './lib/mahord.mjs';
+import { sshHostId } from './lib/sshd.mjs';
 import { run } from './lib/proc.mjs';
 import * as g1 from './scenarios/q00-q03.mjs';
 import * as g2 from './scenarios/q04-q06.mjs';
 import * as g3 from './scenarios/q07-q09.mjs';
 import * as g4 from './scenarios/q10-q13.mjs';
+import { recoverOwnerAfterException } from './scenarios/common.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '../../..');
@@ -154,6 +156,41 @@ export async function prepareBaselineDist({ host, agent, worktree }) {
   return dir;
 }
 
+/**
+ * One QA build. Output never crosses the agent channel: the agent writes stdout+stderr to
+ * <runDir>/build-logs/build-<name>.log on the host and the real exit (status, signal, timedOut) to
+ * build-<name>.status.json beside it, and returns only that exit and a bounded tail. Both files
+ * are then copied to the evidence dir as files (build-<name>.log keeps its name). A failed copy
+ * leaves the returned tail in build-<name>.log instead, marked as such, and is recorded on the
+ * result; the build outcome is still decided by the recorded exit.
+ */
+export async function runBuildStep({ host, agent, name, step, runDir, localEvidence, fetch = fetchHostFile }) {
+  const logFile = joinFor(host.platform, runDir, 'build-logs', `build-${name}.log`);
+  const statusFile = joinFor(host.platform, runDir, 'build-logs', `build-${name}.status.json`);
+  const built = await agent.call('execLogged', { command: step.command, args: step.args, cwd: step.cwd, env: step.env, logFile, statusFile, deadlineMs: 4 * 3_600_000 });
+  const localLog = path.join(localEvidence, `build-${name}.log`);
+  const localStatus = path.join(localEvidence, `build-${name}.status.json`);
+  const fetchErrors = [];
+  try { await fetch(host, logFile, localLog); } catch (error) {
+    fetchErrors.push(`log: ${error?.message ?? error}`);
+    writeFileSync(localLog, `[full log copy failed: ${error?.message ?? error}; last lines returned by the agent follow]\n${built.tail}\n`);
+  }
+  try { await fetch(host, statusFile, localStatus); } catch (error) {
+    fetchErrors.push(`status: ${error?.message ?? error}`);
+    writeFileSync(localStatus, `${JSON.stringify({ ...built, tail: undefined, copyFailed: true }, null, 2)}\n`);
+  }
+  const ok = built.status === 0 && !built.signal && !built.timedOut && !built.error;
+  return { ...built, ok, localLog, localStatus, fetchErrors };
+}
+
+/** BUILD_FAILED detail: the recorded exit code, signal, timeout or spawn error. */
+export function buildFailureDetail(name, built) {
+  const parts = [`exit=${built.status}`, `signal=${built.signal ?? 'none'}`];
+  if (built.timedOut) parts.push('timedOut');
+  if (built.error) parts.push(`error=${built.error}`);
+  return `${name} ${parts.join(' ')}`;
+}
+
 /** Artifact descriptor for a built QA bundle (per platform layout of cargo tauri build --debug). */
 export function artifactPaths({ platform, targetDir, productName, name }) {
   const dbg = joinFor(platform, targetDir, 'debug');
@@ -196,6 +233,21 @@ export function teardownExtras(live, summary) {
     }],
     ['mahord', async () => { if (live.mahord) await live.mahord.close(); }],
   ];
+}
+
+/**
+ * After a scenario threw, its owner state is unknown (run-9a5db442: Q08b's exception left the
+ * v1bump owner running and Q10 adopted it). The failed scenario's owner is retired and a fresh A
+ * owner started before the next scenario; the outcome is its own assertion and evidence file of
+ * the failed scenario, and a failed recovery never replaces the original exception.
+ */
+export async function recoverAfterScenarioException(ctx, result, { writeFileSync: write, localEvidence, recover = recoverOwnerAfterException }) {
+  const recovery = await recover(ctx, ctx.artifacts.A);
+  const file = path.join(localEvidence, `${result.id}-exception-recovery.json`);
+  write(file, `${JSON.stringify(recovery, null, 2)}\n`);
+  result.evidence.push(file);
+  result.assertions.push({ name: 'owner of the failed scenario retired and a fresh QA owner started', ok: recovery.ok === true, detail: recovery });
+  return recovery;
 }
 
 /**
@@ -249,10 +301,20 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
       if (text !== null) writeFileSync(path.join(localEvidence, `runlog-${name}`), text);
     }
   });
+  // The private sshd's remote-helper daemon outlives the session that started it (it daemonises
+  // outside the run dirs): record any not yet recorded before the kill, remove its root after.
+  await step('record-ssh-helper', async () => {
+    await agent.call('recordSshHelper', { hostId: sshHostId(summary.runId) });
+  });
   await step('kill-recorded', async () => {
     const t = await agent.call('teardownRecorded');
     summary.teardown.killed = t.killed.map((e) => ({ pid: e.pid, role: e.role }));
     summary.teardown.refused = t.refused;
+  });
+  await step('remove-ssh-helper-roots', async () => {
+    const r = await agent.call('removeSshHelperRoots');
+    summary.teardown.dirsRemoved.push(...(r?.removed ?? []).map((h) => h.root));
+    summary.teardown.leftovers.push(...(r?.kept ?? []).map((h) => ({ kind: 'ssh-helper-root', ...h })));
   });
   await step('remove-jobs', async () => {
     for (const name of await jobs.listQaJobs()) {
@@ -370,9 +432,10 @@ async function main() {
       if (!step) continue;
       assertQaBuild(step);
       if (name === 'baseline') await prepareBaselineDist({ host, agent, worktree: step.cwd });
-      const built = await agent.call('exec', { command: step.command, args: step.args, cwd: step.cwd, env: step.env, deadlineMs: 4 * 3_600_000 });
-      writeFileSync(path.join(localEvidence, `build-${name}.log`), `exit ${built.status}\n${built.stdout}\n${built.stderr}`);
-      if (built.status !== 0) throw new GuardError('BUILD_FAILED', `${name} exited ${built.status}`);
+      const built = await runBuildStep({ host, agent, name, step, runDir, localEvidence });
+      summary.builds = { ...(summary.builds ?? {}), [name]: { status: built.status, signal: built.signal, timedOut: built.timedOut, error: built.error, bytes: built.bytes, log: built.localLog, statusFile: built.localStatus, fetchErrors: built.fetchErrors } };
+      writeSummary();
+      if (!built.ok) throw new GuardError('BUILD_FAILED', buildFailureDetail(name, built));
       if (name === 'baseline') {
         artifacts.baseline = { name, daemonExecutable: joinFor(host.platform, step.env.CARGO_TARGET_DIR, 'debug', host.platform === 'windows' ? 'ferryx.exe' : 'ferryx') };
         continue;
@@ -447,20 +510,6 @@ async function main() {
         }
         return { artifact: { ...from, name: to.name, sha256: await agent.call('sha256', { file: from.guiExecutable }) } };
       },
-      typeIntoSession: async (guiProc, sessionId, text) => {
-        // macOS: no desktop input on the user's MacBook; the data-protocol write is the GUI-equivalent
-        // client write. Remote hosts type through MahoRD into the focused QA window.
-        if (mahord) {
-          // MahoRD drops '-' and '_' on maho-win and types no newline: refuse untypable text instead
-          // of letting a marker arrive mangled, and send Enter as a key.
-          const line = text.replace(/\r?\n$/, '');
-          if (host.platform === 'windows' && !mahordTypable(line)) throw new Error(`MahoRD cannot type '-' or '_' on maho-win: ${line}`);
-          await mahord.type(line);
-          return text.endsWith('\n') ? mahord.key('Enter') : true;
-        }
-        const { conn } = { conn: ctx.state.conn };
-        return conn.call({ type: 'write', sessionId, data: Buffer.from(text).toString('base64') });
-      },
     };
 
     const ordered = summary.scenarios.filter((s) => selected.includes(s.id));
@@ -482,6 +531,7 @@ async function main() {
         result.assertions.push({ name: 'scenario completed without an exception', ok: false, detail: String(error?.stack ?? error) });
         writeFileSync(path.join(localEvidence, `${result.id}-exception.log`), String(error?.stack ?? error));
         result.evidence.push(path.join(localEvidence, `${result.id}-exception.log`));
+        await recoverAfterScenarioException(ctx, result, { writeFileSync, localEvidence });
       }
       result.durationMs = Date.now() - t0;
       settle(result);

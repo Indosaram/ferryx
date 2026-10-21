@@ -7,10 +7,10 @@ import { HANDOVER_FAULTS, TRANSFER_FAULTS, FORCED_COMMIT_FAILURE } from '../lib/
 import { data as D, helloSupportsHandover, inventoryTotal } from '../lib/wire.mjs';
 import {
   evidence, dataConn, controlConn, ownerIdentity, nonceRoundTrip, assertInventoryKept, assertSameOwner,
-  retireOwner, freshOwner, nonce, counterCommand, interrupt, DAEMON_READY_TIMEOUT_MS, RESPAWN_BACKOFF_MS,
+  retireOwner, freshOwner, nonce, counterCommand, interrupt, setAsideHeadCatalog, DAEMON_READY_TIMEOUT_MS, RESPAWN_BACKOFF_MS,
 } from './common.mjs';
 import { surviveGuiEnd } from './q00-q03.mjs';
-import { startSshd } from '../lib/sshd.mjs';
+import { startSshd, recordSshHelper } from '../lib/sshd.mjs';
 import { AUTHORITY_ARM, AUTHORITY_STAGE, HANDOVER_FAULT_REQUEST, receiptFile, authorityStages, authorityInvariant, receiptCount, stagePattern } from '../lib/receipts.mjs';
 
 /** Arms the handover-authority receipts for one upgrade; the daemon acks it on its next stage. */
@@ -51,6 +51,16 @@ export async function Q07(ctx, result) {
     const jobB = await ctx.jobs.inspect(ctx.keys.B);
     assertion(result, 'B generation job registered but not running while A is Alive', jobB.state !== 'Running', jobB.state);
   }
+  // The B GUI registered the B generation job (supervisor_linux.rs reconcile_login_registration
+  // enables the newest registered generation). Left behind, it starts whenever the lock frees and
+  // becomes the next owner (run-9a5db442 Q13). Remove it by its recorded name only.
+  const bJob = ctx.jobs.jobName(ctx.keys.B);
+  const listed = await ctx.jobs.listQaJobs();
+  const bInstalled = listed.some((j) => j === bJob || j === `${bJob}.service` || j === `${bJob}.plist`);
+  if (bInstalled) await ctx.jobs.remove(bJob);
+  const remaining = await ctx.jobs.listQaJobs();
+  await evidence(ctx, result, 'b-job-teardown.json', { bJob, bInstalled, listed, remaining });
+  assertion(result, 'B generation job removed by its recorded name after the replacement check', !remaining.some((j) => j === bJob || j === `${bJob}.service`), remaining);
   await ctx.state.conn.close().catch(() => {});
   ctx.state.conn = conn;
   // Put A back so later scenarios start from the same artifact.
@@ -66,6 +76,7 @@ async function seedPair(ctx, conn, tag) {
   await conn.call(D.write(local, counterCommand(ctx.platform, `${tag}_L`)));
   const spawned = await conn.call(D.spawnSsh({ clientRequestId: `qa-ssh-${nonce('R')}`, workspaceId: ctx.sshd.workspaceId, hostStorePath: ctx.sshd.hostStorePath }), 60_000);
   if (spawned.type !== 'spawnOk') throw new Error(`ssh spawn: ${JSON.stringify(spawned)}`);
+  await recordSshHelper(ctx);
   await conn.call(D.attach(spawned.sessionId, 0));
   await conn.call(D.write(spawned.sessionId, counterCommand('linux', `${tag}_S`)));
   const lo = await conn.waitOutput(local, `${tag}_L_TICK_3`, 15_000);
@@ -253,6 +264,8 @@ export async function Q08b(ctx, result) {
   }
   const retired = await retireOwner(ctx);
   assertion(result, 'previous QA owner retired', retired.retired, retired);
+  // v1bump (24cbfd25) only reads a version-1 workspace catalog; the HEAD owners wrote version 2.
+  await evidence(ctx, result, 'catalog-set-aside.json', await setAsideHeadCatalog(ctx, 'Q08b'));
   const old = await freshOwner(ctx, ctx.artifacts.v1bump, { tag: 'Q08B', dataVersion: 6 });
   await evidence(ctx, result, 'old-owner.json', { old, sameRevision: ctx.revisions.handoverV1Rev === ctx.revisions.head });
   assertion(result, 'old owner speaks protocol 6', old.hello?.protocol_version === 6, old.hello);

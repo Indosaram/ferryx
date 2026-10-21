@@ -5,7 +5,7 @@
 // `Wait-Process -Id <pid>`. The waiter exits when the target does; its 'exit' event is the signal.
 
 import { spawn } from 'node:child_process';
-import { readFileSync, readlinkSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync, readSync, readlinkSync } from 'node:fs';
 import { assertCommandAllowed } from './guards.mjs';
 
 export function withDeadline(promise, ms, label) {
@@ -34,6 +34,53 @@ export function run(command, args, { ctx = null, env = undefined, cwd = undefine
     });
     if (input !== null) child.stdin.end(input); else child.stdin.end();
   }), deadlineMs, `${command} ${args.join(' ')}`);
+}
+
+/**
+ * Runs a command with stdout and stderr both written straight to an open file descriptor, so the
+ * output never passes through this process's memory (a build emits ~1.3 MB per run). Resolves with
+ * the real exit: { status, signal, pid, timedOut, error }. Past deadlineMs the child is killed
+ * (SIGKILL) and the outcome says timedOut. A spawn failure (ENOENT) resolves with error set.
+ */
+export function runToFd(command, args, { ctx = null, env = undefined, cwd = undefined, fd, deadlineMs = 60_000 } = {}) {
+  if (ctx) assertCommandAllowed(command, args, ctx);
+  return new Promise((resolve) => {
+    let timedOut = false;
+    let settled = false;
+    const child = spawn(command, args, { env, cwd, stdio: ['ignore', fd, fd], windowsHide: true });
+    const done = (outcome) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ pid: child.pid ?? null, timedOut, error: null, ...outcome });
+    };
+    const timer = setTimeout(() => { timedOut = true; try { child.kill('SIGKILL'); } catch { /* already gone */ } }, deadlineMs);
+    child.once('error', (error) => done({ status: null, signal: null, error: String(error?.message ?? error) }));
+    child.once('exit', (status, signal) => done({ status, signal }));
+  });
+}
+
+/** Default number of log lines a file-backed exec returns over the agent channel. */
+export const LOG_TAIL_LINES = 200;
+
+/**
+ * The last n lines of a file, reading at most maxBytes from its end; the rest of the file is never
+ * loaded. When the read starts mid-file its first (possibly partial) line is dropped.
+ */
+export function tailOfFile(file, n = LOG_TAIL_LINES, maxBytes = 512 * 1024) {
+  const fd = openSync(file, 'r');
+  try {
+    const bytes = fstatSync(fd).size;
+    const len = Math.min(bytes, maxBytes);
+    const buf = Buffer.alloc(len);
+    if (len > 0) readSync(fd, buf, 0, len, bytes - len);
+    const lines = buf.toString('utf8').split(/\r?\n/);
+    if (lines.at(-1) === '') lines.pop();
+    if (len < bytes) lines.shift();
+    return { tail: lines.slice(-n).join('\n'), bytes };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function psQuote(value) {

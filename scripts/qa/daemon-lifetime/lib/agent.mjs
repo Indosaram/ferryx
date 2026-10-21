@@ -8,12 +8,54 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, watch, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, watch, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import os from 'node:os';
 import { GuardError, ProcessRegistry, isInside, assertRunId } from './guards.mjs';
-import { run, probeIdentity, signalPid, subscribeExit, processTable, withDeadline } from './proc.mjs';
+import { run, runToFd, tailOfFile, LOG_TAIL_LINES, probeIdentity, signalPid, subscribeExit, processTable, withDeadline } from './proc.mjs';
 import { connectData, connectControl } from './client.mjs';
+import { data as D, DsrResponder, DSR_REPLY, visibleText } from './wire.mjs';
+import { findSshHelpers, sshHostId } from './sshd.mjs';
+
+/**
+ * An empty marker waits for any output; with visible, for output a person would see (a prompt,
+ * not a bare terminal query such as ConPTY's ESC[6n); otherwise a substring.
+ */
+export function outputMatches(text, marker, visible = false) {
+  if (marker) return text.includes(marker);
+  return visible ? visibleText(text).trim().length > 0 : text.length > 0;
+}
+
+/**
+ * The stream handler for one data handle: stores output per session, answers ConPTY's cursor
+ * query on Windows (one reply per query, sent as a data-protocol write on the request
+ * connection), and wakes waiters. A failed reply write is kept in replyErrors, never dropped.
+ */
+export function createOutputRoute({ platform, output, waiters, responder = new DsrResponder(), send }) {
+  const replyErrors = [];
+  /** Answers the queries owed for a live frame at sequence, or for attach history (history: true). */
+  const answer = (sessionId, text, sequence, { history = false } = {}) => {
+    if (platform !== 'windows' || !sessionId) return 0;
+    const owed = history ? responder.feedHistory(sessionId, text, sequence ?? null) : responder.feed(sessionId, text, sequence ?? null);
+    for (let i = 0; i < owed; i += 1) {
+      Promise.resolve(send(D.write(sessionId, DSR_REPLY))).catch((error) => replyErrors.push({ sessionId, error: String(error?.message ?? error) }));
+    }
+    return owed;
+  };
+  const route = (m) => {
+    if (m.type !== 'output') return;
+    const sid = m.sessionId ?? '*';
+    const text = Buffer.from(m.data, 'base64').toString();
+    output.set(sid, (output.get(sid) ?? '') + text);
+    answer(m.sessionId, text, m.sequence);
+    for (const w of [...waiters]) {
+      const all = output.get(w.sessionId) ?? output.get('*') ?? '';
+      if (outputMatches(all, w.marker, w.visible)) { waiters.delete(w); w.resolve(all); }
+    }
+  };
+  return { route, answer, responder, replyErrors };
+}
 
 export function parseAgentArgs(argv) {
   const out = { platform: null, runId: null, runDir: null, allowRoots: [] };
@@ -31,12 +73,17 @@ export function parseAgentArgs(argv) {
   return out;
 }
 
-export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
+export function createAgent({ platform, runId, runDir, allowRoots = [], home = os.homedir(), table = () => processTable(platform), probe = (pid) => probeIdentity(pid, platform), signal = (pid, sig) => signalPid(pid, sig, platform) }) {
   const ctx = { runId, platform };
   const roots = [runDir, ...allowRoots];
-  const registry = new ProcessRegistry({ platform, probe: (pid) => probeIdentity(pid, platform), signal: (pid, sig) => signalPid(pid, sig, platform) });
+  const registry = new ProcessRegistry({ platform, probe, signal });
+  // Remote-helper daemons of this run's private sshd: pid (in the registry) and exact root dir.
+  const sshHelpers = new Map();
   const handles = new Map();
   const children = new Map();
+  // One cursor-query responder for every data handle: a session re-attached from a second
+  // connection must not be answered again for a query the first one already answered.
+  const dsr = new DsrResponder();
   let nextHandle = 1;
 
   const inRun = (p) => {
@@ -49,6 +96,28 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
     exec: async ({ command, args = [], env, cwd, input = null, deadlineMs = 120_000 }) => {
       const r = await run(command, args, { ctx, env: env ? { ...process.env, ...env } : undefined, cwd, input, deadlineMs });
       return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+    },
+    // Long, chatty commands (QA builds): stdout and stderr go straight to logFile on this host and
+    // the real exit (status, signal, timedOut) is written to the statusFile sidecar. Only the exit,
+    // the byte count and a bounded tail come back over the agent channel; the controller copies
+    // the full log back as a file (run.mjs runBuildStep).
+    execLogged: async ({ command, args = [], env, cwd, logFile, statusFile, tailLines = LOG_TAIL_LINES, deadlineMs = 120_000 }) => {
+      inRun(logFile);
+      inRun(statusFile);
+      mkdirSync(path.dirname(logFile), { recursive: true });
+      mkdirSync(path.dirname(statusFile), { recursive: true });
+      const startedAt = new Date().toISOString();
+      const fd = openSync(logFile, 'w');
+      let outcome;
+      try {
+        outcome = await runToFd(command, args, { ctx, env: env ? { ...process.env, ...env } : undefined, cwd, fd, deadlineMs });
+      } finally {
+        closeSync(fd);
+      }
+      const { tail, bytes } = tailOfFile(logFile, tailLines);
+      const record = { command, args, cwd: cwd ?? null, ...outcome, startedAt, finishedAt: new Date().toISOString(), logFile, bytes };
+      writeFileSync(statusFile, `${JSON.stringify(record, null, 2)}\n`);
+      return { status: outcome.status, signal: outcome.signal, timedOut: outcome.timedOut, error: outcome.error, pid: outcome.pid, bytes, tail, logFile, statusFile };
     },
     // Spawns a long-lived process this run owns, records it by pid + executable, and streams its
     // exit as an event. stdout lines are appended to logFile (inside the run dir).
@@ -121,17 +190,10 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
       const { conn, handshake } = await connectData(runtimeDir, platform, { version, allowMismatch });
       const handle = nextHandle++;
       const output = new Map();
-      const route = (m) => {
-        if (m.type !== 'output') return;
-        const sid = m.sessionId ?? '*';
-        output.set(sid, (output.get(sid) ?? '') + Buffer.from(m.data, 'base64').toString());
-        for (const w of [...(handles.get(handle)?.waiters ?? [])]) {
-          const text = output.get(w.sessionId) ?? output.get('*') ?? '';
-          if (text.includes(w.marker)) { handles.get(handle).waiters.delete(w); w.resolve(text); }
-        }
-      };
+      const waiters = new Set();
+      const { route, answer, responder, replyErrors } = createOutputRoute({ platform, output, waiters, responder: dsr, send: (frame) => conn.call(frame) });
       conn.onStream(route);
-      handles.set(handle, { conn, kind: 'data', output, waiters: new Set(), runtimeDir, version, route, streams: new Map() });
+      handles.set(handle, { conn, kind: 'data', output, waiters, responder, replyErrors, answer, runtimeDir, version, route, streams: new Map() });
       return { handle, handshake };
     },
     controlOpen: async ({ runtimeDir }) => {
@@ -159,20 +221,28 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
       }
       if (h.kind === 'data' && resp?.type === 'attachOk' && frame.sessionId) {
         const prior = h.output.get(frame.sessionId) ?? '';
-        h.output.set(frame.sessionId, Buffer.from(resp.history ?? '', 'base64').toString() + prior);
+        const history = Buffer.from(resp.history ?? '', 'base64').toString();
+        h.output.set(frame.sessionId, history + prior);
+        h.answer(frame.sessionId, history, resp.endSequence ?? null, { history: true });
+        // A visible-output waiter may already be satisfied by the history just stored.
+        for (const w of [...h.waiters]) {
+          const all = h.output.get(w.sessionId) ?? h.output.get('*') ?? '';
+          if (outputMatches(all, w.marker, w.visible)) { h.waiters.delete(w); w.resolve(all); }
+        }
       }
       return resp;
     },
-    waitOutput: async ({ handle, sessionId, marker, deadlineMs = 15_000 }) => {
+    waitOutput: async ({ handle, sessionId, marker, visible = false, deadlineMs = 15_000 }) => {
       const h = handles.get(handle);
       const text = () => h.output.get(sessionId) ?? h.output.get('*') ?? '';
-      if (text().includes(marker)) return { text: text(), count: text().split(marker).length - 1 };
+      const extra = () => ({ dsrReplies: h.responder.replies(sessionId), replyErrors: h.replyErrors.filter((e) => e.sessionId === sessionId) });
+      if (outputMatches(text(), marker, visible)) return { text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
       try {
-        await withDeadline(new Promise((resolve) => h.waiters.add({ sessionId, marker, resolve })), deadlineMs, `output ${marker}`);
+        await withDeadline(new Promise((resolve) => h.waiters.add({ sessionId, marker, visible, resolve })), deadlineMs, `output ${marker}`);
       } catch {
-        return { timedOut: true, text: text(), count: text().split(marker).length - 1 };
+        return { timedOut: true, text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
       }
-      return { text: text(), count: text().split(marker).length - 1 };
+      return { text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
     },
     outputOf: async ({ handle, sessionId }) => handles.get(handle)?.output.get(sessionId) ?? '',
     // Resolves when the file's content matches pattern (fs.watch on its directory).
@@ -239,6 +309,36 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
         } catch (error) {
           out.refused.push({ ...entry, reason: error.message });
         }
+      }
+      return out;
+    },
+    // Records the remote-helper daemon(s) started for this run's private sshd host id: the pid by
+    // its exact executable, the root by its exact path. Only this run's host id is accepted.
+    recordSshHelper: async ({ hostId }) => {
+      if (hostId !== sshHostId(runId)) throw new GuardError('SSH_HELPER_NOT_OURS', `${hostId} is not this run's sshd host id`);
+      const out = [];
+      for (const h of findSshHelpers(await table(), { platform, home, hostId })) {
+        try {
+          if (!registry.has(h.pid)) await registry.record(h.pid, { role: 'ssh-helper', executable: h.executable });
+        } catch (error) {
+          if (error?.code !== 'PID_GONE') throw error;
+        }
+        sshHelpers.set(h.root, h.pid);
+        out.push(h);
+      }
+      return out;
+    },
+    // After teardownRecorded: removes each recorded helper root once its recorded pid has exited.
+    removeSshHelperRoots: async ({ deadlineMs = 15_000 } = {}) => {
+      const out = { removed: [], kept: [] };
+      for (const [root, pid] of sshHelpers) {
+        const sub = subscribeExit(pid, platform);
+        // The waiter's exit only wakes us; the pid's own probe decides that it is gone.
+        if ((await probe(pid)) !== null) await withDeadline(sub.exited, deadlineMs, `exit of ssh helper ${pid}`).catch(() => {});
+        sub.cancel();
+        if ((await probe(pid)) !== null) { out.kept.push({ root, pid, reason: 'helper pid still running' }); continue; }
+        rmSync(root, { recursive: true, force: true });
+        (existsSync(root) ? out.kept : out.removed).push({ root, pid });
       }
       return out;
     },

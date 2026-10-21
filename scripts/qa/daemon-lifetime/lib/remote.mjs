@@ -1,8 +1,10 @@
 // Controller side of the host agent: starts it locally or over SSH and exposes call(method, params).
 
 import { spawn } from 'node:child_process';
+import { copyFileSync, mkdirSync } from 'node:fs';
+import path from 'node:path';
 import { createInterface } from 'node:readline';
-import { withDeadline } from './proc.mjs';
+import { run, withDeadline } from './proc.mjs';
 
 export function agentCommand(host, { agentPath, runId, runDir, allowRoots = [] }) {
   const args = [agentPath, '--platform', host.platform, '--run-id', runId, '--run-dir', runDir];
@@ -11,6 +13,27 @@ export function agentCommand(host, { agentPath, runId, runDir, allowRoots = [] }
   const quote = (s) => (host.platform === 'windows' ? `"${String(s).replace(/"/g, '\\"')}"` : `'${String(s).replace(/'/g, "'\\''")}'`);
   const remote = [host.node, ...args].map(quote).join(' ');
   return { command: 'ssh', args: ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', host.transport.target, host.transport.shell === 'powershell' ? `& ${remote}` : remote] };
+}
+
+/** scp source spec for a file on the host; Windows OpenSSH takes C:/... (measured: C:\... fails). */
+export function scpSource(host, remotePath) {
+  const p = host.platform === 'windows' ? String(remotePath).replace(/\\/g, '/') : String(remotePath);
+  return `${host.transport.target}:${p}`;
+}
+
+/**
+ * Copies one file from the host to this Mac outside the agent channel: a plain copy for the local
+ * host, scp for SSH hosts. Throws when the copy fails.
+ */
+export async function fetchHostFile(host, remotePath, localPath, { exec = run } = {}) {
+  mkdirSync(path.dirname(localPath), { recursive: true });
+  if (host.transport.kind === 'local') {
+    copyFileSync(remotePath, localPath);
+    return localPath;
+  }
+  const r = await exec('scp', ['-q', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', scpSource(host, remotePath), localPath], { deadlineMs: 600_000 });
+  if (r.status !== 0) throw new Error(`scp ${scpSource(host, remotePath)} exited ${r.status}: ${r.stderr}`);
+  return localPath;
 }
 
 export async function startAgent(host, opts, { log = () => {} } = {}) {
