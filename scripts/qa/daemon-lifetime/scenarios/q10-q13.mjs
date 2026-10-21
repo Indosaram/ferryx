@@ -11,6 +11,7 @@ import {
   enterKey,
 } from './common.mjs';
 import { startSshd, sshRestoreSession, recordSshHelper } from '../lib/sshd.mjs';
+import { typeVerified } from '../lib/typeverified.mjs';
 import { legacyLogFiles } from '../lib/jobs.mjs';
 
 export const OPTOUT_FILE = 'daemon-supervisor.optout'; // supervisor.rs OPTOUT_FILE_NAME, in <FERRYX_DATA_DIR>/remote
@@ -261,19 +262,35 @@ export async function Q11(ctx, result) {
   try { tuple = attached.matched ? JSON.parse(attached.matched).attachTuple : null; } catch { tuple = null; }
   if (!assertion(result, 'a GUI tab is attached to the SSH session (native attach receipt)', tuple?.backendSessionId === sid && tuple?.incarnation === incarnation, { tuple, incarnation, attached })) return;
   // Type the marker into that tab. The remote tty echoes it, which proves the keystrokes reached
-  // this session; cat has not read it yet (canonical mode holds the line until Enter).
+  // this session; cat has not read it yet (canonical mode holds the line until Enter). MahoRD drops
+  // keys from a typed burst on omarchy (lib/typeverified.mjs), so each key is confirmed by its echo.
   const marker = nonce('UNCERTAIN').replace('_', '');
-  await ctx.mahord.type(marker);
-  const echoed = await conn.waitOutput(sid, marker, 15_000);
-  if (!assertion(result, 'the marker typed through the GUI reached the SSH session', !echoed.timedOut && echoed.count >= 1, echoed)) return;
+  const since = await conn.outputLength(sid);
+  let typed;
+  try {
+    typed = await typeVerified({ mahord: ctx.mahord, text: marker, waitEcho: (prefix, ms) => conn.waitOutput(sid, prefix, ms, { since }) });
+  } catch (error) {
+    typed = { error: error.detail ?? String(error?.message ?? error) };
+  }
+  const echoed = await conn.waitOutput(sid, marker, 1_000, { since });
+  if (!assertion(result, 'the marker typed through the GUI reached the SSH session', !typed.error && !echoed.timedOut && echoed.count === 1, { typed, echoed })) return;
   // Arm the hold only now: the GUI input queue is serialized, so a held keystroke would block the
   // rest of the marker. Enter is the uncertain write that commits the marker line to cat.
   const receipts = hjoin(ctx.layout.barriers, 'write-ack-hold.receipt.jsonl');
   await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barriers, 'write-ack-hold.request.json'), content: JSON.stringify({ runId: ctx.runId, operationId: op, sessionId: sid }) });
   const armed = await ctx.agent.call('waitLog', { file: receipts, pattern: `"armed"[^\\n]*"${sid}"`, deadlineMs: 10_000 });
   assertion(result, 'write-ack hold armed for the SSH session', Boolean(armed.matched), armed);
-  await ctx.mahord.key('Enter');
-  const applied = await ctx.agent.call('waitLog', { file: receipts, pattern: `"write-applied"[^\\n]*"${sid}"`, deadlineMs: 30_000 });
+  // Enter can be dropped like any MahoRD key; one that reached the GUI shows as write-applied
+  // within seconds, so a missing receipt means a lost key and Enter is resent (bounded). A second
+  // Enter that did land would show as an extra line, which the exact remote-log check reports.
+  let applied = { matched: null };
+  let enterSends = 0;
+  while (!applied.matched && enterSends < 3) {
+    enterSends += 1;
+    await ctx.mahord.key('Enter');
+    applied = await ctx.agent.call('waitLog', { file: receipts, pattern: `"write-applied"[^\\n]*"${sid}"`, deadlineMs: 10_000 });
+  }
+  applied.enterSends = enterSends;
   assertion(result, 'write-applied observed for the GUI write while the ack is held', Boolean(applied.matched), applied);
   const atQuit = (await ctx.agent.call('readFile', { file: receipts })) ?? '';
   assertion(result, 'the ack was still held when the GUI quit', Boolean(applied.matched) && !new RegExp(`"released"[^\\n]*"${sid}"`).test(atQuit), atQuit);

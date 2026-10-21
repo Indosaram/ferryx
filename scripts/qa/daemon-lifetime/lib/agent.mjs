@@ -116,7 +116,7 @@ export function createOutputRoute({ platform, output, waiters, responder = new D
     output.set(sid, (output.get(sid) ?? '') + text);
     answer(m.sessionId, text, m.sequence);
     for (const w of [...waiters]) {
-      const all = output.get(w.sessionId) ?? output.get('*') ?? '';
+      const all = (output.get(w.sessionId) ?? output.get('*') ?? '').slice(w.since ?? 0);
       if (outputMatches(all, w.marker, w.visible, w.promptAfter ?? null)) { waiters.delete(w); w.resolve(all); }
     }
   };
@@ -298,13 +298,14 @@ export function createAgent({ platform, runId, runDir, allowRoots = [], home = o
       }
       return resp;
     },
-    waitOutput: async ({ handle, sessionId, marker, visible = false, promptAfter = null, deadlineMs = 15_000 }) => {
+    // since: match only output after that many characters (outputOf(...).length taken earlier).
+    waitOutput: async ({ handle, sessionId, marker, visible = false, promptAfter = null, since = 0, deadlineMs = 15_000 }) => {
       const h = handles.get(handle);
-      const text = () => h.output.get(sessionId) ?? h.output.get('*') ?? '';
+      const text = () => (h.output.get(sessionId) ?? h.output.get('*') ?? '').slice(since);
       const extra = () => ({ dsrReplies: h.responder.replies(sessionId), replyErrors: h.replyErrors.filter((e) => e.sessionId === sessionId) });
       if (outputMatches(text(), marker, visible, promptAfter)) return { text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
       try {
-        await withDeadline(new Promise((resolve) => h.waiters.add({ sessionId, marker, visible, promptAfter, resolve })), deadlineMs, `output ${marker}`);
+        await withDeadline(new Promise((resolve) => h.waiters.add({ sessionId, marker, visible, promptAfter, since, resolve })), deadlineMs, `output ${marker}`);
       } catch {
         return { timedOut: true, text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
       }
