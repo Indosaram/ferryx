@@ -117,7 +117,8 @@ pub struct ObserveOutcome {
 
 struct WatchState {
     streaming: HashMap<String, bool>,
-    first_seen: HashMap<String, DateTime<Utc>>,
+    /// Notices waiting for their release time, with the time each was first seen.
+    pending: HashMap<String, (Notice, DateTime<Utc>)>,
     sent_fallback: HashSet<String>,
 }
 
@@ -134,7 +135,7 @@ impl Watcher {
             policy,
             state: Mutex::new(WatchState {
                 streaming: HashMap::new(),
-                first_seen: HashMap::new(),
+                pending: HashMap::new(),
                 sent_fallback: HashSet::new(),
             }),
         }
@@ -150,37 +151,50 @@ impl Watcher {
         let notices = session_notices(obs, was_streaming);
         state.streaming.insert(obs.target.clone(), obs.streaming);
 
-        let mut present = HashSet::new();
-        let mut due = Vec::new();
-        let mut next_wake = None;
+        // Observations arrive one session at a time, so this one only speaks for its own
+        // target. A question or block that is no longer on this target's screen is withdrawn;
+        // a completion already happened and stays until it is sent. Other targets' pending
+        // notices are untouched.
+        let present: HashSet<String> = notices.iter().map(|notice| notice.dedupe_key.clone()).collect();
+        let machine_failed = obs.machine_failed;
+        state.pending.retain(|key, (notice, _)| {
+            notice.target != obs.target
+                || present.contains(key)
+                || notice.kind == "completion"
+                || machine_failed
+        });
         for notice in notices {
-            present.insert(notice.dedupe_key.clone());
             if self.already_sent(&notice.dedupe_key).await?
                 || state.sent_fallback.contains(&notice.dedupe_key)
             {
                 continue;
             }
-            let first = *state
-                .first_seen
+            state
+                .pending
                 .entry(notice.dedupe_key.clone())
-                .or_insert(now);
+                .or_insert((notice, now));
+        }
+
+        let mut due = Vec::new();
+        let mut next_wake = None;
+        let keys: Vec<String> = state.pending.keys().cloned().collect();
+        for key in keys {
+            let Some((_, first)) = state.pending.get(&key).cloned() else {
+                continue;
+            };
             let ready = self.policy.release_at(
                 first + chrono::Duration::from_std(self.policy.notify_after).unwrap_or_default(),
             );
             if now >= ready {
-                due.push(notice);
+                if let Some((notice, _)) = state.pending.remove(&key) {
+                    due.push(notice);
+                }
             } else {
                 next_wake =
                     Some(next_wake.map_or(ready, |current: DateTime<Utc>| current.min(ready)));
             }
         }
-        let failed = if obs.machine_failed {
-            HashSet::from([obs.machine.as_str()])
-        } else {
-            HashSet::new()
-        };
-        let present_ref: HashSet<&str> = present.iter().map(String::as_str).collect();
-        retain_first_seen(&mut state.first_seen, &present_ref, &failed);
+        due.sort_by(|left, right| left.dedupe_key.cmp(&right.dedupe_key));
         Ok(ObserveOutcome { due, next_wake })
     }
 
@@ -357,6 +371,46 @@ mod tests {
             .await
             .unwrap();
         assert!(again_c.due.is_empty(), "the completion was already sent");
+    }
+
+    #[tokio::test]
+    async fn another_sessions_event_does_not_reset_a_held_notice_and_a_completion_survives() {
+        let pool = crate::storage::memory().await.unwrap();
+        let policy = NotifyPolicy {
+            notify_after: Duration::from_secs(60),
+            quiet_hours: None,
+        };
+        let start = DateTime::parse_from_rfc3339("2026-10-21T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let watcher = Watcher::new(pool, policy);
+        let held = watcher.on_observation(&question(true), start).await.unwrap();
+        assert!(held.due.is_empty());
+
+        let mut other = question(false);
+        other.target = "host-a:sess-2".into();
+        other.session_id = "sess-2".into();
+        other.question = None;
+        let later = start + TimeDelta::seconds(30);
+        watcher.on_observation(&other, later).await.unwrap();
+
+        // The first session's turn ends while its question is still up.
+        let mut done = question(false);
+        done.message_count = 5;
+        let after_delay = start + TimeDelta::seconds(61);
+        let outcome = watcher.on_observation(&done, after_delay).await.unwrap();
+        let kinds: Vec<_> = outcome.due.iter().map(|notice| notice.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["question"], "the question kept its first-seen time");
+
+        // Quiet again, the completion that was held is still released on time.
+        let mut idle = done.clone();
+        idle.question = None;
+        let released = watcher
+            .on_observation(&idle, after_delay + TimeDelta::seconds(61))
+            .await
+            .unwrap();
+        let kinds: Vec<_> = released.due.iter().map(|notice| notice.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["completion"]);
     }
 
     #[test]
