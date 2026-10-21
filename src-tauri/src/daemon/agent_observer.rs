@@ -44,6 +44,7 @@ struct Slot {
 }
 
 type Slots = Arc<Mutex<HashMap<String, Slot>>>;
+type WorkspaceLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// Observes every daemon-owned PTY the cap allows.
 pub struct AgentObserverHub {
@@ -53,7 +54,7 @@ pub struct AgentObserverHub {
     cap: usize,
     timing: ObserverTiming,
     sources: Mutex<Option<Arc<AgentStateHub>>>,
-    workspace_of: Mutex<Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>>,
+    workspace_of: Mutex<Option<WorkspaceLookup>>,
     generation: AtomicU64,
 }
 
@@ -93,7 +94,7 @@ impl AgentObserverHub {
         self.bus.attach_machine_events(events);
     }
 
-    pub fn set_workspace_lookup(&self, lookup: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>) {
+    pub fn set_workspace_lookup(&self, lookup: WorkspaceLookup) {
         *self.workspace_of.lock() = Some(lookup);
     }
 
@@ -206,7 +207,7 @@ fn screen_text(engine: &NativeTerminal) -> String {
 fn publish_if_changed(
     bus: &AgentEventBus,
     session_id: &str,
-    workspace_of: Option<&Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>,
+    workspace_of: Option<&WorkspaceLookup>,
     provider: Option<&ProviderReport>,
     engine: &NativeTerminal,
     quiet_elapsed: bool,
@@ -234,7 +235,7 @@ async fn observe_session(
     terminals: Arc<TerminalService>,
     bus: Arc<AgentEventBus>,
     sources: Option<Arc<AgentStateHub>>,
-    workspace_of: Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>,
+    workspace_of: Option<WorkspaceLookup>,
     timing: ObserverTiming,
     mut stop: watch::Receiver<bool>,
 ) {

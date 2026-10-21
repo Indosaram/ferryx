@@ -558,6 +558,7 @@ fn control_finish(result: Result<serde_json::Value, ScopeError>) -> Response {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn http_device(
     state: &RemoteGatewayState,
     headers: &HeaderMap,
@@ -1141,7 +1142,7 @@ mod tests {
             .await
             .expect("a fallen cursor is still a successful replay");
         assert_eq!(gapped["gap"], true, "{gapped}");
-        assert!(gapped["snapshot"].as_array().unwrap().len() >= 1);
+        assert!(!gapped["snapshot"].as_array().unwrap().is_empty());
 
         let waited = handle(
             &state,
