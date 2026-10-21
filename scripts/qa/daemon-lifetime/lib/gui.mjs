@@ -173,6 +173,16 @@ export function windowsCloseFiles(layout, tag) {
   return { request: `${layout.root}\\gui-${tag}.close.request`, receipt: `${layout.root}\\gui-${tag}.closed.json` };
 }
 
+/** Request/answer of the launcher's main-window rect query (fixtures/windows-gui-launcher.ps1). */
+export function windowsRectFiles(layout, tag) {
+  return { request: `${layout.root}\\gui-${tag}.rect.request`, answer: `${layout.root}\\gui-${tag}.rect.json` };
+}
+
+/** Title bar point of a window rect: left part of the caption, clear of the caption buttons. */
+export function titleBarPoint(rect) {
+  return { x: rect.left + Math.min(200, Math.floor((rect.right - rect.left) / 4)), y: rect.top + 12 };
+}
+
 /** A Windows launch that stopped at a named stage; receipt is what was written to logs\. */
 export class WindowsLaunchError extends Error {
   constructor(stage, detail, receipt) {
@@ -235,6 +245,7 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
   const bundleId = qaBundleIdentifier(runId);
   let launches = 0;
   let batches = 0;
+  let rectQueries = 0;
   // One interactive desktop, one Run dialog: the keyboard section of every Windows launch (taskbar
   // click .. cmd-started) runs alone. Two launches typing into one dialog concatenated their paths
   // (run-q00fix-all runlog-launch-g10-failure.png).
@@ -571,6 +582,33 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
   }
 
   /**
+   * Windows: make the recorded GUI's main window the foreground before MahoRD keys go to it. A GUI
+   * started from the Run dialog's .cmd can open behind the console that started it (run-q11
+   * only-q11-q13-r2: Escape went to that console, the setup wizard stayed open). The launcher
+   * reports the window rect and the foreground hwnd; if they differ, its own title bar is clicked
+   * and the query repeated. Other platforms need no focus step.
+   */
+  async function focus(gui) {
+    if (platform !== 'windows') return { skipped: platform };
+    if (!mahord) throw new Error('Windows GUI focus needs MahoRD');
+    const f = windowsRectFiles(layout, gui.tag);
+    const query = async () => {
+      const seq = ++rectQueries;
+      await agent.call('writeFile', { file: f.request, content: String(seq) });
+      const seen = await agent.call('waitLog', { file: f.answer, pattern: `"seq":${seq},`, deadlineMs: 10_000 });
+      if (!seen.matched) throw new Error(`launcher ${gui.tag} answered no rect query ${seq} within 10000ms`);
+      return JSON.parse(await agent.call('readFile', { file: f.answer }));
+    };
+    const before = await query();
+    if (!before.ok || !before.hwnd) return { focused: false, before };
+    if (before.foreground === before.hwnd) return { focused: true, clicked: null, before };
+    const point = titleBarPoint(before);
+    await mahord.click(point.x, point.y);
+    const after = await query();
+    return { focused: after.foreground === after.hwnd, clicked: point, before, after };
+  }
+
+  /**
    * Normal quit; resolves with the exit event of the recorded pid ({ skipped } without a GUI).
    * Windows asks the launcher that started this GUI to send WM_CLOSE to its main window
    * (CloseMainWindow, the path of a user's close button) instead of a global Alt+F4, which closes
@@ -621,5 +659,5 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     return { exited: await exited, detail };
   }
 
-  return { launch, launchBatch, quit, kill, forceTerminate, sweepExplorerDialogs, bundleId };
+  return { launch, launchBatch, focus, quit, kill, forceTerminate, sweepExplorerDialogs, bundleId };
 }
