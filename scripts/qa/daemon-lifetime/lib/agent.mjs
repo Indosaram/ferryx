@@ -14,6 +14,46 @@ import { createInterface } from 'node:readline';
 import { GuardError, ProcessRegistry, isInside, assertRunId } from './guards.mjs';
 import { run, probeIdentity, signalPid, subscribeExit, processTable, withDeadline } from './proc.mjs';
 import { connectData, connectControl } from './client.mjs';
+import { data as D, DsrResponder, DSR_REPLY, visibleText } from './wire.mjs';
+
+/**
+ * An empty marker waits for any output; with visible, for output a person would see (a prompt,
+ * not a bare terminal query such as ConPTY's ESC[6n); otherwise a substring.
+ */
+export function outputMatches(text, marker, visible = false) {
+  if (marker) return text.includes(marker);
+  return visible ? visibleText(text).trim().length > 0 : text.length > 0;
+}
+
+/**
+ * The stream handler for one data handle: stores output per session, answers ConPTY's cursor
+ * query on Windows (one reply per query, sent as a data-protocol write on the request
+ * connection), and wakes waiters. A failed reply write is kept in replyErrors, never dropped.
+ */
+export function createOutputRoute({ platform, output, waiters, responder = new DsrResponder(), send }) {
+  const replyErrors = [];
+  /** Answers the queries owed for a live frame at sequence, or for attach history (history: true). */
+  const answer = (sessionId, text, sequence, { history = false } = {}) => {
+    if (platform !== 'windows' || !sessionId) return 0;
+    const owed = history ? responder.feedHistory(sessionId, text, sequence ?? null) : responder.feed(sessionId, text, sequence ?? null);
+    for (let i = 0; i < owed; i += 1) {
+      Promise.resolve(send(D.write(sessionId, DSR_REPLY))).catch((error) => replyErrors.push({ sessionId, error: String(error?.message ?? error) }));
+    }
+    return owed;
+  };
+  const route = (m) => {
+    if (m.type !== 'output') return;
+    const sid = m.sessionId ?? '*';
+    const text = Buffer.from(m.data, 'base64').toString();
+    output.set(sid, (output.get(sid) ?? '') + text);
+    answer(m.sessionId, text, m.sequence);
+    for (const w of [...waiters]) {
+      const all = output.get(w.sessionId) ?? output.get('*') ?? '';
+      if (outputMatches(all, w.marker, w.visible)) { waiters.delete(w); w.resolve(all); }
+    }
+  };
+  return { route, answer, responder, replyErrors };
+}
 
 export function parseAgentArgs(argv) {
   const out = { platform: null, runId: null, runDir: null, allowRoots: [] };
@@ -37,6 +77,9 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
   const registry = new ProcessRegistry({ platform, probe: (pid) => probeIdentity(pid, platform), signal: (pid, sig) => signalPid(pid, sig, platform) });
   const handles = new Map();
   const children = new Map();
+  // One cursor-query responder for every data handle: a session re-attached from a second
+  // connection must not be answered again for a query the first one already answered.
+  const dsr = new DsrResponder();
   let nextHandle = 1;
 
   const inRun = (p) => {
@@ -121,17 +164,10 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
       const { conn, handshake } = await connectData(runtimeDir, platform, { version, allowMismatch });
       const handle = nextHandle++;
       const output = new Map();
-      const route = (m) => {
-        if (m.type !== 'output') return;
-        const sid = m.sessionId ?? '*';
-        output.set(sid, (output.get(sid) ?? '') + Buffer.from(m.data, 'base64').toString());
-        for (const w of [...(handles.get(handle)?.waiters ?? [])]) {
-          const text = output.get(w.sessionId) ?? output.get('*') ?? '';
-          if (text.includes(w.marker)) { handles.get(handle).waiters.delete(w); w.resolve(text); }
-        }
-      };
+      const waiters = new Set();
+      const { route, answer, responder, replyErrors } = createOutputRoute({ platform, output, waiters, responder: dsr, send: (frame) => conn.call(frame) });
       conn.onStream(route);
-      handles.set(handle, { conn, kind: 'data', output, waiters: new Set(), runtimeDir, version, route, streams: new Map() });
+      handles.set(handle, { conn, kind: 'data', output, waiters, responder, replyErrors, answer, runtimeDir, version, route, streams: new Map() });
       return { handle, handshake };
     },
     controlOpen: async ({ runtimeDir }) => {
@@ -159,20 +195,28 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
       }
       if (h.kind === 'data' && resp?.type === 'attachOk' && frame.sessionId) {
         const prior = h.output.get(frame.sessionId) ?? '';
-        h.output.set(frame.sessionId, Buffer.from(resp.history ?? '', 'base64').toString() + prior);
+        const history = Buffer.from(resp.history ?? '', 'base64').toString();
+        h.output.set(frame.sessionId, history + prior);
+        h.answer(frame.sessionId, history, resp.endSequence ?? null, { history: true });
+        // A visible-output waiter may already be satisfied by the history just stored.
+        for (const w of [...h.waiters]) {
+          const all = h.output.get(w.sessionId) ?? h.output.get('*') ?? '';
+          if (outputMatches(all, w.marker, w.visible)) { h.waiters.delete(w); w.resolve(all); }
+        }
       }
       return resp;
     },
-    waitOutput: async ({ handle, sessionId, marker, deadlineMs = 15_000 }) => {
+    waitOutput: async ({ handle, sessionId, marker, visible = false, deadlineMs = 15_000 }) => {
       const h = handles.get(handle);
       const text = () => h.output.get(sessionId) ?? h.output.get('*') ?? '';
-      if (text().includes(marker)) return { text: text(), count: text().split(marker).length - 1 };
+      const extra = () => ({ dsrReplies: h.responder.replies(sessionId), replyErrors: h.replyErrors.filter((e) => e.sessionId === sessionId) });
+      if (outputMatches(text(), marker, visible)) return { text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
       try {
-        await withDeadline(new Promise((resolve) => h.waiters.add({ sessionId, marker, resolve })), deadlineMs, `output ${marker}`);
+        await withDeadline(new Promise((resolve) => h.waiters.add({ sessionId, marker, visible, resolve })), deadlineMs, `output ${marker}`);
       } catch {
-        return { timedOut: true, text: text(), count: text().split(marker).length - 1 };
+        return { timedOut: true, text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
       }
-      return { text: text(), count: text().split(marker).length - 1 };
+      return { text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
     },
     outputOf: async ({ handle, sessionId }) => handles.get(handle)?.output.get(sessionId) ?? '',
     // Resolves when the file's content matches pattern (fs.watch on its directory).

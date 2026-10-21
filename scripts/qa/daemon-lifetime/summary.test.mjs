@@ -4,7 +4,9 @@ import { SCENARIO_IDS, newSummary, selectScenarios, assertion, settle, block, ap
 import { readFileSync } from 'node:fs';
 import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths, selfTestExitCode, SELF_TEST_PATCH, teardownRun, runWithTeardown, prepareSelfTestWorktree, teardownExtras, releaseOwnerFile, releaseContinuity, prepareBaselineDist } from './run.mjs';
 import { hostFor } from './lib/hosts.mjs';
-import { confirmOwner, ownerStartMatches, ownerIdentity, parseStarting, awaitPendingStart, retireOwner, freshOwner, STARTING_WINDOW_MS } from './scenarios/common.mjs';
+import { confirmOwner, ownerStartMatches, ownerIdentity, parseStarting, awaitPendingStart, retireOwner, freshOwner, STARTING_WINDOW_MS, seedLocalSession, seedShell, counterCommand, SHELL_READY_TIMEOUT_MS, COUNTER_TIMEOUT_MS, SEED_TEXT_TAIL } from './scenarios/common.mjs';
+import { outputMatches, createOutputRoute } from './lib/agent.mjs';
+import { DsrResponder, DSR_QUERY, DSR_REPLY, visibleText } from './lib/wire.mjs';
 import { Q06, killLaunchedGui } from './scenarios/q04-q06.mjs';
 
 const RUN = '20261019t064512z';
@@ -514,5 +516,173 @@ test('baseline step gets an empty ui/dist in its own worktree, idempotently, on 
     assert.deepEqual(readdirSync(root), ['ui']);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** A scripted data connection: each waitOutput answers from `waits` in order. */
+function seedWorld({ platform = 'windows', waits }) {
+  const calls = [];
+  const files = new Map();
+  const conn = {
+    call: async (frame, deadlineMs) => {
+      calls.push({ kind: frame.type, frame, deadlineMs });
+      if (frame.type === 'registerWorkspace') return { type: 'registerWorkspaceOk' };
+      if (frame.type === 'spawn') return { type: 'spawnOk', sessionId: 'S1' };
+      if (frame.type === 'attach') return { type: 'attachOk' };
+      if (frame.type === 'write') return { type: 'writeOk' };
+      return { type: 'unexpected' };
+    },
+    waitOutput: async (sessionId, marker, deadlineMs, opts = {}) => { calls.push({ kind: 'waitOutput', sessionId, marker, deadlineMs, visible: Boolean(opts.visible) }); return waits.shift(); },
+    describe: async () => { calls.push({ kind: 'describe' }); return { type: 'describeLiveSessionsOk', sessions: [{ backendId: 'S1', readerOpen: true, localChildPid: 77 }] }; },
+  };
+  const ctx = { platform, workspaceId: 'ws', repoDir: 'C:\\r\\repo', workspaceRegistered: false, evidenceDir: '/e', writeEvidence: async (f, c) => { files.set(f, c); } };
+  return { conn, ctx, calls, files };
+}
+
+test('seed: Windows spawns powershell explicitly and writes the counter only after the shell prompt', async () => {
+  assert.equal(seedShell('windows'), 'powershell');
+  assert.equal(seedShell('linux'), null);
+  assert.equal(seedShell('mac'), null);
+  const { conn, ctx, calls, files } = seedWorld({ waits: [{ text: 'PS C:\\r\\repo> ', count: 0 }, { text: 'QA_A_TICK_2', count: 1 }] });
+  assert.equal(await seedLocalSession(ctx, conn, 'QA_A'), 'S1');
+  assert.deepEqual(calls.map((c) => c.kind), ['registerWorkspace', 'spawn', 'attach', 'waitOutput', 'write', 'waitOutput']);
+  assert.equal(calls[1].frame.shell, 'powershell');
+  // The readiness wait is "any visible output" (a prompt, not ConPTY's query), bounded, and
+  // strictly before the counter write.
+  assert.deepEqual([calls[3].marker, calls[3].deadlineMs, calls[3].visible], ['', SHELL_READY_TIMEOUT_MS, true]);
+  assert.equal(Buffer.from(calls[4].frame.data, 'base64').toString(), counterCommand('windows', 'QA_A'));
+  assert.deepEqual([calls[5].marker, calls[5].deadlineMs], ['QA_A_TICK_2', COUNTER_TIMEOUT_MS]);
+  assert.equal(files.size, 0);
+  // Linux keeps the daemon default shell (no shell field on the wire).
+  const linux = seedWorld({ platform: 'linux', waits: [{ text: '$ ', count: 0 }, { text: 'QA_A_TICK_2', count: 1 }] });
+  await seedLocalSession(linux.ctx, linux.conn, 'QA_A');
+  assert.equal('shell' in linux.calls[1].frame, false);
+});
+
+test('seed: a silent shell fails at shell-ready, never writes the counter, and keeps describe-live evidence', async () => {
+  const { conn, ctx, calls, files } = seedWorld({ waits: [{ timedOut: true, text: '', count: 0 }] });
+  await assert.rejects(seedLocalSession(ctx, conn, 'QA_A'), (e) => {
+    assert.equal(e.code, 'SEED_FAILED');
+    assert.equal(e.detail.stage, 'shell-ready');
+    assert.equal(e.detail.receivedBytes, 0);
+    assert.deepEqual(e.detail.describe.sessions.map((s) => s.backendId), ['S1']);
+    assert.match(e.message, /shell-ready timed out/);
+    return true;
+  });
+  assert.ok(!calls.some((c) => c.kind === 'write'), 'no counter is typed into a shell that never answered');
+  assert.deepEqual([...files.keys()], ['/e/seed-QA_A-shell-ready.json']);
+  assert.equal(JSON.parse(files.get('/e/seed-QA_A-shell-ready.json')).stage, 'shell-ready');
+});
+
+test('seed: a counter timeout carries the bounded received-text tail and describe-live', async () => {
+  const noise = 'x'.repeat(SEED_TEXT_TAIL * 2) + 'TAIL_END';
+  const { conn, ctx, files } = seedWorld({ waits: [{ text: 'PS> ', count: 0 }, { timedOut: true, text: noise, count: 0 }] });
+  await assert.rejects(seedLocalSession(ctx, conn, 'QA_A'), (e) => {
+    assert.equal(e.detail.stage, 'counter');
+    assert.equal(e.detail.marker, 'QA_A_TICK_2');
+    assert.equal(e.detail.receivedBytes, noise.length);
+    assert.equal(e.detail.receivedTail.length, SEED_TEXT_TAIL);
+    assert.ok(e.detail.receivedTail.endsWith('TAIL_END'));
+    assert.equal(e.detail.shell, 'powershell');
+    assert.equal(e.detail.evidence, '/e/seed-QA_A-counter.json');
+    return true;
+  });
+  const saved = JSON.parse(files.get('/e/seed-QA_A-counter.json'));
+  assert.equal(saved.receivedTail.length, SEED_TEXT_TAIL);
+  assert.equal(saved.describe.sessions[0].localChildPid, 77);
+});
+
+test('agent output matching: an empty marker means any output, otherwise a substring', () => {
+  assert.equal(outputMatches('', ''), false);
+  assert.equal(outputMatches('P', ''), true);
+  assert.equal(outputMatches('abc QA_A_TICK_2', 'QA_A_TICK_2'), true);
+  assert.equal(outputMatches('QA_A_TICK_1', 'QA_A_TICK_2'), false);
+  // visible: a bare terminal query is not a prompt; a prompt behind VT noise is.
+  assert.equal(outputMatches(DSR_QUERY, '', true), false);
+  assert.equal(outputMatches('\x1b[?25l\x1b[2J\x1b[H\x1b]0;Windows PowerShell\x07\r\n', '', true), false);
+  assert.equal(outputMatches('\x1b[6n\x1b[?25lPS C:\\r> ', '', true), true);
+  assert.equal(visibleText('\x1b[1;1H\x1b[32mok\x1b[0m\r\n'), 'ok\n');
+  assert.equal(visibleText('\x1b['), '');
+  assert.equal(visibleText('ok\x1b]0;tit'), 'ok');
+});
+
+test('DSR responder: one reply per query, split across frames, two queries, never twice for one query', () => {
+  const r = new DsrResponder();
+  // Query split across frames: nothing owed until it completes, then exactly one.
+  assert.equal(r.feed('S1', 'hello\x1b[', 1), 0);
+  assert.equal(r.feed('S1', '6n', 2), 1);
+  // Two queries in one frame, and one split three ways.
+  assert.equal(r.feed('S1', '\x1b[6nPS> \x1b[6n', 3), 2);
+  assert.equal(r.feed('S1', '\x1b', 4), 0);
+  assert.equal(r.feed('S1', '[', 5), 0);
+  assert.equal(r.feed('S1', '6n tail', 6), 1);
+  // The same frame seen again (a re-attach replaying a sequence) is never answered twice.
+  assert.equal(r.feed('S1', '\x1b[6n', 6), 0);
+  assert.equal(r.feed('S1', '\x1b[6n', 5), 0);
+  assert.equal(r.replies('S1'), 4);
+  // A completed query leaves no tail that could complete a second time.
+  assert.equal(r.feed('S1', 'n', 7), 0);
+  // Near-misses are not queries; sessions are independent.
+  assert.equal(r.feed('S2', '\x1b[5n \x1b[6 n \x1b6n', 1), 0);
+  assert.equal(r.feed('S2', '\x1b[', 2), 0);
+  assert.equal(r.feed('S1', '6n', 8), 0, 'S2 tail never completes a query in S1');
+  assert.equal(r.feed('S2', '6n', 3), 1);
+  assert.deepEqual([r.replies('S1'), r.replies('S2')], [4, 1]);
+});
+
+test('DSR responder: the query in the first attach history is answered once; a re-attach replay never again', () => {
+  const r = new DsrResponder();
+  // ConPTY asks at spawn, before the harness attaches: the query is in the first history.
+  assert.equal(r.feedHistory('S1', '\x1b[6n', 1), 1);
+  // Live output continues after the history's end sequence.
+  assert.equal(r.feed('S1', 'PS C:\\r> ', 2), 0);
+  // A re-attach (same or another connection) replays the history including the old query.
+  assert.equal(r.feedHistory('S1', '\x1b[6nPS C:\\r> ', 2), 0);
+  assert.equal(r.feedHistory('S1', '\x1b[6nPS C:\\r> more', 5), 0);
+  // ...and the sequence it advanced to keeps the live replay of those frames unanswered too.
+  assert.equal(r.feed('S1', '\x1b[6n', 4), 0);
+  // A genuinely new live query after that is answered.
+  assert.equal(r.feed('S1', '\x1b[6n', 6), 1);
+  assert.equal(r.replies('S1'), 2);
+  // An empty first history leaves a later live query answerable.
+  assert.equal(r.feedHistory('S2', '', null), 0);
+  assert.equal(r.feed('S2', '\x1b[6n', 1), 1);
+});
+
+test('output route answers each live ConPTY query with exactly one ESC[1;1R write to that session, on Windows only', async () => {
+  const frame = (sessionId, text, sequence) => ({ type: 'output', sessionId, sequence, data: Buffer.from(text).toString('base64') });
+  const sent = [];
+  const output = new Map();
+  const waiters = new Set();
+  const { route, replyErrors } = createOutputRoute({ platform: 'windows', output, waiters, send: async (f) => { sent.push(f); return { type: 'writeOk' }; } });
+  let prompt;
+  waiters.add({ sessionId: 'S1', marker: '', visible: true, resolve: (t) => { prompt = t; } });
+  route(frame('S1', '\x1b[', 1));
+  route(frame('S1', '6n', 2));
+  assert.equal(prompt, undefined, 'the query alone never satisfies a visible wait');
+  route(frame('S1', '\x1b[6n', 2)); // duplicate sequence
+  route(frame('S2', '\x1b[6n', 1));
+  route(frame('S1', 'PS C:\\r> ', 3));
+  await Promise.resolve();
+  assert.deepEqual(sent.map((f) => [f.type, f.sessionId, Buffer.from(f.data, 'base64').toString()]), [['write', 'S1', DSR_REPLY], ['write', 'S2', DSR_REPLY]]);
+  // Output storage is unchanged (every received frame is kept); only the replies are deduplicated.
+  assert.equal(prompt, '\x1b[6n\x1b[6nPS C:\\r> ');
+  assert.deepEqual(replyErrors, []);
+  // A failing reply write is kept, not swallowed.
+  const failing = createOutputRoute({ platform: 'windows', output: new Map(), waiters: new Set(), send: async () => { throw new Error('closed'); } });
+  failing.route(frame('S9', '\x1b[6n', 1));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(failing.replyErrors, [{ sessionId: 'S9', error: 'closed' }]);
+  // Attach history goes through answer({ history: true }): answered once per session.
+  const h = createOutputRoute({ platform: 'windows', output: new Map(), waiters: new Set(), send: async (f) => { sent.push(f); } });
+  sent.length = 0;
+  assert.equal(h.answer('H1', '\x1b[6n', 1, { history: true }), 1);
+  assert.equal(h.answer('H1', '\x1b[6n', 1, { history: true }), 0);
+  assert.deepEqual(sent.map((f) => f.sessionId), ['H1']);
+  // Linux and mac: no replies (the harness is not the terminal of a Unix PTY start-up).
+  for (const platform of ['linux', 'mac']) {
+    const unix = [];
+    createOutputRoute({ platform, output: new Map(), waiters: new Set(), send: async (f) => { unix.push(f); } }).route(frame('S1', '\x1b[6n', 1));
+    assert.deepEqual(unix, []);
   }
 });
