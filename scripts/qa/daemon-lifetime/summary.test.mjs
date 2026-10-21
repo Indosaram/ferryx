@@ -938,6 +938,8 @@ function q11World({ replayOnRelaunch = false, resendOnReconnect = false, release
       case 'waitOutput': { const n = w.echo.split(params.marker).length - 1; return n > 0 ? { count: n, text: w.echo } : { timedOut: true, count: 0 }; }
       case 'close': return true;
       case 'exec': return { status: 0, stdout: w.log, stderr: '' };
+      // build-log branch: Q11 records this run's SSH remote-helper pids for teardown.
+      case 'recordSshHelper': return [];
       default: throw new Error(`unexpected agent call ${method}`);
     }
   };

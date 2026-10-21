@@ -9,7 +9,7 @@ import {
   evidence, dataConn, controlConn, ownerIdentity, nonceRoundTrip, assertSameOwner, retireOwner, freshOwner, nonce,
   echoCommand, interrupt, setAsideHeadCatalog, DAEMON_READY_TIMEOUT_MS,
 } from './common.mjs';
-import { startSshd, sshRestoreSession } from '../lib/sshd.mjs';
+import { startSshd, sshRestoreSession, recordSshHelper } from '../lib/sshd.mjs';
 import { legacyLogFiles } from '../lib/jobs.mjs';
 
 export const OPTOUT_FILE = 'daemon-supervisor.optout'; // supervisor.rs OPTOUT_FILE_NAME, in <FERRYX_DATA_DIR>/remote
@@ -220,6 +220,7 @@ export async function Q11(ctx, result) {
   const spawned = await conn.call(D.spawnSsh({ clientRequestId: `qa-q11-${nonce('R')}`, workspaceId: ctx.sshd.workspaceId, hostStorePath: ctx.sshd.hostStorePath }), 60_000);
   assertion(result, 'SSH session spawned against the private sshd', spawned.type === 'spawnOk', spawned);
   if (spawned.type !== 'spawnOk') return;
+  await recordSshHelper(ctx);
   const sid = spawned.sessionId;
   const incarnation = spawned.session?.incarnation ?? null;
   const input = hjoin(ctx.sshd.repoRoot, 'ssh-input.log');

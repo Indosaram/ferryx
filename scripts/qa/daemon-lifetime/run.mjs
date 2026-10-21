@@ -25,12 +25,13 @@ import { newSummary, selectScenarios, settle, block, applyQ00Gate, computeExitCo
 import { hostFor, buildPlan, assertQaBuild, worktreePaths } from './lib/hosts.mjs';
 import { probeHooks, missingHooksFor } from './lib/hooks.mjs';
 import { generationKey, assertDistinctKeys } from './lib/wire.mjs';
-import { startAgent } from './lib/remote.mjs';
+import { startAgent, fetchHostFile } from './lib/remote.mjs';
 import { createJobs } from './lib/jobs.mjs';
 import { createGuiDriver, macGuiExecutable } from './lib/gui.mjs';
 import { assembleDaemonHelper } from '../../macos-daemon-helper.mjs';
 import { finalizeMacosBundle } from '../../lib/release-platforms.mjs';
 import { connectMahord } from './lib/mahord.mjs';
+import { sshHostId } from './lib/sshd.mjs';
 import { run } from './lib/proc.mjs';
 import * as g1 from './scenarios/q00-q03.mjs';
 import * as g2 from './scenarios/q04-q06.mjs';
@@ -155,6 +156,41 @@ export async function prepareBaselineDist({ host, agent, worktree }) {
   return dir;
 }
 
+/**
+ * One QA build. Output never crosses the agent channel: the agent writes stdout+stderr to
+ * <runDir>/build-logs/build-<name>.log on the host and the real exit (status, signal, timedOut) to
+ * build-<name>.status.json beside it, and returns only that exit and a bounded tail. Both files
+ * are then copied to the evidence dir as files (build-<name>.log keeps its name). A failed copy
+ * leaves the returned tail in build-<name>.log instead, marked as such, and is recorded on the
+ * result; the build outcome is still decided by the recorded exit.
+ */
+export async function runBuildStep({ host, agent, name, step, runDir, localEvidence, fetch = fetchHostFile }) {
+  const logFile = joinFor(host.platform, runDir, 'build-logs', `build-${name}.log`);
+  const statusFile = joinFor(host.platform, runDir, 'build-logs', `build-${name}.status.json`);
+  const built = await agent.call('execLogged', { command: step.command, args: step.args, cwd: step.cwd, env: step.env, logFile, statusFile, deadlineMs: 4 * 3_600_000 });
+  const localLog = path.join(localEvidence, `build-${name}.log`);
+  const localStatus = path.join(localEvidence, `build-${name}.status.json`);
+  const fetchErrors = [];
+  try { await fetch(host, logFile, localLog); } catch (error) {
+    fetchErrors.push(`log: ${error?.message ?? error}`);
+    writeFileSync(localLog, `[full log copy failed: ${error?.message ?? error}; last lines returned by the agent follow]\n${built.tail}\n`);
+  }
+  try { await fetch(host, statusFile, localStatus); } catch (error) {
+    fetchErrors.push(`status: ${error?.message ?? error}`);
+    writeFileSync(localStatus, `${JSON.stringify({ ...built, tail: undefined, copyFailed: true }, null, 2)}\n`);
+  }
+  const ok = built.status === 0 && !built.signal && !built.timedOut && !built.error;
+  return { ...built, ok, localLog, localStatus, fetchErrors };
+}
+
+/** BUILD_FAILED detail: the recorded exit code, signal, timeout or spawn error. */
+export function buildFailureDetail(name, built) {
+  const parts = [`exit=${built.status}`, `signal=${built.signal ?? 'none'}`];
+  if (built.timedOut) parts.push('timedOut');
+  if (built.error) parts.push(`error=${built.error}`);
+  return `${name} ${parts.join(' ')}`;
+}
+
 /** Artifact descriptor for a built QA bundle (per platform layout of cargo tauri build --debug). */
 export function artifactPaths({ platform, targetDir, productName, name }) {
   const dbg = joinFor(platform, targetDir, 'debug');
@@ -265,10 +301,20 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
       if (text !== null) writeFileSync(path.join(localEvidence, `runlog-${name}`), text);
     }
   });
+  // The private sshd's remote-helper daemon outlives the session that started it (it daemonises
+  // outside the run dirs): record any not yet recorded before the kill, remove its root after.
+  await step('record-ssh-helper', async () => {
+    await agent.call('recordSshHelper', { hostId: sshHostId(summary.runId) });
+  });
   await step('kill-recorded', async () => {
     const t = await agent.call('teardownRecorded');
     summary.teardown.killed = t.killed.map((e) => ({ pid: e.pid, role: e.role }));
     summary.teardown.refused = t.refused;
+  });
+  await step('remove-ssh-helper-roots', async () => {
+    const r = await agent.call('removeSshHelperRoots');
+    summary.teardown.dirsRemoved.push(...(r?.removed ?? []).map((h) => h.root));
+    summary.teardown.leftovers.push(...(r?.kept ?? []).map((h) => ({ kind: 'ssh-helper-root', ...h })));
   });
   await step('remove-jobs', async () => {
     for (const name of await jobs.listQaJobs()) {
@@ -386,9 +432,10 @@ async function main() {
       if (!step) continue;
       assertQaBuild(step);
       if (name === 'baseline') await prepareBaselineDist({ host, agent, worktree: step.cwd });
-      const built = await agent.call('exec', { command: step.command, args: step.args, cwd: step.cwd, env: step.env, deadlineMs: 4 * 3_600_000 });
-      writeFileSync(path.join(localEvidence, `build-${name}.log`), `exit ${built.status}\n${built.stdout}\n${built.stderr}`);
-      if (built.status !== 0) throw new GuardError('BUILD_FAILED', `${name} exited ${built.status}`);
+      const built = await runBuildStep({ host, agent, name, step, runDir, localEvidence });
+      summary.builds = { ...(summary.builds ?? {}), [name]: { status: built.status, signal: built.signal, timedOut: built.timedOut, error: built.error, bytes: built.bytes, log: built.localLog, statusFile: built.localStatus, fetchErrors: built.fetchErrors } };
+      writeSummary();
+      if (!built.ok) throw new GuardError('BUILD_FAILED', buildFailureDetail(name, built));
       if (name === 'baseline') {
         artifacts.baseline = { name, daemonExecutable: joinFor(host.platform, step.env.CARGO_TARGET_DIR, 'debug', host.platform === 'windows' ? 'ferryx.exe' : 'ferryx') };
         continue;
