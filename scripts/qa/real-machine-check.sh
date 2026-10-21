@@ -42,8 +42,8 @@ case "${1:-}" in
 2. Click that pane and type a few characters. Do not wait.
 3. Immediately run, using that session id:
 
-   ferryx-cli agents send --session <id> --text 'echo should-not-run' --request-id gui-send-1 --json
-   ferryx-cli agents stop --session <id> --request-id gui-stop-1 --json
+   ferryx-cli agents send <id> 'echo should-not-run' --request-id gui-send-1 --json
+   ferryx-cli agents stop <id> --request-id gui-stop-1 --json
 
 4. Both commands must exit 4. The JSON code is CONTROL_CONFLICT.
    The pane must not show "should-not-run" and the process must still be alive.
@@ -84,7 +84,7 @@ On ${other}, the daemon must already be running. Do not restart it.
 2. On this machine, while ${other} is briefly firewalled:
    ferryx-cli agents list --json with the fleet hosts.
    The firewalled host's entry is stale and still shows its last sessions.
-3. ferryx-cli agents stop --host <other-host-id> --session <id> --request-id relay-stop-1 --json
+3. ferryx-cli agents stop <id> --host <other-host-id> --request-id relay-stop-1 --json
    Exit 0. On ${other}, the pane is still alive (stop is the interrupt key,
    not a kill) and its foreground program saw Esc.
 EOF
@@ -102,7 +102,7 @@ Restart is not required if the hub was already built with hub-slack; start
 1. From the owner Slack user, send a message in the wired channel.
    The meta pane must show it inside a ```untrusted fence with the origin.
 2. When a Claude or Codex card is up, click the approval button.
-   ferryx-cli agents read --session <id> --json shows the card answered, and
+   ferryx-cli agents read <id> --json shows the card answered, and
    the pane received the option keys. A click from any other Slack user is
    refused and types nothing.
 3. A reply posted with `ferryx-cli mcp` tool chat.reply appears in Slack.

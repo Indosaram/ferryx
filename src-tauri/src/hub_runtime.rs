@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ferryx_hub::agent_control::{AgentControl, AgentOp, TaskLauncher};
-use ferryx_hub::chat::session::SessionKey;
 use ferryx_hub::security::{auto_answer, AutoDecision, Reading};
 use ferryx_hub::sessions::watch::Observation;
 use ferryx_hub::{Hub, HubConfig, HubError};
@@ -158,10 +157,12 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     let watch_bridge = bridge.clone();
     tokio::spawn(async move {
         let mut answered = std::collections::HashSet::new();
+        let mut runs = std::collections::HashMap::new();
         loop {
             match events.recv().await {
                 Ok(observation) => {
-                    if let Err(error) = on_agent_event(&watch_hub, watch_bridge.as_ref(), &mut answered, observation).await {
+                    let run = state_run(&mut runs, &observation);
+                    if let Err(error) = on_agent_event(&watch_hub, watch_bridge.as_ref(), &mut answered, run, observation).await {
                         tracing::debug!(%error, "hub observer event was not applied");
                     }
                 }
@@ -235,10 +236,28 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     Ok(())
 }
 
+/// Sequence of the first observation in this session's current state run. A blocked pane
+/// re-observed while its screen redraws is the same run, so its notice keeps one dedupe key;
+/// each new run (a new turn, a new block) gets a new key.
+fn state_run(
+    runs: &mut std::collections::HashMap<String, (AgentControlState, Option<String>, u64)>,
+    observation: &crate::agent_control::events::AgentObservation,
+) -> u64 {
+    let current = (observation.state, observation.prompt_id.clone(), observation.sequence);
+    let entry = runs
+        .entry(observation.session_id.clone())
+        .or_insert_with(|| current.clone());
+    if entry.0 != current.0 || entry.1 != current.1 {
+        *entry = current;
+    }
+    entry.2
+}
+
 async fn on_agent_event(
-    hub: &Hub,
+    hub: &Arc<Hub>,
     control: &DaemonBridge,
     answered: &mut std::collections::HashSet<String>,
+    run: u64,
     observation: crate::agent_control::events::AgentObservation,
 ) -> Result<(), HubError> {
     let session_id = observation.session_id.clone();
@@ -259,7 +278,7 @@ async fn on_agent_event(
         machine: "local".into(),
         session_id: session_id.clone(),
         name: session_id.clone(),
-        message_count: observation.sequence,
+        message_count: run,
         streaming: matches!(observation.state, AgentControlState::Working),
         blocking_question: matches!(observation.state, AgentControlState::Blocked) && question.is_none(),
         question: question.clone(),
@@ -296,7 +315,7 @@ async fn on_agent_event(
                         .await;
                 }
                 AutoDecision::EscalateOwner => {
-                    let session = SessionKey::new("slack", None::<String>, "owner", None::<String>, "owner");
+                    let session = hub.owner_session();
                     let _ = ferryx_hub::chat::reply::chat_reply(
                         &hub.pool,
                         &session,
@@ -324,7 +343,12 @@ pub fn run_mcp() -> i32 {
     runtime.block_on(async {
         let bridge = Arc::new(DaemonBridge { client: DaemonClient::new() });
         let config = HubConfig::load().unwrap_or_default();
-        let path = ferryx_hub::hub::default_database_path();
+        // The same database the daemon's hub opened: the config file path wins, then
+        // FERRYX_HUB_DB, then the default.
+        let path = config.database_path.clone().unwrap_or_else(ferryx_hub::hub::default_database_path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let pool = match ferryx_hub::storage::connect(&path).await {
             Ok(pool) => pool,
             Err(error) => {

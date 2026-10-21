@@ -32,6 +32,8 @@ pub async fn serve(context: Arc<McpContext>) -> Result<()> {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
+            // A JSON-RPC notification (no id) is never answered.
+            Ok(request) if request.get("id").is_none() => continue,
             Ok(request) => dispatch(&context, &request).await,
             Err(error) => {
                 json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":error.to_string()}})
@@ -76,24 +78,53 @@ pub async fn dispatch(context: &McpContext, request: &Value) -> Value {
 }
 
 fn tool_list() -> Vec<Value> {
-    [
-        "agents.list",
-        "agents.read",
-        "agents.wait",
-        "agents.send",
-        "agents.answer",
-        "agents.stop",
-        "lane.list",
-        "lane.transition",
-        "lane.drive",
-        "tracker.issues",
-        "cron.list",
-        "cron.run",
-        "chat.reply",
-    ]
-    .into_iter()
-    .map(|name| json!({"name": name, "inputSchema": {"type": "object"}}))
-    .collect()
+    let session = json!({"type": "string", "description": "Pane session id from agents.list"});
+    let host = json!({"type": "string", "description": "Paired host id; omit for this machine"});
+    let request_id = json!({"type": "string", "description": "Idempotency key; reuse it when retrying the same input"});
+    let schema = |properties: Value, required: &[&str]| {
+        json!({"type": "object", "properties": properties, "required": required})
+    };
+    let tools: Vec<(&str, &str, Value)> = vec![
+        ("agents.list", "List agent panes and their state. Pass hosts to list a fleet.",
+            schema(json!({"host": host, "hosts": {"type": "array", "items": {"type": "string"}}}), &[])),
+        ("agents.read", "Read one pane: state, pending prompt, and screen text.",
+            schema(json!({"sessionId": session, "host": host}), &["sessionId"])),
+        ("agents.wait", "Block until the pane reaches a state after a cursor, without polling.",
+            schema(json!({"sessionId": session, "host": host,
+                "until": {"type": "string", "enum": ["working", "blocked", "idle", "prompt", "any"]},
+                "after": {"type": "integer", "description": "Sequence cursor from a previous result"},
+                "revision": {"type": "string", "description": "Wait for a screen revision other than this"},
+                "timeoutMs": {"type": "integer"}}), &["sessionId"])),
+        ("agents.send", "Type a line into the pane and press Enter. Refused if a person just typed.",
+            schema(json!({"sessionId": session, "host": host, "text": {"type": "string"}, "requestId": request_id}), &["sessionId", "text", "requestId"])),
+        ("agents.answer", "Answer the pending prompt from agents.read, checked against its screen revision.",
+            schema(json!({"sessionId": session, "host": host, "promptId": {"type": "string"},
+                "screenRevision": {"type": "string"},
+                "answer": {"type": "object", "description": "Exactly one of optionIndex, optionIndices, customText"},
+                "requestId": request_id}), &["sessionId", "promptId", "screenRevision", "answer", "requestId"])),
+        ("agents.stop", "Interrupt the agent's turn with its interrupt key. Never kills the process.",
+            schema(json!({"sessionId": session, "host": host, "requestId": request_id}), &["sessionId", "requestId"])),
+        ("lane.list", "List work lanes and their states.", schema(json!({}), &[])),
+        ("lane.transition", "Move a lane to another status.",
+            schema(json!({"key": {"type": "string"}, "status": {"type": "string"}, "reason": {"type": "string"}}), &["key", "status"])),
+        ("lane.drive", "Drive a lane one step: launch or nudge its pane.",
+            schema(json!({"key": {"type": "string"}}), &["key"])),
+        ("tracker.issues", "List tracker issues, or create one when title is given.",
+            schema(json!({"title": {"type": "string"}, "body": {"type": "string"}}), &[])),
+        ("cron.list", "List scheduled jobs.", schema(json!({}), &[])),
+        ("cron.run", "Run a stored job now. With script, store the job first.",
+            schema(json!({"id": {"type": "string"}, "name": {"type": "string"}, "script": {"type": "string"},
+                "target": {"type": "string", "description": "shell (default) or another cron target"}}), &["id"])),
+        ("chat.reply", "Post a reply to a chat channel. The text is yours; it is never copied from a screen.",
+            schema(json!({"platform": {"type": "string", "enum": ["slack", "discord"]}, "channelId": {"type": "string"},
+                "userId": {"type": "string"}, "text": {"type": "string"}}), &["channelId", "text"])),
+    ];
+    tools
+        .into_iter()
+        .map(|(name, description, input_schema)| {
+            json!({"name": name, "description": description, "inputSchema": input_schema})
+        })
+        .collect()
 }
 
 async fn call_tool(
