@@ -1141,12 +1141,14 @@ pub fn reference_history_page_from_window(
         },
         _ => None,
     };
-    let view: Vec<u8> = match &pi_segments {
-        Some(segments) => branch_bytes(bytes, segments),
-        None => bytes.to_vec(),
+    let view: std::borrow::Cow<'_, [u8]> = match &pi_segments {
+        Some(segments) => std::borrow::Cow::Owned(branch_bytes(bytes, segments)),
+        None => std::borrow::Cow::Borrowed(bytes),
     };
 
     let mut starts = reference_history_turn_starts(stream.kind, &view);
+    // Taken before the reset filter: the whole-stream generation below starts at this boundary.
+    let first_start = starts.first().copied();
     // A reset clears every turn before it: no page may start before it, so no cursor can reach
     // the cleared conversation.
     let reset = reference_history_reset_end(stream.kind, &view);
@@ -1254,7 +1256,7 @@ pub fn reference_history_page_from_window(
     // A tail window begins mid-stream, so what precedes its first boundary is a torn piece of an
     // older turn and is left out.
     let whole_from = if window_start > 0 {
-        reference_history_turn_starts(stream.kind, &view).first().copied().unwrap_or(0)
+        first_start.unwrap_or(0)
     } else {
         0
     };
@@ -1329,8 +1331,8 @@ pub fn reference_history_page_from_remote_bytes(
 
 /// Read one page of a local store, off the async reactor.
 ///
-/// The read is synchronous file I/O and is therefore handed to [`crate::ipc::run_blocking`]; the
-/// paging itself is pure and runs on the caller's thread.
+/// The read is synchronous file I/O and the paging parses the whole window, so both are handed
+/// to [`crate::ipc::run_blocking`].
 pub async fn read_reference_history_page(
     stream: &ReferenceHistoryStream,
     identity: &ReferenceHistoryIdentity,
@@ -1344,8 +1346,32 @@ pub async fn read_reference_history_page(
     };
     let path = path.to_path_buf();
     let kind = stream.kind;
-    let window = crate::ipc::run_blocking(move || {
-        Ok::<_, crate::ipc::error::IpcError>(read_reference_history_window(&path, kind))
+    let stream = stream.clone();
+    let identity = identity.clone();
+    let cursor = cursor.cloned();
+    crate::ipc::run_blocking(move || {
+        let page = (|| -> Result<ReferenceHistoryPage, ScopeError> {
+            // A pi store past the branch cap is disclosed like a branch past it: the pane shows
+            // its own output rather than an error that leaves it with nothing.
+            let window = match read_reference_history_window(&path, kind) {
+                Err(error)
+                    if kind == ReferenceNativeHistoryKind::Pi
+                        && error.code == ScopeErrorCode::PayloadTooLarge =>
+                {
+                    return Ok(unreadable_page(&stream, super::history_pi::PI_BRANCH_UNREADABLE));
+                }
+                other => other?,
+            };
+            reference_history_page_from_window(
+                &stream,
+                &identity,
+                window.start,
+                &window.bytes,
+                limit,
+                cursor.as_ref(),
+            )
+        })();
+        Ok::<_, crate::ipc::error::IpcError>(page)
     })
     .await
     .map_err(|error| {
@@ -1353,20 +1379,7 @@ pub async fn read_reference_history_page(
             ScopeErrorCode::Timeout,
             format!("the transcript read did not finish: {}", error.message),
         )
-    })?;
-    // A pi store past the branch cap is disclosed like a branch past it: the pane shows its own
-    // output rather than an error that leaves it with nothing.
-    let window = match window {
-        Err(error)
-            if kind == ReferenceNativeHistoryKind::Pi
-                && error.code == ScopeErrorCode::PayloadTooLarge =>
-        {
-            return Ok(unreadable_page(stream, super::history_pi::PI_BRANCH_UNREADABLE));
-        }
-        other => other?,
-    };
-
-    reference_history_page_from_window(stream, identity, window.start, &window.bytes, limit, cursor)
+    })?
 }
 
 fn scrollback_page(stream: &ReferenceHistoryStream) -> ReferenceHistoryPage {
