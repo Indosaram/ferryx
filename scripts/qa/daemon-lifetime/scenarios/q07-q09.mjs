@@ -7,7 +7,7 @@ import { HANDOVER_FAULTS, TRANSFER_FAULTS, FORCED_COMMIT_FAILURE } from '../lib/
 import { data as D, helloSupportsHandover, inventoryTotal } from '../lib/wire.mjs';
 import {
   evidence, dataConn, controlConn, ownerIdentity, nonceRoundTrip, assertInventoryKept, assertSameOwner,
-  retireOwner, freshOwner, nonce, counterCommand, interrupt, setAsideHeadCatalog, DAEMON_READY_TIMEOUT_MS, RESPAWN_BACKOFF_MS,
+  retireOwner, freshOwner, nonce, counterCommand, interrupt, setAsideHeadCatalog, requireOwner, DAEMON_READY_TIMEOUT_MS, RESPAWN_BACKOFF_MS,
 } from './common.mjs';
 import { surviveGuiEnd } from './q00-q03.mjs';
 import { startSshd, recordSshHelper } from '../lib/sshd.mjs';
@@ -26,6 +26,7 @@ async function readStages(ctx, from) {
 }
 
 export async function Q07(ctx, result) {
+  if (!requireOwner(ctx, result)) return;
   // A is the running generation; the on-disk app is replaced by B (same version, other bytes).
   const before = await ctx.state.conn.describe();
   const ownerBefore = await ownerIdentity(ctx);
@@ -219,6 +220,7 @@ async function faultVariant(ctx, result, fault, artifact, pair) {
 }
 
 export async function Q08(ctx, result) {
+  if (!requireOwner(ctx, result)) return;
   for (const hook of ['handoverCandidate', 'authorityTransfer']) {
     if (!ctx.hooks[hook]?.present) return block(result, 'HOOK_MISSING', ctx.hooks[hook].owner);
   }
@@ -258,6 +260,7 @@ export async function Q08(ctx, result) {
 }
 
 export async function Q08b(ctx, result) {
+  if (!requireOwner(ctx, result)) return;
   if (!ctx.artifacts.v1bump) return block(result, 'ARTIFACT_MISSING', 'handover_v1_rev build (tag daemon-lifetime-handover-v1) not available');
   for (const hook of ['protocolBump', ...(ctx.platform === 'windows' ? ['windowsPending'] : ['handoverCandidate', 'authorityTransfer'])]) {
     if (!ctx.hooks[hook]?.present) return block(result, 'HOOK_MISSING', ctx.hooks[hook].owner);
@@ -296,6 +299,7 @@ export async function Q08b(ctx, result) {
 }
 
 export async function Q09(ctx, result) {
+  if (!requireOwner(ctx, result)) return;
   for (const hook of ['protocolBump', 'windowsPending', 'disableControl']) {
     if (!ctx.hooks[hook]?.present) return block(result, 'HOOK_MISSING', ctx.hooks[hook].owner);
   }

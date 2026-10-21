@@ -3,7 +3,7 @@
 import path from 'node:path';
 import { hjoin } from '../lib/hostpath.mjs';
 import { assertion, block } from '../lib/summary.mjs';
-import { evidence, dataConn, ownerIdentity, seedLocalSession, nonceRoundTrip, assertInventoryKept, assertSameOwner, DAEMON_READY_TIMEOUT_MS } from './common.mjs';
+import { evidence, dataConn, ownerIdentity, seedLocalSession, nonceRoundTrip, assertInventoryKept, assertSameOwner, requireOwner, counterCommand, DAEMON_READY_TIMEOUT_MS } from './common.mjs';
 
 /** Launches GUI A and waits for its daemon to publish owner.json. */
 export async function launchGuiAndOwner(ctx, artifact = ctx.artifacts.A, opts = {}) {
@@ -70,13 +70,21 @@ export async function Q00(ctx, result) {
 
 /** Shared body of Q01-Q03: end the GUI one way, then prove daemon, children and sessions survived. */
 export async function surviveGuiEnd(ctx, result, how, artifact = ctx.artifacts.A) {
+  if (!requireOwner(ctx, result)) return;
   const conn = ctx.state.conn;
   const before = await conn.describe();
   const ownerBefore = await ownerIdentity(ctx);
   await evidence(ctx, result, 'before.json', { before, ownerBefore });
   const ended = await how(ctx.state.gui);
   await evidence(ctx, result, 'gui-end.json', ended);
-  assertion(result, 'GUI process exited', !ended?.timedOut && !(ended?.exited?.timedOut), ended);
+  const exited = assertion(result, 'GUI process exited', !ended?.timedOut && !(ended?.exited?.timedOut), ended);
+  if (!exited && ctx.state.gui) {
+    // A GUI that outlived its end must not survive into later scenarios (Q10b's no-GUI check):
+    // the identity-checked registry kill of the recorded pid ends it before the relaunch.
+    const exit = ctx.agent.call('waitExit', { pid: ctx.state.gui.pid, deadlineMs: 30_000 });
+    const killed = await ctx.agent.call('kill', { pid: ctx.state.gui.pid, signal: 'SIGKILL' }).catch((e) => ({ error: String(e?.message ?? e) }));
+    await evidence(ctx, result, 'gui-end-kill.json', { killed, exit: await exit });
+  }
   const ownerMid = await ownerIdentity(ctx);
   assertSameOwner(result, ownerBefore, ownerMid, 'after GUI end');
   const relaunch = await ctx.gui.launch(artifact);
@@ -91,7 +99,7 @@ export async function surviveGuiEnd(ctx, result, how, artifact = ctx.artifacts.A
   await conn.close();
   ctx.state.conn = conn2;
   // restart the counter so later scenarios see continuous output again
-  await conn2.call({ type: 'write', sessionId: ctx.state.localA, data: Buffer.from(ctx.platform === 'windows' ? 'for($i=0;;$i++){"QA_A_TICK_$i";Start-Sleep -Milliseconds 100}\r\n' : 'i=0; while :; do i=$((i+1)); echo QA_A_TICK_$i; sleep 0.1; done\n').toString('base64') });
+  await conn2.call({ type: 'write', sessionId: ctx.state.localA, data: Buffer.from(counterCommand(ctx.platform, 'QA_A')).toString('base64') });
 }
 
 export async function Q01(ctx, result) {

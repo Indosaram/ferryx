@@ -21,10 +21,68 @@ import { findSshHelpers, sshHostId } from './sshd.mjs';
 /**
  * An empty marker waits for any output; with visible, for output a person would see (a prompt,
  * not a bare terminal query such as ConPTY's ESC[6n); otherwise a substring.
+ * With promptAfter (a text offset), it waits for a PowerShell prompt that ends the output after
+ * that offset: the shell is reading a new line (nonceRoundTrip after Ctrl+C).
  */
-export function outputMatches(text, marker, visible = false) {
+export function outputMatches(text, marker, visible = false, promptAfter = null) {
+  if (promptAfter !== null) return endsAtPowerShellPrompt(text.slice(promptAfter));
   if (marker) return text.includes(marker);
   return visible ? visibleText(text).trim().length > 0 : text.length > 0;
+}
+
+/**
+ * True when the visible text ends at a PowerShell prompt (`PS <path>> `) with nothing typed and no
+ * continuation prompt (`>>`) after it; cursor-hide/show and colour sequences around it are ignored.
+ */
+export function endsAtPowerShellPrompt(text) {
+  const lines = visibleText(text).split('\n').map((l) => l.replace(/\r/g, '').trimEnd());
+  while (lines.length && lines.at(-1) === '') lines.pop();
+  return lines.length > 0 && /^PS [^>]*>$/.test(lines.at(-1));
+}
+
+/** Re-read cadence of waitLog besides its directory watch (Q13: a write with no change event). */
+export const LOG_POLL_MS = 250;
+
+/** Read errors waitLog treats as "not written yet": a writer's exclusive lock (Windows sshd -E: EBUSY), a share/permission denial while it is held (EPERM), or a file not created yet (ENOENT). */
+export const LOG_NOT_YET_CODES = Object.freeze(['EBUSY', 'EPERM', 'ENOENT']);
+
+/** waitLog's read: the file's text, '' for a not-yet error (run-r6d q11-only), any other error rethrown. */
+export function readLogText(file, read = (f) => readFileSync(f, 'utf8')) {
+  try {
+    return read(file);
+  } catch (error) {
+    if (LOG_NOT_YET_CODES.includes(error?.code)) return '';
+    throw error;
+  }
+}
+
+/**
+ * Resolves with the first match of re in read(), or null at deadlineMs. The file is re-read on every
+ * change event of its directory AND every pollMs: Windows defers or coalesces directory change
+ * notifications for a file whose writer keeps its handle open (the Q13 legacy daemon's redirected
+ * stdout, run-q00fix-all: the ready line was in the file, no event was seen). A deterministic
+ * bounded poll of the content is the fallback that cannot miss it.
+ */
+export function waitForContent({ read, re, deadlineMs, pollMs = LOG_POLL_MS, subscribe = () => () => {}, setTimer = setInterval, clearTimer = clearInterval }) {
+  return new Promise((resolve) => {
+    let done = false;
+    let unsubscribe = () => {};
+    let poll = null;
+    let deadline = null;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      unsubscribe();
+      if (poll !== null) clearTimer(poll);
+      if (deadline !== null) clearTimeout(deadline);
+      resolve(value);
+    };
+    const test = () => { const m = re.exec(read()); if (m) finish(m[0]); };
+    unsubscribe = subscribe(test);
+    poll = setTimer(test, pollMs);
+    deadline = setTimeout(() => finish(null), deadlineMs);
+    test();
+  });
 }
 
 /**
@@ -34,6 +92,9 @@ export function outputMatches(text, marker, visible = false) {
  */
 export function createOutputRoute({ platform, output, waiters, responder = new DsrResponder(), send }) {
   const replyErrors = [];
+  // Exit stream messages (protocol.rs StreamMsg::Exit { sessionId, exitCode }) per session.
+  const exits = new Map();
+  const exitWaiters = new Set();
   /** Answers the queries owed for a live frame at sequence, or for attach history (history: true). */
   const answer = (sessionId, text, sequence, { history = false } = {}) => {
     if (platform !== 'windows' || !sessionId) return 0;
@@ -44,6 +105,11 @@ export function createOutputRoute({ platform, output, waiters, responder = new D
     return owed;
   };
   const route = (m) => {
+    if (m.type === 'exit') {
+      if (m.sessionId) exits.set(m.sessionId, { exitCode: m.exitCode ?? null });
+      for (const w of [...exitWaiters]) if (w.sessionId === m.sessionId) { exitWaiters.delete(w); w.resolve(exits.get(m.sessionId)); }
+      return;
+    }
     if (m.type !== 'output') return;
     const sid = m.sessionId ?? '*';
     const text = Buffer.from(m.data, 'base64').toString();
@@ -51,10 +117,10 @@ export function createOutputRoute({ platform, output, waiters, responder = new D
     answer(m.sessionId, text, m.sequence);
     for (const w of [...waiters]) {
       const all = output.get(w.sessionId) ?? output.get('*') ?? '';
-      if (outputMatches(all, w.marker, w.visible)) { waiters.delete(w); w.resolve(all); }
+      if (outputMatches(all, w.marker, w.visible, w.promptAfter ?? null)) { waiters.delete(w); w.resolve(all); }
     }
   };
-  return { route, answer, responder, replyErrors };
+  return { route, answer, responder, replyErrors, exits, exitWaiters };
 }
 
 export function parseAgentArgs(argv) {
@@ -191,9 +257,9 @@ export function createAgent({ platform, runId, runDir, allowRoots = [], home = o
       const handle = nextHandle++;
       const output = new Map();
       const waiters = new Set();
-      const { route, answer, responder, replyErrors } = createOutputRoute({ platform, output, waiters, responder: dsr, send: (frame) => conn.call(frame) });
+      const { route, answer, responder, replyErrors, exits, exitWaiters } = createOutputRoute({ platform, output, waiters, responder: dsr, send: (frame) => conn.call(frame) });
       conn.onStream(route);
-      handles.set(handle, { conn, kind: 'data', output, waiters, responder, replyErrors, answer, runtimeDir, version, route, streams: new Map() });
+      handles.set(handle, { conn, kind: 'data', output, waiters, responder, replyErrors, answer, exits, exitWaiters, runtimeDir, version, route, streams: new Map() });
       return { handle, handshake };
     },
     controlOpen: async ({ runtimeDir }) => {
@@ -227,43 +293,44 @@ export function createAgent({ platform, runId, runDir, allowRoots = [], home = o
         // A visible-output waiter may already be satisfied by the history just stored.
         for (const w of [...h.waiters]) {
           const all = h.output.get(w.sessionId) ?? h.output.get('*') ?? '';
-          if (outputMatches(all, w.marker, w.visible)) { h.waiters.delete(w); w.resolve(all); }
+          if (outputMatches(all, w.marker, w.visible, w.promptAfter ?? null)) { h.waiters.delete(w); w.resolve(all); }
         }
       }
       return resp;
     },
-    waitOutput: async ({ handle, sessionId, marker, visible = false, deadlineMs = 15_000 }) => {
+    waitOutput: async ({ handle, sessionId, marker, visible = false, promptAfter = null, deadlineMs = 15_000 }) => {
       const h = handles.get(handle);
       const text = () => h.output.get(sessionId) ?? h.output.get('*') ?? '';
       const extra = () => ({ dsrReplies: h.responder.replies(sessionId), replyErrors: h.replyErrors.filter((e) => e.sessionId === sessionId) });
-      if (outputMatches(text(), marker, visible)) return { text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
+      if (outputMatches(text(), marker, visible, promptAfter)) return { text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
       try {
-        await withDeadline(new Promise((resolve) => h.waiters.add({ sessionId, marker, visible, resolve })), deadlineMs, `output ${marker}`);
+        await withDeadline(new Promise((resolve) => h.waiters.add({ sessionId, marker, visible, promptAfter, resolve })), deadlineMs, `output ${marker}`);
       } catch {
         return { timedOut: true, text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
       }
       return { text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
     },
     outputOf: async ({ handle, sessionId }) => handles.get(handle)?.output.get(sessionId) ?? '',
-    // Resolves when the file's content matches pattern (fs.watch on its directory).
+    // Resolves with the session's Exit stream message ({ exitCode }) or { timedOut } at the deadline.
+    waitSessionExit: async ({ handle, sessionId, deadlineMs = 15_000 }) => {
+      const h = handles.get(handle);
+      if (h.exits.has(sessionId)) return h.exits.get(sessionId);
+      let waiter;
+      try {
+        return await withDeadline(new Promise((resolve) => { waiter = { sessionId, resolve }; h.exitWaiters.add(waiter); }), deadlineMs, `exit ${sessionId}`);
+      } catch {
+        h.exitWaiters.delete(waiter);
+        return { timedOut: true };
+      }
+    },
+    // Resolves when the file's content matches pattern (directory change events plus a bounded poll).
     waitLog: async ({ file, pattern, flags = '', deadlineMs = 30_000 }) => {
       const re = new RegExp(pattern, flags);
       const dir = path.dirname(file);
       mkdirSync(dir, { recursive: true });
-      const read = () => (existsSync(file) ? readFileSync(file, 'utf8') : '');
-      let watcher;
-      const found = new Promise((resolve) => {
-        const test = () => { const m = re.exec(read()); if (m) resolve(m[0]); };
-        watcher = watch(dir, test);
-        test();
-      });
-      try {
-        return { matched: await withDeadline(found, deadlineMs, `log ${pattern}`) };
-      } catch {
-        return { matched: null, timedOut: true };
-      } finally {
-        watcher?.close();
-      }
+      const read = () => readLogText(file);
+      const matched = await waitForContent({ read, re, deadlineMs, subscribe: (test) => { const w = watch(dir, test); return () => w.close(); } });
+      return matched === null ? { matched: null, timedOut: true } : { matched };
     },
     // Resolves when <runtimeDir>/owner.json names a pid other than fromPid; reports every pid seen.
     waitOwnerChange: async ({ runtimeDir, fromPid, deadlineMs = 60_000 }) => {

@@ -1,6 +1,6 @@
 // OS-job queries and QA-scoped job actions, all through the host agent (which runs the guard).
 
-import { parseLaunchctlPrint, launchctlProgram, parseSystemctlShow, windowsTaskTree, parseScheduledTaskState } from './os-jobs.mjs';
+import { parseLaunchctlPrint, launchctlProgram, parseSystemctlShow, selectWindowsTree, parseScheduledTaskState } from './os-jobs.mjs';
 import { qaSupervisorName } from './guards.mjs';
 import { hjoin } from './hostpath.mjs';
 
@@ -36,13 +36,14 @@ export function createJobs({ host, agent, runId, layout, uid = null }) {
     return { state: st.state, pid: null, raw: q };
   }
 
-  /** Windows: the watchdog (--daemon-supervisor) running the staged executable and its daemon child. */
-  async function windowsTree(stagedRoot) {
+  /**
+   * Windows: the watchdog (--daemon-supervisor) running the staged executable and its daemon child.
+   * With ownerPid, the tree is the one whose daemon is that owner (selectWindowsTree).
+   */
+  async function windowsTree(stagedRoot, { ownerPid = null } = {}) {
     const rows = await agent.call('table');
     const under = rows.filter((r) => r.executable && r.executable.toLowerCase().startsWith(stagedRoot.toLowerCase()));
-    const watchdog = under.find((r) => /--daemon-supervisor/.test(r.commandLine));
-    if (!watchdog) return { watchdog: null, daemon: null, rows: under };
-    return { ...windowsTaskTree(under, { watchdogPid: watchdog.pid }), rows: under };
+    return { ...selectWindowsTree(under, { ownerPid }), rows: under };
   }
 
   /** Lists QA-named jobs of this run (for teardown and leftover checks). */
