@@ -66,15 +66,23 @@ export function SystemResourcesDialog({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     alive.current = true;
-    void refresh();
+    let cancelled = false;
+    let timer: number | undefined;
     // The daemon samples only when asked, so this panel owns the cadence: it re-asks while it is
-    // open and stops on unmount, which leaves an idle daemon with no collector to run.
-    const timer = window.setInterval(() => {
-      void refresh();
-    }, RESOURCE_SAMPLE_INTERVAL_MS);
+    // open and stops on unmount, which leaves an idle daemon with no collector to run. The next
+    // ask is scheduled only after the previous one settles, so slow samples never pile up.
+    const sample = async () => {
+      await refresh();
+      if (cancelled) return;
+      timer = window.setTimeout(() => {
+        void sample();
+      }, RESOURCE_SAMPLE_INTERVAL_MS);
+    };
+    void sample();
     return () => {
+      cancelled = true;
       alive.current = false;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [refresh]);
 

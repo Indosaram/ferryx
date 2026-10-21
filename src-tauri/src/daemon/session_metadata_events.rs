@@ -35,7 +35,7 @@ impl MetadataOwner {
             .feed(&history)
             .map_err(|_| "METADATA_PARSER_UNAVAILABLE")?;
         Ok(tokio::spawn(async move {
-            loop {
+            'owner: loop {
                 let title = if engine.take_title_changed() {
                     match engine.title() {
                         Ok(title) => Some(title),
@@ -63,33 +63,49 @@ impl MetadataOwner {
                     tracing::debug!(%error, "Machine metadata owner no longer available");
                     break;
                 }
-                match receiver.recv().await {
-                    Ok(bytes) => {
-                        if let Err(error) = engine.feed(&bytes) {
-                            tracing::warn!(%error, "Machine metadata parser failed");
+                // Feed every queued chunk in order, then refresh once for the whole batch.
+                let mut next = receiver.recv().await;
+                loop {
+                    match next {
+                        Ok(bytes) => {
+                            if let Err(error) = engine.feed(&bytes) {
+                                tracing::warn!(%error, "Machine metadata parser failed");
+                                break 'owner;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break 'owner,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            self.workspaces.machine_events.publish(
+                                "inventoryInvalidated",
+                                None,
+                                None,
+                                serde_json::json!({"completeness":"partial","reason":"metadataLag"}),
+                            );
+                            let Some((history, fresh)) =
+                                self.terminals.output_hub().subscribe(&target.session_id)
+                            else {
+                                break 'owner;
+                            };
+                            receiver = fresh;
+                            engine.reset();
+                            if let Err(error) = engine.feed(&history) {
+                                tracing::warn!(%error, "Machine metadata replay failed");
+                                break 'owner;
+                            }
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        self.workspaces.machine_events.publish(
-                            "inventoryInvalidated",
-                            None,
-                            None,
-                            serde_json::json!({"completeness":"partial","reason":"metadataLag"}),
-                        );
-                        let Some((history, fresh)) =
-                            self.terminals.output_hub().subscribe(&target.session_id)
-                        else {
-                            break;
-                        };
-                        receiver = fresh;
-                        engine.reset();
-                        if let Err(error) = engine.feed(&history) {
-                            tracing::warn!(%error, "Machine metadata replay failed");
-                            break;
+                    next = match receiver.try_recv() {
+                        Ok(bytes) => Ok(bytes),
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))
                         }
-                    }
+                        // Closed is reported by the next recv(), after this batch's refresh.
+                        Err(
+                            tokio::sync::broadcast::error::TryRecvError::Empty
+                            | tokio::sync::broadcast::error::TryRecvError::Closed,
+                        ) => break,
+                    };
                 }
             }
         }))
