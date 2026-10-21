@@ -215,12 +215,13 @@ it("migrates a single-host inventory and its scoped token without borrowing an o
   expect(store.getState().hosts[key].deviceToken).toBe("a-token");
 });
 
-it("parses fragment PIN and hints separately and keeps transport on the relay", async () => {
-  window.history.replaceState(null, "", "/#pair=123456&hints=" + encodeURIComponent("http://192.168.1.20:8787,https://evil.example"));
+it("ignores pairing fragments, filters query hints and keeps transport on the relay", async () => {
+  // QR pairing is retired: a #pair= fragment is inert and only query hints are read.
+  localStorage.setItem(`ferryx_remote_token_local:${window.location.origin}`, "paired");
+  window.history.replaceState(null, "", "/?hints=" + encodeURIComponent("http://192.168.1.20:8787,https://evil.example") + "#pair=123456");
   // The real gateway health route is unauthenticated and returns only { status, version }.
   // It therefore cannot prove the responder owns the paired machine identity.
   const fetcher = vi.fn(async (url: string, _init?: RequestInit) => {
-    if (url.includes("pair/exchange")) return new Response(JSON.stringify({ token: "paired" }));
     if (url.endsWith("/api/v1/health")) {
       return new Response(JSON.stringify({ status: "ok", version: "0.1.0" }), { status: 200 });
     }
@@ -229,10 +230,7 @@ it("parses fragment PIN and hints separately and keeps transport on the relay", 
   vi.stubGlobal("fetch", ticketed(fetcher));
   vi.stubGlobal("WebSocket", EventSocket);
   await act(async () => { render(<RemoteApp />); });
-  const pairing = fetcher.mock.calls.find(([url]) => url.includes("pair/exchange"));
-  expect(pairing).toBeDefined();
-  const init = (pairing as unknown as [string, RequestInit])[1];
-  expect(JSON.parse(init.body as string).code).toBe("123456");
+  expect(fetcher.mock.calls.some(([url]) => url.includes("pair/exchange"))).toBe(false);
   expect(fetcher.mock.calls.some(([url]) => url.includes("evil.example"))).toBe(false);
   expect(localStorage.getItem(`ferryx_remote_direct_candidates_local:${window.location.origin}`)).not.toContain("evil.example");
 
