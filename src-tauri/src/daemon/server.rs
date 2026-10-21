@@ -7262,7 +7262,7 @@ impl DaemonServer {
         session_id: String,
         rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
         hub: Arc<TerminalOutputHub>,
-        mut writer: W,
+        writer: W,
         agent_rx: Option<AgentStateSubscription>,
         client_reader: Option<R>,
     ) where
