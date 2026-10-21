@@ -217,6 +217,119 @@ export function attachedPattern(sessionId) {
   return `^(?=[^\\n]*"kind":"attached")(?=[^\\n]*"backendSessionId":"${sessionId}")[^\\n]*$`;
 }
 
+/**
+ * Wait for the restored tab's attach before and after one Escape. A fresh QA profile can open the
+ * first-run setup wizard (App.tsx shouldAutoOpenOnboarding): a role="dialog" that, off macOS,
+ * hides native surfaces (nativeTerminalVisibility.tsx), so no tab attaches while it is open. On
+ * Windows the notifications permission reports Unknown with an open-settings affordance, which
+ * keeps the permissions step pending (onboarding.ts visiblePermissionKeys), so it opens there
+ * (run-q11 Q11-attach-screenshot.png); on Linux that step is hidden. Escape is the wizard's
+ * "remind later" (WelcomeWizard.tsx handleKeyDown). It is sent only when no attach came, so no
+ * native terminal owns the key; one that reached the SSH session would fail the exact-log check.
+ */
+export const ATTACH_BEFORE_ESCAPE_MS = 20_000;
+export const ATTACH_AFTER_ESCAPE_MS = 40_000;
+export async function waitRestoredAttach(ctx, sid, gui) {
+  const wait = (deadlineMs) => ctx.agent.call('waitLog', { file: nativeEventsFile(ctx.layout), pattern: attachedPattern(sid), flags: 'm', deadlineMs });
+  const first = await wait(ATTACH_BEFORE_ESCAPE_MS);
+  if (first.matched) return { ...first, escapeSent: false, focus: null };
+  // The key must reach the GUI, not the window that holds the foreground (Windows: see gui.focus).
+  const focus = await ctx.gui.focus(gui);
+  await ctx.mahord.key('Escape');
+  return { ...(await wait(ATTACH_AFTER_ESCAPE_MS)), escapeSent: true, focus };
+}
+
+/**
+ * Windows: close the first-run setup wizard before any key is typed. On a fresh QA profile it
+ * always opens there (the notifications permission is Unknown with an open-settings affordance,
+ * onboarding.ts visiblePermissionKeys; nothing in the run persists a dismissal: Escape is
+ * "remind later", App.tsx onRemindLater), but it opens from a timer 1.2 s after mount
+ * (App.tsx shouldAutoOpenOnboarding effect), so it can land after the restored tab attached and
+ * cover the pane mid-typing (run-q11 all/Q11-switch-debug.jsonl: "which=dialog:Welcome to Ferryx"
+ * at 22:32:01.345, after the 13th key; the 14th was never echoed). The app has no flag a QA
+ * profile could set beforehand (the state is WebView localStorage), so the harness waits for the
+ * wizard's own event: the pane records terminal.surface.skipped naming the dialog
+ * (NativeTerminalPane.tsx) in the GUI's %TEMP%\ferryx-switch-debug.jsonl, and Q11 points TEMP at
+ * this run's own dir so no other run's lines can match. Escape goes to the GUI only after
+ * gui.focus; the pane's next visible gate.state proves the wizard closed. The wizard opens once per
+ * mount, so nothing can cover the pane after that. Elsewhere this is a no-op.
+ */
+export const WIZARD_OPEN_MS = 60_000;
+export const WIZARD_CLOSED_MS = 10_000;
+export const WIZARD_ESCAPE_SENDS = 3;
+export function expectsSetupWizard(platform) {
+  return platform === 'windows';
+}
+export function guiTempDir(layout) {
+  return hjoin(layout.root, 'gui-tmp');
+}
+export function wizardOpenPattern(pane) {
+  return `"terminal\\.surface\\.skipped"[^\\n]*"localSessionId":"${pane}"[^\\n]*which=dialog:Welcome to Ferryx`;
+}
+export function wizardClosedPattern(pane) {
+  return `which=dialog:Welcome to Ferryx[\\s\\S]*"terminal\\.surface\\.input\\.gate\\.state"[^\\n]*"paneIdentity":"${pane}"[^\\n]*"visible":true`;
+}
+export async function dismissSetupWizard(ctx, gui, pane) {
+  if (!expectsSetupWizard(ctx.platform)) return { expected: false };
+  const file = hjoin(guiTempDir(ctx.layout), 'ferryx-switch-debug.jsonl');
+  const opened = await ctx.agent.call('waitLog', { file, pattern: wizardOpenPattern(pane), deadlineMs: WIZARD_OPEN_MS });
+  if (!opened.matched) return { expected: true, opened: false, closed: false, escapes: 0 };
+  let closed = { matched: null };
+  let escapes = 0;
+  const focus = [];
+  // A lost Escape (MahoRD drops keys) leaves the pane covered, so it is resent (bounded).
+  while (!closed.matched && escapes < WIZARD_ESCAPE_SENDS) {
+    focus.push(await ctx.gui.focus(gui));
+    await ctx.mahord.key('Escape');
+    escapes += 1;
+    closed = await ctx.agent.call('waitLog', { file, pattern: wizardClosedPattern(pane), deadlineMs: WIZARD_CLOSED_MS });
+  }
+  return { expected: true, opened: true, closed: Boolean(closed.matched), escapes, focus };
+}
+
+/**
+ * What the GUI did instead of attaching, read when the attach receipt never came: every native
+ * receipt line, the saved session as the GUI left it, the GUI's boot trace and one screenshot.
+ * Read-only; a read that fails is recorded in place of its value.
+ */
+export async function attachDiagnostics(ctx, sessionFile) {
+  const read = async (file) => { try { return await ctx.agent.call('readFile', { file }); } catch (error) { return `READ_FAILED: ${error?.message ?? error}`; } };
+  const receipts = hjoin(path.posix.dirname(ctx.layout.barriers.replace(/\\/g, '/')), 'receipts');
+  const out = {
+    nativeEvents: await read(nativeEventsFile(ctx.layout)),
+    nativeCurrent: await read(hjoin(receipts, 'native-current.json')),
+    sessionState: await read(sessionFile),
+    bootTrace: await read(hjoin(ctx.layout.runtime, 'boot-trace.log')),
+    // A first v3 save over the seeded v2 file leaves session_state.json.pre-v3 next to it.
+    sessionsDir: await ctx.agent.call('exec', { command: 'node', args: ['-e', 'try{console.log(JSON.stringify(require("fs").readdirSync(process.argv[1])))}catch(e){console.log(JSON.stringify(String(e)))}', ctx.layout.sessions] }).then((r) => r.stdout?.trim() ?? null, (error) => `LIST_FAILED: ${error?.message ?? error}`),
+    screenshot: null,
+  };
+  if (ctx.mahord) {
+    try { out.screenshot = (await ctx.mahord.screenshot())?.toString('base64') ?? null; } catch (error) { out.screenshot = `SCREENSHOT_FAILED: ${error?.message ?? error}`; }
+  }
+  return out;
+}
+
+/**
+ * The remote line appender Q11 types into. Windows SSH sessions run %COMSPEC% (cmd.exe,
+ * ferryx_scope/ssh/helper.rs default_platform_login_shell), which has no cat, and ConPTY turns LF
+ * into Ctrl+Enter (run-r6c), so the POSIX line never ran and the marker was typed onto it
+ * (run-q11 only-q11-q13-r4: a file named ssh-input.logUNCERTAIN...). On Windows a PowerShell
+ * loop appends each line read from the console, ends with CR, and prints a ready sentinel built
+ * from two halves so the echoed command line cannot match it. Elsewhere: cat, unchanged.
+ */
+export const APPENDER_READY = 'Q11APPENDREADY';
+export const APPENDER_READY_MS = 30_000;
+export function appenderCommand(platform, file) {
+  if (platform !== 'windows') return `cat >> ${file}\n`;
+  return `powershell -NoProfile -Command "Write-Output ('Q11APPEND' + 'READY'); while ($true) { $l = [Console]::ReadLine(); if ($null -eq $l) { break }; Add-Content -LiteralPath '${file}' -Value $l }"${enterKey(platform)}`;
+}
+
+/** The appended lines with CRLF (Add-Content on Windows) read as LF. */
+export function appendedText(text) {
+  return String(text ?? '').replace(/\r\n/g, '\n');
+}
+
 export async function Q11(ctx, result) {
   if (!requireOwner(ctx, result)) return;
   if (!ctx.hooks.writeAckHoldArm?.present) return block(result, 'HOOK_MISSING', ctx.hooks.writeAckHoldArm.owner);
@@ -232,7 +345,12 @@ export async function Q11(ctx, result) {
   const incarnation = spawned.session?.incarnation ?? null;
   const input = hjoin(ctx.sshd.repoRoot, 'ssh-input.log');
   await conn.call(D.attach(sid, 0));
-  await conn.call(D.write(sid, `cat >> ${input}\n`));
+  const appenderSince = await conn.outputLength(sid);
+  await conn.call(D.write(sid, appenderCommand(ctx.platform, input)));
+  if (ctx.platform === 'windows') {
+    const ready = await conn.waitOutput(sid, APPENDER_READY, APPENDER_READY_MS, { since: appenderSince });
+    if (!assertion(result, 'the remote line appender is running in the SSH session', !ready.timedOut, { timedOut: Boolean(ready.timedOut) })) return;
+  }
   const before = await conn.describe();
   const sBefore = before.sessions.find((s) => s.backendId === sid);
   await evidence(ctx, result, 'before.json', before);
@@ -256,16 +374,32 @@ export async function Q11(ctx, result) {
   await evidence(ctx, result, 'restore-session.json', seeded);
   // The operation id lets the GUI write its native attach receipts (qa_barrier.rs validate_native_tuple).
   const op = `q11-${ctx.runId}`;
-  ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A, { env: { FERRYX_QA_OPERATION_ID: op } });
-  const attached = await ctx.agent.call('waitLog', { file: nativeEventsFile(ctx.layout), pattern: attachedPattern(sid), flags: 'm', deadlineMs: 60_000 });
+  const pane = `q11-pane-${ctx.runId}`;
+  const guiEnv = { FERRYX_QA_OPERATION_ID: op };
+  if (expectsSetupWizard(ctx.platform)) {
+    // Rust std::env::temp_dir (GetTempPath2) reads TMP, then TEMP: the GUI's switch-debug log lands here.
+    await ctx.agent.call('mkdir', { dir: guiTempDir(ctx.layout) });
+    guiEnv.TMP = guiTempDir(ctx.layout);
+    guiEnv.TEMP = guiTempDir(ctx.layout);
+  }
+  ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A, { env: guiEnv });
+  const wizard = await dismissSetupWizard(ctx, ctx.state.gui, pane);
+  if (wizard.expected && !assertion(result, 'the first-run setup wizard opened and was closed before any key was typed', wizard.opened && wizard.closed, wizard)) return;
+  const attached = await waitRestoredAttach(ctx, sid, ctx.state.gui);
   let tuple = null;
   try { tuple = attached.matched ? JSON.parse(attached.matched).attachTuple : null; } catch { tuple = null; }
-  if (!assertion(result, 'a GUI tab is attached to the SSH session (native attach receipt)', tuple?.backendSessionId === sid && tuple?.incarnation === incarnation, { tuple, incarnation, attached })) return;
+  if (!assertion(result, 'a GUI tab is attached to the SSH session (native attach receipt)', tuple?.backendSessionId === sid && tuple?.incarnation === incarnation, { tuple, incarnation, attached })) {
+    await evidence(ctx, result, 'attach-diagnostics.json', await attachDiagnostics(ctx, sessionFile));
+    return;
+  }
   // Type the marker into that tab. The remote tty echoes it, which proves the keystrokes reached
   // this session; cat has not read it yet (canonical mode holds the line until Enter). MahoRD drops
   // keys from a typed burst on omarchy (lib/typeverified.mjs), so each key is confirmed by its echo.
   const marker = nonce('UNCERTAIN').replace('_', '');
   const since = await conn.outputLength(sid);
+  // Keys go to the foreground window: make it the GUI that attached (Windows: gui.focus).
+  const focused = await ctx.gui.focus(ctx.state.gui);
+  await evidence(ctx, result, 'focus.json', { beforeEscape: attached.focus ?? null, beforeTyping: focused });
   let typed;
   try {
     typed = await typeVerified({ mahord: ctx.mahord, text: marker, waitEcho: (prefix, ms) => conn.waitOutput(sid, prefix, ms, { since }) });
@@ -306,8 +440,11 @@ export async function Q11(ctx, result) {
   await evidence(ctx, result, 'after.json', { after, quit });
   assertion(result, 'same backend id and remote_pid after GUI quit/relaunch', sAfter?.remotePid === sBefore?.remotePid && isLive(sAfter), sAfter);
   await interrupt(conn2, sid);
-  const log = await ctx.agent.call('exec', { command: 'ssh', args: ['-i', ctx.sshd.clientKey, '-o', `UserKnownHostsFile=${ctx.sshd.knownHosts}`, '-o', 'BatchMode=yes', '-p', String(ctx.sshd.port), `${ctx.sshd.user}@127.0.0.1`, `cat ${input}`] });
-  await evidence(ctx, result, 'ssh-input.log', log.stdout);
+  // The private sshd listens on the agent's own host (127.0.0.1), so the file the SSH session
+  // appended to is read where it lies; no shell-specific read command (cmd.exe has no cat).
+  const raw = await ctx.agent.call('readFile', { file: input });
+  const log = { stdout: appendedText(raw) };
+  await evidence(ctx, result, 'ssh-input.log', raw ?? '');
   const count = log.stdout.split(marker).length - 1;
   assertion(result, 'remote log contains the marker exactly once (no replay of the uncertain write)', count === 1, count);
   assertion(result, 'remote log holds only the committed marker line (the held Enter was not replayed)', log.stdout === `${marker}\n`, JSON.stringify(log.stdout));
@@ -462,7 +599,8 @@ export async function Q13(ctx, result) {
   const guiLog = hjoin(ctx.layout.logs, `gui-${gui.tag}.log`);
   await ctx.agent.call('waitLog', { file: guiLog, pattern: 'legacy|attached|handshake', flags: 'i', deadlineMs: DAEMON_READY_TIMEOUT_MS });
   await conn.call(D.attach(sp.sessionId, 0));
-  await nonceRoundTrip(ctx, conn, sp.sessionId, result, 'legacy session usable with the new GUI attached');
+  // Spawned just above with nothing typed into it: the only session that can be before its first prompt.
+  await nonceRoundTrip(ctx, conn, sp.sessionId, result, 'legacy session usable with the new GUI attached', { freshShell: true });
   const legacyAfter = await ctx.agent.call('probe', { pid: legacyPid });
   assertion(result, 'legacy pid and start time unchanged', legacyBefore && legacyAfter && String(legacyBefore.startTime) === String(legacyAfter.startTime), { legacyBefore, legacyAfter });
   const legacyJob = await ctx.jobs.inspect(null);

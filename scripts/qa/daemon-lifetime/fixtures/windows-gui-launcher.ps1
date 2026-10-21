@@ -30,6 +30,10 @@ public static class QaJob {
   [DllImport("kernel32.dll")] public static extern bool TerminateJobObject(IntPtr j, uint c);
   [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint a, bool i, int pid);
   [DllImport("kernel32.dll")] public static extern bool SetInformationJobObject(IntPtr j, int c, IntPtr info, uint len);
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   // JOBOBJECT_EXTENDED_LIMIT_INFORMATION (class 9) is 144 bytes on x64; LimitFlags is the u32 at
   // byte 16. KILL_ON_JOB_CLOSE (0x2000) alone sets neither BREAKAWAY_OK nor SILENT_BREAKAWAY_OK.
   public static bool ForbidBreakaway(IntPtr j) {
@@ -76,6 +80,11 @@ Move-Item -Force "$out.tmp" $out
 $request = Join-Path $RunDir "gui-$Tag.terminate.request"
 $closeRequest = Join-Path $RunDir "gui-$Tag.close.request"
 $closeHandled = $false
+# rect.request: the GUI main window's rect in physical pixels (MahoRD's frame) and the foreground
+# window, so the harness can click the GUI's own title bar before a key (lib/gui.mjs focus).
+$rectRequest = Join-Path $RunDir "gui-$Tag.rect.request"
+$rectSeq = 0
+$null = [QaJob]::SetProcessDPIAware()
 $watcher = New-Object System.IO.FileSystemWatcher $RunDir, "gui-$Tag.*.request"
 $watcher.EnableRaisingEvents = $true
 while (-not $proc.HasExited) {
@@ -89,6 +98,18 @@ while (-not $proc.HasExited) {
     $proc.Refresh()
     $sent = $proc.CloseMainWindow()
     Set-Content -Path (Join-Path $RunDir "gui-$Tag.closed.json") -Value ([ordered]@{ closeMainWindow = $sent; mainWindowHandle = [int64]$proc.MainWindowHandle } | ConvertTo-Json -Compress)
+  }
+  if (Test-Path $rectRequest) {
+    $seq = [int](Get-Content -Raw -Path $rectRequest)
+    if ($seq -gt $rectSeq) {
+      $rectSeq = $seq
+      $proc.Refresh()
+      $h = $proc.MainWindowHandle
+      $r = New-Object QaJob+RECT
+      $ok = [QaJob]::GetWindowRect($h, [ref]$r)
+      [ordered]@{ seq = $seq; ok = $ok; hwnd = [int64]$h; foreground = [int64][QaJob]::GetForegroundWindow(); left = $r.Left; top = $r.Top; right = $r.Right; bottom = $r.Bottom } | ConvertTo-Json -Compress | Set-Content -Path (Join-Path $RunDir "gui-$Tag.rect.json.tmp")
+      Move-Item -Force (Join-Path $RunDir "gui-$Tag.rect.json.tmp") (Join-Path $RunDir "gui-$Tag.rect.json")
+    }
   }
   # Bounded wait: a request written between Test-Path and here is seen on the next pass.
   $null = $watcher.WaitForChanged([System.IO.WatcherChangeTypes]::Created, 1000)

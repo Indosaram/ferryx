@@ -4,7 +4,7 @@ import { selectWindowsTree } from './lib/os-jobs.mjs';
 import { createJobs } from './lib/jobs.mjs';
 import { sshdArgs, sshdConfig, startSshd, BANNER_PROBE_SCRIPT } from './lib/sshd.mjs';
 import { createOutputRoute, waitForContent, readLogText, LOG_NOT_YET_CODES } from './lib/agent.mjs';
-import { createGuiDriver, windowsLaunchCmdContent, windowsLaunchFiles, windowsCloseFiles, lastObserverRecord, isExplorerDialogForeground, GO_WAIT_SECONDS } from './lib/gui.mjs';
+import { createGuiDriver, windowsLaunchCmdContent, windowsLaunchFiles, windowsCloseFiles, windowsRectFiles, titleBarPoint, lastObserverRecord, isExplorerDialogForeground, GO_WAIT_SECONDS } from './lib/gui.mjs';
 import { isolationLayout } from './lib/guards.mjs';
 import { requireOwner, nonceRoundTrip, hasShownPrompt, FIRST_PROMPT_MS } from './scenarios/common.mjs';
 import { legacyDaemonRows, recordLegacyJobProcess, SESSION_EXIT_TIMEOUT_MS } from './scenarios/q10-q13.mjs';
@@ -705,12 +705,21 @@ test('Q13: hasShownPrompt sees a PowerShell prompt line, not a bare DSR or banne
 function roundTripWorld({ history, promptArrives = true }) {
   const order = [];
   let text = history;
+  // pwsh after Ctrl+C: the prompt the probe waits for is the one its Enter prints, after the offset.
+  let probed = null;
   const conn = {
-    call: async (m) => { order.push(m.type === 'write' ? (Buffer.from(m.data, 'base64').toString() === '\u0003' ? 'ctrlC' : 'write') : m.type); if (m.type === 'write' && Buffer.from(m.data, 'base64').toString() !== '\u0003') text += 'NONCE_X\r\n'; return m.type === 'attach' ? { type: 'attachOk' } : { type: 'writeOk' }; },
+    call: async (m) => {
+      const data = m.type === 'write' ? Buffer.from(m.data, 'base64').toString() : null;
+      order.push(m.type === 'write' ? (data === '\u0003' ? 'ctrlC' : data === '\r' ? 'enter' : 'write') : m.type);
+      if (data === '\u0003') text += '^C\r\n';
+      else if (data === '\r') { probed = text.length; text += 'PS C:\\repo> '; }
+      else if (data !== null) text += 'NONCE_X\r\n';
+      return m.type === 'attach' ? { type: 'attachOk' } : { type: 'writeOk' };
+    },
     outputOf: async () => text,
     waitOutput: async (_sid, marker, deadlineMs, { promptAfter = null } = {}) => {
       if (promptAfter === 0) { order.push(`firstPrompt:${deadlineMs}`); if (!promptArrives) return { timedOut: true, text }; text += 'PS C:\\repo> '; return { text }; }
-      if (promptAfter !== null) { order.push('freshPrompt'); text += '^C\r\nPS C:\\repo> '; return { text }; }
+      if (promptAfter !== null) { order.push('freshPrompt'); return probed !== null && probed >= promptAfter ? { text } : { timedOut: true, text }; }
       return { text, count: 1 };
     },
     describe: async () => ({}),
@@ -721,7 +730,7 @@ function roundTripWorld({ history, promptArrives = true }) {
 test('Q13: a never-prompted Windows session waits for its first prompt, then types without Ctrl+C', async () => {
   const { conn, order } = roundTripWorld({ history: '\x1b[6n\x1b[?9001h' });
   const result = { assertions: [] };
-  await nonceRoundTrip({ platform: 'windows' }, conn, 's1', result, 'legacy');
+  await nonceRoundTrip({ platform: 'windows' }, conn, 's1', result, 'legacy', { freshShell: true });
   assert.deepEqual(order.slice(0, 3), ['attach', `firstPrompt:${FIRST_PROMPT_MS}`, 'write']);
   assert.ok(!order.includes('ctrlC') && !order.includes('freshPrompt'));
   assert.ok(result.assertions.find((a) => a.name === 'legacy: first prompt before Ctrl+C')?.ok);
@@ -732,19 +741,80 @@ test('Q13: a session that already prompted (counter running) goes straight to Ct
   const { conn, order } = roundTripWorld({ history: 'PS C:\\repo> while(1){}\r\nQA_TICK_2\r\n' });
   const result = { assertions: [] };
   await nonceRoundTrip({ platform: 'windows' }, conn, 's1', result, 'reattached');
-  assert.deepEqual(order.slice(0, 2), ['attach', 'ctrlC']);
+  assert.deepEqual(order.slice(0, 5), ['attach', 'ctrlC', 'enter', 'freshPrompt', 'write']);
   assert.ok(!result.assertions.some((a) => /first prompt/.test(a.name)));
+});
+
+test('Q01: a reattached session whose replay holds only counter ticks is probed with Enter, never waited on for a first prompt (run-q11 all)', async () => {
+  // The measured replay tail of Q01's reattached QA_A session: ticks only, no PS line.
+  const { conn, order } = roundTripWorld({ history: 'QA_A_TICK_304\r\nQA_A_TICK_305\r\nQA_A_TICK_317\r\n' });
+  const result = { assertions: [] };
+  await nonceRoundTrip({ platform: 'windows' }, conn, 's1', result, 'reattached session');
+  assert.deepEqual(order.slice(0, 5), ['attach', 'ctrlC', 'enter', 'freshPrompt', 'write']);
+  assert.ok(!order.some((o) => String(o).startsWith('firstPrompt')));
+  assert.deepEqual(result.assertions.filter((a) => !a.ok), []);
+  assert.ok(result.assertions.find((a) => a.name === 'reattached session: fresh prompt after Ctrl+C')?.ok);
+});
+
+test('Q01: a prompt printed before the probe offset does not count as the fresh prompt', async () => {
+  const w = roundTripWorld({ history: 'PS C:\\repo> for(;;){}\r\nQA_A_TICK_1\r\n' });
+  const silent = { ...w.conn, call: async (m) => (m.type === 'write' && Buffer.from(m.data, 'base64').toString() === '\r' ? { type: 'writeOk' } : w.conn.call(m)) };
+  const result = { assertions: [] };
+  await nonceRoundTrip({ platform: 'windows' }, silent, 's1', result, 'reattached');
+  assert.equal(result.assertions.find((a) => a.name === 'reattached: fresh prompt after Ctrl+C')?.ok, false);
 });
 
 test('Q13: no first prompt is a failed assertion, never a hang; Linux never waits', async () => {
   const w = roundTripWorld({ history: '\x1b[6n', promptArrives: false });
   const result = { assertions: [] };
-  await nonceRoundTrip({ platform: 'windows' }, w.conn, 's1', result, 'legacy');
+  await nonceRoundTrip({ platform: 'windows' }, w.conn, 's1', result, 'legacy', { freshShell: true });
   assert.equal(result.assertions.find((a) => a.name === 'legacy: first prompt before Ctrl+C')?.ok, false);
   const l = roundTripWorld({ history: '' });
-  await nonceRoundTrip({ platform: 'linux' }, l.conn, 's1', { assertions: [] }, 'x');
+  await nonceRoundTrip({ platform: 'linux' }, l.conn, 's1', { assertions: [] }, 'x', { freshShell: true });
   assert.ok(!l.order.some((o) => String(o).startsWith('firstPrompt')));
+  assert.ok(!l.order.includes('enter'), 'Linux sends no prompt probe');
 });
+
+/**
+ * run-q11 only-q11-q13-r2 (Q11-attach-screenshot.png): the GUI opened behind the console of its
+ * launch .cmd, so MahoRD's Escape went to the console. gui.focus asks the launcher for the GUI's
+ * window rect and the foreground hwnd and clicks the GUI's own title bar only when they differ.
+ */
+function rectDesktop({ foregroundAfterClick }) {
+  const layout = isolationLayout('C:\\r', 'windows');
+  const clicks = [];
+  let foreground = 111;
+  let answer = null;
+  const rect = { ok: true, hwnd: 222, left: 100, top: 50, right: 1700, bottom: 1050 };
+  const agent = { call: async (m, p = {}) => {
+    if (m === 'writeFile' && p.file === windowsRectFiles(layout, 'g2').request) { answer = JSON.stringify({ seq: Number(p.content), ...rect, foreground }); return true; }
+    if (m === 'waitLog' && p.file === windowsRectFiles(layout, 'g2').answer) return new RegExp(p.pattern).test(answer ?? '') ? { matched: answer } : { matched: null, timedOut: true };
+    if (m === 'readFile' && p.file === windowsRectFiles(layout, 'g2').answer) return answer;
+    throw new Error(`unexpected agent call ${m} ${p.file ?? ''}`);
+  } };
+  const mahord = { click: async (x, y) => { clicks.push([x, y]); if (foregroundAfterClick) foreground = rect.hwnd; } };
+  const gui = createGuiDriver({ host: { platform: 'windows' }, agent, runId: RUN, layout, allowedRoots: ['C:\\r'], forbidden: [], mahord });
+  return { gui, clicks, setForeground: (h) => { foreground = h; } };
+}
+
+test('Windows gui.focus clicks the GUI title bar when another window holds the foreground, and proves it after', async () => {
+  const d = rectDesktop({ foregroundAfterClick: true });
+  const r = await d.gui.focus({ tag: 'g2', pid: 9 });
+  assert.equal(r.focused, true);
+  assert.deepEqual(d.clicks, [[300, 62]]);
+  assert.deepEqual(titleBarPoint({ left: 100, top: 50, right: 1700 }), { x: 300, y: 62 });
+  const stuck = rectDesktop({ foregroundAfterClick: false });
+  assert.equal((await stuck.gui.focus({ tag: 'g2', pid: 9 })).focused, false, 'a click that did not take the foreground is reported, not assumed');
+  const already = rectDesktop({ foregroundAfterClick: false });
+  already.setForeground(222);
+  const a = await already.gui.focus({ tag: 'g2', pid: 9 });
+  assert.deepEqual([a.focused, already.clicks.length], [true, 0]);
+  const ps1 = readFileSync(new URL('./fixtures/windows-gui-launcher.ps1', import.meta.url), 'utf8');
+  assert.match(ps1, /"gui-\$Tag\.rect\.request"/);
+  assert.match(ps1, /GetForegroundWindow\(\)/);
+  assert.match(ps1, /"gui-\$Tag\.rect\.json"/);
+});
+
 
 
 

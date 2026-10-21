@@ -325,8 +325,11 @@ export async function interrupt(conn, sessionId) {
 /** Wait for the shell's fresh prompt after Ctrl+C (Windows: PowerShell prompt; elsewhere none). */
 export const PROMPT_AFTER_INTERRUPT_MS = 10_000;
 
-/** Wait for a never-prompted Windows session's first prompt before Ctrl+C (pwsh cold start). */
+/** Wait for a never-prompted fresh Windows shell's first prompt (pwsh cold start). */
 export const FIRST_PROMPT_MS = 30_000;
+
+/** Enter typed at the shell after Ctrl+C: its own fresh prompt is what the probe waits for. */
+export const FRESH_PROMPT_PROBE = '\r';
 
 /** True once the session's output has shown a PowerShell prompt line (`PS <path>>`) anywhere. */
 export function hasShownPrompt(text) {
@@ -338,12 +341,20 @@ export function hasShownPrompt(text) {
  * The daemon sends output only on a connection that attached the session (server.rs Attach ->
  * pump_session_stream); a data connection opened after a GUI quit/relaunch has no stream yet, so
  * attach first. The agent gives each attach its own stream connection (agent.mjs call()).
+ *
+ * freshShell: the caller spawned this session itself and typed nothing into it (Q13's legacy
+ * spawn). Only such a shell can still be before its first prompt, where a Ctrl+C ends pwsh, so only
+ * it waits for that prompt. Any other session already ran the harness's counter, so it prompted
+ * long ago, but its replayed output need not show it: a reattach replays only the ring tail, all
+ * counter ticks (run-q11 all Q01: tail QA_A_TICK_304..317, no PS line, the first-prompt wait
+ * timed out). Those are interrupted, then probed: Enter typed after an offset, and the prompt it
+ * prints after that offset is the shell reading a new line.
  */
-export async function nonceRoundTrip(ctx, conn, sessionId, result, label) {
+export async function nonceRoundTrip(ctx, conn, sessionId, result, label, { freshShell = false } = {}) {
   const attached = await conn.call(D.attach(sessionId, 0));
   assertion(result, `${label}: attach accepted`, attached?.type === 'attachOk', attached?.type === 'attachOk' ? 'attachOk' : attached);
   let idleAtFirstPrompt = false;
-  if (ctx.platform === 'windows' && !hasShownPrompt(await conn.outputOf(sessionId))) {
+  if (ctx.platform === 'windows' && freshShell && !hasShownPrompt(await conn.outputOf(sessionId))) {
     // A Ctrl+C that reaches pwsh before its first prompt ends the shell (run-r6d q13-probe
     // out-task-noprompt-30000: exit 270 ms after Ctrl+C, then SESSION_NOT_FOUND on the write),
     // which is Q13's "legacy session not found". Only a session that never prompted waits here.
@@ -353,13 +364,14 @@ export async function nonceRoundTrip(ctx, conn, sessionId, result, label) {
     // nothing to wait on (run-r6d q13-only: empty tail, then the echo passed). Type directly.
     idleAtFirstPrompt = !first.timedOut;
   }
-  const before = ctx.platform === 'windows' ? String(await conn.outputOf(sessionId) ?? '').length : 0;
   if (!idleAtFirstPrompt) await interrupt(conn, sessionId);
   if (ctx.platform === 'windows' && !idleAtFirstPrompt) {
     // Type the echo only at a fresh prompt: the Ctrl+C has ended the counter and PowerShell is
     // reading a new line (run-r6b Q01/Q02 typed into the loop's tail and hit a `>>` line).
-    const prompt = await conn.waitOutput(sessionId, '', PROMPT_AFTER_INTERRUPT_MS, { promptAfter: before });
-    assertion(result, `${label}: fresh prompt after Ctrl+C`, !prompt.timedOut, { timedOut: Boolean(prompt.timedOut), tail: visibleText(String(prompt.text ?? '').slice(before)).slice(-200) });
+    const since = String(await conn.outputOf(sessionId) ?? '').length;
+    await conn.call(D.write(sessionId, FRESH_PROMPT_PROBE));
+    const prompt = await conn.waitOutput(sessionId, '', PROMPT_AFTER_INTERRUPT_MS, { promptAfter: since });
+    assertion(result, `${label}: fresh prompt after Ctrl+C`, !prompt.timedOut, { timedOut: Boolean(prompt.timedOut), since, tail: visibleText(String(prompt.text ?? '').slice(since)).slice(-200) });
   }
   const marker = nonce('NONCE');
   const w = await conn.call(D.write(sessionId, echoCommand(ctx.platform, marker)));
