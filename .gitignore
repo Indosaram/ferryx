@@ -29,3 +29,9 @@ Thumbs.db
 
 # Video production belongs in the separate private repository.
 /videos/
+
+# Mobile generated SDK projects and build outputs
+ui/dist-mobile/
+mobile/src-tauri/gen/
+!/mobile/src-tauri/Cargo.lock
+mobile/src-tauri/.tauri/

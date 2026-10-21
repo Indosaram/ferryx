@@ -1,8 +1,9 @@
+import { isDesktopShell } from "./clientRuntime";
 import type { DagRunSnapshot } from "./dagTypes";
 import type { RunTarget } from "./scopedContracts";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken, RemoteClient, type RemotePreferenceTarget } from "./remoteClient";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri as isTauriShell } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { switchDebug } from "./switchDebug";
 import { shortcutContext, traceShortcutAction } from "./shortcutDiagnostics";
@@ -217,6 +218,10 @@ export type TerminalDescribeResult = {
   /** Whether this describes a paired proxy actor whose running=false is connection loss (INV-4). */
   isPairedProxy?: boolean | null;
 };
+
+function isTauri() {
+  return isDesktopShell(isTauriShell());
+}
 
 export function isTauriRuntime() {
   return isTauri();

@@ -1,3 +1,4 @@
+import { isDesktopShell, isMobileCompanion } from "./lib/clientRuntime";
 import "./lib/uuid";
 import React from "react";
 import ReactDOM from "react-dom/client";
@@ -21,7 +22,7 @@ if (import.meta.env.DEV && import.meta.env.VITE_DISABLE_REACT_DEVTOOLS !== "1") 
   void import("react-scan");
 }
 
-const isTauriApp = typeof window !== "undefined" && Boolean((window as any).__TAURI_INTERNALS__);
+const isTauriApp = isDesktopShell(typeof window !== "undefined" && Boolean((window as any).__TAURI_INTERNALS__));
 // Build identity is exposed for support: a stale phone bundle is then visible on the device itself.
 document.documentElement.dataset.ferryxBuild = BUILD_STAMP;
 console.info(`Ferryx ${isTauriApp ? "desktop" : "remote client"} build ${BUILD_STAMP}`);
@@ -99,7 +100,7 @@ boot().catch((error: unknown) => {
   el.replaceChildren(message);
 });
 
-if (typeof window !== "undefined" && "serviceWorker" in navigator && !isTauriApp) {
+if (typeof window !== "undefined" && "serviceWorker" in navigator && !isTauriApp && !isMobileCompanion()) {
   const registerServiceWorker = () => {
     navigator.serviceWorker.register(SERVICE_WORKER_PATH).catch(() => {});
   };

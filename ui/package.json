@@ -14,7 +14,9 @@
     "doctor": "react-doctor",
     "lint": "eslint src",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:mobile": "tsc && vite build --config vite.mobile.config.ts",
+    "dev:mobile": "vite --config vite.mobile.config.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
