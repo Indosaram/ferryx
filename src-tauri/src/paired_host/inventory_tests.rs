@@ -74,7 +74,7 @@ fn real_private_persistence_restart_and_secret_exclusion() {
     assert_eq!(row.host_id, "https://relay.example/host/a%20%2F%E7%8C%AB!");
     assert_eq!(row.generation, Epoch(1));
     assert_eq!(row.auth_status, AuthStatus::Paired);
-    assert!(row.online);
+    assert!(!row.online, "a host nobody has probed is not online");
     assert_eq!(
         serde_json::from_str::<HostView>(&serde_json::to_string(&row).unwrap()).unwrap(),
         row
@@ -82,6 +82,7 @@ fn real_private_persistence_restart_and_secret_exclusion() {
     store
         .set_online(&row.host_id, row.generation, true)
         .unwrap();
+    assert!(store.list()[0].online, "a probe that reached the host sets online");
     let lease = store.capture(&row.host_id, row.generation).unwrap();
     assert_eq!(lease.token().unwrap(), input.device_token);
     let outward = format!(

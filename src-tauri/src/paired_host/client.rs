@@ -1,7 +1,8 @@
 //! Typed native machine HTTP. No arbitrary URL/method input or credential projection.
 use super::{
-    inventory::{CredentialLease, HostView},
+    inventory::{AuthStatus, CredentialLease, GrantScope, HostView},
     projects,
+    reachability::ReachabilityState,
     service::{PairedHostService, ServiceError},
 };
 use crate::{remote::machine_protocol as m, scoped_contracts::Epoch};
@@ -217,6 +218,41 @@ fn project_remote_error(error: m::MachineError) -> m::MachineError {
         details,
     }
 }
+/// How one Capabilities round-trip bears on a host's reachability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProbeOutcome {
+    Online,
+    /// The host (or its relay control channel) cannot be reached right now. Carries no
+    /// error: being offline is the whole finding.
+    Unreachable,
+    /// The credential was rejected: revoke it and leave reachability untouched.
+    Unauthorized,
+    /// Anything else the host or transport answered; still offline, with the code kept.
+    Failed(String),
+}
+
+/// Classifies a Capabilities result. A lost direct path is never seen here: `http` has
+/// already retried an idempotent request over the relay, so only the relay's answer counts.
+pub(crate) fn probe_outcome(result: &Result<m::Capabilities>, host: &HostView) -> ProbeOutcome {
+    match result {
+        Ok(caps) if caps.machine_id == host.machine_id => ProbeOutcome::Online,
+        Ok(_) => ProbeOutcome::Failed("PAIRED_HOST_WRONG_MACHINE".into()),
+        Err(error) => match error.code.as_str() {
+            "HOST_UNAVAILABLE" | "TIMEOUT" | "MACHINE_SERVICE_UNAVAILABLE" => {
+                ProbeOutcome::Unreachable
+            }
+            // The relay answers 404 with no body when the machine has no live control
+            // channel (relay_server.rs `proxy_http`/socket-ticket paths). A bodyless 404 is
+            // mapped with a synthesized machine_error, so machine_error cannot tell the two
+            // apart. request_id can: it is Some exactly when a JSON error envelope was parsed
+            // (its id may be empty), and None for the bodyless relay answer.
+            "NOT_FOUND" if error.request_id.is_none() => ProbeOutcome::Unreachable,
+            "UNAUTHORIZED" => ProbeOutcome::Unauthorized,
+            other => ProbeOutcome::Failed(other.to_owned()),
+        },
+    }
+}
+
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|_| ClientError::local("PAIRED_HOST_INVALID_RESPONSE"))
 }
@@ -963,6 +999,46 @@ impl MachineClient {
             })=> result.map_err(|_|ClientError::local("TIMEOUT"))?
         }
     }
+    /// Checks one paired host with a Capabilities round-trip and records the result.
+    /// Returns the state now recorded for that generation (`Checking` when nothing was
+    /// recorded: a stale generation, or a rejected credential that was revoked instead).
+    pub async fn probe(
+        &self,
+        service: &PairedHostService,
+        host_id: String,
+        generation: Epoch,
+    ) -> ReachabilityState {
+        let Ok((host, lease)) = service.capture_operation(host_id.clone(), generation).await
+        else {
+            return ReachabilityState::Checking;
+        };
+        let result = match Operation::Capabilities.route() {
+            Ok(route) => match self.http(&host, &lease, &route, false).await {
+                Ok(bytes) => decode::<m::Capabilities>(&bytes),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        drop(lease);
+        let (state, last_error) = match probe_outcome(&result, &host) {
+            ProbeOutcome::Online => (ReachabilityState::Online, None),
+            ProbeOutcome::Unreachable => (ReachabilityState::Offline, None),
+            ProbeOutcome::Failed(code) => (ReachabilityState::Offline, Some(code)),
+            ProbeOutcome::Unauthorized => {
+                service.revoke_on_auth_failure(host_id, generation).await;
+                return ReachabilityState::Checking;
+            }
+        };
+        if service
+            .record_reachability(host_id, generation, state, last_error)
+            .await
+        {
+            state
+        } else {
+            ReachabilityState::Checking
+        }
+    }
+
     pub async fn execute(
         &self,
         service: &PairedHostService,
@@ -985,14 +1061,38 @@ impl MachineClient {
         let (host, lease) = service
             .capture_operation(request.host_id.clone(), request.generation)
             .await?;
-        let caps: m::Capabilities = decode(
-            &self
-                .http(&host, &lease, &Operation::Capabilities.route()?, false)
-                .await?,
-        )?;
+        let caps = match self
+            .http(&host, &lease, &Operation::Capabilities.route()?, false)
+            .await
+        {
+            Ok(bytes) => decode::<m::Capabilities>(&bytes)?,
+            Err(error) => {
+                // Only a "cannot reach the host" answer says anything about reachability.
+                if probe_outcome(&Err(error.clone()), &host) == ProbeOutcome::Unreachable {
+                    service
+                        .record_reachability(
+                            request.host_id.clone(),
+                            request.generation,
+                            ReachabilityState::Offline,
+                            None,
+                        )
+                        .await;
+                }
+                return Err(error);
+            }
+        };
         if caps.machine_id != host.machine_id {
             return Err(ClientError::local("PAIRED_HOST_WRONG_MACHINE"));
         }
+        // The operation path just reached the host itself.
+        service
+            .record_reachability(
+                request.host_id.clone(),
+                request.generation,
+                ReachabilityState::Online,
+                None,
+            )
+            .await;
         if caps.access_scope != m::AccessScope::Machine || caps.permission != m::Permission::Control
         {
             return Err(ClientError::local("MACHINE_ACCESS_REQUIRED"));
@@ -1099,6 +1199,50 @@ impl MachineClient {
         })
     }
 }
+/// Daemon probe cadence for paired hosts.
+pub const PROBE_INTERVAL: Duration = Duration::from_secs(30);
+/// At most this many host probes run at once.
+pub const PROBE_CONCURRENCY: usize = 4;
+
+/// Whether the probe loop checks this host: paired, with a machine grant. Mirror-only,
+/// revoked and unknown hosts are never probed.
+pub(crate) fn is_probe_target(host: &HostView) -> bool {
+    host.auth_status == AuthStatus::Paired && host.grant_scope == GrantScope::Machine
+}
+
+/// Probes every host that is paired with a machine grant, at most
+/// [`PROBE_CONCURRENCY`] at a time (see [`is_probe_target`]).
+pub async fn probe_paired_hosts(client: &MachineClient, service: &PairedHostService) {
+    use futures_util::stream::{self, StreamExt};
+    let Ok(hosts) = service.list().await else {
+        return;
+    };
+    stream::iter(hosts.into_iter().filter(is_probe_target))
+    .map(|host| client.probe(service, host.host_id, host.generation))
+    .buffer_unordered(PROBE_CONCURRENCY)
+    .for_each(|_| async {})
+    .await;
+}
+
+/// Probes immediately, then on every `interval` tick (missed ticks are skipped), until
+/// `alive` reports false. The daemon passes [`PROBE_INTERVAL`]; tests inject a short one.
+pub async fn run_probe_loop(
+    service: PairedHostService,
+    interval: Duration,
+    alive: impl Fn() -> bool,
+) {
+    let client = MachineClient::new();
+    let mut ticks = tokio::time::interval(interval);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticks.tick().await;
+        if !alive() {
+            break;
+        }
+        probe_paired_hosts(&client, &service).await;
+    }
+}
+
 fn validate_operation(op: &m::Operation, expected: &str) -> Result<()> {
     let id = match op {
         m::Operation::Pending { request_id }
@@ -1251,3 +1395,6 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "probe_tests.rs"]
+mod probe_tests;

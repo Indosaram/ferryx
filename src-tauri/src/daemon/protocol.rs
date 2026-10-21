@@ -687,6 +687,8 @@ pub enum DaemonRequest {
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
     PairedHostList,
+    /// Gated by `pairedHostReachabilityV1`; an older daemon never receives it.
+    PairedHostReachabilityList,
     PairedTerminalReattach {
         descriptor: crate::terminal::paired_daemon::Descriptor,
     },
@@ -893,6 +895,9 @@ pub enum DaemonResponse {
     },
     PairedHostListOk {
         hosts: Vec<crate::paired_host::inventory::HostView>,
+    },
+    PairedHostReachabilityListOk {
+        entries: Vec<crate::paired_host::reachability::HostReachability>,
     },
     PairedHostPairOk {
         host: crate::paired_host::inventory::HostView,
