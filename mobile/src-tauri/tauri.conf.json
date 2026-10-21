@@ -13,6 +13,7 @@
     "windows": [{ "label": "main", "title": "Ferryx", "width": 390, "height": 844 }],
     "security": {
       "capabilities": [],
+      "dangerousDisableAssetCspModification": ["style-src"],
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https: wss:; object-src 'none'; base-uri 'self'; frame-src 'none'; form-action 'none'"
     }
   },

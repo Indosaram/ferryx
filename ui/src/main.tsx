@@ -100,6 +100,17 @@ boot().catch((error: unknown) => {
   el.replaceChildren(message);
 });
 
+// Short landscape phone viewports: when the soft keyboard shrinks the native view, keep the
+// focused field visible instead of leaving it below the fold.
+if (isMobileCompanion() && window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => {
+    const focused = document.activeElement;
+    if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) {
+      focused.scrollIntoView({ block: "center" });
+    }
+  });
+}
+
 if (typeof window !== "undefined" && "serviceWorker" in navigator && !isTauriApp && !isMobileCompanion()) {
   const registerServiceWorker = () => {
     navigator.serviceWorker.register(SERVICE_WORKER_PATH).catch(() => {});
