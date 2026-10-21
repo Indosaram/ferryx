@@ -25,6 +25,47 @@ async function readStages(ctx, from) {
   return authorityStages(await ctx.agent.call('readFile', { file: receiptFile(ctx.layout, AUTHORITY_STAGE) }), ctx.runId, from);
 }
 
+/**
+ * Adds the sessions a draining predecessor still serves to the owner's describe. DescribeLiveSessions
+ * reports a daemon's own sessions only (plan todo 11: its counts back Shutdown's
+ * confirm_live_sessions and the retirement predicate, and a routed SSH session does not end with
+ * this daemon), so an SSH session kept by an older generation (plan line 51) is described by
+ * that generation through its legacy socket, the route handover_routes.json names.
+ */
+export async function mergeRoutedSessions(after, manifestText, describeAt) {
+  const own = new Set((after.sessions ?? []).map((s) => s.backendId));
+  const routes = manifestText ? (JSON.parse(manifestText).routes ?? []) : [];
+  const sessions = [...(after.sessions ?? [])];
+  const routed = [];
+  for (const route of routes) {
+    const wanted = (route.sessions ?? []).filter((id) => !own.has(id));
+    if (wanted.length === 0) continue;
+    const described = await describeAt(route.legacySocketPath);
+    for (const s of described?.sessions ?? []) {
+      if (wanted.includes(s.backendId) && !own.has(s.backendId)) { sessions.push(s); own.add(s.backendId); routed.push({ backendId: s.backendId, via: route.legacySocketPath }); }
+    }
+  }
+  return { ...after, sessions, routed };
+}
+
+/**
+ * Each route is described on the protocol its own predecessor speaks: the manifest can hold a
+ * draining HEAD route (5, Q08's A) next to a draining handover_v1_rev route (6) (rerun2f/2g). The
+ * refusal names the version that daemon expects, so a mismatch reconnects once on it.
+ */
+export async function describeWithRoutes(ctx, conn) {
+  const own = await conn.describe();
+  const manifest = await ctx.agent.call('readFile', { file: hjoin(ctx.layout.runtime, 'handover_routes.json') });
+  return mergeRoutedSessions(own, manifest, async (socketPath) => {
+    let legacy = await dataConn(ctx, ctx.layout.runtime, { socketPath, allowMismatch: true });
+    if (legacy.handshake?.type === 'protocolMismatch' && Number.isInteger(legacy.handshake.expectedVersion)) {
+      await legacy.close();
+      legacy = await dataConn(ctx, ctx.layout.runtime, { socketPath, version: legacy.handshake.expectedVersion });
+    }
+    try { return await legacy.describe(); } finally { await legacy.close(); }
+  });
+}
+
 export async function Q07(ctx, result) {
   // A is the running generation; the on-disk app is replaced by B (same version, other bytes).
   const before = await ctx.state.conn.describe();
@@ -69,11 +110,23 @@ export async function Q07(ctx, result) {
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A);
 }
 
-/** Seeds a local and an SSH session, each running a 100ms counter. */
-async function seedPair(ctx, conn, tag) {
+/**
+ * Seeds a local and an SSH session, each running a 100ms counter tagged `${tag}_L`/`${tag}_S`.
+ * The pair carries its counter tag (upgradeStep labels its assertions with a step tag such as
+ * A_B, which is not the counter tag) and the owner pid that serves the SSH session: SSH sessions
+ * never move on upgrade (plan line 51), so that generation keeps serving it through every later
+ * successor and is the one that must stay alive.
+ */
+export async function seedPair(ctx, conn, tag, { ssh: withSsh = true } = {}) {
   const local = ctx.state.localA;
+  const sshOwnerPid = (await ownerIdentity(ctx)).pid;
   await interrupt(conn, local);
   await conn.call(D.write(local, counterCommand(ctx.platform, `${tag}_L`)));
+  if (!withSsh) {
+    const lo = await conn.waitOutput(local, `${tag}_L_TICK_3`, 15_000);
+    if (lo.timedOut) throw new Error('local counter produced no output');
+    return { local, ssh: null, tag, sshOwnerPid: null };
+  }
   const spawned = await conn.call(D.spawnSsh({ clientRequestId: `qa-ssh-${nonce('R')}`, workspaceId: ctx.sshd.workspaceId, hostStorePath: ctx.sshd.hostStorePath }), 60_000);
   if (spawned.type !== 'spawnOk') throw new Error(`ssh spawn: ${JSON.stringify(spawned)}`);
   await recordSshHelper(ctx);
@@ -82,7 +135,12 @@ async function seedPair(ctx, conn, tag) {
   const lo = await conn.waitOutput(local, `${tag}_L_TICK_3`, 15_000);
   const so = await conn.waitOutput(spawned.sessionId, `${tag}_S_TICK_3`, 30_000);
   if (lo.timedOut || so.timedOut) throw new Error('counters produced no output');
-  return { local, ssh: spawned.sessionId };
+  return { local, ssh: spawned.sessionId, tag, sshOwnerPid };
+}
+
+/** The process that must stay alive while the SSH session is open: the generation it was spawned on. */
+export function sshOwnerProbeTarget(pair, pred) {
+  return pair.sshOwnerPid ?? pred.pid;
 }
 
 /** Highest counter value seen; continuity = values after are > values before with no restart at 1. */
@@ -101,33 +159,58 @@ async function stageGeneration(ctx, artifact) {
 }
 
 /** One control RequestUpgrade from the current owner to artifact; asserts the Q08 contract. */
-async function upgradeStep(ctx, result, artifact, pair, tag) {
-  const before = await ctx.state.conn.describe();
+async function upgradeStep(ctx, result, artifact, pair, tag, { guiDriven = false } = {}) {
+  // Q08's GUI-end round trips between A_B and B_C interrupt the pair's local counter and start a
+  // QA_A counter instead (rerun2b: B_C local max 297); every step starts from fresh pair counters.
+  await restartCounters(ctx, ctx.state.conn, pair);
+  // B_C: the SSH session is still A's; B describes only its own sessions.
+  const before = await describeWithRoutes(ctx, ctx.state.conn);
   const pred = await ownerIdentity(ctx);
+  // Q08b (plan todo 12): a HEAD GUI meeting an older-protocol owner sends RequestUpgrade itself
+  // (update_pending::resolve_mismatch). Arm the receipts and the owner watch before it launches,
+  // and read the predecessor's Hello while it still owns the control endpoint.
+  const early = guiDriven ? await controlConn(ctx) : null;
+  const earlyHello = early ? await early.hello() : null;
+  const earlyAuthority = guiDriven ? await armAuthority(ctx, tag) : null;
+  // <FERRYX_DATA_DIR>/logs/daemon.log (run.mjs daemonLogFile; not imported here: run.mjs imports this module).
+  const daemonLog = hjoin(ctx.layout.data, 'logs', 'daemon.log');
+  const logFrom = guiDriven ? receiptCount(await ctx.agent.call('readFile', { file: daemonLog })) : 0;
+  const earlyChange = guiDriven ? ctx.agent.call('waitOwnerChange', { runtimeDir: ctx.layout.runtime, fromPid: pred.pid, deadlineMs: DAEMON_READY_TIMEOUT_MS * 2 }) : null;
   // Launching the new GUI stages its runtime; the new GUI itself never starts a second owner.
   await ctx.gui.quit(ctx.state.gui);
   ctx.state.gui = await ctx.gui.launch(artifact);
   const staged = await stageGeneration(ctx, artifact);
   assertion(result, `${tag}: ${artifact.name} runtime staged`, staged.present, staged);
-  const ctl = await controlConn(ctx);
-  const hello = await ctl.hello();
+  const ctl = early ?? await controlConn(ctx);
+  const hello = earlyHello ?? await ctl.hello();
   assertion(result, `${tag}: predecessor advertises RequestUpgrade + handover-v1`, helloSupportsHandover(hello), hello.ops);
-  const authority = await armAuthority(ctx, tag);
-  const ownerChange = ctx.agent.call('waitOwnerChange', { runtimeDir: ctx.layout.runtime, fromPid: pred.pid, deadlineMs: DAEMON_READY_TIMEOUT_MS * 2 });
-  const accepted = await ctl.requestUpgrade(staged.exe, staged.key);
-  assertion(result, `${tag}: RequestUpgrade accepted`, accepted?.ok === true && accepted.accepted === true, accepted);
+  const authority = earlyAuthority ?? await armAuthority(ctx, tag);
+  const ownerChange = earlyChange ?? ctx.agent.call('waitOwnerChange', { runtimeDir: ctx.layout.runtime, fromPid: pred.pid, deadlineMs: DAEMON_READY_TIMEOUT_MS * 2 });
+  if (guiDriven) {
+    // The old owner's own record (control_server.rs) that the HEAD GUI's RequestUpgrade was accepted.
+    const sent = await ctx.agent.call('waitLog', { file: daemonLog, pattern: 'RequestUpgrade (accepted|refused)[^\\n]*', fromLine: logFrom, deadlineMs: DAEMON_READY_TIMEOUT_MS });
+    assertion(result, `${tag}: the HEAD GUI's RequestUpgrade was accepted by the old owner`, /RequestUpgrade accepted/.test(sent.matched ?? ''), sent);
+  } else {
+    const accepted = await ctl.requestUpgrade(staged.exe, staged.key);
+    assertion(result, `${tag}: RequestUpgrade accepted`, accepted?.ok === true && accepted.accepted === true, accepted);
+  }
   const changed = await ownerChange;
   const succ = await ownerIdentity(ctx);
   await evidence(ctx, result, `${tag}-owners.json`, { pred, succ, seen: changed.seen });
   assertion(result, `${tag}: owner.json moved straight from predecessor to successor`, changed.owner && changed.seen.filter((p) => p !== pred.pid).length === 1, changed.seen);
   assertion(result, `${tag}: successor serves generation ${artifact.name}`, succ.hello?.generation_key === staged.key, succ.hello?.generation_key);
   // todo 8 receipts: the candidate's own stages through authority-adopted, sampled at each transition.
-  const adopted = await ctx.agent.call('waitLog', { file: receiptFile(ctx.layout, AUTHORITY_STAGE), pattern: stagePattern(succ.pid, 'authority-adopted'), deadlineMs: 30_000 });
+  // Q08b: a v1 predecessor with no retained session retires 100ms after its commit, which can beat
+  // its CommitHandoverOk; the candidate then owns through the recorded decision (authority-recovered,
+  // rerun2h), the designed outcome of a lost reply. The predecessor-committed receipt follows the
+  // same reply path, so it is required only when the candidate saw the reply.
+  const adopted = await ctx.agent.call('waitLog', { file: receiptFile(ctx.layout, AUTHORITY_STAGE), pattern: stagePattern(succ.pid, ownedStagePattern(guiDriven)), deadlineMs: 30_000 });
   const stages = await readStages(ctx, authority.from);
   const inv = authorityInvariant(stages, succ.pid);
   await evidence(ctx, result, `${tag}-authority.json`, { operationId: authority.operationId, stages, inv });
-  assertion(result, `${tag}: candidate wrote authority-adopted`, Boolean(adopted.matched), adopted);
-  assertion(result, `${tag}: predecessor wrote predecessor-prepared and predecessor-committed`, ['predecessor-prepared', 'predecessor-committed'].every((s) => stages.some((r) => r.producerPid === pred.pid && r.stage === s)), inv.stages);
+  assertion(result, `${tag}: candidate wrote ${guiDriven ? 'authority-adopted or authority-recovered' : 'authority-adopted'}`, Boolean(adopted.matched), adopted);
+  const commit = commitEvidence({ stages, predPid: pred.pid, succPid: succ.pid, guiDriven, ownedLine: adopted.matched });
+  assertion(result, `${tag}: ${commit.label}`, commit.ok, inv.stages);
   assertion(result, `${tag}: candidate stages before commit were sampled`, ['candidate-admitted', 'authority-validated', 'commit-sent'].every((s) => inv.candidatePreCommit.includes(s)), inv.candidatePreCommit);
   assertion(result, `${tag}: candidate accepted nothing on any inherited listener before commit`, inv.candidatePreCommit.length > 0 && inv.acceptedBeforeCommit.length === 0, inv.acceptedBeforeCommit);
   assertion(result, `${tag}: a probe flock on both lock files failed at every stage`, stages.length > 0 && inv.lockFreeAt.length === 0, inv.lockFreeAt);
@@ -141,31 +224,137 @@ async function upgradeStep(ctx, result, artifact, pair, tag) {
     : await ctx.jobs.inspect(staged.key);
   assertion(result, `${tag}: successor runs under its own generation job`, job.pid !== null && job.pid === succ.pid, { jobPid: job.pid, succ: succ.pid });
   assertion(result, `${tag}: successor parent is not the predecessor`, row && row.ppid !== pred.pid, row);
-  // predecessor keeps serving the SSH session, drains, and is still alive
-  assertion(result, `${tag}: predecessor still alive while it owns the SSH session`, (await ctx.agent.call('probe', { pid: pred.pid })) !== null, pred.pid);
+  // The generation that owns the SSH session keeps serving it (draining) and is still alive. For
+  // B_C that is A, not B: routes are direct and B never owned the session (plan line 51).
+  if (pair.ssh) {
+    const sshOwner = sshOwnerProbeTarget(pair, pred);
+    assertion(result, `${tag}: SSH-owning generation still alive while it serves the SSH session`, (await ctx.agent.call('probe', { pid: sshOwner })) !== null, { sshOwner, pred: pred.pid });
+  }
   await ctx.agent.call('record', { pid: succ.pid, role: `daemon-${artifact.name}`, executable: succ.os.executable });
-  const conn = await dataConn(ctx);
-  const after = await conn.describe();
+  const conn = guiDriven ? await successorDataConn(ctx, result, tag, succ.pid) : await dataConn(ctx);
+  const after = await describeWithRoutes(ctx, conn);
   await evidence(ctx, result, `${tag}-describe.json`, { before, after });
   assertInventoryKept(result, before, after, `${tag}: local + SSH identities`);
-  const sshAfter = after.sessions.find((s) => s.backendId === pair.ssh);
-  const sshBefore = before.sessions.find((s) => s.backendId === pair.ssh);
-  assertion(result, `${tag}: SSH remote_pid unchanged`, sshAfter?.remotePid === sshBefore?.remotePid && sshAfter?.remotePid != null, { before: sshBefore, after: sshAfter });
-  await conn.call(D.attach(pair.local, 0));
-  await conn.call(D.attach(pair.ssh, 0));
-  const lText = (await conn.waitOutput(pair.local, `${tag}_L_TICK_`, 5_000)).text ?? '';
-  const sText = (await conn.waitOutput(pair.ssh, `${tag}_S_TICK_`, 5_000)).text ?? '';
-  const lp1 = counterProgress(lText, `${tag}_L`);
-  const sp1 = counterProgress(sText, `${tag}_S`);
-  const lNext = await conn.waitOutput(pair.local, `${tag}_L_TICK_${lp1.max + 3}`, 10_000);
-  const sNext = await conn.waitOutput(pair.ssh, `${tag}_S_TICK_${sp1.max + 3}`, 10_000);
-  assertion(result, `${tag}: local counter continues without restart`, !lNext.timedOut && !counterProgress(lNext.text, `${tag}_L`).restarted, lp1);
-  assertion(result, `${tag}: SSH counter continues through the successor without restart`, !sNext.timedOut && !counterProgress(sNext.text, `${tag}_S`).restarted, sp1);
-  for (const sid of [pair.local, pair.ssh]) await nonceRoundTrip(ctx, conn, sid, result, `${tag}: ${sid === pair.local ? 'local' : 'ssh'} input once`);
+  if (pair.ssh) {
+    const sshAfter = after.sessions.find((s) => s.backendId === pair.ssh);
+    const sshBefore = before.sessions.find((s) => s.backendId === pair.ssh);
+    assertion(result, `${tag}: SSH remote_pid unchanged`, sshAfter?.remotePid === sshBefore?.remotePid && sshAfter?.remotePid != null, { before: sshBefore, after: sshAfter });
+  }
+  for (const sid of pairSessions(pair)) await conn.call(D.attach(sid, 0));
+  const { local: lTag, ssh: sTag } = counterTags(pair);
+  const lText = (await conn.waitOutput(pair.local, `${lTag}_TICK_`, 5_000)).text ?? '';
+  const lp1 = counterProgress(lText, lTag);
+  const lNext = await conn.waitOutput(pair.local, `${lTag}_TICK_${lp1.max + 3}`, 10_000);
+  assertion(result, `${tag}: local counter continues without restart`, !lNext.timedOut && !counterProgress(lNext.text, lTag).restarted, lp1);
+  if (pair.ssh) {
+    const sText = (await conn.waitOutput(pair.ssh, `${sTag}_TICK_`, 5_000)).text ?? '';
+    const sp1 = counterProgress(sText, sTag);
+    const sNext = await conn.waitOutput(pair.ssh, `${sTag}_TICK_${sp1.max + 3}`, 10_000);
+    assertion(result, `${tag}: SSH counter continues through the successor without restart`, !sNext.timedOut && !counterProgress(sNext.text, sTag).restarted, sp1);
+  }
+  for (const sid of pairSessions(pair)) await nonceRoundTrip(ctx, conn, sid, result, `${tag}: ${sid === pair.local ? 'local' : 'ssh'} input once`);
   await ctl.close();
   await ctx.state.conn.close().catch(() => {});
   ctx.state.conn = conn;
   return { pred, succ };
+}
+
+/** Counter tags the pair was seeded with (seedPair), never the upgrade step's label. */
+/**
+ * A data connection served by the successor. A draining handover_v1_rev predecessor still accepts
+ * on the shared public data listener (24cbfd25 gates only its control listener, control_server.rs:101
+ * there; HEAD gates both through HandoverManager::gated_accept), so a connect can land on it and be
+ * refused with protocolMismatch (rerun2e). Each attempt is a new accept on that listener; bounded.
+ */
+export async function successorDataConn(ctx, result, tag, succPid, attempts = 20) {
+  const refused = [];
+  for (let i = 0; i < attempts; i += 1) {
+    let conn = null;
+    try { conn = await dataConn(ctx); } catch (error) { refused.push(String(error.message ?? error)); continue; }
+    if (conn.handshake?.pid === succPid) {
+      await evidence(ctx, result, `${tag}-data-accepts.json`, { succPid, refusedBeforeSuccessor: refused });
+      return conn;
+    }
+    refused.push(conn.handshake);
+    await conn.close();
+  }
+  await evidence(ctx, result, `${tag}-data-accepts.json`, { succPid, refusedBeforeSuccessor: refused });
+  throw new Error(`no data connection reached the successor ${succPid} in ${attempts} accepts`);
+}
+
+export function counterTags(pair) {
+  return { local: `${pair.tag}_L`, ssh: `${pair.tag}_S` };
+}
+
+/**
+ * The candidate stage that makes it the owner. Q08b (guiDriven): a v1 predecessor with no
+ * retained session retires 100ms after its commit, which can beat its CommitHandoverOk; the
+ * candidate then owns through the recorded decision (authority-recovered, rerun2h), the designed
+ * outcome of a lost reply. Every HEAD-to-HEAD step must adopt from a received reply.
+ */
+export function ownedStagePattern(guiDriven) {
+  return guiDriven ? '(authority-adopted|authority-recovered)' : 'authority-adopted';
+}
+
+/**
+ * The commit evidence one upgrade step must show. A HEAD predecessor writes predecessor-prepared
+ * and predecessor-committed. A handover_v1_rev predecessor (24cbfd25) writes predecessor-prepared
+ * only on its data-socket PrepareHandover path (server.rs:5723 there), never on control
+ * RequestUpgrade, so Q08b needs predecessor-committed only. That receipt follows the reply path,
+ * so when the reply was lost (the candidate recovered) the candidate must instead show that it
+ * sent the commit and then recovered from the recorded decision.
+ */
+export function commitEvidence({ stages, predPid, succPid, guiDriven, ownedLine }) {
+  const by = (pid, stage) => stages.some((r) => r.producerPid === pid && r.stage === stage);
+  if (guiDriven && /authority-recovered/.test(ownedLine ?? '')) {
+    return { label: 'lost commit reply settled by the recorded decision (commit-sent then authority-recovered)', ok: ['commit-sent', 'authority-recovered'].every((s) => by(succPid, s)) };
+  }
+  const pred = guiDriven ? ['predecessor-committed'] : ['predecessor-prepared', 'predecessor-committed'];
+  return { label: `predecessor wrote ${pred.join(' and ')}`, ok: pred.every((s) => by(predPid, s)) };
+}
+
+/** The pair's sessions: Q08b's local-only pair (seedPair { ssh: false }) has no SSH session. */
+export function pairSessions(pair) {
+  return pair.ssh ? [pair.local, pair.ssh] : [pair.local];
+}
+
+/** Next counter tag of a pair: Q08 -> Q08R1 -> Q08R2, so a restarted counter never reads as a restart. */
+export function nextCounterTag(tag) {
+  const m = /^(.*)R(\d+)$/.exec(tag);
+  return m ? `${m[1]}R${Number(m[2]) + 1}` : `${tag}R1`;
+}
+
+/**
+ * nonceRoundTrip interrupts the counter of each session it writes to (run-q08 rerun2: B_C's
+ * counters stopped at the max A_B left them at, 318/305). Restarts both under a fresh tag.
+ */
+export async function restartCounters(ctx, conn, pair) {
+  pair.tag = nextCounterTag(pair.tag);
+  const { local, ssh } = counterTags(pair);
+  // The connection may be one that never streamed this pair (surviveGuiEnd replaces it).
+  for (const sid of pairSessions(pair)) await conn.call(D.attach(sid, 0));
+  for (const sid of pairSessions(pair)) await interrupt(conn, sid);
+  await conn.call(D.write(pair.local, counterCommand(ctx.platform, local)));
+  const lo = await conn.waitOutput(pair.local, `${local}_TICK_3`, 15_000);
+  if (lo.timedOut) throw new Error(`restarted counters produced no output (${pair.tag})`);
+  if (!pair.ssh) return;
+  await conn.call(D.write(pair.ssh, counterCommand('linux', ssh)));
+  const so = await conn.waitOutput(pair.ssh, `${ssh}_TICK_3`, 30_000);
+  if (so.timedOut) throw new Error(`restarted counters produced no output (${pair.tag})`);
+}
+
+/**
+ * The artifact a fault variant upgrades to. After drop-commit-ok-after-record the candidate
+ * recovers and becomes the owner, so the next variant's request to that same generation is
+ * refused "already running this generation" (rerun2 abort-after-adopt), and the generation it
+ * replaced still runs its own unit while it drains the SSH session ("successor unit ... is already
+ * active", rerun2b). Use a generation that is neither the owner nor running.
+ */
+export async function faultTarget(ctx, pred, artifact) {
+  const usable = async (a) => a && ctx.keys[a.name] !== pred.hello?.generation_key && (await ctx.jobs.inspect(ctx.keys[a.name])).state !== 'Running';
+  if (await usable(artifact)) return artifact;
+  for (const a of [ctx.artifacts.A, ctx.artifacts.C, ctx.artifacts.B]) if (await usable(a)) return a;
+  return artifact;
 }
 
 /**
@@ -174,6 +363,7 @@ async function upgradeStep(ctx, result, artifact, pair, tag) {
  */
 async function faultVariant(ctx, result, fault, artifact, pair) {
   const pred = await ownerIdentity(ctx);
+  artifact = await faultTarget(ctx, pred, artifact);
   const op = `fault-${fault}-${ctx.runId}`;
   await ctx.agent.call('writeFile', { file: hjoin(ctx.layout.barriers, HANDOVER_FAULT_REQUEST), content: JSON.stringify({ runId: ctx.runId, operationId: op, fault }) });
   const authority = await armAuthority(ctx, `F_${fault}`);
@@ -184,11 +374,13 @@ async function faultVariant(ctx, result, fault, artifact, pair) {
   // reply dropped after the decision leaves the predecessor serving and the candidate exits;
   // after-record, the recorded decision makes the candidate the owner (authority-recovered).
   const file = receiptFile(ctx.layout, AUTHORITY_STAGE);
-  const admitted = await ctx.agent.call('waitLog', { file, pattern: `"producerPid":(?!${pred.pid},)\\d+,[^\\n]*"stage":"candidate-admitted"`, deadlineMs: 60_000 });
+  // Only receipts appended after this variant armed its authority count: an earlier upgrade's
+  // candidate (run-int1: B 906546 from A_B) wrote candidate-admitted too.
+  const admitted = await ctx.agent.call('waitLog', { file, pattern: `"producerPid":(?!${pred.pid},)\\d+,[^\\n]*"stage":"candidate-admitted"`, fromLine: authority.from, deadlineMs: 60_000 });
   const candidatePid = admitted.matched ? Number(/"producerPid":(\d+)/.exec(admitted.matched)[1]) : null;
   const recovers = fault === 'drop-commit-ok-after-record';
   const settled = !candidatePid ? { timedOut: true }
-    : recovers ? await ctx.agent.call('waitLog', { file, pattern: stagePattern(candidatePid, 'authority-recovered'), deadlineMs: 60_000 })
+    : recovers ? await ctx.agent.call('waitLog', { file, pattern: stagePattern(candidatePid, 'authority-recovered'), fromLine: authority.from, deadlineMs: 60_000 })
     : await ctx.agent.call('waitExit', { pid: candidatePid, deadlineMs: 60_000 });
   const after = await ownerIdentity(ctx);
   const stages = await readStages(ctx, authority.from);
@@ -257,6 +449,25 @@ export async function Q08(ctx, result) {
   for (const fault of HANDOVER_FAULTS.filter((f) => f !== FORCED_COMMIT_FAILURE)) await faultVariant(ctx, result, fault, ctx.artifacts.B, pair2);
 }
 
+/**
+ * Linux Q08b: the v1bump owner renders every unit it writes (its own, and the HEAD successor's on
+ * RequestUpgrade) without the QA-only variables, because its supervisor_linux forwarded_env
+ * predates QA_NAME_KEYS (d9dd5334). Its daemon then runs isolated with no QA supervisor name,
+ * supervisor::supported() is false, and RequestUpgrade is refused with "No daemon supervisor is
+ * supported in this runtime" (run-q08 rerun daemon.log 17:53:40). Production units never carry
+ * these variables and are not isolated, so this is QA plumbing for the old revision, not the
+ * upgrade contract: drop-ins give both generation units this run's QA environment.
+ */
+export async function installV1QaEnv(ctx) {
+  const out = {};
+  // One prefix drop-in for every generation unit of this run: the v1bump unit is named after its
+  // own version (2026.1013.2-<sha>, rerun2b), not the HEAD version the harness keys use.
+  const r = await ctx.jobs.installQaEnvDropIn(null, ctx.isolationEnv);
+  out.dropIn = { dir: `${ctx.jobs.base}-.service.d`, status: r?.status ?? null, stderr: r?.stderr ?? '' };
+  if (r?.status !== 0) throw new Error(`QA env drop-in failed: ${JSON.stringify(out.dropIn)}`);
+  return out;
+}
+
 export async function Q08b(ctx, result) {
   if (!ctx.artifacts.v1bump) return block(result, 'ARTIFACT_MISSING', 'handover_v1_rev build (tag daemon-lifetime-handover-v1) not available');
   for (const hook of ['protocolBump', ...(ctx.platform === 'windows' ? ['windowsPending'] : ['handoverCandidate', 'authorityTransfer'])]) {
@@ -266,12 +477,12 @@ export async function Q08b(ctx, result) {
   assertion(result, 'previous QA owner retired', retired.retired, retired);
   // v1bump (24cbfd25) only reads a version-1 workspace catalog; the HEAD owners wrote version 2.
   await evidence(ctx, result, 'catalog-set-aside.json', await setAsideHeadCatalog(ctx, 'Q08b'));
+  if (ctx.platform === 'linux') await evidence(ctx, result, 'qa-env-dropins.json', await installV1QaEnv(ctx));
   const old = await freshOwner(ctx, ctx.artifacts.v1bump, { tag: 'Q08B', dataVersion: 6 });
   await evidence(ctx, result, 'old-owner.json', { old, sameRevision: ctx.revisions.handoverV1Rev === ctx.revisions.head });
   assertion(result, 'old owner speaks protocol 6', old.hello?.protocol_version === 6, old.hello);
-  await ctx.gui.quit(ctx.state.gui);
-  const gui = await ctx.gui.launch(ctx.artifacts.A);
-  ctx.state.gui = gui;
+  // Probe and seed the old owner BEFORE any HEAD GUI exists: on Unix the HEAD GUI upgrades it on
+  // its own (rerun2c: the probes ran after the upgrade and met the HEAD owner).
   const mismatch = await ctx.agent.call('dataOpen', { runtimeDir: ctx.layout.runtime, version: 5, allowMismatch: true });
   assertion(result, 'HEAD data handshake is refused with a protocol mismatch', mismatch.handshake?.type !== 'handshakeOk', mismatch.handshake);
   await ctx.agent.call('close', { handle: mismatch.handle });
@@ -281,18 +492,23 @@ export async function Q08b(ctx, result) {
   await evidence(ctx, result, 'control.json', { hello, inv });
   assertion(result, 'control Hello succeeds across revisions', hello?.ok === true && hello.pid === old.pid, hello);
   assertion(result, 'control Inventory succeeds across revisions', inv?.ok === true && inventoryTotal(inv) >= 1, inv);
+  await ctl.close();
   if (ctx.platform === 'windows') {
+    await ctx.gui.quit(ctx.state.gui);
+    const gui = await ctx.gui.launch(ctx.artifacts.A);
+    ctx.state.gui = gui;
     const pending = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.logs, `gui-${gui.tag}.log`), pattern: 'DAEMON_UPDATE_PENDING|DaemonUpdatePending', deadlineMs: DAEMON_READY_TIMEOUT_MS });
     assertion(result, 'Windows enters the pending state', Boolean(pending.matched), pending);
     assertion(result, 'old owner untouched', (await ctx.agent.call('probe', { pid: old.pid })) !== null, old.pid);
   } else {
-    ctx.sshd = ctx.sshd ?? await startSshd(ctx);
-    if (ctx.sshd.unavailable) return block(result, 'SSHD_UNAVAILABLE', ctx.sshd.unavailable);
-    const pair = await seedPair(ctx, ctx.state.conn, 'Q8B');
-    await upgradeStep(ctx, result, ctx.artifacts.A, pair, 'V1_HEAD');
-    await ctx.state.conn.call(D.close(pair.ssh));
+    // Local session only: the handover_v1_rev build predates FERRYX_QA_SSH_KNOWN_HOSTS (ssh/direct.rs
+    // in 24cbfd25 has no QA known_hosts pin), so under StrictHostKeyChecking=yes it can never reach
+    // the harness's private sshd (rerun2d: "No ED25519 host key is known"). The plan's Q08b moves
+    // the old owner's sessions "as in Q08"; local sessions are the ones that move.
+    await evidence(ctx, result, 'ssh-leg.json', { ssh: false, reason: 'handover_v1_rev has no FERRYX_QA_SSH_KNOWN_HOSTS pin; its ssh cannot verify the private sshd host key' });
+    const pair = await seedPair(ctx, ctx.state.conn, 'Q8B', { ssh: false });
+    await upgradeStep(ctx, result, ctx.artifacts.A, pair, 'V1_HEAD', { guiDriven: true });
   }
-  await ctl.close();
 }
 
 export async function Q09(ctx, result) {

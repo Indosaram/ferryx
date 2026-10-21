@@ -92,6 +92,7 @@ impl DaemonServer {
                     listener
                 }
             };
+            self.note_published_endpoint(&path);
             {
                 use std::os::fd::AsRawFd;
                 self.handover_manager
@@ -101,13 +102,10 @@ impl DaemonServer {
             tokio::spawn(async move {
                 let manager = Arc::clone(&server.handover_manager);
                 loop {
-                    if !manager.accept_gate_open() {
-                        manager.wait_accept_open().await;
-                        continue;
-                    }
-                    let accepted = tokio::select! {
-                        accepted = listener.accept() => accepted,
-                        () = manager.wait_accept_closed() => continue,
+                    // None: the successor serves this listener now; close this copy.
+                    let Some(accepted) = manager.gated_accept(|| listener.accept()).await else {
+                        drop(listener);
+                        break;
                     };
                     match accepted {
                         Ok((stream, _)) => {
@@ -147,6 +145,8 @@ impl DaemonServer {
             })
             .await
             .map_err(|e| format!("Failed to publish control port and token: {e}"))?;
+            self.note_published_endpoint(&runtime_dir.join(control::CONTROL_PORT_FILE));
+            self.note_published_endpoint(&runtime_dir.join(control::CONTROL_TOKEN_FILE));
             let token = Arc::new(token);
             let server = Arc::clone(self);
             tokio::spawn(async move {

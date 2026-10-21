@@ -398,6 +398,19 @@ test('retireOwner never reports a stale owner as retired while a start is pendin
   assert.equal(p.retired, true);
   assert.equal(p.pid, 9);
   assert.equal(pending.w.alive.has(9), false);
+
+  // rerun2 Q08b: ctx.state.conn named a generation that had handed over; the owner's sessions are
+  // closed through a fresh connection to the current owner, never through that stale one.
+  const stale = ownerWorld({ owner: 1, alive: [1], sessions: ['live'] });
+  const staleCloses = [];
+  stale.ctx.state.conn = { describe: async () => ({ sessions: [{ backendId: 'old' }] }), call: async (f) => { staleCloses.push(f.sessionId); }, close: async () => {} };
+  const real = stale.ctx.agent.call;
+  stale.ctx.agent.call = async (m, p) => (m === 'call' && p.frame?.type === 'describeLiveSessions' ? { type: 'describeLiveSessionsOk', sessions: [...stale.w.sessions].map((backendId) => ({ backendId })) } : real(m, p));
+  const retiredStale = await retireOwner(stale.ctx);
+  assert.deepEqual(staleCloses, [], 'nothing is closed through the stale connection');
+  assert.deepEqual(stale.w.sessionCloses, ['live']);
+  assert.equal(retiredStale.retired, true);
+  assert.equal(stale.ctx.state.conn, null);
 });
 
 test('freshOwner with expectKey refuses an owner of another generation (run-9a5db442 Q13 got B)', async () => {
