@@ -125,7 +125,7 @@ Do not export secret values into shell tracing, command transcripts, or shared t
 During the current legacy-client transition, explicitly select the NSIS migration channel:
 
 ```bash
-node scripts/release-local.mjs prepare \
+bun scripts/release-local.mjs prepare \
   --config "$RELEASE_CONFIG" \
   --tag "$TAG" \
   --commit "$COMMIT" \
@@ -153,7 +153,7 @@ NSIS clients. Use Store-only only after a separately approved end to legacy upda
 ### 2. Preflight all three hosts
 
 ```bash
-node scripts/release-local.mjs preflight \
+bun scripts/release-local.mjs preflight \
   --config "$RELEASE_CONFIG" \
   --plan "$RUN/plan.json"
 ```
@@ -168,9 +168,9 @@ certify that a package can be built, signed, notarized, installed, or run.
 Run each exact host command against the same run and config:
 
 ```bash
-node scripts/release-local.mjs build --config "$RELEASE_CONFIG" --run "$RUN" --host macbook --approve-notarization
-node scripts/release-local.mjs build --config "$RELEASE_CONFIG" --run "$RUN" --host omaki
-node scripts/release-local.mjs build --config "$RELEASE_CONFIG" --run "$RUN" --host maho-win
+bun scripts/release-local.mjs build --config "$RELEASE_CONFIG" --run "$RUN" --host macbook --approve-notarization
+bun scripts/release-local.mjs build --config "$RELEASE_CONFIG" --run "$RUN" --host omaki
+bun scripts/release-local.mjs build --config "$RELEASE_CONFIG" --run "$RUN" --host maho-win
 ```
 
 `--approve-notarization` is a specific approval for Apple submission, not publication approval.
@@ -190,8 +190,8 @@ For a production release, use the public key from committed Tauri configuration 
 test-only `--pubkey` override):
 
 ```bash
-node scripts/release-local.mjs assemble --run "$RUN"
-node scripts/release-local.mjs verify --run "$RUN"
+bun scripts/release-local.mjs assemble --run "$RUN"
+bun scripts/release-local.mjs verify --run "$RUN"
 ```
 
 Assembly requires the macOS updater + DMG + universal CLI, Linux AppImage + DEB + x86_64 CLI,
@@ -217,7 +217,7 @@ The current parser exposes the following publish command and requires both appro
 
 ```bash
 FERRYX_APPROVE_PUBLISH=1 \
-  node scripts/release-local.mjs publish --run "$RUN" --approve-publish
+  bun scripts/release-local.mjs publish --run "$RUN" --approve-publish
 ```
 
 The coordinator validates remote tag closure, creates a draft release on GitHub, uploads the
@@ -229,7 +229,7 @@ around publish.
 After separately approved publication, run:
 
 ```bash
-node scripts/release-local.mjs verify-remote --run "$RUN"
+bun scripts/release-local.mjs verify-remote --run "$RUN"
 ```
 
 This verifies public `latest.json` version and availability of `SHA256SUMS.txt`. Final validation

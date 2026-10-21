@@ -6,7 +6,7 @@
     "dev": "cargo tauri dev",
     "build": "cargo tauri build",
     "tauri": "cargo tauri",
-    "release:local": "node scripts/release-local.mjs",
+    "release:local": "bun scripts/release-local.mjs",
     "ui:dev": "bun run --cwd ui dev",
     "ui:build": "bun run --cwd ui build",
     "ui:test": "bun run --cwd ui test"
