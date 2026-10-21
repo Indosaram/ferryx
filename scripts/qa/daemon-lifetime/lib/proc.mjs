@@ -40,8 +40,26 @@ function psQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-/** { executable, startTime } of a live pid, or null when it is gone. */
-export async function probeIdentity(pid, platform) {
+/**
+ * Windows probe script. CreationTime FILETIME (~1.34e17) exceeds 2^53: emitted as a JSON string
+ * so JSON.parse never rounds it (owner.json records the exact u64; equality must be exact).
+ */
+export function windowsProbeScript(pid) {
+  return `$p = Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue; if ($p) { [pscustomobject]@{ path = $p.Path; start = [string]$p.StartTime.ToFileTimeUtc() } | ConvertTo-Json -Compress }`;
+}
+
+/** Parses windowsProbeScript stdout; a non-string or non-decimal start is refused, never rounded. */
+export function parseWindowsProbe(stdout) {
+  const text = String(stdout ?? '').trim();
+  if (!text) return null;
+  const v = JSON.parse(text);
+  if (!v.path) return null;
+  if (typeof v.start !== 'string' || !/^\d+$/.test(v.start)) throw new Error(`windows probe start is not an exact decimal string: ${JSON.stringify(v.start)}`);
+  return { executable: v.path, startTime: v.start };
+}
+
+/** { executable, startTime } of a live pid, or null when it is gone. exec is injectable for tests. */
+export async function probeIdentity(pid, platform, { exec = run } = {}) {
   if (platform === 'linux') {
     try {
       const executable = readlinkSync(`/proc/${pid}/exe`).replace(/ \(deleted\)$/, '');
@@ -61,12 +79,8 @@ export async function probeIdentity(pid, platform) {
     return { executable: m[2], startTime: m[1] };
   }
   if (platform === 'windows') {
-    const script = `$p = Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue; if ($p) { [pscustomobject]@{ path = $p.Path; start = $p.StartTime.ToFileTimeUtc() } | ConvertTo-Json -Compress }`;
-    const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { deadlineMs: 20_000 });
-    const text = r.stdout.trim();
-    if (!text) return null;
-    const v = JSON.parse(text);
-    return v.path ? { executable: v.path, startTime: String(v.start) } : null;
+    const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', windowsProbeScript(pid)], { deadlineMs: 20_000 });
+    return parseWindowsProbe(r.stdout);
   }
   throw new Error(`unknown platform ${platform}`);
 }

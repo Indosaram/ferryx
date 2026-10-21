@@ -4,6 +4,9 @@
 # QA GUI with the run's env and its stderr/stdout copied to logs\gui-<tag>.log, assigns it to the
 # job, publishes gui.json, then waits for the harness to ask for TerminateJobObject (Q03) through
 # terminate.request in the run dir. It never touches any process other than the one it started.
+# Receipts for lib/gui.mjs launchWindows: its first statement writes logs\launcher-<tag>.started,
+# and any terminating error writes logs\launcher-<tag>.err (the window is hidden, so nothing else
+# would show it). teardown copies both into the evidence.
 param(
   [Parameter(Mandatory = $true)][string]$Exe,
   [Parameter(Mandatory = $true)][string]$RunDir,
@@ -12,6 +15,10 @@ param(
   [switch]$NoBreakaway
 )
 $ErrorActionPreference = 'Stop'
+$receiptDir = Join-Path $RunDir 'logs'
+[System.IO.Directory]::CreateDirectory($receiptDir) | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $receiptDir "launcher-$Tag.started"), "pid=$PID`r`n")
+try {
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -72,4 +79,8 @@ while (-not $proc.HasExited) {
     break
   }
   $null = $watcher.WaitForChanged([System.IO.WatcherChangeTypes]::Created, 60000)
+}
+} catch {
+  [System.IO.File]::WriteAllText((Join-Path $receiptDir "launcher-$Tag.err"), ($_ | Out-String) + $_.ScriptStackTrace)
+  exit 1
 }

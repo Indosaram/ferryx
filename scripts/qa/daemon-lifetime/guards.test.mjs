@@ -4,6 +4,8 @@ import {
   makeRunId, assertRunId, qaSupervisorName, qaBundleIdentifier, tauriQaConfig, isQaJobName, assertBundleIdentifier,
   forbiddenRoots, assertQaExecutable, isolationLayout, isolationEnv, assertIsolatedEnv, classifyCommand, ProcessRegistry, GuardError,
 } from './lib/guards.mjs';
+import { probeIdentity, windowsProbeScript } from './lib/proc.mjs';
+import { ownerStartMatches } from './scenarios/common.mjs';
 
 const RUN = '20261019t064512z';
 const OTHER = '20261019t064513z';
@@ -111,4 +113,27 @@ test('ProcessRegistry kills only a recorded pid whose identity still matches', a
   table.delete(10);
   assert.equal(await reg.kill(10), false);
   assert.deepEqual(sent, [[10, 'SIGKILL']]);
+});
+
+test('windows probe keeps the FILETIME start exact through script, JSON and parse (> 2^53)', async () => {
+  const filetime = 134048390123456789n; // owner.json u64; Number(filetime) would round to ...800
+  assert.notEqual(String(Number(filetime)), String(filetime));
+  // Emulates ConvertTo-Json for the script actually sent: [string] cast -> JSON string, else number.
+  const calls = [];
+  const exec = async (command, args) => {
+    calls.push([command, args]);
+    const script = args.at(-1);
+    const start = /start = \[string\]\$p\.StartTime\.ToFileTimeUtc\(\)/.test(script) ? JSON.stringify(String(filetime)) : String(filetime);
+    return { status: 0, stdout: `{"path":"C:\\\\qa\\\\ferryx.exe","start":${start}}\r\n`, stderr: '' };
+  };
+  const live = await probeIdentity(42, 'windows', { exec });
+  assert.equal(calls[0][0], 'powershell.exe');
+  assert.equal(calls[0][1].at(-1), windowsProbeScript(42));
+  assert.deepEqual(live, { executable: 'C:\\qa\\ferryx.exe', startTime: String(filetime) });
+  assert.equal(ownerStartMatches('windows', String(filetime), live.startTime), true);
+  assert.equal(ownerStartMatches('windows', String(filetime + 1n), live.startTime), false);
+  // A numeric start (the old producer shape) is refused, never silently rounded.
+  const numeric = async () => ({ status: 0, stdout: `{"path":"C:\\\\x.exe","start":${filetime}}`, stderr: '' });
+  await assert.rejects(probeIdentity(42, 'windows', { exec: numeric }), /not an exact decimal string/);
+  assert.equal(await probeIdentity(42, 'windows', { exec: async () => ({ status: 0, stdout: '', stderr: '' }) }), null);
 });
