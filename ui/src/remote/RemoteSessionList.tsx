@@ -614,7 +614,12 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         aria-selected={paneActive}
         aria-label={tabAriaLabel}
         disabled={pending !== null}
-        onClick={() => selectPane(tab)}
+        onClick={() => {
+          // Like every other row: the drawer covers the terminal, so leaving it open makes the
+          // switch invisible and the tap look dead.
+          onSelectorOpenChange(false);
+          selectPane(tab);
+        }}
         className={cn(
           rowDensity === "touch"
             ? "flex min-h-11 w-full items-center gap-1.5 rounded-md py-0.5 pl-4 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
