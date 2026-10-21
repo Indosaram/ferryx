@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SCENARIO_IDS, newSummary, selectScenarios, assertion, settle, block, applyQ00Gate, computeExitCode, validateSummary } from './lib/summary.mjs';
 import { readFileSync } from 'node:fs';
-import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths, selfTestExitCode, SELF_TEST_PATCH, teardownRun, runWithTeardown, prepareSelfTestWorktree, teardownExtras, releaseOwnerFile, releaseContinuity, prepareBaselineDist } from './run.mjs';
+import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths, selfTestExitCode, SELF_TEST_PATCH, teardownRun, runWithTeardown, prepareSelfTestWorktree, teardownExtras, releaseOwnerFile, releaseContinuity, prepareBaselineDist, recoverAfterScenarioException } from './run.mjs';
 import { hostFor } from './lib/hosts.mjs';
-import { confirmOwner, ownerStartMatches, ownerIdentity, parseStarting, awaitPendingStart, retireOwner, freshOwner, STARTING_WINDOW_MS } from './scenarios/common.mjs';
+import { confirmOwner, ownerStartMatches, ownerIdentity, parseStarting, awaitPendingStart, retireOwner, freshOwner, invalidateOwnerState, setAsideHeadCatalog, workspaceCatalogFile, recoverOwnerAfterException, STARTING_WINDOW_MS } from './scenarios/common.mjs';
 import { Q06, killLaunchedGui } from './scenarios/q04-q06.mjs';
+import { Q07 } from './scenarios/q07-q09.mjs';
+import { Q11, openSettings, nthReceiptPattern, SETTINGS_OPENED_RECEIPT, SETTINGS_OPEN_ATTEMPTS } from './scenarios/q10-q13.mjs';
 
 const RUN = '20261019t064512z';
 
@@ -251,8 +253,11 @@ test('artifact paths per platform layout', () => {
  * In-memory host for the owner-state helpers: owner.json, starting.json, live pids and the
  * owner change a waitOwnerChange observes are plain fields; no clock, sleep or real process.
  */
-function ownerWorld({ owner = null, alive = [], starting = null, publish = [] } = {}) {
-  const w = { owner, alive: new Set(alive), starting, publish: [...publish], calls: [], closed: [], quits: [], kills: [], launches: [], registryKills: [], killRefused: new Set() };
+function ownerWorld({ owner = null, alive = [], starting = null, publish = [], sessions = [], stuck = false } = {}) {
+  // sessions: backend ids the owner still serves. ListSessionsOk carries them as bare strings
+  // (protocol.rs ListSessionsOk { sessions: Vec<String> }); RetireWhenIdle refuses while any is
+  // open, so the owner exits only after every one is closed. stuck: close never ends a session.
+  const w = { owner, alive: new Set(alive), starting, publish: [...publish], sessions: new Set(sessions), stuck, sessionCloses: [], calls: [], closed: [], quits: [], kills: [], launches: [], registryKills: [], killRefused: new Set() };
   const RT = '/r/run';
   // Linux units: owner.json startTime and the probe are the same /proc starttime ticks.
   const startOf = (pid) => 1000 + pid;
@@ -278,7 +283,17 @@ function ownerWorld({ owner = null, alive = [], starting = null, publish = [] } 
           const f = params.frame;
           if (f.op === 'Hello') return { ok: true, pid: w.owner };
           if (f.op === 'Inventory') return { ok: true, live_local: 0, live_remote: 0, live_paired: 0 };
-          if (f.op === 'RetireWhenIdle') { w.alive.delete(w.owner); return { ok: true, live: 0 }; }
+          if (f.op === 'RetireWhenIdle') {
+            if (w.sessions.size > 0) return { ok: true, live: w.sessions.size };
+            w.alive.delete(w.owner); return { ok: true, live: 0 };
+          }
+          if (f.type === 'listSessions') return { type: 'listSessionsOk', epoch: 1, sessions: [...w.sessions] };
+          if (f.type === 'close') {
+            w.sessionCloses.push(f.sessionId);
+            if (!w.sessions.has(f.sessionId)) return { type: 'error', code: 'SESSION_NOT_FOUND' };
+            if (!w.stuck) w.sessions.delete(f.sessionId);
+            return { type: 'closeOk' };
+          }
           if (f.type === 'describeLiveSessions') return { type: 'describeLiveSessionsOk', sessions: [] };
           if (f.type === 'registerWorkspace') return { type: 'registerWorkspaceOk' };
           if (f.type === 'spawn') return { type: 'spawnOk', sessionId: 'S1' };
@@ -287,7 +302,8 @@ function ownerWorld({ owner = null, alive = [], starting = null, publish = [] } 
           return { type: 'unexpected', frame: f };
         }
         case 'waitOutput': return { count: 1, text: 'QA_A_TICK_2' };
-        case 'waitExit': return { pid: params.pid, exitedAt: 1 };
+        // An owner with open sessions never exits on retire; a killed one is gone.
+        case 'waitExit': return w.alive.has(params.pid) && w.sessions.size > 0 ? { pid: params.pid, timedOut: true } : { pid: params.pid, exitedAt: 1 };
         case 'waitOwnerChange': {
           const next = w.publish.shift();
           if (!next) return { owner: null, timedOut: true, seen: [] };
@@ -380,6 +396,55 @@ test('retireOwner never reports a stale owner as retired while a start is pendin
   assert.equal(p.retired, true);
   assert.equal(p.pid, 9);
   assert.equal(pending.w.alive.has(9), false);
+});
+
+test('freshOwner with expectKey refuses an owner of another generation (run-9a5db442 Q13 got B)', async () => {
+  const withKey = (key) => {
+    const world = ownerWorld({ owner: 1, publish: [{ pid: 9, alive: true }] });
+    const real = world.ctx.agent.call;
+    world.ctx.agent.call = async (m, p) => (m === 'call' && p.frame?.op === 'Hello' ? { ok: true, pid: world.w.owner, generation_key: key } : real(m, p));
+    return world;
+  };
+  const stale = withKey('KEY_B');
+  await assert.rejects(freshOwner(stale.ctx, { name: 'A' }, { expectKey: 'KEY_A' }), (e) => e.code === 'OWNER_WRONG_GENERATION' && e.detail.expected === 'KEY_A' && e.detail.actual === 'KEY_B');
+  assert.equal(stale.ctx.state.conn, undefined, 'no session seeded on the wrong generation');
+  const right = withKey('KEY_A');
+  assert.equal((await freshOwner(right.ctx, { name: 'A' }, { expectKey: 'KEY_A' })).pid, 9);
+});
+
+test('Q07 removes the B generation job it installed, by its recorded name only', async () => {
+  const removed = [];
+  const units = new Set(['ferryx-qa-x.service', 'ferryx-qa-x-KEY_A.service', 'ferryx-qa-x-KEY_B.service']);
+  const jobs = {
+    jobName: (key) => `ferryx-qa-x-${key}`,
+    inspect: async () => ({ state: 'inactive' }),
+    listQaJobs: async () => [...units],
+    remove: async (name) => { removed.push(name); units.delete(`${name}.service`); return true; },
+  };
+  const session = { kind: 'local', backendId: 'L1', readerOpen: true, localChildPid: 5 };
+  const conn = { describe: async () => ({ type: 'describeLiveSessionsOk', sessions: [session] }), call: async (f) => ({ type: f.type === 'attach' ? 'attachOk' : 'writeOk' }), waitOutput: async (_s, marker) => ({ count: 1, text: marker }), close: async () => {} };
+  const call = async (method, params = {}) => {
+    if (method === 'dataOpen') return { handle: 'd', handshake: { type: 'handshakeOk' } };
+    if (method === 'controlOpen') return { handle: 'c' };
+    if (method === 'call') return params.handle === 'd' ? conn.call(params.frame).then((r) => (params.frame.type === 'describeLiveSessions' ? conn.describe() : r)) : { ok: true, pid: 4, generation_key: 'KEY_A' };
+    if (method === 'waitOutput') return { count: 1, text: params.marker };
+    if (method === 'probe') return { executable: '/qa/4', startTime: '1' };
+    if (method === 'readFile') return null;
+    if (method === 'exists') return true;
+    return true;
+  };
+  const ctx = {
+    agent: { call }, platform: 'linux', runId: RUN, keys: { A: 'KEY_A', B: 'KEY_B' }, stagedRoot: '/s', jobs,
+    layout: { runtime: '/r/run', barriers: '/r/barriers' }, evidenceDir: '/e', writeEvidence: async () => {},
+    artifacts: { A: { name: 'A' }, B: { name: 'B' } }, replaceAppOnDisk: async (_from, to) => ({ artifact: to }),
+    gui: { quit: async () => ({}), launch: async () => ({ pid: 3 }) }, state: { conn, gui: { pid: 2 }, localA: 'L1' },
+  };
+  ctx.agent.call = async (method, params) => (method === 'dataOpen' ? { handle: 'd', handshake: { type: 'handshakeOk' } } : call(method, params));
+  const result = { id: 'Q07', assertions: [], evidence: [] };
+  await Q07(ctx, result);
+  assert.deepEqual(removed, ['ferryx-qa-x-KEY_B']);
+  assert.ok(units.has('ferryx-qa-x-KEY_A.service') && units.has('ferryx-qa-x.service'), 'only the B unit is removed');
+  assert.ok(result.assertions.some((a) => a.name === 'B generation job removed by its recorded name after the replacement check' && a.ok));
 });
 
 test('freshOwner throws a structured OWNER_GONE instead of dereferencing a dead owner', async () => {
@@ -515,4 +580,277 @@ test('baseline step gets an empty ui/dist in its own worktree, idempotently, on 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+/** Records every data frame type the fake agent of an ownerWorld receives. */
+function frameLog(ctx) {
+  const frames = [];
+  const real = ctx.agent.call;
+  ctx.agent.call = async (method, params = {}) => {
+    if (method === 'call') frames.push(params.frame.type ?? params.frame.op);
+    return real(method, params);
+  };
+  return frames;
+}
+
+test('a retired owner forgets the workspace registration, so the next owner is registered again (Q08b/Q13)', async () => {
+  const { ctx } = ownerWorld({ owner: 1, publish: [{ pid: 9, alive: true }, { pid: 10, alive: true }] });
+  const frames = frameLog(ctx);
+  ctx.workspaceRegistered = false;
+  await freshOwner(ctx, { name: 'A' });
+  assert.equal(ctx.workspaceRegistered, true);
+  await invalidateOwnerState(ctx);
+  assert.equal(ctx.workspaceRegistered, false, 'the next owner has not seen registerWorkspace');
+  await freshOwner(ctx, { name: 'v1bump' });
+  assert.equal(frames.filter((f) => f === 'registerWorkspace').length, 2, 'one registration per owner');
+});
+
+test('an older owner never inherits the HEAD version-2 catalog: it is set aside as evidence and registration is redone', async () => {
+  const files = new Map([['/r/data/remote/machine-workspaces.v1.json', '{"version":2,"workspaces":{}}']]);
+  const ops = [];
+  const ctx = {
+    layout: { data: '/r/data', root: '/r' }, workspaceRegistered: true,
+    agent: { call: async (m, a) => {
+      ops.push([m, a.file ?? a.target]);
+      if (m === 'readFile') return files.get(a.file) ?? null;
+      if (m === 'writeFile') { files.set(a.file, a.content); return true; }
+      if (m === 'remove') { files.delete(a.target); return true; }
+      throw new Error(m);
+    } },
+  };
+  assert.equal(workspaceCatalogFile(ctx), '/r/data/remote/machine-workspaces.v1.json');
+  const out = await setAsideHeadCatalog(ctx, 'Q08b');
+  assert.deepEqual([out.setAside, out.version], ['/r/set-aside/Q08b-machine-workspaces.v1.json', 2]);
+  assert.equal(files.has(workspaceCatalogFile(ctx)), false);
+  assert.equal(files.get(out.setAside), '{"version":2,"workspaces":{}}', 'kept byte for byte');
+  assert.equal(ctx.workspaceRegistered, false);
+  // No catalog: nothing moved, registration still redone.
+  ctx.workspaceRegistered = true;
+  assert.equal((await setAsideHeadCatalog(ctx, 'Q13')).setAside, null);
+  assert.equal(ctx.workspaceRegistered, false);
+});
+
+test('a scenario exception retires the leftover owner and starts a fresh A owner before the next scenario (Q08b -> Q10)', async () => {
+  // Owner 1 is the failed scenario's (v1bump) owner; its GUI 5 is still up.
+  const { w, ctx } = ownerWorld({ owner: 1, alive: [1], publish: [{ pid: 40, alive: true }], sessions: ['SSH-left', 'L-left'] });
+  ctx.state = { gui: { tag: 'Q08B', pid: 5 }, conn: { close: async () => { w.closed.push('old'); } }, localA: 'OLD' };
+  ctx.workspaceRegistered = true;
+  const frames = frameLog(ctx);
+  const out = await recoverOwnerAfterException(ctx, ctx.artifacts.A);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.deepEqual(w.kills, [5], 'the failed scenario GUI is killed by recorded pid, never a focused-window quit');
+  assert.deepEqual(w.quits, []);
+  assert.ok(frames.includes('RetireWhenIdle'));
+  // run-r5c: the list carries bare id strings; each leftover session is closed by its id, so the
+  // owner retires on its own and is never killed.
+  assert.deepEqual(w.sessionCloses, ['SSH-left', 'L-left']);
+  assert.deepEqual(out.closed.map((c) => [c.id, c.resp.type]), [['SSH-left', 'closeOk'], ['L-left', 'closeOk']]);
+  assert.equal(w.sessions.size, 0);
+  assert.deepEqual(w.registryKills, [], 'a retired owner is not killed');
+  assert.equal(w.alive.has(1), false, 'leftover owner retired');
+  assert.deepEqual([out.fresh, ctx.state.daemon.pid], [40, 40]);
+  assert.ok(frames.includes('registerWorkspace'), 'the fresh owner is registered again');
+  // run.mjs records the recovery on the failed scenario and keeps the original failure.
+  const result = { id: 'Q08b', assertions: [{ name: 'scenario completed without an exception', ok: false }], evidence: [] };
+  const written = [];
+  const rec = await recoverAfterScenarioException(ctx, result, { writeFileSync: (f, t) => written.push([f, t]), localEvidence: '/ev', recover: async () => ({ ok: false, code: 'OWNER_STATE_UNRECOVERABLE' }) });
+  assert.equal(rec.ok, false);
+  assert.deepEqual(result.assertions.map((a) => [a.name, a.ok]), [['scenario completed without an exception', false], ['owner of the failed scenario retired and a fresh QA owner started', false]]);
+  assert.deepEqual(result.evidence, ['/ev/Q08b-exception-recovery.json']);
+  assert.equal(written[0][0], '/ev/Q08b-exception-recovery.json');
+});
+
+test('an owner that keeps live sessions past its retire deadline is killed by its recorded pid, then a fresh A starts', async () => {
+  const { w, ctx } = ownerWorld({ owner: 1, alive: [1], publish: [{ pid: 40, alive: true }], sessions: ['S-held'], stuck: true });
+  ctx.state = { gui: null };
+  const out = await recoverOwnerAfterException(ctx, ctx.artifacts.A);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.deepEqual(w.sessionCloses, ['S-held']);
+  assert.deepEqual(w.registryKills, [{ pid: 1, signal: 'SIGTERM' }], 'only the recorded owner pid, through the registry');
+  assert.deepEqual([out.killed.exited, out.retired.retired, out.fresh], [true, true, 40]);
+});
+
+test('a kill the registry refuses leaves the owner unrecoverable, never thrown', async () => {
+  const { w, ctx } = ownerWorld({ owner: 1, alive: [1], sessions: ['S-held'], stuck: true });
+  ctx.state = { gui: null };
+  w.killRefused.add(1);
+  const out = await recoverOwnerAfterException(ctx, ctx.artifacts.A);
+  assert.deepEqual([out.ok, out.code, out.killed.exited, out.killed.steps[0].refused], [false, 'OWNER_STATE_UNRECOVERABLE', false, 'KILL_REFUSED']);
+  assert.equal(out.fresh, null);
+});
+
+test('a dead owner that cannot be retired is reported, never thrown', async () => {
+  const { ctx } = ownerWorld({ owner: 1, alive: [1], starting: '{bad' });
+  ctx.state = { gui: null };
+  // Owner 1 alive but retirement through control fails: RetireWhenIdle answers not ok.
+  const real = ctx.agent.call;
+  ctx.agent.call = async (m, p = {}) => (m === 'call' && p.frame?.op === 'RetireWhenIdle' ? { ok: false } : real(m, p));
+  const out = await recoverOwnerAfterException(ctx, ctx.artifacts.A);
+  assert.deepEqual([out.ok, out.code], [false, 'OWNER_STATE_UNRECOVERABLE']);
+});
+
+/** GUI log + MahoRD whose Ctrl+, opens Settings only from the press numbered in \`opensOn\`. */
+function settingsWorld({ opensOn, prior = 0 }) {
+  let log = `${SETTINGS_OPENED_RECEIPT}\n`.repeat(prior);
+  const presses = [];
+  const ctx = {
+    mahord: { hotkey: async (keys) => { presses.push(keys.join('+')); if (opensOn.includes(presses.length)) log += `x ${SETTINGS_OPENED_RECEIPT} supported=true\n`; } },
+    agent: { call: async (m, a) => {
+      if (m === 'readFile') return log;
+      if (m === 'waitLog') { const r = new RegExp(a.pattern).exec(log); return r ? { matched: r[0] } : { matched: null, timedOut: true }; }
+      throw new Error(m);
+    } },
+  };
+  return { ctx, presses };
+}
+
+test('Settings counts as open only on a new cmd_daemon_supervisor_get receipt, with a bounded retry (Q10)', async () => {
+  // An earlier GUI session's receipt in the log never counts for this press.
+  assert.ok(new RegExp(nthReceiptPattern(SETTINGS_OPENED_RECEIPT, 2)).test(`${SETTINGS_OPENED_RECEIPT}\n${SETTINGS_OPENED_RECEIPT}`));
+  assert.equal(new RegExp(nthReceiptPattern(SETTINGS_OPENED_RECEIPT, 2)).test(SETTINGS_OPENED_RECEIPT), false);
+  const first = settingsWorld({ opensOn: [1], prior: 1 });
+  const ok = await openSettings(first.ctx, '/l/gui.log');
+  assert.deepEqual([ok.opened, first.presses.length, ok.attempts[0].before], [true, 1, 1]);
+  // run-9a5db442: the first press reached a webview that had not rendered yet.
+  const late = settingsWorld({ opensOn: [2] });
+  const retried = await openSettings(late.ctx, '/l/gui.log');
+  assert.deepEqual([retried.opened, late.presses], [true, ['Control+,', 'Control+,']]);
+  const never = settingsWorld({ opensOn: [] });
+  const failed = await openSettings(never.ctx, '/l/gui.log');
+  assert.deepEqual([failed.opened, never.presses.length], [false, SETTINGS_OPEN_ATTEMPTS]);
+});
+
+/**
+ * Q11 fake world. The remote log records every write that reaches the SSH session from any
+ * connection (M12: a resend on reconnect through another handle lands in it too), and the GUI's
+ * MahoRD keystrokes are the only path that commits the marker line. Variants inject the defects
+ * each assertion exists to catch.
+ */
+function q11World({ replayOnRelaunch = false, resendOnReconnect = false, releaseBeforeQuit = false, wrongAttach = false } = {}) {
+  const sid = 'SSH1';
+  const w = { log: '', line: '', echo: '', receipts: [], events: [], sessionFile: null, launches: [], quits: [], quitWhileHeld: null, writesByHandle: {}, typedBy: [], held: false };
+  const call = async (method, params = {}) => {
+    switch (method) {
+      case 'writeFile':
+        if (params.file.endsWith('write-ack-hold.request.json')) { w.receipts.push(`{"event":"armed","sessionId":"${sid}"}`); w.held = true; }
+        if (params.file.endsWith('write-ack-hold.release.json')) { w.receipts.push(`{"event":"released","sessionId":"${sid}"}`); w.held = false; }
+        if (params.file.endsWith('session_state.json')) w.sessionFile = params.content;
+        return true;
+      case 'readFile':
+        if (params.file.endsWith('write-ack-hold.receipt.jsonl')) return w.receipts.join('\n');
+        if (params.file.endsWith('session_state.json')) return w.sessionFile;
+        return null;
+      case 'mkdir': return true;
+      case 'waitLog': {
+        const text = params.file.endsWith('native-events.jsonl') ? w.events.join('\n') : w.receipts.join('\n');
+        const r = new RegExp(params.pattern, params.flags ?? '').exec(text);
+        return r ? { matched: r[0] } : { matched: null, timedOut: true };
+      }
+      case 'dataOpen': return { handle: `h${Object.keys(w.writesByHandle).length + 1}`, handshake: { type: 'handshakeOk' } };
+      case 'call': {
+        const f = params.frame;
+        if (f.type === 'describeLiveSessions') return { type: 'describeLiveSessionsOk', sessions: [{ kind: 'ssh', backendId: sid, remotePid: 77, localChildPid: null, readerOpen: true, connected: true }] };
+        if (f.type === 'spawn') return { type: 'spawnOk', sessionId: sid, epoch: 3, session: { sessionId: sid, incarnation: 'qa-q11-inc' } };
+        if (f.type === 'write') {
+          const text = Buffer.from(f.data, 'base64').toString();
+          (w.writesByHandle[params.handle] ??= []).push(text);
+          if (text === '\u0003') {
+            w.line = '';
+            // A harness resend of the marker on the reconnected handle reaches the session too.
+            if (resendOnReconnect && w.lastMarker) w.log += `${w.lastMarker}\n`;
+          } else if (!text.startsWith('cat >> ')) {
+            w.log += text;
+          }
+          return { type: 'writeOk' };
+        }
+        return { type: `${f.type}Ok` };
+      }
+      case 'waitOutput': { const n = w.echo.split(params.marker).length - 1; return n > 0 ? { count: n, text: w.echo } : { timedOut: true, count: 0 }; }
+      case 'close': return true;
+      case 'exec': return { status: 0, stdout: w.log, stderr: '' };
+      default: throw new Error(`unexpected agent call ${method}`);
+    }
+  };
+  const conn = { handle: 'h0', call: (frame) => call('call', { handle: 'h0', frame }), describe: () => call('call', { handle: 'h0', frame: { type: 'describeLiveSessions' } }), waitOutput: (s, marker) => call('waitOutput', { marker }), close: async () => {} };
+  const restoredTab = () => {
+    const doc = w.sessionFile ? JSON.parse(w.sessionFile) : null;
+    const ws = doc && Object.values(doc.workspaces).find((x) => x.target?.kind === 'ssh');
+    return ws && Object.values(ws.terminalSessions).find((s) => s.backendSessionId === sid);
+  };
+  const ctx = {
+    agent: { call }, runId: RUN, platform: 'linux', hooks: { writeAckHoldArm: { present: true } },
+    sshd: { hostId: 'qa-sshd-x', workspaceId: 'ssh:x', hostStorePath: '/d/ssh_hosts.json', repoRoot: '/r/ssh-repo', clientKey: '/k', knownHosts: '/kh', port: 2, user: 'u' },
+    layout: { runtime: '/r/run', barriers: '/r/barriers', sessions: '/r/sessions' }, evidenceDir: '/e', writeEvidence: async () => {},
+    mahord: {
+      type: async (text) => { w.typedBy.push(w.launches.at(-1)); w.line += text; w.echo += text; w.lastMarker = text; },
+      key: async (key) => {
+        assert.equal(key, 'Enter');
+        // The GUI writes the Enter; the line reaches cat's log and the daemon parks the ack.
+        w.log += `${w.line}\n`; w.line = '';
+        w.receipts.push(`{"event":"write-applied","sessionId":"${sid}","seq":1}`);
+        if (releaseBeforeQuit) w.receipts.push(`{"event":"released","sessionId":"${sid}"}`);
+      },
+    },
+    gui: {
+      quit: async (g) => { w.quits.push(g.pid); if (w.receipts.some((r) => r.includes('write-applied'))) w.quitWhileHeld ??= w.held; return { code: 0 }; },
+      launch: async (_artifact, { env } = {}) => {
+        const pid = 10 + w.launches.length;
+        w.launches.push(pid);
+        const tab = restoredTab();
+        if (tab && env?.FERRYX_QA_OPERATION_ID) {
+          const tuple = { backendSessionId: wrongAttach ? 'OTHER' : tab.backendSessionId, incarnation: tab.incarnation, daemonEpoch: tab.daemonEpoch, frontendSessionId: tab.localSessionId, paneIdentity: tab.localSessionId, bindingKey: 'k', attemptGeneration: 0 };
+          w.events.push(JSON.stringify({ runId: RUN, operationId: env.FERRYX_QA_OPERATION_ID, kind: 'attached', attachTuple: tuple }));
+        }
+        // A product that replays the uncertain write after relaunch.
+        if (replayOnRelaunch && w.launches.length > 1 && w.lastMarker) w.log += `${w.lastMarker}\n`;
+        return { tag: `g${pid}`, pid };
+      },
+    },
+    artifacts: { A: { name: 'A' } }, state: { conn, gui: { tag: 'g8', pid: 8 } },
+  };
+  return { w, ctx, sid };
+}
+
+async function runQ11(opts) {
+  const world = q11World(opts);
+  const result = { id: 'Q11', assertions: [], evidence: [] };
+  await Q11(world.ctx, result);
+  return { ...world, result, failed: result.assertions.filter((a) => !a.ok).map((a) => a.name) };
+}
+
+test('Q11 types the marker through a GUI tab restored onto the SSH session and quits while the ack is held', async () => {
+  const { w, result, failed, sid } = await runQ11();
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  // The tab came from the GUI's own restore path: a saved SSH workspace bound to this backend.
+  const restored = JSON.parse(w.sessionFile).workspaces['ssh:x'];
+  assert.deepEqual(restored.target, { kind: 'ssh', hostId: 'qa-sshd-x' });
+  assert.equal(Object.values(restored.terminalSessions)[0].backendSessionId, sid);
+  assert.deepEqual(w.quits, [8, 10], 'the old GUI quits before the seeded restore, the restored GUI quits while held');
+  assert.deepEqual(w.typedBy, [10], 'the marker is typed into the GUI that attached the restored tab');
+  assert.equal(w.quitWhileHeld, true);
+  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+  // No data connection writes the marker: only the cat command and the closing interrupt.
+  for (const writes of Object.values(w.writesByHandle)) for (const text of writes) assert.ok(!text.includes('UNCERTAIN'), text);
+});
+
+test('Q11 fails when the uncertain write is replayed after the relaunch', async () => {
+  const { failed } = await runQ11({ replayOnRelaunch: true });
+  assert.ok(failed.includes('remote log contains the marker exactly once (no replay of the uncertain write)'), failed.join('; '));
+});
+
+test('Q11 fails when the marker is resent through a reconnected data connection (M12)', async () => {
+  const { failed } = await runQ11({ resendOnReconnect: true });
+  assert.ok(failed.includes('remote log contains the marker exactly once (no replay of the uncertain write)'), failed.join('; '));
+});
+
+test('Q11 fails when the ack is no longer held at the GUI quit (M13)', async () => {
+  const { failed } = await runQ11({ releaseBeforeQuit: true });
+  assert.ok(failed.includes('the ack was still held when the GUI quit'), failed.join('; '));
+});
+
+test('Q11 never types when no GUI tab is attached to the SSH session', async () => {
+  const { w, failed } = await runQ11({ wrongAttach: true });
+  assert.deepEqual(failed, ['a GUI tab is attached to the SSH session (native attach receipt)']);
+  assert.deepEqual(w.typedBy, []);
+  assert.equal(w.log, '');
 });
