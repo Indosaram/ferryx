@@ -311,6 +311,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_prompt_with_a_card_is_a_single_notice() {
+        let pool = crate::storage::memory().await.unwrap();
+        let hub = hub(pool.clone(), std::time::Duration::ZERO);
+        let mut observation = blocked(Some("Proceed?"));
+        observation.approval = Some(crate::sessions::watch::ApprovalCard {
+            session_id: "pane".into(),
+            prompt_id: "same-prompt".into(),
+            screen_revision: "rev-1".into(),
+            options: vec!["Yes".into(), "No".into()],
+        });
+        hub.ingest(&observation).await.unwrap();
+        let outbox = crate::chat::reply::pending(&pool).await.unwrap();
+        assert_eq!(outbox.len(), 1, "the card is the only notice: {outbox:?}");
+        assert!(outbox[0].2.contains("Proceed?"));
+        assert!(
+            !outbox[0].2.contains("needs the owner"),
+            "the plain escalation line is not also queued: {}",
+            outbox[0].2
+        );
+    }
+
+    #[tokio::test]
     async fn a_question_that_went_away_is_not_sent_when_the_timer_fires() {
         let pool = crate::storage::memory().await.unwrap();
         let hub = hub(pool.clone(), std::time::Duration::from_millis(200));

@@ -334,15 +334,16 @@ async fn on_agent_event(
                         .await;
                 }
                 AutoDecision::EscalateOwner => {
-                    // Same route as a notice: the Slack home channel, or the owner DM.
-                    let session = hub.owner_session();
-                    let _ = ferryx_hub::chat::reply::chat_reply(
-                        &hub.pool,
-                        &session,
-                        &format!("approval {prompt_id} on {target} needs the owner"),
-                        None,
-                    )
-                    .await;
+                    // A card is the only notice for this prompt. The plain line is for an
+                    // escalation the watcher cannot turn into buttons.
+                    if let Some(text) = ferryx_hub::sessions::watch::escalation_plain_text(
+                        &prompt_id,
+                        &target,
+                        obs.approval.is_some(),
+                    ) {
+                        let session = hub.owner_session();
+                        let _ = ferryx_hub::chat::reply::chat_reply(&hub.pool, &session, &text, None).await;
+                    }
                 }
                 AutoDecision::Hold => {}
             }

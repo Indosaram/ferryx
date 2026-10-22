@@ -102,6 +102,19 @@ for line in open(sys.argv[2]):
 PY
 )
   [[ -n "$VALUE" ]] && ok "owner notice was posted to home channel $SLACK_HOME_CHANNEL with answer buttons ($VALUE)" || bad "no card with buttons was posted to $SLACK_HOME_CHANNEL"
+  if python3 - "$ROOT/mock.jsonl" <<'PY'
+import json,sys
+posts=[]
+for line in open(sys.argv[1]):
+    e=json.loads(line)
+    if e.get("kind")=="chat.postMessage":
+        posts.append(e.get("body") or {})
+cards=[p for p in posts if "blocks" in p]
+plain=[p for p in posts if "needs the owner" in (p.get("text") or "")]
+if len(cards)!=1 or plain:
+    raise SystemExit(f"cards={len(cards)} plain={len(plain)}")
+PY
+  then ok "one prompt posted a single card and no plain escalation"; else bad "duplicate notice: expected one card and no 'needs the owner' message"; fi
   if python3 - "$FERRYX_HUB_SLACK_OWNER" "$ROOT/mock.jsonl" <<'PY'
 import json,sys
 owner, path = sys.argv[1], sys.argv[2]
@@ -114,20 +127,41 @@ raise SystemExit(1)
 PY
   then bad "approval card was posted to the owner DM"; fi
   : > "$FAKE_CARD_LOG"
-  inject "{\"type\":\"interactive\",\"payload\":{\"type\":\"block_actions\",\"user\":{\"id\":\"USTRANGER\"},\"actions\":[{\"value\":\"$VALUE\"}]}}" >/dev/null; sleep 2
+  inject "{\"type\":\"interactive\",\"payload\":{\"type\":\"block_actions\",\"user\":{\"id\":\"USTRANGER\"},\"channel\":{\"id\":\"$SLACK_HOME_CHANNEL\"},\"message\":{\"ts\":\"1.0\",\"text\":\"card\"},\"actions\":[{\"value\":\"$VALUE\",\"text\":{\"type\":\"plain_text\",\"text\":\"Yes\"}}]}}" >/dev/null; sleep 2
   [[ ! -s "$FAKE_CARD_LOG" ]] && grep -q "not from the owner" "$DLOG" && ok "a stranger's click was refused and typed nothing" || bad "stranger click typed: $(cat "$FAKE_CARD_LOG")"
-  inject "{\"type\":\"interactive\",\"payload\":{\"type\":\"block_actions\",\"user\":{\"id\":\"$FERRYX_HUB_SLACK_OWNER\"},\"actions\":[{\"value\":\"$VALUE\"}]}}" >/dev/null
+  grep -q "only the owner can answer" "$ROOT/mock.jsonl" && ok "the stranger got an ephemeral explanation" || bad "no ephemeral for the stranger click"
+  inject "{\"type\":\"interactive\",\"payload\":{\"type\":\"block_actions\",\"user\":{\"id\":\"$FERRYX_HUB_SLACK_OWNER\"},\"channel\":{\"id\":\"$SLACK_HOME_CHANNEL\"},\"message\":{\"ts\":\"1.0\",\"text\":\"card\",\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"card\"}},{\"type\":\"actions\",\"elements\":[{\"type\":\"button\"}]}]},\"actions\":[{\"value\":\"$VALUE\",\"text\":{\"type\":\"plain_text\",\"text\":\"Yes\"}}]}}" >/dev/null
 else
   if [[ -n "${SLACK_HOME_CHANNEL:-}" ]]; then
     echo ">>> Look in the home channel <#$SLACK_HOME_CHANNEL> (not a DM)."
   else
     echo ">>> No SLACK_HOME_CHANNEL is set, so the card is in the DM with $FERRYX_HUB_SLACK_OWNER."
   fi
-  echo ">>> A non-owner click must do nothing; then click it as the owner ($FERRYX_HUB_SLACK_OWNER)."
+  echo ">>> A non-owner click must do nothing (they get an ephemeral). Then click it as the owner ($FERRYX_HUB_SLACK_OWNER)."
+  echo ">>> The card should change to a check mark with no buttons. A second click of the same option just refreshes that line."
 fi
 for _ in $(seq 1 ${WAIT_SECS:-120}); do [[ -s "$FAKE_CARD_LOG" ]] && break; sleep 1; done
 sleep 1
 if [[ -s "$FAKE_CARD_LOG" ]]; then ok "the pane received the option keys: $(tr '\n' ' ' < "$FAKE_CARD_LOG")"; else bad "the pane got no keys from the click"; fi
+if [[ "$MODE" == mock ]]; then
+  if python3 - "$SLACK_HOME_CHANNEL" "$ROOT/mock.jsonl" <<'PY'
+import json,sys
+home=sys.argv[1]
+for line in open(sys.argv[2]):
+    e=json.loads(line)
+    body=e.get("body") or {}
+    if e.get("kind")!="chat.update" or body.get("channel")!=home:
+        continue
+    blocks=body.get("blocks") or []
+    if any(b.get("type")=="actions" for b in blocks):
+        raise SystemExit("actions still on the card")
+    if not any(b.get("type")=="context" and "✅" in ((b.get("elements") or [{}])[0].get("text") or "") for b in blocks):
+        raise SystemExit("no resolved context line")
+    raise SystemExit(0)
+raise SystemExit("no chat.update")
+PY
+  then ok "the answered card was updated in place, without buttons"; else bad "chat.update did not replace the card"; fi
+fi
 
 # --- 3. chat.reply posts the caller's text, not a screen copy --------------------------
 REPLY="ferryx reply $NONCE-r (typed by the caller, not on any screen)"

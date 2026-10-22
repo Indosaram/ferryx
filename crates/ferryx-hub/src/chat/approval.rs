@@ -83,8 +83,59 @@ pub fn answer_op(click: &ApprovalClick, request_id: &str) -> AgentOp {
     }
 }
 
+/// Idempotency key for one prompt on one screen. The option is not part of the key, so
+/// clicking the same option again replays and a different option conflicts as already answered.
+/// An empty host is this machine.
+pub fn approval_request_id(host_id: &str, click: &ApprovalClick) -> String {
+    let host = {
+        let trimmed = host_id.trim();
+        if trimmed.is_empty() {
+            "local"
+        } else {
+            trimmed
+        }
+    };
+    format!(
+        "slack-approval:{host}:{}:{}:{}",
+        click.session_id, click.screen_revision, click.prompt_id
+    )
+}
+
+/// How a failed answer should be explained to the person who clicked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickFailure {
+    /// Same card, different option, or the card's answer was already sent.
+    AlreadyAnswered,
+    /// The first click with this id is still in the daemon.
+    InFlight,
+    /// The screen moved on; the prompt the card named is gone.
+    Stale,
+    /// Anything else. The card itself should show the error.
+    Other,
+}
+
+pub fn click_failure_kind(message: &str) -> ClickFailure {
+    if message.contains("already in flight") {
+        ClickFailure::InFlight
+    } else if message.contains("already used with a different payload")
+        || message.contains("already sent")
+        || message.contains("already answered")
+    {
+        ClickFailure::AlreadyAnswered
+    } else if message.contains("screen changed") || message.contains("no longer on screen") {
+        ClickFailure::Stale
+    } else {
+        ClickFailure::Other
+    }
+}
+
 /// Slack `block_actions` from the owner. A stranger's click is refused and produces no op.
-pub fn slack_approval_op(payload: &Value, owner_id: &str) -> Result<Option<AgentOp>> {
+/// `host_id` is part of the answer's idempotency key.
+pub fn slack_approval_op(
+    payload: &Value,
+    owner_id: &str,
+    host_id: &str,
+) -> Result<Option<AgentOp>> {
     if payload.get("type").and_then(Value::as_str) != Some("block_actions") {
         return Ok(None);
     }
@@ -125,7 +176,7 @@ pub fn slack_approval_op(payload: &Value, owner_id: &str) -> Result<Option<Agent
         if let Some(click) = click {
             return Ok(Some(answer_op(
                 &click,
-                &format!("slack-approval-{}", click.prompt_id),
+                &approval_request_id(host_id, &click),
             )));
         }
     }
@@ -144,19 +195,22 @@ mod tests {
             "user": {"id": "UOWNER"},
             "actions": [{"value": "ferryx:approval:pane-1:prompt-9:rev-42:0:once"}]
         });
-        let op = slack_approval_op(&payload, "UOWNER").unwrap().unwrap();
+        let op = slack_approval_op(&payload, "UOWNER", "local")
+            .unwrap()
+            .unwrap();
         match op {
             AgentOp::Answer {
                 session_id,
                 prompt_id,
                 screen_revision,
                 answer,
-                ..
+                request_id,
             } => {
                 assert_eq!(session_id, "pane-1");
                 assert_eq!(prompt_id, "prompt-9");
                 assert_eq!(screen_revision, "rev-42");
                 assert_eq!(answer["optionIndex"], 0);
+                assert_eq!(request_id, "slack-approval:local:pane-1:rev-42:prompt-9");
             }
             other => panic!("expected answer, got {other:?}"),
         }
@@ -166,14 +220,62 @@ mod tests {
             "user": {"id": "USTRANGER"},
             "actions": [{"value": "ferryx:approval:pane-1:prompt-9:rev-42:0:once"}]
         });
-        assert!(slack_approval_op(&stranger, "UOWNER").is_err());
+        assert!(slack_approval_op(&stranger, "UOWNER", "local").is_err());
         let owner_in_channel = json!({
             "type": "block_actions",
             "channel": {"id": "C0C9XG5FP8W"},
             "user": {"id": "UOWNER"},
             "actions": [{"value": "ferryx:approval:pane-1:prompt-9:rev-42:0:once"}]
         });
-        assert!(slack_approval_op(&owner_in_channel, "UOWNER").is_ok());
+        assert!(slack_approval_op(&owner_in_channel, "UOWNER", "").is_ok());
+    }
+
+    fn request_id_of(session: &str, revision: &str, host: &str, index: u32) -> String {
+        let payload = json!({
+            "type": "block_actions",
+            "user": {"id": "UOWNER"},
+            "actions": [{"value": format!("ferryx:approval:{session}:same-prompt:{revision}:{index}:once")}]
+        });
+        match slack_approval_op(&payload, "UOWNER", host)
+            .unwrap()
+            .unwrap()
+        {
+            AgentOp::Answer { request_id, .. } => request_id,
+            other => panic!("expected answer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_same_prompt_text_on_two_sessions_does_not_share_a_request_id() {
+        let pane_a = request_id_of("pane-a", "rev-1", "local", 2);
+        let pane_b = request_id_of("pane-b", "rev-1", "local", 2);
+        let next_revision = request_id_of("pane-a", "rev-2", "local", 2);
+        let other_host = request_id_of("pane-a", "rev-1", "host-b", 2);
+        let same_option_again = request_id_of("pane-a", "rev-1", "local", 2);
+        let other_option = request_id_of("pane-a", "rev-1", "local", 0);
+        assert_ne!(pane_a, pane_b);
+        assert_ne!(pane_a, next_revision);
+        assert_ne!(pane_a, other_host);
+        assert_eq!(pane_a, same_option_again);
+        // The option is not part of the key: a repeat of the same option replays,
+        // and a different option conflicts as already answered.
+        assert_eq!(pane_a, other_option);
+        assert_eq!(
+            click_failure_kind(
+                "REQUEST_CONFLICT this request id was already used with a different payload"
+            ),
+            ClickFailure::AlreadyAnswered
+        );
+        assert_eq!(
+            click_failure_kind(
+                "REQUEST_CONFLICT the screen changed since the card was read; nothing was sent"
+            ),
+            ClickFailure::Stale
+        );
+        assert_eq!(
+            click_failure_kind("REQUEST_CONFLICT this request id is already in flight; its outcome must be resolved before it is reused"),
+            ClickFailure::InFlight
+        );
     }
 
     #[test]

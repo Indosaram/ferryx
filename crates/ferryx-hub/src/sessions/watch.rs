@@ -97,6 +97,17 @@ pub struct Notice {
     pub approval: Option<ApprovalCard>,
 }
 
+/// Plain text for an owner escalation that has no answer card. A prompt that already
+/// has a card is posted once, as that card, so the owner does not also get
+/// "approval … needs the owner".
+pub fn escalation_plain_text(prompt_id: &str, target: &str, has_card: bool) -> Option<String> {
+    if has_card {
+        None
+    } else {
+        Some(format!("approval {prompt_id} on {target} needs the owner"))
+    }
+}
+
 /// A detected prompt a notice can carry as buttons. An answer is checked against
 /// `screen_revision`, so a card for a screen that moved on is refused, not misfired.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -169,7 +180,10 @@ impl Watcher {
         // target. A question or block that is no longer on this target's screen is withdrawn;
         // a completion already happened and stays until it is sent. Other targets' pending
         // notices are untouched.
-        let present: HashSet<String> = notices.iter().map(|notice| notice.dedupe_key.clone()).collect();
+        let present: HashSet<String> = notices
+            .iter()
+            .map(|notice| notice.dedupe_key.clone())
+            .collect();
         let machine_failed = obs.machine_failed;
         state.pending.retain(|key, (notice, _)| {
             notice.target != obs.target
@@ -405,7 +419,10 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let watcher = Watcher::new(pool, policy);
-        let held = watcher.on_observation(&question(true), start).await.unwrap();
+        let held = watcher
+            .on_observation(&question(true), start)
+            .await
+            .unwrap();
         assert!(held.due.is_empty());
 
         let mut other = question(false);
@@ -420,8 +437,16 @@ mod tests {
         done.message_count = 5;
         let after_delay = start + TimeDelta::seconds(61);
         let outcome = watcher.on_observation(&done, after_delay).await.unwrap();
-        let kinds: Vec<_> = outcome.due.iter().map(|notice| notice.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["question"], "the question kept its first-seen time");
+        let kinds: Vec<_> = outcome
+            .due
+            .iter()
+            .map(|notice| notice.kind.as_str())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["question"],
+            "the question kept its first-seen time"
+        );
 
         // Quiet again, the completion that was held is still released on time.
         let mut idle = done.clone();
@@ -430,7 +455,11 @@ mod tests {
             .on_observation(&idle, after_delay + TimeDelta::seconds(61))
             .await
             .unwrap();
-        let kinds: Vec<_> = released.due.iter().map(|notice| notice.kind.as_str()).collect();
+        let kinds: Vec<_> = released
+            .due
+            .iter()
+            .map(|notice| notice.kind.as_str())
+            .collect();
         assert_eq!(kinds, vec!["completion"]);
     }
 
@@ -448,6 +477,15 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc)
         );
+    }
+
+    #[test]
+    fn a_card_is_the_only_notice_and_a_cardless_escalation_stays_plain_text() {
+        assert!(escalation_plain_text("same-prompt", "local:pane", true).is_none());
+        let plain = escalation_plain_text("same-prompt", "local:pane", false).unwrap();
+        assert!(plain.contains("same-prompt"));
+        assert!(plain.contains("local:pane"));
+        assert!(plain.contains("needs the owner"));
     }
 
     #[test]

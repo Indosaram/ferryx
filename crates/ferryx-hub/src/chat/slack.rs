@@ -20,6 +20,10 @@ pub enum SlackFrame {
 /// Slack Web API base. `FERRYX_HUB_SLACK_API` may point it at a loopback stand-in for a
 /// local round-trip check; any other host is ignored so a token is never sent elsewhere.
 pub fn api_base() -> String {
+    #[cfg(test)]
+    if let Some((base, _)) = slack_test_api() {
+        return base;
+    }
     std::env::var("FERRYX_HUB_SLACK_API")
         .ok()
         .and_then(|value| is_loopback_api(&value).then(|| value.trim_end_matches('/').to_owned()))
@@ -47,7 +51,23 @@ pub fn app_token() -> Option<String> {
 }
 
 pub fn bot_token() -> Option<String> {
+    #[cfg(test)]
+    if let Some((_, token)) = slack_test_api() {
+        return Some(token);
+    }
     secret_from_env("SLACK_BOT_TOKEN")
+}
+
+// Visible only to the test task that entered `SLACK_API_TEST.scope`. Other tests keep
+// reading the process environment, so a click-feedback test cannot redirect them.
+#[cfg(test)]
+tokio::task_local! {
+    static SLACK_API_TEST: (String, String);
+}
+
+#[cfg(test)]
+fn slack_test_api() -> Option<(String, String)> {
+    SLACK_API_TEST.try_with(|pair| pair.clone()).ok()
 }
 
 /// Turns one Socket Mode text frame into an ack plus the inbound or approval it carries.
@@ -69,7 +89,7 @@ pub fn handle_frame(text: &str, owner_id: &str) -> Result<(Value, SlackFrame)> {
         "events_api" => inbound_from_event(&payload)
             .map(SlackFrame::Inbound)
             .unwrap_or(SlackFrame::Ignore),
-        "interactive" => match slack_approval_op(&payload, owner_id)? {
+        "interactive" => match slack_approval_op(&payload, owner_id, "local")? {
             Some(op) => SlackFrame::Approval(op),
             None => SlackFrame::Ignore,
         },
@@ -115,8 +135,9 @@ fn inbound_from_event(payload: &Value) -> Option<Inbound> {
     })
 }
 
-/// Applies one Socket Mode frame. An approval is answered. An inbound message is fenced and
-/// sent to the meta-agent pane, or to the lane pane a profile names. Nothing is read back.
+/// Applies one Socket Mode frame. An approval is answered, then the card or an ephemeral
+/// note tells the clicker what happened. An inbound message is fenced and sent to the
+/// meta-agent pane, or to the lane pane a profile names. Nothing is read back.
 pub async fn apply_frame(
     text: &str,
     owner_id: &str,
@@ -124,17 +145,232 @@ pub async fn apply_frame(
     profiles: &super::router::ProfileRouter,
     control: &dyn AgentControl,
 ) -> Result<SlackFrame> {
+    let frame_value: Value = serde_json::from_str(text)
+        .map_err(|error| HubError::message(format!("slack frame: {error}")))?;
+    if frame_value.get("type").and_then(Value::as_str) == Some("interactive") {
+        return apply_interactive(&frame_value, owner_id, control).await;
+    }
     let (_ack, frame) = handle_frame(text, owner_id)?;
-    match &frame {
-        SlackFrame::Approval(op) => {
-            control.execute(None, op.clone()).await?;
-        }
-        SlackFrame::Inbound(inbound) => {
-            super::router::route_inbound(inbound, profiles, meta_session_id, control).await?;
-        }
-        SlackFrame::Ignore => {}
+    if let SlackFrame::Inbound(inbound) = &frame {
+        super::router::route_inbound(inbound, profiles, meta_session_id, control).await?;
     }
     Ok(frame)
+}
+
+struct ClickTarget {
+    channel_id: String,
+    message_ts: String,
+    option_label: String,
+    message: Value,
+}
+
+fn click_target(payload: &Value, op: Option<&AgentOp>) -> ClickTarget {
+    let channel_id = payload
+        .pointer("/channel/id")
+        .or_else(|| payload.pointer("/container/channel_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let message_ts = payload
+        .pointer("/message/ts")
+        .or_else(|| payload.pointer("/container/message_ts"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let from_button = payload
+        .pointer("/actions/0/text/text")
+        .and_then(Value::as_str)
+        .filter(|label| !label.trim().is_empty())
+        .map(str::to_owned);
+    let option_label = from_button.unwrap_or_else(|| match op {
+        Some(AgentOp::Answer { answer, .. }) => {
+            let index = answer
+                .get("optionIndex")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            format!("option {}", index + 1)
+        }
+        _ => "that option".into(),
+    });
+    ClickTarget {
+        channel_id,
+        message_ts,
+        option_label,
+        message: payload.get("message").cloned().unwrap_or(Value::Null),
+    }
+}
+
+fn answered_line(label: &str, user_id: &str, at: chrono::DateTime<chrono::Utc>) -> String {
+    format!(
+        "✅ {label} — answered by <@{user_id}> at {}",
+        at.format("%Y-%m-%d %H:%M UTC")
+    )
+}
+
+fn card_blocks(message: &Value, line: &str) -> Value {
+    let mut blocks = Vec::new();
+    if let Some(existing) = message.get("blocks").and_then(Value::as_array) {
+        for block in existing {
+            if block.get("type").and_then(Value::as_str) == Some("actions") {
+                continue;
+            }
+            blocks.push(block.clone());
+        }
+    }
+    if blocks.is_empty() {
+        if let Some(text) = message.get("text").and_then(Value::as_str) {
+            if !text.is_empty() {
+                blocks.push(json!({"type": "section", "text": {"type": "mrkdwn", "text": text}}));
+            }
+        }
+    }
+    blocks.push(json!({"type": "context", "elements": [{"type": "mrkdwn", "text": line}]}));
+    Value::Array(blocks)
+}
+
+fn remember_label(request_id: &str, label: &str) {
+    if request_id.is_empty() || label.is_empty() {
+        return;
+    }
+    ANSWERED_LABELS
+        .lock()
+        .expect("answered labels")
+        .insert(request_id.to_owned(), label.to_owned());
+}
+
+fn remembered_label(request_id: &str) -> Option<String> {
+    ANSWERED_LABELS
+        .lock()
+        .expect("answered labels")
+        .get(request_id)
+        .cloned()
+}
+
+static ANSWERED_LABELS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn answer_request_id(op: &AgentOp) -> &str {
+    match op {
+        AgentOp::Answer { request_id, .. } => request_id,
+        _ => "",
+    }
+}
+
+fn log_interactive(user: &str, outcome: &str, request_id: &str, reason: &str) {
+    tracing::info!(user, outcome, request_id, reason, "slack interactive frame");
+}
+
+async fn apply_interactive(
+    frame_value: &Value,
+    owner_id: &str,
+    control: &dyn AgentControl,
+) -> Result<SlackFrame> {
+    let payload = frame_value.get("payload").cloned().unwrap_or(Value::Null);
+    let user = payload
+        .pointer("/user/id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    log_interactive(&user, "received", "", "");
+    let target = click_target(&payload, None);
+    match slack_approval_op(&payload, owner_id, "local") {
+        Err(error) if error.to_string().contains("not from the owner") => {
+            log_interactive(&user, "refused", "", "not from the owner");
+            let _ = post_ephemeral(&target, &user, "only the owner can answer").await;
+            Ok(SlackFrame::Ignore)
+        }
+        Err(error) => {
+            log_interactive(&user, "ignored", "", &error.to_string());
+            Err(error)
+        }
+        Ok(None) => {
+            log_interactive(&user, "ignored", "", "");
+            Ok(SlackFrame::Ignore)
+        }
+        Ok(Some(op)) => {
+            let target = click_target(&payload, Some(&op));
+            let request_id = answer_request_id(&op).to_owned();
+            log_interactive(&user, "accepted", &request_id, "");
+            match control.execute(None, op.clone()).await {
+                Ok(_) => {
+                    remember_label(&request_id, &target.option_label);
+                    log_interactive(&user, "answered", &request_id, "");
+                    let line = answered_line(&target.option_label, &user, chrono::Utc::now());
+                    let _ = update_card(&target, &line).await;
+                    Ok(SlackFrame::Approval(op))
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    log_interactive(&user, "answer_failed", &request_id, &message);
+                    match super::approval::click_failure_kind(&message) {
+                        super::approval::ClickFailure::AlreadyAnswered => {
+                            let text = match remembered_label(&request_id) {
+                                Some(label) => format!("already answered with {label}"),
+                                None => "already answered".into(),
+                            };
+                            let _ = post_ephemeral(&target, &user, &text).await;
+                        }
+                        super::approval::ClickFailure::InFlight => {
+                            let _ =
+                                post_ephemeral(&target, &user, "that click is already in progress")
+                                    .await;
+                        }
+                        super::approval::ClickFailure::Stale => {
+                            let _ =
+                                post_ephemeral(&target, &user, "prompt no longer on screen").await;
+                            let _ = update_card(&target, "⚠️ prompt no longer on screen").await;
+                        }
+                        super::approval::ClickFailure::Other => {
+                            let shown: String = message.chars().take(240).collect();
+                            let _ = post_ephemeral(&target, &user, &shown).await;
+                            let _ = update_card(&target, &format!("⚠️ {shown}")).await;
+                        }
+                    }
+                    Ok(SlackFrame::Ignore)
+                }
+            }
+        }
+    }
+}
+
+async fn post_ephemeral(target: &ClickTarget, user_id: &str, text: &str) -> Result<bool> {
+    if target.channel_id.is_empty() || user_id.is_empty() {
+        return Ok(false);
+    }
+    slack_web(
+        "chat.postEphemeral",
+        json!({ "channel": target.channel_id, "user": user_id, "text": text }),
+    )
+    .await
+}
+
+async fn update_card(target: &ClickTarget, line: &str) -> Result<bool> {
+    if target.channel_id.is_empty() || target.message_ts.is_empty() {
+        return Ok(false);
+    }
+    slack_web(
+        "chat.update",
+        json!({
+            "channel": target.channel_id,
+            "ts": target.message_ts,
+            "text": line,
+            "blocks": card_blocks(&target.message, line),
+        }),
+    )
+    .await
+}
+
+async fn slack_web(method: &str, body: Value) -> Result<bool> {
+    #[cfg(feature = "hub-slack")]
+    {
+        return slack_method(method, body).await;
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (method, body);
+        Ok(false)
+    }
 }
 
 /// The ack Slack requires, independent of whether we will act on the payload.
@@ -222,9 +458,9 @@ async fn post_message(
     text: &str,
     blocks: Option<Value>,
 ) -> Result<bool> {
-    let Some(token) = bot_token() else {
+    if bot_token().is_none() {
         return Ok(false);
-    };
+    }
     let mut body = json!({ "channel": session.channel_id, "text": text });
     if let Some(blocks) = blocks {
         body["blocks"] = blocks;
@@ -232,9 +468,24 @@ async fn post_message(
     if let Some(thread) = &session.thread_id {
         body["thread_ts"] = json!(thread);
     }
-    let client = reqwest::Client::new();
+    slack_method("chat.postMessage", body).await
+}
+
+#[cfg(feature = "hub-slack")]
+async fn slack_method(method: &str, body: Value) -> Result<bool> {
+    let Some(token) = bot_token() else {
+        return Ok(false);
+    };
+    let base = api_base();
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15));
+    if is_loopback_api(&base) {
+        builder = builder.no_proxy();
+    }
+    let client = builder
+        .build()
+        .map_err(|error| HubError::message(error.to_string()))?;
     let response = client
-        .post(format!("{}/chat.postMessage", api_base()))
+        .post(format!("{base}/{method}"))
         .bearer_auth(token)
         .json(&body)
         .send()
@@ -245,9 +496,7 @@ async fn post_message(
         .await
         .map_err(|error| HubError::message(error.to_string()))?;
     if value.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(HubError::message(format!(
-            "slack chat.postMessage failed: {value}"
-        )));
+        return Err(HubError::message(format!("slack {method} failed: {value}")));
     }
     Ok(true)
 }
@@ -741,7 +990,7 @@ mod tests {
             &control
         )
         .await
-        .is_err());
+        .is_ok());
         assert!(control.ops().is_empty());
         // A part with ':' would be split wrong, so no buttons are offered.
         let bad = crate::sessions::watch::ApprovalCard {
@@ -812,6 +1061,244 @@ mod tests {
             .ops()
             .iter()
             .all(|(_, op)| !matches!(op, AgentOp::Read { .. })));
+    }
+
+    #[cfg(feature = "hub-slack")]
+    #[derive(Clone)]
+    struct SlackRec(std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>);
+
+    #[cfg(feature = "hub-slack")]
+    async fn record_update(
+        axum::extract::State(rec): axum::extract::State<SlackRec>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        rec.0
+            .lock()
+            .expect("slack rec")
+            .push(("chat.update".into(), body));
+        axum::Json(json!({"ok": true}))
+    }
+
+    #[cfg(feature = "hub-slack")]
+    async fn record_ephemeral(
+        axum::extract::State(rec): axum::extract::State<SlackRec>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        rec.0
+            .lock()
+            .expect("slack rec")
+            .push(("chat.postEphemeral".into(), body));
+        axum::Json(json!({"ok": true}))
+    }
+
+    #[cfg(feature = "hub-slack")]
+    async fn serve_slack_api() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = axum::Router::new()
+            .route("/chat.update", axum::routing::post(record_update))
+            .route("/chat.postEphemeral", axum::routing::post(record_ephemeral))
+            .with_state(SlackRec(log.clone()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (port, log)
+    }
+
+    #[cfg(feature = "hub-slack")]
+    struct Scripted {
+        steps: std::sync::Mutex<std::collections::VecDeque<std::result::Result<Value, String>>>,
+        ops: std::sync::Mutex<Vec<AgentOp>>,
+    }
+
+    #[cfg(feature = "hub-slack")]
+    impl Scripted {
+        fn new(steps: Vec<std::result::Result<Value, String>>) -> Self {
+            Self {
+                steps: std::sync::Mutex::new(steps.into()),
+                ops: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[cfg(feature = "hub-slack")]
+    #[async_trait::async_trait]
+    impl AgentControl for Scripted {
+        async fn execute(&self, _host_id: Option<&str>, op: AgentOp) -> Result<Value> {
+            self.ops.lock().expect("ops").push(op);
+            match self.steps.lock().expect("steps").pop_front() {
+                Some(Ok(value)) => Ok(value),
+                Some(Err(message)) => Err(HubError::message(message)),
+                None => Ok(json!({"ok": true})),
+            }
+        }
+    }
+
+    #[cfg(feature = "hub-slack")]
+    fn click_frame(user: &str, value: &str, label: &str) -> String {
+        json!({
+            "envelope_id": "e-click",
+            "type": "interactive",
+            "payload": {
+                "type": "block_actions",
+                "user": {"id": user},
+                "channel": {"id": "CHOME"},
+                "message": {
+                    "ts": "1.0",
+                    "text": "❓ pane: ship it?",
+                    "blocks": [
+                        {"type": "section", "text": {"type": "mrkdwn", "text": "❓ pane: ship it?"}},
+                        {"type": "actions", "block_id": "ferryx_approval_same", "elements": [{"type": "button"}]}
+                    ]
+                },
+                "actions": [{"value": value, "text": {"type": "plain_text", "text": label}}]
+            }
+        })
+        .to_string()
+    }
+
+    #[cfg(feature = "hub-slack")]
+    fn calls_named<'a>(log: &'a [(String, Value)], method: &str) -> Vec<&'a Value> {
+        log.iter()
+            .filter(|(name, _)| name == method)
+            .map(|(_, body)| body)
+            .collect()
+    }
+
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn an_answer_updates_the_card_and_a_conflict_is_ephemeral() {
+        let (port, log) = serve_slack_api().await;
+        SLACK_API_TEST
+            .scope(
+                (format!("http://127.0.0.1:{port}"), "xoxb-test".into()),
+                async {
+                    let control = Scripted::new(vec![
+                        Ok(json!({"ok": true})),
+                        Ok(json!({"ok": true})),
+                        Err(
+                            "REQUEST_CONFLICT this request id was already used with a different payload"
+                                .into(),
+                        ),
+                    ]);
+                    let profiles = crate::chat::router::ProfileRouter::new(vec![]);
+                    let ship = click_frame(
+                        "UOWNER",
+                        "ferryx:approval:pane-1:ship-prompt:rev-1:2:once",
+                        "Ship it",
+                    );
+                    apply_frame(&ship, "UOWNER", "meta", &profiles, &control)
+                        .await
+                        .unwrap();
+                    apply_frame(&ship, "UOWNER", "meta", &profiles, &control)
+                        .await
+                        .unwrap();
+                    let other = click_frame(
+                        "UOWNER",
+                        "ferryx:approval:pane-1:ship-prompt:rev-1:0:once",
+                        "No",
+                    );
+                    apply_frame(&other, "UOWNER", "meta", &profiles, &control)
+                        .await
+                        .unwrap();
+                    let recorded = log.lock().expect("log").clone();
+                    let updates = calls_named(&recorded, "chat.update");
+                    let notes = calls_named(&recorded, "chat.postEphemeral");
+                    assert_eq!(
+                        updates.len(),
+                        2,
+                        "resolved card refreshed on the repeat: {recorded:?}"
+                    );
+                    assert_eq!(updates[0]["channel"], "CHOME");
+                    assert_eq!(updates[0]["ts"], "1.0");
+                    let blocks = updates[0]["blocks"].as_array().unwrap();
+                    assert!(
+                        blocks.iter().all(|block| block["type"] != "actions"),
+                        "{blocks:?}"
+                    );
+                    let line = blocks
+                        .iter()
+                        .find(|block| block["type"] == "context")
+                        .unwrap()["elements"][0]["text"]
+                        .as_str()
+                        .unwrap();
+                    assert!(
+                        line.starts_with("✅ Ship it — answered by <@UOWNER> at "),
+                        "{line}"
+                    );
+                    assert!(notes.len() == 1, "{recorded:?}");
+                    assert_eq!(notes[0]["user"], "UOWNER");
+                    assert_eq!(notes[0]["channel"], "CHOME");
+                    assert_eq!(notes[0]["text"], "already answered with Ship it");
+                    let ids: Vec<_> = control
+                        .ops
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|op| match op {
+                            AgentOp::Answer { request_id, .. } => request_id.clone(),
+                            other => panic!("expected answers, got {other:?}"),
+                        })
+                        .collect();
+                    assert_eq!(ids.len(), 3);
+                    assert!(ids.iter().all(|id| id == &ids[0]), "{ids:?}");
+                },
+            )
+            .await;
+    }
+
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn a_non_owner_click_is_ephemeral_and_a_stale_card_shows_the_error() {
+        let (port, log) = serve_slack_api().await;
+        SLACK_API_TEST
+            .scope(
+                (format!("http://127.0.0.1:{port}"), "xoxb-test".into()),
+                async {
+                    let control = Scripted::new(vec![Err(
+                        "REQUEST_CONFLICT the screen changed since the card was read; nothing was sent"
+                            .into(),
+                    )]);
+                    let profiles = crate::chat::router::ProfileRouter::new(vec![]);
+                    let stranger = click_frame(
+                        "USTRANGER",
+                        "ferryx:approval:pane-9:stale-prompt:rev-9:1:once",
+                        "Ship it",
+                    );
+                    apply_frame(&stranger, "UOWNER", "meta", &profiles, &control)
+                        .await
+                        .unwrap();
+                    assert!(control.ops.lock().unwrap().is_empty());
+                    let owner = click_frame(
+                        "UOWNER",
+                        "ferryx:approval:pane-9:stale-prompt:rev-9:1:once",
+                        "Ship it",
+                    );
+                    apply_frame(&owner, "UOWNER", "meta", &profiles, &control)
+                        .await
+                        .unwrap();
+                    let recorded = log.lock().expect("log").clone();
+                    let notes = calls_named(&recorded, "chat.postEphemeral");
+                    let updates = calls_named(&recorded, "chat.update");
+                    assert_eq!(notes.len(), 2, "{recorded:?}");
+                    assert_eq!(notes[0]["user"], "USTRANGER");
+                    assert_eq!(notes[0]["text"], "only the owner can answer");
+                    assert_eq!(notes[1]["user"], "UOWNER");
+                    assert_eq!(notes[1]["text"], "prompt no longer on screen");
+                    assert_eq!(updates.len(), 1, "{recorded:?}");
+                    let blocks = updates[0]["blocks"].as_array().unwrap();
+                    assert!(blocks.iter().all(|block| block["type"] != "actions"));
+                    let line = blocks
+                        .iter()
+                        .find(|block| block["type"] == "context")
+                        .unwrap()["elements"][0]["text"]
+                        .as_str()
+                        .unwrap();
+                    assert!(line.contains("prompt no longer on screen"), "{line}");
+                },
+            )
+            .await;
     }
 
     #[cfg(feature = "hub-slack")]

@@ -1247,7 +1247,7 @@ mod tests {
                     "value": format!("ferryx:approval:{session_id}:{prompt_id}:{revision}:0:once")
                 }]
             });
-            let op = ferryx_hub::chat::approval::slack_approval_op(&payload, "UOWNER")
+            let op = ferryx_hub::chat::approval::slack_approval_op(&payload, "UOWNER", "local")
                 .expect("owner click")
                 .expect("an approval op");
             let mapped = crate::hub_runtime::to_agent_control_op(&op).expect("daemon op");
