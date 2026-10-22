@@ -1,3 +1,7 @@
+//! Dormant. The wait and replay behavior worth keeping lives in `agent_control`
+//! (`AgentEventBus::replay`, `AgentControlOp::Wait`). This module stays unmounted: its
+//! `GET /api/v1/events` collides with the machine-events socket, and its input path bypasses
+//! the shared reference-chat queue.
 use crate::scoped_contracts::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

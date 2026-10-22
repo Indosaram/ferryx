@@ -65,7 +65,22 @@ impl MachineEvents {
         session: Option<&str>,
         payload: Value,
     ) {
-        self.publish_event(None, kind, workspace, session, payload);
+        let _ = self.publish_sequenced(kind, workspace, session, payload);
+    }
+
+    /// Publish one event and return the sequence it was stored under.
+    ///
+    /// Agent control reuses this sequence so `agents events` and the events socket name the
+    /// same change. A payload over the per-event cap is replaced with `inventoryInvalidated`
+    /// and still consumes the sequence.
+    pub(crate) fn publish_sequenced(
+        &self,
+        kind: &str,
+        workspace: Option<&str>,
+        session: Option<&str>,
+        payload: Value,
+    ) -> u64 {
+        self.publish_event(None, kind, workspace, session, payload)
     }
     pub(crate) fn publish_revision(
         &self,
@@ -84,7 +99,7 @@ impl MachineEvents {
         workspace: Option<&str>,
         session: Option<&str>,
         payload: Value,
-    ) {
+    ) -> u64 {
         let mut sequence = self.sequence.lock();
         *sequence = sequence
             .checked_add(1)
@@ -105,6 +120,7 @@ impl MachineEvents {
         }
         // No subscribers is normal; state is reconciled on the next subscription.
         let _ = self.sender.send(event);
+        *sequence
     }
 }
 

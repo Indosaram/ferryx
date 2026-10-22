@@ -804,6 +804,14 @@ pub struct RemoteGatewayState {
     pub session_backend: Arc<dyn RemoteSessionBackend>,
     /// Absent for legacy/test constructors. Presence enables no future API.
     pub machine_services: Option<Arc<crate::daemon::MachineServices>>,
+    /// Observer readings a supervisor waits on. The sequence matches machine events once attached.
+    pub agent_events: Arc<crate::agent_control::events::AgentEventBus>,
+    /// Output-driven per-session observer. Installed by the daemon after the gateway exists.
+    pub agent_observers: Arc<crate::daemon::agent_observer::AgentObserverHub>,
+    /// Per-device switch on top of the machine Control grant. Defaults to allowing every such device.
+    pub agent_control_policy: Arc<crate::agent_control::policy::AgentControlPolicy>,
+    /// Bounded audit of agent-control calls, including the device id. Not the workspace journal.
+    pub agent_control_audit: Arc<crate::agent_control::policy::AgentControlAudit>,
     pub workspace_registry: WorkspaceRegistry,
     pub ssh_store_path: RwLock<Option<PathBuf>>,
     pub active_selection: RwLock<Option<RemoteActiveDesktopSelection>>,
@@ -987,6 +995,17 @@ impl RemoteGatewayState {
                 relay_url: persisted.relay_url,
             })
             .unwrap_or_default();
+        let agent_events = Arc::new(crate::agent_control::events::AgentEventBus::new(
+            crate::agent_control::events::AGENT_EVENT_RETAIN,
+        ));
+        let agent_observers = Arc::new(crate::daemon::agent_observer::AgentObserverHub::new(
+            Arc::clone(&terminal_service),
+            Arc::clone(&agent_events),
+        ));
+        let agent_control_policy =
+            Arc::new(crate::agent_control::policy::AgentControlPolicy::default());
+        let agent_control_audit =
+            Arc::new(crate::agent_control::policy::AgentControlAudit::default());
         Self {
             config: RwLock::new(config),
             identity_dir: auth_path
@@ -1008,6 +1027,10 @@ impl RemoteGatewayState {
             session_backend,
             workspace_registry,
             machine_services: None,
+            agent_events,
+            agent_observers,
+            agent_control_policy,
+            agent_control_audit,
             active_selection: RwLock::new(None),
             active_selection_tx,
             ssh_store_path: RwLock::new(None),

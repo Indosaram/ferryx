@@ -284,6 +284,7 @@ impl From<InventoryError> for ServiceError {
             InventoryError::StaleGeneration => ("PAIRED_HOST_STALE_GENERATION", true),
             InventoryError::Unauthorized => ("PAIRED_HOST_UNAUTHORIZED", false),
             InventoryError::MigrationPending => ("PAIRED_HOST_MIGRATION_PENDING", false),
+            InventoryError::InsecureRelay => ("PAIRED_HOST_INSECURE_RELAY", false),
             _ => ("PAIRED_HOST_UNAVAILABLE", true),
         };
         Self {

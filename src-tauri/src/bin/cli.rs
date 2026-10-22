@@ -17,6 +17,12 @@ fn main() {
     if args.get(1).is_some_and(|arg| arg == "agents") {
         std::process::exit(ferryx_lib::agent_control::run_agents_cli(&args));
     }
+    if args.get(1).is_some_and(|arg| arg == "hub") {
+        std::process::exit(ferryx_lib::hub_runtime::run_hub_cli(&args));
+    }
+    if args.get(1).is_some_and(|arg| arg == "mcp") {
+        std::process::exit(ferryx_lib::hub_runtime::run_mcp());
+    }
     if args.get(1).is_some_and(|arg| arg == "open") {
         let outcome = std::env::current_dir()
             .map_err(|e| format!("failed to determine current directory: {e}"))
@@ -101,7 +107,7 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
-            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <account <enroll|login>|pair|remote|direct-trust|browser|--daemon>");
+            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <agents|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|--daemon>");
             std::process::exit(1);
         }
         LaunchMode::DaemonSupervisor => std::process::exit(run_daemon_supervisor(&args)),
