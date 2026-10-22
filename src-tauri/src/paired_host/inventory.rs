@@ -168,7 +168,9 @@ impl std::fmt::Debug for Inventory {
 }
 
 pub fn normalize_origin(input: &str) -> Result<String> {
-    normalize_origin_policy(input, false)
+    // A self-hosted relay on this machine without TLS is the same opt-in the daemon's own
+    // relay client honours (`FERRYX_ALLOW_INSECURE_RELAY`); without it, pairing is HTTPS only.
+    normalize_origin_policy(input, crate::remote::relay_client::is_insecure_relay_allowed())
 }
 fn normalize_origin_policy(input: &str, loopback_http: bool) -> Result<String> {
     if input.trim() != input || input.chars().any(char::is_control) {
@@ -306,7 +308,10 @@ fn load(path: &Path, loopback_http: bool) -> Result<Disk> {
 
 impl Inventory {
     pub fn open(private_data_dir: &Path) -> Result<Self> {
-        Self::open_policy(private_data_dir, false)
+        Self::open_policy(
+            private_data_dir,
+            crate::remote::relay_client::is_insecure_relay_allowed(),
+        )
     }
     /// Isolated native fixtures only; not compiled into production binaries.
     #[cfg(test)]
