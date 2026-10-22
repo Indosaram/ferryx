@@ -98,6 +98,7 @@ describe("billingApi entitlement", () => {
         orgId: null,
         role: null,
         manageUrl: "https://store.example.test/subscriptions/42",
+        paidPlansOpen: true,
       }),
     );
 
@@ -119,6 +120,7 @@ describe("billingApi entitlement", () => {
       orgId: null,
       role: null,
       manageUrl: "https://store.example.test/subscriptions/42",
+      paidPlansOpen: true,
     });
   });
 

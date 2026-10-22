@@ -67,6 +67,7 @@ export interface BillingEntitlement {
   readonly orgId: string | null;
   readonly role: OrgRole | null;
   readonly manageUrl: string | null;
+  readonly paidPlansOpen: boolean;
 }
 
 export interface OrgMember {
@@ -292,6 +293,7 @@ function parseEntitlement(payload: unknown): BillingEntitlement {
     orgId: asString(payload.orgId),
     role: parseEnum(ORG_ROLES, payload.role),
     manageUrl: asString(payload.manageUrl),
+    paidPlansOpen: payload.paidPlansOpen === true,
   };
 }
 

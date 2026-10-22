@@ -142,8 +142,8 @@ export interface PlanSectionProps {
   accountSessionToken?: string | null;
   now?: number;
   onUnavailable?: () => void;
-  /** Mirrors the account server's paid-plan switch; while closed, Pro and Team are shown as
-   *  coming soon with no purchase or quantity controls. */
+  /** Overrides the account server's paid-plan switch (`paidPlansOpen` on the entitlement); while
+   *  closed, Pro and Team are shown as coming soon with no purchase or quantity controls. */
   paidPlansOpen?: boolean;
 }
 
@@ -152,7 +152,7 @@ export function PlanSection({
   accountSessionToken,
   now = Date.now(),
   onUnavailable,
-  paidPlansOpen = false,
+  paidPlansOpen: paidPlansOpenOverride,
 }: PlanSectionProps) {
   const unavailableRef = useRef(onUnavailable);
   unavailableRef.current = onUnavailable;
@@ -163,6 +163,7 @@ export function PlanSection({
   );
 
   const [entitlement, setEntitlement] = useState<BillingEntitlement | null>(null);
+  const paidPlansOpen = paidPlansOpenOverride ?? entitlement?.paidPlansOpen ?? false;
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<BillingApiError | null>(null);
   const [unavailable, setUnavailable] = useState(false);

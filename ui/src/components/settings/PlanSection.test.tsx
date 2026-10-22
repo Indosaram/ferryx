@@ -1067,6 +1067,16 @@ describe("PlanSection while paid plans are coming soon", () => {
     expect(screen.queryByLabelText("Additional machine packs")).toBeNull();
   });
 
+  it("follows the account server's paid-plan switch when no override is passed", async () => {
+    stubFetch([], () => jsonResponse(wireEntitlement({ paidPlansOpen: true })));
+
+    renderPlan();
+
+    await settledTestId("plan-summary");
+    expect(screen.getByRole("button", { name: "Pro monthly" })).toBeInTheDocument();
+    expect(screen.queryByTestId("plan-coming-soon-pro")).toBeNull();
+  });
+
   it("keeps the manage link and opens the pricing docs from the coming-soon note", async () => {
     stubFetch([], () =>
       jsonResponse(wireEntitlement({ plan: "free", manageUrl: CHECKOUT_URL })),
