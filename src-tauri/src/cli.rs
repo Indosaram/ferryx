@@ -3052,15 +3052,18 @@ pub fn run_daemon_headless(
                     let _ = std::io::stdout().flush();
                     #[cfg(unix)]
                     crate::daemon::supervisor_linux::notify_ready();
-                    // The hub starts after readiness so it cannot delay FERRYX_DAEMON_READY.
-                    // A hub failure is logged and the daemon keeps serving panes.
-                    if let Some(server) = hub_server {
-                        tokio::spawn(async move {
-                            if let Err(error) = crate::hub_runtime::start(server).await {
-                                tracing::warn!(%error, "ferryx hub did not start");
-                            }
-                        });
-                    }
+                }
+                // The hub starts after readiness so it cannot delay FERRYX_DAEMON_READY. A
+                // `--handover-from` successor announces nothing on stdout, but it still owns the
+                // hub from here on: the predecessor's hub tasks end when it retires, and the
+                // persisted hub_stopped flag decides whether Slack opens again. A hub failure is
+                // logged and the daemon keeps serving panes.
+                if let Some(server) = hub_server {
+                    tokio::spawn(async move {
+                        if let Err(error) = crate::hub_runtime::start(server).await {
+                            tracing::warn!(%error, "ferryx hub did not start");
+                        }
+                    });
                 }
             }
             Err(_) => {

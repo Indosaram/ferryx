@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "helperVersion": "2026.1017.1",
   "protocolVersion": 1,
-  "sourceFingerprint": "d7a1958c1bd391a31f53d5382c81d9f964e808b2993856b6fe46dd8954eea4f6",
+  "sourceFingerprint": "ecc20bb999b3e29e1be22a4f4881a561bb9be4d87adcc7209155d49da92fcb58",
   "requiredCapabilities": [
     "sshHelperV1",
     "dagSubscribeV1",
@@ -12,8 +12,8 @@
     {
       "target": "x86_64-unknown-linux-gnu",
       "filename": "ferryx-remote-helper",
-      "sha256": "c68d5d83b4097a9c3376dee3ee1c380d834a6e6fe8b7b237c9b1c5be619418b1",
-      "byteLength": 1528040,
+      "sha256": "11680fdba40991d7be967eb0d0afca26614055b18c91d2d265d41aa20035df2d",
+      "byteLength": 1937312,
       "capabilities": [
         "sshHelperV1",
         "dagStreamingV1",
