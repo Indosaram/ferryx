@@ -19,6 +19,31 @@ const sep = (platform) => (platform === 'windows' ? '\\' : '/');
 const join = (platform, ...parts) => parts.join(sep(platform));
 const basename = (platform, p) => p.split(platform === 'windows' ? /[\\/]/ : /\//).pop();
 const psQuote = (p) => `'${String(p).replace(/'/g, "''")}'`;
+const dirname = (platform, p) => p.slice(0, p.lastIndexOf(sep(platform)));
+
+/** Bound on the processes imaged under a Windows target dir exiting before it is overwritten. */
+export const TARGET_FREE_DEADLINE_MS = 30_000;
+
+/**
+ * Windows keeps a running image locked: Copy-Item over it fails with a sharing violation (all2 Q07:
+ * artifacts\A\ferryx.exe "used by another process" right after the A GUI was quit). Before the
+ * copy, every process whose executable sits under the target's directory is waited on, bounded,
+ * through its observed exit. Nothing is killed. Returns the holders seen; throws
+ * REPLACE_TARGET_BUSY naming the ones still running at the deadline.
+ */
+async function waitTargetFree({ platform, agent }, target) {
+  if (platform !== 'windows') return [];
+  const dir = `${dirname(platform, target.guiExecutable)}\\`.toLowerCase();
+  const holders = ((await agent.call('table')) ?? []).filter((r) => r.executable && r.executable.toLowerCase().startsWith(dir));
+  const deadline = Date.now() + TARGET_FREE_DEADLINE_MS;
+  const busy = [];
+  for (const h of holders) {
+    const exit = await agent.call('waitExit', { pid: h.pid, deadlineMs: Math.max(0, deadline - Date.now()) });
+    if (exit?.timedOut) busy.push({ pid: h.pid, ppid: h.ppid, executable: h.executable, commandLine: h.commandLine });
+  }
+  if (busy.length) throw new ReplaceAppError('REPLACE_TARGET_BUSY', { target: target.guiExecutable, busy, deadlineMs: TARGET_FREE_DEADLINE_MS });
+  return holders.map((h) => ({ pid: h.pid, executable: h.executable }));
+}
 
 /** One copy of an app (mac bundle dir, else the GUI executable); throws on a non-zero exit. */
 async function copyApp({ platform, agent }, from, to) {
@@ -58,9 +83,10 @@ export function createAppReplacer({ platform, agent, pristineRoot }) {
     await pristineOf(from);
     const source = saved.get(to.guiExecutable) ?? to;
     if (source.guiExecutable === from.guiExecutable) throw new ReplaceAppError('REPLACE_SELF_COPY', { path: from.guiExecutable });
+    const waitedFor = await waitTargetFree({ platform, agent }, from);
     await copyApp({ platform, agent }, source, from);
     const [got, want] = [await agent.call('sha256', { file: from.guiExecutable }), await agent.call('sha256', { file: source.guiExecutable })];
     if (got !== want) throw new ReplaceAppError('REPLACE_VERIFY_FAILED', { path: from.guiExecutable, got, want, source: source.guiExecutable });
-    return { artifact: { ...from, name: to.name, sha256: got }, source: source.guiExecutable };
+    return { artifact: { ...from, name: to.name, sha256: got }, source: source.guiExecutable, waitedFor };
   };
 }
