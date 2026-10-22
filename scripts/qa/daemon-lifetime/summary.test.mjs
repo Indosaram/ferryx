@@ -972,7 +972,7 @@ function q11World({ replayOnRelaunch = false, resendOnReconnect = false, release
       default: throw new Error(`unexpected agent call ${method}`);
     }
   };
-  const conn = { handle: 'h0', call: (frame) => call('call', { handle: 'h0', frame }), describe: () => call('call', { handle: 'h0', frame: { type: 'describeLiveSessions' } }), waitOutput: (s, marker, _ms, { since = 0 } = {}) => call('waitOutput', { marker, since }), outputLength: async () => (await call('outputOf', {})).length, close: async () => {} };
+  const conn = { handle: 'h0', call: (frame) => call('call', { handle: 'h0', frame }), describe: () => call('call', { handle: 'h0', frame: { type: 'describeLiveSessions' } }), waitOutput: (s, marker, _ms, { since = 0 } = {}) => call('waitOutput', { marker, since }), outputOf: () => call('outputOf', {}), outputLength: async () => (await call('outputOf', {})).length, close: async () => {} };
   const restoredTab = () => {
     const doc = w.sessionFile ? JSON.parse(w.sessionFile) : null;
     const ws = doc && Object.values(doc.workspaces).find((x) => x.target?.kind === 'ssh');
@@ -1114,7 +1114,8 @@ test('Q11 focuses a GUI that attached behind another window before typing the ma
 test('Q11 on Windows appends through a PowerShell line loop (cmd.exe has no cat) and reads the CRLF file (run-q11 r4)', async () => {
   const { w, result, failed } = await runQ11({ platform: 'windows' });
   assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
-  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+  // Windows types a lowercase marker: MahoRD drops Shift+letter on maho-win (run-int2-all Q11).
+  assert.match(w.log, /^uncertain[0-9a-f]{12}\n$/);
   assert.ok(result.assertions.some((a) => a.name === 'the remote line appender is running in the SSH session' && a.ok));
 });
 

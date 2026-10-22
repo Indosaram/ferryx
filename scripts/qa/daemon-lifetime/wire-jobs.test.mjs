@@ -611,6 +611,9 @@ test('Q13 legacy job captures the daemon stdout/stderr on every platform', async
       if (method === 'writeFile') written.push(p.content);
       if (method === 'exec' && p.input) written.push(p.input);
       if (method === 'exec' && p.command === 'sh' && !p.input) return { status: 0, stdout: '/home/q' };
+      // Windows: the non-elevated helper's result file (jobs.mjs createLegacyNonElevated).
+      if (method === 'waitPath') return true;
+      if (method === 'readFile') return JSON.stringify({ create: 0, run: 0, stdout: '' });
       return { status: 0, stdout: '' };
     } };
     const jobs = createJobs({ host: { platform }, agent, runId: RUN, layout, uid: 501 });

@@ -66,3 +66,57 @@ test('a failed copy throws instead of reporting a replacement that did not happe
   await assert.rejects(replace(A, B), (e) => e.code === 'REPLACE_COPY_FAILED');
   assert.equal(files.get(A.guiExecutable), 'bytes-A');
 });
+
+/** Windows host whose processes keep their image locked until they exit (all2 Q07). */
+function lockingHost(files, procs) {
+  const base = fakeHost('windows', files);
+  const order = [];
+  return {
+    order,
+    call: async (method, params) => {
+      if (method === 'table') return procs.filter((p) => p.alive).map(({ pid, executable }) => ({ pid, ppid: 1, executable, commandLine: '' }));
+      if (method === 'waitExit') {
+        const p = procs.find((x) => x.pid === params.pid);
+        order.push(`wait:${params.pid}`);
+        if (p.exitsAfterWait) { p.alive = false; return { pid: p.pid, exitedAt: 1 }; }
+        return { timedOut: true };
+      }
+      if (method === 'exec') {
+        const dst = /-Destination '([^']+)'/.exec(params.args.at(-1))?.[1];
+        if (procs.some((p) => p.alive && p.executable.toLowerCase() === dst?.toLowerCase())) return { status: 1, stdout: '', stderr: 'Copy-Item : used by another process' };
+        order.push(`copy:${dst}`);
+      }
+      return base.call(method, params);
+    },
+  };
+}
+
+test('windows: Q07 waits for the exit of a process still imaged from the target dir before copying (all2 Q07)', async () => {
+  const A = LAYOUTS.windows.art('A');
+  const B = LAYOUTS.windows.art('B');
+  const files = new Map([[A.guiExecutable, 'bytes-A'], [B.guiExecutable, 'bytes-B']]);
+  // The quit A GUI still runs for a moment; a B process elsewhere is not A's business.
+  const procs = [
+    { pid: 25304, executable: 'C:\\RUN\\artifacts\\A\\ferryx.exe', alive: true, exitsAfterWait: true },
+    { pid: 900, executable: B.guiExecutable, alive: true, exitsAfterWait: false },
+  ];
+  const agent = lockingHost(files, procs);
+  const replace = createAppReplacer({ platform: 'windows', agent, pristineRoot: 'C:\\run\\artifacts\\pristine' });
+  const replaced = await replace(A, B);
+  assert.equal(files.get(A.guiExecutable), 'bytes-B');
+  assert.deepEqual(agent.order.filter((o) => o === 'wait:25304' || o === `copy:${A.guiExecutable}`), ['wait:25304', `copy:${A.guiExecutable}`]);
+  assert.ok(!agent.order.includes('wait:900'), 'a process outside the target dir is never waited on');
+  assert.deepEqual(replaced.waitedFor.map((w) => w.pid), [25304]);
+});
+
+test('windows: a process that keeps the target imaged past the bound fails REPLACE_TARGET_BUSY, nothing copied or killed', async () => {
+  const A = LAYOUTS.windows.art('A');
+  const B = LAYOUTS.windows.art('B');
+  const files = new Map([[A.guiExecutable, 'bytes-A'], [B.guiExecutable, 'bytes-B']]);
+  const procs = [{ pid: 25304, executable: A.guiExecutable, alive: true, exitsAfterWait: false }];
+  const agent = lockingHost(files, procs);
+  const replace = createAppReplacer({ platform: 'windows', agent, pristineRoot: 'C:\\run\\artifacts\\pristine' });
+  await assert.rejects(replace(A, B), (e) => e.code === 'REPLACE_TARGET_BUSY' && e.detail.busy.map((b) => b.pid).join() === '25304');
+  assert.equal(files.get(A.guiExecutable), 'bytes-A');
+  assert.ok(procs[0].alive, 'the holder is waited on, never killed');
+});

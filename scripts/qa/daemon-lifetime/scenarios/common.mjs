@@ -322,6 +322,27 @@ export async function interrupt(conn, sessionId) {
   return conn.call({ type: 'write', sessionId, data: Buffer.from('\u0003').toString('base64') });
 }
 
+/** Bound on the shell redrawing its line editor after Ctrl-C. */
+export const INTERRUPT_SETTLE_MS = 5_000;
+/** zsh (and bash 5.1+) enable bracketed paste each time the line editor starts reading a line. */
+export const LINE_EDITOR_READY = '\x1b[?2004h';
+
+/**
+ * Ctrl-C, then (Unix) the shell's line editor ready again before anything is typed. Input written
+ * right after Ctrl-C reaches zsh while it handles the interrupt, which discards what is pending:
+ * run-int2-all Q08 "reattached session" sent Ctrl-C at an idle prompt and the echo command at once,
+ * the new prompt then received "rintf ..." without its "p" (zsh: command not found: rintf, nonce
+ * count 0, Q08-nonce-NONCE_3564458615F7.json). The wait is for the line editor's own readiness
+ * sequence after the Ctrl-C; a shell that never emits it costs the bound and proceeds as before.
+ * Windows has its own fresh-prompt probe (nonceRoundTrip). Returns the wait, or null when none.
+ */
+export async function interruptSettled(ctx, conn, sessionId) {
+  const since = ctx.platform === 'windows' ? 0 : String(await conn.outputOf(sessionId) ?? '').length;
+  await interrupt(conn, sessionId);
+  if (ctx.platform === 'windows') return null;
+  return conn.waitOutput(sessionId, LINE_EDITOR_READY, INTERRUPT_SETTLE_MS, { since });
+}
+
 /** Wait for the shell's fresh prompt after Ctrl+C (Windows: PowerShell prompt; elsewhere none). */
 export const PROMPT_AFTER_INTERRUPT_MS = 10_000;
 
@@ -364,7 +385,7 @@ export async function nonceRoundTrip(ctx, conn, sessionId, result, label, { fres
     // nothing to wait on (run-r6d q13-only: empty tail, then the echo passed). Type directly.
     idleAtFirstPrompt = !first.timedOut;
   }
-  if (!idleAtFirstPrompt) await interrupt(conn, sessionId);
+  if (!idleAtFirstPrompt) await interruptSettled(ctx, conn, sessionId);
   if (ctx.platform === 'windows' && !idleAtFirstPrompt) {
     // Type the echo only at a fresh prompt: the Ctrl+C has ended the counter and PowerShell is
     // reading a new line (run-r6b Q01/Q02 typed into the loop's tail and hit a `>>` line).
@@ -430,18 +451,31 @@ export async function retireOwner(ctx, { depth = 0 } = {}) {
   // RetireWhenIdle answers live:1 and never exits.
   if (ctx.state.conn) await ctx.state.conn.close().catch(() => {});
   ctx.state.conn = null;
-  const conn = await dataConn(ctx).catch(() => null);
+  // The owner's own data protocol: Q08b leaves a protocol-6 (v1bump) owner, which refuses a
+  // protocol-5 handshake (run-int2-all Q09), so its sessions were never closed and it never retired.
+  const version = owner.hello?.protocol_version ?? 5;
+  let dataError = null;
+  const conn = await dataConn(ctx, ctx.layout.runtime, { version }).catch((error) => { dataError = String(error?.message ?? error); return null; });
   if (conn) {
     const desc = await conn.describe().catch(() => ({ sessions: [] }));
     for (const s of desc.sessions ?? []) await conn.call({ type: 'close', sessionId: s.backendId }).catch(() => {});
     await conn.close().catch(() => {});
   }
   const ctl = await controlConn(ctx);
-  if (!ctl) return { retired: false, pid: owner.pid, reason: 'no control endpoint' };
+  if (!ctl) {
+    // An owner already retiring (a GUI sent RetireWhenIdle) exits once the sessions above close and
+    // takes its endpoint with it (only3 Q10: owner 23480 exited at 07:38:59 with no endpoint left).
+    const gone = await ctx.agent.call('waitExit', { pid: owner.pid, deadlineMs: 10_000 });
+    return { retired: !gone.timedOut, pid: owner.pid, reason: 'no control endpoint', exited: gone, dataError };
+  }
   const exit = ctx.agent.call('waitExit', { pid: owner.pid, deadlineMs: 30_000 });
-  const resp = await ctl.retireWhenIdle();
+  // An owner with zero sessions retires at once and can drop the control connection before its
+  // reply is read (only2 Q09: the v1bump owner, drained over protocol 6, gave ECONNRESET). A lost
+  // reply counts only when the owner's exit is then observed.
+  let replyError = null;
+  const resp = await ctl.retireWhenIdle().catch((error) => { replyError = String(error?.message ?? error); return null; });
   const exited = await exit;
-  return { retired: resp?.ok === true && !exited.timedOut, pid: owner.pid, resp, exited };
+  return { retired: (resp?.ok === true || replyError !== null) && !exited.timedOut, pid: owner.pid, resp, replyError, exited, dataError };
 }
 
 /** Launches a GUI, waits for a new owner and seeds one local session; records the daemon pid. */
