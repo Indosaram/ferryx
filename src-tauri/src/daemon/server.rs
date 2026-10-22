@@ -5717,11 +5717,9 @@ impl DaemonServer {
                         .ok()
                         .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok());
                     let machine_id = identity.map(|id| id.machine_id);
-                    let relay_pairing = self.remote_state.relay_pairing.read();
-                    let (relay_connected, control_channel_connected) = if relay_pairing.is_some() {
-                        (Some(true), Some(true))
-                    } else {
-                        (Some(false), Some(false))
+                    let (relay_connected, control_channel_connected) = {
+                        let relay_client = self.remote_state.relay_client.read();
+                        crate::remote::relay_client::relay_connection_flags(relay_client.as_ref())
                     };
                     let (gate_status, gate_reason) = {
                         let handle_guard = self.remote_server_handle.lock();
@@ -10276,6 +10274,57 @@ mod tests {
             }
             other => panic!("Expected RemoteStatusOk, got {other:?}"),
         }
+
+        drop(write_half);
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn remote_get_status_follows_the_accepted_control_channel_not_pairing() {
+        use super::*;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let server = Arc::new(DaemonServer::new());
+        let client = crate::remote::relay_client::RelayClient::new("https://relay.example", "token");
+        *server.remote_state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+            coordinator: client.pairing_coordinator(),
+            epoch: 1,
+        });
+        *server.remote_state.relay_client.write() = Some(client.clone());
+
+        let (client_stream, server_stream) = UnixStream::pair().expect("unix pair");
+        let server_clone = Arc::clone(&server);
+        let server_task = tokio::spawn(async move {
+            server_clone.handle_client(server_stream).await;
+        });
+        let (read_half, mut write_half) = client_stream.into_split();
+        let mut reader = BufReader::new(read_half);
+
+        async fn status(write_half: &mut tokio::net::unix::OwnedWriteHalf, reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> DaemonRemoteStatus {
+            let mut line = String::new();
+            let mut json = serde_json::to_string(&DaemonRequest::RemoteGetStatus).unwrap();
+            json.push('\n');
+            write_half.write_all(json.as_bytes()).await.unwrap();
+            reader.read_line(&mut line).await.unwrap();
+            match serde_json::from_str::<DaemonResponse>(line.trim()).unwrap() {
+                DaemonResponse::RemoteStatusOk { status } => status,
+                other => panic!("Expected RemoteStatusOk, got {other:?}"),
+            }
+        }
+
+        let before = status(&mut write_half, &mut reader).await;
+        assert_eq!(before.relay_connected, Some(false));
+        assert_eq!(before.control_channel_connected, Some(false));
+
+        let admission = client.test_admit_control_channel();
+        let during = status(&mut write_half, &mut reader).await;
+        assert_eq!(during.relay_connected, Some(true));
+        assert_eq!(during.control_channel_connected, Some(true));
+
+        drop(admission);
+        let after = status(&mut write_half, &mut reader).await;
+        assert_eq!(after.relay_connected, Some(false));
+        assert_eq!(after.control_channel_connected, Some(false));
 
         drop(write_half);
         let _ = server_task.await;

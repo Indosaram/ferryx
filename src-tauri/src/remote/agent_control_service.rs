@@ -452,6 +452,13 @@ struct ForwardFailure {
     message: String,
 }
 
+/// Overwrite a forwarded receipt's host id. List, read, wait, and events have no receipt.
+fn stamp_remote_receipt_host(value: &mut serde_json::Value, host_id: &str) {
+    if let Some(host) = value.pointer_mut("/receipt/target/hostId") {
+        *host = serde_json::Value::String(host_id.to_string());
+    }
+}
+
 fn forward_code(code: &str) -> String {
     match code {
         "PAIRED_HOST_CAPABILITY_UNAVAILABLE" => "UNSUPPORTED".into(),
@@ -522,7 +529,12 @@ async fn forward_once(
         .await
     {
         Ok(response) => match response.result {
-            crate::paired_host::client::OperationResult::AgentControl(value) => Ok(value),
+            crate::paired_host::client::OperationResult::AgentControl(mut value) => {
+                // The remote daemon stamps its own reference host, which defaults to "local".
+                // The receipt the caller sees names the paired host this forward was sent to.
+                stamp_remote_receipt_host(&mut value, host_id);
+                Ok(value)
+            }
             _ => Err(ForwardFailure {
                 code: "INTERNAL".into(),
                 message: "the paired host answered a different operation".into(),
@@ -832,6 +844,33 @@ mod tests {
     use super::*;
     use crate::remote::backend::RemoteSessionBackend as _;
     use crate::remote::reference_chat::types::ReferencePromptAnswer;
+
+    #[test]
+    fn a_remote_receipt_carries_the_paired_host_id_and_other_results_do_not() {
+        let mut receipt = serde_json::json!({
+            "receipt": {
+                "requestId": "r1",
+                "target": {
+                    "hostId": "local",
+                    "ownerId": "owner",
+                    "epoch": "1",
+                    "backendSessionId": "pane-1"
+                },
+                "stage": "accepted"
+            }
+        });
+        stamp_remote_receipt_host(&mut receipt, "https://relay.example/host/other");
+        assert_eq!(
+            receipt["receipt"]["target"]["hostId"],
+            "https://relay.example/host/other"
+        );
+        assert_eq!(receipt["receipt"]["target"]["backendSessionId"], "pane-1");
+
+        let mut listed = serde_json::json!({"sessions": [{"sessionId": "pane-1"}]});
+        stamp_remote_receipt_host(&mut listed, "https://relay.example/host/other");
+        assert!(listed.get("receipt").is_none());
+        assert_eq!(listed["sessions"][0]["sessionId"], "pane-1");
+    }
 
     const CLAUDE_APPROVAL: &str = include_str!("reference_chat/fixtures/claude/prompt/approval-command.screen");
 
