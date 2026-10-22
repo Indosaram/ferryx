@@ -377,6 +377,10 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
     summary.teardown.refused = t.refused;
   });
   if (locked.length) await step('copy-locked-logs', async () => { for (const name of locked) await copyLog(name); });
+  // Windows: a GUI still alive during the first pass re-registers its missing generation task
+  // before the kill (only4: task file rewritten at 09:05:49, after remove-jobs, kept as a
+  // leftover). Sweep again once every recorded pid is gone; the leftover check below still runs.
+  if (host.platform === 'windows') await step('remove-jobs-after-kill', removeJobs);
   await step('remove-ssh-helper-roots', async () => {
     const r = await agent.call('removeSshHelperRoots');
     summary.teardown.dirsRemoved.push(...(r?.removed ?? []).map((h) => h.root));

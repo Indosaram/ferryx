@@ -260,3 +260,27 @@ test('Windows teardown ends and deletes the QA tasks before killing recorded pid
     assert.deepEqual(order, platform === 'windows' ? ['remove-job', 'kill'] : ['kill', 'remove-job'], platform);
   }
 });
+
+test('Windows teardown removes a QA task a still-alive GUI re-registered before the kill (only4 leftover)', async () => {
+  const order = [];
+  let tasks = ['Ferryx\\ferryx-qa-x-k'];
+  let guiAlive = true;
+  const agent = { call: async (method) => {
+    if (method === 'teardownRecorded') { order.push('kill'); guiAlive = false; return { killed: [{ pid: 1, role: 'gui-g12' }], refused: [] }; }
+    if (method === 'exec') return { status: 0, stdout: '[]', stderr: '' };
+    if (method === 'table') return [];
+    if (method === 'remove') return true;
+    if (method === 'exists') return false;
+    return null;
+  } };
+  // A live GUI re-creates its generation task right after it is deleted.
+  const jobs = {
+    listQaJobs: async () => [...tasks],
+    remove: async (n) => { order.push('remove-job'); tasks = tasks.filter((t) => t !== n); if (guiAlive) tasks.push(n); },
+  };
+  const summary = newSummary({ runId: RUN, platform: 'windows', host: 'h' });
+  await teardownRun({ summary, agent, jobs, host: { platform: 'windows' }, layout: { logs: '/s/logs' }, runDirs: [], qaRoots: [], localEvidence: '/nonexistent', prodSnapshot: async () => null });
+  assert.deepEqual(order, ['remove-job', 'kill', 'remove-job']);
+  assert.deepEqual(summary.teardown.leftovers, []);
+  assert.deepEqual(tasks, []);
+});
