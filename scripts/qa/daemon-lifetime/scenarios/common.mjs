@@ -462,7 +462,12 @@ export async function retireOwner(ctx, { depth = 0 } = {}) {
     await conn.close().catch(() => {});
   }
   const ctl = await controlConn(ctx);
-  if (!ctl) return { retired: false, pid: owner.pid, reason: 'no control endpoint', dataError };
+  if (!ctl) {
+    // An owner already retiring (a GUI sent RetireWhenIdle) exits once the sessions above close and
+    // takes its endpoint with it (only3 Q10: owner 23480 exited at 07:38:59 with no endpoint left).
+    const gone = await ctx.agent.call('waitExit', { pid: owner.pid, deadlineMs: 10_000 });
+    return { retired: !gone.timedOut, pid: owner.pid, reason: 'no control endpoint', exited: gone, dataError };
+  }
   const exit = ctx.agent.call('waitExit', { pid: owner.pid, deadlineMs: 30_000 });
   // An owner with zero sessions retires at once and can drop the control connection before its
   // reply is read (only2 Q09: the v1bump owner, drained over protocol 6, gave ECONNRESET). A lost

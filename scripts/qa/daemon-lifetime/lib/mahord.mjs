@@ -12,7 +12,30 @@ export function mahordArgs({ host, pairingId }) {
   return ['--host', host, '--pairing-id', pairingId, '--mcp'];
 }
 
-export async function connectMahord(gui, { binary = 'maho-client', log = () => {} } = {}) {
+/**
+ * A MahoRD client that can be replaced: reconnect() closes the current maho-client and opens a
+ * fresh session. A host-side session can die (heartbeat timeout) while every tool call still
+ * reports "Dispatched successfully" (only3 Q13: host-run.log 07:39:53 heartbeat timeout, then
+ * g15/g16 Win+R reached nothing and both failure screenshots were the same stale frame).
+ */
+export async function connectMahord(gui, { binary = 'maho-client', log = () => {}, open = openMahord } = {}) {
+  let current = await open(gui, { binary, log });
+  let reconnects = 0;
+  const via = (name) => (...args) => current[name](...args);
+  return {
+    click: via('click'), type: via('type'), key: via('key'), hotkey: via('hotkey'), screenshot: via('screenshot'),
+    reconnect: async () => {
+      await current.close().catch(() => {});
+      current = await open(gui, { binary, log });
+      reconnects += 1;
+      log({ mahordReconnect: reconnects });
+      return reconnects;
+    },
+    close: () => current.close(),
+  };
+}
+
+async function openMahord(gui, { binary, log }) {
   if (gui.kind !== 'mahord') throw new Error(`not a MahoRD host: ${gui.kind}`);
   const child = spawn(binary, mahordArgs(gui), { stdio: ['pipe', 'pipe', 'pipe'] });
   const pending = new Map();

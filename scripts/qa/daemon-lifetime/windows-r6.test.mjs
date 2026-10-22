@@ -4,8 +4,9 @@ import { selectWindowsTree } from './lib/os-jobs.mjs';
 import { createJobs } from './lib/jobs.mjs';
 import { sshdArgs, sshdConfig, startSshd, BANNER_PROBE_SCRIPT } from './lib/sshd.mjs';
 import { createOutputRoute, waitForContent, readLogText, LOG_NOT_YET_CODES } from './lib/agent.mjs';
-import { createGuiDriver, windowsLaunchCmdContent, windowsLaunchFiles, windowsCloseFiles, windowsRectFiles, titleBarPoint, lastObserverRecord, isExplorerDialogForeground, GO_WAIT_SECONDS } from './lib/gui.mjs';
+import { createGuiDriver, windowsLaunchCmdContent, windowsLaunchFiles, windowsCloseFiles, windowsRectFiles, titleBarPoint, lastObserverRecord, isExplorerDialogForeground, onlyArmedRecord, GO_WAIT_SECONDS } from './lib/gui.mjs';
 import { isolationLayout } from './lib/guards.mjs';
+import { connectMahord } from './lib/mahord.mjs';
 import { requireOwner, nonceRoundTrip, hasShownPrompt, FIRST_PROMPT_MS } from './scenarios/common.mjs';
 import { legacyDaemonRows, recordLegacyJobProcess, SESSION_EXIT_TIMEOUT_MS } from './scenarios/q10-q13.mjs';
 import { recoverAfterScenarioException, endScenarioGuis, recordedGuiPids } from './run.mjs';
@@ -344,7 +345,7 @@ const focus = (o = {}) => JSON.stringify({ kind: 'focus', focusHwnd: 0x5012c, ro
  * One interactive desktop: each tag has its own observer events list, and every MahoRD call is
  * logged with the tag that currently holds the input section. Scripts decide outcomes per attempt.
  */
-function desktop({ winR = () => [focus()], afterEscape = () => [focus({ processName: 'WindowsTerminal.exe', rootClass: 'CASCADIA', focusedClass: 'CASCADIA' })], typedMatch = () => true, cmdStarted = () => true, gate = null } = {}) {
+function desktop({ winR = () => [focus()], afterEscape = () => [focus({ processName: 'WindowsTerminal.exe', rootClass: 'CASCADIA', focusedClass: 'CASCADIA' })], typedMatch = () => true, cmdStarted = () => true, gate = null, reconnect = null } = {}) {
   const layout = isolationLayout('C:\\r', 'windows');
   const events = new Map();
   const written = new Map();
@@ -419,6 +420,7 @@ function desktop({ winR = () => [focus()], afterEscape = () => [focus({ processN
     },
     screenshot: async () => Buffer.from('png'),
   };
+  if (reconnect) mahord.reconnect = async () => { log.push(['reconnect']); return reconnect(); };
   const gui = createGuiDriver({ host: { platform: 'windows' }, agent, runId: RUN, layout, allowedRoots: ['C:\\r'], forbidden: [], mahord });
   return { gui, log, written, layout, artifact: { guiExecutable: 'C:\\r\\ferryx.exe' } };
 }
@@ -498,6 +500,57 @@ test('exactly one retry, and none once the .cmd executed or after a later stage'
   const noCmd = desktop({ cmdStarted: () => false });
   await assert.rejects(noCmd.gui.launch(noCmd.artifact, { tag: 'a' }), (e) => e.stage === 'cmd-not-executed' && e.receipt.attempt === 1);
   assert.equal(noCmd.log.filter((l) => l[0] === 'arm').length, 1, 'cmd-not-executed is never retried');
+});
+
+test('Win+R that changed nothing on the desktop (only3 Q13 g15/g16): MahoRD reconnects, then one retry', async () => {
+  // Attempt 1: the armed observer records no focus or foreground change at all after Win+R.
+  const d = desktop({ winR: (tag, n) => (n === 1 ? [] : [focus()]), reconnect: () => 1 });
+  const g = await d.gui.launch(d.artifact, { tag: 'a' });
+  assert.equal(g.tag, 'a');
+  const order = d.log.map((l) => l[0]);
+  const rc = order.indexOf('reconnect');
+  assert.ok(rc > 0 && rc < order.lastIndexOf('arm'), 'reconnect before the second attempt arms');
+  assert.ok(!d.log.some((l) => l[0] === 'key' && l[2] === 'Escape'), 'nothing to dismiss: never a blind key');
+  const receipt = JSON.parse(d.written.get(windowsLaunchFiles(d.layout, 'a').receipt));
+  assert.equal(receipt.attempt, 2);
+  assert.equal(receipt.priorAttempts[0].undelivered, true);
+  assert.equal(receipt.priorAttempts[0].mahordReconnect, 1);
+});
+
+test('an undelivered Win+R is retried only once and never without a reconnect', async () => {
+  const twice = desktop({ winR: () => [], reconnect: () => 1 });
+  await assert.rejects(twice.gui.launch(twice.artifact, { tag: 'a' }), (e) => e.stage === 'run-dialog-not-identified' && e.receipt.attempt === 2);
+  assert.equal(twice.log.filter((l) => l[0] === 'reconnect').length, 1);
+  // A focus change that is not the Run dialog (a foreign window took the foreground) is the
+  // existing clear-desktop retry, never a reconnect.
+  const foreign = desktop({ winR: () => [focus({ processName: 'RobloxStudioBeta.exe', rootClass: 'Qt', focusedClass: 'Qt' })], reconnect: () => 1 });
+  await assert.rejects(foreign.gui.launch(foreign.artifact, { tag: 'a' }), (e) => e.receipt.attempt === 2 && e.receipt.priorAttempts[0].undelivered === false);
+  assert.ok(!foreign.log.some((l) => l[0] === 'reconnect'));
+  const noReconnect = desktop({ winR: () => [] });
+  await assert.rejects(noReconnect.gui.launch(noReconnect.artifact, { tag: 'a' }), (e) => e.receipt.attempt === 1);
+});
+
+test('onlyArmedRecord: the armed record alone is proof Win+R reached nothing; garbage or any other record is not', () => {
+  assert.equal(onlyArmedRecord('{"kind":"armed","pid":1,"seq":1}\r\n'), true);
+  assert.equal(onlyArmedRecord('{"kind":"armed","pid":1,"seq":1}\n{"kind":"exit","reason":"stop","seq":2}\n'), false);
+  assert.equal(onlyArmedRecord('boom at line 44'), false);
+  assert.equal(onlyArmedRecord(''), false);
+  assert.equal(onlyArmedRecord(null), false);
+});
+
+test('connectMahord.reconnect closes the old maho-client and routes every later call to the new one', async () => {
+  const sessions = [];
+  const open = async () => {
+    const s = { id: sessions.length + 1, calls: [], closed: false };
+    sessions.push(s);
+    const rec = (name) => async (...a) => { s.calls.push([name, ...a]); };
+    return { click: rec('click'), type: rec('type'), key: rec('key'), hotkey: rec('hotkey'), screenshot: rec('screenshot'), close: async () => { s.closed = true; } };
+  };
+  const m = await connectMahord({ kind: 'mahord' }, { open });
+  await m.hotkey(['Meta', 'r']);
+  assert.equal(await m.reconnect(), 1);
+  await m.hotkey(['Meta', 'r']);
+  assert.deepEqual(sessions.map((s) => [s.calls.length, s.closed]), [[1, true], [1, false]]);
 });
 
 test('lastObserverRecord / isExplorerDialogForeground read the newest focus record', () => {

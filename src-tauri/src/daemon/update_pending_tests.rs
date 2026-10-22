@@ -142,6 +142,26 @@ fn op_names(ops: &Ops) -> Vec<String> {
     ops.lock().unwrap().iter().map(|op| op.op().to_string()).collect()
 }
 
+/// Captured log output of the current thread (tokio::test runs on one thread).
+#[derive(Clone, Default)]
+struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogBuf {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
 #[tokio::test]
 async fn update_pending_without_control_endpoint_is_unknown_and_sends_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -169,6 +189,11 @@ async fn update_pending_without_control_endpoint_is_unknown_and_sends_nothing() 
 async fn update_pending_reads_inventory_and_sends_retire_when_idle_once() {
     let dir = tempfile::tempdir().unwrap();
     let ops = serve_control(bind_control(dir.path()).await, standard_answer(3));
+    let logs = LogBuf::default();
+    let writer = logs.clone();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt().with_ansi(false).with_writer(move || writer.clone()).finish(),
+    );
     let pending = enter(dir.path(), Some("v".into())).await;
     assert_eq!(pending.live_sessions, Some(3));
     assert!(pending.retire_requested);
@@ -185,6 +210,9 @@ async fn update_pending_reads_inventory_and_sends_retire_when_idle_once() {
         vec![OP_INVENTORY, OP_RETIRE_WHEN_IDLE, OP_INVENTORY],
         "RetireWhenIdle is sent once per GUI run; no Shutdown is ever sent automatically"
     );
+    // QA Q09 counts the op name in the GUI log: exactly one line, however often pending is entered.
+    let text = logs.text();
+    assert_eq!(text.matches("RetireWhenIdle").count(), 1, "{text}");
 }
 
 #[tokio::test]

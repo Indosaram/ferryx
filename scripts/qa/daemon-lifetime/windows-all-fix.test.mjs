@@ -73,6 +73,35 @@ test('Q09 retire: an idle owner that exits before its RetireWhenIdle reply is re
   assert.equal(stuck.retired, false);
 });
 
+test('Q10 retire: an owner already retiring without a control endpoint is retired once it exits (only3 owner 23480)', async () => {
+  // Without control there is no Hello, so the drain speaks protocol 5 (only3: HEAD owner 23480).
+  const exiting = retireWorld({ protocol: 5 });
+  // Retiring already: its endpoint is gone and it exits once its last session closes.
+  exiting.ctx.agent.call = ((call) => async (m, p) => {
+    if (m === 'controlOpen') return { handle: null };
+    const r = await call(m, p);
+    if (m === 'call' && p.frame.type === 'close') exiting.w.alive.delete(7);
+    return r;
+  })(exiting.ctx.agent.call);
+  const r = await retireOwner(exiting.ctx);
+  assert.equal(r.retired, true);
+  assert.equal(r.reason, 'no control endpoint');
+  // An owner without control that keeps running (Q09 part 3) is not retired.
+  const kept = retireWorld({ protocol: 5 });
+  kept.ctx.agent.call = ((call) => async (m, p) => (m === 'controlOpen' ? { handle: null } : call(m, p)))(kept.ctx.agent.call);
+  assert.equal((await retireOwner(kept.ctx)).retired, false);
+});
+
+test('Q09 part 3 re-registers the bump task before the no-control launch and ends that owner', () => {
+  const src = readFileSync(new URL('./scenarios/q07-q09.mjs', import.meta.url), 'utf8');
+  const part3 = src.slice(src.indexOf('// Part 3:'), src.indexOf('\n}\n', src.indexOf('// Part 3:')));
+  const removeBefore = part3.indexOf('ctx.jobs.remove(bumpTask)');
+  assert.ok(removeBefore >= 0 && removeBefore < part3.indexOf("FERRYX_QA_DISABLE_CONTROL: '1'"), 'old bump task removed before the opted-out launch');
+  const end = part3.lastIndexOf('ctx.jobs.remove(bumpTask)');
+  assert.ok(end > removeBefore && end < part3.indexOf('killRecordedOwner(ctx, a3.pid)'), 'task removed before the recorded kill');
+  assert.ok(part3.indexOf('killRecordedOwner(ctx, a3.pid)') < part3.indexOf('freshOwner(ctx, ctx.artifacts.A'), 'a controllable owner follows');
+});
+
 // ---- Q10 / Q09: the watchdog compared is the owner's own tree, read at the time ----
 
 test('Q10 reads the owner tree before the toggle instead of reusing the Q00 watchdog', () => {
@@ -155,6 +184,8 @@ function windowsJobsWorld() {
     calls.push([method, p]);
     if (method === 'exec' && p.command === 'powershell.exe' && p.args.includes('-File')) return { status: 0, stdout: record + '\r\n', stderr: '' };
     if (method === 'exec' && p.command === 'whoami') return { status: 0, stdout: 'desktop-1lapjmp\\sook\r\n', stderr: '' };
+    if (method === 'waitPath') return true;
+    if (method === 'readFile' && p.file.endsWith('legacy-task-create.json')) return JSON.stringify({ create: 0, run: 0, stdout: 'ok' });
     return { status: 0, stdout: '', stderr: '' };
   } };
   const layout = isolationLayout('C:\\q\\' + RUN, 'windows');
@@ -170,17 +201,43 @@ test('Q13 Windows legacy install writes the UTF-16 definition record before /Cre
   assert.match(xml, /<LogonTrigger>/);
   // The account whoami names (an SSH logon's USERDOMAIN is WORKGROUP, which schtasks cannot map).
   assert.match(xml, /<UserId>desktop-1lapjmp\\sook<\/UserId>/);
-  assert.match(xml, /<Command>[^<]*legacy-daemon\.cmd<\/Command>/);
+  // Headless: no console window in front of the QA GUI launches (only3 Q13 g15/g16).
+  assert.match(xml, /<Command>conhost\.exe<\/Command>\s*<Arguments>--headless cmd\.exe \/c &quot;[^<]*legacy-daemon\.cmd&quot;<\/Arguments>/);
   const script = writes.find((p) => p.file.endsWith('legacy-task-record.ps1'))?.content;
   assert.match(script, /\[Text\.Encoding\]::Unicode/);
   assert.ok(script.includes('Ferryx-ferryx-qa-' + RUN + '.xml'));
   const execs = calls.filter(([m]) => m === 'exec').map(([, p]) => [p.command, ...p.args]);
   const ps = execs.findIndex((a) => a[0] === 'powershell.exe' && a.includes('-File'));
-  const create = execs.findIndex((a) => a[0] === 'schtasks' && a.includes('/Create'));
-  assert.ok(ps >= 0 && ps < create, 'record written before /Create');
-  assert.deepEqual(execs[create], ['schtasks', '/Create', '/TN', 'Ferryx\\ferryx-qa-' + RUN, '/XML', record, '/F']);
-  assert.ok(!execs.some((a) => a.includes('/SC')), 'no bare /SC ONLOGON task without a record');
-  assert.deepEqual(execs.at(-1), ['schtasks', '/Run', '/TN', 'Ferryx\\ferryx-qa-' + RUN]);
+  // The legacy task is created and run from the non-elevated logon token by a helper task: the
+  // elevated SSH session never creates it, so the non-elevated GUI can re-import it.
+  const legacy = 'Ferryx\\ferryx-qa-' + RUN;
+  assert.ok(!execs.some((a) => a[0] === 'schtasks' && a.includes(legacy)), 'the SSH session never creates or runs the legacy task');
+  const create = writes.find((p) => p.file.endsWith('legacy-task-create.ps1'))?.content;
+  assert.ok(create.includes(`schtasks /Create /TN '${legacy}' /XML '${record}' /F`), create);
+  assert.ok(create.indexOf('/Create') < create.indexOf('/Run'), 'run only after create');
+  const helper = 'Ferryx\\ferryx-qa-' + RUN + '-legacy-create';
+  const made = execs.findIndex((a) => a[0] === 'schtasks' && a[1] === '/Create' && a[3] === helper);
+  assert.ok(ps >= 0 && ps < made, 'record written before the helper creates the task');
+  assert.ok(!execs[made].includes('/RU'), 'helper runs with the interactive (limited) token');
+  assert.deepEqual(execs.slice(made + 1), [['schtasks', '/Run', '/TN', helper], ['schtasks', '/Delete', '/TN', helper, '/F']]);
+});
+
+test('Q13 a failed non-elevated /Create is reported and the helper task is still deleted', async () => {
+  const c2 = [];
+  const record = 'C:\\r.xml';
+  const agent = { call: async (method, p) => {
+    c2.push([method, p]);
+    if (method === 'exec' && p.command === 'powershell.exe') return { status: 0, stdout: record, stderr: '' };
+    if (method === 'exec' && p.command === 'whoami') return { status: 0, stdout: 'd\\s', stderr: '' };
+    if (method === 'waitPath') return true;
+    if (method === 'readFile') return JSON.stringify({ create: 1, run: null, stdout: 'ERROR: access denied' });
+    return { status: 0, stdout: '', stderr: '' };
+  } };
+  const j = createJobs({ host: { platform: 'windows' }, agent, runId: RUN, layout: isolationLayout('C:\\q\\' + RUN, 'windows') });
+  const r = await j.installLegacy({ executable: 'C:\\t\\ferryx.exe', env: {} });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /access denied/);
+  assert.deepEqual(c2.filter(([m]) => m === 'exec').map(([, p]) => [p.command, ...p.args]).at(-1), ['schtasks', '/Delete', '/TN', 'Ferryx\\ferryx-qa-' + RUN + '-legacy-create', '/F']);
 });
 
 // ---- Teardown: on Windows the tasks end before the recorded daemon is killed ----

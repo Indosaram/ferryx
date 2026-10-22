@@ -8,6 +8,7 @@ import { data as D, helloSupportsHandover, inventoryTotal } from '../lib/wire.mj
 import {
   evidence, dataConn, controlConn, ownerIdentity, nonceRoundTrip, assertInventoryKept, assertSameOwner,
   retireOwner, freshOwner, nonce, counterCommand, interruptSettled, setAsideHeadCatalog, requireOwner, DAEMON_READY_TIMEOUT_MS, RESPAWN_BACKOFF_MS,
+  invalidateOwnerState, killRecordedOwner,
 } from './common.mjs';
 import { surviveGuiEnd } from './q00-q03.mjs';
 import { startSshd, recordSshHelper } from '../lib/sshd.mjs';
@@ -602,6 +603,10 @@ export async function Q09(ctx, result) {
   assertion(result, 'newest generation starts after the confirmed exit', Boolean(started.owner), started);
   // Part 3: A without a control endpoint -> button disabled, A untouched.
   await retireOwner(ctx);
+  // ensure_with only /Runs an existing task, so the bump task Part 1 registered would start A with
+  // its old arguments and a bound control endpoint (only3). Re-registered, it forwards the switch.
+  const bumpTask = ctx.jobs.jobName(ctx.keys.bump);
+  if (ctx.platform === 'windows') await ctx.jobs.remove(bumpTask);
   const a3 = await freshOwner(ctx, ctx.artifacts.bump, { tag: 'Q09D', env: { FERRYX_QA_DISABLE_CONTROL: '1' }, dataVersion: 6 });
   assertion(result, 'A started without a control endpoint', (await controlConn(ctx)) === null, null);
   await ctx.gui.quit(ctx.state.gui);
@@ -613,4 +618,13 @@ export async function Q09(ctx, result) {
   assertion(result, 'A untouched', (await ctx.agent.call('check', { pid: a3.pid })) === 'match', a3.pid);
   await ctlA.close().catch(() => {});
   await ctl2.close().catch(() => {});
+  // A without control never retires: end it the way teardown does (task first, so its watchdog
+  // cannot respawn it, then the recorded pid) and leave the next scenario a controllable owner.
+  await ctx.gui.quit(ctx.state.gui).catch(() => {});
+  ctx.state.gui = null;
+  if (ctx.platform === 'windows') await ctx.jobs.remove(bumpTask);
+  await invalidateOwnerState(ctx);
+  const ended = await killRecordedOwner(ctx, a3.pid);
+  assertion(result, 'A without control ended by its recorded pid', ended.exited, ended);
+  await freshOwner(ctx, ctx.artifacts.A, { expectKey: ctx.keys.A });
 }

@@ -120,6 +120,8 @@ pub async fn enter(runtime_dir: &Path, running_version: Option<String>) -> Updat
             Ok(ControlReply::Live { .. }) => {
                 mark_retire_sent(runtime_dir);
                 pending.retire_requested = true;
+                // Once per runtime dir per GUI run, unlike the pending line (QA Q09 counts it).
+                tracing::info!("Sent RetireWhenIdle; the running daemon exits once its terminals close");
             }
             Ok(other) => tracing::warn!(?other, "RetireWhenIdle refused by the running daemon"),
             Err(error) => tracing::warn!(%error, "RetireWhenIdle could not be sent"),
