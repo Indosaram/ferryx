@@ -90,23 +90,20 @@ On ${other}, the daemon must already be running. Do not restart it.
 EOF
     ;;
   slack)
-    cat <<'EOF'
-Build the daemon with Slack and export the tokens (a *_FILE path wins):
+    script="$root/scripts/qa/slack/slack-roundtrip.sh"
+    mode="${2:-}"
+    if [[ "$mode" == mock || "$mode" == real ]]; then
+      exec "$script" "$mode"
+    fi
+    cat <<EOF
+Slack round trip: $script
 
-  cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx-cli --features hub-slack
-  export SLACK_APP_TOKEN_FILE=... SLACK_BOT_TOKEN_FILE=... FERRYX_HUB_SLACK_OWNER=U...
-
-Restart is not required if the hub was already built with hub-slack; start
-`ferryx-cli --daemon` so Socket Mode connects.
-
-1. From the owner Slack user, send a message in the wired channel.
-   The meta pane must show it inside a ```untrusted fence with the origin.
-2. When a Claude or Codex card is up, click the approval button.
-   ferryx-cli agents read <id> --json shows the card answered, and
-   the pane received the option keys. A click from any other Slack user is
-   refused and types nothing.
-3. A reply posted with `ferryx-cli mcp` tool chat.reply appears in Slack.
-   It must not be copied out of the terminal screen.
+  $0 slack mock
+      Isolated daemon and a loopback Slack stand-in. No real tokens.
+  $0 slack real
+      The owner's Slack app. Needs SLACK_APP_TOKEN(_FILE), SLACK_BOT_TOKEN(_FILE),
+      FERRYX_HUB_SLACK_OWNER, and SLACK_CHANNEL.
+      Scopes: scripts/qa/slack/ferryx-slack-manifest.json
 EOF
     ;;
   *)
