@@ -1,5 +1,9 @@
 //! `ferryx direct-trust` — explicit, out-of-band provisioning of direct (P2P) peer keys.
 //!
+//! Machines enrolled with the same account owner normally pin each other automatically from
+//! account-signed peer records; manual pins made here always win over those, `revoke` tombstones
+//! the id so it is never auto-repinned, and a later manual `provision` clears the tombstone.
+//!
 //! The relay is untrusted, so each side exchanges `identity` output by hand and runs
 //! `provision` with the other machine's values. Never contacts or launches the daemon:
 //! it only touches `<data>/remote/{identity,direct-trust}.json`, with that disk IO
@@ -192,5 +196,21 @@ mod tests {
         let again = run(dir.path(), &["ferryx", "direct-trust", "revoke", "peer-1"]).unwrap();
         assert_eq!(again["revoked"], false);
         assert!(run(dir.path(), &["ferryx", "direct-trust", "provision", "peer-1", "not-a-key"]).is_err());
+    }
+
+    #[test]
+    fn cli_revoke_tombstones_and_manual_provision_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DirectTrustStore::at(dir.path());
+        store.provision_from_account("peer-2", &key_b64(3), 1).unwrap();
+        let revoked = run(dir.path(), &["ferryx", "direct-trust", "revoke", "peer-2"]).unwrap();
+        assert_eq!(revoked["revoked"], true);
+        assert_eq!(
+            store.provision_from_account("peer-2", &key_b64(3), 2),
+            Err(crate::paired_host::direct_trust::TrustError::Revoked)
+        );
+        let out = run(dir.path(), &["ferryx", "direct-trust", "provision", "peer-2", &key_b64(3)]).unwrap();
+        assert_eq!(out, serde_json::json!({ "provisioned": "peer-2" }));
+        assert!(store.trusted_key("peer-2").unwrap().is_some());
     }
 }

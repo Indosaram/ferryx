@@ -1089,6 +1089,110 @@ fn owner_key_for_user(store: &AccountStore, user_id: &str) -> String {
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerRecordResponse {
+    pub record: String,
+    pub expires_at: u64,
+}
+
+/// Accepted distance between the caller's signature timestamp and the account clock.
+pub const PEER_RECORD_CLOCK_SKEW_SECS: u64 = 60;
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// `GET /api/account/v1/machines/{machine_id}/peer-record`
+///
+/// The caller authenticates as an enrolled machine: headers carry its machine id, a timestamp and
+/// an Ed25519 signature by its enrolled key over `"{peer_record_auth_nonce(caller, target)}:{ts}"`.
+/// Only a caller whose owner key equals the target's owner key receives the signed record.
+/// 401 = missing/invalid machine auth, 404 = unknown target, 403 = different owner.
+pub async fn get_peer_record(
+    State(state): State<Arc<AccountState>>,
+    axum::extract::Path(target_machine_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<PeerRecordResponse>, ApiError> {
+    use crate::account::peer_record as pr;
+    let unauthorized = || ApiError::unauthorized("MACHINE_AUTH_REQUIRED", "machine signature required");
+    let caller_id = header_str(&headers, pr::PEER_AUTH_MACHINE_HEADER).ok_or_else(unauthorized)?;
+    let ts: u64 = header_str(&headers, pr::PEER_AUTH_TS_HEADER)
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(unauthorized)?;
+    let sig = header_str(&headers, pr::PEER_AUTH_SIG_HEADER).ok_or_else(unauthorized)?;
+    let now = now_secs();
+    if ts.abs_diff(now) > PEER_RECORD_CLOCK_SKEW_SECS {
+        return Err(ApiError::unauthorized(
+            "MACHINE_SIGNATURE_STALE",
+            "machine signature timestamp is outside the accepted window",
+        ));
+    }
+    let (caller_id, sig) = (caller_id.to_string(), sig.to_string());
+    let read_state = Arc::clone(&state);
+    let (caller, caller_owner, target) = crate::ipc::run_blocking(move || {
+        Ok(read_state.read(|store| {
+            let caller = store.machines.values().find(|m| m.machine_id == caller_id).cloned();
+            let caller_owner = caller
+                .as_ref()
+                .map(|m| owner_key_for_user(store, &m.owner_user_id));
+            let target = store
+                .machines
+                .values()
+                .find(|m| m.machine_id == target_machine_id)
+                .map(|m| (m.clone(), owner_key_for_user(store, &m.owner_user_id)));
+            Ok((caller, caller_owner, target))
+        }))
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("account blocking task failed: {error}")))??;
+
+    let (Some(caller), Some(caller_owner)) = (caller, caller_owner) else {
+        return Err(unauthorized());
+    };
+    let Some((target, target_owner)) = target else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "NOT_FOUND", "no such machine"));
+    };
+    let nonce = pr::peer_record_auth_nonce(&caller.machine_id, &target.machine_id);
+    if !crate::remote::auth::verify_machine_signature(&caller.public_key, &nonce, ts, &sig) {
+        return Err(ApiError::unauthorized(
+            "MACHINE_SIGNATURE_INVALID",
+            "machine signature verification failed",
+        ));
+    }
+    if caller_owner != target_owner {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "PEER_OWNER_MISMATCH",
+            "the machine belongs to a different owner",
+        ));
+    }
+    let expires_at = now.saturating_add(pr::PEER_RECORD_TTL_SECS);
+    let record = crate::ipc::run_blocking(move || {
+        Ok((|| {
+            let key = state
+                .signing_key()
+                .map_err(|error| ApiError::internal(format!("signing key unavailable: {error}")))?;
+            pr::sign_peer_record(
+                &key,
+                &target.machine_id,
+                &target.public_key,
+                &target_owner,
+                target.enrollment_epoch,
+                expires_at,
+            )
+            .map_err(ApiError::internal)
+        })())
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("account blocking task failed: {error}")))??;
+    Ok(Json(PeerRecordResponse { record, expires_at }))
+}
+
 pub(crate) fn owner_stopped_at(state: &AccountState, user_id: &str) -> Option<u64> {
     state
         .read(|store| {
@@ -1615,6 +1719,10 @@ pub fn router(state: Arc<AccountState>) -> Router {
         .route(
             "/api/account/v1/machines/{machine_record_id}/grants",
             post(issue_grant),
+        )
+        .route(
+            "/api/account/v1/machines/{machine_id}/peer-record",
+            get(get_peer_record),
         );
 
     // Self-hosted deployments never expose billing, lease or team routes: nothing is registered,

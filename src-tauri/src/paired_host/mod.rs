@@ -2,6 +2,7 @@
 pub mod attach;
 pub mod client;
 pub mod direct;
+pub mod direct_autotrust;
 pub mod direct_client;
 pub mod direct_connect;
 pub mod direct_route;

@@ -76,13 +76,73 @@ pub(crate) fn kick(http: &reqwest::Client, host: &HostView, lease: &CredentialLe
 
 async fn load_attempt(host: &HostView, bearer: String) -> Option<DirectAttempt> {
     let dir = crate::remote::auth::canonical_identity_dir().ok()?;
-    let host_key = trusted_key(DirectTrustStore::at(&dir), host.machine_id.clone()).await?;
+    let account_key = super::direct_trust::auto_trust_enabled()
+        .then(crate::remote::direct_lease::pinned_account_public_key)
+        .flatten();
+    let http = super::direct_autotrust::account_http();
+    load_attempt_in(dir, host, bearer, account_key.as_deref().map(|key| (&http, key))).await
+}
+
+/// [`load_attempt`] against an explicit identity dir. `auto_trust` carries the account HTTP
+/// client and the operator-pinned account public key; `None` disables account auto-pinning.
+///
+/// On a trust miss, a client enrolled with an account fetches the host's account-signed peer
+/// record from the account origin it enrolled with, verifies it, pins it and continues. Every
+/// failure (not enrolled, no pin, network, bad record) is logged and leaves the route on the relay.
+pub(crate) async fn load_attempt_in(
+    dir: std::path::PathBuf,
+    host: &HostView,
+    bearer: String,
+    auto_trust: Option<(&reqwest::Client, &str)>,
+) -> Option<DirectAttempt> {
+    let pinned = trusted_key(DirectTrustStore::at(&dir), host.machine_id.clone()).await;
+    if pinned.is_none() && auto_trust.is_none() {
+        return None;
+    }
+    let identity_dir = dir.clone();
     let identity = crate::ipc::run_blocking(move || {
-        crate::remote::auth::load_or_generate_machine_identity(&dir)
+        crate::remote::auth::load_or_generate_machine_identity(&identity_dir)
             .map_err(crate::ipc::IpcError::internal)
     })
     .await
     .ok()?;
+    let host_key = match pinned {
+        Some(key) => key,
+        None => {
+            let (http, account_public_key) = auto_trust?;
+            let enrollment_dir = dir.clone();
+            let enrollment = crate::ipc::run_blocking(move || {
+                Ok(crate::remote::direct_lease::load_host_enrollment(Some(&enrollment_dir)))
+            })
+            .await
+            .ok()
+            .flatten()?;
+            let attestor = super::direct_autotrust::Attestor {
+                http,
+                account_origin: &enrollment.account_origin,
+                own: &identity,
+                account_public_key,
+            };
+            match super::direct_autotrust::attest_and_pin(
+                DirectTrustStore::at(&dir),
+                &attestor,
+                &host.machine_id,
+                None,
+                crate::remote::direct_lease::unix_now_secs(),
+            )
+            .await
+            {
+                Ok(key) => {
+                    tracing::info!(host = %host.machine_id, "direct trust pinned from account record");
+                    key
+                }
+                Err(error) => {
+                    tracing::info!(host = %host.machine_id, %error, "no account direct trust; staying on relay");
+                    return None;
+                }
+            }
+        }
+    };
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let seed: [u8; 32] = STANDARD.decode(&identity.private_key).ok()?.try_into().ok()?;
     Some(DirectAttempt {
@@ -95,3 +155,130 @@ async fn load_attempt(host: &HostView, bearer: String) -> Option<DirectAttempt> 
         host_key,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account::peer_record::{sign_peer_record, test_support::*};
+    use crate::account::enroll_client::{AccountEnrollmentRecord, ACCOUNT_ENROLLMENT_FILE};
+    use crate::paired_host::inventory::{AuthStatus, GrantScope};
+    use crate::scoped_contracts::Epoch;
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use std::time::Duration;
+
+    const LIMIT: Duration = Duration::from_secs(15);
+
+    fn host_view(machine_id: &str) -> HostView {
+        HostView {
+            host_id: "host-view-1".into(),
+            relay_origin: "https://relay.test".into(),
+            machine_id: machine_id.into(),
+            display_label: "host".into(),
+            grant_scope: GrantScope::Machine,
+            generation: Epoch(1),
+            auth_status: AuthStatus::Paired,
+            online: true,
+            ssh_host_id: None,
+            device_id: None,
+        }
+    }
+
+    /// A client data dir with an identity and an account enrollment pointing at `origin`.
+    fn client_dir(origin: &str) -> (tempfile::TempDir, crate::remote::auth::MachineIdentity) {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = crate::remote::auth::load_or_generate_machine_identity(dir.path()).unwrap();
+        let record = AccountEnrollmentRecord {
+            account_id: "acct-1".into(),
+            machine_record_id: format!("rec-{}", identity.machine_id),
+            account_origin: origin.into(),
+            relay_origin: "https://relay.test".into(),
+            enrollment_epoch: "1".into(),
+            enrolled_at: 1,
+        };
+        std::fs::write(
+            dir.path().join(ACCOUNT_ENROLLMENT_FILE),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        (dir, identity)
+    }
+
+    async fn attempt(
+        dir: &std::path::Path,
+        host: &HostView,
+        account_key: Option<&str>,
+    ) -> Option<DirectAttempt> {
+        let http = http();
+        tokio::time::timeout(
+            LIMIT,
+            load_attempt_in(dir.to_path_buf(), host, "bearer".into(), account_key.map(|k| (&http, k))),
+        )
+        .await
+        .expect("bounded attempt")
+    }
+
+    #[tokio::test]
+    async fn client_valid_account_record_pins_host_and_attempt_proceeds() {
+        let host = identity("host-m", 31);
+        // Enrollment origin is only known after the account starts; the identity must exist first.
+        let probe = tempfile::tempdir().unwrap();
+        let client = crate::remote::auth::load_or_generate_machine_identity(probe.path()).unwrap();
+        let fx = spawn_account(&[
+            ("user-1", &client.machine_id, &client.public_key),
+            ("user-1", "host-m", &host.public_key),
+        ])
+        .await;
+        let (dir, _) = client_dir(&fx.origin);
+        std::fs::copy(probe.path().join("identity.json"), dir.path().join("identity.json")).unwrap();
+
+        let store = DirectTrustStore::at(dir.path());
+        assert_eq!(store.trusted_key("host-m").unwrap(), None);
+        let attempt = attempt(dir.path(), &host_view("host-m"), Some(&fx.account_public_key))
+            .await
+            .expect("an account-attested host key lets the direct attempt proceed");
+        let expected = super::super::direct_trust::parse_verifying_key(&host.public_key).unwrap();
+        assert_eq!(attempt.host_key, expected);
+        assert_eq!(attempt.own_machine_id, client.machine_id);
+        assert_eq!(store.trusted_key("host-m").unwrap(), Some(expected), "the key is pinned");
+    }
+
+    #[tokio::test]
+    async fn client_forged_or_unsigned_record_leaves_no_pin() {
+        let host = identity("host-m", 31);
+        let account = ed25519_dalek::SigningKey::from_bytes(&[41; 32]);
+        let account_public = STANDARD.encode(account.verifying_key().to_bytes());
+        let forger = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let now = crate::remote::direct_lease::unix_now_secs();
+        let forged =
+            sign_peer_record(&forger, "host-m", &host.public_key, "user-1", 1, now + 600).unwrap();
+        let wrong_machine =
+            sign_peer_record(&account, "host-other", &host.public_key, "user-1", 1, now + 600).unwrap();
+        for record in [forged, "unsigned-garbage".to_string(), wrong_machine] {
+            let (origin, stub) = spawn_record_stub(record).await;
+            let (dir, _) = client_dir(&origin);
+            assert!(attempt(dir.path(), &host_view("host-m"), Some(&account_public)).await.is_none());
+            assert_eq!(DirectTrustStore::at(dir.path()).trusted_key("host-m").unwrap(), None);
+            stub.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn client_without_enrollment_or_opt_out_stays_on_relay() {
+        let host = identity("host-m", 31);
+        let account = ed25519_dalek::SigningKey::from_bytes(&[41; 32]);
+        let account_public = STANDARD.encode(account.verifying_key().to_bytes());
+        let now = crate::remote::direct_lease::unix_now_secs();
+        let record = sign_peer_record(&account, "host-m", &host.public_key, "u", 1, now + 600).unwrap();
+        let (origin, stub) = spawn_record_stub(record).await;
+        // Opt-out (no account key passed): nothing is fetched or pinned.
+        let (dir, _) = client_dir(&origin);
+        assert!(attempt(dir.path(), &host_view("host-m"), None).await.is_none());
+        assert_eq!(DirectTrustStore::at(dir.path()).trusted_key("host-m").unwrap(), None);
+        // Not account-enrolled: skipped silently.
+        let bare = tempfile::tempdir().unwrap();
+        assert!(attempt(bare.path(), &host_view("host-m"), Some(&account_public)).await.is_none());
+        assert_eq!(DirectTrustStore::at(bare.path()).trusted_key("host-m").unwrap(), None);
+        stub.abort();
+    }
+}
+
