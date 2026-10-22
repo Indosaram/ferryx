@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createAgent } from './lib/agent.mjs';
 import { counterTags, mergeRoutedSessions, sshOwnerProbeTarget, installV1QaEnv, nextCounterTag, restartCounters, faultTarget, pairSessions, seedPair, successorDataConn, describeWithRoutes, ownedStagePattern, commitEvidence, stageGeneration } from './scenarios/q07-q09.mjs';
 import { createJobs, qaEnvDropIn, QA_UNIT_ENV_KEYS } from './lib/jobs.mjs';
-import { Q11, Q12 } from './scenarios/q10-q13.mjs';
+import { Q11, Q12, closeAllSessions } from './scenarios/q10-q13.mjs';
 import { nonceRoundTrip, LINE_EDITOR_READY } from './scenarios/common.mjs';
 import { daemonLogFile, teardownRun } from './run.mjs';
 import { stagePattern } from './lib/receipts.mjs';
@@ -320,5 +320,20 @@ test('rerun2h Q08b: a recovered owner must show commit-sent before authority-rec
   const head = [stage(1, 'predecessor-prepared'), stage(1, 'predecessor-committed')];
   assert.equal(commitEvidence({ stages: head, predPid: 1, succPid: 2, guiDriven: false, ownedLine: adoptedLine }).ok, true);
   assert.equal(commitEvidence({ stages: full, predPid: 1, succPid: 2, guiDriven: false, ownedLine: recoveredLine }).ok, false);
+});
+
+test('run-all-fix all2 Q13: sessions left from earlier scenarios are closed before the zero-session check', async () => {
+  // The legacy owner listed Q08's SSH pair (fd805ced, 717906d9) besides Q13's own session.
+  const live = new Set(['own', 'fd805ced', '717906d9']);
+  const conn = {
+    call: async (frame) => {
+      if (frame.type === 'close') { live.delete(frame.sessionId); return { type: 'closeOk' }; }
+      if (frame.type === 'listSessions') return { type: 'listSessionsOk', sessions: [...live] };
+      throw new Error(`unexpected ${frame.type}`);
+    },
+  };
+  const drained = await closeAllSessions(conn, 'own');
+  assert.deepEqual(drained.after.sessions, []);
+  assert.deepEqual(drained.foreign.map((f) => f.id), ['fd805ced', '717906d9']);
 });
 

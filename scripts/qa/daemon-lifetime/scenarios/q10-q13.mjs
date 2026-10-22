@@ -570,6 +570,21 @@ export async function recordLegacyJobProcess(ctx, executable, prior, { deadlineM
   }
 }
 
+/**
+ * Closes ownId and every other session the daemon lists, then lists again. foreign: the sessions
+ * this scenario did not spawn, with each close response.
+ */
+export async function closeAllSessions(conn, ownId) {
+  const closed = [{ id: ownId, resp: await conn.call(D.close(ownId)) }];
+  const before = await conn.call(D.listSessions());
+  const foreign = [];
+  for (const id of before.sessions ?? []) {
+    if (id === ownId) continue;
+    foreign.push({ id, resp: await conn.call(D.close(id)) });
+  }
+  return { closed, foreign, before, after: foreign.length ? await conn.call(D.listSessions()) : before };
+}
+
 export async function Q13(ctx, result) {
   if (!ctx.artifacts.baseline) return block(result, 'ARTIFACT_MISSING', 'pre-plan baseline daemon binary not built');
   const retired = await retireOwner(ctx);
@@ -630,11 +645,15 @@ export async function Q13(ctx, result) {
     assertion(result, 'legacy job lost login autostart without being stopped', reg, legacyJob.unitFileState ?? null);
   }
   // Zero-session explicit end of the legacy daemon (stand-in for logout/reboot).
-  await conn.call(D.close(sp.sessionId));
-  const listed = await conn.call(D.listSessions());
+  // Earlier scenarios' sessions live in the run's session store and follow it into the legacy owner
+  // (run-all-fix all2: Q08's SSH pair fd805ced/717906d9, listed again here once Q08 completed instead
+  // of throwing; its exception recovery used to close them). Every listed session is this run's.
+  const drained = await closeAllSessions(conn, sp.sessionId);
+  await evidence(ctx, result, 'legacy-drain.json', drained);
+  const listed = drained.after;
   const desc = await conn.call(D.describeLiveSessions()).catch(() => null);
   const zero = (desc?.type === 'describeLiveSessionsOk' ? liveSessions(desc).length : listed.sessions?.length ?? -1) === 0;
-  assertion(result, 'legacy live count is zero before the explicit shutdown', zero, { listed, desc });
+  assertion(result, 'legacy live count is zero before the explicit shutdown', zero, { listed, desc, foreign: drained.foreign });
   if (!zero) return;
   await ctx.gui.quit(ctx.state.gui);
   const exit = ctx.agent.call('waitExit', { pid: legacyPid, deadlineMs: 30_000 });
