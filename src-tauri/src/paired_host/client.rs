@@ -781,8 +781,8 @@ impl MachineClient {
         match (first, base.direct_epoch) {
             (Err(error), Some(epoch)) if super::direct_client::is_transport_failure(&error) => {
                 super::direct_client::report_direct_loss(host, epoch);
-                let relay =
-                    Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+                let relay = Url::parse(&crate::remote::relay_client::live_relay_url(&host.host_id))
+                    .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
                 self.open_socket_at(&relay, lease, segments, query, ticket_target, max_frame)
                     .await
                     .map(|socket| (socket, None))
@@ -930,8 +930,8 @@ impl MachineClient {
                 if !route.idempotent {
                     return Err(error);
                 }
-                let relay =
-                    Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+                let relay = Url::parse(&crate::remote::relay_client::live_relay_url(&host.host_id))
+                    .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
                 self.http_at(relay, lease, route, directory).await
             }
             (result, _) => result,

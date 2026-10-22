@@ -19,7 +19,7 @@ pub fn build_host_candidates(
 
     candidates.push(CandidatePath::with_expected_machine_id(
         AttachPath::Relay,
-        &host.relay_origin,
+        crate::remote::relay_client::live_relay_url(&host.relay_origin).as_ref(),
         device_token.map(str::to_owned),
         Some(host.machine_id.clone()),
     ));
@@ -190,7 +190,7 @@ pub async fn attach_host_session(
 ) -> anyhow::Result<RelayAttachedStream> {
     let candidates = build_host_candidates(host, device_token);
     attach_paired_session_with_candidates(
-        &host.relay_origin,
+        &crate::remote::relay_client::live_relay_url(&host.relay_origin),
         session_id,
         &host.machine_id,
         machine_attach_public_key,

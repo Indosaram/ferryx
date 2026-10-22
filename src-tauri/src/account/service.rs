@@ -1450,7 +1450,7 @@ pub async fn issue_grant(
 
     let relay_url = format!(
         "{}/api/v1/attach/grant",
-        machine.relay_origin.trim_end_matches('/')
+        crate::remote::relay_client::live_relay_url(&machine.relay_origin).trim_end_matches('/')
     );
     let rollback_grant = || {
         let rollback_state = state.clone();

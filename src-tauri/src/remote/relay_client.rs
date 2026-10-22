@@ -890,7 +890,23 @@ pub fn validate_relay_url(
 /// equivalent, trimming any trailing slash so path segments can be
 /// appended directly.
 pub fn to_ws_base(url: &str) -> Result<String, RelayUrlSecurityError> {
-    validate_relay_url(url, is_insecure_relay_allowed())
+    validate_relay_url(&live_relay_url(url), is_insecure_relay_allowed())
+}
+
+/// The retired public relay hostname. Pairings and daemon configs saved before the move to
+/// relay.ferryx.dev still carry it (host ids embed it), and it no longer resolves to a relay.
+pub const RETIRED_RELAY_ORIGIN: &str = "https://relay.checka.cc";
+
+/// Rewrites a URL on the retired relay origin to the same path on the current default relay,
+/// leaving every other URL untouched. Stored ids keep the old origin; only connections move.
+pub fn live_relay_url(url: &str) -> std::borrow::Cow<'_, str> {
+    match url.strip_prefix(RETIRED_RELAY_ORIGIN) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => std::borrow::Cow::Owned(format!(
+            "{}{rest}",
+            crate::remote::state::DEFAULT_RELAY_URL
+        )),
+        _ => std::borrow::Cow::Borrowed(url),
+    }
 }
 
 /// Proxies frames bidirectionally between a relay data-channel WebSocket
@@ -1335,6 +1351,22 @@ mod tests {
             to_ws_base("wss://relay.example.com").unwrap(),
             "wss://relay.example.com"
         );
+    }
+
+    #[test]
+    fn retired_relay_origin_connects_through_the_current_relay() {
+        assert_eq!(
+            live_relay_url("https://relay.checka.cc/host/m-1"),
+            "https://relay.ferryx.dev/host/m-1"
+        );
+        assert_eq!(live_relay_url("https://relay.checka.cc"), "https://relay.ferryx.dev");
+        assert_eq!(to_ws_base("https://relay.checka.cc").unwrap(), "wss://relay.ferryx.dev");
+        // A different host that merely shares the prefix is left alone.
+        assert_eq!(
+            live_relay_url("https://relay.checka.cc.example/host/m-1"),
+            "https://relay.checka.cc.example/host/m-1"
+        );
+        assert_eq!(live_relay_url("https://relay.example.com"), "https://relay.example.com");
     }
 
     #[test]
