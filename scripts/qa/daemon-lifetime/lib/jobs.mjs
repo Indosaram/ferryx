@@ -1,12 +1,20 @@
 // OS-job queries and QA-scoped job actions, all through the host agent (which runs the guard).
 
 import { parseLaunchctlPrint, launchctlProgram, parseSystemctlShow, selectWindowsTree, parseScheduledTaskState } from './os-jobs.mjs';
-import { qaSupervisorName } from './guards.mjs';
+import { qaSupervisorName, isQaJobName } from './guards.mjs';
 import { hjoin } from './hostpath.mjs';
 
 /** stdout/stderr of the Q13 legacy daemon job, on every platform (the baseline prints FERRYX_DAEMON_READY to stdout). */
 export function legacyLogFiles(layout) {
   return { stdout: hjoin(layout.logs, 'legacy.stdout.log'), stderr: hjoin(layout.logs, 'legacy.stderr.log') };
+}
+
+/**
+ * The file name of a task's recorded definition in <LOCALAPPDATA>\Ferryx\supervisor, as the
+ * product derives it (supervisor_windows.rs task_xml_path: every '\' of the task name -> '-').
+ */
+export function taskXmlFileName(name) {
+  return `${String(name).replace(/^\\/, '').replace(/\\/g, '-')}.xml`;
 }
 
 export function createJobs({ host, agent, runId, layout, uid = null }) {
@@ -61,6 +69,19 @@ export function createJobs({ host, agent, runId, layout, uid = null }) {
     }
     const r = await agent.call('exec', { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command',
       `Get-ScheduledTask -TaskPath '\\Ferryx\\' -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like '${base}*' } | ForEach-Object { 'Ferryx\\' + $_.TaskName }`] });
+    return r.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  }
+
+  /**
+   * Windows: this run's task-definition records left in the user's real
+   * <LOCALAPPDATA>\Ferryx\supervisor (the product writes one per task it registers). Other
+   * platforms keep no such record.
+   */
+  async function listQaTaskXml() {
+    if (platform !== 'windows') return [];
+    const r = await agent.call('exec', { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command',
+      `$d = Join-Path $env:LOCALAPPDATA 'Ferryx\\supervisor'; if (Test-Path -LiteralPath $d) { Get-ChildItem -LiteralPath $d -Filter 'Ferryx-${base}*.xml' | ForEach-Object { $_.Name } }`] });
+    if (r.status !== 0) throw new Error(`listing the QA task definitions failed: ${r.stderr}`);
     return r.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   }
 
@@ -203,12 +224,13 @@ ${envXml}
       }
       return true;
     }
+    if (!isQaJobName(name, runId, 'windows')) throw new Error(`refusing to remove non-QA task ${name}`);
     await agent.call('exec', { command: 'schtasks', args: ['/End', '/TN', name] });
     await agent.call('exec', { command: 'schtasks', args: ['/Delete', '/TN', name, '/F'] });
-    // The legacy definition record installLegacy wrote, if the product left it behind.
-    if (name === task(null)) {
-      await agent.call('exec', { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', `Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Ferryx\supervisor\${name.replace('\\', '-')}.xml') -ErrorAction SilentlyContinue`] });
-    }
+    // The task's definition record: the product writes <LOCALAPPDATA>\Ferryx\supervisor\<name>.xml
+    // before every /Create (generation tasks) and installLegacy writes the legacy one. /Delete
+    // leaves it behind, so remove it for every QA task (the name is checked above).
+    await agent.call('exec', { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', `Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Ferryx\\supervisor\\${taskXmlFileName(name)}') -ErrorAction SilentlyContinue`] });
     return true;
   }
 
@@ -230,7 +252,7 @@ ${envXml}
     });
   }
 
-  return { inspect, windowsTree, listQaJobs, start, installLegacy, installQaEnvDropIn, remove, jobName, label, unit, task, base };
+  return { inspect, windowsTree, listQaJobs, listQaTaskXml, start, installLegacy, installQaEnvDropIn, remove, jobName, label, unit, task, base };
 }
 
 /** The baseline task definition (493fae45 render_task_xml), launching the QA legacy launcher. */
