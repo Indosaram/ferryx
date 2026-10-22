@@ -90,6 +90,22 @@ describe("sessionLifecycle", () => {
     return { sessionId: "back", cols: 80, rows: 24, running: true, suspended: true, kernelStopped: true, ...overrides };
   }
 
+  it("does not mark a running session asleep when only its reader is paused", async () => {
+    let answered: () => void = () => {};
+    const describeAnswered = new Promise<void>((done) => { answered = done; });
+    vi.spyOn(tauri, "describeTerminal").mockImplementation(async () => {
+      queueMicrotask(answered);
+      return { sessionId: "back", cols: 80, rows: 24, running: true, suspended: false, kernelStopped: false, readerPaused: true };
+    });
+    const current = session("back");
+    registerSessionSnapshot(current);
+    await describeAnswered;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(getDaemonSuspension(current.id)?.readerPaused).toBe(true);
+    expect(isSessionSleeping(current.id)).toBe(false);
+  });
+
   it("releases a Ferryx-owned stop left by an earlier build", async () => {
     vi.spyOn(tauri, "describeTerminal").mockResolvedValue(
       stoppedDetails({ suspensionSource: "ferryx-owned", registrySuspended: true }),

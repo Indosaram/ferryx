@@ -689,9 +689,42 @@ export async function waitForTerminalExit(_sessionId: string, _timeoutMs = 5000)
   return;
 }
 
-export async function listTerminalSessions() {
-  if (!isTauri()) return [] as TerminalSessionSummary[];
-  return invokeCommand<TerminalSessionSummary[]>("cmd_terminal_list");
+let terminalListInFlight: Promise<TerminalSessionSummary[]> | null = null;
+let terminalListQueued: Promise<TerminalSessionSummary[]> | null = null;
+
+/**
+ * `cmd_terminal_list` describes every daemon session in turn, so one call takes hundreds of
+ * milliseconds. Remote status events request it far faster than that; without coalescing the
+ * unresolved calls pile up without bound (each pins a WebKit URL scheme task) until the webview
+ * exceeds its memory limit and freezes. At most one call runs, and every caller that arrives while
+ * it runs shares a single follow-up call that starts after them, so no caller sees a list older
+ * than its own request.
+ */
+export function listTerminalSessions(): Promise<TerminalSessionSummary[]> {
+  if (!isTauri()) return Promise.resolve([] as TerminalSessionSummary[]);
+  if (!terminalListInFlight) {
+    terminalListInFlight = runTerminalList();
+    return terminalListInFlight;
+  }
+  if (!terminalListQueued) {
+    terminalListQueued = terminalListInFlight
+      .catch(() => undefined)
+      .then(() => {
+        terminalListQueued = null;
+        terminalListInFlight = runTerminalList();
+        return terminalListInFlight;
+      });
+  }
+  return terminalListQueued;
+}
+
+function runTerminalList(): Promise<TerminalSessionSummary[]> {
+  const call = invokeCommand<TerminalSessionSummary[]>("cmd_terminal_list");
+  const clear = () => {
+    if (terminalListInFlight === call) terminalListInFlight = null;
+  };
+  call.then(clear, clear);
+  return call;
 }
 
 export async function getTerminalRemoteStatus(sessionId: string): Promise<import("./types").RemoteSessionStatusResponse> {
