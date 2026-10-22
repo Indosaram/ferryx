@@ -148,6 +148,11 @@ async fn update_pending_without_control_endpoint_is_unknown_and_sends_nothing() 
     let pending = enter(dir.path(), Some("2026.1013.2".into())).await;
     assert_eq!(pending.live_sessions, None, "no control endpoint: unknown, never zero");
     assert!(!pending.retire_requested);
+    assert_eq!(
+        pending.log_line(),
+        "code=DAEMON_UPDATE_PENDING liveSessions=null retireRequested=false",
+        "an unknown count is logged as a literal null, never 0"
+    );
     let error = pending.into_error();
     assert_eq!(error.code, IpcErrorCode::DaemonUpdatePending);
     let details = error.details.unwrap();
@@ -167,6 +172,11 @@ async fn update_pending_reads_inventory_and_sends_retire_when_idle_once() {
     let pending = enter(dir.path(), Some("v".into())).await;
     assert_eq!(pending.live_sessions, Some(3));
     assert!(pending.retire_requested);
+    let line = pending.log_line();
+    assert_eq!(line, "code=DAEMON_UPDATE_PENDING liveSessions=3 retireRequested=true");
+    // The QA harness (q07-q09.mjs Q09) reads the count after the code on the same line.
+    assert!(regex::Regex::new(r"DAEMON_UPDATE_PENDING[^\n]*\b3\b").unwrap().is_match(&line));
+    assert!(!regex::Regex::new(r"DAEMON_UPDATE_PENDING[^\n]*\b4\b").unwrap().is_match(&line));
     assert_eq!(op_names(&ops), vec![OP_INVENTORY, OP_RETIRE_WHEN_IDLE]);
     let again = enter(dir.path(), Some("v".into())).await;
     assert!(again.retire_requested);

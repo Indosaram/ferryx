@@ -34,6 +34,19 @@ pub struct UpdatePending {
 }
 
 impl UpdatePending {
+    /// One log line naming the pending state and its live count, written as a number or a literal
+    /// null (unknown, never zero). Nothing else on the line carries digits, so the count can be
+    /// read from the line without being confused with a version or a pid.
+    pub fn log_line(&self) -> String {
+        let live = self
+            .live_sessions
+            .map_or_else(|| "null".to_string(), |live| live.to_string());
+        format!(
+            "code=DAEMON_UPDATE_PENDING liveSessions={live} retireRequested={}",
+            self.retire_requested
+        )
+    }
+
     pub fn into_error(self) -> IpcError {
         IpcError::new(
             IpcErrorCode::DaemonUpdatePending,
@@ -227,7 +240,11 @@ where
             Err(error) => tracing::warn!(%error, "Control-channel upgrade failed; entering the pending update state"),
         }
     }
-    MismatchResolution::Pending(enter(runtime_dir, running_version).await)
+    let pending = enter(runtime_dir, running_version).await;
+    // The pending state is otherwise only an IpcError to the frontend; the GUI log is where an
+    // operator (and the QA harness, Q08b/Q09) sees it.
+    tracing::warn!(code = "DAEMON_UPDATE_PENDING", "{}", pending.log_line());
+    MismatchResolution::Pending(pending)
 }
 
 #[cfg(test)]

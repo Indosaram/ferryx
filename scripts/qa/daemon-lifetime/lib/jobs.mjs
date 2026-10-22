@@ -126,7 +126,26 @@ ${envXml}
     const launcher = `${layout.root}\\legacy-daemon.cmd`;
     const script = ['@echo off', ...Object.entries(env).map(([k, v]) => `set "${k}=${v}"`), `"${executable}" --daemon 1>>"${legacyLogs.stdout}" 2>>"${legacyLogs.stderr}"`, ''].join('\r\n');
     await agent.call('writeFile', { file: launcher, content: script });
-    await agent.call('exec', { command: 'schtasks', args: ['/Create', '/TN', task(null), '/SC', 'ONLOGON', '/TR', launcher, '/F'] });
+    // The legacy task's recorded definition, as the baseline (493fae45 supervisor_windows.rs
+    // ensure_with) wrote it before every /Create: <LOCALAPPDATA>\Ferryx\supervisor\<name>.xml in
+    // UTF-16. HEAD migrates the legacy task only by that record (migrate_legacy_task_with), so a
+    // bare /SC ONLOGON task was never migrated (run-int2-all Q13).
+    const user = (await agent.call('exec', { command: 'cmd.exe', args: ['/d', '/c', 'echo %USERDOMAIN%\\%USERNAME%'] })).stdout.trim();
+    const xmlFile = `${layout.root}\\legacy-task.xml`;
+    await agent.call('writeFile', { file: xmlFile, content: legacyTaskXml(user, launcher) });
+    const recordName = `${task(null).replace('\\', '-')}.xml`;
+    const ps = `${layout.root}\\legacy-task-record.ps1`;
+    await agent.call('writeFile', { file: ps, content: [
+      "$ErrorActionPreference = 'Stop'",
+      "$dir = Join-Path $env:LOCALAPPDATA 'Ferryx\\supervisor'",
+      'New-Item -ItemType Directory -Force -Path $dir | Out-Null',
+      `$out = Join-Path $dir '${recordName}'`,
+      `[IO.File]::WriteAllText($out, [IO.File]::ReadAllText('${xmlFile}'), [Text.Encoding]::Unicode)`,
+      'Write-Output $out', ''].join('\r\n') });
+    const recorded = await agent.call('exec', { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ps] });
+    if (recorded.status !== 0) return recorded;
+    const created = await agent.call('exec', { command: 'schtasks', args: ['/Create', '/TN', task(null), '/XML', recorded.stdout.trim(), '/F'] });
+    if (created.status !== 0) return created;
     return agent.call('exec', { command: 'schtasks', args: ['/Run', '/TN', task(null)] });
   }
 
@@ -154,6 +173,10 @@ ${envXml}
     }
     await agent.call('exec', { command: 'schtasks', args: ['/End', '/TN', name] });
     await agent.call('exec', { command: 'schtasks', args: ['/Delete', '/TN', name, '/F'] });
+    // The legacy definition record installLegacy wrote, if the product left it behind.
+    if (name === task(null)) {
+      await agent.call('exec', { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', `Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Ferryx\supervisor\${name.replace('\\', '-')}.xml') -ErrorAction SilentlyContinue`] });
+    }
     return true;
   }
 
@@ -176,6 +199,47 @@ ${envXml}
   }
 
   return { inspect, windowsTree, listQaJobs, start, installLegacy, installQaEnvDropIn, remove, jobName, label, unit, task, base };
+}
+
+/** The baseline task definition (493fae45 render_task_xml), launching the QA legacy launcher. */
+export function legacyTaskXml(user, command) {
+  const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Keeps the Ferryx terminal daemon running for this user and restarts it after a crash.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${esc(user)}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>${esc(user)}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>${esc(command)}</Command>
+    </Exec>
+  </Actions>
+</Task>
+`;
 }
 
 /** QA-only variables a QA-named unit needs (HEAD supervisor_linux QA_NAME_KEYS + QA_BARRIER_KEYS). */

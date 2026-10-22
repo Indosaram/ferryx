@@ -45,6 +45,61 @@ export function renderEcho(raw) {
   return line.join('').trimEnd();
 }
 
+/**
+ * The input line of a Windows ConPTY session. ConPTY repaints the full screen (ESC[H, rows
+ * separated by CRLF) and then parks the cursor on the input row with a CUP; renderEcho flattens
+ * that screen into one line, so "C:\Users ..." satisfied a dropped "U" (run-int2-all Q11). The
+ * input row is the row after the anchor line in the last repaint holding the anchor; later output
+ * (CUP back to that row, characters, ESC[K, backspace) edits it. Without a repaint: renderEcho of
+ * the text after the anchor's line (the anchor line itself is never input), or of everything when
+ * the anchor never appeared.
+ */
+export function renderConptyInput(raw, anchor) {
+  const s = String(raw ?? '');
+  let frame = -1;
+  for (let at = s.lastIndexOf('\x1b[H'); at >= 0; at = at > 0 ? s.lastIndexOf('\x1b[H', at - 1) : -1) {
+    if (s.indexOf(anchor, at) >= 0) { frame = at; break; }
+  }
+  if (frame < 0) {
+    const at = s.lastIndexOf(anchor);
+    if (at < 0) return renderEcho(s);
+    const end = s.indexOf('\n', at);
+    return end < 0 ? '' : renderEcho(s.slice(end + 1));
+  }
+  const tail = s.slice(frame);
+  const lineEnd = tail.indexOf('\n', tail.lastIndexOf(anchor));
+  if (lineEnd < 0) return '';
+  const rest = tail.slice(lineEnd + 1);
+  const line = [];
+  let row = 0;
+  let col = 0;
+  for (let i = 0; i < rest.length;) {
+    const ch = rest[i];
+    if (ch === '\x1b') {
+      const csi = /^\x1b\[([0-?]*)[ -/]*([@-~])/.exec(rest.slice(i, i + 32));
+      if (csi) {
+        // After a repaint the cursor is parked on the input row; a CUP moves back to it.
+        if (csi[2] === 'H' || csi[2] === 'f') { row = 0; col = Math.max(0, (Number(csi[1].split(';')[1]) || 1) - 1); }
+        else if (csi[2] === 'K' && row === 0) line.length = Math.min(line.length, col);
+        i += csi[0].length;
+        continue;
+      }
+      const osc = /^\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/.exec(rest.slice(i));
+      i += osc ? osc[0].length : 2;
+      continue;
+    }
+    if (ch === '\r') col = 0;
+    else if (ch === '\n') row += 1;
+    else if (ch === '\b') col = Math.max(0, col - 1);
+    else if (ch >= ' ' && ch !== '\x7f') {
+      if (row === 0) line[col] = ch;
+      col += 1;
+    }
+    i += 1;
+  }
+  return Array.from(line, (c) => c ?? ' ').join('').trimEnd();
+}
+
 function commonPrefix(a, b) {
   let n = 0;
   while (n < a.length && n < b.length && a[n] === b[n]) n += 1;
@@ -58,14 +113,14 @@ function commonPrefix(a, b) {
  * resends and of erased characters, and the rendered line; throws TypeVerifiedError when a
  * position is still missing after `attempts` sends or the erasing does not converge.
  */
-export async function typeVerified({ mahord, echo, waitMore, text, perKeyMs = 3_000, attempts = 3 }) {
+export async function typeVerified({ mahord, echo, waitMore, text, render = renderEcho, perKeyMs = 3_000, attempts = 3 }) {
   const sends = [];
   let erased = 0;
   let erases = 0;
   const maxErases = attempts * (text.length + 1);
   for (;;) {
     const raw = await echo();
-    const line = renderEcho(raw);
+    const line = render(raw);
     if (line === text) return { sends, resent: sends.reduce((a, n) => a + n - 1, 0), erased, line };
     const good = commonPrefix(line, text);
     if (line.length > good) {

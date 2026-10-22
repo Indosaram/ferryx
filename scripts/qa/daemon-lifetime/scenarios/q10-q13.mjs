@@ -11,7 +11,7 @@ import {
   enterKey,
 } from './common.mjs';
 import { startSshd, sshRestoreSession, recordSshHelper } from '../lib/sshd.mjs';
-import { typeVerified, renderEcho } from '../lib/typeverified.mjs';
+import { typeVerified, renderEcho, renderConptyInput } from '../lib/typeverified.mjs';
 import { legacyLogFiles } from '../lib/jobs.mjs';
 
 export const OPTOUT_FILE = 'daemon-supervisor.optout'; // supervisor.rs OPTOUT_FILE_NAME, in <FERRYX_DATA_DIR>/remote
@@ -123,6 +123,8 @@ export async function Q10(ctx, result) {
   // (Q08b's v1bump) may legitimately hold the registration.
   const regBefore = await loginRegistration(ctx, key);
   assertion(result, 'newest generation registered for login before opt-out', autostarts(regBefore) === true, regBefore.raw?.slice?.(0, 400) ?? regBefore.raw);
+  // The owner's own tree right before the toggle: Q00's watchdog was replaced long ago (run-int2-all Q10).
+  const treeBefore = ctx.platform === 'windows' ? await ctx.jobs.windowsTree(ctx.stagedRoot, { ownerPid: owner.pid }) : null;
   const toggle = await toggleAutostartOffThroughSettings(ctx, optout, guiLog);
   if (toggle.before) await evidence(ctx, result, 'settings-before-space.png.b64', toggle.before.toString('base64'));
   if (toggle.after) await evidence(ctx, result, 'settings-after-space.png.b64', toggle.after.toString('base64'));
@@ -134,8 +136,8 @@ export async function Q10(ctx, result) {
   assertion(result, 'opt-out removed login autostart', autostarts(regAfter) === false, regAfter.raw?.slice?.(0, 400) ?? regAfter.raw);
   assertSameOwner(result, owner, ownerAfter, 'opt-out toggle never stops the running owner');
   if (ctx.platform === 'windows') {
-    const tree = await ctx.jobs.windowsTree(ctx.stagedRoot);
-    assertion(result, 'task re-import kept watchdog and daemon pids (carry-over todo 10 N4)', tree.watchdog?.pid === ctx.state.watchdog?.pid && tree.daemon?.pid === owner.pid, tree);
+    const tree = await ctx.jobs.windowsTree(ctx.stagedRoot, { ownerPid: owner.pid });
+    assertion(result, 'task re-import kept watchdog and daemon pids (carry-over todo 10 N4)', Boolean(treeBefore?.watchdog) && tree.watchdog?.pid === treeBefore.watchdog.pid && tree.daemon?.pid === owner.pid, { before: treeBefore, after: tree });
     ctx.carry.push({ item: 'todo 10 N4: /Create /XML /F re-import keeps watchdog and daemon alive', evidence: path.posix.join(ctx.evidenceDir, 'Q10-toggle.json') });
   }
   // Opted-out launch with an Absent owner: the newest generation still starts through its OS job.
@@ -325,6 +327,15 @@ export function appenderCommand(platform, file) {
   return `powershell -NoProfile -Command "Write-Output ('Q11APPEND' + 'READY'); while ($true) { $l = [Console]::ReadLine(); if ($null -eq $l) { break }; Add-Content -LiteralPath '${file}' -Value $l }"${enterKey(platform)}`;
 }
 
+/**
+ * Q11 marker. Windows: lowercase only. MahoRD on maho-win drops Shift+letter (run-int2-all Q11:
+ * the first key "U" never echoed in two runs), and a plain key press is delivered.
+ */
+export function q11Marker(platform) {
+  const marker = nonce('UNCERTAIN').replace('_', '');
+  return platform === 'windows' ? marker.toLowerCase() : marker;
+}
+
 /** The appended lines with CRLF (Add-Content on Windows) read as LF. */
 export function appendedText(text) {
   return String(text ?? '').replace(/\r\n/g, '\n');
@@ -399,8 +410,12 @@ export async function Q11(ctx, result) {
   // and repeats keys on omarchy (lib/typeverified.mjs), so the echoed line is driven to the marker
   // key by key and a surplus key is erased; the tty's erase echo means the raw output need not hold
   // the marker contiguously, so the rendered input line is what must equal it.
-  const marker = nonce('UNCERTAIN').replace('_', '');
-  const since = await conn.outputLength(sid);
+  const marker = q11Marker(ctx.platform);
+  // Windows: ConPTY repaints the whole screen per key (ESC[H), so the typed line is the row after
+  // the appender's ready line in the last repaint (renderConptyInput), read from before that line.
+  const conpty = ctx.platform === 'windows';
+  const since = conpty ? appenderSince : await conn.outputLength(sid);
+  const render = conpty ? (raw) => renderConptyInput(raw, APPENDER_READY) : renderEcho;
   // Keys go to the foreground window: make it the GUI that attached (Windows: gui.focus).
   const focused = await ctx.gui.focus(ctx.state.gui);
   await evidence(ctx, result, 'focus.json', { beforeEscape: attached.focus ?? null, beforeTyping: focused });
@@ -409,13 +424,14 @@ export async function Q11(ctx, result) {
     typed = await typeVerified({
       mahord: ctx.mahord,
       text: marker,
+      render,
       echo: async () => String(await conn.outputOf(sid) ?? '').slice(since),
       waitMore: (length, ms) => conn.waitOutput(sid, '', ms, { since: since + length }),
     });
   } catch (error) {
     typed = { error: error.detail ?? String(error?.message ?? error) };
   }
-  const echoed = renderEcho(String(await conn.outputOf(sid) ?? '').slice(since));
+  const echoed = render(String(await conn.outputOf(sid) ?? '').slice(since));
   if (!assertion(result, 'the marker typed through the GUI reached the SSH session', !typed.error && echoed === marker, { typed, echoed })) return;
   // Arm the hold only now: the GUI input queue is serialized, so a held keystroke would block the
   // rest of the marker. Enter is the uncertain write that commits the marker line to cat.

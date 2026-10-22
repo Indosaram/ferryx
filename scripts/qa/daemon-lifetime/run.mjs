@@ -361,6 +361,16 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
   await step('record-ssh-helper', async () => {
     await agent.call('recordSshHelper', { hostId: sshHostId(summary.runId) });
   });
+  const removeJobs = async () => {
+    for (const name of await jobs.listQaJobs()) {
+      await jobs.remove(name);
+      summary.teardown.jobsRemoved.push(name);
+    }
+    if (host.platform === 'linux') await agent.call('exec', { command: 'systemctl', args: ['--user', 'daemon-reload'] });
+  };
+  // Windows: end and delete the QA tasks first. A task's watchdog respawns a killed daemon, and
+  // that child was never recorded (only-q11 leftover pid 27232).
+  if (host.platform === 'windows') await step('remove-jobs', removeJobs);
   await step('kill-recorded', async () => {
     const t = await agent.call('teardownRecorded');
     summary.teardown.killed = t.killed.map((e) => ({ pid: e.pid, role: e.role }));
@@ -372,13 +382,7 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
     summary.teardown.dirsRemoved.push(...(r?.removed ?? []).map((h) => h.root));
     summary.teardown.leftovers.push(...(r?.kept ?? []).map((h) => ({ kind: 'ssh-helper-root', ...h })));
   });
-  await step('remove-jobs', async () => {
-    for (const name of await jobs.listQaJobs()) {
-      await jobs.remove(name);
-      summary.teardown.jobsRemoved.push(name);
-    }
-    if (host.platform === 'linux') await agent.call('exec', { command: 'systemctl', args: ['--user', 'daemon-reload'] });
-  });
+  if (host.platform !== 'windows') await step('remove-jobs', removeJobs);
   await step('leftovers', async () => {
     summary.teardown.leftovers = [
       ...(await jobs.listQaJobs()).map((j) => ({ kind: 'job', name: j })),

@@ -451,18 +451,22 @@ export async function retireOwner(ctx, { depth = 0 } = {}) {
   // RetireWhenIdle answers live:1 and never exits.
   if (ctx.state.conn) await ctx.state.conn.close().catch(() => {});
   ctx.state.conn = null;
-  const conn = await dataConn(ctx).catch(() => null);
+  // The owner's own data protocol: Q08b leaves a protocol-6 (v1bump) owner, which refuses a
+  // protocol-5 handshake (run-int2-all Q09), so its sessions were never closed and it never retired.
+  const version = owner.hello?.protocol_version ?? 5;
+  let dataError = null;
+  const conn = await dataConn(ctx, ctx.layout.runtime, { version }).catch((error) => { dataError = String(error?.message ?? error); return null; });
   if (conn) {
     const desc = await conn.describe().catch(() => ({ sessions: [] }));
     for (const s of desc.sessions ?? []) await conn.call({ type: 'close', sessionId: s.backendId }).catch(() => {});
     await conn.close().catch(() => {});
   }
   const ctl = await controlConn(ctx);
-  if (!ctl) return { retired: false, pid: owner.pid, reason: 'no control endpoint' };
+  if (!ctl) return { retired: false, pid: owner.pid, reason: 'no control endpoint', dataError };
   const exit = ctx.agent.call('waitExit', { pid: owner.pid, deadlineMs: 30_000 });
   const resp = await ctl.retireWhenIdle();
   const exited = await exit;
-  return { retired: resp?.ok === true && !exited.timedOut, pid: owner.pid, resp, exited };
+  return { retired: resp?.ok === true && !exited.timedOut, pid: owner.pid, resp, exited, dataError };
 }
 
 /** Launches a GUI, waits for a new owner and seeds one local session; records the daemon pid. */
