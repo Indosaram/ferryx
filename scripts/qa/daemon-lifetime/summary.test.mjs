@@ -2,10 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SCENARIO_IDS, newSummary, selectScenarios, assertion, settle, block, applyQ00Gate, computeExitCode, validateSummary } from './lib/summary.mjs';
 import { readFileSync } from 'node:fs';
-import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths, selfTestExitCode, SELF_TEST_PATCH, teardownRun, runWithTeardown, prepareSelfTestWorktree, teardownExtras, releaseOwnerFile, releaseContinuity, prepareBaselineDist } from './run.mjs';
+import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths, selfTestExitCode, SELF_TEST_PATCH, teardownRun, runWithTeardown, prepareSelfTestWorktree, teardownExtras, releaseOwnerFile, releaseContinuity, prepareBaselineDist, recoverAfterScenarioException } from './run.mjs';
 import { hostFor } from './lib/hosts.mjs';
-import { confirmOwner, ownerStartMatches, ownerIdentity, parseStarting, awaitPendingStart, retireOwner, freshOwner, STARTING_WINDOW_MS } from './scenarios/common.mjs';
+import { confirmOwner, ownerStartMatches, ownerIdentity, parseStarting, awaitPendingStart, retireOwner, freshOwner, invalidateOwnerState, setAsideHeadCatalog, workspaceCatalogFile, recoverOwnerAfterException, STARTING_WINDOW_MS, seedLocalSession, seedShell, counterCommand, SHELL_READY_TIMEOUT_MS, COUNTER_TIMEOUT_MS, SEED_TEXT_TAIL } from './scenarios/common.mjs';
+import { outputMatches, createOutputRoute } from './lib/agent.mjs';
+import { DsrResponder, DSR_QUERY, DSR_REPLY, visibleText } from './lib/wire.mjs';
 import { Q06, killLaunchedGui } from './scenarios/q04-q06.mjs';
+import { Q07 } from './scenarios/q07-q09.mjs';
+import { Q11, openSettings, nthReceiptPattern, SETTINGS_OPENED_RECEIPT, SETTINGS_OPEN_ATTEMPTS } from './scenarios/q10-q13.mjs';
 
 const RUN = '20261019t064512z';
 
@@ -251,8 +255,11 @@ test('artifact paths per platform layout', () => {
  * In-memory host for the owner-state helpers: owner.json, starting.json, live pids and the
  * owner change a waitOwnerChange observes are plain fields; no clock, sleep or real process.
  */
-function ownerWorld({ owner = null, alive = [], starting = null, publish = [] } = {}) {
-  const w = { owner, alive: new Set(alive), starting, publish: [...publish], calls: [], closed: [], quits: [], kills: [], launches: [], registryKills: [], killRefused: new Set() };
+function ownerWorld({ owner = null, alive = [], starting = null, publish = [], sessions = [], stuck = false } = {}) {
+  // sessions: backend ids the owner still serves. ListSessionsOk carries them as bare strings
+  // (protocol.rs ListSessionsOk { sessions: Vec<String> }); RetireWhenIdle refuses while any is
+  // open, so the owner exits only after every one is closed. stuck: close never ends a session.
+  const w = { owner, alive: new Set(alive), starting, publish: [...publish], sessions: new Set(sessions), stuck, sessionCloses: [], calls: [], closed: [], quits: [], kills: [], launches: [], registryKills: [], killRefused: new Set() };
   const RT = '/r/run';
   // Linux units: owner.json startTime and the probe are the same /proc starttime ticks.
   const startOf = (pid) => 1000 + pid;
@@ -278,7 +285,17 @@ function ownerWorld({ owner = null, alive = [], starting = null, publish = [] } 
           const f = params.frame;
           if (f.op === 'Hello') return { ok: true, pid: w.owner };
           if (f.op === 'Inventory') return { ok: true, live_local: 0, live_remote: 0, live_paired: 0 };
-          if (f.op === 'RetireWhenIdle') { w.alive.delete(w.owner); return { ok: true, live: 0 }; }
+          if (f.op === 'RetireWhenIdle') {
+            if (w.sessions.size > 0) return { ok: true, live: w.sessions.size };
+            w.alive.delete(w.owner); return { ok: true, live: 0 };
+          }
+          if (f.type === 'listSessions') return { type: 'listSessionsOk', epoch: 1, sessions: [...w.sessions] };
+          if (f.type === 'close') {
+            w.sessionCloses.push(f.sessionId);
+            if (!w.sessions.has(f.sessionId)) return { type: 'error', code: 'SESSION_NOT_FOUND' };
+            if (!w.stuck) w.sessions.delete(f.sessionId);
+            return { type: 'closeOk' };
+          }
           if (f.type === 'describeLiveSessions') return { type: 'describeLiveSessionsOk', sessions: [] };
           if (f.type === 'registerWorkspace') return { type: 'registerWorkspaceOk' };
           if (f.type === 'spawn') return { type: 'spawnOk', sessionId: 'S1' };
@@ -287,7 +304,8 @@ function ownerWorld({ owner = null, alive = [], starting = null, publish = [] } 
           return { type: 'unexpected', frame: f };
         }
         case 'waitOutput': return { count: 1, text: 'QA_A_TICK_2' };
-        case 'waitExit': return { pid: params.pid, exitedAt: 1 };
+        // An owner with open sessions never exits on retire; a killed one is gone.
+        case 'waitExit': return w.alive.has(params.pid) && w.sessions.size > 0 ? { pid: params.pid, timedOut: true } : { pid: params.pid, exitedAt: 1 };
         case 'waitOwnerChange': {
           const next = w.publish.shift();
           if (!next) return { owner: null, timedOut: true, seen: [] };
@@ -316,6 +334,7 @@ function ownerWorld({ owner = null, alive = [], starting = null, publish = [] } 
     quit: async (g) => { if (g) w.quits.push(g.pid); return { pid: g?.pid, exitedAt: 1 }; },
     kill: async (g) => { w.kills.push(g.pid); return { pid: g.pid, exitedAt: 1 }; },
   };
+  gui.launchBatch = (items) => Promise.allSettled(items.map(({ artifact, options }) => gui.launch(artifact, options)));
   const evidenceFiles = [];
   const ctx = {
     agent, gui, platform: 'linux', runId: RUN, layout: { runtime: RT, logs: '/r/logs' }, evidenceDir: '/e',
@@ -380,6 +399,68 @@ test('retireOwner never reports a stale owner as retired while a start is pendin
   assert.equal(p.retired, true);
   assert.equal(p.pid, 9);
   assert.equal(pending.w.alive.has(9), false);
+
+  // rerun2 Q08b: ctx.state.conn named a generation that had handed over; the owner's sessions are
+  // closed through a fresh connection to the current owner, never through that stale one.
+  const stale = ownerWorld({ owner: 1, alive: [1], sessions: ['live'] });
+  const staleCloses = [];
+  stale.ctx.state.conn = { describe: async () => ({ sessions: [{ backendId: 'old' }] }), call: async (f) => { staleCloses.push(f.sessionId); }, close: async () => {} };
+  const real = stale.ctx.agent.call;
+  stale.ctx.agent.call = async (m, p) => (m === 'call' && p.frame?.type === 'describeLiveSessions' ? { type: 'describeLiveSessionsOk', sessions: [...stale.w.sessions].map((backendId) => ({ backendId })) } : real(m, p));
+  const retiredStale = await retireOwner(stale.ctx);
+  assert.deepEqual(staleCloses, [], 'nothing is closed through the stale connection');
+  assert.deepEqual(stale.w.sessionCloses, ['live']);
+  assert.equal(retiredStale.retired, true);
+  assert.equal(stale.ctx.state.conn, null);
+});
+
+test('freshOwner with expectKey refuses an owner of another generation (run-9a5db442 Q13 got B)', async () => {
+  const withKey = (key) => {
+    const world = ownerWorld({ owner: 1, publish: [{ pid: 9, alive: true }] });
+    const real = world.ctx.agent.call;
+    world.ctx.agent.call = async (m, p) => (m === 'call' && p.frame?.op === 'Hello' ? { ok: true, pid: world.w.owner, generation_key: key } : real(m, p));
+    return world;
+  };
+  const stale = withKey('KEY_B');
+  await assert.rejects(freshOwner(stale.ctx, { name: 'A' }, { expectKey: 'KEY_A' }), (e) => e.code === 'OWNER_WRONG_GENERATION' && e.detail.expected === 'KEY_A' && e.detail.actual === 'KEY_B');
+  assert.equal(stale.ctx.state.conn, undefined, 'no session seeded on the wrong generation');
+  const right = withKey('KEY_A');
+  assert.equal((await freshOwner(right.ctx, { name: 'A' }, { expectKey: 'KEY_A' })).pid, 9);
+});
+
+test('Q07 removes the B generation job it installed, by its recorded name only', async () => {
+  const removed = [];
+  const units = new Set(['ferryx-qa-x.service', 'ferryx-qa-x-KEY_A.service', 'ferryx-qa-x-KEY_B.service']);
+  const jobs = {
+    jobName: (key) => `ferryx-qa-x-${key}`,
+    inspect: async () => ({ state: 'inactive' }),
+    listQaJobs: async () => [...units],
+    remove: async (name) => { removed.push(name); units.delete(`${name}.service`); return true; },
+  };
+  const session = { kind: 'local', backendId: 'L1', readerOpen: true, localChildPid: 5 };
+  const conn = { describe: async () => ({ type: 'describeLiveSessionsOk', sessions: [session] }), call: async (f) => ({ type: f.type === 'attach' ? 'attachOk' : 'writeOk' }), waitOutput: async (_s, marker) => ({ count: 1, text: marker }), close: async () => {} };
+  const call = async (method, params = {}) => {
+    if (method === 'dataOpen') return { handle: 'd', handshake: { type: 'handshakeOk' } };
+    if (method === 'controlOpen') return { handle: 'c' };
+    if (method === 'call') return params.handle === 'd' ? conn.call(params.frame).then((r) => (params.frame.type === 'describeLiveSessions' ? conn.describe() : r)) : { ok: true, pid: 4, generation_key: 'KEY_A' };
+    if (method === 'waitOutput') return { count: 1, text: params.marker };
+    if (method === 'probe') return { executable: '/qa/4', startTime: '1' };
+    if (method === 'readFile') return null;
+    if (method === 'exists') return true;
+    return true;
+  };
+  const ctx = {
+    agent: { call }, platform: 'linux', runId: RUN, keys: { A: 'KEY_A', B: 'KEY_B' }, stagedRoot: '/s', jobs,
+    layout: { runtime: '/r/run', barriers: '/r/barriers' }, evidenceDir: '/e', writeEvidence: async () => {},
+    artifacts: { A: { name: 'A' }, B: { name: 'B' } }, replaceAppOnDisk: async (_from, to) => ({ artifact: to }),
+    gui: { quit: async () => ({}), launch: async () => ({ pid: 3 }) }, state: { conn, gui: { pid: 2 }, localA: 'L1' },
+  };
+  ctx.agent.call = async (method, params) => (method === 'dataOpen' ? { handle: 'd', handshake: { type: 'handshakeOk' } } : call(method, params));
+  const result = { id: 'Q07', assertions: [], evidence: [] };
+  await Q07(ctx, result);
+  assert.deepEqual(removed, ['ferryx-qa-x-KEY_B']);
+  assert.ok(units.has('ferryx-qa-x-KEY_A.service') && units.has('ferryx-qa-x.service'), 'only the B unit is removed');
+  assert.ok(result.assertions.some((a) => a.name === 'B generation job removed by its recorded name after the replacement check' && a.ok));
 });
 
 test('freshOwner throws a structured OWNER_GONE instead of dereferencing a dead owner', async () => {
@@ -515,4 +596,558 @@ test('baseline step gets an empty ui/dist in its own worktree, idempotently, on 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+/** A scripted data connection: each waitOutput answers from `waits` in order. */
+function seedWorld({ platform = 'windows', waits }) {
+  const calls = [];
+  const files = new Map();
+  const conn = {
+    call: async (frame, deadlineMs) => {
+      calls.push({ kind: frame.type, frame, deadlineMs });
+      if (frame.type === 'registerWorkspace') return { type: 'registerWorkspaceOk' };
+      if (frame.type === 'spawn') return { type: 'spawnOk', sessionId: 'S1' };
+      if (frame.type === 'attach') return { type: 'attachOk' };
+      if (frame.type === 'write') return { type: 'writeOk' };
+      return { type: 'unexpected' };
+    },
+    waitOutput: async (sessionId, marker, deadlineMs, opts = {}) => { calls.push({ kind: 'waitOutput', sessionId, marker, deadlineMs, visible: Boolean(opts.visible) }); return waits.shift(); },
+    describe: async () => { calls.push({ kind: 'describe' }); return { type: 'describeLiveSessionsOk', sessions: [{ backendId: 'S1', readerOpen: true, localChildPid: 77 }] }; },
+  };
+  const ctx = { platform, workspaceId: 'ws', repoDir: 'C:\\r\\repo', workspaceRegistered: false, evidenceDir: '/e', writeEvidence: async (f, c) => { files.set(f, c); } };
+  return { conn, ctx, calls, files };
+}
+
+test('seed: Windows spawns powershell explicitly and writes the counter only after the shell prompt', async () => {
+  assert.equal(seedShell('windows'), 'powershell');
+  assert.equal(seedShell('linux'), null);
+  assert.equal(seedShell('mac'), null);
+  const { conn, ctx, calls, files } = seedWorld({ waits: [{ text: 'PS C:\\r\\repo> ', count: 0 }, { text: 'QA_A_TICK_2', count: 1 }] });
+  assert.equal(await seedLocalSession(ctx, conn, 'QA_A'), 'S1');
+  assert.deepEqual(calls.map((c) => c.kind), ['registerWorkspace', 'spawn', 'attach', 'waitOutput', 'write', 'waitOutput']);
+  assert.equal(calls[1].frame.shell, 'powershell');
+  // The readiness wait is "any visible output" (a prompt, not ConPTY's query), bounded, and
+  // strictly before the counter write.
+  assert.deepEqual([calls[3].marker, calls[3].deadlineMs, calls[3].visible], ['', SHELL_READY_TIMEOUT_MS, true]);
+  assert.equal(Buffer.from(calls[4].frame.data, 'base64').toString(), counterCommand('windows', 'QA_A'));
+  assert.deepEqual([calls[5].marker, calls[5].deadlineMs], ['QA_A_TICK_2', COUNTER_TIMEOUT_MS]);
+  assert.equal(files.size, 0);
+  // Linux keeps the daemon default shell (no shell field on the wire).
+  const linux = seedWorld({ platform: 'linux', waits: [{ text: '$ ', count: 0 }, { text: 'QA_A_TICK_2', count: 1 }] });
+  await seedLocalSession(linux.ctx, linux.conn, 'QA_A');
+  assert.equal('shell' in linux.calls[1].frame, false);
+});
+
+test('seed: a silent shell fails at shell-ready, never writes the counter, and keeps describe-live evidence', async () => {
+  const { conn, ctx, calls, files } = seedWorld({ waits: [{ timedOut: true, text: '', count: 0 }] });
+  await assert.rejects(seedLocalSession(ctx, conn, 'QA_A'), (e) => {
+    assert.equal(e.code, 'SEED_FAILED');
+    assert.equal(e.detail.stage, 'shell-ready');
+    assert.equal(e.detail.receivedBytes, 0);
+    assert.deepEqual(e.detail.describe.sessions.map((s) => s.backendId), ['S1']);
+    assert.match(e.message, /shell-ready timed out/);
+    return true;
+  });
+  assert.ok(!calls.some((c) => c.kind === 'write'), 'no counter is typed into a shell that never answered');
+  assert.deepEqual([...files.keys()], ['/e/seed-QA_A-shell-ready.json']);
+  assert.equal(JSON.parse(files.get('/e/seed-QA_A-shell-ready.json')).stage, 'shell-ready');
+});
+
+test('seed: a counter timeout carries the bounded received-text tail and describe-live', async () => {
+  const noise = 'x'.repeat(SEED_TEXT_TAIL * 2) + 'TAIL_END';
+  const { conn, ctx, files } = seedWorld({ waits: [{ text: 'PS> ', count: 0 }, { timedOut: true, text: noise, count: 0 }] });
+  await assert.rejects(seedLocalSession(ctx, conn, 'QA_A'), (e) => {
+    assert.equal(e.detail.stage, 'counter');
+    assert.equal(e.detail.marker, 'QA_A_TICK_2');
+    assert.equal(e.detail.receivedBytes, noise.length);
+    assert.equal(e.detail.receivedTail.length, SEED_TEXT_TAIL);
+    assert.ok(e.detail.receivedTail.endsWith('TAIL_END'));
+    assert.equal(e.detail.shell, 'powershell');
+    assert.equal(e.detail.evidence, '/e/seed-QA_A-counter.json');
+    return true;
+  });
+  const saved = JSON.parse(files.get('/e/seed-QA_A-counter.json'));
+  assert.equal(saved.receivedTail.length, SEED_TEXT_TAIL);
+  assert.equal(saved.describe.sessions[0].localChildPid, 77);
+});
+
+test('agent output matching: an empty marker means any output, otherwise a substring', () => {
+  assert.equal(outputMatches('', ''), false);
+  assert.equal(outputMatches('P', ''), true);
+  assert.equal(outputMatches('abc QA_A_TICK_2', 'QA_A_TICK_2'), true);
+  assert.equal(outputMatches('QA_A_TICK_1', 'QA_A_TICK_2'), false);
+  // visible: a bare terminal query is not a prompt; a prompt behind VT noise is.
+  assert.equal(outputMatches(DSR_QUERY, '', true), false);
+  assert.equal(outputMatches('\x1b[?25l\x1b[2J\x1b[H\x1b]0;Windows PowerShell\x07\r\n', '', true), false);
+  assert.equal(outputMatches('\x1b[6n\x1b[?25lPS C:\\r> ', '', true), true);
+  assert.equal(visibleText('\x1b[1;1H\x1b[32mok\x1b[0m\r\n'), 'ok\n');
+  assert.equal(visibleText('\x1b['), '');
+  assert.equal(visibleText('ok\x1b]0;tit'), 'ok');
+});
+
+test('DSR responder: one reply per query, split across frames, two queries, never twice for one query', () => {
+  const r = new DsrResponder();
+  // Query split across frames: nothing owed until it completes, then exactly one.
+  assert.equal(r.feed('S1', 'hello\x1b[', 1), 0);
+  assert.equal(r.feed('S1', '6n', 2), 1);
+  // Two queries in one frame, and one split three ways.
+  assert.equal(r.feed('S1', '\x1b[6nPS> \x1b[6n', 3), 2);
+  assert.equal(r.feed('S1', '\x1b', 4), 0);
+  assert.equal(r.feed('S1', '[', 5), 0);
+  assert.equal(r.feed('S1', '6n tail', 6), 1);
+  // The same frame seen again (a re-attach replaying a sequence) is never answered twice.
+  assert.equal(r.feed('S1', '\x1b[6n', 6), 0);
+  assert.equal(r.feed('S1', '\x1b[6n', 5), 0);
+  assert.equal(r.replies('S1'), 4);
+  // A completed query leaves no tail that could complete a second time.
+  assert.equal(r.feed('S1', 'n', 7), 0);
+  // Near-misses are not queries; sessions are independent.
+  assert.equal(r.feed('S2', '\x1b[5n \x1b[6 n \x1b6n', 1), 0);
+  assert.equal(r.feed('S2', '\x1b[', 2), 0);
+  assert.equal(r.feed('S1', '6n', 8), 0, 'S2 tail never completes a query in S1');
+  assert.equal(r.feed('S2', '6n', 3), 1);
+  assert.deepEqual([r.replies('S1'), r.replies('S2')], [4, 1]);
+});
+
+test('DSR responder: the query in the first attach history is answered once; a re-attach replay never again', () => {
+  const r = new DsrResponder();
+  // ConPTY asks at spawn, before the harness attaches: the query is in the first history.
+  assert.equal(r.feedHistory('S1', '\x1b[6n', 1), 1);
+  // Live output continues after the history's end sequence.
+  assert.equal(r.feed('S1', 'PS C:\\r> ', 2), 0);
+  // A re-attach (same or another connection) replays the history including the old query.
+  assert.equal(r.feedHistory('S1', '\x1b[6nPS C:\\r> ', 2), 0);
+  assert.equal(r.feedHistory('S1', '\x1b[6nPS C:\\r> more', 5), 0);
+  // ...and the sequence it advanced to keeps the live replay of those frames unanswered too.
+  assert.equal(r.feed('S1', '\x1b[6n', 4), 0);
+  // A genuinely new live query after that is answered.
+  assert.equal(r.feed('S1', '\x1b[6n', 6), 1);
+  assert.equal(r.replies('S1'), 2);
+  // An empty first history leaves a later live query answerable.
+  assert.equal(r.feedHistory('S2', '', null), 0);
+  assert.equal(r.feed('S2', '\x1b[6n', 1), 1);
+});
+
+test('output route answers each live ConPTY query with exactly one ESC[1;1R write to that session, on Windows only', async () => {
+  const frame = (sessionId, text, sequence) => ({ type: 'output', sessionId, sequence, data: Buffer.from(text).toString('base64') });
+  const sent = [];
+  const output = new Map();
+  const waiters = new Set();
+  const { route, replyErrors } = createOutputRoute({ platform: 'windows', output, waiters, send: async (f) => { sent.push(f); return { type: 'writeOk' }; } });
+  let prompt;
+  waiters.add({ sessionId: 'S1', marker: '', visible: true, resolve: (t) => { prompt = t; } });
+  route(frame('S1', '\x1b[', 1));
+  route(frame('S1', '6n', 2));
+  assert.equal(prompt, undefined, 'the query alone never satisfies a visible wait');
+  route(frame('S1', '\x1b[6n', 2)); // duplicate sequence
+  route(frame('S2', '\x1b[6n', 1));
+  route(frame('S1', 'PS C:\\r> ', 3));
+  await Promise.resolve();
+  assert.deepEqual(sent.map((f) => [f.type, f.sessionId, Buffer.from(f.data, 'base64').toString()]), [['write', 'S1', DSR_REPLY], ['write', 'S2', DSR_REPLY]]);
+  // Output storage is unchanged (every received frame is kept); only the replies are deduplicated.
+  assert.equal(prompt, '\x1b[6n\x1b[6nPS C:\\r> ');
+  assert.deepEqual(replyErrors, []);
+  // A failing reply write is kept, not swallowed.
+  const failing = createOutputRoute({ platform: 'windows', output: new Map(), waiters: new Set(), send: async () => { throw new Error('closed'); } });
+  failing.route(frame('S9', '\x1b[6n', 1));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(failing.replyErrors, [{ sessionId: 'S9', error: 'closed' }]);
+  // Attach history goes through answer({ history: true }): answered once per session.
+  const h = createOutputRoute({ platform: 'windows', output: new Map(), waiters: new Set(), send: async (f) => { sent.push(f); } });
+  sent.length = 0;
+  assert.equal(h.answer('H1', '\x1b[6n', 1, { history: true }), 1);
+  assert.equal(h.answer('H1', '\x1b[6n', 1, { history: true }), 0);
+  assert.deepEqual(sent.map((f) => f.sessionId), ['H1']);
+  // Linux and mac: no replies (the harness is not the terminal of a Unix PTY start-up).
+  for (const platform of ['linux', 'mac']) {
+    const unix = [];
+    createOutputRoute({ platform, output: new Map(), waiters: new Set(), send: async (f) => { unix.push(f); } }).route(frame('S1', '\x1b[6n', 1));
+    assert.deepEqual(unix, []);
+  }
+});
+
+/** Records every data frame type the fake agent of an ownerWorld receives. */
+function frameLog(ctx) {
+  const frames = [];
+  const real = ctx.agent.call;
+  ctx.agent.call = async (method, params = {}) => {
+    if (method === 'call') frames.push(params.frame.type ?? params.frame.op);
+    return real(method, params);
+  };
+  return frames;
+}
+
+test('a retired owner forgets the workspace registration, so the next owner is registered again (Q08b/Q13)', async () => {
+  const { ctx } = ownerWorld({ owner: 1, publish: [{ pid: 9, alive: true }, { pid: 10, alive: true }] });
+  const frames = frameLog(ctx);
+  ctx.workspaceRegistered = false;
+  await freshOwner(ctx, { name: 'A' });
+  assert.equal(ctx.workspaceRegistered, true);
+  await invalidateOwnerState(ctx);
+  assert.equal(ctx.workspaceRegistered, false, 'the next owner has not seen registerWorkspace');
+  await freshOwner(ctx, { name: 'v1bump' });
+  assert.equal(frames.filter((f) => f === 'registerWorkspace').length, 2, 'one registration per owner');
+});
+
+test('an older owner never inherits the HEAD version-2 catalog: it is set aside as evidence and registration is redone', async () => {
+  const files = new Map([['/r/data/remote/machine-workspaces.v1.json', '{"version":2,"workspaces":{}}']]);
+  const ops = [];
+  const ctx = {
+    layout: { data: '/r/data', root: '/r' }, workspaceRegistered: true,
+    agent: { call: async (m, a) => {
+      ops.push([m, a.file ?? a.target]);
+      if (m === 'readFile') return files.get(a.file) ?? null;
+      if (m === 'writeFile') { files.set(a.file, a.content); return true; }
+      if (m === 'remove') { files.delete(a.target); return true; }
+      throw new Error(m);
+    } },
+  };
+  assert.equal(workspaceCatalogFile(ctx), '/r/data/remote/machine-workspaces.v1.json');
+  const out = await setAsideHeadCatalog(ctx, 'Q08b');
+  assert.deepEqual([out.setAside, out.version], ['/r/set-aside/Q08b-machine-workspaces.v1.json', 2]);
+  assert.equal(files.has(workspaceCatalogFile(ctx)), false);
+  assert.equal(files.get(out.setAside), '{"version":2,"workspaces":{}}', 'kept byte for byte');
+  assert.equal(ctx.workspaceRegistered, false);
+  // No catalog: nothing moved, registration still redone.
+  ctx.workspaceRegistered = true;
+  assert.equal((await setAsideHeadCatalog(ctx, 'Q13')).setAside, null);
+  assert.equal(ctx.workspaceRegistered, false);
+});
+
+test('a scenario exception retires the leftover owner and starts a fresh A owner before the next scenario (Q08b -> Q10)', async () => {
+  // Owner 1 is the failed scenario's (v1bump) owner; its GUI 5 is still up.
+  const { w, ctx } = ownerWorld({ owner: 1, alive: [1], publish: [{ pid: 40, alive: true }], sessions: ['SSH-left', 'L-left'] });
+  ctx.state = { gui: { tag: 'Q08B', pid: 5 }, conn: { close: async () => { w.closed.push('old'); } }, localA: 'OLD' };
+  ctx.workspaceRegistered = true;
+  const frames = frameLog(ctx);
+  const out = await recoverOwnerAfterException(ctx, ctx.artifacts.A);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.deepEqual(w.kills, [5], 'the failed scenario GUI is killed by recorded pid, never a focused-window quit');
+  assert.deepEqual(w.quits, []);
+  assert.ok(frames.includes('RetireWhenIdle'));
+  // run-r5c: the list carries bare id strings; each leftover session is closed by its id, so the
+  // owner retires on its own and is never killed.
+  assert.deepEqual(w.sessionCloses, ['SSH-left', 'L-left']);
+  assert.deepEqual(out.closed.map((c) => [c.id, c.resp.type]), [['SSH-left', 'closeOk'], ['L-left', 'closeOk']]);
+  assert.equal(w.sessions.size, 0);
+  assert.deepEqual(w.registryKills, [], 'a retired owner is not killed');
+  assert.equal(w.alive.has(1), false, 'leftover owner retired');
+  assert.deepEqual([out.fresh, ctx.state.daemon.pid], [40, 40]);
+  assert.ok(frames.includes('registerWorkspace'), 'the fresh owner is registered again');
+  // run.mjs records the recovery on the failed scenario and keeps the original failure.
+  const result = { id: 'Q08b', assertions: [{ name: 'scenario completed without an exception', ok: false }], evidence: [] };
+  const written = [];
+  const rec = await recoverAfterScenarioException(ctx, result, { writeFileSync: (f, t) => written.push([f, t]), localEvidence: '/ev', recover: async () => ({ ok: false, code: 'OWNER_STATE_UNRECOVERABLE' }) });
+  assert.equal(rec.ok, false);
+  assert.deepEqual(result.assertions.map((a) => [a.name, a.ok]), [['scenario completed without an exception', false], ['owner of the failed scenario retired and a fresh QA owner started', false]]);
+  assert.deepEqual(result.evidence, ['/ev/Q08b-exception-recovery.json']);
+  assert.equal(written[0][0], '/ev/Q08b-exception-recovery.json');
+});
+
+test('an owner that keeps live sessions past its retire deadline is killed by its recorded pid, then a fresh A starts', async () => {
+  const { w, ctx } = ownerWorld({ owner: 1, alive: [1], publish: [{ pid: 40, alive: true }], sessions: ['S-held'], stuck: true });
+  ctx.state = { gui: null };
+  const out = await recoverOwnerAfterException(ctx, ctx.artifacts.A);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.deepEqual(w.sessionCloses, ['S-held']);
+  assert.deepEqual(w.registryKills, [{ pid: 1, signal: 'SIGTERM' }], 'only the recorded owner pid, through the registry');
+  assert.deepEqual([out.killed.exited, out.retired.retired, out.fresh], [true, true, 40]);
+});
+
+test('a kill the registry refuses leaves the owner unrecoverable, never thrown', async () => {
+  const { w, ctx } = ownerWorld({ owner: 1, alive: [1], sessions: ['S-held'], stuck: true });
+  ctx.state = { gui: null };
+  w.killRefused.add(1);
+  const out = await recoverOwnerAfterException(ctx, ctx.artifacts.A);
+  assert.deepEqual([out.ok, out.code, out.killed.exited, out.killed.steps[0].refused], [false, 'OWNER_STATE_UNRECOVERABLE', false, 'KILL_REFUSED']);
+  assert.equal(out.fresh, null);
+});
+
+test('a dead owner that cannot be retired is reported, never thrown', async () => {
+  const { ctx } = ownerWorld({ owner: 1, alive: [1], starting: '{bad' });
+  ctx.state = { gui: null };
+  // Owner 1 alive but retirement through control fails: RetireWhenIdle answers not ok.
+  const real = ctx.agent.call;
+  ctx.agent.call = async (m, p = {}) => (m === 'call' && p.frame?.op === 'RetireWhenIdle' ? { ok: false } : real(m, p));
+  const out = await recoverOwnerAfterException(ctx, ctx.artifacts.A);
+  assert.deepEqual([out.ok, out.code], [false, 'OWNER_STATE_UNRECOVERABLE']);
+});
+
+/** GUI log + MahoRD whose Ctrl+, opens Settings only from the press numbered in \`opensOn\`. */
+function settingsWorld({ opensOn, prior = 0 }) {
+  let log = `${SETTINGS_OPENED_RECEIPT}\n`.repeat(prior);
+  const presses = [];
+  const ctx = {
+    mahord: { hotkey: async (keys) => { presses.push(keys.join('+')); if (opensOn.includes(presses.length)) log += `x ${SETTINGS_OPENED_RECEIPT} supported=true\n`; } },
+    agent: { call: async (m, a) => {
+      if (m === 'readFile') return log;
+      if (m === 'waitLog') { const r = new RegExp(a.pattern).exec(log); return r ? { matched: r[0] } : { matched: null, timedOut: true }; }
+      throw new Error(m);
+    } },
+  };
+  return { ctx, presses };
+}
+
+test('Settings counts as open only on a new cmd_daemon_supervisor_get receipt, with a bounded retry (Q10)', async () => {
+  // An earlier GUI session's receipt in the log never counts for this press.
+  assert.ok(new RegExp(nthReceiptPattern(SETTINGS_OPENED_RECEIPT, 2)).test(`${SETTINGS_OPENED_RECEIPT}\n${SETTINGS_OPENED_RECEIPT}`));
+  assert.equal(new RegExp(nthReceiptPattern(SETTINGS_OPENED_RECEIPT, 2)).test(SETTINGS_OPENED_RECEIPT), false);
+  const first = settingsWorld({ opensOn: [1], prior: 1 });
+  const ok = await openSettings(first.ctx, '/l/gui.log');
+  assert.deepEqual([ok.opened, first.presses.length, ok.attempts[0].before], [true, 1, 1]);
+  // run-9a5db442: the first press reached a webview that had not rendered yet.
+  const late = settingsWorld({ opensOn: [2] });
+  const retried = await openSettings(late.ctx, '/l/gui.log');
+  assert.deepEqual([retried.opened, late.presses], [true, ['Control+,', 'Control+,']]);
+  const never = settingsWorld({ opensOn: [] });
+  const failed = await openSettings(never.ctx, '/l/gui.log');
+  assert.deepEqual([failed.opened, never.presses.length], [false, SETTINGS_OPEN_ATTEMPTS]);
+});
+
+/**
+ * Q11 fake world. The remote log records every write that reaches the SSH session from any
+ * connection (M12: a resend on reconnect through another handle lands in it too), and the GUI's
+ * MahoRD keystrokes are the only path that commits the marker line. Variants inject the defects
+ * each assertion exists to catch.
+ */
+function q11World({ replayOnRelaunch = false, resendOnReconnect = false, releaseBeforeQuit = false, wrongAttach = false, setupWizard = false, behindConsole = false, platform = 'linux', noWizardEvent = false } = {}) {
+  const sid = 'SSH1';
+  const w = { log: '', line: '', echo: '', receipts: [], events: [], sessionFile: null, launches: [], quits: [], quitWhileHeld: null, writesByHandle: {}, typedBy: [], held: false, escapes: 0, wizardOpen: false, pendingAttach: null, focused: true, focusCalls: 0, lostKeys: 0, appender: false, debug: [], debugDir: null, wizardArmed: false };
+  const call = async (method, params = {}) => {
+    switch (method) {
+      case 'writeFile':
+        if (params.file.endsWith('write-ack-hold.request.json')) { w.receipts.push(`{"event":"armed","sessionId":"${sid}"}`); w.held = true; }
+        if (params.file.endsWith('write-ack-hold.release.json')) { w.receipts.push(`{"event":"released","sessionId":"${sid}"}`); w.held = false; }
+        if (params.file.endsWith('session_state.json')) w.sessionFile = params.content;
+        return true;
+      case 'readFile':
+        if (params.file.endsWith('write-ack-hold.receipt.jsonl')) return w.receipts.join('\n');
+        if (params.file.endsWith('session_state.json')) return w.sessionFile;
+        // Windows Add-Content writes CRLF; the remote file is read where it lies.
+        if (params.file.endsWith('ssh-input.log')) return platform === 'windows' ? w.log.replace(/\n/g, '\r\n') : w.log;
+        return null;
+      case 'mkdir': return true;
+      case 'waitLog': {
+        // The GUI's switch-debug log, written under its TEMP (Windows): absent unless Q11 redirected TEMP there.
+        if (params.file.endsWith('ferryx-switch-debug.jsonl')) {
+          const text = w.debugDir && params.file.startsWith(w.debugDir) ? w.debug.join('\n') : '';
+          const d = new RegExp(params.pattern, params.flags ?? '').exec(text);
+          return d ? { matched: d[0] } : { matched: null, timedOut: true };
+        }
+        const text = params.file.endsWith('native-events.jsonl') ? w.events.join('\n') : w.receipts.join('\n');
+        const r = new RegExp(params.pattern, params.flags ?? '').exec(text);
+        return r ? { matched: r[0] } : { matched: null, timedOut: true };
+      }
+      case 'dataOpen': return { handle: `h${Object.keys(w.writesByHandle).length + 1}`, handshake: { type: 'handshakeOk' } };
+      case 'call': {
+        const f = params.frame;
+        if (f.type === 'describeLiveSessions') return { type: 'describeLiveSessionsOk', sessions: [{ kind: 'ssh', backendId: sid, remotePid: 77, localChildPid: null, readerOpen: true, connected: true }] };
+        if (f.type === 'spawn') return { type: 'spawnOk', sessionId: sid, epoch: 3, session: { sessionId: sid, incarnation: 'qa-q11-inc' } };
+        if (f.type === 'write') {
+          const text = Buffer.from(f.data, 'base64').toString();
+          (w.writesByHandle[params.handle] ??= []).push(text);
+          if (text === '\u0003') {
+            w.line = '';
+            // A harness resend of the marker on the reconnected handle reaches the session too.
+            if (resendOnReconnect && w.lastMarker) w.log += `${w.lastMarker}\n`;
+          } else if (text.startsWith('cat >> ')) {
+            // The SSH session's shell: a POSIX shell runs cat; Windows cmd.exe has none (run-q11 r4).
+            w.appender = platform !== 'windows';
+          } else if (text.startsWith('powershell ')) {
+            w.appender = platform === 'windows' && text.endsWith('\r');
+            if (w.appender) w.echo += 'Q11APPENDREADY\r\n';
+          } else {
+            w.log += text;
+          }
+          return { type: 'writeOk' };
+        }
+        return { type: `${f.type}Ok` };
+      }
+      case 'waitOutput': { const text = w.echo.slice(params.since ?? 0); const n = text.split(params.marker).length - 1; return n > 0 ? { count: n, text } : { timedOut: true, count: 0 }; }
+      case 'outputOf': return w.echo;
+      case 'close': return true;
+      case 'exec': return { status: 0, stdout: w.log, stderr: '' };
+      // build-log branch: Q11 records this run's SSH remote-helper pids for teardown.
+      case 'recordSshHelper': return [];
+      default: throw new Error(`unexpected agent call ${method}`);
+    }
+  };
+  const conn = { handle: 'h0', call: (frame) => call('call', { handle: 'h0', frame }), describe: () => call('call', { handle: 'h0', frame: { type: 'describeLiveSessions' } }), waitOutput: (s, marker, _ms, { since = 0 } = {}) => call('waitOutput', { marker, since }), outputLength: async () => (await call('outputOf', {})).length, close: async () => {} };
+  const restoredTab = () => {
+    const doc = w.sessionFile ? JSON.parse(w.sessionFile) : null;
+    const ws = doc && Object.values(doc.workspaces).find((x) => x.target?.kind === 'ssh');
+    return ws && Object.values(ws.terminalSessions).find((s) => s.backendSessionId === sid);
+  };
+  const typeChar = (ch) => { if (!w.typedBy.includes(w.launches.at(-1))) w.typedBy.push(w.launches.at(-1)); w.line += ch; w.echo += ch; };
+  // Windows first run (run-q11 all): the wizard opens from a 1.2 s timer, after the tab attached, and
+  // covers the pane: a key that arrives while it is up never reaches the terminal.
+  const coveredByWizard = () => { if (!w.wizardArmed) return false; w.lostKeys += 1; return true; };
+  // Windows first run (run-q11 Q11-attach-screenshot.png): the setup wizard is a role="dialog" that
+  // hides native surfaces off macOS, so the restored tab attaches only after Escape closes it.
+  const flushAttach = () => { if (w.pendingAttach) { w.events.push(w.pendingAttach); w.pendingAttach = null; } };
+  const ctx = {
+    agent: { call }, runId: RUN, platform, hooks: { writeAckHoldArm: { present: true } },
+    sshd: { hostId: 'qa-sshd-x', workspaceId: 'ssh:x', hostStorePath: '/d/ssh_hosts.json', repoRoot: '/r/ssh-repo', clientKey: '/k', knownHosts: '/kh', port: 2, user: 'u' },
+    layout: { root: '/r', runtime: '/r/run', barriers: '/r/barriers', sessions: '/r/sessions' }, evidenceDir: '/e', writeEvidence: async () => {},
+    // MahoRD keys one at a time (lib/typeverified.mjs): each printable key reaches the line and its
+    // echo; Enter commits the line. A whole-text burst is not used (MahoRD drops keys from it).
+    mahord: {
+      // A GUI behind the console that started it (Windows run-q11 r2) gets no key until focused.
+      hotkey: async (keys) => { assert.equal(keys[0], 'Shift'); if (!w.focused) { w.lostKeys += 1; return; } if (coveredByWizard()) return; typeChar(keys[1].toUpperCase()); },
+      key: async (key) => {
+        if (!w.focused) { w.lostKeys += 1; return; }
+        if (key === 'Escape') {
+          w.escapes += 1;
+          w.wizardOpen = false;
+          if (w.wizardArmed) { w.wizardArmed = false; w.debug.push(`{"event":"terminal.surface.input.gate.state","details":{"paneIdentity":"q11-pane-${RUN}","visible":true}}`); }
+          flushAttach();
+          return;
+        }
+        if (coveredByWizard()) return;
+        assert.equal(w.wizardOpen, false, 'a key reached the GUI while the setup wizard owned the input');
+        if (key !== 'Enter') { typeChar(key); return; }
+        w.lastMarker = w.line;
+        // The GUI writes the Enter; the line reaches cat's log and the daemon parks the ack.
+        if (w.appender) w.log += `${w.line}\n`;
+        w.line = '';
+        w.receipts.push(`{"event":"write-applied","sessionId":"${sid}","seq":1}`);
+        if (releaseBeforeQuit) w.receipts.push(`{"event":"released","sessionId":"${sid}"}`);
+      },
+    },
+    gui: {
+      focus: async () => { w.focusCalls += 1; w.focused = true; return { focused: true }; },
+      quit: async (g) => { w.quits.push(g.pid); if (w.receipts.some((r) => r.includes('write-applied'))) w.quitWhileHeld ??= w.held; return { code: 0 }; },
+      launch: async (_artifact, { env } = {}) => {
+        const pid = 10 + w.launches.length;
+        w.launches.push(pid);
+        w.focused = !behindConsole;
+        const tab = restoredTab();
+        if (tab && env?.FERRYX_QA_OPERATION_ID) {
+          const tuple = { backendSessionId: wrongAttach ? 'OTHER' : tab.backendSessionId, incarnation: tab.incarnation, daemonEpoch: tab.daemonEpoch, frontendSessionId: tab.localSessionId, paneIdentity: tab.localSessionId, bindingKey: 'k', attemptGeneration: 0 };
+          w.pendingAttach = JSON.stringify({ runId: RUN, operationId: env.FERRYX_QA_OPERATION_ID, kind: 'attached', attachTuple: tuple });
+          w.wizardOpen = setupWizard;
+          if (!setupWizard) flushAttach();
+          // Windows: the wizard always opens on a fresh QA profile; the pane logs it to the GUI's TEMP.
+          if (platform === 'windows') {
+            w.wizardArmed = true;
+            w.debugDir = env.TEMP ?? null;
+            if (!noWizardEvent) w.debug.push(`{"event":"terminal.surface.skipped","details":{"localSessionId":"${tab.localSessionId}","reason":"surfaceVisible=false yielding=1 which=dialog:Welcome to Ferryx"}}`);
+          }
+        }
+        // A product that replays the uncertain write after relaunch.
+        if (replayOnRelaunch && w.launches.length > 1 && w.lastMarker) w.log += `${w.lastMarker}\n`;
+        return { tag: `g${pid}`, pid };
+      },
+    },
+    artifacts: { A: { name: 'A' } }, state: { conn, gui: { tag: 'g8', pid: 8 } },
+  };
+  return { w, ctx, sid };
+}
+
+async function runQ11(opts) {
+  const world = q11World(opts);
+  const result = { id: 'Q11', assertions: [], evidence: [] };
+  await Q11(world.ctx, result);
+  return { ...world, result, failed: result.assertions.filter((a) => !a.ok).map((a) => a.name) };
+}
+
+test('Q11 types the marker through a GUI tab restored onto the SSH session and quits while the ack is held', async () => {
+  const { w, result, failed, sid } = await runQ11();
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  // The tab came from the GUI's own restore path: a saved SSH workspace bound to this backend.
+  const restored = JSON.parse(w.sessionFile).workspaces['ssh:x'];
+  assert.deepEqual(restored.target, { kind: 'ssh', hostId: 'qa-sshd-x' });
+  assert.equal(Object.values(restored.terminalSessions)[0].backendSessionId, sid);
+  assert.deepEqual(w.quits, [8, 10], 'the old GUI quits before the seeded restore, the restored GUI quits while held');
+  assert.deepEqual(w.typedBy, [10], 'the marker is typed into the GUI that attached the restored tab');
+  assert.equal(w.quitWhileHeld, true);
+  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+  assert.equal(w.escapes, 0, 'no Escape when the tab attached without a setup wizard');
+  // No data connection writes the marker: only the cat command and the closing interrupt.
+  for (const writes of Object.values(w.writesByHandle)) for (const text of writes) assert.ok(!text.includes('UNCERTAIN'), text);
+});
+
+test('Q11 fails when the uncertain write is replayed after the relaunch', async () => {
+  const { failed } = await runQ11({ replayOnRelaunch: true });
+  assert.ok(failed.includes('remote log contains the marker exactly once (no replay of the uncertain write)'), failed.join('; '));
+});
+
+test('Q11 fails when the marker is resent through a reconnected data connection (M12)', async () => {
+  const { failed } = await runQ11({ resendOnReconnect: true });
+  assert.ok(failed.includes('remote log contains the marker exactly once (no replay of the uncertain write)'), failed.join('; '));
+});
+
+test('Q11 fails when the ack is no longer held at the GUI quit (M13)', async () => {
+  const { failed } = await runQ11({ releaseBeforeQuit: true });
+  assert.ok(failed.includes('the ack was still held when the GUI quit'), failed.join('; '));
+});
+
+test('Q11 never types when no GUI tab is attached to the SSH session', async () => {
+  const { w, failed } = await runQ11({ wrongAttach: true });
+  assert.deepEqual(failed, ['a GUI tab is attached to the SSH session (native attach receipt)']);
+  assert.deepEqual(w.typedBy, []);
+  assert.equal(w.log, '');
+});
+
+test('Q11 closes a first-run setup wizard with one Escape, then the restored tab attaches (Windows run-q11)', async () => {
+  const { w, result, failed } = await runQ11({ setupWizard: true });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.equal(w.escapes, 1);
+  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+  assert.equal(result.assertions.find((a) => a.name.startsWith('a GUI tab is attached')).detail.attached.escapeSent, true);
+});
+
+test('Q11 focuses the GUI before its Escape and before typing when it opened behind another window (Windows run-q11 r2)', async () => {
+  const { w, result, failed } = await runQ11({ setupWizard: true, behindConsole: true });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.deepEqual([w.escapes, w.lostKeys], [1, 0]);
+  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+});
+
+test('Q11 focuses a GUI that attached behind another window before typing the marker, without an Escape', async () => {
+  const { w, result, failed } = await runQ11({ behindConsole: true });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.deepEqual([w.escapes, w.lostKeys], [0, 0]);
+  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+});
+
+test('Q11 on Windows appends through a PowerShell line loop (cmd.exe has no cat) and reads the CRLF file (run-q11 r4)', async () => {
+  const { w, result, failed } = await runQ11({ platform: 'windows' });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+  assert.ok(result.assertions.some((a) => a.name === 'the remote line appender is running in the SSH session' && a.ok));
+});
+
+test('Q11 on Windows closes the setup wizard that opens after the tab attached before typing a key (run-q11 all)', async () => {
+  const { w, result, failed } = await runQ11({ platform: 'windows' });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.deepEqual([w.escapes, w.lostKeys], [1, 0], 'one Escape, and no key was swallowed by the wizard');
+  const wizard = result.assertions.find((a) => a.name === 'the first-run setup wizard opened and was closed before any key was typed');
+  assert.deepEqual([wizard?.ok, wizard?.detail.opened, wizard?.detail.closed], [true, true, true]);
+  assert.ok(wizard.detail.focus.length === 1, 'the GUI is focused before its Escape');
+});
+
+test('Q11 on Windows never types when the setup wizard event never shows', async () => {
+  const { w, failed } = await runQ11({ platform: 'windows', noWizardEvent: true });
+  assert.deepEqual(failed, ['the first-run setup wizard opened and was closed before any key was typed']);
+  assert.deepEqual([w.typedBy, w.escapes], [[], 0]);
+});
+
+test('Q11 on Windows focuses a GUI that opened behind the console before the wizard Escape (run-q11 r2)', async () => {
+  const { w, result, failed } = await runQ11({ platform: 'windows', behindConsole: true });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.deepEqual([w.escapes, w.lostKeys], [1, 0], 'the Escape reached the GUI, not the console');
+});
+
+test('Q11 waits for the setup wizard only on Windows', async () => {
+  const { expectsSetupWizard, wizardOpenPattern, wizardClosedPattern } = await import('./scenarios/q10-q13.mjs');
+  assert.deepEqual(['windows', 'linux', 'mac'].map(expectsSetupWizard), [true, false, false]);
+  // Lines as the GUI wrote them on maho-win (run-q11 all/Q11-switch-debug.jsonl).
+  const pane = 'q11-pane-20261021t220833z';
+  const skipped = `{"event":"terminal.surface.skipped","details":{"localSessionId":"${pane}","reason":"surfaceVisible=false element=true tauri=true target=true yielding=1 which=dialog:Welcome to Ferryx"}}`;
+  const visible = `{"event":"terminal.surface.input.gate.state","details":{"paneIdentity":"${pane}","backendSessionId":"x","visible":true,"interactive":true}}`;
+  assert.ok(new RegExp(wizardOpenPattern(pane)).test(skipped));
+  assert.ok(!new RegExp(wizardOpenPattern('other-pane')).test(skipped));
+  assert.ok(!new RegExp(wizardClosedPattern(pane)).test(`${visible}\n${skipped}`), 'a visible gate before the wizard is not its close');
+  assert.ok(new RegExp(wizardClosedPattern(pane)).test(`${visible}\n${skipped}\n${visible}`));
 });

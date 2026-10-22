@@ -8,12 +8,120 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, watch, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, watch, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import os from 'node:os';
 import { GuardError, ProcessRegistry, isInside, assertRunId } from './guards.mjs';
-import { run, probeIdentity, signalPid, subscribeExit, processTable, withDeadline } from './proc.mjs';
+import { run, runToFd, tailOfFile, LOG_TAIL_LINES, probeIdentity, signalPid, subscribeExit, processTable, withDeadline } from './proc.mjs';
 import { connectData, connectControl } from './client.mjs';
+import { data as D, DsrResponder, DSR_REPLY, visibleText } from './wire.mjs';
+import { findSshHelpers, sshHostId } from './sshd.mjs';
+
+/**
+ * An empty marker waits for any output; with visible, for output a person would see (a prompt,
+ * not a bare terminal query such as ConPTY's ESC[6n); otherwise a substring.
+ * With promptAfter (a text offset), it waits for a PowerShell prompt that ends the output after
+ * that offset: the shell is reading a new line (nonceRoundTrip after Ctrl+C).
+ */
+export function outputMatches(text, marker, visible = false, promptAfter = null) {
+  if (promptAfter !== null) return endsAtPowerShellPrompt(text.slice(promptAfter));
+  if (marker) return text.includes(marker);
+  return visible ? visibleText(text).trim().length > 0 : text.length > 0;
+}
+
+/**
+ * True when the visible text ends at a PowerShell prompt (`PS <path>> `) with nothing typed and no
+ * continuation prompt (`>>`) after it; cursor-hide/show and colour sequences around it are ignored.
+ */
+export function endsAtPowerShellPrompt(text) {
+  const lines = visibleText(text).split('\n').map((l) => l.replace(/\r/g, '').trimEnd());
+  while (lines.length && lines.at(-1) === '') lines.pop();
+  return lines.length > 0 && /^PS [^>]*>$/.test(lines.at(-1));
+}
+
+/** Re-read cadence of waitLog besides its directory watch (Q13: a write with no change event). */
+export const LOG_POLL_MS = 250;
+
+/** Read errors waitLog treats as "not written yet": a writer's exclusive lock (Windows sshd -E: EBUSY), a share/permission denial while it is held (EPERM), or a file not created yet (ENOENT). */
+export const LOG_NOT_YET_CODES = Object.freeze(['EBUSY', 'EPERM', 'ENOENT']);
+
+/** waitLog's read: the file's text, '' for a not-yet error (run-r6d q11-only), any other error rethrown. */
+export function readLogText(file, read = (f) => readFileSync(f, 'utf8')) {
+  try {
+    return read(file);
+  } catch (error) {
+    if (LOG_NOT_YET_CODES.includes(error?.code)) return '';
+    throw error;
+  }
+}
+
+/**
+ * Resolves with the first match of re in read(), or null at deadlineMs. The file is re-read on every
+ * change event of its directory AND every pollMs: Windows defers or coalesces directory change
+ * notifications for a file whose writer keeps its handle open (the Q13 legacy daemon's redirected
+ * stdout, run-q00fix-all: the ready line was in the file, no event was seen). A deterministic
+ * bounded poll of the content is the fallback that cannot miss it.
+ */
+export function waitForContent({ read, re, deadlineMs, pollMs = LOG_POLL_MS, subscribe = () => () => {}, setTimer = setInterval, clearTimer = clearInterval }) {
+  return new Promise((resolve) => {
+    let done = false;
+    let unsubscribe = () => {};
+    let poll = null;
+    let deadline = null;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      unsubscribe();
+      if (poll !== null) clearTimer(poll);
+      if (deadline !== null) clearTimeout(deadline);
+      resolve(value);
+    };
+    const test = () => { const m = re.exec(read()); if (m) finish(m[0]); };
+    unsubscribe = subscribe(test);
+    poll = setTimer(test, pollMs);
+    deadline = setTimeout(() => finish(null), deadlineMs);
+    test();
+  });
+}
+
+/**
+ * The stream handler for one data handle: stores output per session, answers ConPTY's cursor
+ * query on Windows (one reply per query, sent as a data-protocol write on the request
+ * connection), and wakes waiters. A failed reply write is kept in replyErrors, never dropped.
+ */
+export function createOutputRoute({ platform, output, waiters, responder = new DsrResponder(), send }) {
+  const replyErrors = [];
+  // Exit stream messages (protocol.rs StreamMsg::Exit { sessionId, exitCode }) per session.
+  const exits = new Map();
+  const exitWaiters = new Set();
+  /** Answers the queries owed for a live frame at sequence, or for attach history (history: true). */
+  const answer = (sessionId, text, sequence, { history = false } = {}) => {
+    if (platform !== 'windows' || !sessionId) return 0;
+    const owed = history ? responder.feedHistory(sessionId, text, sequence ?? null) : responder.feed(sessionId, text, sequence ?? null);
+    for (let i = 0; i < owed; i += 1) {
+      Promise.resolve(send(D.write(sessionId, DSR_REPLY))).catch((error) => replyErrors.push({ sessionId, error: String(error?.message ?? error) }));
+    }
+    return owed;
+  };
+  const route = (m) => {
+    if (m.type === 'exit') {
+      if (m.sessionId) exits.set(m.sessionId, { exitCode: m.exitCode ?? null });
+      for (const w of [...exitWaiters]) if (w.sessionId === m.sessionId) { exitWaiters.delete(w); w.resolve(exits.get(m.sessionId)); }
+      return;
+    }
+    if (m.type !== 'output') return;
+    const sid = m.sessionId ?? '*';
+    const text = Buffer.from(m.data, 'base64').toString();
+    output.set(sid, (output.get(sid) ?? '') + text);
+    answer(m.sessionId, text, m.sequence);
+    for (const w of [...waiters]) {
+      const all = (output.get(w.sessionId) ?? output.get('*') ?? '').slice(w.since ?? 0);
+      if (outputMatches(all, w.marker, w.visible, w.promptAfter ?? null)) { waiters.delete(w); w.resolve(all); }
+    }
+  };
+  return { route, answer, responder, replyErrors, exits, exitWaiters };
+}
 
 export function parseAgentArgs(argv) {
   const out = { platform: null, runId: null, runDir: null, allowRoots: [] };
@@ -31,12 +139,17 @@ export function parseAgentArgs(argv) {
   return out;
 }
 
-export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
+export function createAgent({ platform, runId, runDir, allowRoots = [], home = os.homedir(), table = () => processTable(platform), probe = (pid) => probeIdentity(pid, platform), signal = (pid, sig) => signalPid(pid, sig, platform) }) {
   const ctx = { runId, platform };
   const roots = [runDir, ...allowRoots];
-  const registry = new ProcessRegistry({ platform, probe: (pid) => probeIdentity(pid, platform), signal: (pid, sig) => signalPid(pid, sig, platform) });
+  const registry = new ProcessRegistry({ platform, probe, signal });
+  // Remote-helper daemons of this run's private sshd: pid (in the registry) and exact root dir.
+  const sshHelpers = new Map();
   const handles = new Map();
   const children = new Map();
+  // One cursor-query responder for every data handle: a session re-attached from a second
+  // connection must not be answered again for a query the first one already answered.
+  const dsr = new DsrResponder();
   let nextHandle = 1;
 
   const inRun = (p) => {
@@ -49,6 +162,28 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
     exec: async ({ command, args = [], env, cwd, input = null, deadlineMs = 120_000 }) => {
       const r = await run(command, args, { ctx, env: env ? { ...process.env, ...env } : undefined, cwd, input, deadlineMs });
       return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+    },
+    // Long, chatty commands (QA builds): stdout and stderr go straight to logFile on this host and
+    // the real exit (status, signal, timedOut) is written to the statusFile sidecar. Only the exit,
+    // the byte count and a bounded tail come back over the agent channel; the controller copies
+    // the full log back as a file (run.mjs runBuildStep).
+    execLogged: async ({ command, args = [], env, cwd, logFile, statusFile, tailLines = LOG_TAIL_LINES, deadlineMs = 120_000 }) => {
+      inRun(logFile);
+      inRun(statusFile);
+      mkdirSync(path.dirname(logFile), { recursive: true });
+      mkdirSync(path.dirname(statusFile), { recursive: true });
+      const startedAt = new Date().toISOString();
+      const fd = openSync(logFile, 'w');
+      let outcome;
+      try {
+        outcome = await runToFd(command, args, { ctx, env: env ? { ...process.env, ...env } : undefined, cwd, fd, deadlineMs });
+      } finally {
+        closeSync(fd);
+      }
+      const { tail, bytes } = tailOfFile(logFile, tailLines);
+      const record = { command, args, cwd: cwd ?? null, ...outcome, startedAt, finishedAt: new Date().toISOString(), logFile, bytes };
+      writeFileSync(statusFile, `${JSON.stringify(record, null, 2)}\n`);
+      return { status: outcome.status, signal: outcome.signal, timedOut: outcome.timedOut, error: outcome.error, pid: outcome.pid, bytes, tail, logFile, statusFile };
     },
     // Spawns a long-lived process this run owns, records it by pid + executable, and streams its
     // exit as an event. stdout lines are appended to logFile (inside the run dir).
@@ -117,21 +252,15 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
     sha256: async ({ file }) => createHash('sha256').update(readFileSync(file)).digest('hex'),
     stat: async ({ file }) => { const s = statSync(file); return { size: s.size, mtimeMs: s.mtimeMs }; },
     // ---- daemon clients; each connection is a handle ----
-    dataOpen: async ({ runtimeDir, version = 5, allowMismatch = false }) => {
-      const { conn, handshake } = await connectData(runtimeDir, platform, { version, allowMismatch });
+    dataOpen: async ({ runtimeDir, version = 5, allowMismatch = false, socketPath = null }) => {
+      if (socketPath) inRun(socketPath);
+      const { conn, handshake } = await connectData(runtimeDir, platform, { version, allowMismatch, socketPath });
       const handle = nextHandle++;
       const output = new Map();
-      const route = (m) => {
-        if (m.type !== 'output') return;
-        const sid = m.sessionId ?? '*';
-        output.set(sid, (output.get(sid) ?? '') + Buffer.from(m.data, 'base64').toString());
-        for (const w of [...(handles.get(handle)?.waiters ?? [])]) {
-          const text = output.get(w.sessionId) ?? output.get('*') ?? '';
-          if (text.includes(w.marker)) { handles.get(handle).waiters.delete(w); w.resolve(text); }
-        }
-      };
+      const waiters = new Set();
+      const { route, answer, responder, replyErrors, exits, exitWaiters } = createOutputRoute({ platform, output, waiters, responder: dsr, send: (frame) => conn.call(frame) });
       conn.onStream(route);
-      handles.set(handle, { conn, kind: 'data', output, waiters: new Set(), runtimeDir, version, route, streams: new Map() });
+      handles.set(handle, { conn, kind: 'data', output, waiters, responder, replyErrors, answer, exits, exitWaiters, runtimeDir, version, route, streams: new Map() });
       return { handle, handshake };
     },
     controlOpen: async ({ runtimeDir }) => {
@@ -159,41 +288,56 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
       }
       if (h.kind === 'data' && resp?.type === 'attachOk' && frame.sessionId) {
         const prior = h.output.get(frame.sessionId) ?? '';
-        h.output.set(frame.sessionId, Buffer.from(resp.history ?? '', 'base64').toString() + prior);
+        const history = Buffer.from(resp.history ?? '', 'base64').toString();
+        h.output.set(frame.sessionId, history + prior);
+        h.answer(frame.sessionId, history, resp.endSequence ?? null, { history: true });
+        // A visible-output waiter may already be satisfied by the history just stored.
+        for (const w of [...h.waiters]) {
+          const all = h.output.get(w.sessionId) ?? h.output.get('*') ?? '';
+          if (outputMatches(all, w.marker, w.visible, w.promptAfter ?? null)) { h.waiters.delete(w); w.resolve(all); }
+        }
       }
       return resp;
     },
-    waitOutput: async ({ handle, sessionId, marker, deadlineMs = 15_000 }) => {
+    // since: match only output after that many characters (outputOf(...).length taken earlier).
+    waitOutput: async ({ handle, sessionId, marker, visible = false, promptAfter = null, since = 0, deadlineMs = 15_000 }) => {
       const h = handles.get(handle);
-      const text = () => h.output.get(sessionId) ?? h.output.get('*') ?? '';
-      if (text().includes(marker)) return { text: text(), count: text().split(marker).length - 1 };
+      const text = () => (h.output.get(sessionId) ?? h.output.get('*') ?? '').slice(since);
+      const extra = () => ({ dsrReplies: h.responder.replies(sessionId), replyErrors: h.replyErrors.filter((e) => e.sessionId === sessionId) });
+      if (outputMatches(text(), marker, visible, promptAfter)) return { text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
       try {
-        await withDeadline(new Promise((resolve) => h.waiters.add({ sessionId, marker, resolve })), deadlineMs, `output ${marker}`);
+        await withDeadline(new Promise((resolve) => h.waiters.add({ sessionId, marker, visible, promptAfter, since, resolve })), deadlineMs, `output ${marker}`);
       } catch {
-        return { timedOut: true, text: text(), count: text().split(marker).length - 1 };
+        return { timedOut: true, text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
       }
-      return { text: text(), count: text().split(marker).length - 1 };
+      return { text: text(), count: marker ? text().split(marker).length - 1 : 0, ...extra() };
     },
     outputOf: async ({ handle, sessionId }) => handles.get(handle)?.output.get(sessionId) ?? '',
-    // Resolves when the file's content matches pattern (fs.watch on its directory).
-    waitLog: async ({ file, pattern, flags = '', deadlineMs = 30_000 }) => {
+    // Resolves with the session's Exit stream message ({ exitCode }) or { timedOut } at the deadline.
+    waitSessionExit: async ({ handle, sessionId, deadlineMs = 15_000 }) => {
+      const h = handles.get(handle);
+      if (h.exits.has(sessionId)) return h.exits.get(sessionId);
+      let waiter;
+      try {
+        return await withDeadline(new Promise((resolve) => { waiter = { sessionId, resolve }; h.exitWaiters.add(waiter); }), deadlineMs, `exit ${sessionId}`);
+      } catch {
+        h.exitWaiters.delete(waiter);
+        return { timedOut: true };
+      }
+    },
+    // Resolves when the file's content matches pattern (directory change events plus a bounded poll).
+    // fromLine skips that many non-empty lines (receipts.mjs receiptCount), so a wait is scoped to
+    // lines appended after an offset recorded before the operation, never matched by an earlier one.
+    waitLog: async ({ file, pattern, flags = '', fromLine = 0, deadlineMs = 30_000 }) => {
       const re = new RegExp(pattern, flags);
       const dir = path.dirname(file);
       mkdirSync(dir, { recursive: true });
-      const read = () => (existsSync(file) ? readFileSync(file, 'utf8') : '');
-      let watcher;
-      const found = new Promise((resolve) => {
-        const test = () => { const m = re.exec(read()); if (m) resolve(m[0]); };
-        watcher = watch(dir, test);
-        test();
-      });
-      try {
-        return { matched: await withDeadline(found, deadlineMs, `log ${pattern}`) };
-      } catch {
-        return { matched: null, timedOut: true };
-      } finally {
-        watcher?.close();
-      }
+      const read = () => {
+        const text = readLogText(file);
+        return fromLine > 0 ? text.split(/\r?\n/).filter((line) => line.trim()).slice(fromLine).join('\n') : text;
+      };
+      const matched = await waitForContent({ read, re, deadlineMs, subscribe: (test) => { const w = watch(dir, test); return () => w.close(); } });
+      return matched === null ? { matched: null, timedOut: true } : { matched };
     },
     // Resolves when <runtimeDir>/owner.json names a pid other than fromPid; reports every pid seen.
     waitOwnerChange: async ({ runtimeDir, fromPid, deadlineMs = 60_000 }) => {
@@ -239,6 +383,36 @@ export function createAgent({ platform, runId, runDir, allowRoots = [] }) {
         } catch (error) {
           out.refused.push({ ...entry, reason: error.message });
         }
+      }
+      return out;
+    },
+    // Records the remote-helper daemon(s) started for this run's private sshd host id: the pid by
+    // its exact executable, the root by its exact path. Only this run's host id is accepted.
+    recordSshHelper: async ({ hostId }) => {
+      if (hostId !== sshHostId(runId)) throw new GuardError('SSH_HELPER_NOT_OURS', `${hostId} is not this run's sshd host id`);
+      const out = [];
+      for (const h of findSshHelpers(await table(), { platform, home, hostId })) {
+        try {
+          if (!registry.has(h.pid)) await registry.record(h.pid, { role: 'ssh-helper', executable: h.executable });
+        } catch (error) {
+          if (error?.code !== 'PID_GONE') throw error;
+        }
+        sshHelpers.set(h.root, h.pid);
+        out.push(h);
+      }
+      return out;
+    },
+    // After teardownRecorded: removes each recorded helper root once its recorded pid has exited.
+    removeSshHelperRoots: async ({ deadlineMs = 15_000 } = {}) => {
+      const out = { removed: [], kept: [] };
+      for (const [root, pid] of sshHelpers) {
+        const sub = subscribeExit(pid, platform);
+        // The waiter's exit only wakes us; the pid's own probe decides that it is gone.
+        if ((await probe(pid)) !== null) await withDeadline(sub.exited, deadlineMs, `exit of ssh helper ${pid}`).catch(() => {});
+        sub.cancel();
+        if ((await probe(pid)) !== null) { out.kept.push({ root, pid, reason: 'helper pid still running' }); continue; }
+        rmSync(root, { recursive: true, force: true });
+        (existsSync(root) ? out.kept : out.removed).push({ root, pid });
       }
       return out;
     },

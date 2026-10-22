@@ -80,8 +80,9 @@ class LineConnection {
 }
 
 /** Data protocol client. Throws on mismatch unless allowMismatch; returns { conn, handshake }. */
-export async function connectData(runtimeDir, platform, { version = 5, allowMismatch = false } = {}) {
-  const ep = endpoints(runtimeDir, platform).data;
+export async function connectData(runtimeDir, platform, { version = 5, allowMismatch = false, socketPath = null } = {}) {
+  // socketPath: a draining predecessor's legacy socket (handover_routes.json), Unix only.
+  const ep = socketPath ? { kind: 'unix', path: socketPath } : endpoints(runtimeDir, platform).data;
   const { socket, token } = await openEndpoint(ep);
   const conn = new LineConnection(socket, token, 'data');
   conn.tokenEveryFrame = true; // the data protocol checks the token on every Windows line

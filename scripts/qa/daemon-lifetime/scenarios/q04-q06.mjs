@@ -4,7 +4,7 @@ import { hjoin } from '../lib/hostpath.mjs';
 import { assertion, block } from '../lib/summary.mjs';
 import { supervisorMutations } from '../lib/os-jobs.mjs';
 import { DAEMON_CLIENT_BUSY, busyReceiptPattern, busyVerdict } from '../lib/receipts.mjs';
-import { evidence, dataConn, controlConn, ownerIdentity, seedLocalSession, nonceRoundTrip, assertSameOwner, retireOwner, freshOwner, confirmOwner, invalidateOwnerState, OwnerStateError, SUPERVISED_START_WAIT_MS, DAEMON_READY_TIMEOUT_MS } from './common.mjs';
+import { evidence, dataConn, controlConn, ownerIdentity, seedLocalSession, nonceRoundTrip, assertSameOwner, retireOwner, freshOwner, confirmOwner, invalidateOwnerState, requireOwner, OwnerStateError, SUPERVISED_START_WAIT_MS, DAEMON_READY_TIMEOUT_MS } from './common.mjs';
 import { launchGuiAndOwner } from './q00-q03.mjs';
 
 export const LISTENER_STALL = 'daemon-listener-stall';
@@ -31,14 +31,25 @@ async function guiLogMutations(ctx, gui) {
   return { mutations: supervisorMutations(stripAnsi(text).split('\n')), text };
 }
 
-async function jobPid(ctx, key) {
-  if (ctx.platform === 'windows') return (await ctx.jobs.windowsTree(ctx.stagedRoot)).daemon?.pid ?? null;
+/**
+ * The QA job's daemon pid. Windows: the generation tree whose daemon is the current owner.json pid
+ * (jobs.windowsTree ownerPid); when that resolves to null the whole staged-root process table is
+ * saved as <label>-task-tree.json, so a null is always explained by evidence.
+ */
+async function jobPid(ctx, key, result = null, label = 'job') {
+  if (ctx.platform === 'windows') {
+    const ownerPid = (await ownerIdentity(ctx)).pid ?? null;
+    const tree = await ctx.jobs.windowsTree(ctx.stagedRoot, { ownerPid });
+    if (!tree.daemon && result) await evidence(ctx, result, `${label}-task-tree.json`, { ownerPid, ...tree });
+    return tree.daemon?.pid ?? null;
+  }
   return (await ctx.jobs.inspect(key)).pid;
 }
 
 export async function Q04(ctx, result) {
+  if (!requireOwner(ctx, result)) return;
   const op = `q04-${ctx.runId}`;
-  const pidBefore = await jobPid(ctx, ctx.keys.A);
+  const pidBefore = await jobPid(ctx, ctx.keys.A, result, 'before');
   const ownerBefore = await ownerIdentity(ctx);
   const quit = await ctx.gui.quit(ctx.state.gui);
   await evidence(ctx, result, 'gui-quit.json', quit);
@@ -58,7 +69,7 @@ export async function Q04(ctx, result) {
   // silent handshake with DAEMON_BUSY and appends a receipt correlated to this stall's operation.
   const busyFile = hjoin(ctx.layout.barriers, `${DAEMON_CLIENT_BUSY}.receipt.jsonl`);
   const busy = await ctx.agent.call('waitLog', { file: busyFile, pattern: busyReceiptPattern(ctx.runId, op), deadlineMs: DAEMON_READY_TIMEOUT_MS + SUPERVISED_START_WAIT_MS + 15_000 });
-  const pidDuring = await jobPid(ctx, ctx.keys.A);
+  const pidDuring = await jobPid(ctx, ctx.keys.A, result, 'during');
   const verdict = busyVerdict((await ctx.agent.call('readFile', { file: busyFile })) ?? '', { runId: ctx.runId, operationId: op, pidBefore });
   const { mutations, text } = await guiLogMutations(ctx, gui);
   await evidence(ctx, result, 'gui-during-stall.log', text);
@@ -89,6 +100,7 @@ export async function closeAllSessions(ctx, conn) {
 }
 
 export async function Q04b(ctx, result) {
+  if (!requireOwner(ctx, result)) return;
   const key = ctx.keys.A;
   await ctx.gui.quit(ctx.state.gui);
   const inv = await closeAllSessions(ctx, ctx.state.conn);
@@ -122,16 +134,17 @@ export async function Q04b(ctx, result) {
 }
 
 export async function Q05(ctx, result) {
+  if (!requireOwner(ctx, result)) return;
   for (const fault of PROBE_FAULTS) {
     const ownerBefore = await ownerIdentity(ctx);
-    const pidBefore = await jobPid(ctx, ctx.keys.A);
+    const pidBefore = await jobPid(ctx, ctx.keys.A, result, `${fault}-before`);
     await ctx.gui.quit(ctx.state.gui);
     const gui = await ctx.gui.launch(ctx.artifacts.A, { env: { FERRYX_QA_PROBE_FAULT: fault } });
     ctx.state.gui = gui;
     const logFile = hjoin(ctx.layout.logs, `gui-${gui.tag}.log`);
     const unknown = await ctx.agent.call('waitLog', { file: logFile, pattern: `Unknown[^\\n]*${fault}|${fault}[^\\n]*Unknown`, deadlineMs: DAEMON_READY_TIMEOUT_MS + 15_000 });
     const ownerAfter = await ownerIdentity(ctx);
-    const pidAfter = await jobPid(ctx, ctx.keys.A);
+    const pidAfter = await jobPid(ctx, ctx.keys.A, result, `${fault}-after`);
     const { mutations, text } = await guiLogMutations(ctx, gui);
     await evidence(ctx, result, `${fault}.log`, text);
     assertion(result, `${fault}: typed Unknown logged`, Boolean(unknown.matched), unknown);
@@ -212,6 +225,7 @@ export async function restoreQaOwner(ctx, artifact) {
 }
 
 export async function Q06(ctx, result) {
+  if (!requireOwner(ctx, result)) return;
   await ctx.gui.quit(ctx.state.gui);
   ctx.state.gui = null;
   await closeAllSessions(ctx, ctx.state.conn);
@@ -225,11 +239,13 @@ export async function Q06(ctx, result) {
   assertion(result, 'owner retired: next admission sees Absent', !exited.timedOut, exited);
   // Three concurrent cold starts: two normal GUIs and one forced onto the detached fallback.
   // allSettled keeps the handle of every GUI that did launch when another launch throws.
+  // gui.launchBatch keeps the GUI processes concurrent while the typing is serialized: on Windows
+  // the three launches share one Run dialog, so each is typed alone and they start on one go file.
   const tags = ['q06a', 'q06b', 'q06c'];
-  const settled = await Promise.allSettled([
-    ctx.gui.launch(ctx.artifacts.A, { tag: 'q06a' }),
-    ctx.gui.launch(ctx.artifacts.A, { tag: 'q06b' }),
-    ctx.gui.launch(ctx.artifacts.A, { tag: 'q06c', env: { FERRYX_QA_FORCE_FALLBACK: '1' } }),
+  const settled = await ctx.gui.launchBatch([
+    { artifact: ctx.artifacts.A, options: { tag: 'q06a' } },
+    { artifact: ctx.artifacts.A, options: { tag: 'q06b' } },
+    { artifact: ctx.artifacts.A, options: { tag: 'q06c', env: { FERRYX_QA_FORCE_FALLBACK: '1' } } },
   ]);
   const launches = settled.filter((s) => s.status === 'fulfilled').map((s) => s.value);
   let completed = false;

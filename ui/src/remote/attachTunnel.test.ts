@@ -4,6 +4,8 @@ import { resolve } from "path";
 import {
   createTunnelTransport,
   openAccountTunnel,
+  attachTunnelRefusalCode,
+  AttachTunnelRefusedError,
   WS_OPEN,
   WS_CLOSED,
   MAX_TUNNEL_WS_MESSAGE_BYTES,
@@ -1133,5 +1135,74 @@ describe("attachTunnel closed-state reporting", () => {
     expect(transport.isClosed).toBe(false);
     transport.close();
     expect(transport.isClosed).toBe(true);
+  });
+});
+
+describe("attachTunnel pre-handshake refusal close", () => {
+  it("matches only close code 1008 with an exact contract reason", () => {
+    expect(attachTunnelRefusalCode({ code: 1008, reason: "REMOTE_SUSPENDED" })).toBe("REMOTE_SUSPENDED");
+    expect(attachTunnelRefusalCode({ code: 1008, reason: "PLAN_LIMIT_REACHED" })).toBe("PLAN_LIMIT_REACHED");
+    expect(attachTunnelRefusalCode({ code: 1008, reason: "remote_suspended" })).toBeNull();
+    expect(attachTunnelRefusalCode({ code: 1008, reason: "PLAN_LIMIT" })).toBeNull();
+    expect(attachTunnelRefusalCode({ code: 1008, reason: "REMOTE_SUSPENDED: grace over" })).toBeNull();
+    expect(attachTunnelRefusalCode({ code: 1012, reason: "REMOTE_SUSPENDED" })).toBeNull();
+    expect(attachTunnelRefusalCode({ code: 1000, reason: "PLAN_LIMIT_REACHED" })).toBeNull();
+    expect(attachTunnelRefusalCode(null)).toBeNull();
+  });
+
+  async function openRefusedTunnel(close: { code: number; reason: string }) {
+    const primitives = createNoisePrimitives();
+    const localKeyPair = await getOrCreateAttachKey();
+    const responderKeys = await primitives.generateEphemeralKey();
+    vi.stubGlobal(
+      "WebSocket",
+      class extends MockEncryptedAttachWebSocket {
+        constructor(url: string) {
+          super(url);
+          this.onSend = () => {
+            this.onSend = null;
+            this.readyState = MockEncryptedAttachWebSocket.CLOSED;
+            this.onclose?.({ ...close, wasClean: true });
+          };
+        }
+      },
+    );
+    return openAccountTunnel({
+      socketUrl: "wss://relay.example.com/tunnel/opaque/sess-refused",
+      machineId: "mach-refused",
+      enrollmentEpoch: "1",
+      machineAttachPublicKey: bytesToBase64(responderKeys.publicKey),
+      localKeyPair,
+      sessionId: "sess-refused",
+    });
+  }
+
+  it.each(["REMOTE_SUSPENDED", "PLAN_LIMIT_REACHED"] as const)(
+    "rejects with a structured %s refusal when the relay closes with 1008",
+    async (reason) => {
+      try {
+        const error = await openRefusedTunnel({ code: 1008, reason }).then(
+          () => null,
+          (err: unknown) => err,
+        );
+        expect(error).toBeInstanceOf(AttachTunnelRefusedError);
+        expect((error as AttachTunnelRefusedError).code).toBe(reason);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("keeps a non-contract pre-handshake close a premature close", async () => {
+    try {
+      const error = await openRefusedTunnel({ code: 1008, reason: "plan_limit_reached soon" }).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      expect(error).not.toBeInstanceOf(AttachTunnelRefusedError);
+      expect((error as Error).message).toMatch(/^PREMATURE_CLOSE/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -78,12 +78,13 @@ pub struct DaemonSupervisorStatus {
 pub async fn cmd_daemon_supervisor_get() -> Result<DaemonSupervisorStatus, IpcError> {
     super::run_blocking(|| {
         let supported = crate::daemon::supervisor::supported();
-        Ok(DaemonSupervisorStatus {
-            supported,
-            enabled: supported
-                && !crate::daemon::supervisor::user_opted_out()
-                && crate::daemon::supervisor::installed(),
-        })
+        let enabled = supported
+            && !crate::daemon::supervisor::user_opted_out()
+            && crate::daemon::supervisor::installed();
+        // Settings > General reads this on mount; the line is the lifecycle QA's receipt that the
+        // Settings view opened before it walks focus to the switch (todo 12 Q10).
+        tracing::info!(supported, enabled, "Daemon supervisor status read");
+        Ok(DaemonSupervisorStatus { supported, enabled })
     })
     .await
 }

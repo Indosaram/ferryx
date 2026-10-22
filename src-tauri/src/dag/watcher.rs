@@ -6,6 +6,8 @@ use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 
 type TaggedSink = Sender<(String, DagRunSnapshot)>;
+/// Last observed (len, mtime) of a checkpoint that parsed cleanly.
+type FileStamp = (u64, Option<std::time::SystemTime>);
 use tokio::time::{interval, sleep, MissedTickBehavior};
 
 #[derive(Clone, Default)]
@@ -36,6 +38,7 @@ async fn scan_and_emit(
     project_path: &str,
     root: &Path,
     cache: &mut HashMap<String, DagRunSnapshot>,
+    stamps: &mut HashMap<PathBuf, FileStamp>,
     sink: &TaggedSink,
     hooks: &WatcherHooks,
 ) -> bool {
@@ -63,41 +66,62 @@ async fn scan_and_emit(
     // Only the sink sends stay on the async side.
     let scan_dir = target_dir.to_path_buf();
     let scan_hooks = hooks.clone();
-    let snapshots = match tokio::task::spawn_blocking(move || {
+    let prior = std::mem::take(stamps);
+    let (snapshots, next_stamps) = match tokio::task::spawn_blocking(move || {
         // The scan observation point belongs INSIDE the blocking closure: the whole
         // point is that the walk, reads and parses happen off the async worker, so a
         // hook that fired on the async side would report the wrong thread.
         scan_hooks.scanning();
         let mut collected: Vec<DagRunSnapshot> = Vec::new();
+        let mut next_stamps: HashMap<PathBuf, FileStamp> = HashMap::new();
         let entries = match std::fs::read_dir(&scan_dir) {
             Ok(e) => e,
-            Err(_) => return collected,
+            Err(_) => return (collected, next_stamps),
         };
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_file() || !path.extension().is_some_and(|ext| ext == "json") {
                 continue;
             }
-            // A checkpoint can be observed mid-write; retry briefly before giving up.
-            for attempt in 0..3 {
+            let meta = std::fs::metadata(&path).ok();
+            let stamp = meta.as_ref().map(|m| (m.len(), m.modified().ok()));
+            // Unchanged since the last clean parse: its snapshot is already cached.
+            if let Some(stamp) = stamp {
+                if prior.get(&path) == Some(&stamp) {
+                    next_stamps.insert(path, stamp);
+                    continue;
+                }
+            }
+            // A checkpoint can be observed mid-write; only a recently modified file
+            // is retried briefly, and it is not stamped so the next scan re-parses it.
+            let recent = stamp
+                .and_then(|(_, mtime)| mtime)
+                .and_then(|mtime| mtime.elapsed().ok())
+                .is_none_or(|age| age < Duration::from_secs(2));
+            let attempts = if recent { 3 } else { 1 };
+            for attempt in 0..attempts {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(snapshot) = parse_run_checkpoint(&content) {
                         collected.push(snapshot);
+                        if let (Some(stamp), false) = (stamp, recent) {
+                            next_stamps.insert(path.clone(), stamp);
+                        }
                         break;
                     }
                 }
-                if attempt < 2 {
+                if attempt + 1 < attempts {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
             }
         }
-        collected
+        (collected, next_stamps)
     })
     .await
     {
-        Ok(snapshots) => snapshots,
+        Ok(result) => result,
         Err(_) => return true,
     };
+    *stamps = next_stamps;
 
     for snapshot in snapshots {
         let is_updated = match cache.get(&snapshot.run_id) {
@@ -130,6 +154,7 @@ async fn run_watcher_loop_observed(
     mut lose_watch: Option<tokio::sync::oneshot::Receiver<()>>,
 ) {
     let mut cache = HashMap::new();
+    let mut stamps = HashMap::new();
     let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel(64);
 
     // Only journal directories are watched. Falling back to the project root would arm a
@@ -148,7 +173,7 @@ async fn run_watcher_loop_observed(
 
     // Hydrate before arming: starting a filesystem watch can stall for seconds on a loaded
     // host, and the current inventory must not wait on it.
-    if !scan_and_emit(&project_path, &root, &mut cache, &sink, &hooks).await {
+    if !scan_and_emit(&project_path, &root, &mut cache, &mut stamps, &sink, &hooks).await {
         return;
     }
 
@@ -186,7 +211,7 @@ async fn run_watcher_loop_observed(
 
     hooks.event(if polling_mode { "polling" } else { "armed" });
     // Second pass: anything written while the watch was arming produced no event.
-    if !scan_and_emit(&project_path, &root, &mut cache, &sink, &hooks).await {
+    if !scan_and_emit(&project_path, &root, &mut cache, &mut stamps, &sink, &hooks).await {
         return;
     }
     hooks.event("scanned");
@@ -217,7 +242,9 @@ async fn run_watcher_loop_observed(
                 // `lose_watch` is now None and `debounce_sleep` is None -- so the task
                 // parks forever and DAG progress silently freezes until the app restarts.
                 polling_mode = true;
-                if !scan_and_emit(&project_path, &root, &mut cache, &sink, &hooks).await {
+                if !scan_and_emit(&project_path, &root, &mut cache, &mut stamps, &sink, &hooks)
+                    .await
+                {
                     break;
                 }
                 hooks.event("lost-scanned");
@@ -241,13 +268,17 @@ async fn run_watcher_loop_observed(
                 }
             }, if debounce_sleep.is_some() => {
                 debounce_sleep = None;
-                if !scan_and_emit(&project_path, &root, &mut cache, &sink, &hooks).await {
+                if !scan_and_emit(&project_path, &root, &mut cache, &mut stamps, &sink, &hooks)
+                    .await
+                {
                     break;
                 }
                 hooks.event("scanned");
             }
             _ = poll_interval.tick(), if polling_mode => {
-                if !scan_and_emit(&project_path, &root, &mut cache, &sink, &hooks).await {
+                if !scan_and_emit(&project_path, &root, &mut cache, &mut stamps, &sink, &hooks)
+                    .await
+                {
                     break;
                 }
                 hooks.event("scanned");
@@ -423,7 +454,8 @@ mod tests {
         runtime.block_on(async {
             let (tx, _rx) = tokio::sync::mpsc::channel(10);
             let mut cache = HashMap::new();
-            let scan = scan_and_emit("owned", temp.path(), &mut cache, &tx, &hooks);
+            let mut stamps = HashMap::new();
+            let scan = scan_and_emit("owned", temp.path(), &mut cache, &mut stamps, &tx, &hooks);
             let sentinel = async {
                 sentinel_tx.send(()).expect("async sentinel");
             };

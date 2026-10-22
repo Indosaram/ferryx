@@ -32,6 +32,7 @@ import { SettingRow, SettingsHeading } from "./primitives";
 const DAY_MS = 86_400_000;
 const TEAM_MIN_SEATS = 2;
 const MAX_PACKS = 100;
+const PRICING_DOCS_URL = "https://ferryx.dev/docs/pricing/";
 
 type RenewalChangeKind = "hostPacks" | "seats";
 
@@ -69,6 +70,18 @@ function isTeamPlan(plan: BillingPlan): boolean {
   return plan === "team_monthly" || plan === "team_annual";
 }
 
+function ComingSoonBadge({ tier }: { tier: "pro" | "team" }) {
+  return (
+    <Badge
+      data-testid={`plan-coming-soon-${tier}`}
+      variant="secondary"
+      className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground shadow-none"
+    >
+      Coming soon
+    </Badge>
+  );
+}
+
 function canManagePlan(entitlement: BillingEntitlement): boolean {
   return entitlement.role === null || entitlement.role === "owner" || entitlement.role === "admin";
 }
@@ -98,10 +111,13 @@ function usagePercent(entitlement: BillingEntitlement): number {
 }
 
 function errorText(error: BillingApiError): string {
+  if (error.code === "PLAN_COMING_SOON") {
+    return "Paid plans are coming soon. Only the Free plan is available right now.";
+  }
   if (error.code === "PLAN_LIMIT_REACHED") {
     const details = planLimitDetails(error.details);
     if (details) {
-      return `The ${details.plan ?? "current"} plan allows ${details.limit ?? "?"} machines and ${details.used ?? "?"} are registered. Remove a machine or upgrade to continue.`;
+      return `The ${details.plan ?? "current"} plan allows ${details.limit ?? "?"} machines and ${details.used ?? "?"} are registered. Remove a machine to continue.`;
     }
   }
   if (error.code === "REMOTE_SUSPENDED") {
@@ -126,6 +142,9 @@ export interface PlanSectionProps {
   accountSessionToken?: string | null;
   now?: number;
   onUnavailable?: () => void;
+  /** Overrides the account server's paid-plan switch (`paidPlansOpen` on the entitlement); while
+   *  closed, Pro and Team are shown as coming soon with no purchase or quantity controls. */
+  paidPlansOpen?: boolean;
 }
 
 export function PlanSection({
@@ -133,6 +152,7 @@ export function PlanSection({
   accountSessionToken,
   now = Date.now(),
   onUnavailable,
+  paidPlansOpen: paidPlansOpenOverride,
 }: PlanSectionProps) {
   const unavailableRef = useRef(onUnavailable);
   unavailableRef.current = onUnavailable;
@@ -143,6 +163,7 @@ export function PlanSection({
   );
 
   const [entitlement, setEntitlement] = useState<BillingEntitlement | null>(null);
+  const paidPlansOpen = paidPlansOpenOverride ?? entitlement?.paidPlansOpen ?? false;
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<BillingApiError | null>(null);
   const [unavailable, setUnavailable] = useState(false);
@@ -540,78 +561,86 @@ export function PlanSection({
                   label="Pro"
                   description="10 machines included, plus 5 for each additional pack."
                 >
-                  <div className="flex flex-wrap items-center justify-end gap-2">
-                    {PRO_CHOICES.map((choice) =>
-                      entitlement.plan === choice.plan ? (
-                        <Badge
-                          key={choice.plan}
-                          variant="secondary"
-                          className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground shadow-none"
-                        >
-                          {choice.label} · current
-                        </Badge>
-                      ) : (
-                        <Button
-                          key={choice.plan}
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-7 text-[11px]"
-                          disabled={busy}
-                          onClick={() => void handleCheckout(choice.plan)}
-                        >
-                          {choice.label}
-                        </Button>
-                      ),
-                    )}
-                  </div>
+                  {paidPlansOpen ? (
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      {PRO_CHOICES.map((choice) =>
+                        entitlement.plan === choice.plan ? (
+                          <Badge
+                            key={choice.plan}
+                            variant="secondary"
+                            className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground shadow-none"
+                          >
+                            {choice.label} · current
+                          </Badge>
+                        ) : (
+                          <Button
+                            key={choice.plan}
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-[11px]"
+                            disabled={busy}
+                            onClick={() => void handleCheckout(choice.plan)}
+                          >
+                            {choice.label}
+                          </Button>
+                        ),
+                      )}
+                    </div>
+                  ) : (
+                    <ComingSoonBadge tier="pro" />
+                  )}
                 </SettingRow>
 
                 <SettingRow
                   label="Team"
                   description="10 machines per seat (minimum 2 seats), plus 5 for each additional pack."
                 >
-                  <div className="flex flex-wrap items-center justify-end gap-2">
-                    <Input
-                      aria-label="Team seats"
-                      type="number"
-                      inputMode="numeric"
-                      min={TEAM_MIN_SEATS}
-                      value={seatsText}
-                      onChange={(event) => setSeatsText(event.target.value)}
-                      onBlur={() => setSeatsText(String(seatsDraft))}
-                      className="h-7 w-20 rounded-md px-2 text-[12px] md:text-[12px]"
-                    />
-                    {teamPlan ? (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-7 text-[11px]"
-                        disabled={busy || seatsDraft === entitlement.seats}
-                        onClick={() => void handleQuantity({ seats: seatsDraft }, "seats")}
-                      >
-                        Apply seats
-                      </Button>
-                    ) : (
-                      TEAM_CHOICES.map((choice) => (
+                  {paidPlansOpen ? (
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <Input
+                        aria-label="Team seats"
+                        type="number"
+                        inputMode="numeric"
+                        min={TEAM_MIN_SEATS}
+                        value={seatsText}
+                        onChange={(event) => setSeatsText(event.target.value)}
+                        onBlur={() => setSeatsText(String(seatsDraft))}
+                        className="h-7 w-20 rounded-md px-2 text-[12px] md:text-[12px]"
+                      />
+                      {teamPlan ? (
                         <Button
-                          key={choice.plan}
                           type="button"
                           variant="outline"
                           size="sm"
                           className="h-7 text-[11px]"
-                          disabled={busy}
-                          onClick={() => void handleCheckout(choice.plan, seatsDraft)}
+                          disabled={busy || seatsDraft === entitlement.seats}
+                          onClick={() => void handleQuantity({ seats: seatsDraft }, "seats")}
                         >
-                          {choice.label}
+                          Apply seats
                         </Button>
-                      ))
-                    )}
-                </div>
-              </SettingRow>
+                      ) : (
+                        TEAM_CHOICES.map((choice) => (
+                          <Button
+                            key={choice.plan}
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-[11px]"
+                            disabled={busy}
+                            onClick={() => void handleCheckout(choice.plan, seatsDraft)}
+                          >
+                            {choice.label}
+                          </Button>
+                        ))
+                      )}
+                    </div>
+                  ) : (
+                    <ComingSoonBadge tier="team" />
+                  )}
+                </SettingRow>
 
-                {entitlement.plan !== "free" ? (
+                {paidPlansOpen && entitlement.plan !== "free" ? (
                   <SettingRow
                     label="Additional machine packs"
                     description="Each pack adds 5 machines. Extra packs are charged from your next renewal."
@@ -650,6 +679,18 @@ export function PlanSection({
                 Only the team owner or an admin can change the plan.
               </p>
             )}
+            {!paidPlansOpen ? (
+              <p data-testid="plan-coming-soon-note" className="text-[11px] text-muted-foreground">
+                Paid plans are coming soon. The Free plan stays available in the meantime.{" "}
+                <button
+                  type="button"
+                  className="underline underline-offset-2 hover:text-foreground"
+                  onClick={() => void handleManageBilling(PRICING_DOCS_URL)}
+                >
+                  See planned pricing
+                </button>
+              </p>
+            ) : null}
             {renewalNotice ? (
               <p
                 role="status"

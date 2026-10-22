@@ -665,11 +665,16 @@ impl RelayClient {
                     if let Ok(delivery) = serde_json::from_str::<AccountGrantOfferDelivery>(&text) {
                         if delivery.machine_id == self.pairing.machine_id {
                             let now = crate::account::store::now_secs();
-                            let ack = match crate::account::offer_sink::apply_envelope_for_this_machine(
-                                &self.pairing.auth,
-                                &delivery.envelope,
-                                now,
-                            ) {
+                            let auth = self.pairing.auth.clone();
+                            let envelope = delivery.envelope;
+                            let applied = crate::ipc::run_blocking(move || {
+                                Ok(crate::account::offer_sink::apply_envelope_for_this_machine(
+                                    &auth, &envelope, now,
+                                ))
+                            })
+                            .await
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            let ack = match applied {
                                 Ok(ack) => AccountGrantOfferDelivered {
                                     grant_id: Some(ack.grant_id),
                                     status: ack.status,
@@ -738,14 +743,21 @@ impl RelayClient {
             return proxy_ws_to_tcp(ws, gateway).await;
         }
 
-        let attach = crate::remote::attach_identity::load_or_generate_canonical_attach_identity()
-            .map_err(|error| anyhow::anyhow!(error))?;
+        let (attach, enrollment_record) = crate::ipc::run_blocking(|| {
+            Ok((
+                crate::remote::attach_identity::load_or_generate_canonical_attach_identity(),
+                crate::account::enroll_client::load_enrollment_record(),
+            ))
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let attach = attach.map_err(|error| anyhow::anyhow!(error))?;
         let machine_id = self
             .identity
             .as_ref()
             .map(|identity| identity.machine_id.clone())
             .unwrap_or_default();
-        let enrollment_epoch = crate::account::enroll_client::load_enrollment_record()
+        let enrollment_epoch = enrollment_record
             .map(|record| record.enrollment_epoch)
             .unwrap_or_default();
         let auth = self.pairing.auth.clone();
@@ -925,7 +937,23 @@ pub fn validate_relay_url(
 /// equivalent, trimming any trailing slash so path segments can be
 /// appended directly.
 pub fn to_ws_base(url: &str) -> Result<String, RelayUrlSecurityError> {
-    validate_relay_url(url, is_insecure_relay_allowed())
+    validate_relay_url(&live_relay_url(url), is_insecure_relay_allowed())
+}
+
+/// The retired public relay hostname. Pairings and daemon configs saved before the move to
+/// relay.ferryx.dev still carry it (host ids embed it), and it no longer resolves to a relay.
+pub const RETIRED_RELAY_ORIGIN: &str = "https://relay.checka.cc";
+
+/// Rewrites a URL on the retired relay origin to the same path on the current default relay,
+/// leaving every other URL untouched. Stored ids keep the old origin; only connections move.
+pub fn live_relay_url(url: &str) -> std::borrow::Cow<'_, str> {
+    match url.strip_prefix(RETIRED_RELAY_ORIGIN) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => std::borrow::Cow::Owned(format!(
+            "{}{rest}",
+            crate::remote::state::DEFAULT_RELAY_URL
+        )),
+        _ => std::borrow::Cow::Borrowed(url),
+    }
 }
 
 /// Proxies frames bidirectionally between a relay data-channel WebSocket
@@ -962,7 +990,8 @@ async fn proxy_ws_to_tcp(
     };
 
     let tcp_to_ws = async {
-        let mut buf = [0u8; 8192];
+        // 64 KiB matches the relay data channel's per-message cap (relay_server MAX_MESSAGE_SIZE).
+        let mut buf = vec![0u8; 64 * 1024];
         loop {
             match tcp_rx.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
@@ -1440,6 +1469,22 @@ mod tests {
             to_ws_base("wss://relay.example.com").unwrap(),
             "wss://relay.example.com"
         );
+    }
+
+    #[test]
+    fn retired_relay_origin_connects_through_the_current_relay() {
+        assert_eq!(
+            live_relay_url("https://relay.checka.cc/host/m-1"),
+            "https://relay.ferryx.dev/host/m-1"
+        );
+        assert_eq!(live_relay_url("https://relay.checka.cc"), "https://relay.ferryx.dev");
+        assert_eq!(to_ws_base("https://relay.checka.cc").unwrap(), "wss://relay.ferryx.dev");
+        // A different host that merely shares the prefix is left alone.
+        assert_eq!(
+            live_relay_url("https://relay.checka.cc.example/host/m-1"),
+            "https://relay.checka.cc.example/host/m-1"
+        );
+        assert_eq!(live_relay_url("https://relay.example.com"), "https://relay.example.com");
     }
 
     #[test]

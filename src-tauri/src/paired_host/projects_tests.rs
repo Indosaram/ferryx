@@ -43,7 +43,7 @@ fn stored_paired_projects_persist_and_resolve() {
         "unavailableWorkspaceIds": []
     }))
     .unwrap();
-    let host_id = "https://relay.checka.cc/host/m-1";
+    let host_id = "https://relay.ferryx.dev/host/m-1";
     let p = project(host_id, raw.projects[0].clone());
     let desktop_id = p.metadata.workspace_id.clone();
     assert!(resolve_stored_project(dir.path(), &desktop_id).is_none());

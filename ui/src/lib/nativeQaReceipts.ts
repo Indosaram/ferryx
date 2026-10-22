@@ -131,10 +131,20 @@ export interface NativeRecoveryEvent {
 }
 
 let qaCapability: Promise<boolean> | undefined;
+// Set once the capability probe resolves false, so hot paths skip QA work synchronously.
+let qaKnownOff = false;
+
+function probeQaCapability(): Promise<boolean> {
+  const probe: Promise<boolean> = Promise.resolve(invoke<boolean>("cmd_native_qa_enabled")).then((enabled) => {
+    if (!enabled && qaCapability === probe) qaKnownOff = true;
+    return enabled;
+  });
+  return probe;
+}
 
 async function withNativeQa<T>(operation: () => Promise<T>): Promise<T | void> {
   if (!isTauri()) return;
-  qaCapability ??= invoke<boolean>("cmd_native_qa_enabled");
+  qaCapability ??= probeQaCapability();
   if (!await qaCapability) return;
   return operation();
 }
@@ -148,12 +158,13 @@ export async function writeNativeRecoverySnapshot(snapshot: NativeRecoverySnapsh
 
 export async function nativeQaEnabled(): Promise<boolean> {
   if (!isTauri()) return false;
-  qaCapability ??= invoke<boolean>("cmd_native_qa_enabled");
+  qaCapability ??= probeQaCapability();
   return qaCapability;
 }
 
 export function resetNativeQaCapabilityForTest(): void {
   qaCapability = undefined;
+  qaKnownOff = false;
   pendingTupleAttachments.clear();
 }
 
@@ -175,6 +186,7 @@ function emitObservedNativeOutput(attachTuple: PaneAttachTuple, decoded: string,
 export function observeNativeOutput(attachTuple: PaneAttachTuple | undefined, data: Uint8Array, sequence?: string | null, daemonEpoch?: string | null): void {
   if (data.byteLength === 0) return;
   if (!attachTuple) return;
+  if (qaKnownOff) return;
   const decoded = typeof TextDecoder !== "undefined" ? new TextDecoder().decode(data) : "";
   const key = tupleAttachmentKey(attachTuple);
   const pending = pendingTupleAttachments.get(key);
@@ -192,7 +204,7 @@ export interface NativeRecoveryEventAck {
 }
 
 export async function appendNativeRecoveryEvent(event: NativeRecoveryEvent): Promise<NativeRecoveryEventAck | void> {
-  if (event.attachTuple && (event.kind === "binding-persisted" || event.kind === "listener-registered" || event.kind === "listener")) {
+  if (!qaKnownOff && event.attachTuple && (event.kind === "binding-persisted" || event.kind === "listener-registered" || event.kind === "listener")) {
     const key = tupleAttachmentKey(event.attachTuple);
     if (!pendingTupleAttachments.has(key)) {
       pendingTupleAttachments.set(key, []);

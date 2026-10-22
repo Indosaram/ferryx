@@ -62,9 +62,18 @@ impl CachedFile {
         }
     }
 
-    fn as_hosts(&self) -> Option<SshHostStore> {
+    /// Borrowed lookup: copies one project out of the cached map, never the map itself.
+    fn project(&self, workspace_id: &str) -> Option<Option<RemoteProject>> {
         match self {
-            Self::Hosts(hosts) => Some(hosts.clone()),
+            Self::Projects(projects) => Some(projects.get(workspace_id).cloned()),
+            _ => None,
+        }
+    }
+
+    /// Borrowed lookup: copies one host out of the cached store, never the store itself.
+    fn host(&self, host_id: &str) -> Option<Option<SshHost>> {
+        match self {
+            Self::Hosts(hosts) => Some(hosts.hosts.iter().find(|h| h.id == host_id).cloned()),
             _ => None,
         }
     }
@@ -119,7 +128,7 @@ pub fn invalidate_store_memo(host_store: &Path) {
 fn memoized_read<T: Clone + Default>(
     path: &Path,
     kind: MemoKind,
-    extract: fn(&CachedFile) -> Option<T>,
+    extract: impl Fn(&CachedFile) -> Option<T>,
     parse: impl FnOnce(&[u8]) -> Result<CachedFile, IpcError>,
 ) -> Result<T, IpcError> {
     let gen_before = MEMO_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
@@ -210,28 +219,32 @@ fn read_projects(host_store: &Path) -> Result<BTreeMap<String, RemoteProject>, I
     )
 }
 
-fn read_host_store(host_store: &Path) -> Result<SshHostStore, IpcError> {
+fn find_project(host_store: &Path, workspace_id: &str) -> Result<Option<RemoteProject>, IpcError> {
+    memoized_read(
+        &store_path(host_store),
+        MemoKind::Projects,
+        |file: &CachedFile| file.project(workspace_id),
+        |bytes| parse_projects(bytes).map(CachedFile::Projects),
+    )
+}
+
+fn find_host(host_store: &Path, host_id: &str) -> Result<Option<SshHost>, IpcError> {
     memoized_read(
         host_store,
         MemoKind::Hosts,
-        CachedFile::as_hosts,
+        |file: &CachedFile| file.host(host_id),
         |bytes| parse_host_store(bytes).map(CachedFile::Hosts),
     )
 }
 
 pub fn enabled_host(host_store: &Path, host_id: &str) -> Result<SshHost, IpcError> {
-    let store = read_host_store(host_store)?;
-    let host = store
-        .hosts
-        .into_iter()
-        .find(|h| h.id == host_id)
-        .ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::WorkspaceNotFound,
-                "Configured SSH host no longer exists",
-            )
-            .with_details(serde_json::json!({"hostId": host_id, "reason": "hostMissing"}))
-        })?;
+    let host = find_host(host_store, host_id)?.ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::WorkspaceNotFound,
+            "Configured SSH host no longer exists",
+        )
+        .with_details(serde_json::json!({"hostId": host_id, "reason": "hostMissing"}))
+    })?;
     if host.disabled == Some(true) {
         return Err(IpcError::new(
             IpcErrorCode::WorkspaceNotFound,
@@ -255,8 +268,7 @@ pub fn resolve(
     host_store: &Path,
     workspace_id: &str,
 ) -> Result<(RemoteProject, SshHost), IpcError> {
-    let projects = read_projects(host_store)?;
-    let project = projects.get(workspace_id).ok_or_else(|| {
+    let project = find_project(host_store, workspace_id)?.ok_or_else(|| {
         IpcError::new(
             IpcErrorCode::WorkspaceNotFound,
             "Remote project is not registered",
@@ -275,7 +287,7 @@ pub fn resolve(
         .unwrap_or(super::runtime::RemotePlatform::Posix)
         .validate_path(&project.repo_root)?;
     let host = enabled_host(host_store, &project.host_id)?;
-    Ok((project.clone(), host))
+    Ok((project, host))
 }
 
 fn save(host_store: &Path, projects: &BTreeMap<String, RemoteProject>) -> Result<(), IpcError> {

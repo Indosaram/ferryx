@@ -866,6 +866,11 @@ describe("dispatchNotification", () => {
 });
 
 describe("account enrollment API", () => {
+  beforeEach(() => {
+    core.invoke.mockReset();
+    core.isTauri.mockReturnValue(true);
+  });
+
   it("invokes cmd_account_enrollment_status and returns status", async () => {
     const status: AccountEnrollmentStatus = {
       enrolled: true,

@@ -419,6 +419,8 @@ pub(crate) struct PtySessionConfig {
     pub reader_interrupt: Option<Arc<dyn ReaderInterrupt>>,
     pub child: Box<dyn Child + Send + Sync>,
     pub writer: Box<dyn Write + Send>,
+    /// The EOF-on-drop switch of `writer` when it is a [PtyInputWriter] (unix); `None` otherwise.
+    pub writer_eof: Option<Arc<AtomicBool>>,
     pub reader: Box<dyn Read + Send>,
     pub cols: u16,
     pub rows: u16,
@@ -511,6 +513,9 @@ pub struct PtySession {
     output_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     worktree_path: Option<PathBuf>,
     reader_finished: Arc<AtomicBool>,
+    /// Signalled once right after `reader_finished` is set, so the lifecycle watcher wakes
+    /// immediately instead of on its next poll.
+    reader_finished_notify: Arc<tokio::sync::Notify>,
     /// Set when this session begins closing, so its reader stops instead of issuing another
     /// blocking read. Deliberately separate from `reader_finished`, which means "the reader thread
     /// has returned" and is consumed by the lifecycle watcher.
@@ -543,6 +548,68 @@ pub struct PtySession {
     close_grace: Arc<Mutex<Option<Duration>>>,
     #[cfg(unix)]
     relinquish_wake: Option<std::os::unix::net::UnixStream>,
+    /// Unix: the EOF-on-drop switch of this session's [PtyInputWriter]. Cleared before a session
+    /// another daemon still serves is let go, so dropping the writer here never sends EOF to that
+    /// daemon's child. `None` on Windows, whose ConPTY writer is portable-pty's own.
+    writer_eof: Option<Arc<AtomicBool>>,
+}
+
+/// Unix PTY input writer owned by Ferryx, used instead of portable-pty's `take_writer` writer.
+///
+/// portable-pty's unix writer sends `\n` + VEOF to the terminal whenever it is dropped, with no way
+/// to opt out. That is right for a close, and wrong for a session given to another daemon: a
+/// candidate relinquishing an aborted adoption (or a predecessor dropping a committed session)
+/// would end the shell the other daemon still serves. run-q08 Q08 lost its local session exactly
+/// this way after two aborted handovers. This writer keeps the same EOF on drop by default (same
+/// tcgetattr/VEOF rule, same open file description as the master), and lets the session switch
+/// it off for a relinquish.
+#[cfg(unix)]
+pub(crate) struct PtyInputWriter {
+    file: std::fs::File,
+    eof_on_drop: Arc<AtomicBool>,
+}
+
+#[cfg(unix)]
+impl PtyInputWriter {
+    /// A writer on a duplicate of `raw` (the master), plus its EOF-on-drop switch.
+    pub(crate) fn from_master_fd(raw: std::os::fd::RawFd) -> Result<(Self, Arc<AtomicBool>), PtyError> {
+        use std::os::fd::FromRawFd;
+        let dup = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 0) };
+        if dup < 0 {
+            return Err(PtyError::IoError(std::io::Error::last_os_error().to_string()));
+        }
+        let eof_on_drop = Arc::new(AtomicBool::new(true));
+        let file = unsafe { std::fs::File::from_raw_fd(dup) };
+        Ok((Self { file, eof_on_drop: Arc::clone(&eof_on_drop) }, eof_on_drop))
+    }
+}
+
+#[cfg(unix)]
+impl Write for PtyInputWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PtyInputWriter {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        if !self.eof_on_drop.load(Ordering::Acquire) {
+            return;
+        }
+        // portable-pty unix.rs UnixMasterWriter::drop: EOF is only interpreted after a newline.
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(self.file.as_raw_fd(), &mut termios) } == 0 {
+            let eot = termios.c_cc[libc::VEOF];
+            if eot != 0 {
+                let _ = self.file.write_all(&[b'\n', eot]);
+            }
+        }
+    }
 }
 
 fn record_output_millis(target: &AtomicU64) {
@@ -574,6 +641,7 @@ impl PtySession {
             .expect("output sender must exist while starting reader")
             .clone();
         let reader = config.reader;
+        let writer_eof = config.writer_eof;
         #[cfg(unix)]
         let reader_poll = {
             use std::os::fd::AsFd;
@@ -587,6 +655,8 @@ impl PtySession {
         let metrics_session_id = config.id.clone();
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
+        let reader_finished_notify = Arc::new(tokio::sync::Notify::new());
+        let reader_finished_notify_task = Arc::clone(&reader_finished_notify);
         let reader_stop_requested = Arc::new(AtomicBool::new(false));
         let reader_stop_requested_task = Arc::clone(&reader_stop_requested);
         let reader_last_output_at = Arc::new(AtomicU64::new(0));
@@ -604,7 +674,7 @@ impl PtySession {
         let reader_phase_task = Arc::clone(&reader_phase);
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = reader;
-            let mut buf = [0u8; 4096];
+            let mut buf = [0u8; 16 * 1024];
             loop {
                 // A requested stop ends the loop once the pipe has nothing left to deliver. It is a
                 // variable rather than an immediate `break` because one read carries at most one
@@ -672,6 +742,7 @@ impl PtySession {
                 }
             }
             reader_finished_task.store(true, Ordering::Release);
+            reader_finished_notify_task.notify_one();
             reader_phase_task.store(PtyReaderPhase::Finished.as_raw(), Ordering::Release);
         });
 
@@ -681,6 +752,7 @@ impl PtySession {
             id: config.id,
             #[cfg(unix)]
             relinquish_wake: None,
+            writer_eof,
             incarnation: config.incarnation,
             suspension_receipt: Mutex::new(None),
             master: Arc::new(Mutex::new(Some(config.master))),
@@ -692,6 +764,7 @@ impl PtySession {
             output_tx,
             worktree_path: config.worktree_path,
             reader_finished,
+            reader_finished_notify,
             reader_stop_requested,
             reader_phase,
             last_output_at,
@@ -917,6 +990,14 @@ impl PtySession {
 
     pub fn pause_reader(&self) {
         self.pause_requested.store(true, Ordering::Release);
+    }
+
+    /// Lets this session go without ending the shell another daemon still serves: the writer
+    /// this daemon drops on close then sends no EOF to the shared terminal.
+    pub(crate) fn keep_writer_from_sending_eof(&self) {
+        if let Some(eof) = &self.writer_eof {
+            eof.store(false, Ordering::Release);
+        }
     }
 
     pub fn resume_reader(&self) -> bool {
@@ -1418,6 +1499,11 @@ impl PtySession {
         self.reader_finished.load(Ordering::Acquire)
     }
 
+    /// Woken once after the reader thread has set `reader_finished`.
+    pub(crate) fn reader_finished_notify(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.reader_finished_notify)
+    }
+
     pub(crate) fn output_receiver_closed(&self) -> bool {
         self.output_tx
             .lock()
@@ -1650,10 +1736,9 @@ impl PtySession {
         // Taken before the master moves into the session, so an adopted session can end its reader
         // just as a spawned one can.
         let reader_interrupt = master_pty.interrupt_handle();
-
-        let writer = master_pty
-            .take_writer()
-            .map_err(|e| PtyError::IoError(format!("Failed to take writer: {e}")))?;
+        let (writer, writer_eof) = PtyInputWriter::from_master_fd(raw)?;
+        let writer: Box<dyn Write + Send> = Box::new(writer);
+        let writer_eof = Some(writer_eof);
 
         if snapshot.cols > 0 && snapshot.rows > 0 {
             let _ = master_pty.resize(PtySize {
@@ -1683,6 +1768,8 @@ impl PtySession {
             .map_err(|error| PtyError::IoError(error.to_string()))?;
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
+        let reader_finished_notify = Arc::new(tokio::sync::Notify::new());
+        let reader_finished_notify_task = Arc::clone(&reader_finished_notify);
         let reader_stop_requested = Arc::new(AtomicBool::new(false));
         let reader_stop_requested_task = Arc::clone(&reader_stop_requested);
         let reader_last_output_at = Arc::new(AtomicU64::new(0));
@@ -1701,7 +1788,7 @@ impl PtySession {
 
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = reader;
-            let mut buf = [0u8; 4096];
+            let mut buf = [0u8; 16 * 1024];
             loop {
                 // A requested stop ends the loop once the pipe has nothing left to deliver. It is a
                 // variable rather than an immediate `break` because one read carries at most one
@@ -1766,6 +1853,7 @@ impl PtySession {
                 }
             }
             reader_finished_task.store(true, Ordering::Release);
+            reader_finished_notify_task.notify_one();
             reader_phase_task.store(PtyReaderPhase::Finished.as_raw(), Ordering::Release);
         });
 
@@ -1781,6 +1869,7 @@ impl PtySession {
             input_gate: tokio::sync::Mutex::new(()),
             id: snapshot.session_id,
             relinquish_wake: Some(wake_write),
+            writer_eof,
             suspension_receipt: Mutex::new(snapshot.suspension_receipt.filter(|receipt|
                 receipt.matches(snapshot.pid, snapshot.incarnation.as_deref()))),
             incarnation: snapshot.incarnation,
@@ -1793,6 +1882,7 @@ impl PtySession {
             output_tx,
             worktree_path: snapshot.worktree_path,
             reader_finished,
+            reader_finished_notify,
             reader_stop_requested,
             reader_phase,
             last_output_at,

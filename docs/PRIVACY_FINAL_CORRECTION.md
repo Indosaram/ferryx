@@ -65,7 +65,7 @@ This ledger records the factual resolutions applied to `site/src/content/docs/pr
 ### P:37 - Content Security Policy scoping
 - **Source inspected:** `src-tauri/tauri.conf.json:30`.
 - **Finding:** The page claimed the CSP restricts connections to explicitly configured relay domains.
-- **Resolution:** Clarified that the desktop shell CSP connect-src permits local dev endpoints, IPC, and hardcoded `checka.cc` relay domains. It doesn't dynamically adapt to arbitrary custom relays, and doesn't govern native Rust networking or guest external webviews.
+- **Resolution:** Clarified that the desktop shell CSP connect-src permits local dev endpoints, IPC, and hardcoded `ferryx.dev` relay domains. It doesn't dynamically adapt to arbitrary custom relays, and doesn't govern native Rust networking or guest external webviews.
 
 ### P:38 - Update discovery vs signing
 - **Sources inspected:** `ui/src/App.tsx:260-262`, `ui/src/lib/updater.ts:54-63,83-105,108-134,154-180`, `src-tauri/tauri.conf.json:34-40`, `src-tauri/src/ipc/updater.rs:5-18`.

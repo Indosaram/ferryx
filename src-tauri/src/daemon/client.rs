@@ -5962,18 +5962,81 @@ mod tests {
     }
 
     /// Todo 2 (a): an accepted connection that answers no handshake while its owner cannot be
-    /// identified (lock free, endpoint silent: row 4) is DAEMON_BUSY, and the client starts
-    /// nothing - no admission lock, no pending-start marker, no owner record.
+    /// identified is DAEMON_BUSY, and the client starts nothing - no admission lock, no
+    /// pending-start marker. The owner is Unknown through row 5: the lock is free and the
+    /// endpoint silent, but owner.json names a live process (this test process, real start time).
     #[tokio::test]
     async fn a_silent_handshake_with_an_unknown_owner_is_daemon_busy_and_starts_nothing() {
         let dir = tempdir().unwrap();
+        let pid = std::process::id();
+        let start_time = owner_admission::process_start_time(pid).expect("own start time");
+        owner_admission::write_record_atomic(
+            &dir.path().join(owner_admission::OWNER_FILE),
+            &owner_admission::OwnerRecord {
+                pid,
+                start_time,
+                generation_key: "gen-test".to_string(),
+                epoch: 1,
+                supervisor_pid: None,
+                supervisor_start_time: None,
+            },
+        )
+        .unwrap();
         let (error, files) = silent_handshake_outcome(dir.path(), false).await;
         assert_eq!(error.code, IpcErrorCode::DaemonBusy, "{}", error.message);
         let details = error.details.expect("busy details");
         assert_eq!(details["type"], "daemonOwnerBusy");
         assert_eq!(details["cause"], "handshakeSilent");
         assert!(details["ownerState"].as_str().unwrap().starts_with("Unknown"), "{details}");
-        assert_eq!(files, vec!["daemon.sock".to_string()], "the client must create no admission or start file");
+        assert_eq!(
+            files,
+            vec!["daemon.sock".to_string(), owner_admission::OWNER_FILE.to_string()],
+            "the client must create no admission or start file"
+        );
+    }
+
+    /// Todo 2 row 4 (amended): a free daemon lock with a silent endpoint is a stale listener, not
+    /// an owner - a live daemon takes the lock before it binds (server.rs acquire_daemon_locks
+    /// precedes the bind), so it is caught by rows 2-3. The client reports the plain handshake
+    /// timeout, never DAEMON_BUSY, destroys nothing (the endpoint stays, no record is written),
+    /// and admission then lets exactly one start through while the stale listener is still there.
+    #[tokio::test]
+    async fn a_silent_handshake_behind_a_free_lock_is_not_busy_and_admits_one_start() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("daemon.sock");
+        // Bound and never accepted: connect and the handshake write succeed, no frame ever comes.
+        let _stale = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let client = DaemonClient::new_with_socket(socket_path.clone());
+        let error = tokio::time::timeout(Duration::from_secs(10), client.send_request(DaemonRequest::Ping))
+            .await
+            .expect("client must stop waiting after the five-second handshake timeout")
+            .expect_err("a silent endpoint must fail the handshake");
+        assert_ne!(error.code, IpcErrorCode::DaemonBusy, "{}", error.message);
+        assert_eq!(error.code, IpcErrorCode::IoError);
+        assert_eq!(error.message, "Handshake timed out");
+        let listed = |dir: &Path| {
+            let mut files: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            files.sort();
+            files
+        };
+        assert_eq!(listed(dir.path()), vec!["daemon.sock".to_string()], "the client destroys and writes nothing");
+
+        let paths = owner_admission::AdmissionPaths::for_endpoint(&socket_path);
+        let admitted = owner_admission::admit(
+            &paths,
+            &owner_admission::RuntimeProbe { paths: &paths },
+            "gen-test",
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(matches!(admitted, owner_admission::Admit::Start(_)), "the stale listener must not block a start");
+        let files = listed(dir.path());
+        assert!(files.contains(&"daemon.sock".to_string()), "admission removes nothing: {files:?}");
+        assert!(files.contains(&owner_admission::STARTING_FILE.to_string()), "exactly one pending start: {files:?}");
+        assert!(!files.contains(&owner_admission::OWNER_FILE.to_string()), "{files:?}");
     }
 
     /// Todo 2 (a) with a live owner: the daemon lock is held and owner.json names a live process

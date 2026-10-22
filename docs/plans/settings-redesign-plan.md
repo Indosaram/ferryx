@@ -6,7 +6,7 @@ Status: proposed implementation plan; source-reviewed 2026-09-15. No application
 
 Replace the separate **Remote Access** and **SSH Machines** Settings destinations with **Remote**. Within Remote, distinguish **Machines** (outbound connections), **Access to This Machine** (inbound access), and **Connection Details** (diagnostics and compatibility). Unify navigation and presentation, not credentials, authorization, project identity, or transport implementations.
 
-New paired-machine connections require only a PIN and always use `https://relay.checka.cc`. Do not ask users for a relay address, machine ID, token, SSH credentials, or a mandatory name. SSH remains an explicit alternative with its existing connection fields and import capabilities. Disabling access to this machine must not disable outbound SSH or paired-machine connections.
+New paired-machine connections require only a PIN and always use `https://relay.ferryx.dev`. Do not ask users for a relay address, machine ID, token, SSH credentials, or a mandatory name. SSH remains an explicit alternative with its existing connection fields and import capabilities. Disabling access to this machine must not disable outbound SSH or paired-machine connections.
 
 Keep all non-remote tabs, their order, settings, storage, and behavior intact. The request's “Alerts” corresponds to the actual **Notifications** tab and its **Alerts & Sounds** group; do not introduce an extra Alerts tab or rename Notifications as part of this work.
 
@@ -132,7 +132,7 @@ Settings                       Remote
                                old-server    SSH       Disabled           [Details]
 
                                build-linux / Paired
-                               Connection  relay.checka.cc (read-only)
+                               Connection  relay.ferryx.dev (read-only)
                                Readiness   Projects ready; terminals not checked
                                Projects    [Open Projects] [Add Project]
                                Management  [Re-pair] [Forget Credentials]
@@ -143,7 +143,7 @@ Add Machine
   [Pair with PIN] [Connect with SSH]
 
   On the other machine, obtain a machine-access PIN.
-  Relay: https://relay.checka.cc
+  Relay: https://relay.ferryx.dev
   PIN [______]                 [Cancel] [Pair Machine]
 
   No URL / machine ID / required label / token / SSH password fields.
@@ -154,7 +154,7 @@ Access to This Machine
   Allow remote access                                  [Off / On]
   Controls incoming connections only. Outbound machines are unaffected.
   Listener: Running     Relay: Connecting / Ready / Unavailable
-  Relay: https://relay.checka.cc
+  Relay: https://relay.ferryx.dev
 
   Pair a Device
   [Generate PIN]   [123456] [Copy PIN]   Expires in 42s
@@ -172,7 +172,7 @@ Use text and icons as well as color for statuses; real labels, keyboard-operable
 
 1. Open Remote > Machines > Add Machine > Pair with PIN. Explain that the owner runs `ferryx-cli --daemon` and obtains `ferryx-cli pair generate --access machine` on the other machine. Those are the current instructions; desktop machine-PIN issuance is not already implemented.
 2. Accept/paste the PIN, preserve leading zeros, and submit exactly once. The present UI says six-digit PIN, while native validation also accepts alphanumeric/hyphen tokens; confirm the issued machine-PIN contract before enforcing a digits-only validator. Never require a second connection datum.
-3. Construct the request internally with `relayOrigin: "https://relay.checka.cc"` and the existing fallback `displayLabel: "Machine"`. Clear the PIN draft on submission, cancellation, success and failure; never persist it or log raw IPC failures.
+3. Construct the request internally with `relayOrigin: "https://relay.ferryx.dev"` and the existing fallback `displayLabel: "Machine"`. Clear the PIN draft on submission, cancellation, success and failure; never persist it or log raw IPC failures.
 4. Native `paired_host_pair` sends the exchange to `/api/v1/pair/exchange` on that fixed origin, obtains machine identity/token, authenticates the returned scope, and persists credentials in daemon-owned inventory. UI receives only `HostView`.
 5. Show the returned identity/type and immediately negotiate capabilities against the captured host ID and generation. A mirror grant is **Needs machine access**, not successful project readiness. Offer fresh machine-PIN re-pairing; never elevate a mirror grant in the renderer.
 6. Successful admission focuses the new inventory row and offers Open Projects/Add Project. With the existing DTO, distinguish generic names using a short machine-ID suffix rather than falsely claiming an authenticated remote display name. Friendly rename requires an additive native metadata API if approved.
@@ -181,7 +181,7 @@ Use text and icons as well as color for statuses; real labels, keyboard-operable
 
 ### 5.2 Enable inbound access and issue a device PIN
 
-- For a new/default installation, enabling uses explicit relay mode and `https://relay.checka.cc`; display actual returned status, not optimistic success. A bound local listener alone must not enable the claim “Ready for PIN pairing through relay.”
+- For a new/default installation, enabling uses explicit relay mode and `https://relay.ferryx.dev`; display actual returned status, not optimistic success. A bound local listener alone must not enable the claim “Ready for PIN pairing through relay.”
 - Generate a device PIN only with the relevant readiness satisfied. Use the returned lifetime with the current safety cap; invalidate old display generations on regenerate/disable/unmount. PIN-only means the user need not scan a QR or transmit a URL/token. A phone can be directed to the fixed relay site and enter the PIN.
 - Keep access scope visible. Existing `cmd_remote_pairing_create` does not issue the machine-access variant. If product wants desktop-to-desktop issuance here, add an explicit scope-aware native entry point backed by `RemoteCreateMachinePairingCode`; old daemons must reject unsupported issuance rather than silently return a mirror PIN.
 - Disabling only stops the inbound listener. Explain that outbound credentials and remote workspace sessions are separate. Do not erase paired inventory or saved layouts.

@@ -1258,9 +1258,6 @@ async function switchToSecondTab(): Promise<void> {
   await act(async () => {
     fireEvent.click(within(sheet).getByRole("tab", { name: /second/i }));
   });
-  await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
-  });
   await screen.findByText("B0");
 }
 
@@ -2707,9 +2704,6 @@ describe("reference chat lane review fixes", () => {
     await act(async () => {
       fireEvent.click(within(sheet).getByRole("tab", { name: /claude/i }));
     });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
-    });
     await laneReady();
     await drainSettledResponses();
 
@@ -2926,9 +2920,6 @@ describe("reference chat lane review fixes", () => {
     const sheet = screen.getByRole("tablist", { name: /terminal tabs/i });
     await act(async () => {
       fireEvent.click(within(sheet).getByRole("tab", { name: /claude/i }));
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
     });
   }
 

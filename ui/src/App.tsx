@@ -120,6 +120,7 @@ import {
   spawnTerminal,
   retryPairedSession,
   retryTerminalRemoteSession,
+  getTerminalRemoteStatus,
   listTerminalSessions,
   toIpcError,
   writeTerminal,
@@ -1617,6 +1618,25 @@ function WorkspaceApp({
       if (cancelled || settled) return;
       if (res.type !== "retryRemoteSessionOk") throw { code: "INVALID_RESPONSE", message: "SSH retry was not admitted" };
       retryAdmitted = true;
+      settleIfConnected();
+      if (cancelled || settled || connectedStatus) return;
+      // A daemon retry on an already-connected session is a no-op that emits no status event
+      // (remote.rs retry returns early), so read the current status once instead of waiting forever.
+      // A failed read is not a failed retry: keep waiting for the stream event as before.
+      let current: import("./lib/types").RemoteSessionStatusResponse | null = null;
+      try {
+        current = await getTerminalRemoteStatus(captured.backendSessionId);
+      } catch (error) {
+        console.warn("SSH status read after retry failed; waiting for status event", error);
+      }
+      if (cancelled || settled || connectedStatus || current?.details?.state !== "connected") return;
+      connectedStatus = {
+        sessionId: captured.backendSessionId,
+        state: "connected",
+        generation: current.details.generation,
+        failure: current.details.failure,
+        replayGap: current.details.replayGap,
+      };
       settleIfConnected();
     }).catch((error) => {
       if (!cancelled && !settled) {

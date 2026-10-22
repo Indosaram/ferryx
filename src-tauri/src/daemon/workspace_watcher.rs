@@ -3,9 +3,39 @@ use super::DaemonWorkspaceService;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
+/// Build output, dependency trees and Git object/log churn never change inventory. Only the
+/// part below the deepest watched root is inspected, so a root whose own path contains such
+/// a name keeps reporting.
+fn is_noise_path(roots: &[PathBuf], path: &std::path::Path) -> bool {
+    let Some(relative) = roots
+        .iter()
+        .filter_map(|root| path.strip_prefix(root).ok())
+        .min_by_key(|relative| relative.components().count())
+    else {
+        return false;
+    };
+    let mut previous: Option<&std::ffi::OsStr> = None;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            previous = None;
+            continue;
+        };
+        if name == "target" || name == "node_modules" {
+            return true;
+        }
+        if previous == Some(std::ffi::OsStr::new(".git")) && (name == "objects" || name == "logs") {
+            return true;
+        }
+        previous = Some(name);
+    }
+    false
+}
+
 pub(crate) struct WorkspaceWatch {
     watcher: RecommendedWatcher,
     paths: BTreeMap<PathBuf, bool>,
+    // Recursive roots read by the native callback to classify noise paths.
+    noise_roots: Arc<parking_lot::RwLock<Vec<PathBuf>>>,
     changed: tokio::sync::mpsc::Receiver<()>,
     debounce: Option<tokio::time::Instant>,
     // The worker, not its cancellable caller, owns refresh admission.
@@ -150,10 +180,21 @@ mod tests {
 impl WorkspaceWatch {
     pub(crate) fn new() -> Result<Self, String> {
         let (sender, changed) = tokio::sync::mpsc::channel(1);
+        let noise_roots = Arc::new(parking_lot::RwLock::new(Vec::<PathBuf>::new()));
+        let roots = noise_roots.clone();
         let watcher =
             notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
                 match event {
                     Ok(event) if matches!(event.kind, notify::EventKind::Access(_)) => return,
+                    Ok(event)
+                        if !event.paths.is_empty()
+                            && {
+                                let roots = roots.read();
+                                event.paths.iter().all(|path| is_noise_path(&roots, path))
+                            } =>
+                    {
+                        return
+                    }
                     Err(error) => tracing::warn!(%error, "Workspace watch failed"),
                     _ => {}
                 }
@@ -164,6 +205,7 @@ impl WorkspaceWatch {
         Ok(Self {
             watcher,
             paths: BTreeMap::new(),
+            noise_roots,
             changed,
             debounce: None,
             refresh_slot: None,
@@ -227,6 +269,11 @@ impl WorkspaceWatch {
                         })?;
                 }
             }
+            *self.noise_roots.write() = paths
+                .iter()
+                .filter(|(_, recursive)| **recursive)
+                .map(|(path, _)| path.clone())
+                .collect();
             self.paths = paths;
             Ok(self)
         })

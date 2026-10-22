@@ -294,8 +294,8 @@ pub enum TerminalStartup {
 
 pub mod base64_serde {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
-    use std::borrow::Cow;
+    use serde::{de, Deserializer, Serializer};
+    use std::fmt;
 
     pub fn serialize<S, T>(bytes: &T, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -305,14 +305,31 @@ pub mod base64_serde {
         serializer.serialize_str(&STANDARD.encode(bytes.as_ref()))
     }
 
+    /// Decodes straight from the borrowed or transient input string; no owned copy first.
+    struct Base64Visitor;
+
+    impl<'de> de::Visitor<'de> for Base64Visitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<Vec<u8>, E> {
+            STANDARD.decode(value.as_bytes()).map_err(E::custom)
+        }
+
+        fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<Vec<u8>, E> {
+            STANDARD.decode(value.as_bytes()).map_err(E::custom)
+        }
+    }
+
     pub fn deserialize<'de, D, T>(deserializer: D) -> Result<T, D::Error>
     where
         D: Deserializer<'de>,
         T: From<Vec<u8>>,
     {
-        let s = Cow::<'de, str>::deserialize(deserializer)?;
-        let decoded = STANDARD.decode(s.as_bytes()).map_err(D::Error::custom)?;
-        Ok(T::from(decoded))
+        deserializer.deserialize_str(Base64Visitor).map(T::from)
     }
 }
 

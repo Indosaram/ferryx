@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, watch};
 
 pub type DesktopEventSink = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
 pub const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT: &str = "remote_active_selection_changed";
-pub const DEFAULT_RELAY_URL: &str = "https://relay.checka.cc";
+pub const DEFAULT_RELAY_URL: &str = "https://relay.ferryx.dev";
 #[cfg(not(test))]
 pub const REMOTE_GATEWAY_PORT: u16 = 43821;
 #[cfg(test)]
@@ -843,6 +843,14 @@ pub struct RemoteGatewayState {
     /// Maps ticket -> (device token, target, expiry unix seconds).
     pub socket_tickets:
         parking_lot::Mutex<std::collections::HashMap<String, (String, String, u64)>>,
+    pub host_lease: Arc<crate::remote::direct_lease::HostLeaseState>,
+    /// Account-relay enrollment decision for the account-gated direct path. Resolved once at
+    /// remote-server startup on a blocking worker, never per offer on the reactor. `false`
+    /// leaves LAN, static-token and selfhost direct trust paths untouched.
+    pub(crate) host_lease_required: std::sync::atomic::AtomicBool,
+    /// One-shot guard so listener restarts inside one process cannot start the lease renewal
+    /// loop or its cancellation watch twice.
+    pub(crate) host_lease_wired: std::sync::atomic::AtomicBool,
     pub browser_backend: parking_lot::RwLock<Arc<dyn RemoteBrowserBackend>>,
     pub admission_controller: Arc<AdmissionController>,
     pub browser_service_epoch: AtomicU64,
@@ -1035,6 +1043,9 @@ impl RemoteGatewayState {
             relay_pairing: RwLock::new(None),
             relay_client: RwLock::new(None),
             socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            host_lease: Arc::new(crate::remote::direct_lease::HostLeaseState::new()),
+            host_lease_required: std::sync::atomic::AtomicBool::new(false),
+            host_lease_wired: std::sync::atomic::AtomicBool::new(false),
             browser_backend: parking_lot::RwLock::new(Arc::new(
                 crate::remote::browser_backend::LocalIpcBrowserBackend::new(
                     // Platform-correct endpoint, derived from the same helper the
@@ -1073,6 +1084,20 @@ impl RemoteGatewayState {
     #[cfg(test)]
     pub fn snapshot_build_count(&self) -> u64 {
         self.snapshot_build_count.load(Ordering::Acquire)
+    }
+
+    /// Whether the account direct path must hold a valid signed entitlement lease.
+    pub fn host_lease_required(&self) -> bool {
+        self.host_lease_required.load(Ordering::Acquire)
+    }
+
+    pub fn set_host_lease_required(&self, required: bool) {
+        self.host_lease_required.store(required, Ordering::Release);
+    }
+
+    /// `true` for the single startup caller that wins the right to wire the lease tasks.
+    pub fn begin_host_lease_wiring(&self) -> bool {
+        !self.host_lease_wired.swap(true, Ordering::AcqRel)
     }
 
     pub fn invalidate_workspace_snapshot(&self) {

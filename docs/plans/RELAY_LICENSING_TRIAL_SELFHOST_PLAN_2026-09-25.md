@@ -1,5 +1,6 @@
 # Ferryx 상용화 계획 — LS(라이선스 서버) · 30일 무료체험 · 셀프호스팅 영구무료
 
+> 2026-09-30 결정으로 체험·Paddle 부분 대체: `.omo/plans/relay-monetization.md`
 > 상태: 확정(레인 6개 설계 병합 · 외부 리뷰 7라운드 통과) · 작성 2026-09-25 · 범위: 프론트/백엔드/앱/모바일/결제/이메일/운영
 
 ## 0. 문서 목적과 요구사항
@@ -430,7 +431,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib account::license::clock::
 **AT-3 현재 배포본 공개키 라우트 실측 (curl)**
 
 ```bash
-curl -sS -o /tmp/pk.json -w '%{http_code}\n' https://relay.checka.cc/api/account/v1/public-key && cat /tmp/pk.json
+curl -sS -o /tmp/pk.json -w '%{http_code}\n' https://relay.ferryx.dev/api/account/v1/public-key && cat /tmp/pk.json
 ```
 
 기대: `200` + `{"publicKey":"<base64 32바이트 Ed25519 공개키>"}` — 응답 키 이름은 camelCase다(`service.rs:266` 핸들러 +
@@ -439,7 +440,7 @@ curl -sS -o /tmp/pk.json -w '%{http_code}\n' https://relay.checka.cc/api/account
 **AT-4 트라이얼 활성화 멱등성 (curl, 로그인 토큰 필요)**
 
 ```bash
-curl -sS -X POST https://relay.checka.cc/api/account/v1/license/activate \
+curl -sS -X POST https://relay.ferryx.dev/api/account/v1/license/activate \
   -H "Authorization: Bearer $FERRYX_ACCOUNT_TOKEN" -H 'Content-Type: application/json' \
   -d '{"machineId":"<machine_id>","fingerprint":"sha256:<hex16>"}'
 ```
@@ -451,7 +452,7 @@ curl -sS -X POST https://relay.checka.cc/api/account/v1/license/activate \
 **AT-5 만료 제한은 새 세션에만 (curl + 데몬 세션 수)**
 
 ```bash
-curl -sS -o /tmp/attach.json -w '%{http_code}\n' -X POST https://relay.checka.cc/api/v1/attach/session \
+curl -sS -o /tmp/attach.json -w '%{http_code}\n' -X POST https://relay.ferryx.dev/api/v1/attach/session \
   -H "Authorization: Bearer $FERRYX_DEVICE_TOKEN" -H 'Content-Type: application/json' -d '{"machineId":"<machine_id>"}'
 cat /tmp/attach.json
 ```
@@ -984,12 +985,12 @@ curl -sS -i -X POST http://127.0.0.1:43822/api/account/v1/billing/webhook/paddle
 | env | 위치 | 의미 |
 |---|---|---|
 | `RESEND_API_KEY` | `mailer.rs:248` | 값이 있으면 Resend 경로 선택 |
-| `FERRYX_MAIL_FROM` | `mailer.rs:250-251` | From; 미설정 시 기본값 `Ferryx <login@checka.cc>` |
+| `FERRYX_MAIL_FROM` | `mailer.rs:250-251` | From; 미설정 시 기본값 `Ferryx <login@ferryx.dev>` |
 | `FERRYX_MAIL_WEBHOOK_URL` | `mailer.rs:255` | Resend 키가 없을 때 쓰는 웹훅 전송 URL |
 | `FERRYX_MAIL_WEBHOOK_TOKEN` | `mailer.rs:257` | 웹훅 Bearer 토큰(선택) |
 | `FERRYX_MAIL_DIR` | `mailer.rs:54` | FileMailer 기록 디렉터리; 없으면 `MAIL_FAILED` |
 
-계정/relay 보조 변수: `FERRYX_ACCOUNT_ORIGIN`(`account/origin.rs:16`), `FERRYX_ACCOUNT_DATA_DIR`(`origin.rs:38`), `FERRYX_ACCOUNT_ORIGIN_ALLOW_FERRYX_DEV`(`origin.rs:70`), `FERRYX_ACCOUNT_BIND`(`bin/account.rs:21`), `FERRYX_ACCOUNT_LOGIN_PER_HOUR`(`bin/account.rs:26`), `FERRYX_ACCOUNT_MAX_BODY_BYTES`(`bin/account.rs:30`), `FERRYX_ACCOUNT_RELAY_ORIGIN`(`bin/relay.rs:128`). relay 의 기본 origin 은 `https://relay.checka.cc`(`bin/relay.rs:126-127`).
+계정/relay 보조 변수: `FERRYX_ACCOUNT_ORIGIN`(`account/origin.rs:16`), `FERRYX_ACCOUNT_DATA_DIR`(`origin.rs:38`), `FERRYX_ACCOUNT_ORIGIN_ALLOW_FERRYX_DEV`(`origin.rs:70`), `FERRYX_ACCOUNT_BIND`(`bin/account.rs:21`), `FERRYX_ACCOUNT_LOGIN_PER_HOUR`(`bin/account.rs:26`), `FERRYX_ACCOUNT_MAX_BODY_BYTES`(`bin/account.rs:30`), `FERRYX_ACCOUNT_RELAY_ORIGIN`(`bin/relay.rs:128`). relay 의 기본 origin 은 `https://relay.ferryx.dev`(`bin/relay.rs:126-127`).
 
 ##### 0.4 로그인 · 디바이스 · 등록 (현재 플로우)
 - 매직링크 요청: 라우트 `service.rs:1115`, 핸들러 `service.rs:581-626`. 이메일 형식만 확인하고(`service.rs:587-592`) **사용자 조회 없이** `202 ACCEPTED`(`service.rs:625`)를 돌려준다. 코드는 SHA-256 해시로 저장(`service.rs:617`, `token_hash` `store.rs:27-33`), TTL `LOGIN_CODE_TTL = 600s`(`store.rs:10`).
@@ -1022,7 +1023,7 @@ curl -sS -i -X POST http://127.0.0.1:43822/api/account/v1/billing/webhook/paddle
 
 #### 2. 전달성 · 남용 방지
 
-- **도메인 인증**: 발신 도메인은 `FERRYX_MAIL_FROM`(`mailer.rs:250-251`)이 가리키는 도메인 하나이고, 전송 경로도 `mailer.rs:183` 한 곳이다. 따라서 SPF(Resend 포함)·DKIM(도메인 인증)·DMARC(`p=quarantine` 이상) 를 **도메인 단위로 한 번** 세팅하면 모든 letter 에 적용된다. `checka.cc` 를 계속 쓸 경우 기본 From 이 그 도메인이므로 DNS 작업 없이는 배포하지 않는다.
+- **도메인 인증**: 발신 도메인은 `FERRYX_MAIL_FROM`(`mailer.rs:250-251`)이 가리키는 도메인 하나이고, 전송 경로도 `mailer.rs:183` 한 곳이다. 따라서 SPF(Resend 포함)·DKIM(도메인 인증)·DMARC(`p=quarantine` 이상) 를 **도메인 단위로 한 번** 세팅하면 모든 letter 에 적용된다. 기본 From 도메인은 `ferryx.dev` 이므로 DNS 작업 없이는 배포하지 않는다.
 - **평판 격리**: 영수증·결제 실패·체험 종료는 거래성(transactional) 메일이다. 업셀/공지가 생기면 서브도메인과 List-Unsubscribe 를 분리하고, 거래성 메일에 마케팅 헤더를 붙이지 않는다(D3).
 - **bounce / complaint**: **신규** `POST /api/account/v1/mail/events` 로 Resend 웹훅을 받아(서명 검증 필수) `AccountStore.mail_suppressions`(신규)에 등록한다. hard bounce 1회, soft bounce 3회 누적으로 차단하고, 차단된 주소로는 `mail_log` 에 `suppressed` 만 남긴다. 웹훅 본문은 본문 상한 4096바이트(`store.rs:14`) 안에 들어와야 하므로 envelope 만 받고 원문은 받지 않는다.
 - **enumeration 방지**: 현재 `/login/request` 는 `email.contains('@')` 외에 store 를 조회하지 않는다(`service.rs:585-592`) — 존재/미존재 계정 모두 `202 ACCEPTED`(`service.rs:625`)다. `400`(`service.rs:587-592`)과 `429`(`service.rs:594-600`)도 계정 존재와 무관하다. 신규 letter 는 **인증된 세션**(`require_user` `service.rs:338`) 또는 **서명된 provider 웹훅**에서만 트리거하고, HTTP 응답 본문에 구독/체험 상태를 싣지 않는다(상태 조회는 `GET /api/account/v1/subscription`, bearer 필요).
@@ -1112,7 +1113,7 @@ curl -sS -i -X POST http://127.0.0.1:43822/api/account/v1/billing/webhook/paddle
 - 권고: **A**. 단, 판정 로직은 순수 함수로 분리한다: `due_letters(&AccountStore, now) -> Vec<(user_id, MailLetter, MailVars)>` 는 store 만 입력으로 받는다.
 - 근거: relay 는 이미 백그라운드 주기 작업을 스폰한다(`bin/relay.rs:124` 의 `spawn_session_reaper`) 그리고 `tokio::time::interval` 패턴이 코드베이스에 이미 있다(`remote/relay_client.rs:527`, `remote/server.rs:3717`). B 는 상태 조회·중복 방지 로직을 두 곳으로 쪼개고, 외부 잡에 계정 store 접근 권한을 새로 열어야 한다. A 의 재기동 누락 위험은 "due-scan 을 store 에서 매번 재계산" 규칙으로 제거한다(메모리 상태 없음).
 
-##### D3. 발신 도메인/아이덴티티 — 단일 `login@checka.cc` 유지 vs 결제용 서브도메인 분리
+##### D3. 발신 도메인/아이덴티티 — 단일 `login@ferryx.dev` 유지 vs 결제용 서브도메인 분리
 - 옵션 A: 현행 단일 주소(`mailer.rs:250-251`). 옵션 B: **결제/체험 메일을 별도 서브도메인·From 으로 분리**.
 - 권고: **B**, 코드 변경은 `FERRYX_MAIL_FROM` 값 교체 1건(`mailer.rs:250`)으로 끝낸다.
 - 근거: 지금은 매직링크·디바이스 승인·(신규) 영수증·독촉이 한 평판을 공유한다. 거래성 메일의 발신 평판이 마케팅/알림과 섞이면 영수증이 스팸으로 밀릴 수 있고, DKIM 셀렉터·SPF 를 분리하면 장애 격리가 된다.
@@ -1141,7 +1142,7 @@ curl -sS -i -X POST http://127.0.0.1:43822/api/account/v1/billing/webhook/paddle
    → `202`, `FERRYX_MAIL_DIR` 파일 수 `+1`.
 5. 요청 제한: 같은 주소로 6회 반복 → 6번째 `429`(`LOGIN_RATE_LIMITED`, `service.rs:595-599`), 다른 주소는 `202`.
 6. 전송 실패 경로: `FERRYX_MAIL_DIR` 미설정으로 4번을 실행 → `503`(`MAIL_FAILED`, `service.rs:606-610`, `mailer.rs:54`).
-7. 웹훅 멱등성(신규): `curl -s -o /dev/null -w '%{http_code}' -X POST https://relay.checka.cc/api/account/v1/billing/webhook -H 'content-type: application/json' -d '{"id":"evt_test_1","type":"invoice.paid","invoice_id":"in_test_1","user_id":"u_test"}'` 를 **두 번** 실행 → 둘 다 `200`, 메일 파일 수는 1회만 증가.
+7. 웹훅 멱등성(신규): `curl -s -o /dev/null -w '%{http_code}' -X POST https://relay.ferryx.dev/api/account/v1/billing/webhook -H 'content-type: application/json' -d '{"id":"evt_test_1","type":"invoice.paid","invoice_id":"in_test_1","user_id":"u_test"}'` 를 **두 번** 실행 → 둘 다 `200`, 메일 파일 수는 1회만 증가.
 8. 기존 회귀 앵커 유지: `cargo test --manifest-path src-tauri/Cargo.toml --lib account::service::tests::device_flow_lifecycle_request_poll_approve`(`service.rs:1173-1174`) → 계속 통과.
 
 </details>

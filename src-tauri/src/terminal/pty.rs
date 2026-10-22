@@ -604,10 +604,24 @@ impl PtyManager {
             .try_clone_reader()
             .map_err(|e| PtyError::IoError(format!("Failed to clone reader: {e}")))?;
 
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| PtyError::IoError(format!("Failed to take writer: {e}")))?;
+        // Unix: Ferryx's own writer, so a relinquish can let the session go without EOF
+        // (session.rs PtyInputWriter). Windows keeps portable-pty's ConPTY writer unchanged.
+        #[cfg(unix)]
+        let (writer, writer_eof): (Box<dyn std::io::Write + Send>, _) = {
+            let raw = pair
+                .master
+                .as_raw_fd()
+                .ok_or_else(|| PtyError::IoError("PTY descriptor unavailable".into()))?;
+            let (writer, eof) = super::session::PtyInputWriter::from_master_fd(raw)?;
+            (Box::new(writer), Some(eof))
+        };
+        #[cfg(not(unix))]
+        let (writer, writer_eof) = (
+            pair.master
+                .take_writer()
+                .map_err(|e| PtyError::IoError(format!("Failed to take writer: {e}")))?,
+            None,
+        );
 
         let child = pair
             .slave
@@ -628,6 +642,7 @@ impl PtyManager {
             reader_interrupt,
             child,
             writer,
+            writer_eof,
             reader,
             cols,
             rows,
@@ -711,7 +726,13 @@ impl PtyManager {
                     }
                 }
 
-                tokio::time::sleep(LIFECYCLE_POLL_INTERVAL).await;
+                // The reader's end wakes the watcher at once; the poll stays the fallback for
+                // exits only the child reports (adopted and Windows children).
+                let reader_finished = session.reader_finished_notify();
+                tokio::select! {
+                    _ = reader_finished.notified() => {}
+                    _ = tokio::time::sleep(LIFECYCLE_POLL_INTERVAL) => {}
+                }
             }
         });
     }
@@ -1327,6 +1348,9 @@ impl PtyManager {
         if !session.begin_closing() {
             return Err(PtyError::Other("Successor relinquish conflicts with session teardown".into()));
         }
+        // The child keeps running under the other daemon (the predecessor after an aborted
+        // adoption, the successor after a commit); the writer dropped below must not send it EOF.
+        session.keep_writer_from_sending_eof();
         session.release_paused_reader();
         session.close_output();
         if let Some(reader) = session.take_reader_task() {
@@ -1523,6 +1547,52 @@ mod tests {
         export.worktree_path = Some(std::path::PathBuf::from("other-workspace"));
         assert!(super::validate_transfer_identity(&expected, &export).is_err());
         assert!(super::validate_transfer_identity(&expected, &expected).is_ok());
+    }
+
+
+    /// run-q08 Q08: two consecutive aborted handovers (MissingFdKind, then GetsocknameMismatch)
+    /// left the predecessor with SESSION_NOT_FOUND for its local session. Each abort makes the
+    /// candidate relinquish the session it adopted and the predecessor resume it; the candidate's
+    /// relinquish must never act on the PTY the predecessor still owns, so after both the shell
+    /// still answers and a third export still offers it.
+    #[tokio::test]
+    async fn two_aborted_handovers_leave_the_predecessor_owning_and_serving_its_session() {
+        let source = super::PtyManager::new();
+        let (id, mut output) = source
+            .spawn(portable_pty::CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn PTY session");
+        for round in 1..=2 {
+            let candidate = super::PtyManager::new();
+            let export = source.export_session(&id).expect("predecessor exports its session");
+            candidate.expect_transferred_owner(export.snapshot()).expect("owner record");
+            let _adopted = candidate.adopt_transferred_export(export).expect("candidate adopts");
+            candidate
+                .relinquish_transferred_session(&id)
+                .await
+                .unwrap_or_else(|error| panic!("round {round}: candidate relinquish failed: {error}"));
+            assert_eq!(source.resume_paused_readers(), 1, "round {round}: predecessor resumes the session");
+        }
+        let third = source.export_session(&id).expect("a third transfer still exports the session");
+        drop(third);
+        assert_eq!(source.resume_paused_readers(), 1);
+        source
+            .write_input(&id, b"printf 'AFTER_ABORTS_%s\\n' 'SERVED'\n")
+            .expect("predecessor still accepts input");
+        let served = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = output.recv().await {
+                bytes.extend_from_slice(&chunk);
+                if bytes.windows(b"AFTER_ABORTS_SERVED".len()).any(|w| w == b"AFTER_ABORTS_SERVED") {
+                    return Ok(());
+                }
+            }
+            Err(String::from_utf8_lossy(&bytes).into_owned())
+        })
+        .await
+        .expect("bounded wait for the marker");
+        assert!(served.is_ok(), "the predecessor's shell ended after the aborts: {served:?}");
+        assert!(source.get_session(&id).is_some(), "the predecessor still owns the session");
+        source.close_session(&id).await.ok();
     }
 
     #[tokio::test]

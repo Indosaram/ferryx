@@ -284,6 +284,98 @@ describe("workspaceRestore coordinator", () => {
     expect(services.spawnTerminal).not.toHaveBeenCalled();
   });
 
+  it("restores the live snapshot, not the boot-time preload, when registration completes late", async () => {
+    const workspaceId = "ws-late-registration";
+    await preloadWorkspaceSnapshots(
+      [workspaceId],
+      async () => persistedSingleTerminal(workspaceId, "backend-boot"),
+      async () => [{ sessionId: "backend-boot" }],
+    );
+    const preloaded = getWorkspaceSnapshot(workspaceId)!;
+    // While the project stays unregistered the user keeps working: panes are replaced and
+    // the mounted store publishes each change to the snapshot cache.
+    const live: WorkspaceState = {
+      ...preloaded,
+      sessions: {
+        "sess-new": { ...preloaded.sessions["sess-1"], id: "sess-new", backendSessionId: "backend-new" },
+      },
+      layout: createLayoutState([{ id: "tab-new", sessionId: "sess-new", label: "main", kind: "terminal" }]),
+    };
+    setWorkspaceSnapshot(workspaceId, live);
+
+    const restoreWorkspace = vi.fn();
+    const { rerender, unmount } = renderHook(
+      ({ enabled }) =>
+        useWorkspaceRestore({
+          workspaceId,
+          recoveredFromHmr: false,
+          restoreWorkspace,
+          loadSessionFn: async () => {
+            throw new Error("preloaded restore must not read disk");
+          },
+          listLiveBackendSessionIdsFn: async () => [],
+          enabled,
+        }),
+      { initialProps: { enabled: false } },
+    );
+    expect(restoreWorkspace).not.toHaveBeenCalled();
+
+    rerender({ enabled: true });
+
+    expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+    const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceState;
+    expect(restored.layout.tabs.map((tab) => tab.id)).toEqual(["tab-new"]);
+    expect(Object.keys(restored.sessions)).toEqual(["sess-new"]);
+    expect(getWorkspaceRestoreStatus(workspaceId)).toBe("restored");
+    unmount();
+  });
+
+  it("never replaces a live layout with the disk layout when a disk restore runs late", async () => {
+    const workspaceId = "ws-live-layout";
+    const live: WorkspaceState = {
+      workspaceId,
+      worktrees: [{ path: "/repo/test", branch: "main", head: "111", bare: false, detached: false, locked: null, prunable: null }],
+      activeWorktreePath: "/repo/test",
+      sessions: {
+        "sess-new": {
+          id: "sess-new",
+          workspaceId,
+          worktree: { wsId: workspaceId, slug: "main" },
+          backendSessionId: "backend-new",
+          worktreePath: "/repo/test",
+          cwd: "/repo/test",
+          lifecycle: "working",
+        },
+      },
+      layout: createLayoutState([{ id: "tab-new", sessionId: "sess-new", label: "main", kind: "terminal" }]),
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+    };
+    setWorkspaceSnapshot(workspaceId, live);
+    // A previous restore attempt failed, so the coordinator is allowed to read disk again.
+    setWorkspaceRestoreStatus(workspaceId, "failed");
+
+    const restoreWorkspace = vi.fn();
+    const { unmount } = renderHook(() =>
+      useWorkspaceRestore({
+        workspaceId,
+        recoveredFromHmr: false,
+        restoreWorkspace,
+        loadSessionFn: async () => persistedSingleTerminal(workspaceId, "backend-stale"),
+        listLiveBackendSessionIdsFn: async () => [{ sessionId: "backend-stale" }],
+      }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getWorkspaceRestoreStatus(workspaceId)).toBe("restored");
+    expect(restoreWorkspace).not.toHaveBeenCalled();
+    expect(getWorkspaceSnapshot(workspaceId)).toBe(live);
+    unmount();
+  });
+
   it("transitions from idle -> loading -> restored on successful disk restore", async () => {
     const workspaceId = "ws-test";
     const restoreWorkspace = vi.fn();

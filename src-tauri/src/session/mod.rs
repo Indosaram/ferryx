@@ -205,10 +205,17 @@ pub fn save_session_to_path(
                 format!("Failed to read pre-migration session: {e}"),
             )
         })?;
-        match serde_json::from_slice::<serde_json::Value>(&original) {
+        // Only the schema version decides migration; every other field is skipped unparsed.
+        #[derive(Deserialize)]
+        struct VersionOnly {
+            #[serde(default)]
+            version: Option<serde_json::Value>,
+        }
+        match serde_json::from_slice::<VersionOnly>(&original) {
             Ok(previous) => {
                 let version = previous
-                    .get("version")
+                    .version
+                    .as_ref()
                     .and_then(serde_json::Value::as_u64)
                     .ok_or_else(|| {
                         IpcError::new(IpcErrorCode::ParseError, "Missing session version")
@@ -245,7 +252,12 @@ pub fn save_session_to_path(
                             "Pre-v3 backup differs from current legacy session",
                         ));
                     }
-                    File::open(&backup)
+                    // FlushFileBuffers (sync_all on Windows) needs a handle with write access; a
+                    // read-only open fails with ERROR_ACCESS_DENIED (Windows QA run-q11).
+                    fs::OpenOptions::new()
+                        .read(true)
+                        .write(cfg!(windows))
+                        .open(&backup)
                         .and_then(|file| file.sync_all())
                         .map_err(|e| {
                             IpcError::new(
@@ -253,6 +265,10 @@ pub fn save_session_to_path(
                                 format!("Failed to sync pre-v3 backup: {e}"),
                             )
                         })?;
+                    // A directory cannot be opened as a file on Windows (File::open fails), so the
+                    // directory-entry fsync is Unix-only, as in session_service.rs's publish; the
+                    // backup bytes themselves were synced above on every platform.
+                    #[cfg(unix)]
                     if let Some(parent) = path.parent() {
                         File::open(parent)
                             .and_then(|dir| dir.sync_all())
@@ -264,6 +280,14 @@ pub fn save_session_to_path(
                             })?;
                     }
                 }
+            }
+            // Well-formed JSON of the wrong shape (no object) was always a version error, not
+            // corruption; only syntactically unreadable bytes are preserved and replaced.
+            Err(e) if e.classify() == serde_json::error::Category::Data => {
+                return Err(IpcError::new(
+                    IpcErrorCode::ParseError,
+                    "Missing session version",
+                ));
             }
             Err(e) => {
                 // Unreadable bytes (mixed/truncated publish, disk fault) must not block
@@ -499,6 +523,25 @@ mod tests {
             serde_json::Value::String(marker.to_string()),
         );
         session
+    }
+
+    /// The first v3 save over a v2 file (an upgraded install, or a restore seeded at v2) backs the
+    /// old file up and must then publish. Windows cannot open a directory as a file, so a parent
+    /// directory fsync there failed this save with IO_ERROR after the backup already existed, and
+    /// every later save failed the same way (Windows QA run-q11: the restored pane never attached).
+    #[test]
+    fn test_first_v3_save_over_v2_session_publishes_and_keeps_backup() {
+        let dir = tempdir().unwrap();
+        let session_file = dir.path().join("session_state.json");
+        let legacy = br#"{"version":2,"timestamp":1,"activeWorkspaceId":"w","workspaces":{}}"#.to_vec();
+        fs::write(&session_file, &legacy).unwrap();
+
+        save_session_to_path(&session_file, &minimal_v3_session("upgraded")).unwrap();
+
+        let loaded = load_session_from_path(&session_file).unwrap().unwrap();
+        assert_eq!(loaded.version, 3);
+        assert_eq!(loaded.extra["testMarker"], "upgraded");
+        assert_eq!(fs::read(session_file.with_extension("json.pre-v3")).unwrap(), legacy);
     }
 
     #[test]

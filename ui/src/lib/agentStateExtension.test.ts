@@ -1,7 +1,9 @@
 // @vitest-environment node
-import { readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { transformSync } from "esbuild";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -15,6 +17,7 @@ type Captured = { state: string; detail?: string };
 
 const captured: Captured[] = [];
 let moduleCounter = 0;
+const moduleDir = mkdtempSync(path.join(os.tmpdir(), "ferryx-ext-test-"));
 let server: net.Server;
 
 // Re-checked whenever the socket server records a payload, so waits resolve on the data event
@@ -52,8 +55,10 @@ async function loadExtension() {
   const source = readFileSync(EXTENSION_PATH, "utf8");
   const compiled = transformSync(source, { loader: "ts", format: "esm", target: "es2022" }).code;
   moduleCounter += 1;
-  const url = `data:text/javascript;base64,${Buffer.from(compiled, "utf8").toString("base64")}#${moduleCounter}`;
-  const mod = await import(url);
+  // Bun's resolver rejects long data: URLs (NameTooLong), so each load gets its own file.
+  const modulePath = path.join(moduleDir, `ferryx-agent-state-${moduleCounter}.mjs`);
+  writeFileSync(modulePath, compiled, "utf8");
+  const mod = await import(pathToFileURL(modulePath).href);
   return mod.default as (pi: unknown) => void;
 }
 
@@ -105,7 +110,6 @@ describe("ferryx-agent-state extension", () => {
           }
         }
       });
-      socket.end();
     });
     await new Promise<void>((resolve) => server.listen(SOCKET_PATH, resolve));
   });
@@ -115,6 +119,7 @@ describe("ferryx-agent-state extension", () => {
     try {
       rmSync(SOCKET_PATH);
     } catch {}
+    rmSync(moduleDir, { recursive: true, force: true });
   });
 
   beforeEach(() => {

@@ -673,6 +673,28 @@ impl Drop for SpawnOwnerGuard {
 mod spawn_owner_tests {
     use super::*;
 
+    /// run-int1 Q08b: a predecessor that committed (here with nothing retained) stops accepting
+    /// for good, and its accept loops are told to close their listener copies instead of parking
+    /// on a gate that never reopens with the socket still connectable.
+    #[tokio::test]
+    async fn committed_handover_ends_every_gated_accept_loop() {
+        let (_root, manager, terminals, _legacy) = committing_fixture();
+        let parked = {
+            let manager = Arc::clone(&manager);
+            tokio::spawn(async move { manager.gated_accept(std::future::pending::<()>).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!parked.is_finished(), "an open gate keeps accepting");
+        let commit = Arc::clone(&manager);
+        tokio::task::spawn_blocking(move || commit.commit_handover_v5(&terminals)).await.unwrap().unwrap();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), parked)
+            .await
+            .expect("the accept loop must end once the listeners are handed over")
+            .unwrap();
+        assert_eq!(ended, None);
+        assert_eq!(manager.gated_accept(std::future::pending::<()>).await, None);
+    }
+
     fn committing_fixture() -> (tempfile::TempDir, Arc<HandoverManager>, Arc<TerminalService>, PathBuf) {
         let root = tempfile::tempdir().unwrap();
         let manager = Arc::new(HandoverManager::new(root.path().join("daemon.sock")));
@@ -1009,6 +1031,11 @@ pub struct HandoverManager {
     /// listeners. Closed while a commit is decided (Committing) and permanently once the
     /// decision is Retired, so a retired predecessor never accepts on a socket it handed over.
     accept_gate: tokio::sync::watch::Sender<bool>,
+    /// Set once the commit decision is written and the public listeners belong to the
+    /// successor. Every accept loop then closes its own listener copy: a draining predecessor
+    /// that kept it open left the path connectable with nobody accepting, so after the owner
+    /// retired admission saw "lock free, endpoint Silent" and started nothing (run-int1 Q08b).
+    listeners_handed_over: tokio::sync::watch::Sender<bool>,
     /// Accepts completed per public listener (canonical, control, agent-state); exposed on the
     /// QA channel so a candidate can prove it accepted nothing before commit.
     accept_counts: [std::sync::atomic::AtomicU64; 3],
@@ -1134,6 +1161,7 @@ impl HandoverManager {
             #[cfg(unix)]
             inherited_listeners: Mutex::new(InheritedListeners::default()),
             accept_gate: tokio::sync::watch::channel(true).0,
+            listeners_handed_over: tokio::sync::watch::channel(false).0,
             accept_counts: Default::default(),
             spawn_owners: std::sync::atomic::AtomicUsize::new(0),
             legacy_socket_path: Arc::new(RwLock::new(None)),
@@ -1401,6 +1429,38 @@ impl HandoverManager {
         gate.wait_for(|open| !*open)
             .await
             .expect("accept gate sender lives in HandoverManager");
+    }
+
+    /// The next accept on a public listener under the accept gate: Some while this daemon may
+    /// serve, None once its listeners were handed to a successor (the caller then drops its
+    /// listener). While the gate is closed for a commit the call waits for either outcome.
+    pub(crate) async fn gated_accept<T, F>(&self, mut accept: impl FnMut() -> F) -> Option<T>
+    where
+        F: std::future::Future<Output = T>,
+    {
+        loop {
+            if *self.listeners_handed_over.borrow() {
+                return None;
+            }
+            if !self.accept_gate_open() {
+                let mut handed_over = self.listeners_handed_over.subscribe();
+                tokio::select! {
+                    () = self.wait_accept_open() => {}
+                    _ = handed_over.wait_for(|done| *done) => {}
+                }
+                continue;
+            }
+            tokio::select! {
+                accepted = accept() => return Some(accepted),
+                () = self.wait_accept_closed() => {}
+            }
+        }
+    }
+
+    /// True while this daemon still holds its daemon lock files: it is the owner, so the public
+    /// endpoint files on disk were published by it (only a lock holder publishes them).
+    pub(crate) fn holds_lock_files(&self) -> bool {
+        self.canonical_lock_files.lock().is_some()
     }
 
     pub(crate) fn note_accept(&self, role: AuthorityListenerRole) {
@@ -1684,6 +1744,7 @@ impl HandoverManager {
         #[cfg(unix)]
         self.release_authority_listeners();
         self.set_accept_gate(false);
+        self.listeners_handed_over.send_replace(true);
 
         let callbacks = std::mem::take(&mut *self.commit_callbacks.lock());
         for cb in callbacks {

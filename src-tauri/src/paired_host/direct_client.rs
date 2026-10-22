@@ -24,7 +24,8 @@ pub(crate) fn request_base(host: &HostView) -> Result<RequestBase, ClientError> 
         }
     }
     Ok(RequestBase {
-        url: Url::parse(&host.host_id).map_err(|_| invalid())?,
+        url: Url::parse(&crate::remote::relay_client::live_relay_url(&host.host_id))
+            .map_err(|_| invalid())?,
         direct_epoch: None,
     })
 }

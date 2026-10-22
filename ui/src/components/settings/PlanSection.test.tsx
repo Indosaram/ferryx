@@ -88,6 +88,7 @@ function renderPlan(props: {
   onUnavailable?: () => void;
   now?: number;
   accountSessionToken?: string | null;
+  paidPlansOpen?: boolean;
 } = {}) {
   return render(
     <PlanSection accountOrigin={ORIGIN} accountSessionToken={TOKEN} now={NOW} {...props} />,
@@ -206,7 +207,7 @@ describe("PlanSection entitlement states", () => {
     expect(screen.queryByTestId("plan-grace-banner")).toBeNull();
   });
 
-  it("keeps the upgrade path enabled while remote access is stopped", async () => {
+  it("keeps the upgrade path enabled while remote access is stopped and paid plans are open", async () => {
     stubFetch([], () =>
       jsonResponse(
         wireEntitlement({
@@ -218,7 +219,7 @@ describe("PlanSection entitlement states", () => {
       ),
     );
 
-    renderPlan();
+    renderPlan({ paidPlansOpen: true });
     await settledTestId("plan-summary");
 
     expect(screen.getByRole("button", { name: "Pro monthly" })).toBeEnabled();
@@ -345,7 +346,7 @@ describe("PlanSection deployment and failure handling", () => {
     });
 
     const { rerender } = render(
-      <PlanSection accountOrigin={ORIGIN} accountSessionToken={TOKEN} now={NOW} />,
+      <PlanSection accountOrigin={ORIGIN} accountSessionToken={TOKEN} now={NOW} paidPlansOpen />,
     );
     await settledTestId("plan-summary");
 
@@ -356,6 +357,7 @@ describe("PlanSection deployment and failure handling", () => {
         accountOrigin="https://new-origin.example.test"
         accountSessionToken="new-token"
         now={NOW}
+        paidPlansOpen
       />,
     );
 
@@ -380,7 +382,7 @@ describe("PlanSection deployment and failure handling", () => {
     });
 
     const { rerender } = render(
-      <PlanSection accountOrigin={ORIGIN} accountSessionToken={TOKEN} now={NOW} />,
+      <PlanSection accountOrigin={ORIGIN} accountSessionToken={TOKEN} now={NOW} paidPlansOpen />,
     );
     await settledTestId("plan-summary");
 
@@ -395,6 +397,7 @@ describe("PlanSection deployment and failure handling", () => {
         accountOrigin={ORIGIN}
         accountSessionToken="different-token-2"
         now={NOW}
+        paidPlansOpen
       />,
     );
 
@@ -578,7 +581,7 @@ describe("PlanSection checkout and quantity", () => {
       opened.resolve(url);
     });
 
-    renderPlan();
+    renderPlan({ paidPlansOpen: true });
     await settledTestId("plan-summary");
 
     const button = screen.getByRole("button", { name: "Pro yearly" });
@@ -607,7 +610,7 @@ describe("PlanSection checkout and quantity", () => {
       return jsonResponse(wireEntitlement({ machinesUsed: 2 }));
     });
 
-    renderPlan();
+    renderPlan({ paidPlansOpen: true });
     await settledTestId("plan-summary");
 
     fireEvent.click(screen.getByRole("button", { name: "Pro monthly" }));
@@ -632,7 +635,7 @@ describe("PlanSection checkout and quantity", () => {
       );
     });
 
-    renderPlan();
+    renderPlan({ paidPlansOpen: true });
     await settledTestId("plan-summary");
 
     const usageSignal = observeDom(() => {
@@ -672,7 +675,7 @@ describe("PlanSection checkout and quantity", () => {
       );
     });
 
-    renderPlan();
+    renderPlan({ paidPlansOpen: true });
     await settledTestId("plan-summary");
 
     fireEvent.change(screen.getByLabelText("Additional machine packs"), {
@@ -743,7 +746,7 @@ describe("PlanSection team management", () => {
       );
     });
 
-    renderPlan();
+    renderPlan({ paidPlansOpen: true });
     await settledTestId("plan-summary");
     await settledTestId("plan-member-row");
 
@@ -778,7 +781,7 @@ describe("PlanSection team management", () => {
       );
     });
 
-    renderPlan();
+    renderPlan({ paidPlansOpen: true });
 
     await settledCount("plan-member-row", 2);
     expect(screen.getByTestId("plan-members-card")).toBeInTheDocument();
@@ -1021,7 +1024,7 @@ describe("PlanSection team management", () => {
     stubFetch([], () =>
       jsonResponse(wireEntitlement({ plan: "pro_monthly", machineLimit: 10, hostPacks: 0 })),
     );
-    renderPlan();
+    renderPlan({ paidPlansOpen: true });
     await settledTestId("plan-summary");
 
     const seats = screen.getByLabelText("Team seats") as HTMLInputElement;
@@ -1040,5 +1043,78 @@ describe("PlanSection team management", () => {
     expect(packs.value).toBe("");
     fireEvent.change(packs, { target: { value: "12" } });
     expect(packs.value).toBe("12");
+  });
+});
+
+describe("PlanSection while paid plans are coming soon", () => {
+  it("labels Pro and Team as coming soon and offers no purchase or quantity controls", async () => {
+    stubFetch([], () =>
+      jsonResponse(wireEntitlement({ plan: "free", machineLimit: 1, machinesUsed: 1 })),
+    );
+
+    renderPlan();
+
+    const summary = await settledTestId("plan-summary");
+    expect(summary).toHaveAttribute("data-plan", "free");
+    expect(screen.getByTestId("plan-usage").textContent).toContain("1 of 1");
+    expect(screen.getByTestId("plan-coming-soon-pro")).toHaveTextContent("Coming soon");
+    expect(screen.getByTestId("plan-coming-soon-team")).toHaveTextContent("Coming soon");
+    expect(screen.getByTestId("plan-coming-soon-note")).toBeInTheDocument();
+    for (const name of ["Pro monthly", "Pro yearly", "Team monthly", "Team yearly", "Apply seats", "Apply packs"]) {
+      expect(screen.queryByRole("button", { name })).toBeNull();
+    }
+    expect(screen.queryByLabelText("Team seats")).toBeNull();
+    expect(screen.queryByLabelText("Additional machine packs")).toBeNull();
+  });
+
+  it("follows the account server's paid-plan switch when no override is passed", async () => {
+    stubFetch([], () => jsonResponse(wireEntitlement({ paidPlansOpen: true })));
+
+    renderPlan();
+
+    await settledTestId("plan-summary");
+    expect(screen.getByRole("button", { name: "Pro monthly" })).toBeInTheDocument();
+    expect(screen.queryByTestId("plan-coming-soon-pro")).toBeNull();
+  });
+
+  it("keeps the manage link and opens the pricing docs from the coming-soon note", async () => {
+    stubFetch([], () =>
+      jsonResponse(wireEntitlement({ plan: "free", manageUrl: CHECKOUT_URL })),
+    );
+    const opened = deferred<string>();
+    browserNative.openExternalUrl.mockImplementation(async (url: string) => {
+      opened.resolve(url);
+    });
+
+    renderPlan();
+    await settledTestId("plan-summary");
+
+    expect(screen.getByRole("button", { name: /Manage billing/ })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "See planned pricing" }));
+
+    expect(await settle(opened)).toBe("https://ferryx.dev/docs/pricing/");
+  });
+
+  it("shows the coming-soon message when checkout is refused with PLAN_COMING_SOON", async () => {
+    stubFetch([], (url) => {
+      if (url.endsWith("/billing/checkout")) {
+        return jsonResponse(
+          { code: "PLAN_COMING_SOON", message: "Paid plans are coming soon", details: { plan: "pro_monthly" } },
+          403,
+        );
+      }
+      return jsonResponse(wireEntitlement());
+    });
+
+    // A client that still believes paid plans are open must surface the server's refusal.
+    renderPlan({ paidPlansOpen: true });
+    await settledTestId("plan-summary");
+
+    fireEvent.click(screen.getByRole("button", { name: "Pro monthly" }));
+
+    const notice = await settledTestId("plan-action-error");
+    expect(notice).toHaveAttribute("data-code", "PLAN_COMING_SOON");
+    expect(notice).toHaveTextContent("Paid plans are coming soon");
+    expect(browserNative.openExternalUrl).not.toHaveBeenCalled();
   });
 });
