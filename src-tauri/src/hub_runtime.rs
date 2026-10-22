@@ -124,15 +124,23 @@ impl TaskLauncher for DaemonBridge {
     }
 }
 
-/// `ferryx hub migrate --from-omo <db> [--dry-run]` copies live gateway state.
+/// `ferryx hub migrate [--from-omo <db>] [--dry-run]` copies live gateway state.
+/// `ferryx hub stop` and `ferryx hub start` talk to the hub control socket.
+/// They do not restart the daemon, so live PTY sessions stay up.
 /// The report is row counts only.
 pub fn run_hub_cli(args: &[String]) -> i32 {
     let mut source = None;
     let mut dry = false;
     let mut rest = args.iter().skip(2);
-    if rest.next().map(String::as_str) != Some("migrate") {
-        eprintln!("usage: ferryx hub migrate --from-omo <db> [--dry-run]");
-        return 2;
+    match rest.next().map(String::as_str) {
+        Some("stop") => return hub_control(ferryx_hub::control::ControlOp::Stop),
+        Some("start") => return hub_control(ferryx_hub::control::ControlOp::Start),
+        Some("migrate") => {}
+        _ => {
+            eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--dry-run]");
+            eprintln!("       ferryx hub stop | start");
+            return 2;
+        }
     }
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -147,10 +155,23 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             }
         }
     }
-    let Some(source) = source else {
-        eprintln!("usage: ferryx hub migrate --from-omo <db> [--dry-run]");
-        return 2;
+    let source = match source {
+        Some(path) => path,
+        None => {
+            let home = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default();
+            match ferryx_hub::import::discover_omo_database(&home) {
+                Some(path) => path,
+                None => {
+                    eprintln!("omo database not found. Pass --from-omo PATH.");
+                    eprintln!("Looked at the gateway plist WorkingDirectory, ~/code/project/omon-gateway/omon_gateway.db, then ~/.omon/gateway.db.");
+                    return 1;
+                }
+            }
+        }
     };
+    println!("source {}", source.display());
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -194,6 +215,8 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
                 println!("allowlist {}", report.allowlist);
                 println!("bot_profiles {}", report.bot_profiles);
                 println!("lanes {}", report.lanes);
+                println!("lane_threads {}", report.lane_threads);
+                println!("cron_jobs_enabled {}", report.cron_jobs_enabled);
                 if let Some(channel) = report.slack_home_channel.as_deref() {
                     println!("slack_home_channel {channel}");
                 }
@@ -208,6 +231,42 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             }
         }
     })
+}
+
+fn hub_control(op: ferryx_hub::control::ControlOp) -> i32 {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let path = ferryx_hub::control::control_socket(&home);
+    #[cfg(unix)]
+    {
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("runtime: {error}");
+                return 1;
+            }
+        };
+        return runtime.block_on(async move {
+            match ferryx_hub::control::send_control(&path, op).await {
+                Ok(reply) => {
+                    println!("{}", reply.trim());
+                    0
+                }
+                Err(error) => {
+                    eprintln!("hub control: {error}");
+                    eprintln!("the daemon was not restarted, so live PTY sessions were left running");
+                    1
+                }
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (op, path);
+        eprintln!("hub control uses a unix socket");
+        1
+    }
 }
 
 /// Opens the hub after the daemon has announced ready. Failures are returned to the caller,
@@ -238,13 +297,51 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
             }
         }
     }
-    let mut events = server.remote_state().agent_events.subscribe();
-    let watch_hub = Arc::clone(&hub);
-    let watch_bridge = bridge.clone();
-    tokio::spawn(async move {
+    if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_schema(&hub.pool).await {
+        tracing::warn!(%error, "kibitzer schema was not created");
+    }
+    let launch = HubLaunch {
+        server,
+        config,
+        hub,
+        bridge,
+        #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
+        profiles,
+        #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
+        meta_session_id,
+    };
+    let running = Arc::new(tokio::sync::Mutex::new(Some(spawn_generation(&launch).await)));
+    serve_control(running, launch);
+    tracing::info!("ferryx hub is up");
+    Ok(())
+}
+
+#[derive(Clone)]
+struct HubLaunch {
+    server: Arc<DaemonServer>,
+    config: HubConfig,
+    hub: Arc<Hub>,
+    bridge: Arc<DaemonBridge>,
+    #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
+    profiles: ferryx_hub::chat::router::ProfileRouter,
+    #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
+    meta_session_id: String,
+}
+
+struct Generation {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+async fn spawn_generation(launch: &HubLaunch) -> Generation {
+    let mut tasks = Vec::new();
+    let mut events = launch.server.remote_state().agent_events.subscribe();
+    let watch_hub = Arc::clone(&launch.hub);
+    let watch_bridge = launch.bridge.clone();
+    let model_url = launch.config.supervisor_listen_url.clone();
+    let lead = launch.config.meta_session_id.clone().unwrap_or_else(|| "meta".into());
+    tasks.push(tokio::spawn(async move {
         let mut answered = std::collections::HashSet::new();
         let mut runs = std::collections::HashMap::new();
-        let mut last_nudge = None;
         loop {
             match events.recv().await {
                 Ok(observation) => {
@@ -253,21 +350,24 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
                     if let Err(error) = on_agent_event(&watch_hub, watch_bridge.as_ref(), &mut answered, run, observation).await {
                         tracing::debug!(%error, "hub observer event was not applied");
                     }
-                    if idle && ferryx_hub::lanes::kibitzer::take_nudge_now(&mut last_nudge) {
-                        tracing::info!("kibitzer nudge due");
+                    if idle {
+                        if let Some(url) = model_url.clone().filter(|url| !url.trim().is_empty()) {
+                            let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
+                            let model = ferryx_hub::meta::backend::UrlModel::new(url);
+                            if let Err(error) = ferryx_hub::lanes::kibitzer::evaluate(&watch_hub.pool, &lead, &judge, &model).await {
+                                tracing::debug!(%error, "kibitzer evaluation failed");
+                            }
+                        }
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
-    if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_schema(&hub.pool).await {
-        tracing::warn!(%error, "kibitzer schema was not created");
-    }
-    let addr = config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
-    let router = ferryx_hub::http::router(hub.pool.clone(), ferryx_hub::http::web_root());
-    tokio::spawn(async move {
+    }));
+    let addr = launch.config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
+    let router = ferryx_hub::http::router(launch.hub.pool.clone(), ferryx_hub::http::web_root());
+    tasks.push(tokio::spawn(async move {
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(listener) => {
                 tracing::info!(%addr, "hub http listening");
@@ -277,34 +377,78 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
             }
             Err(error) => tracing::warn!(%error, %addr, "hub http did not bind"),
         }
-    });
-    if let Some(url) = (!config.supervisor_pane).then(|| config.supervisor_listen_url.clone()).flatten() {
-        let command = config.supervisor_command.clone();
+    }));
+    if let Some(url) = (!launch.config.supervisor_pane).then(|| launch.config.supervisor_listen_url.clone()).flatten() {
+        let command = launch.config.supervisor_command.clone();
         let state_dir = ferryx_hub::meta::supervisor::state_dir_from_home().unwrap_or_else(|| std::path::PathBuf::from(".ferryx/hub"));
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             let supervisor = ferryx_hub::meta::supervisor::DaemonSupervisor::new(url, command, state_dir);
             if let Err(error) = supervisor.ensure().await {
                 tracing::warn!(%error, "omo app-server was not started");
             } else {
                 tracing::info!("omo app-server backend is armed");
             }
-        });
+        }));
     }
+    #[cfg(unix)]
+    {
+        let home = home_dir();
+        for path in ferryx_hub::schedule::native_socket_paths(&home) {
+            let pool = launch.hub.pool.clone();
+            let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+            tasks.push(tokio::spawn(async move {
+                if let Err(error) = ferryx_hub::schedule::serve_native_socket(path, pool, stop_rx).await {
+                    tracing::warn!(%error, "cron socket was not bound");
+                }
+            }));
+        }
+    }
+    let cron_pool = launch.hub.pool.clone();
+    tasks.push(tokio::spawn(async move {
+        loop {
+            match ferryx_hub::schedule::drive_due_now(&cron_pool).await {
+                Ok(deliveries) => {
+                    for item in deliveries {
+                        let error = post_cron_delivery(&item).await;
+                        if let Err(error) = ferryx_hub::schedule::remember_delivery(
+                            &cron_pool,
+                            &item.job_id,
+                            error.as_deref(),
+                        )
+                        .await
+                        {
+                            tracing::warn!(%error, job_id = %item.job_id, "cron delivery was not recorded");
+                        }
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "cron drive failed"),
+            }
+            let wait = ferryx_hub::schedule::next_wait_now(&cron_pool)
+                .await
+                .unwrap_or(std::time::Duration::from_secs(60 * 60));
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = ferryx_hub::schedule::scheduler_wake().notified() => {}
+            }
+        }
+    }));
     #[cfg(feature = "hub-slack")]
     if ferryx_hub::chat::slack::app_token().is_some() {
-        let owner = config.owner_slack_id.clone().unwrap_or_default();
-        let slack_bridge = bridge.clone();
-        let slack_profiles = profiles.clone();
-        let slack_meta = meta_session_id.clone();
-        tokio::spawn(async move {
+        let owner = launch.config.owner_slack_id.clone().unwrap_or_default();
+        let slack_bridge = launch.bridge.clone();
+        let slack_profiles = launch.profiles.clone();
+        let slack_meta = launch.meta_session_id.clone();
+        let slack_pool = launch.hub.pool.clone();
+        tasks.push(tokio::spawn(async move {
             let owner_for_frames = owner.clone();
             if let Err(error) = ferryx_hub::chat::slack::connect_socket_mode(move |text| {
                 let bridge = slack_bridge.clone();
                 let profiles = slack_profiles.clone();
                 let meta = slack_meta.clone();
                 let owner = owner_for_frames.clone();
+                let pool = slack_pool.clone();
                 async move {
-                    if let Err(error) = ferryx_hub::chat::slack::apply_frame(&text, &owner, &meta, &profiles, bridge.as_ref()).await {
+                    if let Err(error) = ferryx_hub::chat::slack::apply_frame_with(&text, &owner, &meta, &profiles, bridge.as_ref(), Some(&pool), std::env::var("SLACK_BOT_USER_ID").ok().as_deref()).await {
                         tracing::warn!(%error, "slack frame was not applied");
                     }
                 }
@@ -313,14 +457,14 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
             {
                 tracing::warn!(%error, "slack socket mode stopped");
             }
-        });
+        }));
     }
     #[cfg(feature = "hub-discord")]
     if ferryx_hub::chat::discord::bot_token().is_some() {
-        let discord_bridge = bridge.clone();
-        let discord_profiles = profiles.clone();
-        let discord_meta = meta_session_id.clone();
-        tokio::spawn(async move {
+        let discord_bridge = launch.bridge.clone();
+        let discord_profiles = launch.profiles.clone();
+        let discord_meta = launch.meta_session_id.clone();
+        tasks.push(tokio::spawn(async move {
             if let Err(error) = ferryx_hub::chat::discord::connect_gateway(move |frame| {
                 let bridge = discord_bridge.clone();
                 let profiles = discord_profiles.clone();
@@ -335,10 +479,123 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
             {
                 tracing::warn!(%error, "discord gateway stopped");
             }
+        }));
+    }
+    Generation { tasks }
+}
+
+async fn post_cron_delivery(item: &ferryx_hub::schedule::DueDelivery) -> Option<String> {
+    let mut errors = Vec::new();
+    for target in &item.targets {
+        let posted = match target.platform.as_str() {
+            "slack" => post_slack_delivery(&target.chat_id, target.thread_id.as_deref(), &item.text).await,
+            "discord" => post_discord_delivery(&target.chat_id, &item.text).await,
+            other => Err(ferryx_hub::HubError::message(format!(
+                "unconfigured delivery transport: {other}"
+            ))),
+        };
+        match posted {
+            Ok(true) => {}
+            Ok(false) => errors.push(format!(
+                "unconfigured delivery transport: {}",
+                target.platform
+            )),
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join("; "))
+    }
+}
+
+async fn post_slack_delivery(channel: &str, thread: Option<&str>, text: &str) -> ferryx_hub::Result<bool> {
+    #[cfg(feature = "hub-slack")]
+    {
+        return ferryx_hub::chat::slack::deliver(channel, thread, text).await;
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (channel, thread, text);
+        Ok(false)
+    }
+}
+
+async fn post_discord_delivery(channel: &str, text: &str) -> ferryx_hub::Result<bool> {
+    #[cfg(feature = "hub-discord")]
+    {
+        return ferryx_hub::chat::discord::deliver(channel, text).await;
+    }
+    #[cfg(not(feature = "hub-discord"))]
+    {
+        let _ = (channel, text);
+        Ok(false)
+    }
+}
+
+fn home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: HubLaunch) {
+    #[cfg(unix)]
+    {
+        let path = ferryx_hub::control::control_socket(&home_dir());
+        tokio::spawn(async move {
+            let listener = match ferryx_hub::schedule::bind_native_socket(&path).await {
+                Ok(listener) => listener,
+                Err(error) => {
+                    tracing::warn!(%error, "hub control socket was not bound");
+                    return;
+                }
+            };
+            tracing::info!(path = %path.display(), "hub control socket listening");
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        tracing::warn!(%error, "hub control accept failed");
+                        continue;
+                    }
+                };
+                let running = Arc::clone(&running);
+                let launch = launch.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+                    let mut reader = tokio::io::BufReader::new(stream);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.is_err() {
+                        return;
+                    }
+                    let reply = match ferryx_hub::control::parse_control(&line) {
+                        Ok(ferryx_hub::control::ControlOp::Stop) => {
+                            if let Some(generation) = running.lock().await.take() {
+                                for task in generation.tasks {
+                                    task.abort();
+                                }
+                            }
+                            "{\"status\":\"ok\",\"op\":\"stop\"}\n"
+                        }
+                        Ok(ferryx_hub::control::ControlOp::Start) => {
+                            let mut slot = running.lock().await;
+                            if slot.is_none() {
+                                *slot = Some(spawn_generation(&launch).await);
+                            }
+                            "{\"status\":\"ok\",\"op\":\"start\"}\n"
+                        }
+                        Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop or start\"}\n",
+                    };
+                    let mut stream = reader.into_inner();
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                });
+            }
         });
     }
-    tracing::info!("ferryx hub is up");
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = (running, launch);
+    }
 }
 
 /// Sequence of the first observation in this session's current state run. A blocked pane

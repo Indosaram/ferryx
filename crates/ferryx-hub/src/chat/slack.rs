@@ -14,6 +14,7 @@ pub const PLATFORM: &str = "slack";
 pub enum SlackFrame {
     Inbound(Inbound),
     Approval(AgentOp),
+    Command(super::commands::SlashInvocation),
     Ignore,
 }
 
@@ -93,6 +94,14 @@ pub fn handle_frame(text: &str, owner_id: &str) -> Result<(Value, SlackFrame)> {
             Some(op) => SlackFrame::Approval(op),
             None => SlackFrame::Ignore,
         },
+        "slash_commands" => {
+            let invocation = super::slash::invocation_from_payload(&payload);
+            if invocation.command.is_empty() {
+                SlackFrame::Ignore
+            } else {
+                SlackFrame::Command(invocation)
+            }
+        }
         _ => SlackFrame::Ignore,
     };
     Ok((ack, parsed))
@@ -108,18 +117,34 @@ fn inbound_from_event(payload: &Value) -> Option<Inbound> {
     {
         return None;
     }
-    let text = event.get("text").and_then(Value::as_str)?.to_owned();
+    let channel_id = event.get("channel").and_then(Value::as_str)?.to_owned();
+    let audio = audio_message(event);
+    let ts = event.get("ts").and_then(Value::as_str).map(str::to_owned);
+    if audio {
+        if let Some(ts) = ts.as_deref() {
+            crate::voice::pending_voice_replies().note(&channel_id, ts);
+        }
+    }
+    let mut text = event
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
     if text.trim().is_empty() {
-        return None;
+        if !audio {
+            return None;
+        }
+        text = "[voice message]".into();
     }
     Some(Inbound {
         platform: PLATFORM.into(),
         guild_id: None,
-        channel_id: event.get("channel").and_then(Value::as_str)?.to_owned(),
+        channel_id,
         thread_id: event
             .get("thread_ts")
             .and_then(Value::as_str)
-            .map(str::to_owned),
+            .map(str::to_owned)
+            .or_else(|| audio.then_some(ts).flatten()),
         user_id: event
             .get("user")
             .and_then(Value::as_str)
@@ -135,6 +160,21 @@ fn inbound_from_event(payload: &Value) -> Option<Inbound> {
     })
 }
 
+fn audio_message(event: &Value) -> bool {
+    event
+        .get("files")
+        .and_then(Value::as_array)
+        .is_some_and(|files| {
+            files.iter().any(|file| {
+                file.get("mimetype")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .starts_with("audio/")
+                    || file.get("subtype").and_then(Value::as_str) == Some("slack_audio")
+            })
+        })
+}
+
 /// Applies one Socket Mode frame. An approval is answered, then the card or an ephemeral
 /// note tells the clicker what happened. An inbound message is fenced and sent to the
 /// meta-agent pane, or to the lane pane a profile names. Nothing is read back.
@@ -145,6 +185,30 @@ pub async fn apply_frame(
     profiles: &super::router::ProfileRouter,
     control: &dyn AgentControl,
 ) -> Result<SlackFrame> {
+    apply_frame_with(
+        text,
+        owner_id,
+        meta_session_id,
+        profiles,
+        control,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Same as [`apply_frame`], and a `slash_commands` frame runs `/omo-*` when `pool` is set.
+/// The reply is posted when a bot token is configured. No token leaves the command applied
+/// and reports that nothing was sent.
+pub async fn apply_frame_with(
+    text: &str,
+    owner_id: &str,
+    meta_session_id: &str,
+    profiles: &super::router::ProfileRouter,
+    control: &dyn AgentControl,
+    pool: Option<&sqlx::SqlitePool>,
+    bot_user_id: Option<&str>,
+) -> Result<SlackFrame> {
     let frame_value: Value = serde_json::from_str(text)
         .map_err(|error| HubError::message(format!("slack frame: {error}")))?;
     if frame_value.get("type").and_then(Value::as_str) == Some("interactive") {
@@ -154,7 +218,71 @@ pub async fn apply_frame(
     if let SlackFrame::Inbound(inbound) = &frame {
         super::router::route_inbound(inbound, profiles, meta_session_id, control).await?;
     }
+    if let (SlackFrame::Command(invocation), Some(pool)) = (&frame, pool) {
+        let url = std::env::var("FERRYX_HUB_OMO_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let model = url.as_deref().map(crate::meta::backend::UrlModel::new);
+        let model_ref = model
+            .as_ref()
+            .map(|model| model as &dyn crate::lanes::kibitzer::ModelTurn);
+        let env = super::slash::SlashEnv {
+            pool,
+            owner_id,
+            bot_user_id: bot_user_id.unwrap_or("bot"),
+            control,
+            meta_session_id,
+            huddle_enabled: matches!(
+                std::env::var("OMON_SLACK_HUDDLE_ENABLED")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim)
+                    .map(|value| value.to_ascii_lowercase()),
+                Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
+            ),
+            model: model_ref,
+        };
+        let reply = super::slash::execute(&env, invocation).await?;
+        post_slash_reply(
+            &invocation.channel_id,
+            &invocation.user_id,
+            invocation.thread_ts.as_deref(),
+            &reply,
+        )
+        .await?;
+    }
     Ok(frame)
+}
+
+async fn post_slash_reply(
+    channel: &str,
+    user: &str,
+    thread: Option<&str>,
+    reply: &super::slash::SlashReply,
+) -> Result<bool> {
+    #[cfg(feature = "hub-slack")]
+    {
+        if bot_token().is_none() {
+            return Ok(false);
+        }
+        if reply.ephemeral {
+            return slack_method(
+                "chat.postEphemeral",
+                json!({"channel": channel, "user": user, "text": reply.text}),
+            )
+            .await;
+        }
+        let mut body = json!({"channel": channel, "text": reply.text});
+        if let Some(thread) = thread {
+            body["thread_ts"] = json!(thread);
+        }
+        return slack_method("chat.postMessage", body).await;
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (channel, user, thread, reply);
+        Ok(false)
+    }
 }
 
 struct ClickTarget {
@@ -471,7 +599,160 @@ async fn post_message(
     if let Some(thread) = &session.thread_id {
         body["thread_ts"] = json!(thread);
     }
-    slack_method("chat.postMessage", body).await
+    let posted = slack_method("chat.postMessage", body).await?;
+    if posted {
+        let _ = attach_voice_reply(
+            &session.channel_id,
+            session.thread_id.as_deref(),
+            session.thread_id.as_deref(),
+            text,
+        )
+        .await;
+    }
+    Ok(posted)
+}
+
+/// Slack external upload: getUploadURLExternal, POST the bytes, completeUploadExternal.
+#[cfg(feature = "hub-slack")]
+pub async fn upload_external(
+    channel: &str,
+    thread_ts: Option<&str>,
+    filename: &str,
+    bytes: Vec<u8>,
+    title: &str,
+) -> Result<bool> {
+    if bot_token().is_none() || bytes.is_empty() {
+        return Ok(false);
+    }
+    let ticket = slack_form(
+        "files.getUploadURLExternal",
+        &[("filename", filename), ("length", &bytes.len().to_string())],
+    )
+    .await?;
+    if ticket.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(HubError::message(format!(
+            "slack files.getUploadURLExternal failed: {ticket}"
+        )));
+    }
+    let upload_url = ticket
+        .get("upload_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HubError::message("slack upload ticket has no upload_url"))?;
+    if !upload_host_allowed(upload_url) {
+        return Err(HubError::message(
+            "slack upload_url host is not slack or loopback",
+        ));
+    }
+    let file_id = ticket
+        .get("file_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60));
+    if is_loopback_api(upload_url) {
+        builder = builder.no_proxy();
+    }
+    let client = builder
+        .build()
+        .map_err(|error| HubError::message(error.to_string()))?;
+    let uploaded = client
+        .post(upload_url)
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|error| HubError::message(error.to_string()))?;
+    if !uploaded.status().is_success() {
+        return Err(HubError::message(format!(
+            "slack file bytes failed: {}",
+            uploaded.status()
+        )));
+    }
+    let mut body = json!({
+        "files": [{ "id": file_id, "title": title }],
+        "channel_id": channel,
+    });
+    if let Some(thread_ts) = thread_ts {
+        body["thread_ts"] = json!(thread_ts);
+    }
+    slack_method("files.completeUploadExternal", body).await
+}
+
+#[cfg(feature = "hub-slack")]
+fn upload_host_allowed(url: &str) -> bool {
+    is_loopback_api(url)
+        || url.starts_with("https://slack.com/")
+        || url.starts_with("https://files.slack.com/")
+}
+
+#[cfg(feature = "hub-slack")]
+async fn slack_form(method: &str, fields: &[(&str, &str)]) -> Result<Value> {
+    let Some(token) = bot_token() else {
+        return Ok(json!({"ok": false}));
+    };
+    let base = api_base();
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15));
+    if is_loopback_api(&base) {
+        builder = builder.no_proxy();
+    }
+    let client = builder
+        .build()
+        .map_err(|error| HubError::message(error.to_string()))?;
+    let mut form = std::collections::HashMap::new();
+    for (key, value) in fields {
+        form.insert(*key, *value);
+    }
+    let response = client
+        .post(format!("{base}/{method}"))
+        .bearer_auth(token)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|error| HubError::message(error.to_string()))?;
+    response
+        .json()
+        .await
+        .map_err(|error| HubError::message(error.to_string()))
+}
+
+#[cfg(feature = "hub-slack")]
+async fn attach_voice_reply(
+    channel: &str,
+    thread: Option<&str>,
+    reply_to: Option<&str>,
+    text: &str,
+) -> Result<bool> {
+    #[cfg(all(feature = "hub-slack", feature = "hub-voice"))]
+    {
+        let settings = crate::voice::VoiceSettings::from_lookup(&|name| std::env::var(name).ok());
+        if !settings.slack_voice_reply() {
+            return Ok(false);
+        }
+        if !crate::voice::pending_voice_replies().take(channel, reply_to) {
+            return Ok(false);
+        }
+        let Some(endpoint) = settings.tts().cloned() else {
+            return Ok(false);
+        };
+        let pcm = crate::voice::synthesize_pcm(&endpoint, settings.tts_voice(), text)
+            .await
+            .map_err(HubError::message)?;
+        if pcm.is_empty() {
+            return Ok(false);
+        }
+        let samples = crate::voice::pcm_bytes_to_samples(&pcm);
+        let wav = crate::voice::pcm_to_wav(
+            crate::voice::OPENAI_PCM_RATE,
+            crate::voice::OPENAI_PCM_CHANNELS,
+            &samples,
+        )
+        .map_err(HubError::message)?;
+        return upload_external(channel, thread, "voice-reply.wav", wav, "Voice reply").await;
+    }
+    #[cfg(not(all(feature = "hub-slack", feature = "hub-voice")))]
+    {
+        let _ = (channel, thread, reply_to, text);
+        Ok(false)
+    }
 }
 
 #[cfg(feature = "hub-slack")]
@@ -502,6 +783,19 @@ async fn slack_method(method: &str, body: Value) -> Result<bool> {
         return Err(HubError::message(format!("slack {method} failed: {value}")));
     }
     Ok(true)
+}
+
+/// Posts one cron or lane delivery into a Slack channel or thread.
+#[cfg(feature = "hub-slack")]
+pub async fn deliver(channel: &str, thread: Option<&str>, text: &str) -> Result<bool> {
+    let session = super::session::SessionKey::new(
+        "slack",
+        None::<String>,
+        channel,
+        thread.map(str::to_owned),
+        "cron",
+    );
+    post_message(&session, text, None).await
 }
 
 pub async fn publish(session: &super::session::SessionKey, text: &str) -> Result<bool> {
@@ -1065,6 +1359,37 @@ mod tests {
             .ops()
             .iter()
             .all(|(_, op)| !matches!(op, AgentOp::Read { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_slash_command_frame_runs_omo_yolo() {
+        let pool = crate::storage::memory().await.unwrap();
+        let frame = r#"{"envelope_id":"e9","type":"slash_commands","payload":{"command":"/omo-yolo","text":"on","user_id":"UOWNER","channel_id":"C1","team_id":"T1"}}"#;
+        let control = RecordingControl::default();
+        let parsed = apply_frame_with(
+            frame,
+            "UOWNER",
+            "meta",
+            &crate::chat::router::ProfileRouter::new(vec![]),
+            &control,
+            Some(&pool),
+            Some("B1"),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(parsed, SlackFrame::Command(_)));
+        let on: i64 =
+            sqlx::query_scalar("SELECT yolo FROM action_loop_state WHERE session_key LIKE '%C1%'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(on, 1);
+        let (_ack, ignored) = handle_frame(
+            r#"{"envelope_id":"e10","type":"slash_commands","payload":{"text":"on"}}"#,
+            "UOWNER",
+        )
+        .unwrap();
+        assert!(matches!(ignored, SlackFrame::Ignore));
     }
 
     #[cfg(feature = "hub-slack")]
@@ -1674,5 +1999,82 @@ mod tests {
             "frame sent on the old socket during handoff was dropped"
         );
         client.abort();
+    }
+
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn a_spoken_reply_uploads_the_wav_and_completes_it() {
+        use axum::extract::State;
+        let bytes_seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let ticket_seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let complete_seen = std::sync::Arc::new(std::sync::Mutex::new(Value::Null));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        #[derive(Clone)]
+        struct UploadState {
+            port: u16,
+            bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+            ticket: std::sync::Arc<std::sync::Mutex<String>>,
+            complete: std::sync::Arc<std::sync::Mutex<Value>>,
+        }
+        let state = UploadState {
+            port,
+            bytes: bytes_seen.clone(),
+            ticket: ticket_seen.clone(),
+            complete: complete_seen.clone(),
+        };
+        let app = axum::Router::new()
+            .route(
+                "/files.getUploadURLExternal",
+                axum::routing::post(|State(state): State<UploadState>, body: String| async move {
+                    *state.ticket.lock().expect("ticket") = body;
+                    axum::Json(json!({
+                        "ok": true,
+                        "upload_url": format!("http://127.0.0.1:{}/bytes", state.port),
+                        "file_id": "F1"
+                    }))
+                }),
+            )
+            .route(
+                "/bytes",
+                axum::routing::post(|State(state): State<UploadState>, body: axum::body::Bytes| async move {
+                    *state.bytes.lock().expect("bytes") = body.to_vec();
+                    axum::http::StatusCode::OK
+                }),
+            )
+            .route(
+                "/files.completeUploadExternal",
+                axum::routing::post(|State(state): State<UploadState>, axum::Json(body): axum::Json<Value>| async move {
+                    *state.complete.lock().expect("complete") = body;
+                    axum::Json(json!({"ok": true}))
+                }),
+            )
+            .with_state(state);
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let wav = vec![1_u8, 2, 3, 4];
+        SLACK_API_TEST
+            .scope(
+                (format!("http://127.0.0.1:{port}"), "xoxb-test".into()),
+                upload_external(
+                    "C1",
+                    Some("1700.1"),
+                    "voice-reply.wav",
+                    wav.clone(),
+                    "Voice reply",
+                ),
+            )
+            .await
+            .unwrap();
+        let ticket = ticket_seen.lock().expect("ticket").clone();
+        assert!(ticket.contains("filename=voice-reply.wav"), "{ticket}");
+        assert!(ticket.contains("length=4"), "{ticket}");
+        assert_eq!(*bytes_seen.lock().expect("bytes"), wav);
+        let complete = complete_seen.lock().expect("complete").clone();
+        assert_eq!(complete["channel_id"], "C1");
+        assert_eq!(complete["thread_ts"], "1700.1");
+        assert_eq!(complete["files"][0]["id"], "F1");
+        assert_eq!(complete["files"][0]["title"], "Voice reply");
     }
 }

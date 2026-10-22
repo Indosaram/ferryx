@@ -13,6 +13,8 @@ pub enum Purpose {
     DoneDiff,
     OwnerIntent,
     EventWake,
+    KibitzerWake,
+    InboxClass,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +101,9 @@ pub struct Judge {
     typesafe: BTreeMap<String, String>,
     /// When set, a missing binary uses this choice instead of spawning a model.
     offline_fallback: Option<String>,
+    /// Skips the binary. Tests use this so a machine with typesafe-judge installed
+    /// still returns the scripted choice.
+    forced: Option<String>,
 }
 
 impl Judge {
@@ -106,6 +111,15 @@ impl Judge {
         Self {
             typesafe,
             offline_fallback: None,
+            forced: None,
+        }
+    }
+
+    pub fn forced(selected: impl Into<String>) -> Self {
+        Self {
+            typesafe: BTreeMap::new(),
+            offline_fallback: None,
+            forced: Some(selected.into()),
         }
     }
 
@@ -119,6 +133,7 @@ impl Judge {
         Self {
             typesafe: BTreeMap::new(),
             offline_fallback: Some("yes".into()),
+            forced: None,
         }
     }
 
@@ -130,6 +145,14 @@ impl Judge {
         options: &[&str],
     ) -> Result<Choice> {
         let _ = scrub_for_external(state);
+        if let Some(selected) = &self.forced {
+            if options.contains(&selected.as_str()) {
+                return Ok(Choice::new(selected.clone()));
+            }
+            return Err(HubError::message(format!(
+                "forced judge choice {selected} is not an option"
+            )));
+        }
         match self.run_typesafe(instructions, options).await {
             Ok(choice) => Ok(choice),
             Err(error) => {

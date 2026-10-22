@@ -154,6 +154,64 @@ pub async fn decide(
     Ok(())
 }
 
+pub const TRIAGE_OPTIONS: &[&str] = &["owner_must_act", "bot_can_handle", "fyi", "ignore"];
+pub const TRIAGE_INSTRUCTIONS: &str = "owner_must_act = a specific person is waiting for the owner's own reply, decision, signature or payment; surveys, reminders, newsletters, receipts, notices, verification/security codes and automated mail are never owner_must_act; bot_can_handle = a coding/ops task an agent can do alone without speaking as the owner; fyi = information only; ignore = ads/promotions";
+
+/// Classifies inbox rows that have no decision yet.
+/// A message older than 24 hours is fyi, except a GitHub `[CI failed]` snippet.
+/// A fallback judge choice leaves every row in the batch pending.
+pub async fn classify_pending<F, Fut>(
+    pool: &SqlitePool,
+    judge: &crate::judge::Judge,
+    now: DateTime<Utc>,
+    mut action_for: F,
+) -> Result<usize>
+where
+    F: FnMut(&str, Class) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<String>>>,
+{
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, source, snippet, received_at FROM inbox_items WHERE id NOT IN (SELECT item_id FROM inbox_decisions)",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut ready = Vec::new();
+    for (id, source, snippet, received_at) in rows {
+        let received = DateTime::parse_from_rfc3339(&received_at)
+            .map(|value| value.with_timezone(&Utc))
+            .unwrap_or(now);
+        let ci_failure = source == "github" && snippet.starts_with("[CI failed]");
+        if !ci_failure && is_stale(received, now) {
+            ready.push((id, Class::Fyi, "stale".to_owned(), None));
+            continue;
+        }
+        let choice = judge
+            .choice(
+                crate::judge::Purpose::InboxClass,
+                &crate::judge::scrub_for_external(&snippet),
+                TRIAGE_INSTRUCTIONS,
+                TRIAGE_OPTIONS,
+            )
+            .await?;
+        if choice.is_fallback {
+            return Err(HubError::message(
+                "inbox jev unavailable; items remain pending",
+            ));
+        }
+        let class = Class::parse(choice.as_str())?;
+        let action = match class {
+            Class::Owner | Class::Bot => action_for(&id, class).await?,
+            Class::Fyi | Class::Ignore => None,
+        };
+        ready.push((id, class, choice.as_str().to_owned(), action));
+    }
+    let stored = ready.len();
+    for (id, class, reason, action) in ready {
+        decide(pool, &id, class, &reason, action.as_deref()).await?;
+    }
+    Ok(stored)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +292,69 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(stored, "fyi");
+    }
+
+    #[tokio::test]
+    async fn triage_files_stale_mail_and_keeps_an_old_ci_failure() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-10-22T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        ingest(
+            &pool,
+            "old",
+            "mail",
+            "m1",
+            "newsletter",
+            "2020-01-01T00:00:00Z",
+        )
+        .await
+        .unwrap();
+        ingest(
+            &pool,
+            "ci",
+            "github",
+            "g1",
+            "[CI failed] red",
+            "2020-01-01T00:00:00Z",
+        )
+        .await
+        .unwrap();
+        ingest(
+            &pool,
+            "fresh",
+            "slack",
+            "s1",
+            "please look",
+            "2026-10-21T23:00:00Z",
+        )
+        .await
+        .unwrap();
+        let judge = crate::judge::Judge::forced("bot_can_handle");
+        let stored = classify_pending(&pool, &judge, now, |_id, class| async move {
+            assert_eq!(class, Class::Bot);
+            Ok(Some("investigate failure".into()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(stored, 3);
+        let stale: String =
+            sqlx::query_scalar("SELECT class FROM inbox_decisions WHERE item_id = 'old'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stale, "fyi");
+        let ci: String =
+            sqlx::query_scalar("SELECT class FROM inbox_decisions WHERE item_id = 'ci'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(ci, "bot");
+        let proposals: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM action_proposals WHERE origin = 'inbox'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(proposals, 2);
     }
 }

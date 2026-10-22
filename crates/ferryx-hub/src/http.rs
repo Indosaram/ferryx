@@ -149,7 +149,10 @@ async fn create_cron(State(state): State<HttpState>, Json(body): Json<Value>) ->
     .execute(&state.pool)
     .await;
     match inserted {
-        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id}))).into_response(),
+        Ok(_) => {
+            crate::schedule::poke_scheduler();
+            (StatusCode::CREATED, Json(json!({"id": id}))).into_response()
+        }
         Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     }
 }
@@ -164,6 +167,7 @@ async fn trigger_cron(State(state): State<HttpState>, UrlPath(id): UrlPath<Strin
     .bind(&id)
     .execute(&state.pool)
     .await;
+    crate::schedule::poke_scheduler();
     Json(json!({"id": id, "next_run_at": now})).into_response()
 }
 

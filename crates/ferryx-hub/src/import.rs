@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sqlx::{Row, SqlitePool};
 
@@ -50,6 +50,8 @@ pub async fn import_once(pool: &SqlitePool, source: &Path) -> Result<ImportRepor
         proposals: copied.proposals,
         allowlist: copied.allowlist,
         bot_profiles: copied.bot_profiles,
+        lane_threads: copied.lane_threads,
+        cron_jobs_enabled: copied.cron_jobs_enabled,
         slack_home_channel,
         tables: copied.tables,
     };
@@ -198,6 +200,8 @@ pub struct ImportReport {
     pub proposals: u64,
     pub allowlist: u64,
     pub bot_profiles: u64,
+    pub lane_threads: u64,
+    pub cron_jobs_enabled: u64,
     pub slack_home_channel: Option<String>,
     pub tables: BTreeMap<String, u64>,
 }
@@ -216,6 +220,8 @@ struct Copied {
     proposals: u64,
     allowlist: u64,
     bot_profiles: u64,
+    lane_threads: u64,
+    cron_jobs_enabled: u64,
     tables: BTreeMap<String, u64>,
 }
 
@@ -234,6 +240,7 @@ pub async fn migrate_from_omo(
         }
         tables.insert("lanes".into(), count_rows(&from, "lanes").await?);
         tables.insert("cron_jobs".into(), count_rows(&from, "cron_jobs").await?);
+        let cron_jobs_enabled = count_enabled_cron(&from).await?;
         from.close().await;
         return Ok(ImportReport {
             lanes: tables["lanes"],
@@ -247,6 +254,8 @@ pub async fn migrate_from_omo(
             proposals: *tables.get("action_proposals").unwrap_or(&0),
             allowlist: *tables.get("approval_allowlist").unwrap_or(&0),
             bot_profiles: *tables.get("bot_profiles").unwrap_or(&0),
+            lane_threads: *tables.get("lane_thread_bindings").unwrap_or(&0),
+            cron_jobs_enabled,
             tables,
             ..ImportReport::default()
         });
@@ -279,9 +288,40 @@ pub async fn migrate_from_omo(
         proposals: copied.proposals,
         allowlist: copied.allowlist,
         bot_profiles: copied.bot_profiles,
+        lane_threads: copied.lane_threads,
+        cron_jobs_enabled: copied.cron_jobs_enabled,
         slack_home_channel,
         tables: copied.tables,
     })
+}
+
+/// Live gateway database. The launchd plist `WorkingDirectory` wins, then the
+/// checkout at `~/code/project/omon-gateway/omon_gateway.db`, then `~/.omon/gateway.db`.
+/// The plist is read only for that one string. Nothing from it is logged.
+pub fn discover_omo_database(home: &Path) -> Option<PathBuf> {
+    let plist = home.join("Library/LaunchAgents/ai.omon.gateway.plist");
+    if let Some(dir) = working_directory(&plist) {
+        let db = PathBuf::from(dir).join("omon_gateway.db");
+        if db.is_file() {
+            return Some(db);
+        }
+    }
+    let project = home.join("code/project/omon-gateway/omon_gateway.db");
+    if project.is_file() {
+        return Some(project);
+    }
+    let legacy = home.join(".omon/gateway.db");
+    legacy.is_file().then_some(legacy)
+}
+
+fn working_directory(plist: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(plist).ok()?;
+    let key = "<key>WorkingDirectory</key>";
+    let rest = text.get(text.find(key)? + key.len()..)?;
+    let start = rest.find("<string>")? + "<string>".len();
+    let end = rest[start..].find("</string>")?;
+    let value = rest[start..start + end].trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 const PARITY_TABLES: &[&str] = &[
@@ -316,10 +356,13 @@ const PARITY_TABLES: &[&str] = &[
     "sessions",
     "messages",
     "memories",
+    "lane_thread_bindings",
+    "cron_problems",
 ];
 
 async fn copy_state(from: &SqlitePool, into: &SqlitePool) -> Result<Copied> {
     let lanes = copy_lanes(from, into).await?;
+    let _ = copy_thread_refs(from, into).await?;
     let watches = copy_watches(from, into).await?;
     let notices = copy_notices(from, into).await?;
     let mut tables = BTreeMap::new();
@@ -343,8 +386,49 @@ async fn copy_state(from: &SqlitePool, into: &SqlitePool) -> Result<Copied> {
         proposals: tables["action_proposals"],
         allowlist: tables["approval_allowlist"],
         bot_profiles: tables["bot_profiles"],
+        lane_threads: *tables.get("lane_thread_bindings").unwrap_or(&0),
+        cron_jobs_enabled: count_enabled_cron(from).await?,
         tables,
     })
+}
+
+async fn count_enabled_cron(pool: &SqlitePool) -> Result<u64> {
+    if !table_exists(pool, "cron_jobs").await? {
+        return Ok(0);
+    }
+    let names = columns(pool, "cron_jobs").await?;
+    if names.iter().any(|name| name == "enabled") {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cron_jobs WHERE enabled = 1")
+            .fetch_one(pool)
+            .await?;
+        return Ok(count as u64);
+    }
+    count_rows(pool, "cron_jobs").await
+}
+
+async fn copy_thread_refs(from: &SqlitePool, into: &SqlitePool) -> Result<u64> {
+    if !table_exists(from, "lanes").await? {
+        return Ok(0);
+    }
+    let names = columns(from, "lanes").await?;
+    if !names.iter().any(|name| name == "thread_channel_id") {
+        return Ok(0);
+    }
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT key, thread_channel_id FROM lanes WHERE thread_channel_id IS NOT NULL AND thread_channel_id != ''",
+    )
+    .fetch_all(from)
+    .await?;
+    let mut copied = 0u64;
+    for (key, thread) in rows {
+        let updated = sqlx::query("UPDATE lanes SET thread_channel_id = ? WHERE key = ?")
+            .bind(&thread)
+            .bind(&key)
+            .execute(into)
+            .await?;
+        copied += updated.rows_affected();
+    }
+    Ok(copied)
 }
 
 async fn count_rows(pool: &SqlitePool, table: &str) -> Result<u64> {
@@ -859,6 +943,67 @@ mod tests {
         let bad = migrate_from_omo(&dest, &bad_cron, false).await;
         let message = bad.expect_err("invalid cron payload").to_string();
         assert!(message.contains("invalid cron payload"), "{message}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn lane_threads_and_the_plist_working_directory_are_the_live_defaults() {
+        let dir = scratch("discover");
+        let db_dir = dir.join("code/project/omon-gateway");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let live = db_dir.join("omon_gateway.db");
+        raw_db(
+            &live,
+            "
+            CREATE TABLE lanes (key TEXT, title TEXT, lead_session_key TEXT, cwd TEXT, brief_path TEXT, session_key TEXT, omo_thread_id TEXT, status TEXT, done_signals TEXT, claim_evidence TEXT, claim_at TEXT, turns_run INTEGER, last_activity_at TEXT, thread_channel_id TEXT);
+            INSERT INTO lanes VALUES ('gate','Gate','meta','/tmp','','meta',NULL,'working','[]',NULL,NULL,0,'2020-01-01T00:00:00Z','slack:C0123:1700.0001');
+            CREATE TABLE lane_thread_bindings (lane_key TEXT, bot_id TEXT, bound_at TEXT);
+            INSERT INTO lane_thread_bindings VALUES ('gate','B1','2020-01-01T00:00:00Z');
+            CREATE TABLE cron_jobs (id TEXT, session_key TEXT, expression TEXT, payload_json TEXT, enabled INTEGER, next_run_at TEXT, created_at TEXT);
+            INSERT INTO cron_jobs VALUES ('on',NULL,'0 9 * * *','{}',1,NULL,'2020-01-01T00:00:00Z');
+            INSERT INTO cron_jobs VALUES ('off',NULL,'0 9 * * *','{}',0,NULL,'2020-01-01T00:00:00Z');
+            CREATE TABLE cron_problems (id INTEGER PRIMARY KEY, job_id TEXT, kind TEXT, signature TEXT, detail TEXT, status TEXT, created_at TEXT, updated_at TEXT);
+            INSERT INTO cron_problems VALUES (4, 'on', 'failed', 'sig', 'boom', 'open', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z');
+            ",
+        )
+        .await;
+        let agents = dir.join("Library/LaunchAgents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("ai.omon.gateway.plist"),
+            format!(
+                r#"<?xml version="1.0"?><plist><dict><key>WorkingDirectory</key><string>{}</string></dict></plist>"#,
+                db_dir.display()
+            ),
+        )
+        .unwrap();
+        let found = discover_omo_database(&dir).unwrap();
+        assert_eq!(found, live);
+        let dest = storage::memory().await.unwrap();
+        let dry = migrate_from_omo(&dest, &live, true).await.unwrap();
+        assert_eq!(dry.lane_threads, 1);
+        assert_eq!(dry.cron_jobs, 2);
+        assert_eq!(dry.cron_jobs_enabled, 1);
+        let report = migrate_from_omo(&dest, &live, false).await.unwrap();
+        assert_eq!(report.lane_threads, 1);
+        let thread: String =
+            sqlx::query_scalar("SELECT thread_channel_id FROM lanes WHERE key = 'gate'")
+                .fetch_one(&dest)
+                .await
+                .unwrap();
+        assert_eq!(thread, "slack:C0123:1700.0001");
+        let bot: String =
+            sqlx::query_scalar("SELECT bot_id FROM lane_thread_bindings WHERE lane_key = 'gate'")
+                .fetch_one(&dest)
+                .await
+                .unwrap();
+        assert_eq!(bot, "B1");
+        let problem: (String, String) =
+            sqlx::query_as("SELECT kind, detail FROM cron_problems WHERE id = '4'")
+                .fetch_one(&dest)
+                .await
+                .unwrap();
+        assert_eq!(problem, ("failed".into(), "boom".into()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

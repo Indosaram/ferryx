@@ -14,7 +14,7 @@ set -euo pipefail
 GATEWAY_LABEL="${OMO_GATEWAY_LABEL:-ai.omon.gateway}"
 WATCHDOG_LABEL="${OMO_WATCHDOG_LABEL:-ai.omon.gateway-watchdog}"
 FERRYX_LABEL="${FERRYX_DAEMON_LABEL:-com.ferryx.daemon}"
-DB="${OMO_DB:-${HOME}/.omon/gateway.db}"
+DB="${OMO_DB:-}"
 FERRYX_BIN="${FERRYX_BIN:-ferryx}"
 MODE=""
 DRY=0
@@ -88,6 +88,34 @@ if [[ "$YES" != 1 ]]; then
   exit 2
 fi
 
+# The live database is the gateway plist's WorkingDirectory, then the project
+# checkout, then ~/.omon/gateway.db. plutil prints one string. The plist body
+# is not printed.
+discover_db() {
+  local plist="${HOME}/Library/LaunchAgents/${GATEWAY_LABEL}.plist"
+  local dir=""
+  if [[ -f "$plist" ]] && command -v plutil >/dev/null 2>&1; then
+    dir="$(plutil -extract WorkingDirectory raw "$plist" 2>/dev/null || true)"
+  fi
+  if [[ -n "$dir" && -f "${dir}/omon_gateway.db" ]]; then
+    printf '%s\n' "${dir}/omon_gateway.db"
+    return
+  fi
+  if [[ -f "${HOME}/code/project/omon-gateway/omon_gateway.db" ]]; then
+    printf '%s\n' "${HOME}/code/project/omon-gateway/omon_gateway.db"
+    return
+  fi
+  if [[ -f "${HOME}/.omon/gateway.db" ]]; then
+    printf '%s\n' "${HOME}/.omon/gateway.db"
+    return
+  fi
+  printf '\n'
+}
+
+if [[ -z "$DB" ]]; then
+  DB="$(discover_db)"
+fi
+
 if [[ "$MODE" == "cutover" ]]; then
   bootout "$WATCHDOG_LABEL" || true
   bootout "$GATEWAY_LABEL"
@@ -104,22 +132,23 @@ if [[ "$MODE" == "cutover" ]]; then
   fi
   echo "migrate ${DB}"
   "$FERRYX_BIN" hub migrate --from-omo "$DB"
-  if launchctl print "${domain}/${FERRYX_LABEL}" >/dev/null 2>&1; then
-    echo "kickstart ${FERRYX_LABEL}"
-    launchctl kickstart -k "${domain}/${FERRYX_LABEL}"
+  # Start hub tasks on the running daemon. kickstart -k would drop live PTYs.
+  if "$FERRYX_BIN" hub start; then
+    echo "hub start sent on the control socket; the daemon was not restarted"
   else
-    echo "ferryx daemon label ${FERRYX_LABEL} is not loaded; start Ferryx so the hub binds 127.0.0.1:9119"
+    echo "hub control socket is not up. Start Ferryx if it is not running. A running daemon was not kickstarted, so live PTY sessions were left alone."
   fi
   echo "cutover requested. confirm http://127.0.0.1:9119/api/health before leaving omo unloaded"
   exit 0
 fi
 
-# Rollback restarts the ferryx daemon with the hub off, then loads omo again.
-# Restarting the daemon drops live PTY sessions.
-export FERRYX_HUB=off
-if launchctl print "${domain}/${FERRYX_LABEL}" >/dev/null 2>&1; then
-  echo "kickstart ${FERRYX_LABEL} with FERRYX_HUB=off"
-  launchctl kickstart -k "${domain}/${FERRYX_LABEL}" || true
+# Rollback stops hub tasks through the control socket, then loads omo again.
+# The ferryx daemon keeps its PTY sessions. omo is not started if the hub
+# cannot be stopped, so two Slack sockets are not opened by accident.
+echo "hub stop"
+if ! "$FERRYX_BIN" hub stop; then
+  echo "hub did not stop. omo was not started, and the ferryx daemon was not restarted." >&2
+  exit 1
 fi
 plist="${HOME}/Library/LaunchAgents/${GATEWAY_LABEL}.plist"
 if [[ -f "$plist" ]]; then

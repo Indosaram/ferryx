@@ -726,26 +726,139 @@ async fn delegate(
         .get("assignee_id")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if assignee.is_empty() {
-        return fail(StatusCode::BAD_REQUEST, "assignee_id is required");
+    let cwd = body.get("cwd").and_then(Value::as_str).unwrap_or("").trim();
+    let done = body
+        .get("done")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if assignee.is_empty() && (cwd.is_empty() || done.is_empty()) {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "assignee_id, or cwd and done, is required",
+        );
     }
-    if let Err(error) =
-        sqlx::query("UPDATE tracker_issues SET assignee_id = ?, updated_at = ? WHERE id = ?")
-            .bind(assignee)
-            .bind(now_rfc3339())
-            .bind(&id)
-            .execute(&pool)
-            .await
-    {
-        return fail(StatusCode::BAD_REQUEST, error.to_string());
+    if !assignee.is_empty() {
+        if let Err(error) =
+            sqlx::query("UPDATE tracker_issues SET assignee_id = ?, updated_at = ? WHERE id = ?")
+                .bind(assignee)
+                .bind(now_rfc3339())
+                .bind(&id)
+                .execute(&pool)
+                .await
+        {
+            return fail(StatusCode::BAD_REQUEST, error.to_string());
+        }
+        if let Err(error) =
+            record_activity(&pool, &id, None, "delegate", None, Some(assignee)).await
+        {
+            return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
     }
-    if let Err(error) = record_activity(&pool, &id, None, "delegate", None, Some(assignee)).await {
-        return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    if !cwd.is_empty() && !done.is_empty() {
+        match open_delegated_lane(
+            &pool,
+            &id,
+            cwd,
+            done,
+            body.get("thread").and_then(Value::as_str),
+        )
+        .await
+        {
+            Ok(lane_key) => {
+                if let Err(error) =
+                    record_activity(&pool, &id, None, "delegated", None, Some(&lane_key)).await
+                {
+                    return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+                }
+            }
+            Err(error) => return fail(StatusCode::CONFLICT, error.to_string()),
+        }
     }
     match load_issue(&pool, &id).await {
         Ok(issue) => ok(issue),
         Err(error) => fail(StatusCode::NOT_FOUND, error.to_string()),
     }
+}
+
+async fn open_delegated_lane(
+    pool: &SqlitePool,
+    issue_id: &str,
+    cwd: &str,
+    done: &str,
+    thread: Option<&str>,
+) -> Result<String> {
+    let row: Option<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT identifier, title, COALESCE(description, ''), lane_key FROM tracker_issues WHERE id = ?",
+    )
+    .bind(issue_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((identifier, title, description, lane_key)) = row else {
+        return Err(crate::error::HubError::message("issue not found"));
+    };
+    if lane_key.is_some() {
+        return Err(crate::error::HubError::message(
+            "issue already delegated to a lane",
+        ));
+    }
+    let lane_key = sanitize_lane_key(&format!(
+        "{}-{:04x}",
+        identifier.to_lowercase(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.subsec_nanos() & 0xffff)
+            .unwrap_or(1)
+    ));
+    let brief_dir = std::env::var("OMON_TRACKER_BRIEF_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("ferryx-tracker-briefs"));
+    tokio::fs::create_dir_all(&brief_dir)
+        .await
+        .map_err(|error| crate::error::HubError::message(error.to_string()))?;
+    let brief_path = brief_dir.join(format!("{lane_key}.md"));
+    tokio::fs::write(
+        &brief_path,
+        format!("# {identifier}: {title}\n\n{description}"),
+    )
+    .await
+    .map_err(|error| crate::error::HubError::message(error.to_string()))?;
+    crate::lanes::state::insert_lane(pool, &lane_key, &title, "tracker", cwd, done)
+        .await
+        .map_err(|error| crate::error::HubError::message(error.to_string()))?;
+    if let Some(thread) = thread.filter(|value| crate::lanes::threads::parse_ref(value).is_some()) {
+        sqlx::query("UPDATE lanes SET thread_channel_id = ? WHERE key = ?")
+            .bind(thread)
+            .bind(&lane_key)
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query("UPDATE tracker_issues SET lane_key = ?, updated_at = ? WHERE id = ?")
+        .bind(&lane_key)
+        .bind(now_rfc3339())
+        .bind(issue_id)
+        .execute(pool)
+        .await?;
+    let _ = brief_path;
+    Ok(lane_key)
+}
+
+fn sanitize_lane_key(key: &str) -> String {
+    let mut out = String::new();
+    for ch in key.chars() {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' {
+            out.push(ch);
+        } else if ch.is_ascii_uppercase() {
+            out.push(ch.to_ascii_lowercase());
+        }
+    }
+    if out.is_empty() {
+        out.push_str("lane-1");
+    }
+    if out.len() > 48 {
+        out.truncate(48);
+    }
+    out
 }
 
 async fn lane_action(
@@ -754,7 +867,63 @@ async fn lane_action(
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     let action = body.get("action").and_then(Value::as_str).unwrap_or("note");
-    let note = body.get("note").and_then(Value::as_str).unwrap_or(action);
+    let note = body
+        .get("note")
+        .or_else(|| body.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or(action);
+    if matches!(action, "send" | "object" | "close" | "reopen") {
+        let lane_key: Option<String> =
+            match sqlx::query_scalar("SELECT lane_key FROM tracker_issues WHERE id = ?")
+                .bind(&id)
+                .fetch_optional(&pool)
+                .await
+            {
+                Ok(lane_key) => lane_key,
+                Err(error) => return fail(StatusCode::BAD_REQUEST, error.to_string()),
+            };
+        let Some(lane_key) = lane_key.filter(|key| !key.is_empty()) else {
+            return fail(StatusCode::CONFLICT, "issue is not linked to a lane");
+        };
+        let force = body.get("force").and_then(Value::as_bool).unwrap_or(false);
+        let reason = match action {
+            "close" if force => Some(if note.starts_with("forced:") {
+                note.to_owned()
+            } else if note.is_empty() {
+                "forced: closed from tracker".into()
+            } else {
+                format!("forced: {note}")
+            }),
+            "reopen" => Some("note: reopened".into()),
+            _ => Some(note.to_owned()),
+        };
+        let target = match action {
+            "send" | "reopen" => crate::lanes::state::LaneStatus::Working,
+            "object" => crate::lanes::state::LaneStatus::Blocked,
+            "close" => crate::lanes::state::LaneStatus::Closed,
+            _ => crate::lanes::state::LaneStatus::Working,
+        };
+        if let Err(error) =
+            crate::lanes::state::transition(&pool, &lane_key, target, reason.as_deref()).await
+        {
+            return fail(StatusCode::CONFLICT, error.to_string());
+        }
+        let kind = if action == "object" {
+            "blocked"
+        } else {
+            "lane_action"
+        };
+        let _ = sqlx::query(
+            "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES(?,?,?,?,?)",
+        )
+        .bind(&lane_key)
+        .bind("tracker")
+        .bind(kind)
+        .bind(note)
+        .bind(now_rfc3339())
+        .execute(&pool)
+        .await;
+    }
     if let Err(error) = record_activity(&pool, &id, None, "lane_action", None, Some(note)).await {
         return fail(StatusCode::BAD_REQUEST, error.to_string());
     }

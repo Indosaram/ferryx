@@ -77,6 +77,110 @@ impl<T: OmoTransport> HeadlessEngine<T> {
     }
 }
 
+/// Websocket client for the omo app-server. Kibitzer and `/omo-compress` call it
+/// when `FERRYX_HUB_OMO_URL` is set.
+pub struct UrlModel {
+    url: String,
+    #[cfg(feature = "hub-slack")]
+    workspace: Workspace,
+}
+
+impl UrlModel {
+    pub fn new(url: impl Into<String>) -> Self {
+        #[cfg(feature = "hub-slack")]
+        let cwd = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .display()
+            .to_string();
+        Self {
+            url: url.into(),
+            #[cfg(feature = "hub-slack")]
+            workspace: Workspace {
+                roots: vec![cwd.clone()],
+                cwd,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl crate::lanes::kibitzer::ModelTurn for UrlModel {
+    async fn complete(&self, prompt: &str) -> Result<String> {
+        if self.url.trim().is_empty() {
+            return Err(HubError::message("omo model backend URL is not configured"));
+        }
+        #[cfg(feature = "hub-slack")]
+        {
+            let engine = HeadlessEngine::new(
+                WebsocketTransport {
+                    url: self.url.clone(),
+                },
+                self.workspace.clone(),
+            )
+            .with_prompt(prompt);
+            return engine.turn(prompt).await;
+        }
+        #[cfg(not(feature = "hub-slack"))]
+        {
+            let _ = prompt;
+            Err(HubError::message(
+                "omo websocket transport is compiled with hub-slack",
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "hub-slack")]
+struct WebsocketTransport {
+    url: String,
+}
+
+#[cfg(feature = "hub-slack")]
+#[async_trait]
+impl OmoTransport for WebsocketTransport {
+    async fn roundtrip(&self, frames: Vec<String>) -> Result<Vec<Value>> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let (mut socket, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio_tungstenite::connect_async(&self.url),
+        )
+        .await
+        .map_err(|_| HubError::message("omo websocket connect timed out"))?
+        .map_err(|error| HubError::message(error.to_string()))?;
+        for frame in frames {
+            socket
+                .send(Message::Text(frame.into()))
+                .await
+                .map_err(|error| HubError::message(error.to_string()))?;
+        }
+        let mut events = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let next = tokio::time::timeout(remaining, socket.next()).await;
+            let message = match next {
+                Ok(Some(Ok(message))) => message,
+                _ => break,
+            };
+            let Message::Text(text) = message else {
+                continue;
+            };
+            if let Ok(value) = serde_json::from_str::<Value>(text.as_str()) {
+                let done = value
+                    .pointer("/params/item/text")
+                    .and_then(Value::as_str)
+                    .is_some();
+                events.push(value);
+                if done {
+                    break;
+                }
+            }
+        }
+        Ok(events)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +213,39 @@ mod tests {
         );
         let reply = engine.turn("hello").await.unwrap();
         assert_eq!(reply, "ready");
+    }
+
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn url_model_reads_the_assistant_event_from_the_omo_socket() {
+        use crate::lanes::kibitzer::ModelTurn;
+        use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+        use axum::response::IntoResponse;
+
+        async fn handle(mut socket: WebSocket) {
+            while let Some(Ok(message)) = socket.recv().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                if text.contains("turn/start") {
+                    let body = r#"{"method":"item/agentMessage/delta","params":{"item":{"text":"{\"wake\":true,\"reason\":\"r\",\"suggested\":\"s\",\"target_lane\":null}"}}}"#;
+                    let _ = socket.send(Message::Text(body.into())).await;
+                    break;
+                }
+            }
+        }
+        async fn upgrade(ws: WebSocketUpgrade) -> impl IntoResponse {
+            ws.on_upgrade(handle)
+        }
+        let app = axum::Router::new().route("/ws", axum::routing::get(upgrade));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let model = UrlModel::new(format!("ws://127.0.0.1:{port}/ws"));
+        let text = model.complete("state").await.unwrap();
+        let decision = crate::lanes::kibitzer::parse_decision(&text).unwrap();
+        assert!(decision.wake);
     }
 }

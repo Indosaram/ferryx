@@ -208,6 +208,14 @@ pub async fn post_if_configured(session: &super::session::SessionKey, text: &str
     Ok(true)
 }
 
+/// Posts one cron or lane delivery into a Discord channel.
+#[cfg(feature = "hub-discord")]
+pub async fn deliver(channel: &str, text: &str) -> Result<bool> {
+    let session =
+        super::session::SessionKey::new("discord", Some(channel), channel, None::<String>, "");
+    post_if_configured(&session, text).await
+}
+
 pub async fn publish(session: &super::session::SessionKey, text: &str) -> Result<bool> {
     #[cfg(feature = "hub-discord")]
     {
