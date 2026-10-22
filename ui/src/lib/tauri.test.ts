@@ -432,6 +432,33 @@ describe("Tauri IPC wrapper contract", () => {
     expect(core.invoke).toHaveBeenNthCalledWith(2, "cmd_terminal_list", undefined);
   });
 
+  it("coalesces overlapping terminal session listings into one in-flight call and one follow-up", async () => {
+    const resolvers: Array<(value: unknown) => void> = [];
+    core.invoke.mockImplementation((command: string) => {
+      expect(command).toBe("cmd_terminal_list");
+      return new Promise((resolve) => resolvers.push(resolve));
+    });
+
+    const first = listTerminalSessions();
+    const waiting = Array.from({ length: 50 }, () => listTerminalSessions());
+    expect(core.invoke).toHaveBeenCalledTimes(1);
+
+    resolvers[0]([{ sessionId: "old" }]);
+    await expect(first).resolves.toEqual([{ sessionId: "old" }]);
+    await vi.waitFor(() => expect(core.invoke).toHaveBeenCalledTimes(2));
+
+    resolvers[1]([{ sessionId: "new" }]);
+    for (const pending of waiting) {
+      await expect(pending).resolves.toEqual([{ sessionId: "new" }]);
+    }
+    expect(core.invoke).toHaveBeenCalledTimes(2);
+
+    const later = listTerminalSessions();
+    expect(core.invoke).toHaveBeenCalledTimes(3);
+    resolvers[2]([]);
+    await expect(later).resolves.toEqual([]);
+  });
+
   it("bridges the native Cmd+T menu event into the frontend callback", async () => {
     const unlisten = vi.fn();
     let listener: ((event: { payload: void }) => void) | null = null;
