@@ -22,21 +22,21 @@ Discovery order, for `ferryx hub migrate` with no `--from-omo` and for `scripts/
 2. `~/code/project/omon-gateway/omon_gateway.db`
 3. `~/.omon/gateway.db`, only if that file is present
 
-A dry-run against the live file should report:
+A dry-run against the live file prints these rows. The counts grow as the gateway keeps running, so a later snapshot is larger than an earlier one.
 
-| row | count |
+| row | what it counts |
 | --- | --- |
-| cron_jobs_enabled | 16 |
-| lanes | 28 |
-| lane_threads | 4 |
-| issues | 83 |
-| activity | 467 |
-| inbox_items | 3343 |
-| proposals | 5781 |
-| bot_profiles | 4 |
-| allowlist | 5 |
+| cron_jobs_enabled | jobs with `enabled = 1` |
+| lanes | lanes |
+| lane_threads | `lane_thread_bindings` |
+| issues | tracker issues |
+| activity | tracker activity |
+| inbox_items | inbox items |
+| proposals | action proposals |
+| bot_profiles | bot profiles |
+| allowlist | approval allowlist |
 
-`cron_jobs` is every row. `cron_jobs_enabled` is `enabled = 1`. `lane_threads` is `lane_thread_bindings`.
+`cron_jobs` is every row, including paused jobs.
 
 ## Before
 

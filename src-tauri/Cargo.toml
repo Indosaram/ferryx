@@ -251,3 +251,9 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
+# `strip = "symbols"` is also applied to proc-macro dylibs. On macOS that
+# corrupts libsqlx_macros ("mis-aligned LINKEDIT") and the notarized app
+# build fails. Build scripts and proc-macros stay unstripped.
+[profile.release.build-override]
+strip = "none"
+
