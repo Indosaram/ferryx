@@ -547,7 +547,9 @@ async fn forward_once(
                     .machine_error
                     .as_ref()
                     .map(|machine| machine.message.clone())
-                    .unwrap_or_else(|| "the paired host refused agent control".into()),
+                    .unwrap_or_else(|| {
+                        format!("the paired host did not accept agent control ({})", error.code)
+                    }),
             })
         }
     }

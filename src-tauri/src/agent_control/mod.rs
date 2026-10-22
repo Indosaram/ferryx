@@ -369,18 +369,22 @@ pub fn parse_agents_cli(args: &[String]) -> Result<ParsedAgents, UsageError> {
     Ok(ParsedAgents { op, host_id })
 }
 
-fn cli_timeout(op: &AgentControlOp) -> std::time::Duration {
+fn cli_timeout(op: &AgentControlOp, remote: bool) -> std::time::Duration {
+    // A remote call is a capability check (up to 30s) and then the forwarded request (60s for a
+    // mutation, wait + 15s for a wait). The CLI must outlast that so the daemon, which knows
+    // whether the request left, reports the outcome instead of a bare local timeout.
+    let slack = if remote { 40_000 } else { 5_000 };
     let budget = match op {
         AgentControlOp::Wait { timeout_ms, .. } => std::time::Duration::from_millis(
             (*timeout_ms)
                 .min(policy::AGENT_CONTROL_TIMEOUT_MAX_MS)
-                .saturating_add(5_000),
+                .saturating_add(slack),
         ),
-        _ => std::time::Duration::from_secs(60),
+        _ => std::time::Duration::from_secs(60) + std::time::Duration::from_millis(slack - 5_000),
     };
     budget
         .max(std::time::Duration::from_secs(60))
-        .min(std::time::Duration::from_secs(310))
+        .min(std::time::Duration::from_secs(if remote { 360 } else { 310 }))
 }
 
 /// The JSON a failed command prints, and its exit code.
@@ -517,12 +521,16 @@ pub fn run_agents_cli(args: &[String]) -> i32 {
             (value, EXIT_INVALID)
         }
         Ok(ParsedAgents { op, host_id }) => {
-            let timeout = cli_timeout(&op);
+            let timeout = cli_timeout(&op, host_id.is_some());
+            let mutates = op.is_input_mutation();
             match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime.block_on(async {
                 match tokio::time::timeout(timeout, request_daemon(op, host_id)).await {
                     Ok(result) => result,
-                    Err(_) => failure("TIMEOUT", "the daemon did not answer before the wait budget elapsed; the outcome is unknown"),
+                    // A send, answer, or stop may already be applied: say so with the code a
+                    // caller retries on (same request id), not a plain timeout.
+                    Err(_) if mutates => failure("OPERATION_OUTCOME_UNKNOWN", "the daemon did not answer before the wait budget elapsed; the outcome is unknown, retry with the same request id"),
+                    Err(_) => failure("TIMEOUT", "the daemon did not answer before the wait budget elapsed"),
                 }
             }),
             Err(error) => failure("INTERNAL", &error.to_string()),
@@ -537,6 +545,13 @@ pub fn run_agents_cli(args: &[String]) -> i32 {
 mod tests {
     use super::*;
     use crate::agent_detect::AgentActivity;
+
+    #[test]
+    fn remote_cli_budget_outlasts_the_capability_check_and_the_forwarded_request() {
+        let send = AgentControlOp::Stop { session_id: "s".into(), request_id: Some("r".into()) };
+        assert!(cli_timeout(&send, true) >= std::time::Duration::from_secs(95));
+        assert_eq!(cli_timeout(&send, false), std::time::Duration::from_secs(60));
+    }
 
     fn argv(words: &[&str]) -> Vec<String> {
         std::iter::once("ferryx-cli").chain(words.iter().copied()).map(String::from).collect()
