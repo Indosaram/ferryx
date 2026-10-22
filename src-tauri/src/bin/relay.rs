@@ -13,92 +13,185 @@
 //! environment and `--machine-token` flags are accepted.
 //! The relay origin advertised in machine records can be configured via
 //! `FERRYX_ACCOUNT_RELAY_ORIGIN`, falling back to the resolved account origin.
+//!
+//! HTTPS (optional; without these flags the relay serves plain HTTP exactly as before):
+//!
+//! - `--tls-domain <name>` / `FERRYX_RELAY_TLS_DOMAIN` (repeatable, comma-separated): obtain
+//!   and renew Let's Encrypt certificates over TLS-ALPN-01 on the listening port.
+//! - `--tls-contact <email>` / `FERRYX_RELAY_TLS_CONTACT`: ACME account contact.
+//! - `--tls-cache-dir <path>` / `FERRYX_RELAY_TLS_CACHE_DIR`: persisted ACME account key and
+//!   certificates (default `<home>/.ferryx/relay-tls`).
+//! - `--tls-staging` / `FERRYX_RELAY_TLS_STAGING=1`: use the Let's Encrypt staging directory.
+//! - `--tls-cert <pem> --tls-key <pem>` / `FERRYX_RELAY_TLS_CERT`, `FERRYX_RELAY_TLS_KEY`:
+//!   serve an operator-provided certificate instead of ACME.
+//!
+//! With TLS enabled the port defaults to `443` instead of `8787`.
 
 use base64::Engine as _;
 use ferryx_lib::remote::relay_server::{
     relay_router_with_account, spawn_session_reaper, spawn_suspension_sweeper, RelayState,
 };
+use ferryx_lib::remote::relay_tls::{self, AcmeSettings, TlsAcceptorMode};
 use ferryx_lib::account::origin::{
-    deployment_mode, missing_lemon_squeezy_env_vars, DeploymentMode,
+    deployment_mode_with, missing_lemon_squeezy_env_vars, DeploymentMode,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+
+const DEFAULT_HTTP_PORT: u16 = 8787;
+const DEFAULT_TLS_PORT: u16 = 443;
+
+#[derive(Debug, PartialEq)]
+enum TlsConfig {
+    /// Plain HTTP, the historical behavior.
+    Off,
+    /// Operator-provided PEM certificate chain and private key.
+    Manual { cert: PathBuf, key: PathBuf },
+    /// Let's Encrypt certificates managed in-process.
+    Acme {
+        domains: Vec<String>,
+        contact: Option<String>,
+        /// `None` resolves to `<home>/.ferryx/relay-tls` at startup.
+        cache_dir: Option<PathBuf>,
+        staging: bool,
+    },
+}
 
 struct RelayConfig {
     port: u16,
     machine_tokens: Vec<String>,
     account_public_key: Option<String>,
     deployment_mode: DeploymentMode,
+    tls: TlsConfig,
+}
+
+fn split_list(value: &str) -> impl Iterator<Item = String> + '_ {
+    value
+        .split(',')
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+}
+
+fn parse_flag(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 fn parse_args(args: &[String]) -> Result<RelayConfig, String> {
-    let deployment_mode = deployment_mode()
+    parse_args_with(args, |name| std::env::var(name).ok())
+}
+
+/// `env` looks up environment variables, so tests can supply them without touching the
+/// process environment.
+fn parse_args_with(
+    args: &[String],
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<RelayConfig, String> {
+    let deployment_mode = deployment_mode_with(&env)
         .map_err(|err| format!("configuration error: {}", err.message))?;
 
-    let mut port: u16 = std::env::var("FERRYX_RELAY_PORT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(8787);
-    let mut machine_tokens: Vec<String> = std::env::var("FERRYX_RELAY_MACHINE_TOKENS")
-        .ok()
-        .map(|value| {
-            value
-                .split(',')
-                .map(|token| token.trim().to_string())
-                .filter(|token| !token.is_empty())
-                .collect()
-        })
+    let mut port: Option<u16> = env("FERRYX_RELAY_PORT").and_then(|value| value.parse().ok());
+    let mut machine_tokens: Vec<String> = env("FERRYX_RELAY_MACHINE_TOKENS")
+        .map(|value| split_list(&value).collect())
         .unwrap_or_default();
-    let mut account_public_key = std::env::var("FERRYX_RELAY_ACCOUNT_PUBLIC_KEY")
-        .ok()
-        .filter(|v| !v.trim().is_empty());
+    let mut account_public_key = non_empty(env("FERRYX_RELAY_ACCOUNT_PUBLIC_KEY"));
+    let mut tls_domains: Vec<String> = env("FERRYX_RELAY_TLS_DOMAIN")
+        .map(|value| split_list(&value).collect())
+        .unwrap_or_default();
+    let mut tls_contact = non_empty(env("FERRYX_RELAY_TLS_CONTACT"));
+    let mut tls_cache_dir = non_empty(env("FERRYX_RELAY_TLS_CACHE_DIR")).map(PathBuf::from);
+    let mut tls_staging = env("FERRYX_RELAY_TLS_STAGING").is_some_and(|value| parse_flag(&value));
+    let mut tls_cert = non_empty(env("FERRYX_RELAY_TLS_CERT")).map(PathBuf::from);
+    let mut tls_key = non_empty(env("FERRYX_RELAY_TLS_KEY")).map(PathBuf::from);
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let mut value_of = |flag: &str| -> Result<String, String> {
+            args.next()
+                .cloned()
+                .ok_or_else(|| format!("{flag} requires a value"))
+        };
+        match arg.as_str() {
             "--port" => {
-                i += 1;
-                let value = args
-                    .get(i)
-                    .ok_or_else(|| "--port requires a value".to_string())?;
-                port = value
-                    .parse()
-                    .map_err(|_| format!("invalid --port value: {value}"))?;
+                let value = value_of("--port")?;
+                port = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("invalid --port value: {value}"))?,
+                );
             }
             "--machine-token" => {
-                i += 1;
-                let value = args
-                    .get(i)
-                    .ok_or_else(|| "--machine-token requires a value".to_string())?;
-                machine_tokens.push(value.clone());
+                machine_tokens.push(value_of("--machine-token")?);
             }
             "--account-public-key" => {
-                i += 1;
-                let value = args
-                    .get(i)
-                    .ok_or_else(|| "--account-public-key requires a value".to_string())?;
-                account_public_key = Some(value.clone());
+                account_public_key = Some(value_of("--account-public-key")?);
             }
+            "--tls-domain" => tls_domains.extend(split_list(&value_of("--tls-domain")?)),
+            "--tls-contact" => tls_contact = Some(value_of("--tls-contact")?),
+            "--tls-cache-dir" => tls_cache_dir = Some(PathBuf::from(value_of("--tls-cache-dir")?)),
+            "--tls-staging" => tls_staging = true,
+            "--tls-cert" => tls_cert = Some(PathBuf::from(value_of("--tls-cert")?)),
+            "--tls-key" => tls_key = Some(PathBuf::from(value_of("--tls-key")?)),
             other => {
                 return Err(format!("unrecognized argument: {other}"));
             }
         }
-        i += 1;
     }
 
+    let acme_only_option = tls_contact.is_some() || tls_cache_dir.is_some() || tls_staging;
+    let tls = match (tls_cert, tls_key) {
+        (Some(cert), Some(key)) => {
+            if !tls_domains.is_empty() || acme_only_option {
+                return Err(
+                    "--tls-cert/--tls-key serve a fixed certificate and cannot be combined with \
+                     --tls-domain, --tls-contact, --tls-cache-dir or --tls-staging"
+                        .into(),
+                );
+            }
+            TlsConfig::Manual { cert, key }
+        }
+        (Some(_), None) => return Err("--tls-cert requires --tls-key".into()),
+        (None, Some(_)) => return Err("--tls-key requires --tls-cert".into()),
+        (None, None) if !tls_domains.is_empty() => TlsConfig::Acme {
+            domains: tls_domains,
+            contact: tls_contact,
+            cache_dir: tls_cache_dir,
+            staging: tls_staging,
+        },
+        (None, None) => {
+            if acme_only_option {
+                return Err(
+                    "--tls-contact, --tls-cache-dir and --tls-staging require --tls-domain".into(),
+                );
+            }
+            TlsConfig::Off
+        }
+    };
+    let default_port = if tls == TlsConfig::Off {
+        DEFAULT_HTTP_PORT
+    } else {
+        DEFAULT_TLS_PORT
+    };
+
     Ok(RelayConfig {
-        port,
+        port: port.unwrap_or(default_port),
         machine_tokens,
         account_public_key,
         deployment_mode,
+        tls,
     })
 }
 
-/// `<home>/.ferryx/account-data`, the directory holding persistent relay account
-/// state and the mail spool. There is deliberately no working-directory fallback:
-/// a relay started without `HOME` (Windows leaves it unset) must fail fast rather
-/// than write durable account data wherever it happened to be launched from.
-fn default_account_data_dir() -> Option<PathBuf> {
+/// `<home>/.ferryx`. There is deliberately no working-directory fallback: a relay
+/// started without `HOME` (Windows leaves it unset) must fail fast rather than write
+/// durable data wherever it happened to be launched from.
+fn ferryx_home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     let base = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -106,7 +199,56 @@ fn default_account_data_dir() -> Option<PathBuf> {
     #[cfg(not(windows))]
     let base = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     base.filter(|base| !base.is_empty())
-        .map(|base| PathBuf::from(base).join(".ferryx").join("account-data"))
+        .map(|base| PathBuf::from(base).join(".ferryx"))
+}
+
+/// `<home>/.ferryx/account-data`, the directory holding persistent relay account
+/// state and the mail spool.
+fn default_account_data_dir() -> Option<PathBuf> {
+    ferryx_home_dir().map(|dir| dir.join("account-data"))
+}
+
+/// Resolves the TLS configuration into an acceptor. Disk work (reading PEM files,
+/// creating the ACME cache) runs on a blocking thread.
+async fn prepare_tls(tls: TlsConfig) -> Result<Option<TlsAcceptorMode>, String> {
+    match tls {
+        TlsConfig::Off => Ok(None),
+        TlsConfig::Manual { cert, key } => {
+            let config = tokio::task::spawn_blocking(move || {
+                relay_tls::load_static_server_config(&cert, &key)
+            })
+            .await
+            .map_err(|err| format!("TLS setup task failed: {err}"))??;
+            eprintln!("ferryx-relay: tls: serving the operator-provided certificate");
+            Ok(Some(TlsAcceptorMode::Static(config)))
+        }
+        TlsConfig::Acme {
+            domains,
+            contact,
+            cache_dir,
+            staging,
+        } => {
+            let cache_dir = match cache_dir.or_else(|| ferryx_home_dir().map(|d| d.join("relay-tls"))) {
+                Some(dir) => dir,
+                None => {
+                    return Err("cannot resolve the TLS cache directory; set \
+                                FERRYX_RELAY_TLS_CACHE_DIR or pass --tls-cache-dir"
+                        .into())
+                }
+            };
+            let probe_dir = cache_dir.clone();
+            tokio::task::spawn_blocking(move || relay_tls::prepare_cache_dir(&probe_dir))
+                .await
+                .map_err(|err| format!("TLS setup task failed: {err}"))??;
+            relay_tls::start_acme(AcmeSettings {
+                domains,
+                contact,
+                cache_dir,
+                staging,
+            })
+            .map(Some)
+        }
+    }
 }
 
 #[tokio::main]
@@ -212,6 +354,23 @@ async fn main() {
         }
     };
 
+    // Certificates are prepared only after the port is held, so ACME validation can reach it.
+    let tls = match prepare_tls(config.tls).await {
+        Ok(tls) => tls,
+        Err(err) => {
+            eprintln!("ferryx-relay: {err}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(mode) = tls {
+        tracing::info!("ferryx-relay listening on {addr} (HTTPS)");
+        if let Err(err) = relay_tls::serve(listener, mode, router).await {
+            eprintln!("ferryx-relay: server error: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     tracing::info!("ferryx-relay listening on {addr}");
     if let Err(err) = axum::serve(
         listener,
@@ -223,3 +382,129 @@ async fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn parse(args: &[&str], env: &[(&str, &str)]) -> Result<RelayConfig, String> {
+        let mut vars: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        vars.entry("FERRYX_DEPLOYMENT_MODE".into())
+            .or_insert_with(|| "selfhost".into());
+        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        parse_args_with(&args, |name| vars.get(name).cloned())
+    }
+
+    #[test]
+    fn no_tls_flags_keep_plain_http_on_8787() {
+        let config = parse(&[], &[]).unwrap();
+        assert_eq!(config.tls, TlsConfig::Off);
+        assert_eq!(config.port, 8787);
+        assert_eq!(parse(&["--port", "9000"], &[]).unwrap().port, 9000);
+    }
+
+    #[test]
+    fn tls_domain_enables_acme_and_defaults_port_to_443() {
+        let config = parse(
+            &[
+                "--tls-domain",
+                "relay.example.com, alt.example.com",
+                "--tls-domain",
+                "third.example.com",
+                "--tls-contact",
+                "ops@example.com",
+                "--tls-cache-dir",
+                "/srv/relay-tls",
+                "--tls-staging",
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(config.port, 443);
+        assert_eq!(
+            config.tls,
+            TlsConfig::Acme {
+                domains: vec![
+                    "relay.example.com".into(),
+                    "alt.example.com".into(),
+                    "third.example.com".into()
+                ],
+                contact: Some("ops@example.com".into()),
+                cache_dir: Some(PathBuf::from("/srv/relay-tls")),
+                staging: true,
+            }
+        );
+    }
+
+    #[test]
+    fn tls_settings_are_read_from_the_environment() {
+        let config = parse(
+            &[],
+            &[
+                ("FERRYX_RELAY_TLS_DOMAIN", "relay.example.com,alt.example.com"),
+                ("FERRYX_RELAY_TLS_CONTACT", "ops@example.com"),
+                ("FERRYX_RELAY_TLS_STAGING", "1"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(config.port, 443);
+        assert_eq!(
+            config.tls,
+            TlsConfig::Acme {
+                domains: vec!["relay.example.com".into(), "alt.example.com".into()],
+                contact: Some("ops@example.com".into()),
+                cache_dir: None,
+                staging: true,
+            }
+        );
+        // An explicit port still wins over the TLS default.
+        let config = parse(&["--port", "8443"], &[("FERRYX_RELAY_TLS_DOMAIN", "relay.example.com")])
+            .unwrap();
+        assert_eq!(config.port, 8443);
+        let config = parse(
+            &[],
+            &[("FERRYX_RELAY_TLS_DOMAIN", "relay.example.com"), ("FERRYX_RELAY_PORT", "8443")],
+        )
+        .unwrap();
+        assert_eq!(config.port, 8443);
+        let config = parse(
+            &[],
+            &[("FERRYX_RELAY_TLS_DOMAIN", "relay.example.com"), ("FERRYX_RELAY_TLS_STAGING", "0")],
+        )
+        .unwrap();
+        assert!(matches!(config.tls, TlsConfig::Acme { staging: false, .. }));
+    }
+
+    #[test]
+    fn manual_certificate_mode_uses_443() {
+        let config = parse(&["--tls-cert", "/etc/cert.pem", "--tls-key", "/etc/key.pem"], &[])
+            .unwrap();
+        assert_eq!(config.port, 443);
+        assert_eq!(
+            config.tls,
+            TlsConfig::Manual {
+                cert: PathBuf::from("/etc/cert.pem"),
+                key: PathBuf::from("/etc/key.pem"),
+            }
+        );
+    }
+
+    #[test]
+    fn inconsistent_tls_flags_are_rejected() {
+        for args in [
+            &["--tls-cert", "c.pem"][..],
+            &["--tls-key", "k.pem"][..],
+            &["--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-domain", "a.example"][..],
+            &["--tls-staging"][..],
+            &["--tls-contact", "ops@example.com"][..],
+            &["--tls-domain"][..],
+        ] {
+            assert!(parse(args, &[]).is_err(), "{args:?} must be rejected");
+        }
+    }
+}
+

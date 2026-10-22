@@ -28,6 +28,7 @@ pub mod relay_client;
 pub mod sealed_offer;
 pub mod session_transport;
 pub mod relay_server;
+pub mod relay_tls;
 pub mod server;
 pub(crate) mod session_api;
 mod ssh;

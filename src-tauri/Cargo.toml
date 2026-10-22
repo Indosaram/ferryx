@@ -134,6 +134,10 @@ quinn = { version = "=0.11.11", default-features = false, features = ["runtime-t
 rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "=1.15.1"
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "ring"] }
+# Direct TLS termination for ferryx-relay (src/remote/relay_tls.rs). Both stay on ring; never
+# enable their aws-lc defaults.
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-acme = { version = "=0.15.4", default-features = false, features = ["ring", "webpki-roots"] }
 
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
