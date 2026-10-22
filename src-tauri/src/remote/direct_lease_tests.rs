@@ -529,7 +529,7 @@ async fn enrolled_machine_pins_account_key_and_lease_context_resolves_without_en
     write_enrollment(&fx, &origin);
     let dir = fx._dir.path();
     assert!(
-        !HostLeaseWiring::resolve(Some(dir)).context.is_some(),
+        HostLeaseWiring::resolve(Some(dir)).context.is_none(),
         "before pinning, an enrolled host has no verifiable lease context"
     );
 
