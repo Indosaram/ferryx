@@ -390,7 +390,7 @@ Ensure your host has an assigned CGNAT address in `100.64.0.0/10` (`100.64.0.0` 
 
 #### Example 3: Relay Mode
 
-Relay mode connects outbound to a relay coordinator. The default public relay URL is `https://relay.checka.cc` (`src-tauri/src/remote/state.rs:20`). Save as `~/.ferryx/remote/remote-config.json`:
+Relay mode connects outbound to a relay coordinator. The default public relay URL is `https://relay.ferryx.dev` (`src-tauri/src/remote/state.rs:20`). Save as `~/.ferryx/remote/remote-config.json`:
 
 ```json
 {
@@ -398,7 +398,7 @@ Relay mode connects outbound to a relay coordinator. The default public relay UR
   "port": 43821,
   "allowControl": true,
   "restartPolicy": "restoreListener",
-  "relayUrl": "https://relay.checka.cc"
+  "relayUrl": "https://relay.ferryx.dev"
 }
 ```
 
@@ -601,7 +601,7 @@ Firewall rules below are external operational examples. The Ferryx daemon binds 
   ```
 
 * **Relay Mode (`relay`):**
-  Relay mode binds an internal loopback listener on `127.0.0.1:43821` (`src-tauri/src/remote/server.rs:2299-2304`) and initiates an outbound WebSocket connection to the relay server. No external inbound ports are opened. Ensure outbound connections to the relay URL are permitted. The default public relay uses TCP port 443 (`https://relay.checka.cc`), but custom relay URLs can use HTTP, WS, or nonstandard ports (`src-tauri/src/remote/relay_client.rs:538-549`).
+  Relay mode binds an internal loopback listener on `127.0.0.1:43821` (`src-tauri/src/remote/server.rs:2299-2304`) and initiates an outbound WebSocket connection to the relay server. No external inbound ports are opened. Ensure outbound connections to the relay URL are permitted. The default public relay uses TCP port 443 (`https://relay.ferryx.dev`), but custom relay URLs can use HTTP, WS, or nonstandard ports (`src-tauri/src/remote/relay_client.rs:538-549`).
 
 ---
 

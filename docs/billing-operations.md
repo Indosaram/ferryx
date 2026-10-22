@@ -84,7 +84,7 @@ All commercial deployments must configure the following exact environment variab
 | Variable Name | Required | Description |
 | :--- | :--- | :--- |
 | `FERRYX_DEPLOYMENT_MODE` | Yes | Must be set to `commercial`. |
-| `FERRYX_ACCOUNT_ORIGIN` | Yes | Canonical public HTTPS URL of the account service (e.g. `https://relay.checka.cc`). |
+| `FERRYX_ACCOUNT_ORIGIN` | Yes | Canonical public HTTPS URL of the account service (e.g. `https://relay.ferryx.dev`). |
 | `FERRYX_ACCOUNT_DATA_DIR` | No | Directory holding the SQLite store (`account-store.sqlite3`). If unset, defaults to `~/.ferryx/account` on Unix/macOS (`$HOME/.ferryx/account`) and `%USERPROFILE%\.ferryx\account` on Windows (`src-tauri/src/account/origin.rs`). |
 | `FERRYX_LS_API_KEY` | Yes | Lemon Squeezy API key (Bearer token). |
 | `FERRYX_LS_STORE_ID` | Yes | Lemon Squeezy store ID (numeric string). |
@@ -100,7 +100,7 @@ All commercial deployments must configure the following exact environment variab
 | `FERRYX_BILLING_PAID_PLANS` | No | Paid-plan launch switch (`src-tauri/src/account/origin.rs`). Unset or any value other than `open` keeps only Free open: `POST /api/account/v1/billing/checkout` and `POST /api/account/v1/billing/quantity` answer `403 PLAN_COMING_SOON` ("Paid plans are coming soon", `details.plan`) and make no Lemon Squeezy call. Set `open` to sell paid plans. Entitlement reads, webhooks, enforcement and the Free limit are unaffected. |
 | `FERRYX_RELAY_ACCOUNT_PUBLIC_KEY` | Yes (relay and enrolled hosts) | Operator-pinned account-service Ed25519 public key. The relay uses it to authenticate account-signed payloads; an enrolled host uses it to verify billing leases. Without it a host holds no lease and the direct path stays refused (fail closed). |
 | `RESEND_API_KEY` | No | Resend API key. When set and non-empty, login mail is sent through Resend. |
-| `FERRYX_MAIL_FROM` | No | Sender address for Resend mail; defaults to `Ferryx <login@checka.cc>`. Used only with `RESEND_API_KEY`. |
+| `FERRYX_MAIL_FROM` | No | Sender address for Resend mail; defaults to `Ferryx <login@ferryx.dev>`. Used only with `RESEND_API_KEY`. |
 | `FERRYX_MAIL_WEBHOOK_URL` | No | Mail delivery webhook used when `RESEND_API_KEY` is unset. Without either, mail is written to files (`FERRYX_MAIL_DIR`). |
 | `FERRYX_MAIL_WEBHOOK_TOKEN` | No | Optional token sent with `FERRYX_MAIL_WEBHOOK_URL` requests. |
 
@@ -115,7 +115,7 @@ Create `/etc/systemd/system/ferryx-account.service.d/billing.conf`:
 [Service]
 # Set explicit deployment mode
 Environment="FERRYX_DEPLOYMENT_MODE=commercial"
-Environment="FERRYX_ACCOUNT_ORIGIN=https://relay.checka.cc"
+Environment="FERRYX_ACCOUNT_ORIGIN=https://relay.ferryx.dev"
 
 # Load sensitive Lemon Squeezy API credentials and variant IDs from a protected file
 EnvironmentFile=/etc/ferryx/billing.env
@@ -152,7 +152,7 @@ sudo systemctl restart ferryx-account
 
 ### 4.1 Webhook Endpoint & Signature Verification
 
-- **Endpoint URL**: `https://relay.checka.cc/api/account/v1/billing/webhook`
+- **Endpoint URL**: `https://relay.ferryx.dev/api/account/v1/billing/webhook`
 - **Signature Header**: `X-Signature`
 - **Algorithm**: Raw HMAC-SHA256 computed over the unparsed request body bytes (`req.body.to_vec()`) using `FERRYX_LS_WEBHOOK_SECRET`, compared using constant-time verification.
 - **Failures**: Signature mismatches return `401 Unauthorized (WEBHOOK_SIGNATURE_INVALID)` and record an unauthenticated rejection audit in `payment_events`.

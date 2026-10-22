@@ -38,7 +38,7 @@ The running daemon owns the relay identity. Do not launch a second standalone pa
 The PIN-based desktop steps below are historical, not a current enrollment procedure. Permanent
 bearer credentials must never appear in URLs or renderer logs.
 
-In the macOS native desktop, open Settings > Remote Access > Paired machines. The pairing form asks for the PIN only: the built-in relay (`https://relay.checka.cc`) and a default machine label are applied automatically; enter a custom relay origin or label only through the collapsed Advanced controls. Choose Pair machine. The separate QR-code section is for phone mirrors, not machine authorization. Refresh machines and Check capabilities. Resolve the displayed version/scope error rather than selecting a Local/SSH fallback.
+In the macOS native desktop, open Settings > Remote Access > Paired machines. The pairing form asks for the PIN only: the built-in relay (`https://relay.ferryx.dev`) and a default machine label are applied automatically; enter a custom relay origin or label only through the collapsed Advanced controls. Choose Pair machine. The separate QR-code section is for phone mirrors, not machine authorization. Refresh machines and Check capabilities. Resolve the displayed version/scope error rather than selecting a Local/SSH fallback.
 
 Once compatible proxy and project capabilities are shipped, enable Paired daemon projects, open workspace Add Project > Paired Daemon, select this host and a permitted folder, and verify the returned canonical remote identity. Verify remote `pwd`, split panes, and original session reattachment after reconnection. These are required human acceptance checks, not capabilities proven by this settings packet.
 
