@@ -35,6 +35,15 @@ pub fn classify_disk_pressure(total_bytes: Option<u64>, free_bytes: Option<u64>)
     }
 }
 
+/// `statvfs` is POSIX-only, so non-unix targets report no sample and the caller
+/// classifies the disk as `unknown`, matching the `/proc`-based load and memory
+/// probes in `lanes::guard`.
+#[cfg(not(unix))]
+pub fn disk_sample(_path: &std::ffi::CStr) -> Option<(u64, u64)> {
+    None
+}
+
+#[cfg(unix)]
 pub fn disk_sample(path: &std::ffi::CStr) -> Option<(u64, u64)> {
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
     let rc = unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) };
