@@ -37,8 +37,8 @@ pub async fn memory() -> Result<SqlitePool> {
 }
 
 async fn migrate(pool: &SqlitePool) -> Result<()> {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations");
-    sqlx::migrate::Migrator::new(path).await?.run(pool).await?;
+    // Embedded at build time: an installed binary has no source tree to read them from.
+    sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())
 }
 

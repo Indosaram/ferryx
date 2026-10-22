@@ -45,6 +45,41 @@ impl Fleet {
     }
 }
 
+/// Lists `hosts` with the last successful lists kept in `pool`, so a host that hangs is shown
+/// stale with its last sessions even when the caller (a CLI or a new MCP process) is new.
+pub async fn list_persisted(
+    control: &(impl AgentControl + ?Sized),
+    pool: &sqlx::SqlitePool,
+    hosts: &[String],
+    timeout: Duration,
+) -> Vec<InventoryEntry> {
+    let mut cache = HashMap::new();
+    for host in hosts {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT sessions FROM fleet_inventory_cache WHERE host_id = ?")
+                .bind(host)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
+        if let Some(sessions) = row.and_then(|(text,)| serde_json::from_str::<Vec<Value>>(&text).ok()) {
+            cache.insert(host.clone(), sessions);
+        }
+    }
+    let entries = list_hosts(control, hosts, timeout, &mut cache).await;
+    for entry in entries.iter().filter(|entry| entry.error.is_none()) {
+        let _ = sqlx::query(
+            "INSERT INTO fleet_inventory_cache (host_id, sessions, updated_at) VALUES (?, ?, ?) \
+             ON CONFLICT(host_id) DO UPDATE SET sessions = excluded.sessions, updated_at = excluded.updated_at",
+        )
+        .bind(&entry.host_id)
+        .bind(Value::Array(entry.sessions.clone()).to_string())
+        .bind(crate::storage::now_rfc3339())
+        .execute(pool)
+        .await;
+    }
+    entries
+}
+
 /// Lists every host. A failure is an entry. A timeout returns `cache` for that host and marks it stale.
 pub async fn list_hosts(
     control: &(impl AgentControl + ?Sized),
@@ -126,5 +161,21 @@ mod tests {
         assert!(hung[0].stale);
         assert_eq!(hung[0].sessions[0]["sessionId"], "cached");
         assert!(hung[0].error.as_ref().unwrap().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn persisted_list_shows_a_hung_host_with_its_last_sessions_across_callers() {
+        let pool = crate::storage::memory().await.unwrap();
+        let control = Arc::new(RecordingControl::default());
+        *control.result.lock().unwrap() = json!({"sessions": [{"sessionId": "remote-pane"}]});
+        let hosts = vec!["h1".to_string()];
+        let first = list_persisted(control.as_ref(), &pool, &hosts, Duration::from_millis(30)).await;
+        assert!(!first[0].stale);
+
+        // A new caller with no in-memory state, and the host now hangs.
+        control.hang.store(true, Ordering::SeqCst);
+        let hung = list_persisted(control.as_ref(), &pool, &hosts, Duration::from_millis(30)).await;
+        assert!(hung[0].stale);
+        assert_eq!(hung[0].sessions[0]["sessionId"], "remote-pane");
     }
 }

@@ -141,11 +141,13 @@ async fn call_tool(
                     .filter_map(Value::as_str)
                     .map(str::to_owned)
                     .collect();
-                let fleet = crate::fleet::Fleet::new(
-                    Arc::clone(&context.control),
+                let entries = crate::fleet::list_persisted(
+                    context.control.as_ref(),
+                    &context.pool,
+                    &hosts,
                     std::time::Duration::from_secs(5),
-                );
-                let entries = fleet.list(&hosts).await;
+                )
+                .await;
                 return Ok(json!(entries
                     .into_iter()
                     .map(|entry| json!({
