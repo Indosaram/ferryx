@@ -17,6 +17,7 @@ pub mod judge;
 pub mod lanes;
 pub mod mcp;
 pub mod meta;
+pub mod schedule;
 pub mod security;
 pub mod sessions;
 pub mod storage;

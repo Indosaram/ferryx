@@ -534,6 +534,7 @@ where
     run_socket_mode(credentials_from_env, SocketPace::production(), on_frame).await
 }
 
+#[cfg(any(test, feature = "hub-slack"))]
 fn is_fatal_slack_error(message: &str) -> bool {
     [
         "is not set",

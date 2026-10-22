@@ -37,7 +37,7 @@ impl Tracker {
 
     pub async fn list(&self) -> Result<Vec<Value>> {
         let rows: Vec<(i64, String, String, String)> =
-            sqlx::query_as("SELECT id, title, body, status FROM tracker_issues ORDER BY id")
+            sqlx::query_as("SELECT id, title, body, status FROM hub_tracker_issues ORDER BY id")
                 .fetch_all(&self.pool)
                 .await?;
         Ok(rows
@@ -48,7 +48,7 @@ impl Tracker {
 
     pub async fn create(&self, title: &str, body: &str) -> Result<i64> {
         let done = sqlx::query(
-            "INSERT INTO tracker_issues(title, body, status, created_at) VALUES(?,?, 'open', ?)",
+            "INSERT INTO hub_tracker_issues(title, body, status, created_at) VALUES(?,?, 'open', ?)",
         )
         .bind(title)
         .bind(body)

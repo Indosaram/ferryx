@@ -24,6 +24,21 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     Ok(pool)
 }
 
+/// Opens an existing database without applying migrations. Import uses this so a
+/// live omo-gateway file is never rewritten by the hub's own schema.
+pub async fn connect_readonly(path: &Path) -> Result<SqlitePool> {
+    let uri = format!("sqlite://{}", path.display());
+    let options = SqliteConnectOptions::from_str(&uri)
+        .map_err(|error| crate::error::HubError::config(format!("hub database url: {error}")))?
+        .read_only(true)
+        .foreign_keys(false);
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .map_err(crate::error::HubError::from)
+}
+
 pub async fn memory() -> Result<SqlitePool> {
     let options = SqliteConnectOptions::from_str("sqlite::memory:")
         .map_err(|error| crate::error::HubError::config(error.to_string()))?
