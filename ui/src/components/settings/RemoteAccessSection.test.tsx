@@ -60,7 +60,7 @@ const disabledStatus = { ...enabledStatus, enabled: false, mode: "off" as const 
 const relayStatus = {
   ...enabledStatus,
   mode: "relay" as const,
-  relayUrl: "https://relay.checka.cc",
+  relayUrl: "https://relay.ferryx.dev",
   machineId: "desktop-1",
   relayConnected: true,
   controlChannelConnected: true,
@@ -141,7 +141,7 @@ describe("RemoteAccessSection", () => {
     render(<RemoteAccessSection />);
 
     const field = await screen.findByLabelText("Relay / Signaling Server URL");
-    expect(field).toHaveAttribute("placeholder", "https://relay.checka.cc");
+    expect(field).toHaveAttribute("placeholder", "https://relay.ferryx.dev");
 
     fireEvent.change(field, { target: { value: "https://relay.example.com" } });
     expect(field).toHaveValue("https://relay.example.com");

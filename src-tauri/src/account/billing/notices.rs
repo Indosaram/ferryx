@@ -120,7 +120,7 @@ pub fn render_notice(
     grace_ends_at: Option<u64>,
     now: u64,
 ) -> BillingMessage {
-    let portal_url_str = portal_url.unwrap_or("https://checka.cc/billing");
+    let portal_url_str = portal_url.unwrap_or("https://ferryx.dev/docs/pricing/");
     let (subject, body_text, body_html) = match kind {
         NoticeKind::GraceStarted => {
             let deadline_str = grace_ends_at
@@ -682,7 +682,7 @@ mod tests {
     }
 
     fn create_test_state(test_dir: &std::path::Path, mailer: Arc<dyn Mailer>) -> Arc<AccountState> {
-        let state = AccountState::new(test_dir, "https://checka.cc", mailer)
+        let state = AccountState::new(test_dir, "https://relay.ferryx.dev", mailer)
             .with_deployment_mode(DeploymentMode::Commercial);
         Arc::new(state)
     }
@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn test_render_all_templates() {
         let email = "user@example.com";
-        let portal = "https://billing.checka.cc/p/123";
+        let portal = "https://billing.ferryx.dev/p/123";
         let deadline = 1700604800;
 
         let grace_msg = render_notice(NoticeKind::GraceStarted, email, Some(portal), Some(deadline), 1700000000);

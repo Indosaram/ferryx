@@ -430,7 +430,7 @@ pub fn create_production_mailer(fallback_dir: Option<PathBuf>) -> Arc<dyn Mailer
     if let Ok(key) = std::env::var("RESEND_API_KEY") {
         if !key.is_empty() {
             let from_address = std::env::var("FERRYX_MAIL_FROM")
-                .unwrap_or_else(|_| "Ferryx <login@checka.cc>".to_string());
+                .unwrap_or_else(|_| "Ferryx <login@ferryx.dev>".to_string());
             return Arc::new(ResendMailer::new(key, from_address));
         }
     }
@@ -622,10 +622,10 @@ mod tests {
 
     #[test]
     fn resend_payload_generation() {
-        let url = "https://relay.checka.cc/auth/magic?token=deadbeef12345678";
-        let payload = resend_payload("Ferryx <login@checka.cc>", "alice@example.com", url);
+        let url = "https://relay.ferryx.dev/auth/magic?token=deadbeef12345678";
+        let payload = resend_payload("Ferryx <login@ferryx.dev>", "alice@example.com", url);
 
-        assert_eq!(payload["from"], "Ferryx <login@checka.cc>");
+        assert_eq!(payload["from"], "Ferryx <login@ferryx.dev>");
         assert_eq!(payload["to"], serde_json::json!(["alice@example.com"]));
         assert_eq!(payload["subject"], "Sign in to Ferryx");
 
@@ -652,8 +652,8 @@ mod tests {
             deadline: Some(1700000000),
             portal_url: Some("https://portal.example.com".into()),
         };
-        let payload = resend_billing_payload("Ferryx <billing@checka.cc>", &msg);
-        assert_eq!(payload["from"], "Ferryx <billing@checka.cc>");
+        let payload = resend_billing_payload("Ferryx <billing@ferryx.dev>", &msg);
+        assert_eq!(payload["from"], "Ferryx <billing@ferryx.dev>");
         assert_eq!(payload["to"], serde_json::json!(["bob@example.com"]));
         assert_eq!(payload["subject"], "Urgent: 24 Hours Remaining");
         assert_eq!(payload["text"], "Notice body plain text");
@@ -662,9 +662,9 @@ mod tests {
 
     #[test]
     fn webhook_payload_generation() {
-        let payload = webhook_payload("bob@example.com", "https://relay.checka.cc/auth/magic?token=xyz");
+        let payload = webhook_payload("bob@example.com", "https://relay.ferryx.dev/auth/magic?token=xyz");
         assert_eq!(payload["to"], "bob@example.com");
-        assert_eq!(payload["url"], "https://relay.checka.cc/auth/magic?token=xyz");
+        assert_eq!(payload["url"], "https://relay.ferryx.dev/auth/magic?token=xyz");
     }
 
     #[test]

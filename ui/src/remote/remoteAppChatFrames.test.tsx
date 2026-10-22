@@ -227,7 +227,6 @@ describe("remoteAppChatFrames", () => {
     expect(await screen.findByText("OPTIMISTIC_A_MARKER")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
     fireEvent.click(within(screen.getByRole("tablist", { name: /terminal tabs/i })).getByRole("tab", { name: /second/i }));
-    fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
     await screen.findByText("B1");
     expect(document.body.textContent).not.toContain("OPTIMISTIC_A_MARKER");
     fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "B_DRAFT_MARKER" } });
@@ -418,9 +417,6 @@ describe("remoteAppChatFrames", () => {
     const sheet = screen.getByRole("tablist", { name: /terminal tabs/i });
     await act(async () => {
       fireEvent.click(within(sheet).getByRole("tab", { name: /second/i }));
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
     });
 
     await waitFor(() => {

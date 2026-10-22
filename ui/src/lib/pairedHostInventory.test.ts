@@ -423,8 +423,8 @@ it("pairing stores canonical custom relayOrigin and persists it across refresh a
 });
 
 it("normalizes relay origin and extracts origin and pin from invite links with #pair=", () => {
-  expect(normalizeRelayOrigin("https://relay.checka.cc")).toBe("https://relay.checka.cc");
-  expect(normalizeRelayOrigin("https://relay.checka.cc/")).toBe("https://relay.checka.cc");
+  expect(normalizeRelayOrigin("https://relay.ferryx.dev")).toBe("https://relay.ferryx.dev");
+  expect(normalizeRelayOrigin("https://relay.ferryx.dev/")).toBe("https://relay.ferryx.dev");
   expect(normalizeRelayOrigin("http://localhost:43821")).toBe("http://localhost:43821");
   expect(normalizeRelayOrigin("http://127.0.0.1:43821/")).toBe("http://127.0.0.1:43821");
   expect(() => normalizeRelayOrigin("http://insecure-remote.com")).toThrow("INVALID_RELAY_ORIGIN");

@@ -295,10 +295,10 @@ mod tests {
         let missing = account_origin().expect_err("unset");
         assert_eq!(missing.code, "ACCOUNT_ORIGIN_UNSET");
 
-        std::env::set_var("FERRYX_ACCOUNT_ORIGIN", "https://relay.checka.cc");
+        std::env::set_var("FERRYX_ACCOUNT_ORIGIN", "https://relay.ferryx.dev");
         assert_eq!(
             account_origin().expect("explicit relay").as_str(),
-            "https://relay.checka.cc"
+            "https://relay.ferryx.dev"
         );
         std::env::set_var("FERRYX_ACCOUNT_ORIGIN", "https://ferryx.dev");
         assert_eq!(

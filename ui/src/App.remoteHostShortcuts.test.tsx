@@ -247,7 +247,7 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
       remoteHostStore.upsertHost({
         hostId: "remote-worker-1",
         name: "Remote Worker 1",
-        address: "https://relay.checka.cc",
+        address: "https://relay.ferryx.dev",
         transport: "relay",
         authStatus: "paired",
         online: true,
@@ -336,7 +336,7 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
       remoteHostStore.upsertHost({
         hostId: "remote-worker-2",
         name: "Remote Worker 2",
-        address: "https://relay.checka.cc",
+        address: "https://relay.ferryx.dev",
         transport: "relay",
         authStatus: "paired",
         online: true,
@@ -378,7 +378,7 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
       remoteHostStore.upsertHost({
         hostId: "remote-worker-3",
         name: "Remote Worker 3",
-        address: "https://relay.checka.cc",
+        address: "https://relay.ferryx.dev",
         transport: "relay",
         authStatus: "paired",
         online: true,
@@ -463,7 +463,7 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
       remoteHostStore.upsertHost({
         hostId: "remote-worker-4",
         name: "Remote Worker 4",
-        address: "https://relay.checka.cc",
+        address: "https://relay.ferryx.dev",
         transport: "relay",
         authStatus: "paired",
         online: true,

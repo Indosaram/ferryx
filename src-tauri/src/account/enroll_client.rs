@@ -365,7 +365,7 @@ mod tests {
             account_id: "acct-1".into(),
             machine_record_id: "record-1".into(),
             account_origin: "https://account.example".into(),
-            relay_origin: "https://relay.checka.cc".into(),
+            relay_origin: "https://relay.ferryx.dev".into(),
             enrollment_epoch: "1".into(),
             enrolled_at: 1,
         };
@@ -421,7 +421,7 @@ mod tests {
             account_id: "acct-1".into(),
             machine_record_id: "machine-record-1".into(),
             account_origin: "https://account.example".into(),
-            relay_origin: "https://relay.checka.cc".into(),
+            relay_origin: "https://relay.ferryx.dev".into(),
             enrollment_epoch: "2".into(),
             enrolled_at: 1,
         };

@@ -413,7 +413,7 @@ struct RelayInner {
     /// signed transcript, so a signature is bound to THIS relay.
     ///
     /// Defaults to [`LEGACY_CONTROL_AUDIENCE`]; set from `FERRYX_RELAY_AUDIENCE`
-    /// (normally the public origin, e.g. `relay.checka.cc`) to stop a signature
+    /// (normally the public origin, e.g. `relay.ferryx.dev`) to stop a signature
     /// captured by one relay from being replayed against another.
     control_audience: String,
     control_channels: Mutex<HashMap<String, ControlChannel>>,
@@ -7452,7 +7452,7 @@ mod tests {
             let url = format!("{http_base}{endpoint}");
             let mut req = client.request(reqwest::Method::OPTIONS, &url);
             if send_origin {
-                req = req.header("Origin", "https://relay.checka.cc");
+                req = req.header("Origin", "https://relay.ferryx.dev");
                 req = req.header("Access-Control-Request-Method", "POST");
                 req = req.header(
                     "Access-Control-Request-Headers",

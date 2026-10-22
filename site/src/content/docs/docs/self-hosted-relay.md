@@ -105,7 +105,7 @@ sudo install -m 755 src-tauri/target/release/ferryx-relay /usr/local/bin/ferryx-
 | :--- | :--- | :--- | :--- |
 | `FERRYX_DEPLOYMENT_MODE` | none | unset (required) | Deployment mode: must be set explicitly to `selfhost` for private relays or `commercial` for managed relays. |
 | `FERRYX_RELAY_PORT` | `--port <u16>` | `8787` | TCP port for the HTTP and WebSocket listener. |
-| `FERRYX_ACCOUNT_ORIGIN` | none | `https://relay.checka.cc` | Canonical public HTTPS URL for account auth and magic links. |
+| `FERRYX_ACCOUNT_ORIGIN` | none | `https://relay.ferryx.dev` | Canonical public HTTPS URL for account auth and magic links. |
 | `FERRYX_ACCOUNT_RELAY_ORIGIN` | none | Value of `FERRYX_ACCOUNT_ORIGIN` | Public WebSocket relay URL advertised in machine records. |
 | `FERRYX_ACCOUNT_DATA_DIR` | none | `~/.ferryx/account-data` | Directory where signing keys, accounts, and mail are stored. |
 | `FERRYX_RELAY_MACHINE_TOKENS` | `--machine-token <tok>` | (empty) | Comma-separated list of pre-shared machine tokens. |
