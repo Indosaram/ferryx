@@ -13,12 +13,17 @@ pub const HELPER_VERSION: &str = "2026.1017.1";
 
 /// Capability tokens this helper can advertise, in handshake order. The last one
 /// is bound at runtime, so the handshake omits it when the listener is unavailable.
-pub const HELPER_CAPABILITIES: [&str; 4] = [
+pub const HELPER_CAPABILITIES: [&str; 5] = [
     "sshHelperV1",
     "dagStreamingV1",
     "dagSubscribeV1",
+    AGENT_HOOK_CAPABILITY,
     "agentStateV1",
 ];
+
+/// Advertised by helpers that answer `agent-hook <agent> <event>`. A host whose staged helper
+/// predates it (same version string, older build) never gets remote hooks that would fail.
+pub const AGENT_HOOK_CAPABILITY: &str = "agentHookV1";
 
 /// The single capability that depends on a runtime binding rather than the build.
 pub const CONDITIONAL_AGENT_STATE: &str = "agentStateV1";
@@ -908,6 +913,13 @@ where
 /// Binary entry: integrator calls this instead of any Tauri initialization.
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     let args: Vec<_> = args.into_iter().collect();
+    // `agent-hook <agent> <event>` is run by an agent's hook on an SSH host, inside a pane that has
+    // no helper root. It is the desktop's own reporter (`agent_hook_core.rs`), always exits 0 and
+    // never blocks the agent, so it is answered before the root requirement below.
+    if args.first().map(String::as_str) == Some(super::agent_hook_core::AGENT_HOOK_SUBCOMMAND) {
+        super::agent_hook_core::run(args[1..].iter().map(std::ffi::OsString::from));
+        return Ok(());
+    }
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
         println!("{HELPER_VERSION}");
         return Ok(());

@@ -59,7 +59,8 @@ sha256sum -c SHA256SUMS.txt
 
 ### 多智能体工作区
 
-在彼此隔离的分屏窗格中并行运行 AI 编码智能体（Claude Code、Codex、Gemini CLI），
+在彼此隔离的分屏窗格中并行运行 AI 编码智能体（OmO、Claude Code、Codex、Antigravity、OpenCode、
+pi、omp、GJC、GitHub Copilot CLI、Cursor CLI、Grok、Kimi、Cline、Aider、Crush、Droid），
 并查看实时状态指示。
 
 - 每个智能体使用独立 worktree

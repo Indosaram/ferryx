@@ -525,6 +525,65 @@ fn shell_plan_with_session_forwards_agent_state_socket_and_exports_env() {
     assert!(remote_cmd.contains("export FERRYX_SESSION_ID='session-123'"));
     assert!(remote_cmd.contains("FERRYX_AGENT_STATE_SOCKET='/tmp/ferryx-agent-session-123.sock'"));
     assert!(remote_cmd.contains("cd '/srv/repo'"));
+    // crush's herdr reporter reaches the same forwarded socket, unless real herdr already owns it.
+    assert!(remote_cmd.contains(
+        "[ -n \"${HERDR_ENV:-}\" ] || export HERDR_ENV=1 \
+         HERDR_SOCKET_PATH='/tmp/ferryx-agent-session-123.sock' HERDR_PANE_ID='session-123';"
+    ), "{remote_cmd}");
+}
+
+#[test]
+fn shell_plan_without_a_forwarded_socket_exports_no_herdr_env() {
+    let plan = shell_plan_with_session(&host(), "/srv/repo", Some("session-123"), None)
+        .expect("plan");
+    let remote_cmd = plan.args.last().unwrap();
+    assert!(!remote_cmd.contains("HERDR_"), "{remote_cmd}");
+    assert!(!plan.args.iter().any(|arg| arg == "-R"), "{:?}", plan.args);
+}
+
+/// Runs the remote command of a forwarded pane in a local `sh`. The login shell it execs is `sh -l`,
+/// whose `~/.profile` (in a tempdir HOME) prints the environment, so the HERDR_ENV conditional is
+/// exercised rather than read. A data file, not a fresh executable, so no ETXTBSY race.
+#[cfg(unix)]
+#[test]
+fn forwarded_remote_shell_gets_herdr_env_unless_real_herdr_owns_it() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().to_str().unwrap().to_string();
+    std::fs::write(fixture.path().join(".profile"), "env\nexit 0\n").unwrap();
+    let plan = shell_plan_with_session(&host(), &root, Some("session-123"), Some("/tmp/local.sock"))
+        .expect("plan");
+    let remote_cmd = plan.args.last().unwrap().clone();
+    let env_of = |herdr: Option<(&str, &str)>| {
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", &remote_cmd])
+            .env("HOME", fixture.path())
+            .env("SHELL", "/bin/sh")
+            .env_remove("ENV")
+            .stdin(std::process::Stdio::null())
+            .env_remove("HERDR_ENV")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_PANE_ID");
+        if let Some((socket, pane)) = herdr {
+            command
+                .env("HERDR_ENV", "1")
+                .env("HERDR_SOCKET_PATH", socket)
+                .env("HERDR_PANE_ID", pane);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let env = env_of(None);
+    assert!(env.lines().any(|l| l == "HERDR_ENV=1"), "{env}");
+    assert!(env.lines().any(|l| l == "HERDR_SOCKET_PATH=/tmp/ferryx-agent-session-123.sock"), "{env}");
+    assert!(env.lines().any(|l| l == "HERDR_PANE_ID=session-123"), "{env}");
+    assert!(env.lines().any(|l| l == "FERRYX_AGENT_STATE_SOCKET=/tmp/ferryx-agent-session-123.sock"));
+
+    let env = env_of(Some(("/run/user/herdr.sock", "herdr-pane-3")));
+    assert!(env.lines().any(|l| l == "HERDR_SOCKET_PATH=/run/user/herdr.sock"), "{env}");
+    assert!(env.lines().any(|l| l == "HERDR_PANE_ID=herdr-pane-3"), "{env}");
 }
 
 #[test]

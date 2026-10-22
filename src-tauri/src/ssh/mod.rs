@@ -11,6 +11,7 @@ pub mod manual;
 pub mod operations;
 pub mod password;
 pub mod projects;
+pub mod remote_hooks;
 pub mod runtime;
 pub mod state_bridge;
 #[cfg(unix)]

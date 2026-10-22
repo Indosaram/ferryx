@@ -113,10 +113,11 @@ pub(crate) fn hook_targets_with_env(get_env: impl Fn(&str) -> Option<OsString>) 
         .collect()
 }
 
-/// Quotes the executable for the shell the agent runs hook commands through.
-pub(crate) fn quote_executable(exe: &Path) -> String {
-    let path = exe.to_string_lossy();
-    if cfg!(windows) {
+/// Quotes the executable for the shell the agent runs hook commands through on a host of the
+/// given platform. It is not necessarily this one: the SSH integration writes hook commands for a
+/// remote host from the desktop.
+fn quote_executable_for(path: &str, windows: bool) -> String {
+    if windows {
         format!("\"{path}\"")
     } else {
         format!("'{}'", path.replace('\'', "'\\''"))
@@ -125,7 +126,30 @@ pub(crate) fn quote_executable(exe: &Path) -> String {
 
 /// The exact command Ferryx installs for one event.
 pub fn hook_command(exe: &Path, agent: &str, event: &str) -> String {
-    format!("{} {AGENT_HOOK_SUBCOMMAND} {agent} {event}", quote_executable(exe))
+    hook_command_for(&exe.to_string_lossy(), cfg!(windows), agent, event)
+}
+
+/// [`hook_command`] for an executable on a host of the given platform.
+pub(crate) fn hook_command_for(exe: &str, windows: bool, agent: &str, event: &str) -> String {
+    format!("{} {AGENT_HOOK_SUBCOMMAND} {agent} {event}", quote_executable_for(exe, windows))
+}
+
+/// The reporter a hook command names: its executable and the platform of the host it runs on.
+/// Locally that is this daemon's own executable; for an SSH host it is the staged remote helper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reporter {
+    pub exe: String,
+    pub windows: bool,
+}
+
+impl Reporter {
+    pub(crate) fn local(exe: &Path) -> Self {
+        Self { exe: exe.to_string_lossy().into_owned(), windows: cfg!(windows) }
+    }
+
+    pub(crate) fn command(&self, agent: &str, event: &str) -> String {
+        hook_command_for(&self.exe, self.windows, agent, event)
+    }
 }
 
 fn unquote_executable(quoted: &str) -> Option<String> {
@@ -147,8 +171,16 @@ fn ferryx_command_event<'a>(command: &'a str, agent: &str) -> Option<&'a str> {
         return None;
     }
     let exe = unquote_executable(&command[..split])?;
-    let name = Path::new(&exe).file_name()?.to_str()?;
-    matches!(name, "ferryx" | "ferryx.exe").then_some(event)
+    // Split on both separators: the desktop recognises entries it wrote for a remote host of the
+    // other platform, and `Path` only knows this one's.
+    let name = exe.rsplit(['/', '\\']).next()?;
+    // `ferryx-remote-helper` is the reporter the SSH integration installs on a remote host
+    // (`ssh/remote_hooks.rs`); it runs the same `agent-hook` code.
+    matches!(
+        name,
+        "ferryx" | "ferryx.exe" | "ferryx-remote-helper" | "ferryx-remote-helper.exe"
+    )
+    .then_some(event)
 }
 
 /// The command of a matcher group that has exactly the shape Ferryx writes and nothing more.
@@ -198,7 +230,7 @@ type OwnedEntry = for<'a> fn(&'a Value, &str) -> Option<&'a str>;
 /// Builds the entry Ferryx writes for one command.
 type BuildEntry = fn(String) -> Value;
 /// Writes one agent's entries into its parsed config file.
-type MergeShape = fn(&mut Value, &str, &[&str], &Path) -> Result<(), String>;
+type MergeShape = fn(&mut Value, &str, &[&str], &Reporter) -> Result<(), String>;
 /// Deletes one agent's entries from its parsed config file, returning how many went.
 type StripShape = fn(&mut Value, &str) -> Result<usize, String>;
 
@@ -207,7 +239,7 @@ fn merge_entries(
     root: &mut Value,
     agent: &str,
     events: &[&str],
-    exe: &Path,
+    reporter: &Reporter,
     owned: OwnedEntry,
     build: BuildEntry,
 ) -> Result<(), String> {
@@ -220,7 +252,7 @@ fn merge_entries(
     // Stale entries go first: another generation's executable, or an event no longer installed.
     for (event, groups) in hooks.iter_mut() {
         let Value::Array(groups) = groups else { continue };
-        let current = hook_command(exe, agent, event);
+        let current = reporter.command(agent, event);
         let wanted = events.contains(&event.as_str());
         let mut kept_current = false;
         groups.retain(|group| match owned(group, agent) {
@@ -233,7 +265,7 @@ fn merge_entries(
         });
     }
     for event in events {
-        let current = hook_command(exe, agent, event);
+        let current = reporter.command(agent, event);
         let groups = hooks
             .entry(event.to_string())
             .or_insert_with(|| Value::Array(Vec::new()))
@@ -250,9 +282,9 @@ pub(crate) fn merge_hooks(
     root: &mut Value,
     agent: &str,
     events: &[&str],
-    exe: &Path,
+    reporter: &Reporter,
 ) -> Result<(), String> {
-    merge_entries(root, agent, events, exe, ferryx_group_command, ferryx_group)
+    merge_entries(root, agent, events, reporter, ferryx_group_command, ferryx_group)
 }
 
 /// Deletes every Ferryx-owned entry for `agent` and returns how many went. An event array that
@@ -299,13 +331,13 @@ fn group_object_entry(command: String) -> Value {
     Value::Object(entry)
 }
 
-fn ferryx_group_object(agent: &str, events: &[&str], exe: &Path) -> Value {
+fn ferryx_group_object(agent: &str, events: &[&str], reporter: &Reporter) -> Value {
     let mut group = Map::new();
     group.insert("enabled".into(), Value::Bool(true));
     for event in events {
         group.insert(
             (*event).to_string(),
-            Value::Array(vec![group_object_entry(hook_command(exe, agent, event))]),
+            Value::Array(vec![group_object_entry(reporter.command(agent, event))]),
         );
     }
     Value::Object(group)
@@ -345,7 +377,7 @@ pub(crate) fn merge_group_object(
     root: &mut Value,
     agent: &str,
     events: &[&str],
-    exe: &Path,
+    reporter: &Reporter,
 ) -> Result<(), String> {
     let Some(root) = root.as_object_mut() else {
         return Err("the hooks file is not a JSON object".into());
@@ -353,7 +385,7 @@ pub(crate) fn merge_group_object(
     if root.get(FERRYX_ENTRY_NAME).is_some_and(|group| !is_ferryx_group_object(group, agent)) {
         return Ok(());
     }
-    root.insert(FERRYX_ENTRY_NAME.into(), ferryx_group_object(agent, events, exe));
+    root.insert(FERRYX_ENTRY_NAME.into(), ferryx_group_object(agent, events, reporter));
     Ok(())
 }
 
@@ -399,9 +431,9 @@ pub(crate) fn merge_command_entries(
     root: &mut Value,
     agent: &str,
     events: &[&str],
-    exe: &Path,
+    reporter: &Reporter,
 ) -> Result<(), String> {
-    merge_entries(root, agent, events, exe, ferryx_command_entry, command_entry)?;
+    merge_entries(root, agent, events, reporter, ferryx_command_entry, command_entry)?;
     if let Some(object) = root.as_object_mut() {
         object
             .entry("version")
@@ -442,9 +474,9 @@ pub(crate) fn merge_named_entries(
     root: &mut Value,
     agent: &str,
     events: &[&str],
-    exe: &Path,
+    reporter: &Reporter,
 ) -> Result<(), String> {
-    merge_entries(root, agent, events, exe, ferryx_named_entry, named_entry)
+    merge_entries(root, agent, events, reporter, ferryx_named_entry, named_entry)
 }
 
 /// Unlike the claude shape, an emptied `hooks` object goes too: crush users keep other settings in
@@ -476,18 +508,26 @@ fn read_settings(path: &Path) -> std::io::Result<Option<Value>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    parse_settings(&text).map(Some).map_err(invalid)
+}
+
+/// An empty file counts as an empty object, as the agents themselves treat it.
+fn parse_settings(text: &str) -> Result<Value, String> {
     if text.trim().is_empty() {
-        return Ok(Some(Value::Object(Map::new())));
+        return Ok(Value::Object(Map::new()));
     }
-    serde_json::from_str(&text)
-        .map(Some)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    serde_json::from_str(text).map_err(|error| error.to_string())
+}
+
+/// The bytes Ferryx writes for a settings file: pretty JSON and a final newline.
+fn render_settings(value: &Value) -> Result<String, String> {
+    let mut text = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
+    text.push('\n');
+    Ok(text)
 }
 
 fn write_settings(path: &Path, value: &Value) -> std::io::Result<()> {
-    let mut text = serde_json::to_string_pretty(value)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    text.push('\n');
+    let text = render_settings(value).map_err(invalid)?;
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -513,12 +553,20 @@ const SCRIPT_MARKER: &str =
 
 /// Cline matches a hook file by basename against its event enum, and runs at most one per event.
 fn script_file_name(event: &str) -> String {
-    format!("{event}{}", if cfg!(windows) { ".ps1" } else { ".sh" })
+    script_file_name_for(event, cfg!(windows))
+}
+
+pub(crate) fn script_file_name_for(event: &str, windows: bool) -> String {
+    format!("{event}{}", if windows { ".ps1" } else { ".sh" })
 }
 
 pub(crate) fn hook_script(exe: &Path, agent: &str, event: &str) -> String {
-    let command = hook_command(exe, agent, event);
-    if cfg!(windows) {
+    hook_script_for(&Reporter::local(exe), agent, event)
+}
+
+pub(crate) fn hook_script_for(reporter: &Reporter, agent: &str, event: &str) -> String {
+    let command = reporter.command(agent, event);
+    if reporter.windows {
         format!("{SCRIPT_MARKER}& {command}\n")
     } else {
         format!("#!/bin/sh\n{SCRIPT_MARKER}exec {command}\n")
@@ -526,7 +574,7 @@ pub(crate) fn hook_script(exe: &Path, agent: &str, event: &str) -> String {
 }
 
 /// The event a Ferryx-written script reports, or `None` for a script that is not one of ours.
-fn ferryx_script_event<'a>(body: &'a str, agent: &str) -> Option<&'a str> {
+pub(crate) fn ferryx_script_event<'a>(body: &'a str, agent: &str) -> Option<&'a str> {
     if !body.contains(SCRIPT_MARKER) {
         return None;
     }
@@ -605,14 +653,8 @@ pub fn install_hooks_into(target: &HookFileTarget, exe: &Path) -> std::io::Resul
     let path = resolve_write_path(&target.file)?;
     let original = read_settings(&path)?;
     let mut merged = original.clone().unwrap_or_else(|| Value::Object(Map::new()));
-    let merge: MergeShape = match target.shape {
-        HookShape::ClaudeGroups => merge_hooks,
-        HookShape::GroupKeyedObject => merge_group_object,
-        HookShape::NamedEntries => merge_named_entries,
-        HookShape::CommandEntries => merge_command_entries,
-        HookShape::EventScripts => unreachable!("handled above"),
-    };
-    merge(&mut merged, target.agent, target.events, exe).map_err(invalid)?;
+    let merge = merge_for(target.shape).expect("event scripts handled above");
+    merge(&mut merged, target.agent, target.events, &Reporter::local(exe)).map_err(invalid)?;
     if original.as_ref() == Some(&merged) {
         return Ok(false);
     }
@@ -634,13 +676,7 @@ pub fn remove_hooks_from(target: &HookFileTarget) -> std::io::Result<usize> {
     let Some(mut settings) = read_settings(&path)? else {
         return Ok(0);
     };
-    let strip: StripShape = match target.shape {
-        HookShape::ClaudeGroups => strip_hooks,
-        HookShape::GroupKeyedObject => strip_group_object,
-        HookShape::NamedEntries => strip_named_entries,
-        HookShape::CommandEntries => strip_command_entries,
-        HookShape::EventScripts => unreachable!("handled above"),
-    };
+    let strip = strip_for(target.shape).expect("event scripts handled above");
     let removed = strip(&mut settings, target.agent).map_err(invalid)?;
     if removed > 0 {
         write_settings(&path, &settings)?;
@@ -656,6 +692,61 @@ pub(crate) fn install_hook_targets(targets: &[HookFileTarget], exe: &Path) {
             Err(error) => tracing::warn!(agent = target.agent, file = %target.file.display(), %error, "Failed to install Ferryx agent hooks"),
         }
     }
+}
+
+fn merge_for(shape: HookShape) -> Option<MergeShape> {
+    match shape {
+        HookShape::ClaudeGroups => Some(merge_hooks),
+        HookShape::GroupKeyedObject => Some(merge_group_object),
+        HookShape::NamedEntries => Some(merge_named_entries),
+        HookShape::CommandEntries => Some(merge_command_entries),
+        HookShape::EventScripts => None,
+    }
+}
+
+fn strip_for(shape: HookShape) -> Option<StripShape> {
+    match shape {
+        HookShape::ClaudeGroups => Some(strip_hooks),
+        HookShape::GroupKeyedObject => Some(strip_group_object),
+        HookShape::NamedEntries => Some(strip_named_entries),
+        HookShape::CommandEntries => Some(strip_command_entries),
+        HookShape::EventScripts => None,
+    }
+}
+
+/// The text an install leaves in a settings file whose current text is `existing` (`None` when
+/// the file is absent), or `None` when the file must stay as it is. The same merge
+/// [`install_hooks_into`] applies, on text, so the SSH integration can run it for a remote file.
+pub(crate) fn merged_settings_text(
+    shape: HookShape,
+    agent: &str,
+    events: &[&str],
+    reporter: &Reporter,
+    existing: Option<&str>,
+) -> Result<Option<String>, String> {
+    let merge = merge_for(shape).ok_or("event scripts are not a settings file")?;
+    let original = existing.map(parse_settings).transpose()?;
+    let mut merged = original.clone().unwrap_or_else(|| Value::Object(Map::new()));
+    merge(&mut merged, agent, events, reporter)?;
+    if original.as_ref() == Some(&merged) {
+        return Ok(None);
+    }
+    render_settings(&merged).map(Some)
+}
+
+/// The text a removal leaves in a settings file, or `None` when it holds no Ferryx entry for
+/// `agent` and must stay byte-for-byte as it is. The same strip [`remove_hooks_from`] applies.
+pub(crate) fn stripped_settings_text(
+    shape: HookShape,
+    agent: &str,
+    existing: &str,
+) -> Result<Option<String>, String> {
+    let strip = strip_for(shape).ok_or("event scripts are not a settings file")?;
+    let mut settings = parse_settings(existing)?;
+    if strip(&mut settings, agent)? == 0 {
+        return Ok(None);
+    }
+    render_settings(&settings).map(Some)
 }
 
 #[cfg(test)]

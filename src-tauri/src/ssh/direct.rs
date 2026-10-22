@@ -171,11 +171,17 @@ pub fn shell_plan_with_session(
     let remote_command = match (session_id, local_agent_socket) {
         (Some(sid), Some(_)) => {
             let remote_sock = format!("/tmp/ferryx-agent-{sid}.sock");
+            // The forward ends at the daemon's unix agent-state listener, which also answers herdr
+            // `pane.report_agent` lines (server.rs `serve_agent_state_connection`), so crush's
+            // built-in herdr reporter can use it as on a local pane (pty.rs `apply_herdr_env`). A
+            // remote shell that already has HERDR_ENV runs real herdr and keeps its own variables.
             format!(
-                "export FERRYX_SESSION_ID={} FERRYX_AGENT_STATE_SOCKET={}; cd {} && exec \"${{SHELL:-/bin/sh}}\" -l",
-                quote_posix(sid),
-                quote_posix(&remote_sock),
-                quote_posix(root)
+                "export FERRYX_SESSION_ID={sid} FERRYX_AGENT_STATE_SOCKET={sock}; \
+                 [ -n \"${{HERDR_ENV:-}}\" ] || export HERDR_ENV=1 HERDR_SOCKET_PATH={sock} HERDR_PANE_ID={sid}; \
+                 cd {} && exec \"${{SHELL:-/bin/sh}}\" -l",
+                quote_posix(root),
+                sid = quote_posix(sid),
+                sock = quote_posix(&remote_sock),
             )
         }
         (Some(sid), None) => {

@@ -2,7 +2,10 @@ use super::runtime::{
     error, parse_fields, powershell_data, RemoteEnvironment, RemotePlatform, POWERSHELL_GIT,
 };
 use super::{direct, SshHost};
-use crate::daemon::agent_extension::{extension_source_for, EXTENSION_AGENTS, EXTENSION_FILE_NAME};
+use crate::daemon::agent_extension::{
+    extension_source_for, EXTENSION_AGENTS, EXTENSION_FILE_NAME, PLUGIN_AGENTS, PLUGIN_FILE_NAME,
+    PLUGIN_SOURCE, SENPI_AGENT_DIR_ENV,
+};
 use crate::ipc::{IpcError, IpcErrorCode};
 use crate::terminal::shell::ShellCommandPlan;
 use std::time::Duration;
@@ -115,6 +118,8 @@ pub fn shell_plan(
             Ok(plan)
         }
         RemotePlatform::Windows => {
+            // No HERDR_* here: the Windows bridge is a loopback TCP port that needs this boot's
+            // token, which herdr clients never send, and crush's herdr client dials a unix socket.
             let state = match state_endpoint {
                 Some(endpoint) => format!(
                     "$env:FERRYX_AGENT_STATE_PORT='{}'; $env:FERRYX_AGENT_STATE_TOKEN={};",
@@ -260,28 +265,147 @@ pub(crate) async fn upload_with(
 /// Installs the extension for one agent directory (`.omo`, `.pi` or `.omp`), whose own payload
 /// arrives on stdin. A missing agent directory is left alone: Ferryx never creates one.
 pub fn posix_install_script(dir: &str) -> String {
+    posix_install_at(
+        &format!(
+            "b=\"$HOME/\"{dir}; \
+             if [ ! -d \"$b\" ]; then cat > /dev/null; exit 0; fi; \
+             d=\"$b/agent/extensions\"; mkdir -p \"$d\";",
+            dir = direct::quote_posix(dir)
+        ),
+        EXTENSION_FILE_NAME,
+    )
+}
+
+/// The install body shared by every remote target. `locate` sets `d` to the directory the file goes
+/// in, or drains stdin and exits 0 when the target is not installed on this host.
+fn posix_install_at(locate: &str, file: &str) -> String {
     format!(
-        "set -e; b=\"$HOME/\"{dir}; \
-         if [ ! -d \"$b\" ]; then cat > /dev/null; exit 0; fi; \
-         d=\"$b/agent/extensions\"; mkdir -p \"$d\"; \
+        "set -e; {locate} \
          stage=$(mktemp \"$d/.ferryx-agent-state.XXXXXX\"); \
          trap '[ -z \"$stage\" ] || rm -f \"$stage\"' EXIT; \
-         cat > \"$stage\"; mv -f \"$stage\" \"$d/{EXTENSION_FILE_NAME}\"; stage=",
-        dir = direct::quote_posix(dir)
+         cat > \"$stage\"; mv -f \"$stage\" \"$d/{file}\"; stage="
+    )
+}
+
+/// Sets `a` to senpi's agent directory as the local install resolves it: `$SENPI_CODING_AGENT_DIR`,
+/// else `~/.senpi/agent` (an empty value counts as unset). Read from the remote command's own
+/// environment, which is a non-interactive shell's.
+fn posix_senpi_agent_dir() -> String {
+    format!("a=\"${{{SENPI_AGENT_DIR_ENV}:-$HOME/.senpi/agent}}\";")
+}
+
+/// Installs pi's payload into senpi's extension directory, only when that directory exists (the
+/// local `install_into` gate: Ferryx never creates it). A senpi directory that resolves to one of the
+/// [`EXTENSION_AGENTS`] directories is skipped: it already holds that agent's payload, and the
+/// shared body tells omo from pi at runtime (`reportedAgentId`). This runs after those installs.
+fn posix_senpi_install_script() -> String {
+    let listed = EXTENSION_AGENTS
+        .iter()
+        .map(|(dir, _)| direct::quote_posix(dir))
+        .collect::<Vec<_>>()
+        .join(" ");
+    posix_install_at(
+        &format!(
+            "{agent_dir} d=\"$a/extensions\"; \
+             if [ ! -d \"$d\" ]; then cat > /dev/null; exit 0; fi; \
+             r=$(cd \"$d\" && pwd -P); \
+             for o in {listed}; do \
+                 if [ \"$(cd \"$HOME/$o/agent/extensions\" 2>/dev/null && pwd -P)\" = \"$r\" ]; then cat > /dev/null; exit 0; fi; \
+             done;",
+            agent_dir = posix_senpi_agent_dir()
+        ),
+        EXTENSION_FILE_NAME,
+    )
+}
+
+/// Installs a plugin-style agent's file under `${XDG_CONFIG_HOME:-$HOME/.config}/<dir>/<plugins>`,
+/// only when the agent's config directory exists. The plugin subdirectory is created on demand, as
+/// the local `install_plugin_into` does.
+fn posix_plugin_install_script(dir: &str, plugins: &str) -> String {
+    posix_install_at(
+        &format!(
+            "cfg=\"${{XDG_CONFIG_HOME:-$HOME/.config}}\"; b=\"$cfg/\"{dir}; \
+             if [ ! -d \"$b\" ]; then cat > /dev/null; exit 0; fi; \
+             d=\"$b/\"{plugins}; mkdir -p \"$d\";",
+            dir = direct::quote_posix(dir),
+            plugins = direct::quote_posix(plugins)
+        ),
+        PLUGIN_FILE_NAME,
     )
 }
 
 fn windows_install_script(dir: &str) -> String {
+    windows_install_at(
+        &format!(
+            "$b=Join-Path $homeRoot {dir}; \
+             if ([IO.Directory]::Exists($b)) {{ \
+                 $d=Join-Path $b 'agent/extensions'; [void][IO.Directory]::CreateDirectory($d) \
+             }};",
+            dir = powershell_data(dir)
+        ),
+        EXTENSION_FILE_NAME,
+    )
+}
+
+/// The Windows install body shared by every remote target. `locate` sets `$d` to the directory the
+/// file goes in, or leaves it `$null` when the target is not installed on this host.
+fn windows_install_at(locate: &str, file: &str) -> String {
     format!(
-        "$b=Join-Path $homeRoot {dir}; \
-         if ([IO.Directory]::Exists($b)) {{ \
-             $d=Join-Path $b 'agent/extensions'; [void][IO.Directory]::CreateDirectory($d); \
-             $p=Join-Path $d '{EXTENSION_FILE_NAME}'; $tmp=$p+'.'+[Guid]::NewGuid().ToString()+'.tmp'; \
+        "$d=$null; {locate} \
+         if ($d) {{ \
+             $p=Join-Path $d '{file}'; $tmp=$p+'.'+[Guid]::NewGuid().ToString()+'.tmp'; \
              try {{ [IO.File]::WriteAllBytes($tmp,$bytes); \
                  if ([IO.File]::Exists($p)) {{ [IO.File]::Replace($tmp,$p,[NullString]::Value) }} else {{ [IO.File]::Move($tmp,$p) }} \
              }} finally {{ if ([IO.File]::Exists($tmp)) {{ [IO.File]::Delete($tmp) }} }} \
-         }}",
-        dir = powershell_data(dir)
+         }}"
+    )
+}
+
+fn windows_senpi_agent_dir() -> String {
+    format!(
+        "$a=$env:{SENPI_AGENT_DIR_ENV}; if (!$a) {{ $a=Join-Path $homeRoot '.senpi/agent' }};"
+    )
+}
+
+/// Windows counterpart of [`posix_senpi_install_script`]: the same existence gate and the same skip
+/// of a directory shared with an [`EXTENSION_AGENTS`] entry (compared as full paths).
+fn windows_senpi_install_script() -> String {
+    let listed = EXTENSION_AGENTS
+        .iter()
+        .map(|(dir, _)| powershell_data(dir))
+        .collect::<Vec<_>>()
+        .join(",");
+    windows_install_at(
+        &format!(
+            "{agent_dir} $s=Join-Path $a 'extensions'; \
+             if ([IO.Directory]::Exists($s)) {{ \
+                 $d=$s; $r=[IO.Path]::GetFullPath($s).TrimEnd('\\','/'); \
+                 foreach ($o in @({listed})) {{ \
+                     $od=Join-Path (Join-Path $homeRoot $o) 'agent/extensions'; \
+                     if ([IO.Directory]::Exists($od) -and ([IO.Path]::GetFullPath($od).TrimEnd('\\','/') -eq $r)) {{ $d=$null }} \
+                 }} \
+             }};",
+            agent_dir = windows_senpi_agent_dir()
+        ),
+        EXTENSION_FILE_NAME,
+    )
+}
+
+/// Sets `$c` to `$env:XDG_CONFIG_HOME`, else `<home>/.config`, the root the local install uses.
+const WINDOWS_CONFIG_HOME: &str =
+    "$c=$env:XDG_CONFIG_HOME; if (!$c) { $c=Join-Path $homeRoot '.config' };";
+
+fn windows_plugin_install_script(dir: &str, plugins: &str) -> String {
+    windows_install_at(
+        &format!(
+            "{WINDOWS_CONFIG_HOME} $b=Join-Path $c {dir}; \
+             if ([IO.Directory]::Exists($b)) {{ \
+                 $d=Join-Path $b {plugins}; [void][IO.Directory]::CreateDirectory($d) \
+             }};",
+            dir = powershell_data(dir),
+            plugins = powershell_data(plugins)
+        ),
+        PLUGIN_FILE_NAME,
     )
 }
 
@@ -289,13 +413,48 @@ fn windows_install_script(dir: &str) -> String {
 /// payloads, which arrive concatenated on stdin with their byte `lengths` in order. Prints one
 /// line: `removed|kept_modified|absent <agent>`. Only the file is ever deleted.
 pub fn posix_removal_script(dir: &str, agent: &str, lengths: &[usize]) -> String {
+    posix_removal_at(
+        &format!(
+            "t=\"$HOME/\"{dir}\"/agent/extensions/{EXTENSION_FILE_NAME}\";",
+            dir = direct::quote_posix(dir)
+        ),
+        agent,
+        lengths,
+    )
+}
+
+fn posix_senpi_removal_script(lengths: &[usize]) -> String {
+    posix_removal_at(
+        &format!(
+            "{} t=\"$a/extensions/{EXTENSION_FILE_NAME}\";",
+            posix_senpi_agent_dir()
+        ),
+        SENPI_TARGET,
+        lengths,
+    )
+}
+
+fn posix_plugin_removal_script(agent: &str, dir: &str, plugins: &str, lengths: &[usize]) -> String {
+    posix_removal_at(
+        &format!(
+            "cfg=\"${{XDG_CONFIG_HOME:-$HOME/.config}}\"; t=\"$cfg/\"{dir}\"/\"{plugins}\"/{PLUGIN_FILE_NAME}\";",
+            dir = direct::quote_posix(dir),
+            plugins = direct::quote_posix(plugins)
+        ),
+        agent,
+        lengths,
+    )
+}
+
+/// The removal body shared by every remote target. `locate` sets `t`, the one file it may delete.
+fn posix_removal_at(locate: &str, agent: &str, lengths: &[usize]) -> String {
     let lengths = lengths
         .iter()
         .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "set -e; agent={agent}; t=\"$HOME/\"{dir}\"/agent/extensions/{EXTENSION_FILE_NAME}\"; \
+        "set -e; agent={agent}; {locate} \
          base=\"${{TMPDIR:-/tmp}}\"; base=\"${{base%/}}\"; c=; \
          all=$(mktemp \"$base/.ferryx-remove.XXXXXX\"); \
          trap 'rm -f \"$all\"; [ -z \"$c\" ] || rm -f \"$c\"' EXIT; cat > \"$all\"; \
@@ -310,18 +469,57 @@ pub fn posix_removal_script(dir: &str, agent: &str, lengths: &[usize]) -> String
          done; \
          printf 'kept_modified %s\\n' \"$agent\"",
         agent = direct::quote_posix(agent),
-        dir = direct::quote_posix(dir),
     )
 }
 
 fn windows_removal_script(dir: &str, agent: &str, lengths: &[usize]) -> String {
+    windows_removal_at(
+        &format!(
+            "$t=Join-Path (Join-Path $homeRoot {dir}) 'agent/extensions/{EXTENSION_FILE_NAME}';",
+            dir = powershell_data(dir)
+        ),
+        agent,
+        lengths,
+    )
+}
+
+fn windows_senpi_removal_script(lengths: &[usize]) -> String {
+    windows_removal_at(
+        &format!(
+            "{} $t=Join-Path $a 'extensions/{EXTENSION_FILE_NAME}';",
+            windows_senpi_agent_dir()
+        ),
+        SENPI_TARGET,
+        lengths,
+    )
+}
+
+fn windows_plugin_removal_script(
+    agent: &str,
+    dir: &str,
+    plugins: &str,
+    lengths: &[usize],
+) -> String {
+    windows_removal_at(
+        &format!(
+            "{WINDOWS_CONFIG_HOME} $t=Join-Path (Join-Path (Join-Path $c {dir}) {plugins}) '{PLUGIN_FILE_NAME}';",
+            dir = powershell_data(dir),
+            plugins = powershell_data(plugins)
+        ),
+        agent,
+        lengths,
+    )
+}
+
+/// The Windows removal body shared by every remote target. `locate` sets `$t`.
+fn windows_removal_at(locate: &str, agent: &str, lengths: &[usize]) -> String {
     let lengths = lengths
         .iter()
         .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "$agent={agent}; $t=Join-Path (Join-Path $homeRoot {dir}) 'agent/extensions/{EXTENSION_FILE_NAME}'; \
+        "$agent={agent}; {locate} \
          $item=Get-Item -LiteralPath $t -Force -ErrorAction SilentlyContinue; \
          if (!$item) {{ $state='absent' }} \
          elseif ($item.PSIsContainer -or $item.LinkType) {{ $state='kept_modified' }} \
@@ -336,8 +534,97 @@ fn windows_removal_script(dir: &str, agent: &str, lengths: &[usize]) -> String {
          }}; \
          [Console]::Write($state+' '+$agent+\"`n\")",
         agent = powershell_data(agent),
-        dir = powershell_data(dir),
     )
+}
+
+/// The removal label of senpi's extension directory, which holds pi's payload. It is not an agent
+/// id: `pi` already labels `~/.pi/agent`, and the report has to say which directory it means.
+pub const SENPI_TARGET: &str = "senpi";
+
+/// One file the remote integration installs and removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteTarget {
+    /// `$HOME/<dir>/agent/extensions` with that agent's own payload.
+    Extension { dir: &'static str, agent: &'static str },
+    /// senpi's extension directory with pi's payload (the measured `pi` command is senpi).
+    Senpi,
+    /// A plugin-style agent's plugin file under its config directory.
+    Plugin { agent: &'static str, dir: &'static str, plugins: &'static str },
+}
+
+/// Everything the remote integration covers, in order: the same set the local install covers
+/// (`extension_dirs_with_env` plus `plugin_dirs_with_env`). Senpi comes after the
+/// [`EXTENSION_AGENTS`] directories, so its shared-directory check sees what they just wrote.
+fn remote_targets() -> Vec<RemoteTarget> {
+    EXTENSION_AGENTS
+        .iter()
+        .map(|&(dir, agent)| RemoteTarget::Extension { dir, agent })
+        .chain(std::iter::once(RemoteTarget::Senpi))
+        .chain(
+            PLUGIN_AGENTS
+                .iter()
+                .map(|&(agent, dir, plugins)| RemoteTarget::Plugin { agent, dir, plugins }),
+        )
+        .collect()
+}
+
+impl RemoteTarget {
+    /// The name a removal result is reported under.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Extension { agent, .. } | Self::Plugin { agent, .. } => agent,
+            Self::Senpi => SENPI_TARGET,
+        }
+    }
+
+    fn payload(self) -> Result<Vec<u8>, IpcError> {
+        match self {
+            Self::Extension { agent, .. } => Ok(agent_payload(agent)?.into_bytes()),
+            Self::Senpi => Ok(agent_payload("pi")?.into_bytes()),
+            Self::Plugin { .. } => Ok(PLUGIN_SOURCE.as_bytes().to_vec()),
+        }
+    }
+
+    fn install_script(self, platform: RemotePlatform) -> String {
+        match (self, platform) {
+            (Self::Extension { dir, .. }, RemotePlatform::Posix) => posix_install_script(dir),
+            (Self::Extension { dir, .. }, RemotePlatform::Windows) => windows_install_script(dir),
+            (Self::Senpi, RemotePlatform::Posix) => posix_senpi_install_script(),
+            (Self::Senpi, RemotePlatform::Windows) => windows_senpi_install_script(),
+            (Self::Plugin { dir, plugins, .. }, RemotePlatform::Posix) => {
+                posix_plugin_install_script(dir, plugins)
+            }
+            (Self::Plugin { dir, plugins, .. }, RemotePlatform::Windows) => {
+                windows_plugin_install_script(dir, plugins)
+            }
+        }
+    }
+
+    /// The removal script and its stdin: every payload Ferryx may have written at that path.
+    fn removal(self, platform: RemotePlatform) -> Result<(String, Vec<u8>), IpcError> {
+        let (bytes, lengths) = match self {
+            Self::Extension { agent, .. } => removal_candidates(agent)?,
+            Self::Senpi => removal_candidates("pi")?,
+            Self::Plugin { .. } => (PLUGIN_SOURCE.as_bytes().to_vec(), vec![PLUGIN_SOURCE.len()]),
+        };
+        let script = match (self, platform) {
+            (Self::Extension { dir, agent }, RemotePlatform::Posix) => {
+                posix_removal_script(dir, agent, &lengths)
+            }
+            (Self::Extension { dir, agent }, RemotePlatform::Windows) => {
+                windows_removal_script(dir, agent, &lengths)
+            }
+            (Self::Senpi, RemotePlatform::Posix) => posix_senpi_removal_script(&lengths),
+            (Self::Senpi, RemotePlatform::Windows) => windows_senpi_removal_script(&lengths),
+            (Self::Plugin { agent, dir, plugins }, RemotePlatform::Posix) => {
+                posix_plugin_removal_script(agent, dir, plugins, &lengths)
+            }
+            (Self::Plugin { agent, dir, plugins }, RemotePlatform::Windows) => {
+                windows_plugin_removal_script(agent, dir, plugins, &lengths)
+            }
+        };
+        Ok((script, bytes))
+    }
 }
 
 /// What a remote removal did, by agent id.
@@ -416,7 +703,7 @@ pub fn integration_forwarding<'a>(
     }
 }
 
-async fn run_integration_script(
+pub(super) async fn run_integration_script(
     host: &SshHost,
     environment: &RemoteEnvironment,
     script: &str,
@@ -442,40 +729,34 @@ async fn run_integration_script(
         })
 }
 
-/// Installs each agent's own payload into each agent directory that already exists on the host.
+/// Installs each target's own payload wherever that target's directory already exists on the host:
+/// the [`EXTENSION_AGENTS`] directories, senpi's directory and each plugin agent's config directory.
 pub async fn prepare_integration(
     host: &SshHost,
     environment: &RemoteEnvironment,
 ) -> Result<(), IpcError> {
-    for (dir, agent) in EXTENSION_AGENTS {
-        let payload = agent_payload(agent)?;
-        let script = match environment.platform {
-            RemotePlatform::Posix => posix_install_script(dir),
-            RemotePlatform::Windows => windows_install_script(dir),
-        };
-        run_integration_script(host, environment, &script, payload.into_bytes(), "integration")
+    for target in remote_targets() {
+        let script = target.install_script(environment.platform);
+        run_integration_script(host, environment, &script, target.payload()?, "integration")
             .await?;
     }
-    Ok(())
+    super::remote_hooks::install(host, environment).await
 }
 
-/// Deletes the extension from each agent directory where it is still exactly a Ferryx payload.
+/// Deletes each target's file where it is still exactly a payload Ferryx wrote.
 pub async fn remove_integration(
     host: &SshHost,
     environment: &RemoteEnvironment,
 ) -> Result<RemoteRemovalReport, IpcError> {
     let mut report = RemoteRemovalReport::default();
-    for (dir, agent) in EXTENSION_AGENTS {
-        let (bytes, lengths) = removal_candidates(agent)?;
-        let script = match environment.platform {
-            RemotePlatform::Posix => posix_removal_script(dir, agent, &lengths),
-            RemotePlatform::Windows => windows_removal_script(dir, agent, &lengths),
-        };
+    for target in remote_targets() {
+        let (script, bytes) = target.removal(environment.platform)?;
         let output =
             run_integration_script(host, environment, &script, bytes, "integration_removal")
                 .await?;
-        report.record(agent, &output)?;
+        report.record(target.label(), &output)?;
     }
+    super::remote_hooks::remove(host, environment, &mut report).await?;
     Ok(report)
 }
 
@@ -610,13 +891,80 @@ mod forwarding_tests {
         assert!(report.record("omo", b"removed pi\n").is_err());
         assert!(report.record("omo", b"").is_err());
     }
+
+    /// The remote integration covers what the local install covers: the three extension agents,
+    /// senpi's directory (pi's payload) and opencode's plugin. Dropping either fails here.
+    #[test]
+    fn remote_targets_cover_senpi_and_the_opencode_plugin() {
+        let labels: Vec<_> = remote_targets().into_iter().map(RemoteTarget::label).collect();
+        assert_eq!(labels, ["omo", "pi", "omp", SENPI_TARGET, "opencode"]);
+        assert_eq!(
+            RemoteTarget::Senpi.payload().unwrap(),
+            extension_source_for("pi").unwrap().into_bytes(),
+            "senpi runs the measured pi command, so it gets pi's payload"
+        );
+        let plugin = remote_targets()
+            .into_iter()
+            .find(|target| target.label() == "opencode")
+            .unwrap();
+        assert_eq!(plugin.payload().unwrap(), PLUGIN_SOURCE.as_bytes());
+        let (_, bytes) = plugin.removal(RemotePlatform::Posix).unwrap();
+        assert_eq!(bytes, PLUGIN_SOURCE.as_bytes(), "only the exact plugin bytes are removable");
+    }
+
+    #[test]
+    fn windows_senpi_scripts_resolve_the_senpi_dir_and_skip_a_shared_one() {
+        let install = RemoteTarget::Senpi.install_script(RemotePlatform::Windows);
+        assert!(install.contains("$a=$env:SENPI_CODING_AGENT_DIR"), "{install}");
+        assert!(install.contains("Join-Path $homeRoot '.senpi/agent'"), "{install}");
+        assert!(install.contains("$s=Join-Path $a 'extensions'"), "{install}");
+        assert!(install.contains("[IO.Directory]::Exists($s)"), "the senpi dir is never created");
+        assert!(!install.contains("CreateDirectory"), "{install}");
+        for (dir, _) in EXTENSION_AGENTS {
+            assert!(install.contains(&powershell_data(dir)), "{dir} must be checked for sharing");
+        }
+        assert!(install.contains(&format!("'{EXTENSION_FILE_NAME}'")), "{install}");
+
+        let (removal, bytes) = RemoteTarget::Senpi.removal(RemotePlatform::Windows).unwrap();
+        assert!(removal.contains(&format!("$t=Join-Path $a 'extensions/{EXTENSION_FILE_NAME}'")));
+        assert!(removal.contains(&format!("$agent={}", powershell_data(SENPI_TARGET))));
+        let (candidates, _) = removal_candidates("pi").unwrap();
+        assert_eq!(bytes, candidates, "every Ferryx payload is a removal candidate");
+    }
+
+    #[test]
+    fn windows_opencode_scripts_target_the_config_plugin_dir() {
+        let plugin = remote_targets()
+            .into_iter()
+            .find(|target| target.label() == "opencode")
+            .unwrap();
+        let install = plugin.install_script(RemotePlatform::Windows);
+        assert!(install.contains("$c=$env:XDG_CONFIG_HOME"), "{install}");
+        assert!(install.contains("Join-Path $homeRoot '.config'"), "{install}");
+        assert!(install.contains(&format!("$b=Join-Path $c {}", powershell_data("opencode"))));
+        assert!(install.contains("if ([IO.Directory]::Exists($b))"), "gated on opencode's dir");
+        assert!(install.contains(&format!("$d=Join-Path $b {}", powershell_data("plugins"))));
+        assert!(install.contains(&format!("'{PLUGIN_FILE_NAME}'")), "{install}");
+
+        let (removal, _) = plugin.removal(RemotePlatform::Windows).unwrap();
+        assert!(removal.contains(&format!(
+            "(Join-Path (Join-Path $c {}) {}) '{PLUGIN_FILE_NAME}'",
+            powershell_data("opencode"),
+            powershell_data("plugins")
+        )));
+        assert!(removal.contains(&format!("$agent={}", powershell_data("opencode"))));
+    }
 }
 
 #[cfg(all(test, unix))]
 mod installer_tests {
-    use super::{posix_install_script, posix_removal_script, removal_candidates};
+    use super::{
+        posix_install_script, posix_removal_script, remote_targets, removal_candidates,
+        RemotePlatform, RemoteTarget, SENPI_TARGET,
+    };
     use crate::daemon::agent_extension::{
-        extension_source_for, EXTENSION_AGENTS, EXTENSION_FILE_NAME,
+        extension_source_for, EXTENSION_AGENTS, EXTENSION_FILE_NAME, PLUGIN_FILE_NAME,
+        PLUGIN_SOURCE,
     };
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -624,16 +972,33 @@ mod installer_tests {
     use std::process::{Command, Output, Stdio};
 
     fn run(script: &str, home: &Path, path: Option<String>, input: &[u8]) -> Output {
+        run_env(script, home, path, input, &[])
+    }
+
+    /// Runs `script` under a fixture HOME. The variables the scripts read are cleared first, so the
+    /// test runner's own (omo's launcher exports SENPI_CODING_AGENT_DIR) never reach a real dir.
+    fn run_env(
+        script: &str,
+        home: &Path,
+        path: Option<String>,
+        input: &[u8],
+        vars: &[(&str, &Path)],
+    ) -> Output {
         let mut command = Command::new("sh");
         command
             .args(["-c", script])
             .env("HOME", home)
             .env("TMPDIR", home)
+            .env_remove("SENPI_CODING_AGENT_DIR")
+            .env_remove("XDG_CONFIG_HOME")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Some(path) = path {
             command.env("PATH", path);
+        }
+        for (key, value) in vars {
+            command.env(key, value);
         }
         let mut child = command.spawn().unwrap();
         child.stdin.take().unwrap().write_all(input).unwrap();
@@ -654,6 +1019,144 @@ mod installer_tests {
 
     fn extension_file(home: &Path, dir: &str) -> std::path::PathBuf {
         home.join(dir).join("agent/extensions").join(EXTENSION_FILE_NAME)
+    }
+
+    fn target(label: &str) -> RemoteTarget {
+        remote_targets().into_iter().find(|target| target.label() == label).unwrap()
+    }
+
+    /// Installs every remote target in order, as `prepare_integration` does.
+    fn install_all(home: &Path, vars: &[(&str, &Path)]) {
+        for target in remote_targets() {
+            let script = target.install_script(RemotePlatform::Posix);
+            let output = run_env(&script, home, None, &target.payload().unwrap(), vars);
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
+    }
+
+    fn remove_target(home: &Path, label: &str, vars: &[(&str, &Path)]) -> String {
+        let (script, bytes) = target(label).removal(RemotePlatform::Posix).unwrap();
+        let output = run_env(&script, home, None, &bytes, vars);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn senpi_dir_gets_pis_payload_only_when_it_exists() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path();
+        install_all(home, &[]);
+        assert!(!home.join(".senpi").exists(), "a missing senpi dir must stay missing");
+
+        let senpi = home.join(".senpi/agent/extensions");
+        std::fs::create_dir_all(&senpi).unwrap();
+        install_all(home, &[]);
+        assert_eq!(
+            std::fs::read_to_string(senpi.join(EXTENSION_FILE_NAME)).unwrap(),
+            extension_source_for("pi").unwrap()
+        );
+        assert_eq!(std::fs::read_dir(&senpi).unwrap().count(), 1, "no staging file left");
+        assert_no_staging_left(home);
+    }
+
+    #[test]
+    fn senpi_honours_senpi_coding_agent_dir() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        let custom = fixture.path().join("engine");
+        std::fs::create_dir_all(home.join(".senpi/agent/extensions")).unwrap();
+        std::fs::create_dir_all(custom.join("extensions")).unwrap();
+        let vars = [("SENPI_CODING_AGENT_DIR", custom.as_path())];
+        install_all(&home, &vars);
+        assert_eq!(
+            std::fs::read_to_string(custom.join("extensions").join(EXTENSION_FILE_NAME)).unwrap(),
+            extension_source_for("pi").unwrap()
+        );
+        assert!(
+            !home.join(".senpi/agent/extensions").join(EXTENSION_FILE_NAME).exists(),
+            "the override replaces ~/.senpi/agent"
+        );
+        assert_eq!(remove_target(&home, SENPI_TARGET, &vars), "removed senpi\n");
+        assert!(!custom.join("extensions").join(EXTENSION_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn senpi_sharing_omos_dir_keeps_omos_payload() {
+        // omo's launcher points SENPI_CODING_AGENT_DIR at ~/.omo/agent. That directory is installed
+        // once, as omo; the shared body tells omo from pi at runtime.
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path();
+        std::fs::create_dir_all(home.join(".omo/agent/extensions")).unwrap();
+        let omo_agent = home.join(".omo/agent");
+        install_all(home, &[("SENPI_CODING_AGENT_DIR", omo_agent.as_path())]);
+        assert_eq!(
+            std::fs::read_to_string(extension_file(home, ".omo")).unwrap(),
+            extension_source_for("omo").unwrap()
+        );
+        assert_no_staging_left(home);
+    }
+
+    #[test]
+    fn senpi_removal_is_byte_exact() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path();
+        let senpi = home.join(".senpi/agent/extensions");
+        std::fs::create_dir_all(&senpi).unwrap();
+        assert_eq!(remove_target(home, SENPI_TARGET, &[]), "absent senpi\n");
+        // An older build's omo-declared body there is still a Ferryx payload.
+        std::fs::write(senpi.join(EXTENSION_FILE_NAME), extension_source_for("omo").unwrap())
+            .unwrap();
+        assert_eq!(remove_target(home, SENPI_TARGET, &[]), "removed senpi\n");
+        let edited = format!("{}\n// user edit\n", extension_source_for("pi").unwrap());
+        std::fs::write(senpi.join(EXTENSION_FILE_NAME), &edited).unwrap();
+        assert_eq!(remove_target(home, SENPI_TARGET, &[]), "kept_modified senpi\n");
+        assert_eq!(std::fs::read_to_string(senpi.join(EXTENSION_FILE_NAME)).unwrap(), edited);
+        assert!(senpi.is_dir(), "directories stay");
+        assert_no_staging_left(home);
+    }
+
+    #[test]
+    fn opencode_plugin_installs_only_where_opencode_is_configured() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path();
+        install_all(home, &[]);
+        assert!(!home.join(".config").exists(), "a missing opencode config stays missing");
+
+        std::fs::create_dir_all(home.join(".config/opencode")).unwrap();
+        install_all(home, &[]);
+        let plugin = home.join(".config/opencode/plugins").join(PLUGIN_FILE_NAME);
+        assert_eq!(std::fs::read_to_string(&plugin).unwrap(), PLUGIN_SOURCE);
+        assert_eq!(std::fs::read_dir(plugin.parent().unwrap()).unwrap().count(), 1);
+
+        let xdg = fixture.path().join("xdg");
+        std::fs::create_dir_all(xdg.join("opencode")).unwrap();
+        install_all(home, &[("XDG_CONFIG_HOME", xdg.as_path())]);
+        assert_eq!(
+            std::fs::read_to_string(xdg.join("opencode/plugins").join(PLUGIN_FILE_NAME)).unwrap(),
+            PLUGIN_SOURCE,
+            "XDG_CONFIG_HOME relocates the config root, as it does locally"
+        );
+        assert_no_staging_left(home);
+    }
+
+    #[test]
+    fn opencode_plugin_removal_is_byte_exact() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path();
+        let plugins = home.join(".config/opencode/plugins");
+        assert_eq!(remove_target(home, "opencode", &[]), "absent opencode\n");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join(PLUGIN_FILE_NAME), PLUGIN_SOURCE).unwrap();
+        let neighbour = plugins.join("user-plugin.js");
+        std::fs::write(&neighbour, PLUGIN_SOURCE).unwrap();
+        assert_eq!(remove_target(home, "opencode", &[]), "removed opencode\n");
+        assert!(!plugins.join(PLUGIN_FILE_NAME).exists());
+        assert!(neighbour.is_file(), "only the Ferryx file name is ever deleted");
+        let edited = format!("{PLUGIN_SOURCE}// mine\n");
+        std::fs::write(plugins.join(PLUGIN_FILE_NAME), &edited).unwrap();
+        assert_eq!(remove_target(home, "opencode", &[]), "kept_modified opencode\n");
+        assert_eq!(std::fs::read_to_string(plugins.join(PLUGIN_FILE_NAME)).unwrap(), edited);
+        assert_no_staging_left(home);
     }
 
     fn assert_no_staging_left(home: &Path) {
