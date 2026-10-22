@@ -11,7 +11,7 @@ import {
   enterKey,
 } from './common.mjs';
 import { startSshd, sshRestoreSession, recordSshHelper } from '../lib/sshd.mjs';
-import { typeVerified } from '../lib/typeverified.mjs';
+import { typeVerified, renderEcho } from '../lib/typeverified.mjs';
 import { legacyLogFiles } from '../lib/jobs.mjs';
 
 export const OPTOUT_FILE = 'daemon-supervisor.optout'; // supervisor.rs OPTOUT_FILE_NAME, in <FERRYX_DATA_DIR>/remote
@@ -396,7 +396,9 @@ export async function Q11(ctx, result) {
   }
   // Type the marker into that tab. The remote tty echoes it, which proves the keystrokes reached
   // this session; cat has not read it yet (canonical mode holds the line until Enter). MahoRD drops
-  // keys from a typed burst on omarchy (lib/typeverified.mjs), so each key is confirmed by its echo.
+  // and repeats keys on omarchy (lib/typeverified.mjs), so the echoed line is driven to the marker
+  // key by key and a surplus key is erased; the tty's erase echo means the raw output need not hold
+  // the marker contiguously, so the rendered input line is what must equal it.
   const marker = nonce('UNCERTAIN').replace('_', '');
   const since = await conn.outputLength(sid);
   // Keys go to the foreground window: make it the GUI that attached (Windows: gui.focus).
@@ -404,12 +406,17 @@ export async function Q11(ctx, result) {
   await evidence(ctx, result, 'focus.json', { beforeEscape: attached.focus ?? null, beforeTyping: focused });
   let typed;
   try {
-    typed = await typeVerified({ mahord: ctx.mahord, text: marker, waitEcho: (prefix, ms) => conn.waitOutput(sid, prefix, ms, { since }) });
+    typed = await typeVerified({
+      mahord: ctx.mahord,
+      text: marker,
+      echo: async () => String(await conn.outputOf(sid) ?? '').slice(since),
+      waitMore: (length, ms) => conn.waitOutput(sid, '', ms, { since: since + length }),
+    });
   } catch (error) {
     typed = { error: error.detail ?? String(error?.message ?? error) };
   }
-  const echoed = await conn.waitOutput(sid, marker, 1_000, { since });
-  if (!assertion(result, 'the marker typed through the GUI reached the SSH session', !typed.error && !echoed.timedOut && echoed.count === 1, { typed, echoed })) return;
+  const echoed = renderEcho(String(await conn.outputOf(sid) ?? '').slice(since));
+  if (!assertion(result, 'the marker typed through the GUI reached the SSH session', !typed.error && echoed === marker, { typed, echoed })) return;
   // Arm the hold only now: the GUI input queue is serialized, so a held keystroke would block the
   // rest of the marker. Enter is the uncertain write that commits the marker line to cat.
   const receipts = hjoin(ctx.layout.barriers, 'write-ack-hold.receipt.jsonl');

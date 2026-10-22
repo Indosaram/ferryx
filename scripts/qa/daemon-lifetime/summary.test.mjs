@@ -972,7 +972,7 @@ function q11World({ replayOnRelaunch = false, resendOnReconnect = false, release
       default: throw new Error(`unexpected agent call ${method}`);
     }
   };
-  const conn = { handle: 'h0', call: (frame) => call('call', { handle: 'h0', frame }), describe: () => call('call', { handle: 'h0', frame: { type: 'describeLiveSessions' } }), waitOutput: (s, marker, _ms, { since = 0 } = {}) => call('waitOutput', { marker, since }), outputLength: async () => (await call('outputOf', {})).length, close: async () => {} };
+  const conn = { handle: 'h0', call: (frame) => call('call', { handle: 'h0', frame }), describe: () => call('call', { handle: 'h0', frame: { type: 'describeLiveSessions' } }), waitOutput: (s, marker, _ms, { since = 0 } = {}) => call('waitOutput', { marker, since }), outputOf: () => call('outputOf', {}), outputLength: async () => (await call('outputOf', {})).length, close: async () => {} };
   const restoredTab = () => {
     const doc = w.sessionFile ? JSON.parse(w.sessionFile) : null;
     const ws = doc && Object.values(doc.workspaces).find((x) => x.target?.kind === 'ssh');

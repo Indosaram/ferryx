@@ -7,7 +7,7 @@ import { HANDOVER_FAULTS, TRANSFER_FAULTS, FORCED_COMMIT_FAILURE } from '../lib/
 import { data as D, helloSupportsHandover, inventoryTotal } from '../lib/wire.mjs';
 import {
   evidence, dataConn, controlConn, ownerIdentity, nonceRoundTrip, assertInventoryKept, assertSameOwner,
-  retireOwner, freshOwner, nonce, counterCommand, interrupt, setAsideHeadCatalog, requireOwner, DAEMON_READY_TIMEOUT_MS, RESPAWN_BACKOFF_MS,
+  retireOwner, freshOwner, nonce, counterCommand, interruptSettled, setAsideHeadCatalog, requireOwner, DAEMON_READY_TIMEOUT_MS, RESPAWN_BACKOFF_MS,
 } from './common.mjs';
 import { surviveGuiEnd } from './q00-q03.mjs';
 import { startSshd, recordSshHelper } from '../lib/sshd.mjs';
@@ -121,7 +121,7 @@ export async function Q07(ctx, result) {
 export async function seedPair(ctx, conn, tag, { ssh: withSsh = true } = {}) {
   const local = ctx.state.localA;
   const sshOwnerPid = (await ownerIdentity(ctx)).pid;
-  await interrupt(conn, local);
+  await interruptSettled(ctx, conn, local);
   await conn.call(D.write(local, counterCommand(ctx.platform, `${tag}_L`)));
   if (!withSsh) {
     const lo = await conn.waitOutput(local, `${tag}_L_TICK_3`, 15_000);
@@ -135,7 +135,7 @@ export async function seedPair(ctx, conn, tag, { ssh: withSsh = true } = {}) {
   await conn.call(D.write(spawned.sessionId, counterCommand('linux', `${tag}_S`)));
   const lo = await conn.waitOutput(local, `${tag}_L_TICK_3`, 15_000);
   const so = await conn.waitOutput(spawned.sessionId, `${tag}_S_TICK_3`, 30_000);
-  if (lo.timedOut || so.timedOut) throw new Error('counters produced no output');
+  if (lo.timedOut || so.timedOut) throw new Error(`counters produced no output (local ${lo.timedOut ? 'silent' : 'ok'}, ssh ${so.timedOut ? 'silent' : 'ok'}; local tail ${JSON.stringify(String(lo.text ?? '').slice(-300))}, ssh tail ${JSON.stringify(String(so.text ?? '').slice(-300))})`);
   return { local, ssh: spawned.sessionId, tag, sshOwnerPid };
 }
 
@@ -150,13 +150,32 @@ export function counterProgress(text, tag) {
   return { max: values.length ? Math.max(...values) : 0, restarted: values.some((v, i) => i > 0 && v === 1 && values[i - 1] > 1) };
 }
 
-async function stageGeneration(ctx, artifact) {
-  // The GUI stages its runtime on launch (todo 3); here the harness reads back the staged path.
+/**
+ * Bound on the GUI's runtime staging after launch. The GUI stages from its setup thread
+ * (lib.rs spawn_blocking ensure_if_absent -> supervisor.rs generation_unit stage_runtime), after
+ * admission; omarchy measured 22-28s and up to 63.6s from admission to "Daemon supervisor armed"
+ * (run-int2-all runlog-gui-g12 40.3s, g23 63.6s).
+ */
+export const STAGE_TIMEOUT_MS = 120_000;
+
+/**
+ * The staged runtime of artifact's generation, waited for. The GUI stages asynchronously after its
+ * window starts, so reading the path right after launch raced it (run-int2-all Q08 A_B: present
+ * false, RequestUpgrade refused "staged executable ... does not exist" at 23:48:24.8, the B GUI
+ * armed at 23:48:38.3). runtime_stage.rs publishes a generation by renaming a complete temp dir
+ * to <root>/<key>, so the wait is on that dir appearing in the root (agent waitPath: directory
+ * watch, bounded). waitPath creates the watched file's parent, so it must never watch inside
+ * <key>: an empty <key> dir would make the stager reuse it as an existing generation.
+ */
+export async function stageGeneration(ctx, artifact, { deadlineMs = STAGE_TIMEOUT_MS } = {}) {
   const exe = ctx.platform === 'mac'
     ? hjoin(ctx.stagedRoot, ctx.keys[artifact.name], 'Ferryx Daemon.app', 'Contents', 'MacOS', 'ferryx')
     // runtime_stage.rs:38 stages ferryx.exe on Windows.
     : hjoin(ctx.stagedRoot, ctx.keys[artifact.name], ctx.platform === 'windows' ? 'ferryx.exe' : 'ferryx');
-  return { exe, key: ctx.keys[artifact.name], present: await ctx.agent.call('exists', { file: exe }) };
+  const generationDir = hjoin(ctx.stagedRoot, ctx.keys[artifact.name]);
+  const startedAt = Date.now();
+  const appeared = await ctx.agent.call('waitPath', { file: generationDir, deadlineMs });
+  return { exe, key: ctx.keys[artifact.name], present: appeared && await ctx.agent.call('exists', { file: exe }), waitedMs: Date.now() - startedAt };
 }
 
 /** One control RequestUpgrade from the current owner to artifact; asserts the Q08 contract. */
@@ -334,7 +353,7 @@ export async function restartCounters(ctx, conn, pair) {
   const { local, ssh } = counterTags(pair);
   // The connection may be one that never streamed this pair (surviveGuiEnd replaces it).
   for (const sid of pairSessions(pair)) await conn.call(D.attach(sid, 0));
-  for (const sid of pairSessions(pair)) await interrupt(conn, sid);
+  for (const sid of pairSessions(pair)) await interruptSettled(ctx, conn, sid);
   await conn.call(D.write(pair.local, counterCommand(ctx.platform, local)));
   const lo = await conn.waitOutput(pair.local, `${local}_TICK_3`, 15_000);
   if (lo.timedOut) throw new Error(`restarted counters produced no output (${pair.tag})`);
