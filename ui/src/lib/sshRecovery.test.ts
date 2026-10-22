@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { startSshRecovery } from "./sshRecovery";
+import { coalesceListCalls, startSshRecovery } from "./sshRecovery";
 import { deserializeWorkspaceState, serializeWorkspaceState } from "./sessionPersistence";
 import { workspaceReducer, type WorkspaceState } from "../state/workspaceStore";
 import { createLayoutState } from "../state/layout";
@@ -1547,5 +1547,38 @@ describe("SSH recovery", () => {
 
     expect(retry).not.toHaveBeenCalled();
     recovery.stop();
+  });
+});
+
+describe("coalesceListCalls", () => {
+  it("runs one call at a time and serves every caller that arrived mid-flight from one follow-up", async () => {
+    const resolvers: Array<(value: number) => void> = [];
+    const list = vi.fn(() => new Promise<number>(resolve => { resolvers.push(resolve); }));
+    const coalesced = coalesceListCalls(list);
+
+    const first = coalesced();
+    const burst = Array.from({ length: 50 }, () => coalesced());
+    expect(list).toHaveBeenCalledTimes(1);
+
+    resolvers[0](1);
+    await expect(first).resolves.toBe(1);
+    await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    resolvers[1](2);
+    await expect(Promise.all(burst)).resolves.toEqual(Array(50).fill(2));
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("still issues the follow-up when the in-flight call fails", async () => {
+    let calls = 0;
+    const coalesced = coalesceListCalls(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("daemon busy");
+      return calls;
+    });
+    const first = coalesced();
+    const second = coalesced();
+    await expect(first).rejects.toThrow("daemon busy");
+    await expect(second).resolves.toBe(2);
+    await expect(coalesced()).resolves.toBe(3);
   });
 });
