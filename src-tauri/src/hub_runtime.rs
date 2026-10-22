@@ -334,6 +334,19 @@ struct Generation {
 
 async fn spawn_generation(launch: &HubLaunch) -> Generation {
     let mut tasks = Vec::new();
+    #[cfg(feature = "hub-discord")]
+    {
+        let control: std::sync::Arc<dyn ferryx_hub::agent_control::AgentControl> =
+            launch.bridge.clone();
+        ferryx_hub::voice_session::install(std::sync::Arc::new(
+            ferryx_hub::voice_session::VoiceTurnContext {
+                pool: launch.hub.pool.clone(),
+                profiles: launch.profiles.clone(),
+                meta_session_id: launch.meta_session_id.clone(),
+                control,
+            },
+        ));
+    }
     let mut events = launch.server.remote_state().agent_events.subscribe();
     let watch_hub = Arc::clone(&launch.hub);
     let watch_bridge = launch.bridge.clone();

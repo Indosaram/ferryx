@@ -43,6 +43,7 @@ pub mod tracker;
 pub mod tracker_linear;
 pub mod voice;
 pub mod voice_pcm;
+pub mod voice_session;
 
 pub use config::{secret_from_env, HubConfig};
 pub use error::{HubError, Result};

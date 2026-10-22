@@ -4,6 +4,8 @@ The ferryx daemon starts the hub. Slack, Discord, and voice stay idle until a to
 
 Two Socket Mode connections must not overlap. Unload `ai.omon.gateway` and `ai.omon.gateway-watchdog` before the ferryx hub opens Slack.
 
+A Discord `/voice join` binds that voice channel to the text channel's session. Each utterance is sent to the same pane a typed message in that channel uses, and the spoken reply is the assistant text that pane adds once the turn is idle.
+
 The cron scheduler sleeps until the earliest `next_run_at`. Creating or triggering a job wakes it. A due job runs its payload command, posts Slack and Discord deliveries, and records a cron problem. The third consecutive failure opens a remediation lane. A publishing rerun still needs the owner token on the cron socket. `[SILENT]` and `wakeAgent: false` are stored on the run and are not posted.
 
 The hub control socket is `~/.ferryx/hub/control.sock`. `ferryx hub stop` and `ferryx hub start` write one JSON line to it. Those commands drop or bind the hub's chat, cron, and HTTP tasks. They do not restart `com.ferryx.daemon`, so live PTY sessions stay up. Cron run-now clients keep using `~/.omon/cron-run-now.sock`. The same line protocol is also bound at `~/.ferryx/hub/cron.sock` and `~/.ferryx/hub/cron-run-now.sock`.

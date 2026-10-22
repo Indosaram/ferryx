@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+#[cfg(any(feature = "hub-voice", test))]
 use std::time::Duration;
 
 #[cfg(feature = "hub-voice")]
@@ -18,8 +19,6 @@ use crate::discord_surface::{
     interaction_guild, voice_gateway_update, voice_state_payload, voice_subcommand,
     VoiceGatewayUpdate,
 };
-#[cfg(feature = "hub-voice")]
-use crate::lanes::kibitzer::ModelTurn;
 use crate::voice::VoiceSettings;
 #[cfg(feature = "hub-voice")]
 use crate::voice::{
@@ -219,6 +218,12 @@ async fn join(settings: &VoiceSettings, data: &Value) -> Result<String, String> 
         let silence = settings.silence();
         let min_speech = settings.min_speech();
         let max_speech = settings.max_speech();
+        if !text_channel.is_empty() {
+            crate::voice_session::bind(
+                voice_channel,
+                crate::voice_session::discord_text_session(guild_id, &text_channel),
+            );
+        }
         let owned = settings.clone();
         tokio::spawn(listen(
             packet_rx,
@@ -289,6 +294,7 @@ async fn send_state(guild_id: u64, channel_id: Option<u64>) -> Result<(), String
         .map_err(|_| "Discord gateway is not connected.".to_owned())
 }
 
+#[cfg(any(feature = "hub-voice", test))]
 async fn collect_voice_connection(
     notices: &mut broadcast::Receiver<VoiceGatewayUpdate>,
     guild_id: u64,
@@ -506,7 +512,7 @@ async fn speak_turn(
     text_channel: String,
     settings: VoiceSettings,
     utterance: Utterance,
-    _voice_channel_id: u64,
+    voice_channel_id: u64,
     generation: Arc<AtomicU64>,
     epoch: u64,
     turn: Arc<AtomicU64>,
@@ -543,13 +549,16 @@ async fn speak_turn(
     {
         return;
     }
-    let response = match ask_model(&transcript).await {
-        Ok(text) => text,
-        Err(error) => {
-            tracing::warn!(%error, "voice turn failed");
-            return;
-        }
-    };
+    let response =
+        match crate::voice_session::respond_bound(voice_channel_id, utterance.user_id, &transcript)
+            .await
+        {
+            Ok(text) => text,
+            Err(error) => {
+                tracing::warn!(%error, "voice turn failed");
+                return;
+            }
+        };
     if spoken_text(&response).is_empty()
         || generation.load(Ordering::Acquire) != epoch
         || turn.load(Ordering::Acquire) != mine
@@ -579,16 +588,6 @@ async fn speak_turn(
 }
 
 #[cfg(feature = "hub-voice")]
-async fn ask_model(prompt: &str) -> Result<String, String> {
-    let url =
-        std::env::var("FERRYX_HUB_OMO_URL").unwrap_or_else(|_| "ws://127.0.0.1:19742".to_owned());
-    crate::meta::backend::UrlModel::new(url)
-        .complete_with(prompt, None, &[])
-        .await
-        .map_err(|error| error.to_string())
-}
-
-#[cfg(feature = "hub-voice")]
 fn pcm_input(sample_rate: u32, channels: u32, samples: &[i16]) -> songbird::input::Input {
     let adapter = songbird::input::RawAdapter::new(
         std::io::Cursor::new(pcm_f32_bytes(samples)),
@@ -598,6 +597,7 @@ fn pcm_input(sample_rate: u32, channels: u32, samples: &[i16]) -> songbird::inpu
     adapter.into()
 }
 
+#[cfg(any(feature = "hub-voice", test))]
 fn pcm_f32_bytes(samples: &[i16]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(samples.len() * 4);
     for sample in samples {

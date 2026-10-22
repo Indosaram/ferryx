@@ -331,14 +331,16 @@ pub struct Inbound {
     pub event_id: Option<String>,
 }
 
-/// Routes an inbound message to the meta-agent pane, or to a lane pane the profile names.
-/// The body is fenced untrusted text. This never reads the pane.
-pub async fn route_inbound(
+/// Pane a typed message on this inbound would reach. A voice utterance uses the same pane.
+pub fn inbound_pane(inbound: &Inbound, profiles: &ProfileRouter, meta_session_id: &str) -> String {
+    inbound_target(inbound, profiles, meta_session_id).1
+}
+
+fn inbound_target(
     inbound: &Inbound,
     profiles: &ProfileRouter,
     meta_session_id: &str,
-    control: &dyn AgentControl,
-) -> Result<AgentOp> {
+) -> (SessionKey, String) {
     let key = SessionKey::new(
         inbound.platform.clone(),
         inbound.guild_id.clone(),
@@ -365,6 +367,18 @@ pub async fn route_inbound(
     let session_id = route
         .and_then(|route| route.pane_session_id.clone())
         .unwrap_or_else(|| meta_session_id.to_owned());
+    (key, session_id)
+}
+
+/// Routes an inbound message to the meta-agent pane, or to a lane pane the profile names.
+/// The body is fenced untrusted text. This never reads the pane.
+pub async fn route_inbound(
+    inbound: &Inbound,
+    profiles: &ProfileRouter,
+    meta_session_id: &str,
+    control: &dyn AgentControl,
+) -> Result<AgentOp> {
+    let (key, session_id) = inbound_target(inbound, profiles, meta_session_id);
     let origin = format!(
         "{} channel={} user={}",
         inbound.platform, inbound.channel_id, inbound.user_id
