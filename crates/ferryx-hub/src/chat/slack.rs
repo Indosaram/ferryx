@@ -201,9 +201,12 @@ fn click_target(payload: &Value, op: Option<&AgentOp>) -> ClickTarget {
 }
 
 fn answered_line(label: &str, user_id: &str, at: chrono::DateTime<chrono::Utc>) -> String {
+    let unix = at.timestamp();
+    let fallback = at.format("%Y-%m-%d %H:%M UTC");
+    // `{date_short_pretty}` and `{time}` are Slack tokens. Each viewer sees their own zone.
+    // The UTC string is the fallback for a client that does not expand `<!date^…>`.
     format!(
-        "✅ {label} — answered by <@{user_id}> at {}",
-        at.format("%Y-%m-%d %H:%M UTC")
+        "✅ {label} — answered by <@{user_id}> at <!date^{unix}^{{date_short_pretty}} {{time}}|{fallback}>"
     )
 }
 
@@ -1224,7 +1227,17 @@ mod tests {
                         .as_str()
                         .unwrap();
                     assert!(
-                        line.starts_with("✅ Ship it — answered by <@UOWNER> at "),
+                        line.starts_with("✅ Ship it — answered by <@UOWNER> at <!date^"),
+                        "{line}"
+                    );
+                    let (unix, rest) = line.split_once("<!date^").unwrap().1.split_once('^').unwrap();
+                    assert!(unix.chars().all(|c| c.is_ascii_digit()), "{line}");
+                    let fallback = chrono::DateTime::from_timestamp(unix.parse().unwrap(), 0)
+                        .unwrap()
+                        .format("%Y-%m-%d %H:%M UTC");
+                    assert_eq!(
+                        rest,
+                        format!("{{date_short_pretty}} {{time}}|{fallback}>"),
                         "{line}"
                     );
                     assert!(notes.len() == 1, "{recorded:?}");
