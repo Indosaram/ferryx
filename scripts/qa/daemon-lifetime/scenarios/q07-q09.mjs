@@ -353,10 +353,14 @@ export async function restartCounters(ctx, conn, pair) {
   const { local, ssh } = counterTags(pair);
   // The connection may be one that never streamed this pair (surviveGuiEnd replaces it).
   for (const sid of pairSessions(pair)) await conn.call(D.attach(sid, 0));
-  for (const sid of pairSessions(pair)) await interruptSettled(ctx, conn, sid);
+  const settled = [];
+  for (const sid of pairSessions(pair)) settled.push((await interruptSettled(ctx, conn, sid))?.timedOut ?? null);
+  const since = String(await conn.outputOf(pair.local) ?? '').length;
   await conn.call(D.write(pair.local, counterCommand(ctx.platform, local)));
   const lo = await conn.waitOutput(pair.local, `${local}_TICK_3`, 15_000);
-  if (lo.timedOut) throw new Error(`restarted counters produced no output (${pair.tag})`);
+  // run-all-fix all1 Q08R1: the local counter stayed silent and the run dir was gone; keep the
+  // settle outcome (timedOut per session) and what the local shell printed after the write.
+  if (lo.timedOut) throw new Error(`restarted counters produced no output (${pair.tag}; settle timedOut ${JSON.stringify(settled)}; local after write ${JSON.stringify(String(await conn.outputOf(pair.local) ?? '').slice(since).slice(-600))})`);
   if (!pair.ssh) return;
   await conn.call(D.write(pair.ssh, counterCommand('linux', ssh)));
   const so = await conn.waitOutput(pair.ssh, `${ssh}_TICK_3`, 30_000);
