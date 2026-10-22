@@ -284,3 +284,32 @@ test('Windows teardown removes a QA task a still-alive GUI re-registered before 
   assert.deepEqual(summary.teardown.leftovers, []);
   assert.deepEqual(tasks, []);
 });
+
+// ---- Teardown: no task-definition record of this run stays in the real supervisor dir (F1 O1) ----
+
+test('Windows remove() deletes the definition record of every QA task, and a remaining record is a leftover (F1 O1)', async () => {
+  const execs = [];
+  const agent = { call: async (method, p) => { if (method === 'exec') execs.push([p.command, ...p.args]); return { status: 0, stdout: '', stderr: '' }; } };
+  const jobs = createJobs({ host: { platform: 'windows' }, agent, runId: RUN, layout: isolationLayout('C:\\q\\' + RUN, 'windows') });
+  const removeItems = () => execs.filter((a) => a[0] === 'powershell.exe' && a.at(-1).startsWith('Remove-Item')).map((a) => a.at(-1));
+  // A generation task and the legacy task: each record is <LOCALAPPDATA>\Ferryx\supervisor\<name with \ -> ->.xml
+  // (supervisor_windows.rs task_xml_path), removed after /Delete.
+  for (const [name, file] of [[jobs.task('2026.1018.1-516169bd'), 'Ferryx-ferryx-qa-' + RUN + '-2026.1018.1-516169bd.xml'], [jobs.task(null), 'Ferryx-ferryx-qa-' + RUN + '.xml']]) {
+    execs.length = 0;
+    assert.equal(await jobs.remove(name), true);
+    const del = execs.findIndex((a) => a[0] === 'schtasks' && a[1] === '/Delete');
+    assert.deepEqual(removeItems(), [`Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Ferryx\\supervisor\\${file}') -ErrorAction SilentlyContinue`], name);
+    assert.ok(del >= 0 && del < execs.findIndex((a) => a[0] === 'powershell.exe'), 'record removed after /Delete');
+  }
+  // A name without this run's QA base is refused before any schtasks or file call.
+  execs.length = 0;
+  await assert.rejects(jobs.remove('Ferryx\\Daemon-2026.1018.1-516169bd'), /non-QA task/);
+  assert.deepEqual(execs, []);
+  // Teardown reports a record of this run that is still on disk, so the run is not clean.
+  const tAgent = { call: async (m) => (m === 'exec' ? { status: 0, stdout: '[]', stderr: '' } : m === 'teardownRecorded' ? { killed: [], refused: [] } : m === 'table' ? [] : null) };
+  const left = 'Ferryx-ferryx-qa-' + RUN + '-2026.1013.2-967dfe90.xml';
+  const summary = newSummary({ runId: RUN, platform: 'windows', host: 'h' });
+  await teardownRun({ summary, agent: tAgent, jobs: { listQaJobs: async () => [], listQaTaskXml: async () => [left], remove: async () => {} }, host: { platform: 'windows' }, layout: { logs: 'C:\\r\\logs' }, runDirs: ['C:\\r'], qaRoots: ['C:\\r'], localEvidence: '/nonexistent', prodSnapshot: async () => null });
+  assert.deepEqual(summary.teardown.leftovers, [{ kind: 'task-xml', file: left }]);
+  assert.deepEqual(summary.teardown.dirsRemoved, [], 'run dirs are kept while a leftover exists');
+});
