@@ -13,6 +13,7 @@ pub mod path_select;
 pub mod inventory;
 pub mod projects;
 pub mod reachability;
+pub mod route_view;
 pub mod service;
 pub mod upload;
 

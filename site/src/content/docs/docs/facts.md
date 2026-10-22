@@ -101,6 +101,7 @@ remains alive. Stopping the daemon or rebooting its host can end live PTYs.
 | Pairing | 6-digit PIN (also available as a QR code) | `src-tauri/src/remote/` |
 | Mobile terminal | Custom DOM grid, no xterm.js dependency | `ui/src/remote/` |
 | Off-LAN access | Configurable outbound relay tunnel; no inbound SSH port or public IP required | `src-tauri/src/remote/` |
+| Paired machine path | Relay first; a live session upgrades to a direct QUIC path (UDP, IPv4) when both sides trust each other, and falls back to the relay on loss | `src-tauri/src/paired_host/`, `src-tauri/src/terminal/paired_runtime.rs` |
 
 A terminal exposed over a network is a shell on your machine. Keep remote access off unless you need
 it, and prefer a trusted network path.

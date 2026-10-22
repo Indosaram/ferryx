@@ -11,34 +11,6 @@ use crate::remote::attach_crypto::{SecureStream, WebSocketByteStream};
 pub type RelayAttachedStream =
     SecureStream<WebSocketByteStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>;
 
-pub fn build_host_candidates(
-    host: &crate::paired_host::inventory::HostView,
-    device_token: Option<&str>,
-) -> Vec<CandidatePath> {
-    let mut candidates = Vec::new();
-
-    candidates.push(CandidatePath::with_expected_machine_id(
-        AttachPath::Relay,
-        crate::remote::relay_client::live_relay_url(&host.relay_origin).as_ref(),
-        device_token.map(str::to_owned),
-        Some(host.machine_id.clone()),
-    ));
-
-    if host.ssh_host_id.is_some() {
-        candidates.push(CandidatePath::with_expected_machine_id(
-            AttachPath::SshForward,
-            format!(
-                "http://127.0.0.1:{}",
-                crate::remote::discovery::tailscale::DEFAULT_FERRYX_PORT
-            ),
-            device_token.map(str::to_owned),
-            Some(host.machine_id.clone()),
-        ));
-    }
-
-    candidates
-}
-
 fn attach_ws_url(base_origin: &str, session_id: &str, is_relay: bool) -> String {
     let ws_origin = if base_origin.starts_with("http://") {
         base_origin.replacen("http://", "ws://", 1)
@@ -175,28 +147,6 @@ pub async fn attach_relay_session(
         enrollment_epoch,
         identity_dir,
         &[],
-        None,
-    )
-    .await
-}
-
-pub async fn attach_host_session(
-    host: &crate::paired_host::inventory::HostView,
-    device_token: Option<&str>,
-    session_id: &str,
-    machine_attach_public_key: &str,
-    enrollment_epoch: &str,
-    identity_dir: &Path,
-) -> anyhow::Result<RelayAttachedStream> {
-    let candidates = build_host_candidates(host, device_token);
-    attach_paired_session_with_candidates(
-        &crate::remote::relay_client::live_relay_url(&host.relay_origin),
-        session_id,
-        &host.machine_id,
-        machine_attach_public_key,
-        enrollment_epoch,
-        identity_dir,
-        &candidates,
         None,
     )
     .await

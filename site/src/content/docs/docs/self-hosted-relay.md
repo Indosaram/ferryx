@@ -7,6 +7,12 @@ Ferryx connects remote clients and headless daemons over WebSocket tunnels broke
 
 This guide provides an end-to-end operational reference for building the binary from source, serving HTTPS (directly with built-in Let's Encrypt certificates, or behind a reverse proxy), managing environment variables, enrolling desktop and headless daemons, connecting mobile browsers, and maintaining daemon uptime.
 
+### Relay and the direct path
+
+Every paired session starts on the relay. Between two Ferryx machines (not browsers), the relay also carries the signed offer/answer exchange for a direct, end-to-end encrypted QUIC path. When that path comes up, live terminal streams move onto it without restarting the session, and they fall back to the relay if it breaks. Your relay therefore still matters for direct sessions: it is the signaling channel and the fallback, but it does not carry the direct traffic itself.
+
+The direct path needs outbound UDP and IPv4 on both machines; networks that block non-443 traffic keep the pair on the relay. On an account relay, the host also needs a valid account lease. Lease and peer records are verified against the account public key, which each machine pins from your relay's `/api/account/v1/public-key` when it enrolls (`FERRYX_RELAY_ACCOUNT_PUBLIC_KEY` overrides it). Machines enrolled to the same account trust each other's direct-path keys through a record signed by the account service; because that service runs inside `ferryx-relay`, whoever operates the relay host is part of that trust. Manually pinned keys (`ferryx direct-trust`) always take precedence, and `FERRYX_DIRECT_AUTO_TRUST=0` turns automatic trust off.
+
 ## Architecture and Separation of Concerns
 
 The Ferryx network topology separates authentication authority from data transport:

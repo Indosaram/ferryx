@@ -9,6 +9,7 @@ import {
   type MachineStatus,
 } from "../../../lib/machineStatus";
 import { usePairedHostReachability } from "../../../lib/pairedHostReachability";
+import { pairedPathLabel, usePairedHostRoute } from "../../../lib/pairedHostRoute";
 import type { SshHost, SshTargetSummary } from "../../../lib/sshHosts";
 import type { HostEndpoint } from "../../../state/remoteHostStore";
 import { Badge } from "../../ui/badge";
@@ -188,6 +189,7 @@ export interface PairedMachineRowProps extends PairedStatusInput {
 export function PairedMachineRow(props: PairedMachineRowProps) {
   const { host, busy, signedIn, nativeReady, canOpenProject } = props;
   const status = usePairedRowStatus(props);
+  const route = usePairedHostRoute(host.hostId);
   const name = pairedDisplayName(host);
   const connect = status.primary === "connect";
   const disabled = connect ? busy || !signedIn : busy || status.code !== "READY" || !canOpenProject;
@@ -198,7 +200,7 @@ export function PairedMachineRow(props: PairedMachineRowProps) {
       name={name}
       actionName={host.name}
       kindLabel="Paired"
-      pathChip={host.transport === "relay" ? "Relay" : host.transport}
+      pathChip={pairedPathLabel(host.transport, route)}
       status={status}
       selected={props.selected}
       primary={connect
