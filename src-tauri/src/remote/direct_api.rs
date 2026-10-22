@@ -366,10 +366,22 @@ async fn account_auto_trust(
     identity: &crate::remote::auth::MachineIdentity,
     source: &str,
 ) -> Option<ed25519_dalek::VerifyingKey> {
-    let account_public_key = manager.config.auto_trust_account_key.as_deref()?;
-    if !state.host_lease_required() {
+    if !crate::paired_host::direct_trust::auto_trust_enabled() || !state.host_lease_required() {
         return None;
     }
+    let account_public_key = match manager.config.auto_trust_account_key.clone() {
+        Some(key) => key,
+        None => {
+            let dir = store_dir.to_path_buf();
+            crate::ipc::run_blocking(move || {
+                Ok(crate::remote::direct_lease::pinned_account_public_key_in(Some(&dir)))
+            })
+            .await
+            .ok()
+            .flatten()?
+        }
+    };
+    let account_public_key = account_public_key.as_str();
     let lease = state
         .host_lease
         .get_valid_lease((manager.config.now_ms)() / 1000)?;

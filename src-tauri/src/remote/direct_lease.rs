@@ -363,11 +363,147 @@ pub fn load_host_enrollment(identity_dir: Option<&Path>) -> Option<AccountEnroll
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Blocking: the operator-pinned account-service signing key.
-pub fn pinned_account_public_key() -> Option<String> {
+/// File next to the enrollment record holding the account public key pinned on first contact.
+pub const ACCOUNT_KEY_PIN_FILE: &str = "account-public-key.json";
+
+/// Account public key pinned for one account origin (trust on first use at enrollment).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountKeyPin {
+    pub account_origin: String,
+    pub public_key: String,
+    pub pinned_at: u64,
+}
+
+/// The operator-set account-service signing key (`FERRYX_RELAY_ACCOUNT_PUBLIC_KEY`), if any.
+pub fn env_account_public_key() -> Option<String> {
     std::env::var(ACCOUNT_PUBLIC_KEY_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
+}
+
+/// Blocking: the account-service signing key this machine trusts, from the canonical dirs.
+pub fn pinned_account_public_key() -> Option<String> {
+    pinned_account_public_key_in(None)
+}
+
+/// Blocking: the env key wins; otherwise the key pinned at enrollment, used only while it was
+/// pinned for the account origin of the current enrollment record. An explicit `identity_dir`
+/// is authoritative, so tests never read the developer's real state.
+pub fn pinned_account_public_key_in(identity_dir: Option<&Path>) -> Option<String> {
+    if let Some(key) = env_account_public_key() {
+        return Some(key);
+    }
+    let enrollment = load_host_enrollment(identity_dir)?;
+    let pin = load_account_key_pin(identity_dir)?;
+    (pin.account_origin == enrollment.account_origin).then_some(pin.public_key)
+}
+
+fn account_key_pin_path(identity_dir: Option<&Path>) -> Option<PathBuf> {
+    match identity_dir {
+        Some(dir) => Some(dir.join(ACCOUNT_KEY_PIN_FILE)),
+        None => crate::remote::auth::canonical_remote_dir().map(|dir| dir.join(ACCOUNT_KEY_PIN_FILE)),
+    }
+}
+
+fn load_account_key_pin(identity_dir: Option<&Path>) -> Option<AccountKeyPin> {
+    let bytes = std::fs::read(account_key_pin_path(identity_dir)?).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Minimum spacing between account public-key fetches for the canonical (non-test) dirs.
+pub const ACCOUNT_KEY_FETCH_RETRY: Duration = Duration::from_secs(300);
+
+/// Why [`ensure_account_public_key`] could not leave a usable pin behind.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AccountKeyPinError {
+    #[error("machine is not enrolled with an account")]
+    NotEnrolled,
+    #[error("account public key request failed: {0}")]
+    Transport(String),
+    #[error("account public key request returned status {0}")]
+    Status(u16),
+    #[error("account public key response is not an Ed25519 key")]
+    BadKey,
+    #[error("account public key pin could not be saved: {0}")]
+    Save(String),
+}
+
+/// Makes sure an enrolled machine has the account public key its lease and direct auto-trust are
+/// verified against, without requiring `FERRYX_RELAY_ACCOUNT_PUBLIC_KEY`.
+///
+/// Trust on first use: the key is fetched once from the enrolled account origin over the same
+/// channel enrollment used, then pinned. An existing pin for the same origin is never replaced
+/// (a changed key needs an operator to delete the pin file); a pin for another origin is
+/// replaced because the machine re-enrolled elsewhere. Returns the key now in effect.
+pub async fn ensure_account_public_key(
+    identity_dir: Option<&Path>,
+    http: &reqwest::Client,
+) -> Result<String, AccountKeyPinError> {
+    if let Some(key) = env_account_public_key() {
+        return Ok(key);
+    }
+    let dir = identity_dir.map(Path::to_path_buf);
+    let read_dir = dir.clone();
+    let (enrollment, pin) = crate::ipc::run_blocking(move || {
+        Ok((
+            load_host_enrollment(read_dir.as_deref()),
+            load_account_key_pin(read_dir.as_deref()),
+        ))
+    })
+    .await
+    .map_err(|error| AccountKeyPinError::Save(error.to_string()))?;
+    let enrollment = enrollment.ok_or(AccountKeyPinError::NotEnrolled)?;
+    if let Some(pin) = pin.filter(|pin| pin.account_origin == enrollment.account_origin) {
+        return Ok(pin.public_key);
+    }
+    // One fetch per process per window: every direct attempt calls this, and an unreachable
+    // account service must not be asked again on each one.
+    static LAST_FETCH: parking_lot::Mutex<Option<std::time::Instant>> = parking_lot::Mutex::new(None);
+    {
+        let mut last = LAST_FETCH.lock();
+        if identity_dir.is_none()
+            && last.is_some_and(|at| at.elapsed() < ACCOUNT_KEY_FETCH_RETRY)
+        {
+            return Err(AccountKeyPinError::Transport("recently failed; retry later".into()));
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let origin = enrollment.account_origin.trim_end_matches('/');
+    let response = http
+        .get(format!("{origin}/api/account/v1/public-key"))
+        .send()
+        .await
+        .map_err(|error| AccountKeyPinError::Transport(error.to_string()))?;
+    let status = response.status().as_u16();
+    if status != 200 {
+        return Err(AccountKeyPinError::Status(status));
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PublicKeyBody {
+        public_key: String,
+    }
+    let body: PublicKeyBody = response
+        .json()
+        .await
+        .map_err(|error| AccountKeyPinError::Transport(error.to_string()))?;
+    crate::paired_host::direct_trust::parse_verifying_key(&body.public_key)
+        .map_err(|_| AccountKeyPinError::BadKey)?;
+    let pin = AccountKeyPin {
+        account_origin: enrollment.account_origin.clone(),
+        public_key: body.public_key.clone(),
+        pinned_at: unix_now_secs(),
+    };
+    crate::ipc::run_blocking(move || {
+        let path = account_key_pin_path(dir.as_deref())
+            .ok_or_else(|| crate::ipc::IpcError::internal("cannot resolve remote dir"))?;
+        crate::remote::auth::write_private_json(&path, &pin)
+            .map_err(|error| crate::ipc::IpcError::internal(error.to_string()))
+    })
+    .await
+    .map_err(|error| AccountKeyPinError::Save(error.to_string()))?;
+    Ok(body.public_key)
 }
 
 /// The gateway's own identity dir wins; otherwise the canonical remote dir that
@@ -420,7 +556,7 @@ impl HostLeaseWiring {
             .or_else(|| crate::remote::auth::canonical_identity_dir().ok())?;
         let enrollment = load_host_enrollment(identity_dir)?;
         let machine = crate::remote::auth::load_or_generate_machine_identity(&dir).ok()?;
-        let account_public_key = pinned_account_public_key()?;
+        let account_public_key = pinned_account_public_key_in(identity_dir)?;
         let http = reqwest::Client::builder()
             .timeout(ACCOUNT_LEASE_HTTP_TIMEOUT)
             .build()

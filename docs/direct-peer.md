@@ -1,14 +1,29 @@
 # Direct peer path (P2P) and direct trust
 
-> Status: source only. Not deployed in any release.
-> Verification: PENDING. Compile, tests, and a Windows smoke run have not been
-> reported yet. Nothing here claims the direct path works end to end.
+> Status: the direct path with manual pins ships in v2026.10.11.1. Moving live relay
+> streams onto a direct route when it comes up, account-attested auto-trust, and the
+> Direct/Relay route chip in the machine list are on `main` and not released yet.
+> Verification: unit and integration tests only (see the table below). An end-to-end
+> direct connection between two real machines has not been measured.
 
 ## What it is
 
 Paired machines normally carry all traffic through the relay. The direct path lets
 two paired machines talk over a peer-to-peer QUIC connection instead. The relay is
 still used for signaling (offer/answer), but it is **untrusted**.
+
+## Relay first, then direct
+
+A paired session always starts on the relay, so it works immediately. In the
+background the client tries the direct path for that host. When a direct route comes
+up, live terminal streams that are still on the relay move onto it (make-before-break:
+the direct stream is attached before the relay one is closed, within a 10 s budget;
+one attempt per route epoch). If the direct route drops, new attaches fall back to
+the relay. The desktop machine list shows the current route of each paired host as a
+`Direct` or `Relay` chip; an older daemon that does not report routes shows no chip.
+
+An account-enrolled host only admits direct offers while it holds a valid signed
+account lease, so a suspended or over-limit account stays on the relay.
 
 ## Trust model
 
@@ -28,13 +43,19 @@ still used for signaling (offer/answer), but it is **untrusted**.
     key; the account answers only callers of the same owner (401 without valid machine
     auth, 403 cross-owner, 404 unknown). The record is signed under the domain
     `ferryx-account-direct-peer-v1`, expires after 24 h, and is verified against the
-    operator-pinned `FERRYX_RELAY_ACCOUNT_PUBLIC_KEY`. The host additionally requires a
+    account public key (below). The host additionally requires a
     valid account lease and pins only when the record's `ownerKey` equals its own lease
     owner. Failures are logged, briefly negative-cached on the host, and the pair stays on
     the relay.
 - Precedence: a manual pin always wins over an account key; an account key may only change
   for a strictly newer enrollment epoch; `revoke` tombstones the machine id so it is never
   auto-repinned until you `provision` it manually again.
+- **Account public key**: `FERRYX_RELAY_ACCOUNT_PUBLIC_KEY` wins when set. Otherwise the
+  machine pins the key from `GET /api/account/v1/public-key` on its account origin at
+  enrollment (or on first use for machines enrolled earlier) into
+  `<data>/remote/account-public-key.json`. The pin is bound to that origin and is never
+  replaced by a different key from the same origin; delete the file to re-pin after a
+  deliberate key rotation. Re-enrolling with another origin ignores the old pin.
 - **Shared trust root caveat**: in production the account service runs inside
   `ferryx-relay`, so the account signing key is not independent of the relay host. Whoever
   controls that host's account key can attest a key for any machine of the owner. If that is

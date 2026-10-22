@@ -76,10 +76,14 @@ pub(crate) fn kick(http: &reqwest::Client, host: &HostView, lease: &CredentialLe
 
 async fn load_attempt(host: &HostView, bearer: String) -> Option<DirectAttempt> {
     let dir = crate::remote::auth::canonical_identity_dir().ok()?;
-    let account_key = super::direct_trust::auto_trust_enabled()
-        .then(crate::remote::direct_lease::pinned_account_public_key)
-        .flatten();
     let http = super::direct_autotrust::account_http();
+    let account_key = if super::direct_trust::auto_trust_enabled() {
+        crate::remote::direct_lease::ensure_account_public_key(Some(&dir), &http)
+            .await
+            .ok()
+    } else {
+        None
+    };
     load_attempt_in(dir, host, bearer, account_key.as_deref().map(|key| (&http, key))).await
 }
 

@@ -205,6 +205,11 @@ pub async fn enroll_machine(
         .ok_or_else(|| EnrollError::local("ACCOUNT_IDENTITY_DIR_UNRESOLVED", "cannot resolve identity dir"))?;
     write_private_json(&path, &record)
         .map_err(|error| EnrollError::local("ACCOUNT_ENROLLMENT_SAVE_FAILED", error.to_string()))?;
+    // Pin the account public key now, over the channel enrollment just used, so the direct lease
+    // and account auto-trust work without an operator env var. A failure here is retried lazily.
+    if let Err(error) = crate::remote::direct_lease::ensure_account_public_key(None, &client).await {
+        tracing::warn!("account public key not pinned at enrollment: {error}");
+    }
 
     Ok(record)
 }

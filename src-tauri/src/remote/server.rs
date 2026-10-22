@@ -7858,6 +7858,19 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
     // plus the lease-to-bridge cancellation watch start exactly once. Hosts with no enrollment
     // record start nothing and keep their LAN, static-token and selfhost trust paths.
     let lease_dir = state.identity_dir.clone();
+    // Enrolled machines pin the account public key on first contact so the lease (and account
+    // direct auto-trust) verify without an operator env var. Best-effort: on failure the lease
+    // context stays unresolved, exactly as before, and the next start retries.
+    if let Err(error) = crate::remote::direct_lease::ensure_account_public_key(
+        lease_dir.as_deref(),
+        &crate::paired_host::direct_autotrust::account_http(),
+    )
+    .await
+    {
+        if error != crate::remote::direct_lease::AccountKeyPinError::NotEnrolled {
+            tracing::warn!("account public key not pinned: {error}");
+        }
+    }
     let lease_wiring = match crate::ipc::run_blocking(move || {
         Ok(crate::remote::direct_lease::HostLeaseWiring::resolve(
             lease_dir.as_deref(),
