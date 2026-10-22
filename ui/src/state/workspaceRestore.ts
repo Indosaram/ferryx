@@ -263,6 +263,12 @@ export function useWorkspaceRestore({
     if (preloadedRestoreStateByWorkspace.has(workspaceId)) {
       const preloadedState = preloadedRestoreStateByWorkspace.get(workspaceId) ?? null;
       preloadedRestoreStateByWorkspace.delete(workspaceId);
+      // The preload is the disk state captured at boot, but it is only applied once this
+      // workspace's registration completes, which can happen hours later (for example after a
+      // focus-triggered registration retry). The mounted store was seeded from the same preload and
+      // has kept the snapshot current since, so restore from that live snapshot: replaying the
+      // boot-time copy would roll the layout back and drop every pane created in the meantime.
+      const stateToRestore = preloadedState ? getWorkspaceSnapshot(workspaceId) ?? preloadedState : null;
 
       if (recoveredFromHmr) {
         switchDebug("workspace.restore.preloaded.skipped-hmr", {
@@ -279,11 +285,12 @@ export function useWorkspaceRestore({
       switchDebug("workspace.restore.preloaded", {
         workspaceId,
         action: "applied",
-        hasState: Boolean(preloadedState),
-        tabCount: preloadedState?.layout.tabs.length ?? 0,
-        sessionCount: preloadedState ? Object.keys(preloadedState.sessions).length : 0,
+        hasState: Boolean(stateToRestore),
+        source: stateToRestore === preloadedState ? "preload" : "live-snapshot",
+        tabCount: stateToRestore?.layout.tabs.length ?? 0,
+        sessionCount: stateToRestore ? Object.keys(stateToRestore.sessions).length : 0,
       });
-      if (preloadedState) restoreWorkspace(preloadedState);
+      if (stateToRestore) restoreWorkspace(stateToRestore);
       setWorkspaceRestoreStatus(workspaceId, "restored");
       return;
     }

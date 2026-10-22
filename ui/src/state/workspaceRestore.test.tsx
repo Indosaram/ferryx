@@ -284,6 +284,52 @@ describe("workspaceRestore coordinator", () => {
     expect(services.spawnTerminal).not.toHaveBeenCalled();
   });
 
+  it("restores the live snapshot, not the boot-time preload, when registration completes late", async () => {
+    const workspaceId = "ws-late-registration";
+    await preloadWorkspaceSnapshots(
+      [workspaceId],
+      async () => persistedSingleTerminal(workspaceId, "backend-boot"),
+      async () => [{ sessionId: "backend-boot" }],
+    );
+    const preloaded = getWorkspaceSnapshot(workspaceId)!;
+    // While the project stays unregistered the user keeps working: panes are replaced and
+    // the mounted store publishes each change to the snapshot cache.
+    const live: WorkspaceState = {
+      ...preloaded,
+      sessions: {
+        "sess-new": { ...preloaded.sessions["sess-1"], id: "sess-new", backendSessionId: "backend-new" },
+      },
+      layout: createLayoutState([{ id: "tab-new", sessionId: "sess-new", label: "main", kind: "terminal" }]),
+    };
+    setWorkspaceSnapshot(workspaceId, live);
+
+    const restoreWorkspace = vi.fn();
+    const { rerender, unmount } = renderHook(
+      ({ enabled }) =>
+        useWorkspaceRestore({
+          workspaceId,
+          recoveredFromHmr: false,
+          restoreWorkspace,
+          loadSessionFn: async () => {
+            throw new Error("preloaded restore must not read disk");
+          },
+          listLiveBackendSessionIdsFn: async () => [],
+          enabled,
+        }),
+      { initialProps: { enabled: false } },
+    );
+    expect(restoreWorkspace).not.toHaveBeenCalled();
+
+    rerender({ enabled: true });
+
+    expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+    const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceState;
+    expect(restored.layout.tabs.map((tab) => tab.id)).toEqual(["tab-new"]);
+    expect(Object.keys(restored.sessions)).toEqual(["sess-new"]);
+    expect(getWorkspaceRestoreStatus(workspaceId)).toBe("restored");
+    unmount();
+  });
+
   it("transitions from idle -> loading -> restored on successful disk restore", async () => {
     const workspaceId = "ws-test";
     const restoreWorkspace = vi.fn();
