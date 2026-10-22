@@ -153,7 +153,7 @@ async fn main() {
     spawn_session_reaper(state.clone());
 
     let origin = std::env::var("FERRYX_ACCOUNT_ORIGIN")
-        .unwrap_or_else(|_| "https://relay.checka.cc".into());
+        .unwrap_or_else(|_| "https://relay.ferryx.dev".into());
     let relay_origin = std::env::var("FERRYX_ACCOUNT_RELAY_ORIGIN")
         .ok()
         .map(|value| value.trim().to_string())

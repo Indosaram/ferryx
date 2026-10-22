@@ -4,7 +4,7 @@ import path from 'node:path';
 
 const pin = process.argv[2];
 const displayLabel = process.argv[3] || 'omaki';
-const relayOrigin = process.argv[4] || 'https://relay.checka.cc';
+const relayOrigin = process.argv[4] || 'https://relay.ferryx.dev';
 
 if (!pin) {
     console.error('Usage: bun scripts/agent-pair.mjs <pin> [displayLabel] [relayOrigin]');

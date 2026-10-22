@@ -1066,7 +1066,7 @@ async fn gatefix_p06_relay_ticket_failure_surfaces_typed_error_without_ws_retry(
 #[test]
 fn test_is_relay_transport_classification() {
     assert!(is_relay_transport(
-        &Url::parse("https://relay.checka.cc/host/m1").unwrap()
+        &Url::parse("https://relay.ferryx.dev/host/m1").unwrap()
     ));
     assert!(is_relay_transport(
         &Url::parse("http://127.0.0.1:8787/host/target-id").unwrap()

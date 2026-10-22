@@ -5,7 +5,7 @@ import { remoteHostKey, remoteHostStore, REMOTE_HOST_STORAGE_KEY, type HostEndpo
 
 // The built-in relay is the product default: pairing must work with the PIN
 // alone. Existing legacy identities remain on their original relay.
-export const DEFAULT_RELAY_ORIGIN = "https://relay.checka.cc";
+export const DEFAULT_RELAY_ORIGIN = "https://relay.ferryx.dev";
 export const DEFAULT_MACHINE_LABEL = "Machine";
 
 export interface HostView {

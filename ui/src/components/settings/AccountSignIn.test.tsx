@@ -42,7 +42,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
       fireEvent.click(screen.getByRole("button", { name: "Send Magic Link" }));
     });
 
-    expect(requestSpy).toHaveBeenCalledWith("https://relay.checka.cc", "user@example.com");
+    expect(requestSpy).toHaveBeenCalledWith("https://relay.ferryx.dev", "user@example.com");
 
     const infoMessage = screen.getByTestId("account-signin-info");
     expect(infoMessage).not.toBeNull();
@@ -52,7 +52,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
     expect(pollSpy).toHaveBeenCalledTimes(1);
-    expect(pollSpy).toHaveBeenCalledWith("https://relay.checka.cc", loginHandle);
+    expect(pollSpy).toHaveBeenCalledWith("https://relay.ferryx.dev", loginHandle);
     expect(storeSpy).not.toHaveBeenCalled();
     expect(onSignIn).not.toHaveBeenCalled();
 
@@ -60,7 +60,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
     expect(pollSpy).toHaveBeenCalledTimes(2);
-    expect(storeSpy).toHaveBeenCalledWith("tok-1", "https://relay.checka.cc");
+    expect(storeSpy).toHaveBeenCalledWith("tok-1", "https://relay.ferryx.dev");
     expect(onSignIn).toHaveBeenCalledWith("tok-1", "user@example.com");
 
     await act(async () => {
@@ -106,7 +106,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
     expect(pollSpy).toHaveBeenCalledTimes(2);
-    expect(storeSpy).toHaveBeenCalledWith("tok-2", "https://relay.checka.cc");
+    expect(storeSpy).toHaveBeenCalledWith("tok-2", "https://relay.ferryx.dev");
     expect(onSignIn).toHaveBeenCalledWith("tok-2", "user2@example.com");
 
     await act(async () => {

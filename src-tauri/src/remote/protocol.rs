@@ -500,9 +500,9 @@ mod tests {
             ControlChallenge {
                 nonce: "nonce".into(),
                 timestamp: 7,
-                audience: Some("relay.checka.cc".into()),
+                audience: Some("relay.ferryx.dev".into()),
             },
-            json!({"nonce": "nonce", "timestamp": 7, "audience": "relay.checka.cc"}),
+            json!({"nonce": "nonce", "timestamp": 7, "audience": "relay.ferryx.dev"}),
         );
         assert_wire(
             ControlAuth {
