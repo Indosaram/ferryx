@@ -135,6 +135,30 @@ pub async fn paired_host_reachability_list(
     reachability_list_view(&daemon).await
 }
 
+/// Mirrors `PairedHostRouteList` in ui/src/lib/pairedHostRoute.ts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairedHostRouteList {
+    pub supported: bool,
+    pub entries: Vec<crate::paired_host::route_view::HostRoute>,
+}
+
+/// An older daemon without `pairedHostRouteV1` yields `supported: false`, never an error, so
+/// the renderer keeps the transport label it showed before.
+pub async fn route_list_view(daemon: &DaemonClient) -> Result<PairedHostRouteList> {
+    Ok(match daemon.paired_host_route_list().await? {
+        Some(entries) => PairedHostRouteList { supported: true, entries },
+        None => PairedHostRouteList { supported: false, entries: Vec::new() },
+    })
+}
+
+#[tauri::command]
+pub async fn paired_host_route_list(
+    daemon: State<'_, Arc<DaemonClient>>,
+) -> Result<PairedHostRouteList> {
+    route_list_view(&daemon).await
+}
+
 #[tauri::command]
 pub async fn paired_host_pair<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,

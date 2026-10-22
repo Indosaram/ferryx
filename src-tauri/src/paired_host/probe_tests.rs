@@ -280,6 +280,10 @@ async fn fake_daemon(
                             "type": "pairedHostReachabilityListOk",
                             "entries": [{"hostId":"https://relay.example/host/a","generation":"2","state":"offline","checkedAtMs":5,"lastError":null}]
                         }),
+                        Ok(DaemonRequest::PairedHostRouteList) => json!({
+                            "type": "pairedHostRouteListOk",
+                            "entries": [{"hostId":"https://relay.example/host/a","state":"direct"}]
+                        }),
                         _ => json!({"type": "error", "message": "unknown request"}),
                     };
                     let mut bytes = serde_json::to_vec(&reply).unwrap();
@@ -327,6 +331,41 @@ async fn g_daemon_with_the_capability_returns_entries_in_the_ui_shape() {
     assert_eq!(
         serde_json::to_value(&view).unwrap(),
         json!({"supported": true, "entries": [{"hostId":"https://relay.example/host/a","generation":"2","state":"offline","checkedAtMs":5,"lastError":null}]})
+    );
+    task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn g_daemon_without_the_route_capability_reports_unsupported() {
+    let (_root, client, task) = fake_daemon(vec![
+        "pairedHostInventoryV1",
+        super::super::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY,
+    ])
+    .await;
+    let view = tokio::time::timeout(Duration::from_secs(10), crate::ipc::paired_host::route_list_view(&client))
+        .await
+        .expect("bounded")
+        .unwrap();
+    assert_eq!(serde_json::to_value(&view).unwrap(), json!({"supported": false, "entries": []}));
+    task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn g_daemon_with_the_route_capability_returns_routes_in_the_ui_shape() {
+    let (_root, client, task) = fake_daemon(vec![
+        "pairedHostInventoryV1",
+        super::super::route_view::PAIRED_HOST_ROUTE_CAPABILITY,
+    ])
+    .await;
+    let view = tokio::time::timeout(Duration::from_secs(10), crate::ipc::paired_host::route_list_view(&client))
+        .await
+        .expect("bounded")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&view).unwrap(),
+        json!({"supported": true, "entries": [{"hostId":"https://relay.example/host/a","state":"direct"}]})
     );
     task.abort();
 }

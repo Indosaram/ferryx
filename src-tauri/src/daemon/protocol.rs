@@ -706,6 +706,8 @@ pub enum DaemonRequest {
     PairedHostList,
     /// Gated by `pairedHostReachabilityV1`; an older daemon never receives it.
     PairedHostReachabilityList,
+    /// Gated by `pairedHostRouteV1`; an older daemon never receives it.
+    PairedHostRouteList,
     PairedTerminalReattach {
         descriptor: crate::terminal::paired_daemon::Descriptor,
     },
@@ -915,6 +917,9 @@ pub enum DaemonResponse {
     },
     PairedHostReachabilityListOk {
         entries: Vec<crate::paired_host::reachability::HostReachability>,
+    },
+    PairedHostRouteListOk {
+        entries: Vec<crate::paired_host::route_view::HostRoute>,
     },
     PairedHostPairOk {
         host: crate::paired_host::inventory::HostView,

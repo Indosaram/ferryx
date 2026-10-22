@@ -3915,6 +3915,31 @@ impl DaemonServer {
         })
     }
 
+    /// Forwards direct/relay route transitions to the GUI under `paired_host_route_changed`.
+    /// The subscription is taken here, synchronously, before the accept loop can serve a
+    /// `PairedHostRouteList`, so a transition never falls between a list and its events.
+    fn spawn_paired_host_route_forwarder(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let routes = crate::paired_host::direct_route::GLOBAL_DIRECT_ROUTES.clone();
+        let events = routes.subscribe();
+        let server = Arc::downgrade(self);
+        let service = self.paired_hosts.clone();
+        tokio::spawn(crate::paired_host::route_view::forward_route_events(
+            routes,
+            events,
+            self.remote_event_tx.clone(),
+            move || {
+                let service = service.clone();
+                async move {
+                    service
+                        .list()
+                        .await
+                        .map(|hosts| hosts.into_iter().map(|host| host.host_id).collect::<Vec<_>>())
+                }
+            },
+            move || server.strong_count() > 0,
+        ))
+    }
+
     fn spawn_foreground_observer(self: &Arc<Self>) {
         let server = Arc::downgrade(self);
         tokio::spawn(async move {
@@ -4837,6 +4862,7 @@ impl DaemonServer {
         let agent_state_ingress = self.spawn_agent_state_listener();
         self.spawn_foreground_observer();
         self.spawn_paired_host_probe(crate::paired_host::client::PROBE_INTERVAL);
+        self.spawn_paired_host_route_forwarder();
         crate::daemon::agent_extension::install_agent_state_extension_if_enabled(
             &self.agent_integration,
         );
@@ -6091,6 +6117,18 @@ impl DaemonServer {
                     Ok(entries) => DaemonResponse::PairedHostReachabilityListOk { entries },
                     Err(error) => DaemonResponse::PairedHostError { error },
                 },
+                Ok(DaemonRequest::PairedHostRouteList) => match self.paired_hosts.list().await {
+                    Ok(hosts) => DaemonResponse::PairedHostRouteListOk {
+                        entries: hosts
+                            .into_iter()
+                            .map(|host| crate::paired_host::route_view::HostRoute::current(
+                                &crate::paired_host::direct_route::GLOBAL_DIRECT_ROUTES,
+                                host.host_id,
+                            ))
+                            .collect(),
+                    },
+                    Err(error) => DaemonResponse::PairedHostError { error },
+                },
                 Ok(DaemonRequest::PairedHostPair { request }) => match self.paired_hosts.pair(request).await {
                     Ok(host) => DaemonResponse::PairedHostPairOk { host },
                     Err(error) => DaemonResponse::PairedHostError { error },
@@ -6112,6 +6150,7 @@ impl DaemonServer {
                     if self.paired_hosts.available().await {
                         capabilities.push("pairedHostInventoryV1".into());
                         capabilities.push(crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY.into());
+                        capabilities.push(crate::paired_host::route_view::PAIRED_HOST_ROUTE_CAPABILITY.into());
                     }
                     capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY.into());
                     #[cfg(unix)]
@@ -8262,6 +8301,40 @@ mod tests {
         assert!(
             server.paired_hosts.has_reachability_sink(),
             "daemon-owned PairedHostService must publish reachability changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_forwards_global_route_transitions_as_remote_events() {
+        use crate::paired_host::direct_route::{DirectGuard, GLOBAL_DIRECT_ROUTES};
+        let server = Arc::new(DaemonServer::new_with_paths(None, None));
+        let mut remote_events = server.remote_event_tx.subscribe();
+        let forwarder = server.spawn_paired_host_route_forwarder();
+        // GLOBAL_DIRECT_ROUTES is process-wide; a unique host keeps parallel tests apart.
+        let host = format!("route-forwarder-test-{}", std::process::id());
+        let epoch = GLOBAL_DIRECT_ROUTES.begin_attempt(&host, std::time::Instant::now()).unwrap();
+        assert!(GLOBAL_DIRECT_ROUTES.publish(&host, epoch, "http://127.0.0.1:9".into(), DirectGuard::default()));
+        let mut states = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while states.len() < 2 {
+                let event = remote_events.recv().await.expect("remote event");
+                if event.event == crate::paired_host::route_view::PAIRED_HOST_ROUTE_CHANGED_EVENT
+                    && event.payload["hostId"] == host.as_str()
+                {
+                    states.push(event.payload);
+                }
+            }
+        })
+        .await
+        .expect("route events forwarded within bound");
+        GLOBAL_DIRECT_ROUTES.reset(&host);
+        forwarder.abort();
+        assert_eq!(
+            states,
+            vec![
+                serde_json::json!({"hostId": host, "state": "attempting"}),
+                serde_json::json!({"hostId": host, "state": "direct"}),
+            ]
         );
     }
 

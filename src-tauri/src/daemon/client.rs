@@ -613,6 +613,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::ResourceUsage => "resourceUsage",
         DaemonRequest::PairedHostList => "pairedHostList",
         DaemonRequest::PairedHostReachabilityList => "pairedHostReachabilityList",
+        DaemonRequest::PairedHostRouteList => "pairedHostRouteList",
         DaemonRequest::PairedTerminalReattach { .. } => "pairedTerminalReattach",
         DaemonRequest::PairedTerminalDetach { .. } => "pairedTerminalDetach",
         DaemonRequest::RetryPairedSession { .. } => "retryPairedSession",
@@ -2159,6 +2160,26 @@ impl DaemonClient {
             .await?
         {
             DaemonResponse::PairedHostReachabilityListOk { entries } => Ok(Some(entries)),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
+    /// `Ok(None)` when the running daemon predates `pairedHostRouteV1`: the request is then
+    /// never sent, so an old daemon never sees an unknown request type.
+    pub async fn paired_host_route_list(
+        &self,
+    ) -> crate::paired_host::service::Result<Option<Vec<crate::paired_host::route_view::HostRoute>>> {
+        let capabilities = self.paired_daemon_capabilities().await?;
+        if !capabilities
+            .iter()
+            .any(|c| c == crate::paired_host::route_view::PAIRED_HOST_ROUTE_CAPABILITY)
+        {
+            return Ok(None);
+        }
+        match self
+            .paired_host_request(DaemonRequest::PairedHostRouteList)
+            .await?
+        {
+            DaemonResponse::PairedHostRouteListOk { entries } => Ok(Some(entries)),
             _ => Err(crate::paired_host::service::ServiceError::unavailable()),
         }
     }

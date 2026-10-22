@@ -65,6 +65,8 @@ async function boot() {
     void bootstrapPairedHostInventory();
     const { bootstrapPairedHostReachability } = await import("./lib/pairedHostReachability");
     void bootstrapPairedHostReachability();
+    const { bootstrapPairedHostRoute } = await import("./lib/pairedHostRoute");
+    void bootstrapPairedHostRoute();
     const { startTailscaleDiscovery } = await import("./lib/tailscaleDiscovery");
     const stopDiscovery = startTailscaleDiscovery();
     import.meta.hot?.dispose(stopDiscovery);
