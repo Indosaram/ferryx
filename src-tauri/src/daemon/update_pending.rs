@@ -79,10 +79,27 @@ fn mark_retire_sent(runtime_dir: &Path) {
     }
 }
 
+/// The info line logged when the old owner accepts RetireWhenIdle (QA Q09 counts it).
+const RETIRE_SENT_LOG: &str = "Sent RetireWhenIdle; the running daemon exits once its terminals close";
+
 /// Enters the pending state for the owner whose control endpoint lives in runtime_dir: reads
 /// its version (Hello, only when the data handshake did not carry one) and live count
 /// (Inventory), and sends RetireWhenIdle once per runtime dir per GUI run. Sends nothing else.
 pub async fn enter(runtime_dir: &Path, running_version: Option<String>) -> UpdatePending {
+    let (pending, log) = enter_and_decide_log(runtime_dir, running_version).await;
+    if let Some(line) = log {
+        tracing::info!("{line}");
+    }
+    pending
+}
+
+/// enter without the RetireWhenIdle info line; returns the line enter must log, which is Some
+/// only when RetireWhenIdle was accepted on this call, so once per runtime dir per GUI run.
+async fn enter_and_decide_log(
+    runtime_dir: &Path,
+    running_version: Option<String>,
+) -> (UpdatePending, Option<&'static str>) {
+    let mut log = None;
     let mut pending = UpdatePending {
         running_version,
         live_sessions: None,
@@ -92,11 +109,11 @@ pub async fn enter(runtime_dir: &Path, running_version: Option<String>) -> Updat
         Ok(ControlConnection::Connected(client)) => client,
         Ok(ControlConnection::Missing) => {
             tracing::warn!("Running daemon has no control endpoint; it keeps running until its terminals close");
-            return pending;
+            return (pending, log);
         }
         Err(error) => {
             tracing::warn!(%error, "Control channel unreachable; the running daemon is left alone");
-            return pending;
+            return (pending, log);
         }
     };
     if pending.running_version.is_none() {
@@ -121,13 +138,13 @@ pub async fn enter(runtime_dir: &Path, running_version: Option<String>) -> Updat
                 mark_retire_sent(runtime_dir);
                 pending.retire_requested = true;
                 // Once per runtime dir per GUI run, unlike the pending line (QA Q09 counts it).
-                tracing::info!("Sent RetireWhenIdle; the running daemon exits once its terminals close");
+                log = Some(RETIRE_SENT_LOG);
             }
             Ok(other) => tracing::warn!(?other, "RetireWhenIdle refused by the running daemon"),
             Err(error) => tracing::warn!(%error, "RetireWhenIdle could not be sent"),
         }
     }
-    pending
+    (pending, log)
 }
 
 /// Result of the user's "Restart terminals now" after confirming confirm_live_sessions.
