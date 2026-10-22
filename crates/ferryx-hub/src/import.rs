@@ -27,11 +27,19 @@ pub async fn import_once(pool: &SqlitePool, source: &Path) -> Result<ImportRepor
         )));
     }
     let from = storage::connect(source).await?;
+    let slack_home_channel = slack_home_from_omo_config(source);
+    if let Some(channel) = &slack_home_channel {
+        sqlx::query("INSERT INTO hub_meta(key, value) VALUES('slack_home_channel', ?)")
+            .bind(channel)
+            .execute(pool)
+            .await?;
+    }
     let report = ImportReport {
         lanes: copy_lanes(&from, pool).await?,
         watches: copy_watches(&from, pool).await?,
         notices: copy_notices(&from, pool).await?,
         issues: copy_issues(&from, pool).await?,
+        slack_home_channel,
     };
     let path = source.to_string_lossy().into_owned();
     sqlx::query("INSERT INTO hub_meta(key, value) VALUES('imported_from', ?)")
@@ -195,6 +203,102 @@ pub struct ImportReport {
     pub watches: u64,
     pub notices: u64,
     pub issues: u64,
+    pub slack_home_channel: Option<String>,
+}
+
+/// Home channel copied by the last import, if the omo-gateway config named one.
+pub async fn imported_slack_home(pool: &SqlitePool) -> Result<Option<String>> {
+    let value: Option<String> =
+        sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'slack_home_channel'")
+            .fetch_optional(pool)
+            .await?;
+    Ok(value.and_then(|value| crate::config::normalize_slack_home(&value)))
+}
+
+/// `SLACK_HOME_CHANNEL` from the omo-gateway config next to the database.
+///
+/// Looks in the database directory, then its parent, at `config.yaml`, `config.yml`,
+/// `config.json`, and `.env`. A Discord `home_channel` is not a Slack channel.
+pub fn slack_home_from_omo_config(database: &Path) -> Option<String> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = database.parent() {
+        dirs.push(dir.to_path_buf());
+        if let Some(parent) = dir.parent() {
+            if parent != dir {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+    }
+    for dir in dirs {
+        for name in ["config.yaml", "config.yml", "config.json", ".env"] {
+            let path = dir.join(name);
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let text = text.chars().take(65_536).collect::<String>();
+            if let Some(channel) = slack_home_in_config_text(&text, name) {
+                return Some(channel);
+            }
+        }
+    }
+    None
+}
+
+fn slack_home_in_config_text(text: &str, name: &str) -> Option<String> {
+    if name.ends_with(".json") {
+        let value: serde_json::Value = serde_json::from_str(text).ok()?;
+        let raw = value
+            .get("slackHomeChannel")
+            .or_else(|| value.pointer("/slack/home_channel"))
+            .or_else(|| value.get("SLACK_HOME_CHANNEL"))
+            .and_then(|item| item.as_str())?;
+        return crate::config::normalize_slack_home(raw);
+    }
+    if name == ".env" {
+        return slack_home_from_env_file(text);
+    }
+    slack_home_from_yaml(text)
+}
+
+fn slack_home_from_env_file(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let (key, value) = line.split_once('=')?;
+        if key.trim() != "SLACK_HOME_CHANNEL" {
+            continue;
+        }
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        return crate::config::normalize_slack_home(value);
+    }
+    None
+}
+
+fn slack_home_from_yaml(text: &str) -> Option<String> {
+    let mut section = "";
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+        if indent == 0 {
+            section = trimmed.strip_suffix(':').unwrap_or("");
+            continue;
+        }
+        if section != "slack" {
+            continue;
+        }
+        let Some(value) = trimmed.strip_prefix("home_channel:") else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        return crate::config::normalize_slack_home(value);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -219,6 +323,64 @@ mod tests {
         assert_eq!(report.lanes, 1);
         let again = import_once(&dest, &source).await;
         assert!(again.is_err(), "a second import must be refused");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_omo_config_home_channel_is_slack_and_not_the_discord_one() {
+        let yaml = "discord:\n  home_channel: \"999\"\nslack:\n  home_channel: \"#C0C9XG5FP8W\"\n";
+        assert_eq!(slack_home_from_yaml(yaml).as_deref(), Some("C0C9XG5FP8W"));
+        assert_eq!(
+            slack_home_from_env_file("export SLACK_HOME_CHANNEL=\"CHOME,COTHER\"\n").as_deref(),
+            Some("CHOME")
+        );
+        assert!(slack_home_from_yaml("discord:\n  home_channel: \"999\"\n").is_none());
+    }
+
+    #[tokio::test]
+    async fn import_carries_the_slack_home_channel_and_the_hub_uses_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferryx-hub-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.yaml"),
+            "discord:\n  home_channel: \"999\"\nslack:\n  home_channel: \"C0C9XG5FP8W\"\n",
+        )
+        .unwrap();
+        let source = dir.join("omo.sqlite");
+        let source_pool = storage::connect(&source).await.unwrap();
+        source_pool.close().await;
+
+        let dest_path = dir.join("hub.sqlite");
+        let dest = storage::connect(&dest_path).await.unwrap();
+        let report = import_once(&dest, &source).await.unwrap();
+        assert_eq!(report.slack_home_channel.as_deref(), Some("C0C9XG5FP8W"));
+        assert_eq!(
+            imported_slack_home(&dest).await.unwrap().as_deref(),
+            Some("C0C9XG5FP8W")
+        );
+        dest.close().await;
+
+        let hub = crate::hub::Hub::open(
+            crate::config::HubConfig {
+                database_path: Some(dest_path),
+                owner_slack_id: Some("UOWNER".into()),
+                ..crate::config::HubConfig::default()
+            },
+            std::sync::Arc::new(crate::agent_control::RecordingControl::default()),
+        )
+        .await
+        .unwrap();
+        let session = hub.owner_session();
+        assert_eq!(session.channel_id, "C0C9XG5FP8W");
+        assert_eq!(session.user_id, "UOWNER");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

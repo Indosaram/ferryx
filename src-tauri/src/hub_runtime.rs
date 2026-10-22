@@ -334,6 +334,7 @@ async fn on_agent_event(
                         .await;
                 }
                 AutoDecision::EscalateOwner => {
+                    // Same route as a notice: the Slack home channel, or the owner DM.
                     let session = hub.owner_session();
                     let _ = ferryx_hub::chat::reply::chat_reply(
                         &hub.pool,

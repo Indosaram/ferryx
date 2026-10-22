@@ -23,6 +23,9 @@ pub struct HubConfig {
     /// Launch the supervisor pane preset. The headless engine starts either way.
     pub supervisor_pane: bool,
     pub owner_slack_id: Option<String>,
+    /// Slack channel for owner notices and approval cards (`SLACK_HOME_CHANNEL`).
+    /// Absent means those posts go to the owner DM.
+    pub slack_home_channel: Option<String>,
     pub tracker_addr: Option<String>,
     pub tracker_owner_token: Option<String>,
     pub meta_session_id: Option<String>,
@@ -61,6 +64,7 @@ impl HubConfig {
         if let Ok(id) = std::env::var("FERRYX_HUB_SLACK_OWNER") {
             config.owner_slack_id = Some(id);
         }
+        config.apply_slack_home_override(std::env::var("SLACK_HOME_CHANNEL").ok().as_deref());
         if let Ok(url) = std::env::var("FERRYX_HUB_OMO_URL") {
             config.supervisor_listen_url = Some(url);
         }
@@ -77,6 +81,26 @@ impl HubConfig {
         serde_json::from_str(&text)
             .map_err(|error| HubError::config(format!("hub config: {error}")))
     }
+
+    /// `SLACK_HOME_CHANNEL` wins over the file. A blank value leaves the file alone.
+    /// The first id is the channel, matching omo-gateway's list.
+    pub fn apply_slack_home_override(&mut self, raw: Option<&str>) {
+        if let Some(channel) = raw.and_then(normalize_slack_home) {
+            self.slack_home_channel = Some(channel);
+        }
+    }
+}
+
+/// First Slack channel id in a comma-separated list. A leading `#` is dropped.
+pub fn normalize_slack_home(raw: &str) -> Option<String> {
+    let channel = raw
+        .split(',')
+        .map(str::trim)
+        .find(|part| !part.is_empty())?
+        .trim_start_matches('#')
+        .trim()
+        .to_owned();
+    (!channel.is_empty()).then_some(channel)
 }
 
 /// Token from `NAME`, or from the file named by `NAME_FILE` when that is set.
@@ -119,6 +143,23 @@ mod tests {
             std::env::remove_var("FERRYX_TEST_TOKEN_FILE");
             std::env::remove_var("FERRYX_TEST_TOKEN");
         }
+    }
+
+    #[test]
+    fn slack_home_channel_takes_the_first_id_and_a_blank_override_keeps_the_file() {
+        assert_eq!(
+            normalize_slack_home(" #C0C9XG5FP8W , COTHER ").as_deref(),
+            Some("C0C9XG5FP8W")
+        );
+        assert_eq!(normalize_slack_home(" , ").as_deref(), None);
+        let parsed: HubConfig =
+            serde_json::from_str(r#"{"slackHomeChannel":" from-file "}"#).unwrap();
+        assert_eq!(parsed.slack_home_channel.as_deref(), Some(" from-file "));
+        let mut config = parsed;
+        config.apply_slack_home_override(Some("  "));
+        assert_eq!(config.slack_home_channel.as_deref(), Some(" from-file "));
+        config.apply_slack_home_override(Some("CHOME,COTHER"));
+        assert_eq!(config.slack_home_channel.as_deref(), Some("CHOME"));
     }
 
     fn tempfile_dir() -> PathBuf {

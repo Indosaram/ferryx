@@ -162,10 +162,18 @@ mod tests {
         }
         let stranger = json!({
             "type": "block_actions",
+            "channel": {"id": "C0C9XG5FP8W"},
             "user": {"id": "USTRANGER"},
             "actions": [{"value": "ferryx:approval:pane-1:prompt-9:rev-42:0:once"}]
         });
         assert!(slack_approval_op(&stranger, "UOWNER").is_err());
+        let owner_in_channel = json!({
+            "type": "block_actions",
+            "channel": {"id": "C0C9XG5FP8W"},
+            "user": {"id": "UOWNER"},
+            "actions": [{"value": "ferryx:approval:pane-1:prompt-9:rev-42:0:once"}]
+        });
+        assert!(slack_approval_op(&owner_in_channel, "UOWNER").is_ok());
     }
 
     #[test]

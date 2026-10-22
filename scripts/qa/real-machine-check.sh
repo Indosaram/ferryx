@@ -102,7 +102,8 @@ Slack round trip: $script
       Isolated daemon and a loopback Slack stand-in. No real tokens.
   $0 slack real
       The owner's Slack app. Needs SLACK_APP_TOKEN(_FILE), SLACK_BOT_TOKEN(_FILE),
-      FERRYX_HUB_SLACK_OWNER, and SLACK_CHANNEL.
+      FERRYX_HUB_SLACK_OWNER, and SLACK_CHANNEL. Set SLACK_HOME_CHANNEL to post
+      notices and approval cards there; otherwise they go to the owner DM.
       Scopes: scripts/qa/slack/ferryx-slack-manifest.json
 EOF
     ;;

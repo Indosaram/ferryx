@@ -9,6 +9,8 @@
 #   SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_FILE   xoxb-...  bot token (scopes in ferryx-slack-manifest.json)
 #   FERRYX_HUB_SLACK_OWNER                    U...      owner's Slack member id
 #   SLACK_CHANNEL                             C...      channel the bot is in (for messages and chat.reply)
+#   SLACK_HOME_CHANNEL                        C...      where notices and approval cards are posted
+#                                                       (owner DM only when this is unset)
 # optional: CARD_CMD (default: recorded Claude approval card), CLI, KEEP=1 (leave daemon up)
 set -euo pipefail
 MODE="${1:-}"; [[ "$MODE" == mock || "$MODE" == real ]] || { sed -n 2,15p "$0"; exit 2; }
@@ -43,6 +45,7 @@ if [[ "$MODE" == mock ]]; then
   printf 'xapp-1-LOCAL-MOCK' > "$ROOT/app.token"; printf 'xoxb-LOCAL-MOCK' > "$ROOT/bot.token"
   export SLACK_APP_TOKEN_FILE="$ROOT/app.token" SLACK_BOT_TOKEN_FILE="$ROOT/bot.token"
   export FERRYX_HUB_SLACK_OWNER=UOWNER SLACK_CHANNEL=CMOCK FERRYX_HUB_SLACK_API="http://127.0.0.1:$MOCK_PORT/api"
+  export SLACK_HOME_CHANNEL="${SLACK_HOME_CHANNEL:-CHOME}"
   : > "$ROOT/mock.jsonl"
   (setsid nohup "$PY" "$HERE/mock-slack.py" "$MOCK_PORT" "$ROOT/mock.jsonl" > "$ROOT/mock.out" 2>&1 < /dev/null &) > /dev/null 2>&1
   sleep 1.5
@@ -88,22 +91,39 @@ PROMPT=$(python3 -c 'import json,sys;d=json.loads(sys.argv[1])["session"];print(
 VALUE=""
 if [[ "$MODE" == mock ]]; then
   for _ in $(seq 1 60); do grep -q '"blocks"' "$ROOT/mock.jsonl" && break; sleep 1; done
-  VALUE=$(python3 - "$ROOT/mock.jsonl" <<'PY'
+  VALUE=$(python3 - "$SLACK_HOME_CHANNEL" "$ROOT/mock.jsonl" <<'PY'
 import json,sys
-for line in open(sys.argv[1]):
+home=sys.argv[1]
+for line in open(sys.argv[2]):
     e=json.loads(line)
-    if e["kind"]=="chat.postMessage" and "blocks" in e["body"]:
-        print(e["body"]["blocks"][1]["elements"][0]["value"]); break
+    body=e.get("body") or {}
+    if e["kind"]=="chat.postMessage" and "blocks" in body and body.get("channel")==home:
+        print(body["blocks"][1]["elements"][0]["value"]); break
 PY
 )
-  [[ -n "$VALUE" ]] && ok "owner notice was posted to $FERRYX_HUB_SLACK_OWNER with answer buttons ($VALUE)" || bad "no card with buttons was posted"
+  [[ -n "$VALUE" ]] && ok "owner notice was posted to home channel $SLACK_HOME_CHANNEL with answer buttons ($VALUE)" || bad "no card with buttons was posted to $SLACK_HOME_CHANNEL"
+  if python3 - "$FERRYX_HUB_SLACK_OWNER" "$ROOT/mock.jsonl" <<'PY'
+import json,sys
+owner, path = sys.argv[1], sys.argv[2]
+for line in open(path):
+    e=json.loads(line)
+    body=e.get("body") or {}
+    if e["kind"]=="chat.postMessage" and "blocks" in body and body.get("channel")==owner:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+  then bad "approval card was posted to the owner DM"; fi
   : > "$FAKE_CARD_LOG"
   inject "{\"type\":\"interactive\",\"payload\":{\"type\":\"block_actions\",\"user\":{\"id\":\"USTRANGER\"},\"actions\":[{\"value\":\"$VALUE\"}]}}" >/dev/null; sleep 2
   [[ ! -s "$FAKE_CARD_LOG" ]] && grep -q "not from the owner" "$DLOG" && ok "a stranger's click was refused and typed nothing" || bad "stranger click typed: $(cat "$FAKE_CARD_LOG")"
   inject "{\"type\":\"interactive\",\"payload\":{\"type\":\"block_actions\",\"user\":{\"id\":\"$FERRYX_HUB_SLACK_OWNER\"},\"actions\":[{\"value\":\"$VALUE\"}]}}" >/dev/null
 else
-  echo ">>> In Slack: have a non-owner click the first button on the ferryx DM card (must do nothing),"
-  echo ">>> then click it as the owner ($FERRYX_HUB_SLACK_OWNER)."
+  if [[ -n "${SLACK_HOME_CHANNEL:-}" ]]; then
+    echo ">>> Look in the home channel <#$SLACK_HOME_CHANNEL> (not a DM)."
+  else
+    echo ">>> No SLACK_HOME_CHANNEL is set, so the card is in the DM with $FERRYX_HUB_SLACK_OWNER."
+  fi
+  echo ">>> A non-owner click must do nothing; then click it as the owner ($FERRYX_HUB_SLACK_OWNER)."
 fi
 for _ in $(seq 1 ${WAIT_SECS:-120}); do [[ -s "$FAKE_CARD_LOG" ]] && break; sleep 1; done
 sleep 1

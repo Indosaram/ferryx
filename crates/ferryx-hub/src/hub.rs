@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 
 use crate::agent_control::AgentControl;
-use crate::config::HubConfig;
 use crate::chat::session::SessionKey;
+use crate::config::HubConfig;
 use crate::error::Result;
 use crate::import::import_once;
 use crate::sessions::watch::ObserveOutcome;
@@ -28,7 +28,7 @@ pub struct Hub {
 }
 
 impl Hub {
-    pub async fn open(config: HubConfig, control: Arc<dyn AgentControl>) -> Result<Arc<Self>> {
+    pub async fn open(mut config: HubConfig, control: Arc<dyn AgentControl>) -> Result<Arc<Self>> {
         let path = config
             .database_path
             .clone()
@@ -42,6 +42,19 @@ impl Hub {
                 import_once(&pool, source).await?;
             }
         }
+        // The file and SLACK_HOME_CHANNEL already won in HubConfig::load. The import
+        // fills the channel only when neither of those set one.
+        if crate::config::normalize_slack_home(config.slack_home_channel.as_deref().unwrap_or(""))
+            .is_none()
+        {
+            if let Some(channel) = crate::import::imported_slack_home(&pool).await? {
+                config.slack_home_channel = Some(channel);
+            }
+        } else if let Some(channel) =
+            crate::config::normalize_slack_home(config.slack_home_channel.as_deref().unwrap_or(""))
+        {
+            config.slack_home_channel = Some(channel);
+        }
         let watcher = Arc::new(Watcher::new(pool.clone(), NotifyPolicy::from_env()));
         Ok(Arc::new(Self {
             pool,
@@ -53,8 +66,9 @@ impl Hub {
         }))
     }
 
-    /// Where owner notices and escalations go: a DM to the owner when the Slack owner is
-    /// configured, otherwise the stored outbox under `owner` until a transport exists.
+    /// Where owner notices, approval cards, and auto-answer escalations go.
+    /// A configured Slack home channel receives them. With no home channel they go to
+    /// the owner DM (the owner id as the channel, which is how Slack accepts a DM post).
     pub fn owner_session(&self) -> SessionKey {
         let owner = self
             .config
@@ -62,7 +76,13 @@ impl Hub {
             .clone()
             .filter(|id| !id.trim().is_empty())
             .unwrap_or_else(|| "owner".into());
-        SessionKey::new("slack", None::<String>, owner.clone(), None::<String>, owner)
+        let channel = self
+            .config
+            .slack_home_channel
+            .as_deref()
+            .and_then(crate::config::normalize_slack_home)
+            .unwrap_or_else(|| owner.clone());
+        SessionKey::new("slack", None::<String>, channel, None::<String>, owner)
     }
 
     /// Apply one observer event. A notice that is not yet due arms a timer for its release
@@ -124,7 +144,12 @@ impl Hub {
                         }
                     }
                 }
-                let latest = hub.latest.lock().expect("hub latest lock").get(&target).cloned();
+                let latest = hub
+                    .latest
+                    .lock()
+                    .expect("hub latest lock")
+                    .get(&target)
+                    .cloned();
                 let Some(observation) = latest else { return };
                 let next = match hub.apply(&observation, Utc::now()).await {
                     Ok(outcome) => outcome.next_wake,
@@ -167,6 +192,14 @@ mod tests {
     use crate::agent_control::RecordingControl;
 
     fn hub(pool: SqlitePool, notify_after: std::time::Duration) -> Arc<Hub> {
+        hub_with(pool, notify_after, HubConfig::default())
+    }
+
+    fn hub_with(
+        pool: SqlitePool,
+        notify_after: std::time::Duration,
+        config: HubConfig,
+    ) -> Arc<Hub> {
         Arc::new(Hub {
             pool: pool.clone(),
             control: Arc::new(RecordingControl::default()),
@@ -177,7 +210,7 @@ mod tests {
                     quiet_hours: None,
                 },
             )),
-            config: HubConfig::default(),
+            config,
             latest: std::sync::Mutex::new(HashMap::new()),
             wakes: std::sync::Mutex::new(HashMap::new()),
         })
@@ -205,6 +238,58 @@ mod tests {
             .fetch_all(pool)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn owner_notices_use_the_home_channel_and_fall_back_to_the_owner_dm() {
+        let pool = crate::storage::memory().await.unwrap();
+        let dm = hub_with(
+            pool.clone(),
+            std::time::Duration::ZERO,
+            HubConfig {
+                owner_slack_id: Some("UOWNER".into()),
+                ..HubConfig::default()
+            },
+        );
+        let fallback = dm.owner_session();
+        assert_eq!(fallback.channel_id, "UOWNER");
+        assert_eq!(fallback.user_id, "UOWNER");
+        let home = hub_with(
+            pool,
+            std::time::Duration::ZERO,
+            HubConfig {
+                owner_slack_id: Some("UOWNER".into()),
+                slack_home_channel: Some(" #C0C9XG5FP8W , COTHER ".into()),
+                ..HubConfig::default()
+            },
+        );
+        let session = home.owner_session();
+        assert_eq!(session.channel_id, "C0C9XG5FP8W");
+        assert_eq!(session.user_id, "UOWNER");
+    }
+
+    #[tokio::test]
+    async fn a_due_notice_is_queued_for_the_home_channel() {
+        let pool = crate::storage::memory().await.unwrap();
+        let hub = hub_with(
+            pool.clone(),
+            std::time::Duration::ZERO,
+            HubConfig {
+                owner_slack_id: Some("UOWNER".into()),
+                slack_home_channel: Some("CHOME".into()),
+                ..HubConfig::default()
+            },
+        );
+        hub.ingest(&blocked(Some("Proceed?"))).await.unwrap();
+        let queued: Vec<(String,)> =
+            sqlx::query_as("SELECT session_key FROM chat_outbox ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued.len(), 1);
+        let session = SessionKey::from_storage_key(&queued[0].0).unwrap();
+        assert_eq!(session.channel_id, "CHOME");
+        assert_ne!(session.channel_id, "UOWNER");
     }
 
     #[tokio::test]
