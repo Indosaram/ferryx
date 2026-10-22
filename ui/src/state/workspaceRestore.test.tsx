@@ -330,6 +330,52 @@ describe("workspaceRestore coordinator", () => {
     unmount();
   });
 
+  it("never replaces a live layout with the disk layout when a disk restore runs late", async () => {
+    const workspaceId = "ws-live-layout";
+    const live: WorkspaceState = {
+      workspaceId,
+      worktrees: [{ path: "/repo/test", branch: "main", head: "111", bare: false, detached: false, locked: null, prunable: null }],
+      activeWorktreePath: "/repo/test",
+      sessions: {
+        "sess-new": {
+          id: "sess-new",
+          workspaceId,
+          worktree: { wsId: workspaceId, slug: "main" },
+          backendSessionId: "backend-new",
+          worktreePath: "/repo/test",
+          cwd: "/repo/test",
+          lifecycle: "working",
+        },
+      },
+      layout: createLayoutState([{ id: "tab-new", sessionId: "sess-new", label: "main", kind: "terminal" }]),
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+    };
+    setWorkspaceSnapshot(workspaceId, live);
+    // A previous restore attempt failed, so the coordinator is allowed to read disk again.
+    setWorkspaceRestoreStatus(workspaceId, "failed");
+
+    const restoreWorkspace = vi.fn();
+    const { unmount } = renderHook(() =>
+      useWorkspaceRestore({
+        workspaceId,
+        recoveredFromHmr: false,
+        restoreWorkspace,
+        loadSessionFn: async () => persistedSingleTerminal(workspaceId, "backend-stale"),
+        listLiveBackendSessionIdsFn: async () => [{ sessionId: "backend-stale" }],
+      }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getWorkspaceRestoreStatus(workspaceId)).toBe("restored");
+    expect(restoreWorkspace).not.toHaveBeenCalled();
+    expect(getWorkspaceSnapshot(workspaceId)).toBe(live);
+    unmount();
+  });
+
   it("transitions from idle -> loading -> restored on successful disk restore", async () => {
     const workspaceId = "ws-test";
     const restoreWorkspace = vi.fn();

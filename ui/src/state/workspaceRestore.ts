@@ -17,6 +17,10 @@ import { getHmrWorkspaceState } from "./hmrWorkspaceState";
 import { getWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
 import type { WorkspaceState } from "./workspaceStore";
 
+function hasAnyTabs(state: WorkspaceState): boolean {
+  return state.layout.tabs.length > 0 || Object.values(state.worktreeLayouts ?? {}).some((layout) => layout.tabs.length > 0);
+}
+
 export type WorkspaceRestoreStatus = "idle" | "loading" | "restored" | "failed";
 
 const restoreStatusByWorkspace = new Map<string, WorkspaceRestoreStatus>();
@@ -384,6 +388,21 @@ export function useWorkspaceRestore({
         });
 
         if (hasRestoredTabs) {
+          // Disk is only a fallback for a workspace with no live layout yet. Once the mounted
+          // store holds tabs, that in-memory layout is authoritative: a late or repeated restore
+          // (registration retry, failed-then-retried restore, cancelled load) would otherwise roll
+          // it back to whatever was last written and drop every pane created since.
+          const live = recoveredFromHmr ? null : getWorkspaceSnapshot(workspaceId);
+          if (live && hasAnyTabs(live)) {
+            setWorkspaceRestoreStatus(workspaceId, "restored");
+            switchDebug("workspace.restore.complete", {
+              workspaceId,
+              source: "live-layout-kept",
+              liveTabCount: live.layout.tabs.length,
+              diskTabCount: restoredState.layout.tabs.length,
+            });
+            return;
+          }
           const stateToRestore = recoveredFromHmr
             ? restoredState
             : prepareDiskRestoredState(workspaceId, restoredState);
