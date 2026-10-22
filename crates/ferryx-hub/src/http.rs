@@ -158,6 +158,33 @@ async fn create_cron(State(state): State<HttpState>, Json(body): Json<Value>) ->
 }
 
 async fn trigger_cron(State(state): State<HttpState>, UrlPath(id): UrlPath<String>) -> Response {
+    // Same gate as the run-now socket: a publishing job is not rerun from the dashboard.
+    let stored: Option<String> =
+        match sqlx::query_scalar("SELECT payload_json FROM scheduled_jobs WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(stored) => stored,
+            Err(error) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+            }
+        };
+    let Some(payload_json) = stored else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "cron job not found"})),
+        )
+            .into_response();
+    };
+    let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
+    if crate::schedule::publishing(&id, &payload) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "publishing rerun requires owner approval through remediation"})),
+        )
+            .into_response();
+    }
     let now = now_rfc3339();
     let _ = sqlx::query(
         "UPDATE scheduled_jobs SET enabled = 1, next_run_at = ?, updated_at = ? WHERE id = ?",
@@ -607,5 +634,36 @@ mod tests {
         let value = public_settings(r#"{"token":"xoxb-secret","theme":"dark"}"#);
         assert!(value.get("token").is_none());
         assert_eq!(value["theme"], "dark");
+    }
+
+    #[tokio::test]
+    async fn the_dashboard_trigger_keeps_the_publishing_gate() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled, next_run_at) VALUES('omon-playstore-daily-publish','0 0 * * *','{}',0,'2099-01-01T00:00:00Z')")
+            .execute(&pool).await.unwrap();
+        let app = router(pool.clone(), std::env::temp_dir());
+        for (id, want) in [
+            ("omon-playstore-daily-publish", StatusCode::CONFLICT),
+            ("missing", StatusCode::NOT_FOUND),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/cron/jobs/{id}/trigger"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), want, "{id}");
+        }
+        let (enabled, next): (i64, String) = sqlx::query_as("SELECT enabled, next_run_at FROM scheduled_jobs WHERE id = 'omon-playstore-daily-publish'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!((enabled, next.as_str()), (0, "2099-01-01T00:00:00Z"));
     }
 }

@@ -24,6 +24,32 @@ pub fn control_socket(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".ferryx").join("hub").join("control.sock")
 }
 
+/// `hub stop` writes this so the next daemon start leaves hub tasks down.
+pub async fn mark_stopped(pool: &sqlx::SqlitePool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO hub_meta(key, value) VALUES('hub_stopped', '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn clear_stopped(pool: &sqlx::SqlitePool) -> Result<()> {
+    sqlx::query("DELETE FROM hub_meta WHERE key = 'hub_stopped'")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn is_stopped(pool: &sqlx::SqlitePool) -> Result<bool> {
+    let value: Option<String> =
+        sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'hub_stopped'")
+            .fetch_optional(pool)
+            .await?;
+    Ok(value.as_deref() == Some("1"))
+}
+
 pub fn control_line(op: ControlOp) -> &'static str {
     match op {
         ControlOp::Stop => "{\"op\":\"stop\"}\n",
@@ -69,6 +95,16 @@ mod tests {
             ControlOp::Start
         );
         assert!(parse_control("{\"op\":\"restart-daemon\"}").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_stop_stays_stopped_until_start_clears_it() {
+        let pool = crate::storage::memory().await.unwrap();
+        assert!(!is_stopped(&pool).await.unwrap());
+        mark_stopped(&pool).await.unwrap();
+        assert!(is_stopped(&pool).await.unwrap());
+        clear_stopped(&pool).await.unwrap();
+        assert!(!is_stopped(&pool).await.unwrap());
     }
 
     #[cfg(unix)]

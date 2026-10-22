@@ -130,6 +130,7 @@ impl TaskLauncher for DaemonBridge {
 /// The report is row counts only.
 pub fn run_hub_cli(args: &[String]) -> i32 {
     let mut source = None;
+    let mut cwd = None;
     let mut dry = false;
     let mut rest = args.iter().skip(2);
     match rest.next().map(String::as_str) {
@@ -137,7 +138,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
         Some("start") => return hub_control(ferryx_hub::control::ControlOp::Start),
         Some("migrate") => {}
         _ => {
-            eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--dry-run]");
+            eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--dry-run]");
             eprintln!("       ferryx hub stop | start");
             return 2;
         }
@@ -146,6 +147,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
         match arg.as_str() {
             "--dry-run" => dry = true,
             "--from-omo" => source = rest.next().map(std::path::PathBuf::from),
+            "--cwd" => cwd = rest.next().map(std::path::PathBuf::from),
             other if !other.starts_with('-') && source.is_none() => {
                 source = Some(std::path::PathBuf::from(other));
             }
@@ -188,20 +190,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             }
         };
         let path = config.database_path.clone().unwrap_or_else(ferryx_hub::hub::default_database_path);
-        if let Some(parent) = path.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                eprintln!("database directory: {error}");
-                return 1;
-            }
-        }
-        let pool = match ferryx_hub::storage::connect(&path).await {
-            Ok(pool) => pool,
-            Err(error) => {
-                eprintln!("database: {error}");
-                return 1;
-            }
-        };
-        match ferryx_hub::import::migrate_from_omo(&pool, &source, dry).await {
+        match ferryx_hub::import::open_and_migrate(&path, &source, dry, cwd.as_deref()).await {
             Ok(report) => {
                 println!("dry_run {dry}");
                 println!("issues {}", report.issues);
@@ -300,6 +289,7 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_schema(&hub.pool).await {
         tracing::warn!(%error, "kibitzer schema was not created");
     }
+    let stopped = ferryx_hub::control::is_stopped(&hub.pool).await.unwrap_or(false);
     let launch = HubLaunch {
         server,
         config,
@@ -310,9 +300,18 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
         #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
         meta_session_id,
     };
-    let running = Arc::new(tokio::sync::Mutex::new(Some(spawn_generation(&launch).await)));
+    let generation = if stopped {
+        None
+    } else {
+        Some(spawn_generation(&launch).await)
+    };
+    let running = Arc::new(tokio::sync::Mutex::new(generation));
     serve_control(running, launch);
-    tracing::info!("ferryx hub is up");
+    if stopped {
+        tracing::info!("ferryx hub stayed stopped until hub start");
+    } else {
+        tracing::info!("ferryx hub is up");
+    }
     Ok(())
 }
 
@@ -618,19 +617,34 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                     }
                     let reply = match ferryx_hub::control::parse_control(&line) {
                         Ok(ferryx_hub::control::ControlOp::Stop) => {
+                            let persisted = ferryx_hub::control::mark_stopped(&launch.hub.pool).await;
                             if let Some(generation) = running.lock().await.take() {
                                 for task in generation.tasks {
                                     task.abort();
                                 }
                             }
-                            "{\"status\":\"ok\",\"op\":\"stop\"}\n"
+                            match persisted {
+                                Ok(()) => "{\"status\":\"ok\",\"op\":\"stop\"}\n",
+                                Err(error) => {
+                                    tracing::warn!(%error, "hub stop was not persisted");
+                                    "{\"status\":\"failed\",\"error\":\"hub stop was not persisted\"}\n"
+                                }
+                            }
                         }
                         Ok(ferryx_hub::control::ControlOp::Start) => {
-                            let mut slot = running.lock().await;
-                            if slot.is_none() {
-                                *slot = Some(spawn_generation(&launch).await);
+                            match ferryx_hub::control::clear_stopped(&launch.hub.pool).await {
+                                Ok(()) => {
+                                    let mut slot = running.lock().await;
+                                    if slot.is_none() {
+                                        *slot = Some(spawn_generation(&launch).await);
+                                    }
+                                    "{\"status\":\"ok\",\"op\":\"start\"}\n"
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "hub start did not clear the stopped flag");
+                                    "{\"status\":\"failed\",\"error\":\"hub start was not persisted\"}\n"
+                                }
                             }
-                            "{\"status\":\"ok\",\"op\":\"start\"}\n"
                         }
                         Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop or start\"}\n",
                     };

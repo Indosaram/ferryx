@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Cut omo-gateway over to the ferryx hub, or roll that cutover back.
 #
-# Two Slack Socket Mode connections must not run at once. This script unloads
-# ai.omon.gateway and ai.omon.gateway-watchdog before the ferryx daemon is
-# asked to open the hub. It prints labels and row counts only. It does not
-# print plist contents or secret files.
+# Two Slack Socket Mode connections must not run at once. The live database is
+# snapshotted and imported while omo is still running. ai.omon.gateway and
+# ai.omon.gateway-watchdog are unloaded only after that import succeeds, and
+# only then is the ferryx daemon asked to open the hub. A dry run prints the
+# bootout it would do and does not unload anything. It prints labels and row
+# counts only. It does not print plist contents or secret files.
 #
 # Usage:
 #   scripts/hub-cutover.sh cutover [--db PATH] [--ferryx PATH] [--dry-run] [--yes]
@@ -15,7 +17,11 @@ GATEWAY_LABEL="${OMO_GATEWAY_LABEL:-ai.omon.gateway}"
 WATCHDOG_LABEL="${OMO_WATCHDOG_LABEL:-ai.omon.gateway-watchdog}"
 FERRYX_LABEL="${FERRYX_DAEMON_LABEL:-com.ferryx.daemon}"
 DB="${OMO_DB:-}"
-FERRYX_BIN="${FERRYX_BIN:-ferryx}"
+# `ferryx hub` and `ferryx-cli hub` both dispatch the hub command. Prefer
+# ferryx-cli when it is already on PATH and no binary was chosen.
+if [[ -z "${FERRYX_BIN:-}" ]]; then
+  if command -v ferryx-cli >/dev/null 2>&1; then FERRYX_BIN=ferryx-cli; else FERRYX_BIN=ferryx; fi
+fi
 MODE=""
 DRY=0
 YES=0
@@ -117,27 +123,75 @@ if [[ -z "$DB" ]]; then
 fi
 
 if [[ "$MODE" == "cutover" ]]; then
-  bootout "$WATCHDOG_LABEL" || true
-  bootout "$GATEWAY_LABEL"
-  wait_until_gone "$GATEWAY_LABEL"
   if [[ ! -f "$DB" ]]; then
     echo "omo database not found: ${DB}" >&2
     exit 1
   fi
-  echo "migrate dry-run ${DB}"
-  "$FERRYX_BIN" hub migrate --from-omo "$DB" --dry-run
+  ORIG_DIR="$(cd "$(dirname "$DB")" && pwd)"
   if [[ "$DRY" == 1 ]]; then
-    echo "dry-run only; ferryx hub was not started"
+    # A dry run must not touch launchd: omo keeps serving Slack. The source is
+    # opened read-only, so counting it while the gateway runs is safe. The hub
+    # database is not created.
+    for label in "$WATCHDOG_LABEL" "$GATEWAY_LABEL"; do
+      if launchctl print "${domain}/${label}" >/dev/null 2>&1; then
+        echo "would bootout ${label}"
+      else
+        echo "not loaded ${label}"
+      fi
+    done
+    echo "migrate dry-run ${DB}"
+    "$FERRYX_BIN" hub migrate --from-omo "$DB" --cwd "$ORIG_DIR" --dry-run
+    echo "dry-run only; omo was left running and ferryx hub was not started"
     exit 0
   fi
-  echo "migrate ${DB}"
-  "$FERRYX_BIN" hub migrate --from-omo "$DB"
-  # Start hub tasks on the running daemon. kickstart -k would drop live PTYs.
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    echo "sqlite3 is required to snapshot the live database; omo was left running" >&2
+    exit 1
+  fi
+  SNAP="$(mktemp "${TMPDIR:-/tmp}/omo-gateway.XXXXXXXX.backup")"
+  booted_out=0
+  restore_omo() {
+    local status=$?
+    if [[ -n "${SNAP:-}" ]]; then
+      rm -f "$SNAP"
+    fi
+    if [[ "$status" != 0 && "$booted_out" == 1 ]]; then
+      echo "cutover failed (exit ${status}); loading omo again" >&2
+      bootstrap_plist "$GATEWAY_LABEL" || echo "omo was NOT restored; load ${GATEWAY_LABEL} by hand" >&2
+      bootstrap_plist "$WATCHDOG_LABEL" || true
+    fi
+  }
+  trap restore_omo EXIT
+  # Consistent read of the live database. omo keeps its sockets until the copy
+  # is in the hub database.
+  if ! sqlite3 "$DB" ".backup '$SNAP'"; then
+    echo "could not snapshot ${DB}; omo was left running" >&2
+    exit 1
+  fi
+  echo "migrate dry-run ${SNAP}"
+  if ! "$FERRYX_BIN" hub migrate --from-omo "$SNAP" --cwd "$ORIG_DIR" --dry-run; then
+    echo "migrate dry-run failed; omo was left running" >&2
+    exit 1
+  fi
+  echo "migrate ${SNAP}"
+  if ! "$FERRYX_BIN" hub migrate --from-omo "$SNAP" --cwd "$ORIG_DIR"; then
+    echo "migrate failed; omo was left running" >&2
+    exit 1
+  fi
+  rm -f "$SNAP"
+  SNAP=""
+  # Import succeeded. Unload omo, then start hub tasks. kickstart -k would drop live PTYs.
+  booted_out=1
+  bootout "$WATCHDOG_LABEL" || true
+  bootout "$GATEWAY_LABEL"
+  wait_until_gone "$GATEWAY_LABEL"
   if "$FERRYX_BIN" hub start; then
     echo "hub start sent on the control socket; the daemon was not restarted"
   else
-    echo "hub control socket is not up. Start Ferryx if it is not running. A running daemon was not kickstarted, so live PTY sessions were left alone."
+    echo "hub control socket is not up. omo will be loaded again. A running daemon was not kickstarted, so live PTY sessions were left alone." >&2
+    exit 1
   fi
+  trap - EXIT
   echo "cutover requested. confirm http://127.0.0.1:9119/api/health before leaving omo unloaded"
   exit 0
 fi

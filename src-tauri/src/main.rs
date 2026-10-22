@@ -51,6 +51,11 @@ fn main() {
             std::process::exit(2);
         }
     }
+    // `ferryx hub migrate|stop|start`, as documented in docs/hub-cutover.md. Without this the
+    // GUI binary treats `hub` as a launch and opens a window instead of migrating.
+    if args.get(1).is_some_and(|arg| arg == "hub") {
+        std::process::exit(ferryx_lib::hub_runtime::run_hub_cli(&args));
+    }
     if args.get(1).is_some_and(|arg| arg == "open") {
         let outcome = std::env::current_dir()
             .map_err(|e| format!("failed to determine current directory: {e}"))

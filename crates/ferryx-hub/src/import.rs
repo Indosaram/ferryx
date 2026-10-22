@@ -225,40 +225,73 @@ struct Copied {
     tables: BTreeMap<String, u64>,
 }
 
+/// Counts source rows. Does not open or create a destination database.
+pub async fn preview_from_omo(source: &Path) -> Result<ImportReport> {
+    let from = storage::connect_readonly(source).await?;
+    let mut tables = BTreeMap::new();
+    for name in PARITY_TABLES {
+        tables.insert((*name).to_owned(), count_rows(&from, name).await?);
+    }
+    tables.insert("lanes".into(), count_rows(&from, "lanes").await?);
+    tables.insert("cron_jobs".into(), count_rows(&from, "cron_jobs").await?);
+    let cron_jobs_enabled = count_enabled_cron(&from).await?;
+    from.close().await;
+    Ok(ImportReport {
+        lanes: tables["lanes"],
+        issues: *tables.get("tracker_issues").unwrap_or(&0),
+        teams: *tables.get("tracker_teams").unwrap_or(&0),
+        states: *tables.get("tracker_states").unwrap_or(&0),
+        labels: *tables.get("tracker_labels").unwrap_or(&0),
+        activity: *tables.get("tracker_activity").unwrap_or(&0),
+        cron_jobs: *tables.get("cron_jobs").unwrap_or(&0),
+        inbox_items: *tables.get("inbox_items").unwrap_or(&0),
+        proposals: *tables.get("action_proposals").unwrap_or(&0),
+        allowlist: *tables.get("approval_allowlist").unwrap_or(&0),
+        bot_profiles: *tables.get("bot_profiles").unwrap_or(&0),
+        lane_threads: *tables.get("lane_thread_bindings").unwrap_or(&0),
+        cron_jobs_enabled,
+        tables,
+        ..ImportReport::default()
+    })
+}
+
+/// Opens `dest` and imports, or counts the source when `dry_run` is set.
+/// A dry run does not create `dest` or its parent directory.
+/// `cwd` overrides the working directory recorded for job scripts.
+pub async fn open_and_migrate(
+    dest: &Path,
+    source: &Path,
+    dry_run: bool,
+    cwd: Option<&Path>,
+) -> Result<ImportReport> {
+    if dry_run {
+        return preview_from_omo(source).await;
+    }
+    if let Some(parent) = dest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| HubError::message(format!("database directory: {error}")))?;
+    }
+    let pool = storage::connect(dest).await?;
+    let report = migrate_from_omo(&pool, source, false).await?;
+    if let Some(cwd) = cwd.filter(|cwd| !cwd.as_os_str().is_empty()) {
+        remember_working_directory(&pool, cwd).await?;
+    }
+    pool.close().await;
+    Ok(report)
+}
+
 /// Idempotent copy. A second run inserts nothing new. SQL errors are returned.
-/// `dry_run` counts source rows and writes nothing.
+/// `dry_run` counts source rows and writes nothing, including the destination file.
 pub async fn migrate_from_omo(
     pool: &SqlitePool,
     source: &Path,
     dry_run: bool,
 ) -> Result<ImportReport> {
     if dry_run {
-        let from = storage::connect_readonly(source).await?;
-        let mut tables = BTreeMap::new();
-        for name in PARITY_TABLES {
-            tables.insert((*name).to_owned(), count_rows(&from, name).await?);
-        }
-        tables.insert("lanes".into(), count_rows(&from, "lanes").await?);
-        tables.insert("cron_jobs".into(), count_rows(&from, "cron_jobs").await?);
-        let cron_jobs_enabled = count_enabled_cron(&from).await?;
-        from.close().await;
-        return Ok(ImportReport {
-            lanes: tables["lanes"],
-            issues: *tables.get("tracker_issues").unwrap_or(&0),
-            teams: *tables.get("tracker_teams").unwrap_or(&0),
-            states: *tables.get("tracker_states").unwrap_or(&0),
-            labels: *tables.get("tracker_labels").unwrap_or(&0),
-            activity: *tables.get("tracker_activity").unwrap_or(&0),
-            cron_jobs: *tables.get("cron_jobs").unwrap_or(&0),
-            inbox_items: *tables.get("inbox_items").unwrap_or(&0),
-            proposals: *tables.get("action_proposals").unwrap_or(&0),
-            allowlist: *tables.get("approval_allowlist").unwrap_or(&0),
-            bot_profiles: *tables.get("bot_profiles").unwrap_or(&0),
-            lane_threads: *tables.get("lane_thread_bindings").unwrap_or(&0),
-            cron_jobs_enabled,
-            tables,
-            ..ImportReport::default()
-        });
+        return preview_from_omo(source).await;
     }
     let from = storage::connect_readonly(source).await?;
     let slack_home_channel = slack_home_from_omo_config(source);
@@ -273,6 +306,8 @@ pub async fn migrate_from_omo(
         .bind(source.to_string_lossy().as_ref())
         .execute(pool)
         .await?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    remember_working_directory(pool, &omo_working_directory(source, home.as_deref())).await?;
     from.close().await;
     Ok(ImportReport {
         lanes: copied.lanes,
@@ -324,6 +359,35 @@ fn working_directory(plist: &Path) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
+/// Directory job scripts run in. The gateway plist's `WorkingDirectory` wins when
+/// that directory exists, including when `source` is a sqlite `.backup` snapshot.
+/// Otherwise the database's parent directory is used.
+pub fn omo_working_directory(source: &Path, home: Option<&Path>) -> PathBuf {
+    if let Some(home) = home {
+        let plist = home.join("Library/LaunchAgents/ai.omon.gateway.plist");
+        if let Some(dir) = working_directory(&plist) {
+            let dir = PathBuf::from(dir);
+            if dir.is_dir() || source == dir.join("omon_gateway.db") {
+                return dir;
+            }
+        }
+    }
+    source
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+async fn remember_working_directory(pool: &SqlitePool, dir: &Path) -> Result<()> {
+    let text = dir.to_string_lossy();
+    sqlx::query("INSERT OR REPLACE INTO hub_meta(key, value) VALUES('omo_working_directory', ?)")
+        .bind(text.as_ref())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 const PARITY_TABLES: &[&str] = &[
     "tracker_users",
     "tracker_teams",
@@ -367,8 +431,11 @@ async fn copy_state(from: &SqlitePool, into: &SqlitePool) -> Result<Copied> {
     let notices = copy_notices(from, into).await?;
     let mut tables = BTreeMap::new();
     for name in PARITY_TABLES {
-        let copied = copy_named(from, into, name).await?;
+        let (copied, skipped) = copy_named(from, into, name).await?;
         tables.insert((*name).to_owned(), copied);
+        if skipped > 0 {
+            tables.insert(format!("orphans_skipped.{name}"), skipped);
+        }
     }
     let cron_jobs = copy_cron_jobs(from, into).await?;
     tables.insert("cron_jobs".into(), cron_jobs);
@@ -449,9 +516,9 @@ async fn columns(pool: &SqlitePool, table: &str) -> Result<Vec<String>> {
 /// Copies the columns that exist on both sides. A missing source table copies nothing.
 /// A source table that is the live tracker shape but cannot satisfy the destination
 /// returns the sqlite error instead of an empty success.
-async fn copy_named(from: &SqlitePool, into: &SqlitePool, table: &str) -> Result<u64> {
+async fn copy_named(from: &SqlitePool, into: &SqlitePool, table: &str) -> Result<(u64, u64)> {
     if !table_exists(from, table).await? || !table_exists(into, table).await? {
-        return Ok(0);
+        return Ok((0, 0));
     }
     if table == "tracker_issues" {
         let source_cols = columns(from, table).await?;
@@ -483,9 +550,17 @@ async fn copy_named(from: &SqlitePool, into: &SqlitePool, table: &str) -> Result
         return Err(HubError::message(format!("no shared columns for {table}")));
     }
     let list = shared.join(", ");
-    let selected = sqlx::query(&format!("SELECT {list} FROM {table}"))
+    // Rows whose ON DELETE CASCADE parent is gone in the source are rows sqlite would
+    // already have deleted with foreign keys on. They are skipped and counted, not copied,
+    // because the destination enforces foreign keys and would fail the whole import.
+    // An ON DELETE SET NULL reference to a missing parent is copied as NULL.
+    let (projection, filter) = orphan_guards(from, into, table, &shared).await?;
+    let selected = sqlx::query(&format!("SELECT {projection} FROM {table}{filter}"))
         .fetch_all(from)
         .await?;
+    let skipped = count_rows(from, table)
+        .await?
+        .saturating_sub(selected.len() as u64);
     let placeholders = vec!["?"; shared.len()].join(", ");
     let insert_sql = format!("INSERT OR IGNORE INTO {table} ({list}) VALUES ({placeholders})");
     let primary = primary_key(into, table).await?;
@@ -510,7 +585,56 @@ async fn copy_named(from: &SqlitePool, into: &SqlitePool, table: &str) -> Result
         }
         copied += affected;
     }
-    Ok(copied)
+    Ok((copied, skipped))
+}
+
+/// Single-column destination foreign keys, checked against the source copy of the parent.
+async fn orphan_guards(
+    from: &SqlitePool,
+    into: &SqlitePool,
+    table: &str,
+    shared: &[&str],
+) -> Result<(String, String)> {
+    let sql = format!(
+        "SELECT \"table\", \"from\", \"to\", on_delete FROM pragma_foreign_key_list('{table}') \
+         WHERE id IN (SELECT id FROM pragma_foreign_key_list('{table}') GROUP BY id HAVING COUNT(*) = 1)"
+    );
+    let keys: Vec<(String, String, Option<String>, String)> =
+        sqlx::query_as(&sql).fetch_all(into).await?;
+    let mut projection: Vec<String> = shared.iter().map(|name| (*name).to_owned()).collect();
+    let mut filters = Vec::new();
+    for (parent, column, to, on_delete) in keys {
+        let Some(index) = shared.iter().position(|name| *name == column) else {
+            continue;
+        };
+        if !table_exists(from, &parent).await? {
+            continue;
+        }
+        let to = match to {
+            Some(to) => to,
+            None => match primary_key(from, &parent).await?.as_slice() {
+                [only] => only.clone(),
+                _ => continue,
+            },
+        };
+        if !columns(from, &parent).await?.contains(&to) {
+            continue;
+        }
+        let present = format!("{column} IN (SELECT {to} FROM {parent})");
+        match on_delete.to_ascii_uppercase().as_str() {
+            "CASCADE" => filters.push(format!("({column} IS NULL OR {present})")),
+            "SET NULL" => {
+                projection[index] = format!("CASE WHEN {present} THEN {column} END AS {column}")
+            }
+            _ => {}
+        }
+    }
+    let filter = if filters.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", filters.join(" AND "))
+    };
+    Ok((projection.join(", "), filter))
 }
 
 async fn primary_key(pool: &SqlitePool, table: &str) -> Result<Vec<String>> {
@@ -943,6 +1067,98 @@ mod tests {
         let bad = migrate_from_omo(&dest, &bad_cron, false).await;
         let message = bad.expect_err("invalid cron payload").to_string();
         assert!(message.contains("invalid cron payload"), "{message}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn rows_of_a_deleted_issue_are_skipped_not_a_foreign_key_failure() {
+        let dir = scratch("orphans");
+        let source = dir.join("omo.sqlite");
+        raw_db(
+            &source,
+            "
+            CREATE TABLE tracker_users (id TEXT PRIMARY KEY, name TEXT, display_name TEXT, email TEXT, avatar_color TEXT, kind TEXT, model TEXT, is_me INTEGER, created_at TEXT);
+            INSERT INTO tracker_users VALUES ('u1','ada','Ada',NULL,'#000','human',NULL,1,'2020-01-01T00:00:00Z');
+            CREATE TABLE tracker_teams (id TEXT PRIMARY KEY, key TEXT, name TEXT, icon TEXT, color TEXT, issue_seq INTEGER, system INTEGER, cycles_enabled INTEGER, cycle_weeks INTEGER, triage_enabled INTEGER, created_at TEXT, sort_order REAL);
+            INSERT INTO tracker_teams VALUES ('t1','AGT','Agents','bot','#fff',1,0,0,2,0,'2020-01-01T00:00:00Z',0);
+            CREATE TABLE tracker_states (id TEXT PRIMARY KEY, team_id TEXT, name TEXT, type TEXT, color TEXT, position REAL, lane_status TEXT, description TEXT);
+            INSERT INTO tracker_states VALUES ('s1','t1','Todo','unstarted','#fff',0,NULL,NULL);
+            CREATE TABLE tracker_labels (id TEXT PRIMARY KEY, team_id TEXT, name TEXT, color TEXT, parent_id TEXT, description TEXT, created_at TEXT);
+            INSERT INTO tracker_labels VALUES ('l1','t1','bug','#f00',NULL,NULL,'2020-01-01T00:00:00Z');
+            CREATE TABLE tracker_issues (id TEXT PRIMARY KEY, team_id TEXT, number INTEGER, identifier TEXT, title TEXT, description TEXT, state_id TEXT, priority INTEGER, creator_id TEXT, created_at TEXT, updated_at TEXT);
+            INSERT INTO tracker_issues VALUES ('i1','t1',1,'AGT-1','Kept','body','s1',0,'u1','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z');
+            CREATE TABLE tracker_issue_labels (issue_id TEXT, label_id TEXT, PRIMARY KEY(issue_id, label_id));
+            INSERT INTO tracker_issue_labels VALUES ('i1','l1');
+            INSERT INTO tracker_issue_labels VALUES ('gone','l1');
+            CREATE TABLE tracker_activity (id INTEGER PRIMARY KEY, issue_id TEXT, actor_id TEXT, kind TEXT, created_at TEXT);
+            INSERT INTO tracker_activity (issue_id, actor_id, kind, created_at) VALUES ('i1','u1','created','2020-01-01T00:00:00Z');
+            INSERT INTO tracker_activity (issue_id, actor_id, kind, created_at) VALUES ('i1','ghost','edited','2020-01-01T00:00:00Z');
+            INSERT INTO tracker_activity (issue_id, actor_id, kind, created_at) VALUES ('gone','u1','created','2020-01-01T00:00:00Z');
+            ",
+        )
+        .await;
+        let dest_path = dir.join("hub.sqlite");
+        let dest = storage::connect(&dest_path).await.unwrap();
+        let report = migrate_from_omo(&dest, &source, false).await.unwrap();
+        assert_eq!(report.issues, 1);
+        assert_eq!(report.activity, 2);
+        assert_eq!(report.tables["tracker_issue_labels"], 1);
+        assert_eq!(report.tables["orphans_skipped.tracker_issue_labels"], 1);
+        assert_eq!(report.tables["orphans_skipped.tracker_activity"], 1);
+        let nulled: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tracker_activity WHERE kind = 'edited' AND actor_id IS NULL",
+        )
+        .fetch_one(&dest)
+        .await
+        .unwrap();
+        assert_eq!(nulled, 1, "a missing SET NULL parent is copied as NULL");
+        let again = migrate_from_omo(&dest, &source, false).await.unwrap();
+        assert_eq!(again.activity, 0);
+        dest.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_does_not_create_the_destination_and_cwd_can_be_recorded() {
+        let dir = scratch("dry-dest");
+        let source = dir.join("omo.sqlite");
+        raw_db(&source, "CREATE TABLE unused (id INTEGER);").await;
+        let dest = dir.join("missing").join("hub.sqlite");
+        let report = open_and_migrate(&dest, &source, true, None).await.unwrap();
+        assert_eq!(report.issues, 0);
+        assert!(!dest.exists());
+        assert!(!dir.join("missing").exists());
+        let work = dir.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join("Library/LaunchAgents")).unwrap();
+        std::fs::write(
+            home.join("Library/LaunchAgents/ai.omon.gateway.plist"),
+            format!(
+                "<key>WorkingDirectory</key><string>{}</string>",
+                work.display()
+            ),
+        )
+        .unwrap();
+        let snap = dir.join("snap.backup");
+        raw_db(&snap, "CREATE TABLE unused (id INTEGER);").await;
+        assert_eq!(omo_working_directory(&snap, Some(&home)), work);
+        assert_eq!(
+            omo_working_directory(&work.join("omon_gateway.db"), Some(&home)),
+            work
+        );
+        let imported = open_and_migrate(&dest, &snap, false, Some(&work))
+            .await
+            .unwrap();
+        assert_eq!(imported.issues, 0);
+        let pool = storage::connect(&dest).await.unwrap();
+        let recorded: String =
+            sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'omo_working_directory'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(recorded, work.to_string_lossy());
+        pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 

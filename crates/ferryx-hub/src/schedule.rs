@@ -332,7 +332,10 @@ pub fn publishing(id: &str, payload: &Value) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeRequest {
-    Run(String),
+    Run {
+        id: String,
+        force: bool,
+    },
     Approve {
         problem_id: i64,
         owner_token: String,
@@ -348,7 +351,10 @@ pub fn parse_native_request(line: &str) -> Result<NativeRequest> {
         if id.is_empty() {
             return Err(HubError::message("cron socket job id is empty"));
         }
-        return Ok(NativeRequest::Run(id.to_owned()));
+        return Ok(NativeRequest::Run {
+            id: id.to_owned(),
+            force: false,
+        });
     }
     if let Some(problem_id) = value.get("approve_problem").and_then(Value::as_i64) {
         let owner_token = value
@@ -369,7 +375,11 @@ pub fn parse_native_request(line: &str) -> Result<NativeRequest> {
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
     {
-        return Ok(NativeRequest::Run(id.to_owned()));
+        let force = value.get("force").and_then(Value::as_bool) == Some(true);
+        return Ok(NativeRequest::Run {
+            id: id.to_owned(),
+            force,
+        });
     }
     Err(HubError::message(
         "cron socket expected a job id string or an approval",
@@ -415,14 +425,20 @@ pub async fn health_lines(pool: &SqlitePool) -> Result<Vec<String>> {
 }
 
 /// Runs one scheduled job and writes a `cron_runs` row. A publishing job is refused
-/// until `approve` has matched its owner token.
-pub async fn run_native_job(pool: &SqlitePool, job_id: &str, approved: bool) -> Result<RunReceipt> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT payload_json FROM scheduled_jobs WHERE id = ?")
+/// until `approve` has matched its owner token. A disabled job is refused unless
+/// `force` is set. A successful run is delivered the same way a scheduled run is.
+pub async fn run_native_job(
+    pool: &SqlitePool,
+    job_id: &str,
+    approved: bool,
+    force: bool,
+) -> Result<RunReceipt> {
+    let row: Option<(String, i64)> =
+        sqlx::query_as("SELECT payload_json, enabled FROM scheduled_jobs WHERE id = ?")
             .bind(job_id)
             .fetch_optional(pool)
             .await?;
-    let Some((payload_json,)) = row else {
+    let Some((payload_json, enabled)) = row else {
         return Ok(RunReceipt {
             job_id: job_id.to_owned(),
             run_id: String::new(),
@@ -434,6 +450,18 @@ pub async fn run_native_job(pool: &SqlitePool, job_id: &str, approved: bool) -> 
     };
     let payload: Value = serde_json::from_str(&payload_json)
         .map_err(|error| HubError::message(format!("invalid cron payload: {error}")))?;
+    if enabled != 1 && !force {
+        return Ok(RunReceipt {
+            job_id: job_id.to_owned(),
+            run_id: String::new(),
+            status: "failed".into(),
+            output: None,
+            last_delivery_error: None,
+            error: Some(format!(
+                "cron job {job_id} is disabled; pass force to run it"
+            )),
+        });
+    }
     if publishing(job_id, &payload) && !approved {
         return Ok(RunReceipt {
             job_id: job_id.to_owned(),
@@ -463,9 +491,9 @@ pub async fn run_native_job(pool: &SqlitePool, job_id: &str, approved: bool) -> 
             let _ = crate::cron_exec::commit_monitor(pool, job_id, hash).await;
         }
     }
-    let (status, output, error) = match outcome {
-        Ok(executed) => ("succeeded", Some(executed.output), None),
-        Err(error) => ("failed", None, Some(error.to_string())),
+    let (status, output, error, deliver) = match outcome {
+        Ok(executed) => ("succeeded", Some(executed.output), None, executed.deliver),
+        Err(error) => ("failed", None, Some(error.to_string()), false),
     };
     sqlx::query(
         "UPDATE cron_runs SET status = ?, finished_at = ?, output = ?, error = ? WHERE id = ?",
@@ -477,12 +505,22 @@ pub async fn run_native_job(pool: &SqlitePool, job_id: &str, approved: bool) -> 
     .bind(&run_id)
     .execute(pool)
     .await?;
+    let last_delivery_error = if status == "succeeded" && deliver {
+        match output.as_deref() {
+            Some(text) if should_deliver(text) => {
+                deliver_run_output(pool, job_id, &payload, text).await
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
     Ok(RunReceipt {
         job_id: job_id.to_owned(),
         run_id,
         status: status.into(),
         output,
-        last_delivery_error: None,
+        last_delivery_error,
         error,
     })
 }
@@ -530,7 +568,7 @@ pub async fn approve_problem(
         .bind(problem_id.to_string())
         .execute(pool)
         .await?;
-    run_native_job(pool, &job_id, true).await
+    run_native_job(pool, &job_id, true, true).await
 }
 
 fn failed_receipt(job_id: &str, error: &str) -> RunReceipt {
@@ -546,7 +584,7 @@ fn failed_receipt(job_id: &str, error: &str) -> RunReceipt {
 
 pub async fn handle_native_line(pool: &SqlitePool, line: &str) -> String {
     let response = match parse_native_request(line) {
-        Ok(NativeRequest::Run(id)) => run_native_job(pool, &id, false).await,
+        Ok(NativeRequest::Run { id, force }) => run_native_job(pool, &id, false, force).await,
         Ok(NativeRequest::Approve {
             problem_id,
             owner_token,
@@ -1059,20 +1097,7 @@ pub async fn drive_due_with(
         )
         .await?;
         if ok && deliver && should_deliver(&output) {
-            let mut targets = delivery_targets(&payload);
-            if targets.is_empty() {
-                if let Ok(delivery_json) = sqlx::query_scalar::<_, String>(
-                    "SELECT delivery_json FROM scheduled_jobs WHERE id = ?",
-                )
-                .bind(&job_id)
-                .fetch_one(pool)
-                .await
-                {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(&delivery_json) {
-                        targets = delivery_targets(&parsed);
-                    }
-                }
-            }
+            let targets = targets_for_job(pool, &job_id, &payload).await?;
             if !targets.is_empty() {
                 deliveries.push(DueDelivery {
                     job_id,
@@ -1252,6 +1277,142 @@ fn remediation_lane_key(job_id: &str) -> String {
         "cron-job".into()
     } else {
         key
+    }
+}
+
+fn deliver_wants_home(payload: &Value) -> bool {
+    let parts: Vec<&str> = match payload.get("deliver") {
+        Some(Value::String(text)) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect(),
+        _ => return false,
+    };
+    parts
+        .iter()
+        .any(|part| matches!(*part, "origin" | "slack" | "all" | "discord"))
+}
+
+/// Concrete `deliver` targets, then the stored delivery column, then the Slack
+/// home channel copied at import when the job asked for origin, slack, all, or
+/// discord and named no chat.
+pub async fn targets_for_job(
+    pool: &SqlitePool,
+    job_id: &str,
+    payload: &Value,
+) -> Result<Vec<Delivery>> {
+    let mut targets = delivery_targets(payload);
+    if targets.is_empty() {
+        if let Ok(delivery_json) =
+            sqlx::query_scalar::<_, String>("SELECT delivery_json FROM scheduled_jobs WHERE id = ?")
+                .bind(job_id)
+                .fetch_one(pool)
+                .await
+        {
+            if let Ok(parsed) = serde_json::from_str::<Value>(&delivery_json) {
+                targets = delivery_targets(&parsed);
+            }
+        }
+    }
+    if targets.is_empty() && deliver_wants_home(payload) {
+        if let Some(home) = crate::import::imported_slack_home(pool).await? {
+            let chat = home.trim().trim_start_matches('#').to_owned();
+            if !chat.is_empty() {
+                targets.push(Delivery {
+                    platform: "slack".into(),
+                    chat_id: chat,
+                    thread_id: None,
+                });
+            }
+        }
+    }
+    Ok(targets)
+}
+
+async fn deliver_run_output(
+    pool: &SqlitePool,
+    job_id: &str,
+    payload: &Value,
+    text: &str,
+) -> Option<String> {
+    let targets = match targets_for_job(pool, job_id, payload).await {
+        Ok(targets) => targets,
+        Err(error) => return Some(error.to_string()),
+    };
+    if targets.is_empty() {
+        return match ack_command(payload) {
+            Some(ack) => run_ack(&ack).await.err().map(|error| error.to_string()),
+            None => None,
+        };
+    }
+    let error = post_targets(&targets, text).await;
+    if let Err(record) = remember_delivery(pool, job_id, error.as_deref()).await {
+        return Some(record.to_string());
+    }
+    if error.is_none() {
+        if let Some(ack) = ack_command(payload) {
+            if let Err(ack_error) = run_ack(&ack).await {
+                return Some(ack_error.to_string());
+            }
+        }
+    }
+    error
+}
+
+async fn post_targets(targets: &[Delivery], text: &str) -> Option<String> {
+    let mut errors = Vec::new();
+    for target in targets {
+        let posted = match target.platform.as_str() {
+            "slack" => post_slack_target(&target.chat_id, target.thread_id.as_deref(), text).await,
+            "discord" => post_discord_target(&target.chat_id, text).await,
+            other => Err(HubError::message(format!(
+                "unconfigured delivery transport: {other}"
+            ))),
+        };
+        match posted {
+            Ok(true) => {}
+            Ok(false) => errors.push(format!(
+                "unconfigured delivery transport: {}",
+                target.platform
+            )),
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join("; "))
+    }
+}
+
+async fn post_slack_target(channel: &str, thread: Option<&str>, text: &str) -> Result<bool> {
+    #[cfg(feature = "hub-slack")]
+    {
+        crate::chat::slack::deliver(channel, thread, text).await
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (channel, thread, text);
+        Ok(false)
+    }
+}
+
+async fn post_discord_target(channel: &str, text: &str) -> Result<bool> {
+    #[cfg(feature = "hub-discord")]
+    {
+        crate::chat::discord::deliver(channel, text).await
+    }
+    #[cfg(not(feature = "hub-discord"))]
+    {
+        let _ = (channel, text);
+        Ok(false)
     }
 }
 
@@ -1524,7 +1685,17 @@ mod tests {
     fn the_native_socket_speaks_the_gateway_line() {
         assert_eq!(
             parse_native_request("\"job-1\"\n").unwrap(),
-            NativeRequest::Run("job-1".into())
+            NativeRequest::Run {
+                id: "job-1".into(),
+                force: false
+            }
+        );
+        assert_eq!(
+            parse_native_request(r#"{"id":"job-1","force":true}"#).unwrap(),
+            NativeRequest::Run {
+                id: "job-1".into(),
+                force: true
+            }
         );
         assert_eq!(
             parse_native_request(r#"{"approve_problem":4,"owner_token":"tok"}"#).unwrap(),
@@ -1583,6 +1754,7 @@ mod tests {
         assert_eq!(receipt["status"], "succeeded");
         assert_eq!(receipt["job_id"], "job-1");
         assert_eq!(receipt["output"], "hi");
+        assert!(receipt["last_delivery_error"].is_null());
         let noisy = problem_signature(
             "failed",
             "cron script failed with Some(1): 2026-10-13T01:02:03Z pid 4242 req 9f8e7d6c5b4a connect refused",
@@ -1660,5 +1832,87 @@ mod tests {
         assert!(stored.contains("unconfigured delivery transport: slack"));
         let wait = next_wait(&pool, Utc::now()).await.unwrap();
         assert!(wait > Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn a_disabled_job_does_not_run_unless_forced() {
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled) VALUES('job-1','every 1m','{\"command\":\"printf hi\"}',0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let refused = run_native_job(&pool, "job-1", false, false).await.unwrap();
+        assert_eq!(refused.status, "failed");
+        assert_eq!(
+            refused.error.as_deref(),
+            Some("cron job job-1 is disabled; pass force to run it")
+        );
+        assert!(refused.run_id.is_empty());
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cron_runs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(runs, 0);
+        let forced = run_native_job(&pool, "job-1", false, true).await.unwrap();
+        assert_eq!(forced.status, "succeeded");
+        assert_eq!(forced.output.as_deref(), Some("hi"));
+    }
+
+    #[tokio::test]
+    async fn run_now_posts_an_originless_job_to_the_imported_home_channel() {
+        assert!(
+            crate::chat::slack::bot_token().is_none(),
+            "refusing to post a run-now delivery while a Slack token is configured"
+        );
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("INSERT INTO hub_meta(key, value) VALUES('slack_home_channel', 'C0HOME')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled) VALUES('job-1','every 1m',?,1)")
+            .bind(r#"{"command":"printf hi","deliver":"origin"}"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let receipt = run_native_job(&pool, "job-1", false, false).await.unwrap();
+        assert_eq!(receipt.status, "succeeded");
+        assert_eq!(receipt.output.as_deref(), Some("hi"));
+        assert_eq!(
+            receipt.last_delivery_error.as_deref(),
+            Some("unconfigured delivery transport: slack")
+        );
+        let stored: String =
+            sqlx::query_scalar("SELECT payload_json FROM scheduled_jobs WHERE id = 'job-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(stored.contains("unconfigured delivery transport: slack"));
+    }
+
+    #[tokio::test]
+    async fn a_due_originless_job_targets_the_imported_home_channel() {
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("INSERT INTO hub_meta(key, value) VALUES('slack_home_channel', 'C0HOME')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let due = (Utc::now() - TimeDelta::minutes(1)).to_rfc3339();
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled, next_run_at, delivery_json) VALUES('home','every 10m',?,1,?, '[]')")
+            .bind(r#"{"command":"printf hi","deliver":"origin"}"#)
+            .bind(&due)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled, next_run_at, delivery_json) VALUES('local','every 10m',?,1,?, '[]')")
+            .bind(r#"{"command":"printf hi","deliver":"local"}"#)
+            .bind(&due)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let deliveries = drive_due(&pool, Utc::now()).await.unwrap();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].job_id, "home");
+        assert_eq!(deliveries[0].targets[0].platform, "slack");
+        assert_eq!(deliveries[0].targets[0].chat_id, "C0HOME");
     }
 }

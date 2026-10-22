@@ -156,9 +156,10 @@ pub async fn run_payload(
             "cron job {job_id} sets both monitor_script and monitor_url"
         )));
     }
+    let cwd = script_working_directory(pool).await;
     let script = script_from_payload(payload);
     let script_output = if let Some(script) = script.as_deref() {
-        Some(run_script(script, timeout_secs(payload)).await?)
+        Some(run_script(script, timeout_secs(payload), cwd.as_deref()).await?)
     } else {
         None
     };
@@ -201,7 +202,7 @@ pub async fn run_payload(
             monitor_hash: None,
         });
     }
-    let monitor_hash = match monitor_hash(pool, job_id, payload).await? {
+    let monitor_hash = match monitor_hash(pool, job_id, payload, cwd.as_deref()).await? {
         Monitor::Same => {
             return Ok(Executed {
                 output: String::new(),
@@ -332,12 +333,17 @@ async fn read_prompt(payload: &Value) -> Result<String> {
         .to_owned())
 }
 
-async fn monitor_hash(pool: &sqlx::SqlitePool, job_id: &str, payload: &Value) -> Result<Monitor> {
+async fn monitor_hash(
+    pool: &sqlx::SqlitePool,
+    job_id: &str,
+    payload: &Value,
+    cwd: Option<&Path>,
+) -> Result<Monitor> {
     let script = payload.get("monitor_script").and_then(Value::as_str);
     let Some(script) = script else {
         return Ok(Monitor::Absent);
     };
-    let output = run_script(script, timeout_secs(payload)).await?;
+    let output = run_script(script, timeout_secs(payload), cwd).await?;
     let hash = format!("{:x}", Sha256::digest(output.as_bytes()));
     let previous: Option<String> =
         sqlx::query_scalar("SELECT last_hash FROM cron_monitor_states WHERE job_id = ?")
@@ -376,13 +382,28 @@ async fn context_from_block(pool: &sqlx::SqlitePool, payload: &Value) -> Result<
     Ok(any.then_some(body))
 }
 
-async fn run_script(script: &str, timeout_secs: u64) -> Result<String> {
+async fn script_working_directory(pool: &sqlx::SqlitePool) -> Option<std::path::PathBuf> {
+    let value: Option<String> =
+        sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'omo_working_directory'")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+async fn run_script(script: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<String> {
+    let mut command = tokio::process::Command::new("sh");
+    command.arg("-c").arg(script);
+    if let Some(cwd) = cwd.filter(|cwd| !cwd.as_os_str().is_empty()) {
+        command.current_dir(cwd);
+    }
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
-        tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(script)
-            .output(),
+        command.output(),
     )
     .await
     .map_err(|_| HubError::message("cron script timed out"))?
@@ -436,6 +457,34 @@ mod tests {
             })),
             ["hermes", "script", "agent", "skill", "no_agent", "monitor"]
         );
+    }
+
+    #[tokio::test]
+    async fn a_relative_script_runs_in_the_imported_working_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferryx-cwd-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("token"), "from-omo").unwrap();
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("INSERT INTO hub_meta(key, value) VALUES('omo_working_directory', ?)")
+            .bind(dir.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let executed = run_payload(
+            &pool,
+            "rel",
+            &serde_json::json!({"command": "cat token", "no_agent": true}),
+            &StaticModel(String::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(executed.output, "from-omo");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
