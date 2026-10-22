@@ -1,0 +1,4 @@
+{"type": "metadata", "protocol_version": "1.3"}
+{"timestamp": 1771111180.2128499, "message": {"type": "TurnBegin", "payload": {"user_input": "/usage"}}}
+{"timestamp": 1771111180.214153, "message": {"type": "ContentPart", "payload": {"type": "text", "text": "Unknown slash command \"/usage\"."}}}
+{"timestamp": 1771111180.215214, "message": {"type": "TurnEnd", "payload": {}}}

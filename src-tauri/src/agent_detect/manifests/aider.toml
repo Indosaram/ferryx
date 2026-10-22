@@ -1,0 +1,40 @@
+# aider. Measured 2026-10-22 on aider 0.86.2 (.omo-parity/facts/remote-aider.md,
+# screens/aider/*.screen). aider is a line REPL and sets no OSC title. Its bare ">"
+# prompt and "(Y)es/(N)o ... [Yes]:" confirms are not exclusive on their own, so
+# idle and blocked also require the word "aider" on screen (the "Aider v" header,
+# ".aider*", or "... each aider commit."). Mid-stream text has no stable anchor.
+id = "aider"
+version = "2026.10.22.1"
+min_engine_version = 1
+updated_at = "2026-10-22T00:00:00Z"
+aliases = ["aider-chat"]
+
+[[rules]]
+id = "confirm_prompt_blocked"
+state = "blocked"
+priority = 320
+region = "whole_recent"
+visible_blocker = true
+regex = [
+  '(?i)\baider\b',
+  '\(Y\)es/\(N\)o(?:/\(A\)ll)?(?:/\(S\)kip all)?(?:/\(D\)on.t ask again)? \[(?:Yes|No)\]:\s*\z',
+]
+
+[[rules]]
+id = "waiting_spinner_working"
+state = "working"
+priority = 120
+region = "bottom_non_empty_lines(1)"
+visible_working = true
+line_regex = ['^\s*[░█]+\s+(?:Waiting for|Generating commit message with) \S']
+
+[[rules]]
+id = "prompt_idle"
+state = "idle"
+priority = 75
+region = "whole_recent"
+visible_idle = true
+regex = [
+  '(?i)\baider\b',
+  '(?:^|\n)(?:\w+ )?(?:multi)?> ?\s*\z',
+]

@@ -114,6 +114,14 @@ pub static SHIPPED_MANIFESTS: &[&str] = &[
     // Sourced from the GJC (gajae-code) TUI sources 2026-08-31. Same global
     // evaluation contract: every rule carries gjc-exclusive on-screen evidence.
     include_str!("manifests/gjc.toml"),
+    // Measured 2026-10-22 (.omo-parity/facts/screens/<agent>/). Same global
+    // evaluation contract; omp and pi share senpi chrome with omo, so their rules
+    // anchor on agent-only footers and outrank the omo rules they shadow.
+    include_str!("manifests/omp.toml"),
+    include_str!("manifests/pi.toml"),
+    include_str!("manifests/crush.toml"),
+    include_str!("manifests/aider.toml"),
+    include_str!("manifests/droid.toml"),
 ];
 
 pub fn default_engine() -> &'static DetectionEngine {

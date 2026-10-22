@@ -34,9 +34,9 @@ pub const REFERENCE_SCROLLBACK_DISCLOSURE: &str =
 /// existing transport byte limit.
 pub const REFERENCE_SUBMIT_MAX_CHARS: usize = 20_000;
 
-/// How many provider-native history families the reference recognises. Six readers plus
+/// How many provider-native history families the reference recognises. Fourteen readers plus
 /// `Unavailable`; the 24-row action matrix lives in the contract document, not here.
-pub const REFERENCE_NATIVE_HISTORY_KINDS: usize = 6;
+pub const REFERENCE_NATIVE_HISTORY_KINDS: usize = 14;
 
 /// A reference-chat target: the owning host + backend session + daemon incarnation, plus
 /// the provider/native session identity **only where the reader identified one**.
@@ -87,6 +87,14 @@ pub enum ReferenceHistorySource {
     OmoTranscript,
     GjcTranscript,
     PiTranscript,
+    CopilotTranscript,
+    AntigravityTranscript,
+    KimiTranscript,
+    GrokTranscript,
+    ClineTranscript,
+    OpencodeTranscript,
+    CursorTranscript,
+    CrushTranscript,
     /// Same-pane output for a pane no native reader knows. A legitimate primary result,
     /// not a failure — and it must be disclosed as such.
     Scrollback,
@@ -102,6 +110,14 @@ impl ReferenceHistorySource {
             Self::OmoTranscript => ReferenceNativeHistoryKind::Omo,
             Self::GjcTranscript => ReferenceNativeHistoryKind::Gjc,
             Self::PiTranscript => ReferenceNativeHistoryKind::Pi,
+            Self::CopilotTranscript => ReferenceNativeHistoryKind::Copilot,
+            Self::AntigravityTranscript => ReferenceNativeHistoryKind::Antigravity,
+            Self::KimiTranscript => ReferenceNativeHistoryKind::Kimi,
+            Self::GrokTranscript => ReferenceNativeHistoryKind::Grok,
+            Self::ClineTranscript => ReferenceNativeHistoryKind::Cline,
+            Self::OpencodeTranscript => ReferenceNativeHistoryKind::Opencode,
+            Self::CursorTranscript => ReferenceNativeHistoryKind::Cursor,
+            Self::CrushTranscript => ReferenceNativeHistoryKind::Crush,
             Self::Scrollback => ReferenceNativeHistoryKind::Unavailable,
         }
     }
@@ -115,6 +131,14 @@ impl ReferenceHistorySource {
             Self::OmoTranscript => "omo-transcript",
             Self::GjcTranscript => "gjc-transcript",
             Self::PiTranscript => "pi-transcript",
+            Self::CopilotTranscript => "copilot-transcript",
+            Self::AntigravityTranscript => "antigravity-transcript",
+            Self::KimiTranscript => "kimi-transcript",
+            Self::GrokTranscript => "grok-transcript",
+            Self::ClineTranscript => "cline-transcript",
+            Self::OpencodeTranscript => "opencode-transcript",
+            Self::CursorTranscript => "cursor-transcript",
+            Self::CrushTranscript => "crush-transcript",
             Self::Scrollback => "scrollback",
         }
     }
@@ -143,6 +167,23 @@ pub enum ReferenceNativeHistoryKind {
     Omo,
     Gjc,
     Pi,
+    /// `~/.copilot/session-state/<id>.jsonl`.
+    Copilot,
+    /// agy's `brain/<id>/.system_generated/logs/transcript_full.jsonl`.
+    Antigravity,
+    /// `~/.kimi/sessions/<cwd hash>/<id>/wire.jsonl`.
+    Kimi,
+    /// `~/.grok/sessions/<cwd group>/<id>/updates.jsonl`.
+    Grok,
+    /// `~/.cline/data/sessions/<id>/<id>.messages.json`, one whole JSON document.
+    Cline,
+    /// Rows of the shared `~/.local/share/opencode/opencode.db` SQLite store.
+    Opencode,
+    /// `~/.cursor/chats/<cwd hash>/<id>/store.db`, a content-addressed SQLite blob store.
+    Cursor,
+    /// Rows of a per-project `<project>/.crush/crush.db` SQLite store, found through the
+    /// `~/.local/share/crush/projects.json` index.
+    Crush,
     /// No native reader for this registry entry today. A boundary, not a permanent denial.
     Unavailable,
 }
@@ -162,6 +203,15 @@ impl ReferenceNativeHistoryKind {
             "omo" => Self::Omo,
             "gjc" => Self::Gjc,
             "pi" => Self::Pi,
+            "copilot" => Self::Copilot,
+            // `agentIcon.ts` `AGENT_LOGO_ALIASES`: agy and cursor-agent are the same agents.
+            "antigravity" | "agy" => Self::Antigravity,
+            "kimi" => Self::Kimi,
+            "grok" => Self::Grok,
+            "cline" => Self::Cline,
+            "opencode" => Self::Opencode,
+            "cursor" | "cursor-agent" => Self::Cursor,
+            "crush" => Self::Crush,
             _ => Self::Unavailable,
         }
     }
@@ -180,6 +230,14 @@ impl ReferenceNativeHistoryKind {
             Self::Omo => "omo-transcript",
             Self::Gjc => "gjc-transcript",
             Self::Pi => "pi-transcript",
+            Self::Copilot => "copilot-transcript",
+            Self::Antigravity => "antigravity-transcript",
+            Self::Kimi => "kimi-transcript",
+            Self::Grok => "grok-transcript",
+            Self::Cline => "cline-transcript",
+            Self::Opencode => "opencode-transcript",
+            Self::Cursor => "cursor-transcript",
+            Self::Crush => "crush-transcript",
             Self::Unavailable => "unavailable",
         }
     }
@@ -1120,7 +1178,22 @@ mod tests {
         assert_eq!(ReferenceNativeHistoryKind::from_registry_id("omo"), ReferenceNativeHistoryKind::Omo);
         assert_eq!(ReferenceNativeHistoryKind::from_registry_id("gjc"), ReferenceNativeHistoryKind::Gjc);
         assert_eq!(ReferenceNativeHistoryKind::from_registry_id("pi"), ReferenceNativeHistoryKind::Pi);
-        for unknown in ["mimo-code", "cursor-agent", "prime-agent", "openclaw", ""] {
+        for (registry, kind) in [
+            ("copilot", ReferenceNativeHistoryKind::Copilot),
+            ("antigravity", ReferenceNativeHistoryKind::Antigravity),
+            ("agy", ReferenceNativeHistoryKind::Antigravity),
+            ("kimi", ReferenceNativeHistoryKind::Kimi),
+            ("grok", ReferenceNativeHistoryKind::Grok),
+            ("cline", ReferenceNativeHistoryKind::Cline),
+            ("opencode", ReferenceNativeHistoryKind::Opencode),
+            ("cursor", ReferenceNativeHistoryKind::Cursor),
+            ("cursor-agent", ReferenceNativeHistoryKind::Cursor),
+            ("crush", ReferenceNativeHistoryKind::Crush),
+        ] {
+            assert_eq!(ReferenceNativeHistoryKind::from_registry_id(registry), kind, "{registry}");
+        }
+        // No reader: aider binds no session id, droid records are unsettled.
+        for unknown in ["mimo-code", "aider", "droid", "prime-agent", "openclaw", ""] {
             assert_eq!(
                 ReferenceNativeHistoryKind::from_registry_id(unknown),
                 ReferenceNativeHistoryKind::Unavailable,
@@ -1132,7 +1205,7 @@ mod tests {
         assert_eq!(ReferenceHistorySource::PiTranscript.native_kind(), ReferenceNativeHistoryKind::Pi);
         assert_eq!(ReferenceHistorySource::Scrollback.native_kind(), ReferenceNativeHistoryKind::Unavailable);
         assert_eq!(ReferenceHistorySource::GjcTranscript.as_str(), "gjc-transcript");
-        assert_eq!(REFERENCE_NATIVE_HISTORY_KINDS, 6);
+        assert_eq!(REFERENCE_NATIVE_HISTORY_KINDS, 14);
     }
 
     #[test]
@@ -1144,6 +1217,14 @@ mod tests {
             (ReferenceHistorySource::OmoTranscript, "omo-transcript"),
             (ReferenceHistorySource::GjcTranscript, "gjc-transcript"),
             (ReferenceHistorySource::PiTranscript, "pi-transcript"),
+            (ReferenceHistorySource::CopilotTranscript, "copilot-transcript"),
+            (ReferenceHistorySource::AntigravityTranscript, "antigravity-transcript"),
+            (ReferenceHistorySource::KimiTranscript, "kimi-transcript"),
+            (ReferenceHistorySource::GrokTranscript, "grok-transcript"),
+            (ReferenceHistorySource::ClineTranscript, "cline-transcript"),
+            (ReferenceHistorySource::OpencodeTranscript, "opencode-transcript"),
+            (ReferenceHistorySource::CursorTranscript, "cursor-transcript"),
+            (ReferenceHistorySource::CrushTranscript, "crush-transcript"),
             (ReferenceHistorySource::Scrollback, "scrollback"),
         ];
         for (source, name) in cases {

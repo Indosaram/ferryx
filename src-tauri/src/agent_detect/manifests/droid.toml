@@ -1,0 +1,30 @@
+# droid (Factory CLI). Measured 2026-10-22 on droid 0.247.0 (.omo-parity/facts/remote-droid.md,
+# screens/droid/*.screen). Only the login wall and device-auth screens could be captured;
+# the logged-in idle and working screens are unknown, so this manifest has no idle or
+# working rule. The tool-confirmation labels "Yes, allow" / "No, cancel" come from strings
+# in the shipped binary (remote-droid.md "Approval prompt"); their layout is unmeasured.
+id = "droid"
+version = "2026.10.22.1"
+min_engine_version = 1
+updated_at = "2026-10-22T00:00:00Z"
+aliases = ["factory", "factory-cli"]
+
+[[rules]]
+id = "tool_confirmation_blocked"
+state = "blocked"
+priority = 330
+region = "whole_recent"
+visible_blocker = true
+contains = ["yes, allow", "no, cancel"]
+
+[[rules]]
+id = "login_blocked"
+state = "blocked"
+priority = 320
+region = "whole_recent"
+visible_blocker = true
+contains = ["welcome to factory cli"]
+any = [
+  { contains = ["please login with your factory account to continue."] },
+  { contains = ["auth.factory.ai/device", "waiting for authentication to complete..."] },
+]

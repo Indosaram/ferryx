@@ -1,0 +1,9 @@
+{"type":"metadata","protocol_version":"1.3"}
+{"timestamp":1792654819.811521,"message":{"type":"TurnBegin","payload":{"user_input":[{"type":"text","text":"kimi-user-sentinel"}]}}}
+{"timestamp":1792654819.836672,"message":{"type":"StepBegin","payload":{"n":1}}}
+{"timestamp":1792654820.1,"message":{"type":"ContentPart","payload":{"type":"think","think":"kimi-think-sentinel","encrypted":null}}}
+{"timestamp":1792654820.2,"message":{"type":"ContentPart","payload":{"type":"text","text":"kimi-assistant-"}}}
+{"timestamp":1792654820.3,"message":{"type":"ContentPart","payload":{"type":"text","text":"sentinel"}}}
+{"timestamp":1792654820.4,"message":{"type":"ToolCall","payload":{"type":"function","id":"tool_1","function":{"name":"Shell","arguments":"{\"command\": \"ls\"}"}}}}
+{"timestamp":1792654820.9,"message":{"type":"ToolResult","payload":{"tool_call_id":"tool_1","return_value":{"is_error":false,"output":"a.txt","message":"","display":[]}}}}
+{"timestamp":1792654821,"message":{"type":"TurnEnd","payload":{}}}

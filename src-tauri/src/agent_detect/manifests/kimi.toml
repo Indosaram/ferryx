@@ -77,3 +77,18 @@ priority = 90
 region = "whole_recent"
 visible_working = true
 line_regex = ['(?i)^\s*[\u2800-\u28FF]+\s*(thinking\.\.\.|working\.\.\.|using )']
+# cline's working row " ⠏ Thinking... (esc to cancel)" (screens/cline/working.screen).
+not = [{ line_regex = ['\(esc to cancel\)\s*$'] }]
+
+# Kimi Code CLI (measured 2026-10-22, .omo-parity/facts/screens/kimi/): between
+# turns the bottom row is the status bar "16:12  agent (kimi-for-coding, thinking)
+# ... context: 0.0%"; during a turn it shrinks to "context: 0.0%" under the moon
+# spinner, so the clock + mode prefix only shows while idle.
+
+[[rules]]
+id = "status_bar_idle"
+state = "idle"
+priority = 60
+region = "bottom_non_empty_lines(1)"
+visible_idle = true
+line_regex = ['^\s*\d{1,2}:\d{2}\s+agent \(.*\).*\scontext: \d+(?:\.\d+)?%\s*$']

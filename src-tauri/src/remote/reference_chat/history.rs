@@ -35,9 +35,16 @@
 //!   owning host's own session store, exactly as the reference does; a pane's program is never
 //!   asked for its history.
 //! * **No root is guessed from the registry label.** The identity-exact lookup uses Ferryx's
-//!   existing `.omo` session root ([`crate::agent_transcript`]); a store under a root Ferryx does
-//!   not know (Claude's `~/.claude/projects`, `.pi`, `.omp`) is reached through the absolute
-//!   `provider_transcript_path` the provider record already resolved, never through a guess.
+//!   existing `.omo` session root ([`crate::agent_transcript`]) and, per reader, the one store
+//!   layout measured for that agent ([`reference_history_exact_store`]: Claude's
+//!   `~/.claude/projects/*/<id>.jsonl`, Codex's `~/.codex/sessions/Y/M/D/rollout-*-<id>.jsonl`,
+//!   …), built from the session id itself and never picked by recency. `.pi` and `.omp` stores
+//!   are still reached through the absolute `provider_transcript_path` the provider record
+//!   already resolved.
+//! * **A store that is not a line stream is paged as a projection.** Cline's whole-document JSON,
+//!   OpenCode's SQLite rows and Cursor's SQLite blob tree are read whole and projected to one JSON
+//!   line per message ([`ReferenceHistoryLocation::Rows`] for a session inside a shared database);
+//!   cursors then name offsets in that projection.
 //! * **A page is cut at turn boundaries**, so it never splits a turn. `limit` counts boundaries —
 //!   each boundary opens a human turn, and the page carries that turn and everything that followed
 //!   it up to the next boundary — so a page may hold more turns than `limit` (a tool result, a
@@ -53,6 +60,7 @@
 //!   provider change can. That is the fence task 4 discards a late response with.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -60,7 +68,7 @@ use std::sync::{Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
 
-use crate::scoped_contracts::{ScopeError, ScopeErrorCode};
+use crate::scoped_contracts::{CanonicalProvider, ScopeError, ScopeErrorCode};
 
 use super::types::{
     ReferenceHistoryAvailability, ReferenceHistoryCursor, ReferenceHistoryPage,
@@ -212,6 +220,9 @@ pub enum ReferenceHistoryLocation {
     Scrollback,
     /// A reader-identified session the agent has not written a turn to yet.
     NotStarted,
+    /// One session's rows inside a SQLite store other sessions share (OpenCode's
+    /// `opencode.db`, a Crush project's `crush.db`). It is read as a projection, never as bytes.
+    Rows { store: PathBuf, session_id: String },
 }
 
 /// The store one target's page is served from, and the identity a cursor is minted against.
@@ -259,8 +270,53 @@ pub fn reference_history_source_for_kind(kind: ReferenceNativeHistoryKind) -> Re
         ReferenceNativeHistoryKind::Omo => ReferenceHistorySource::OmoTranscript,
         ReferenceNativeHistoryKind::Gjc => ReferenceHistorySource::GjcTranscript,
         ReferenceNativeHistoryKind::Pi => ReferenceHistorySource::PiTranscript,
+        ReferenceNativeHistoryKind::Copilot => ReferenceHistorySource::CopilotTranscript,
+        ReferenceNativeHistoryKind::Antigravity => ReferenceHistorySource::AntigravityTranscript,
+        ReferenceNativeHistoryKind::Kimi => ReferenceHistorySource::KimiTranscript,
+        ReferenceNativeHistoryKind::Grok => ReferenceHistorySource::GrokTranscript,
+        ReferenceNativeHistoryKind::Cline => ReferenceHistorySource::ClineTranscript,
+        ReferenceNativeHistoryKind::Opencode => ReferenceHistorySource::OpencodeTranscript,
+        ReferenceNativeHistoryKind::Cursor => ReferenceHistorySource::CursorTranscript,
+        ReferenceNativeHistoryKind::Crush => ReferenceHistorySource::CrushTranscript,
         ReferenceNativeHistoryKind::Unavailable => ReferenceHistorySource::Scrollback,
     }
+}
+
+/// The canonical provider whose store root a reader family reads.
+///
+/// `Unavailable` has no store and so no provider. Every other reader maps one-to-one, which is
+/// what lets the remote readers take their root from the same resolver the history dialog uses.
+fn reference_history_provider(kind: ReferenceNativeHistoryKind) -> Option<CanonicalProvider> {
+    match kind {
+        ReferenceNativeHistoryKind::Claude => Some(CanonicalProvider::Claude),
+        ReferenceNativeHistoryKind::Codex => Some(CanonicalProvider::Codex),
+        ReferenceNativeHistoryKind::Omp => Some(CanonicalProvider::Omp),
+        ReferenceNativeHistoryKind::Omo => Some(CanonicalProvider::Omo),
+        ReferenceNativeHistoryKind::Gjc => Some(CanonicalProvider::Gjc),
+        ReferenceNativeHistoryKind::Pi => Some(CanonicalProvider::Pi),
+        ReferenceNativeHistoryKind::Copilot => Some(CanonicalProvider::Copilot),
+        ReferenceNativeHistoryKind::Antigravity => Some(CanonicalProvider::Antigravity),
+        ReferenceNativeHistoryKind::Kimi => Some(CanonicalProvider::Kimi),
+        ReferenceNativeHistoryKind::Grok => Some(CanonicalProvider::Grok),
+        ReferenceNativeHistoryKind::Cline => Some(CanonicalProvider::Cline),
+        ReferenceNativeHistoryKind::Opencode => Some(CanonicalProvider::Opencode),
+        ReferenceNativeHistoryKind::Cursor => Some(CanonicalProvider::Cursor),
+        ReferenceNativeHistoryKind::Crush => Some(CanonicalProvider::Crush),
+        ReferenceNativeHistoryKind::Unavailable => None,
+    }
+}
+
+/// One reader's store root, resolved through
+/// [`crate::ipc::agent_history::history_root_for`] — the same resolver the history dialog uses, so
+/// an evidenced env override (`CODEX_HOME`, `GROK_HOME`, `CRUSH_GLOBAL_DATA`, …) moves the remote
+/// readers too. Only the root moves: the layout below it stays each agent's measured one.
+fn reference_history_root(
+    home: &Path,
+    kind: ReferenceNativeHistoryKind,
+    get_env: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    reference_history_provider(kind)
+        .map(|provider| crate::ipc::agent_history::history_root_for(home, provider, get_env))
 }
 
 /// The opaque identity of one target's stream: the target tuple, the reader, and the store.
@@ -306,10 +362,31 @@ pub fn reference_history_stream_id(
 ///   candidate store, so no reader can say which one is this pane's.
 /// * `NOT_FOUND` — nothing identifies a store for this pane at all.
 /// * `UNAUTHORIZED` — the target names no backend session.
+///
+/// Store roots are resolved against this process's environment; see
+/// [`resolve_reference_history_stream_with_env`].
 pub fn resolve_reference_history_stream(
     home: &Path,
     identity: &ReferenceHistoryIdentity,
     siblings: &[ReferenceHistorySibling],
+) -> Result<ReferenceHistoryStream, ScopeError> {
+    // Root overrides describe this user's own stores, so they apply only when `home` is this
+    // process's home; an explicitly different home (a test home, an alternate history home) is
+    // read as given rather than redirected by the caller's environment.
+    if crate::ipc::file_link::home_dir().as_deref() == Some(home) {
+        resolve_reference_history_stream_with_env(home, identity, siblings, &|key| std::env::var_os(key))
+    } else {
+        resolve_reference_history_stream_with_env(home, identity, siblings, &|_| None)
+    }
+}
+
+/// [`resolve_reference_history_stream`] against a named environment, so a test can state an
+/// override without mutating the process's own.
+pub fn resolve_reference_history_stream_with_env(
+    home: &Path,
+    identity: &ReferenceHistoryIdentity,
+    siblings: &[ReferenceHistorySibling],
+    get_env: &dyn Fn(&str) -> Option<OsString>,
 ) -> Result<ReferenceHistoryStream, ScopeError> {
     let kind = identity.native_kind();
     let owner = identity.target.clone();
@@ -336,7 +413,13 @@ pub fn resolve_reference_history_stream(
     // 1. The absolute path the provider record already resolved. It is authoritative: if it names
     //    a file, that file is this session's store; if it names nothing, the session is unwritten
     //    and no other file may be substituted for it.
-    if let Some(path) = identity.provider_transcript_path.as_deref() {
+    //    A shared database (OpenCode's, Crush's) holds every session, so a path to it identifies
+    //    none.
+    let named = identity
+        .provider_transcript_path
+        .as_deref()
+        .filter(|_| !matches!(kind, ReferenceNativeHistoryKind::Opencode | ReferenceNativeHistoryKind::Crush));
+    if let Some(path) = named {
         if path.is_file() {
             verify_named_transcript_identity(identity, path)?;
             return Ok(native_stream(identity, kind, path));
@@ -346,8 +429,15 @@ pub fn resolve_reference_history_stream(
         }
     }
 
-    // 2-4. Identity-exact lookups over the owning host's own session root.
+    // 2-4. Identity-exact lookups: the reader's own store layout first, then the `.omo` root the
+    //      omo-shaped readers (and a claude/codex pane run by OmO) share.
     for session_id in identity.exact_session_ids() {
+        if let Some(location) = reference_history_exact_store(home, kind, session_id, get_env)? {
+            return Ok(located_stream(identity, kind, location));
+        }
+        if !reads_omo_root(kind) {
+            continue;
+        }
         if let Some(path) = crate::agent_transcript::transcript_path_for_session(home, session_id) {
             return Ok(native_stream(identity, kind, &path));
         }
@@ -386,7 +476,7 @@ pub fn resolve_reference_history_stream(
                 ),
             ));
         }
-        let candidates = reference_history_cwd_candidates(home, cwd);
+        let candidates = reference_history_cwd_candidates(home, cwd, get_env);
         match candidates.len() {
             0 => {}
             1 => return Ok(native_stream(identity, kind, &candidates[0])),
@@ -506,7 +596,10 @@ fn verify_named_transcript_identity(
         ));
     };
     let expected = format!("{provider}.jsonl");
-    if !name.ends_with(&expected) {
+    // Stores kept in a directory per session name the session by that directory, not the file.
+    let in_session_dir = reference_history_store_is_per_session_dir(identity.native_kind())
+        && path.components().any(|part| part.as_os_str() == provider);
+    if !name.ends_with(&expected) && !in_session_dir {
         return Err(history_error(
             ScopeErrorCode::Forbidden,
             format!("`{name}` is not the store of provider session `{provider}`"),
@@ -520,15 +613,223 @@ fn native_stream(
     kind: ReferenceNativeHistoryKind,
     path: &Path,
 ) -> ReferenceHistoryStream {
+    located_stream(identity, kind, ReferenceHistoryLocation::File(path.to_path_buf()))
+}
+
+fn located_stream(
+    identity: &ReferenceHistoryIdentity,
+    kind: ReferenceNativeHistoryKind,
+    location: ReferenceHistoryLocation,
+) -> ReferenceHistoryStream {
+    // A session inside a shared store is named by the store and the session together, so two
+    // sessions of one database never share a stream identity.
+    let store = match &location {
+        ReferenceHistoryLocation::File(path) => Some(path.clone()),
+        ReferenceHistoryLocation::Rows { store, session_id } => Some(store.join(session_id)),
+        _ => None,
+    };
     ReferenceHistoryStream {
         source: reference_history_source_for_kind(kind),
         kind,
         availability: ReferenceHistoryAvailability::Native,
-        stream_id: reference_history_stream_id(identity, kind, Some(path)),
-        location: ReferenceHistoryLocation::File(path.to_path_buf()),
+        stream_id: reference_history_stream_id(identity, kind, store.as_deref()),
+        location,
         unavailable_reason: None,
         owner: identity.target.clone(),
     }
+}
+
+/// Do this reader's stores live under the `.omo` session root `transcript_path_for_session`
+/// searches? The omo-shaped readers do, and a claude/codex pane run by OmO keeps its store there;
+/// the other readers' stores never do.
+fn reads_omo_root(kind: ReferenceNativeHistoryKind) -> bool {
+    matches!(
+        kind,
+        ReferenceNativeHistoryKind::Claude
+            | ReferenceNativeHistoryKind::Codex
+            | ReferenceNativeHistoryKind::Omo
+            | ReferenceNativeHistoryKind::Omp
+            | ReferenceNativeHistoryKind::Gjc
+            | ReferenceNativeHistoryKind::Pi
+    )
+}
+
+/// Does this reader keep one directory per session, named by the session id?
+fn reference_history_store_is_per_session_dir(kind: ReferenceNativeHistoryKind) -> bool {
+    matches!(
+        kind,
+        ReferenceNativeHistoryKind::Antigravity
+            | ReferenceNativeHistoryKind::Kimi
+            | ReferenceNativeHistoryKind::Grok
+            | ReferenceNativeHistoryKind::Cline
+            | ReferenceNativeHistoryKind::Cursor
+    )
+}
+
+/// Is this reader's stream a projection of a store that is not a line stream?
+fn reference_history_kind_is_projected(kind: ReferenceNativeHistoryKind) -> bool {
+    matches!(
+        kind,
+        ReferenceNativeHistoryKind::Cline
+            | ReferenceNativeHistoryKind::Opencode
+            | ReferenceNativeHistoryKind::Cursor
+    )
+}
+
+/// The exact store one reader keeps for one session id on the owning host.
+///
+/// Every arm builds the path from the id and the layout measured for that agent
+/// (`.omo-parity/facts`); none lists a folder by recency. Where one level of the layout encodes
+/// the cwd (Claude's project slug, Kimi's and Cursor's cwd hash, Grok's url-encoded cwd), that
+/// level is searched for the file or directory the id names exactly, which is the same answer as
+/// recomputing the encoding without depending on how the agent spelled the cwd. Two hits for one
+/// id is an ambiguous owner and is refused. `None` means this reader has no store for the id yet
+/// (or keeps it under the `.omo` root, which the caller searches).
+fn reference_history_exact_store(
+    home: &Path,
+    kind: ReferenceNativeHistoryKind,
+    session_id: &str,
+    get_env: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<Option<ReferenceHistoryLocation>, ScopeError> {
+    // The root is whatever the shared resolver says it is; only the layout below it is this
+    // reader's own. A kind with no store root (`Unavailable`) has no store for any id.
+    let Some(root) = reference_history_root(home, kind, get_env) else {
+        return Ok(None);
+    };
+    let candidates: Vec<PathBuf> = match kind {
+        ReferenceNativeHistoryKind::Claude => {
+            under_each_dir(&root, |dir| dir.join(format!("{session_id}.jsonl")))
+        }
+        ReferenceNativeHistoryKind::Codex => codex_rollouts(&root, session_id),
+        ReferenceNativeHistoryKind::Copilot => existing(
+            root.join(format!("{session_id}.jsonl")),
+        ),
+        ReferenceNativeHistoryKind::Antigravity => existing(
+            root.join("brain")
+                .join(session_id)
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript_full.jsonl"),
+        ),
+        ReferenceNativeHistoryKind::Kimi => {
+            under_each_dir(&root, |dir| dir.join(session_id).join("wire.jsonl"))
+        }
+        ReferenceNativeHistoryKind::Grok => {
+            under_each_dir(&root, |dir| dir.join(session_id).join("updates.jsonl"))
+        }
+        ReferenceNativeHistoryKind::Cline => existing(
+            root.join(session_id).join(format!("{session_id}.messages.json")),
+        ),
+        ReferenceNativeHistoryKind::Cursor => {
+            under_each_dir(&root, |dir| dir.join(session_id).join("store.db"))
+        }
+        ReferenceNativeHistoryKind::Opencode => {
+            let store = root.join("opencode.db");
+            if !store.is_file() {
+                return Ok(None);
+            }
+            let held = super::history_opencode::opencode_store_has_session(&store, session_id)
+                .map_err(|error| history_error(ScopeErrorCode::NotFound, error))?;
+            return Ok(held.then(|| ReferenceHistoryLocation::Rows {
+                store,
+                session_id: session_id.to_string(),
+            }));
+        }
+        ReferenceNativeHistoryKind::Crush => {
+            // Every project database the index names is asked for this exact UUID; none is
+            // picked by recency, and two holding it is an ambiguous owner.
+            let mut held = Vec::new();
+            for store in super::history_crush::crush_indexed_stores_in(&root) {
+                if super::history_crush::crush_store_has_session(&store, session_id)
+                    .map_err(|error| history_error(ScopeErrorCode::NotFound, error))?
+                {
+                    held.push(store);
+                }
+            }
+            return match held.as_slice() {
+                [] => Ok(None),
+                [store] => Ok(Some(ReferenceHistoryLocation::Rows {
+                    store: store.clone(),
+                    session_id: session_id.to_string(),
+                })),
+                many => Err(history_error(
+                    ScopeErrorCode::ControlConflict,
+                    format!("{} crush stores name session `{session_id}`; the owner is ambiguous", many.len()),
+                )),
+            };
+        }
+        ReferenceNativeHistoryKind::Omp
+        | ReferenceNativeHistoryKind::Omo
+        | ReferenceNativeHistoryKind::Gjc
+        | ReferenceNativeHistoryKind::Pi
+        | ReferenceNativeHistoryKind::Unavailable => Vec::new(),
+    };
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [only] => Ok(Some(ReferenceHistoryLocation::File(only.clone()))),
+        many => Err(history_error(
+            ScopeErrorCode::ControlConflict,
+            format!(
+                "{} `{}` stores name session `{session_id}`; the owner is ambiguous",
+                many.len(),
+                kind.as_str()
+            ),
+        )),
+    }
+}
+
+fn existing(path: PathBuf) -> Vec<PathBuf> {
+    if path.is_file() {
+        vec![path]
+    } else {
+        Vec::new()
+    }
+}
+
+/// `store(dir)` for every directory directly under `root` where it is a file, sorted.
+fn under_each_dir(root: &Path, store: impl Fn(&Path) -> PathBuf) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|dir| dir.is_dir())
+        .map(|dir| store(&dir))
+        .filter(|path| path.is_file())
+        .collect();
+    found.sort();
+    found
+}
+
+/// Codex's `sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl` files for exactly this id.
+fn codex_rollouts(root: &Path, session_id: &str) -> Vec<PathBuf> {
+    let suffix = format!("-{session_id}.jsonl");
+    let mut found = Vec::new();
+    for year in child_dirs(root) {
+        for month in child_dirs(&year) {
+            for day in child_dirs(&month) {
+                let Ok(entries) = std::fs::read_dir(&day) else {
+                    continue;
+                };
+                found.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
+                    path.is_file()
+                        && path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(&suffix))
+                }));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+fn child_dirs(root: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(root)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect())
+        .unwrap_or_default()
 }
 
 fn not_started_stream(
@@ -553,12 +854,15 @@ fn not_started_stream(
 /// Deliberately **not** ordered by mtime: tool activity is not evidence of pane ownership, and a
 /// recency pick is how a pane would show another session's conversation. The caller accepts a
 /// single candidate and refuses several.
-fn reference_history_cwd_candidates(home: &Path, cwd: &str) -> Vec<PathBuf> {
-    let folder = home
-        .join(".omo")
-        .join("agent")
-        .join("sessions")
-        .join(super::history_omo::omo_session_folder(cwd));
+fn reference_history_cwd_candidates(
+    home: &Path,
+    cwd: &str,
+    get_env: &dyn Fn(&str) -> Option<OsString>,
+) -> Vec<PathBuf> {
+    let Some(root) = reference_history_root(home, ReferenceNativeHistoryKind::Omo, get_env) else {
+        return Vec::new();
+    };
+    let folder = root.join(super::history_omo::omo_session_folder(cwd));
     let Ok(entries) = std::fs::read_dir(&folder) else {
         return Vec::new();
     };
@@ -721,6 +1025,16 @@ pub fn reference_history_line_opens_turn(
         ReferenceNativeHistoryKind::Omp
         | ReferenceNativeHistoryKind::Gjc
         | ReferenceNativeHistoryKind::Pi => super::history_omo::omo_line_opens_turn(line),
+        ReferenceNativeHistoryKind::Copilot => super::history_copilot::copilot_line_opens_turn(line),
+        ReferenceNativeHistoryKind::Antigravity => {
+            super::history_antigravity::antigravity_line_opens_turn(line)
+        }
+        ReferenceNativeHistoryKind::Kimi => super::history_kimi::kimi_line_opens_turn(line),
+        ReferenceNativeHistoryKind::Grok => super::history_grok::grok_line_opens_turn(line),
+        ReferenceNativeHistoryKind::Cline => super::history_cline::cline_line_opens_turn(line),
+        ReferenceNativeHistoryKind::Opencode => super::history_opencode::opencode_line_opens_turn(line),
+        ReferenceNativeHistoryKind::Cursor => super::history_cursor::cursor_line_opens_turn(line),
+        ReferenceNativeHistoryKind::Crush => super::history_crush::crush_line_opens_turn(line),
         ReferenceNativeHistoryKind::Unavailable => false,
     }
 }
@@ -1341,11 +1655,30 @@ pub async fn read_reference_history_page(
 ) -> Result<ReferenceHistoryPage, ScopeError> {
     ensure_reference_history_owner(stream, identity)?;
 
+    if let ReferenceHistoryLocation::Rows { store, session_id } = &stream.location {
+        let (store, session_id) = (store.clone(), session_id.clone());
+        if stream.kind == ReferenceNativeHistoryKind::Crush {
+            return read_projected_page(stream, identity, limit, cursor, move || {
+                super::history_crush::crush_store_projection(&store, &session_id)
+            })
+            .await;
+        }
+        return read_projected_page(stream, identity, limit, cursor, move || {
+            super::history_opencode::opencode_store_projection(&store, &session_id)
+        })
+        .await;
+    }
     let Some(path) = stream.file_path() else {
         return reference_history_page_from_window(stream, identity, 0, &[], limit, cursor);
     };
     let path = path.to_path_buf();
     let kind = stream.kind;
+    if reference_history_kind_is_projected(kind) {
+        return read_projected_page(stream, identity, limit, cursor, move || {
+            reference_history_file_projection(kind, &path)
+        })
+        .await;
+    }
     let stream = stream.clone();
     let identity = identity.clone();
     let cursor = cursor.cloned();
@@ -1371,6 +1704,62 @@ pub async fn read_reference_history_page(
                 cursor.as_ref(),
             )
         })();
+        Ok::<_, crate::ipc::error::IpcError>(page)
+    })
+    .await
+    .map_err(|error| {
+        history_error(
+            ScopeErrorCode::Timeout,
+            format!("the transcript read did not finish: {}", error.message),
+        )
+    })?
+}
+
+/// The projection of a whole-document or SQLite store, one JSON message per line.
+/// Synchronous: every caller runs it through [`crate::ipc::run_blocking`].
+fn reference_history_file_projection(kind: ReferenceNativeHistoryKind, path: &Path) -> Result<String, String> {
+    match kind {
+        ReferenceNativeHistoryKind::Cline => {
+            let length = std::fs::metadata(path).map_err(|error| error.to_string())?.len();
+            if length > REFERENCE_HISTORY_MAX_PI_BYTES as u64 {
+                return Err(format!("the document is {length} bytes, past the whole-store read cap"));
+            }
+            let document = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+            super::history_cline::cline_messages_projection(&document)
+                .ok_or_else(|| "the document is not a Cline message list".to_string())
+        }
+        ReferenceNativeHistoryKind::Cursor => super::history_cursor::cursor_store_projection(path),
+        other => Err(format!("{} is not a projected store", other.as_str())),
+    }
+}
+
+/// Serve one page of a projected store. The projection is built off the reactor; a store that
+/// cannot be projected is disclosed as same-pane output, never as an empty conversation.
+async fn read_projected_page<F>(
+    stream: &ReferenceHistoryStream,
+    identity: &ReferenceHistoryIdentity,
+    limit: usize,
+    cursor: Option<&ReferenceHistoryCursor>,
+    project: F,
+) -> Result<ReferenceHistoryPage, ScopeError>
+where
+    F: FnOnce() -> Result<String, String> + Send + 'static,
+{
+    let stream = stream.clone();
+    let identity = identity.clone();
+    let cursor = cursor.cloned();
+    crate::ipc::run_blocking(move || {
+        let page = match project() {
+            Ok(projection) => reference_history_page_from_window(
+                &stream,
+                &identity,
+                0,
+                projection.as_bytes(),
+                limit,
+                cursor.as_ref(),
+            ),
+            Err(reason) => Ok(unreadable_page(&stream, &reason)),
+        };
         Ok::<_, crate::ipc::error::IpcError>(page)
     })
     .await
@@ -1551,10 +1940,18 @@ mod tests {
             ("omp", ReferenceNativeHistoryKind::Omp),
             ("gjc", ReferenceNativeHistoryKind::Gjc),
             ("pi", ReferenceNativeHistoryKind::Pi),
+            ("copilot", ReferenceNativeHistoryKind::Copilot),
+            ("antigravity", ReferenceNativeHistoryKind::Antigravity),
+            ("kimi", ReferenceNativeHistoryKind::Kimi),
+            ("grok", ReferenceNativeHistoryKind::Grok),
+            ("cline", ReferenceNativeHistoryKind::Cline),
+            ("opencode", ReferenceNativeHistoryKind::Opencode),
+            ("cursor-agent", ReferenceNativeHistoryKind::Cursor),
+            ("crush", ReferenceNativeHistoryKind::Crush),
         ] {
             assert_eq!(identity(registry, "sess-1").native_kind(), kind, "{registry}");
         }
-        for registry in ["opencode", "mimo-code", "cursor-agent", ""] {
+        for registry in ["aider", "droid", "mimo-code", ""] {
             let scrollback = resolve_reference_history_stream(
                 home.path(),
                 &identity(registry, "sess-1"),
@@ -1586,6 +1983,248 @@ mod tests {
         let refusal = resolve_reference_history_stream(home.path(), &wrong, &[])
             .expect_err("another session's store is refused");
         assert_eq!(refusal.code, ScopeErrorCode::Forbidden);
+    }
+
+    /// Write a file under the temp home, creating its folders.
+    fn write_store(home: &TempHome, relative: &str, body: &str) -> PathBuf {
+        let path = home.path().join(relative);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("a store folder");
+        std::fs::write(&path, body).expect("a store file");
+        path
+    }
+
+    /// Make `path` strictly newer than every other file, so a recency pick would choose it.
+    fn make_newest(path: &Path) {
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_times(std::fs::FileTimes::new().set_modified(later)))
+            .expect("the decoy's mtime is settable");
+    }
+
+    // C2: a claude/codex pane whose session id was discovered binds its own store under the
+    // agent's own root, not `notStarted`, and never a newer file of another session.
+    #[test]
+    fn every_reader_binds_its_exact_store_by_id_and_ignores_a_newer_foreign_one() {
+        let own = "11111111-2222-4333-8444-555555555555";
+        let other = "99999999-8888-4777-8666-555555555555";
+        let cases: [(&str, String, String); 8] = [
+            ("claude", format!(".claude/projects/-w/{own}.jsonl"), format!(".claude/projects/-w/{other}.jsonl")),
+            (
+                "codex",
+                format!(".codex/sessions/2026/10/22/rollout-2026-10-22T16-07-46-{own}.jsonl"),
+                format!(".codex/sessions/2026/10/22/rollout-2026-10-22T16-09-00-{other}.jsonl"),
+            ),
+            ("copilot", format!(".copilot/session-state/{own}.jsonl"), format!(".copilot/session-state/{other}.jsonl")),
+            (
+                "antigravity",
+                format!(".gemini/antigravity-cli/brain/{own}/.system_generated/logs/transcript_full.jsonl"),
+                format!(".gemini/antigravity-cli/brain/{other}/.system_generated/logs/transcript_full.jsonl"),
+            ),
+            ("kimi", format!(".kimi/sessions/aaaa/{own}/wire.jsonl"), format!(".kimi/sessions/aaaa/{other}/wire.jsonl")),
+            ("grok", format!(".grok/sessions/%2Fw/{own}/updates.jsonl"), format!(".grok/sessions/%2Fw/{other}/updates.jsonl")),
+            (
+                "cline",
+                format!(".cline/data/sessions/{own}/{own}.messages.json"),
+                format!(".cline/data/sessions/{other}/{other}.messages.json"),
+            ),
+            ("cursor", format!(".cursor/chats/bbbb/{own}/store.db"), format!(".cursor/chats/bbbb/{other}/store.db")),
+        ];
+        for (registry, own_store, foreign_store) in cases {
+            let home = TempHome::new();
+            let mine = write_store(&home, &own_store, "{}\n");
+            let decoy = write_store(&home, &foreign_store, "{}\n");
+            make_newest(&decoy);
+
+            let stream = resolve_reference_history_stream(home.path(), &bound_identity(registry, "sess-1", own), &[])
+                .unwrap_or_else(|error| panic!("{registry} resolves its own store: {error:?}"));
+            assert_eq!(stream.availability, ReferenceHistoryAvailability::Native, "{registry}");
+            assert_eq!(stream.file_path(), Some(mine.as_path()), "{registry}");
+            assert_eq!(stream.source, reference_history_source_for_kind(stream.kind), "{registry}");
+
+            // The agent's own session id (no provider id) reaches the same store.
+            let agent = identity(registry, "sess-1").with_agent_session_id(own);
+            let stream = resolve_reference_history_stream(home.path(), &agent, &[]).expect("agent id resolves");
+            assert_eq!(stream.file_path(), Some(mine.as_path()), "{registry} by agent id");
+
+            // A known session with nothing written is notStarted, never the newer foreign store.
+            std::fs::remove_file(&mine).expect("the own store is removable");
+            let stream = resolve_reference_history_stream(home.path(), &bound_identity(registry, "sess-1", own), &[])
+                .expect("an unwritten session resolves");
+            assert_eq!(stream.availability, ReferenceHistoryAvailability::NotStarted, "{registry}");
+            assert!(stream.file_path().is_none(), "{registry} bound {:?}", stream.file_path());
+        }
+    }
+
+    // C15/C16: the remote readers take every root from the same resolver the history dialog uses,
+    // so an evidenced env override moves them too. Stated against a named environment, never the
+    // process's own, so the case is deterministic under a shared test binary.
+    #[test]
+    fn a_store_root_env_override_moves_the_remote_readers_root() {
+        let id = "11111111-2222-4333-8444-555555555555";
+        let cases: [(&str, &str, String); 2] = [
+            ("grok", "GROK_HOME", format!("sessions/%2Fw/{id}/updates.jsonl")),
+            (
+                "codex",
+                "CODEX_HOME",
+                format!("sessions/2026/10/22/rollout-2026-10-22T16-07-46-{id}.jsonl"),
+            ),
+        ];
+        for (registry, key, relative) in cases {
+            // The home-relative default root is left empty, so only the overridden root can
+            // answer, and the subpath below it is still the agent's measured layout.
+            let home = TempHome::new();
+            let overridden = home.path().join("elsewhere").join(key);
+            let mine = overridden.join(&relative);
+            std::fs::create_dir_all(mine.parent().expect("a parent")).expect("an override root");
+            std::fs::write(&mine, "{}\n").expect("a store file");
+            let value = OsString::from(overridden.as_os_str());
+            let env = |asked: &str| (asked == key).then(|| value.clone());
+
+            let identity = bound_identity(registry, "sess-1", id);
+            let stream = resolve_reference_history_stream_with_env(home.path(), &identity, &[], &env)
+                .unwrap_or_else(|error| panic!("{key} moves {registry}'s root: {error:?}"));
+            assert_eq!(stream.availability, ReferenceHistoryAvailability::Native, "{key}");
+            assert_eq!(stream.file_path(), Some(mine.as_path()), "{key}");
+
+            // With no override the same home answers notStarted: the default root is unchanged.
+            let stream =
+                resolve_reference_history_stream_with_env(home.path(), &identity, &[], &|_| None)
+                    .expect("an unwritten session resolves");
+            assert_eq!(stream.availability, ReferenceHistoryAvailability::NotStarted, "{key}");
+            assert!(stream.file_path().is_none(), "{key} bound {:?}", stream.file_path());
+        }
+    }
+
+    #[test]
+    fn an_exact_lookup_that_finds_two_stores_for_one_id_refuses() {
+        let home = TempHome::new();
+        let id = "11111111-2222-4333-8444-555555555555";
+        write_store(&home, &format!(".claude/projects/-a/{id}.jsonl"), "{}\n");
+        write_store(&home, &format!(".claude/projects/-b/{id}.jsonl"), "{}\n");
+        let refusal = resolve_reference_history_stream(home.path(), &bound_identity("claude", "sess-1", id), &[])
+            .expect_err("two stores for one id is no owner");
+        assert_eq!(refusal.code, ScopeErrorCode::ControlConflict);
+    }
+
+    #[test]
+    fn an_opencode_session_binds_its_rows_in_the_shared_store_only() {
+        let home = TempHome::new();
+        let store = home.path().join(".local/share/opencode/opencode.db");
+        std::fs::create_dir_all(store.parent().expect("parent")).expect("store folder");
+        {
+            let connection = rusqlite::Connection::open(&store).expect("a scratch store");
+            connection
+                .execute_batch(
+                    "CREATE TABLE session (id TEXT PRIMARY KEY);
+                     INSERT INTO session VALUES ('ses_own'), ('ses_other');",
+                )
+                .expect("sessions");
+        }
+        let stream = resolve_reference_history_stream(home.path(), &bound_identity("opencode", "sess-1", "ses_own"), &[])
+            .expect("the session resolves");
+        assert_eq!(
+            stream.location,
+            ReferenceHistoryLocation::Rows { store: store.clone(), session_id: "ses_own".into() }
+        );
+        let other = resolve_reference_history_stream(home.path(), &bound_identity("opencode", "sess-1", "ses_other"), &[])
+            .expect("the other session resolves");
+        assert_ne!(stream.stream_id, other.stream_id, "two sessions of one store are two streams");
+        let missing = resolve_reference_history_stream(home.path(), &bound_identity("opencode", "sess-1", "ses_gone"), &[])
+            .expect("an unwritten session resolves");
+        assert_eq!(missing.availability, ReferenceHistoryAvailability::NotStarted);
+        // A provider path naming the shared database identifies no session by itself.
+        let named = bound_identity("opencode", "sess-1", "ses_own").with_provider_transcript_path(&store);
+        assert_eq!(
+            resolve_reference_history_stream(home.path(), &named, &[]).expect("resolves").location,
+            stream.location
+        );
+    }
+
+    #[tokio::test]
+    async fn a_crush_session_binds_its_rows_in_the_indexed_project_store_only() {
+        let home = TempHome::new();
+        let own = "3df112d9-e56f-4f69-b8bb-c58b5d580e89";
+        let mut stores = Vec::new();
+        for project in ["a", "b"] {
+            let data_dir = home.path().join(project).join(".crush");
+            std::fs::create_dir_all(&data_dir).expect("a data dir");
+            let store = data_dir.join("crush.db");
+            let connection = rusqlite::Connection::open(&store).expect("a scratch store");
+            connection
+                .execute_batch(
+                    "CREATE TABLE sessions (id TEXT PRIMARY KEY);
+                     CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, parts TEXT, created_at INTEGER);",
+                )
+                .expect("schema");
+            stores.push((data_dir, store, connection));
+        }
+        // Project a holds this session; project b holds a newer, different one.
+        stores[0].2.execute("INSERT INTO sessions VALUES (?1)", [own]).expect("own session");
+        stores[0]
+            .2
+            .execute(
+                "INSERT INTO messages VALUES ('m1', ?1, 'user', '[{\"type\":\"text\",\"data\":{\"text\":\"SLOW please answer\"}}]', 1792652762)",
+                [own],
+            )
+            .expect("own message");
+        stores[1].2.execute("INSERT INTO sessions VALUES ('other')", []).expect("other session");
+        let index = serde_json::json!({"projects": stores
+            .iter()
+            .map(|(data_dir, _, _)| serde_json::json!({"path": data_dir.parent(), "data_dir": data_dir}))
+            .collect::<Vec<_>>()});
+        write_store(&home, ".local/share/crush/projects.json", &index.to_string());
+
+        let identity = bound_identity("crush", "sess-1", own);
+        let stream = resolve_reference_history_stream(home.path(), &identity, &[]).expect("the session resolves");
+        assert_eq!(
+            stream.location,
+            ReferenceHistoryLocation::Rows { store: stores[0].1.clone(), session_id: own.into() }
+        );
+        assert_eq!(stream.source, ReferenceHistorySource::CrushTranscript);
+        let page = read_reference_history_page(&stream, &identity, 10, None).await.expect("a page");
+        assert_eq!(page.availability, ReferenceHistoryAvailability::Native);
+        assert_eq!(
+            page.turns.first().map(|turn| turn.parts.clone()),
+            Some(vec![ReferencePart::Text { text: "SLOW please answer".into(), phase: None }])
+        );
+        let missing = resolve_reference_history_stream(home.path(), &bound_identity("crush", "sess-1", "gone"), &[])
+            .expect("an unwritten session resolves");
+        assert_eq!(missing.availability, ReferenceHistoryAvailability::NotStarted);
+    }
+
+    #[tokio::test]
+    async fn a_cline_document_is_paged_as_its_projected_message_list() {
+        let home = TempHome::new();
+        let id = "1792653340197_ys4yu";
+        let path = write_store(
+            &home,
+            &format!(".cline/data/sessions/{id}/{id}.messages.json"),
+            include_str!("fixtures/cline/history/1792653340197_ys4yu.messages.json"),
+        );
+        let identity = bound_identity("cline", "sess-1", id);
+        let stream = resolve_reference_history_stream(home.path(), &identity, &[]).expect("resolves");
+        assert_eq!(stream.file_path(), Some(path.as_path()));
+        let page = read_reference_history_page(&stream, &identity, 2, None).await.expect("a page");
+        assert_eq!(page.availability, ReferenceHistoryAvailability::Native);
+        assert_eq!(page.source, ReferenceHistorySource::ClineTranscript);
+        assert!(page.has_more, "six prompts do not fit a two-boundary page");
+        assert_eq!(page.turns.first().map(|turn| turn.role), Some(ReferenceTurnRole::User));
+        assert_eq!(
+            page.turns.last().and_then(|turn| turn.parts.last()),
+            Some(&ReferencePart::Text { text: "OK".into(), phase: None })
+        );
+        let older = read_reference_history_page(&stream, &identity, 10, page.cursor.as_ref())
+            .await
+            .expect("the page before");
+        assert!(!older.has_more);
+        assert_eq!(older.turns.len() + page.turns.len(), 12);
+
+        std::fs::write(&path, "{\"messages\": [").expect("a torn rewrite");
+        let torn = read_reference_history_page(&stream, &identity, 2, None).await.expect("disclosed");
+        assert_eq!(torn.availability, ReferenceHistoryAvailability::Scrollback);
+        assert!(torn.turns.is_empty());
     }
 
     #[test]
@@ -1841,6 +2480,46 @@ mod tests {
         ));
         assert!(reference_history_line_opens_turn(ReferenceNativeHistoryKind::Codex, codex_start));
         assert!(!reference_history_line_opens_turn(ReferenceNativeHistoryKind::Codex, codex_other));
+        for (kind, opens, continues) in [
+            (
+                ReferenceNativeHistoryKind::Copilot,
+                r#"{"type":"user.message","data":{"content":"hi"}}"#,
+                r#"{"type":"assistant.message","data":{"content":"hi"}}"#,
+            ),
+            (
+                ReferenceNativeHistoryKind::Antigravity,
+                r#"{"type":"USER_INPUT","content":"<USER_REQUEST>\nhi\n</USER_REQUEST>"}"#,
+                r#"{"type":"PLANNER_RESPONSE","content":"hi"}"#,
+            ),
+            (
+                ReferenceNativeHistoryKind::Kimi,
+                r#"{"message":{"type":"TurnBegin","payload":{"user_input":"hi"}}}"#,
+                r#"{"message":{"type":"ContentPart","payload":{"type":"text","text":"hi"}}}"#,
+            ),
+            (
+                ReferenceNativeHistoryKind::Grok,
+                r#"{"params":{"update":{"sessionUpdate":"user_message_chunk","content":{"text":"hi"}}}}"#,
+                r#"{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"hi"}}}}"#,
+            ),
+            (
+                ReferenceNativeHistoryKind::Cline,
+                r#"{"role":"user","content":[{"type":"text","text":"hi"}]}"#,
+                r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1"}]}"#,
+            ),
+            (
+                ReferenceNativeHistoryKind::Opencode,
+                r#"{"info":{"role":"user"},"parts":[{"type":"text","text":"hi"}]}"#,
+                r#"{"info":{"role":"assistant"},"parts":[{"type":"text","text":"hi"}]}"#,
+            ),
+            (
+                ReferenceNativeHistoryKind::Cursor,
+                r#"{"role":"user","content":"<user_query>\nhi\n</user_query>"}"#,
+                r#"{"role":"user","content":"<user_info>\nctx\n</user_info>"}"#,
+            ),
+        ] {
+            assert!(reference_history_line_opens_turn(kind, opens), "{}", kind.as_str());
+            assert!(!reference_history_line_opens_turn(kind, continues), "{}", kind.as_str());
+        }
         assert!(!reference_history_line_opens_turn(
             ReferenceNativeHistoryKind::Unavailable,
             user
@@ -1987,9 +2666,9 @@ mod tests {
     #[test]
     fn scrollback_and_not_started_pages_carry_no_older_cursor() {
         let home = TempHome::new();
-        let scrollback = resolve_reference_history_stream(home.path(), &identity("opencode", "s1"), &[])
+        let scrollback = resolve_reference_history_stream(home.path(), &identity("droid", "s1"), &[])
             .expect("a pane with no reader resolves to its own output");
-        let page = reference_history_page_from_bytes(&scrollback, &identity("opencode", "s1"), b"", 50, None)
+        let page = reference_history_page_from_bytes(&scrollback, &identity("droid", "s1"), b"", 50, None)
             .expect("a scrollback page is served");
         assert_eq!(page.availability, ReferenceHistoryAvailability::Scrollback);
         assert_eq!(page.source, ReferenceHistorySource::Scrollback);

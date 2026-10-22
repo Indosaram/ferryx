@@ -19,3 +19,42 @@ any = [
   { contains = ["[plan mode]", "execute command?", "yes"] },
   { contains = ["[plan mode]", "use this tool?", "yes"] },
 ]
+
+# Measured 2026-10-22 (cline CLI, .omo-parity/facts/screens/cline/). Every screen ends with the
+# mode footer "○ Plan ● Act (Tab)" and "Auto-approve all disabled|enabled (Shift+Tab)".
+[[rules]]
+id = "permission_card_blocked"
+state = "blocked"
+priority = 420
+region = "whole_recent"
+visible_blocker = true
+contains = ["cline needs permission", "approve tool call?"]
+line_regex = ['\[y\] Approve\s+\[n\] Deny']
+
+# Working row " ⠏ Thinking... (esc to cancel)" (working, lc-working, local3-working). Priority
+# 210 beats cursor spinner_working (90) and omo spinner_working (200).
+[[rules]]
+id = "thinking_row_working"
+state = "working"
+priority = 210
+region = "whole_recent"
+visible_working = true
+contains = ["auto-approve all", "(shift+tab)"]
+line_regex = [
+  '^\s*[\x{2800}-\x{28FF}]\s+\S.*\(esc to cancel\)\s*$',
+  '○ Plan ● Act \(Tab\)\s*$',
+]
+
+# The "❯" composer between two rules above the mode footer (idle, after-turn-idle,
+# idle-after-turn, resumed captures). The working row above outranks it.
+[[rules]]
+id = "composer_idle"
+state = "idle"
+priority = 85
+region = "bottom_non_empty_lines(6)"
+visible_idle = true
+contains = ["auto-approve all", "(shift+tab)"]
+line_regex = [
+  '^\s*❯ ',
+  '○ Plan ● Act \(Tab\)\s*$',
+]

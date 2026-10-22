@@ -1,0 +1,40 @@
+
+ │ SLOW please answer                                                                   ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+                                                                                        ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+   Mock reply done.                                                                      Charm™               v0.98.1
+                                                                                        ▄▀▀▀▀ █▀▀▀▄ █   █ ▄▀▀▀▀ █   █
+   ◇ Mock One via Mock in 25s ────────────────────────────────────────────────────────  █     █▀▀▀▄ █   █ ▀▀▀▀█ █▀▀▀█
+                                                                                         ▀▀▀▀ ▀   ▀  ▀▀▀  ▀▀▀▀  ▀   ▀
+ │ RUNCMD create the probe file                                                         ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+
+   Hook parity-probe → OK                                                             	Mock reply done.
+
+   ✓ Bash touch parity-probe.txt                                                        master
+                                                                                        ~/agent-parity-
+   Mock reply done.                                                                     facts/crush/proj
+
+   ◇ Mock One via Mock in 21s ────────────────────────────────────────────────────────  ◇ Mock One via Mock
+                                                                                          0% (13) $0.00
+
+                                                                                        Modified Files ──────────────
+
+                                                                                        None
+
+                                                                                        LSPs ────────────────────────
+
+                                                                                        None
+
+                                                                                        MCPs ────────────────────────
+
+                                                                                        None
+
+                                                                                        Skills ──────────────────────
+
+                                                                                        ● crush-config
+                                                                                        ● crush-hooks
+   > Ready!                                                                             ● diagnose-crash
+ :::                                                                                    ● jq
+ :::                                                                                    ● omarchy
+
+ tab focus chat • shift+tab mode • / or ctrl+p commands • ctrl+l models • ctrl+b toggle sidebar • ctrl+j newline …
+

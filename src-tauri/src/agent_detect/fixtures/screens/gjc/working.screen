@@ -1,0 +1,40 @@
+╭─── gjc v0.18.12 · package install · GJC Forge ──────────────────────────────────────────────────────────────────────╮
+│                                                          │                                                          │
+│                                                          │ What's New                                               │
+│                        GJC Forge                         │ ▸ Added the task.compactSubagentPanel setting. When it i…│
+│                   shape · act · prove                    │ ▸ --credential, --prefer-credential, /credential, gjc ac…│
+│                                                          │ … /changelog for full notes                              │
+│           ╭────────────────╮        ╭────────╮           │ ──────────────────────────────────────────────────────── │
+│           ╰──────╮      ╭──╯     ╭──╯  ╭─────╯           │ Flow keys                                                │
+│                  ╰──────╯    ╭───╯  ╭──╯                 │ / commands · # actions · ! shell · $ python · ? keymap   │
+│                  ╭──────╮    ╰───╮  ╰──╮                 │ Ctrl+L model · Shift+Tab reasoning · Tab complete        │
+│           ╭──────╯      ╰──╮     ╰──╮  ╰─────╮           │ Ctrl+J newline · Ctrl+C clear                            │
+│           ╰────────────────╯        ╰────────╯           │ ──────────────────────────────────────────────────────── │
+│                                                          │ Project pulse                                            │
+│                         ⣾ ready                          │ ⏳ bashls .sh .bash .zsh                                 │
+│                     [ ⬢ Fake Model ]                     │ ──────────────────────────────────────────────────────── │
+│                     [ 📦 fakelocal ]                     │ Session trail                                            │
+│                                                          │ No saved trails                                          │
+│                                                          │                                                          │
+╰──────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────╯
+
+ user
+
+ SLOW please count
+
+
+ Error: Connection error. (transport=ConnectionRefused url=http://127.0.0.1:18923/v1/chat/completions)
+
+ user
+
+ SLOW please count
+
+
+ gajae
+ tick 0 tick 1 tick 2 tick 3 tick 4 tick 5 tick 6 tick 7
+
+ ⠏ Working… ⟦esc⟧
+ ⬢ fake-model · 10.0% / ⑂ master ?1 / 📁 ~/agent-parity-facts/gjc/work ─────────────────────────────────────── v0.18.12
+╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ > Type your message... Enter: Steer · Alt+Enter: Queue · Shift+Tab: Thinking · Ctrl+L: Model · Ctrl+R: History · S… │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

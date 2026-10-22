@@ -59,6 +59,11 @@ describe("agent icon mapping and resolution contract", () => {
     expect(resolveAgentLogo("cursor-agent")).toBe(SUPPORTED_AGENT_LOGOS.cursor);
   });
 
+  it("resolves omp to the adaptive Pi mark", () => {
+    expect(resolveAgentLogo("omp")).toBe(SUPPORTED_AGENT_LOGOS.pi);
+    expect(isMonochromeAgentLogo("omp")).toBe(true);
+  });
+
   it("resolves herdr antigravity aliases without changing pi identity", () => {
     expect(resolveAgentLogo("agy")).toBe(SUPPORTED_AGENT_LOGOS.antigravity);
     expect(resolveAgentLogo("antigravity-cli")).toBe(SUPPORTED_AGENT_LOGOS.antigravity);

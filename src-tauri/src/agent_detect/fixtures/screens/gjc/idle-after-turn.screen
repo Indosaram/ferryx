@@ -1,0 +1,40 @@
+╭─── gjc v0.18.12 · package install · GJC Forge ──────────────────────────────────────────────────────────────────────╮
+│                                                          │                                                          │
+│                                                          │ What's New                                               │
+│                                                          │ ▸ Added the task.compactSubagentPanel setting. When it i…│
+│                                                          │ ▸ --credential, --prefer-credential, /credential, gjc ac…│
+│                                                          │ ▸ Reload user settings and model configuration in open L…│
+│                                                          │ ▸ Added global auth.credentialPreferences: an ordered li…│
+│                        GJC Forge                         │ ▸ Added gjc accounts prefer <provider> <account>[=<perce…│
+│                   shape · act · prove                    │ ▸ gjc migrate now imports Claude Code CLAUDE.md and Code…│
+│                                                          │ … /changelog for full notes                              │
+│           ╭────────────────╮        ╭────────╮           │ ──────────────────────────────────────────────────────── │
+│           ╰──────╮      ╭──╯     ╭──╯  ╭─────╯           │ Flow keys                                                │
+│                  ╰──────╯    ╭───╯  ╭──╯                 │ / commands · # actions · ! shell · $ python · ? keymap   │
+│                  ╭──────╮    ╰───╮  ╰──╮                 │ Ctrl+L model · Shift+Tab reasoning · Tab complete        │
+│           ╭──────╯      ╰──╮     ╰──╮  ╰─────╮           │ Ctrl+J newline · Ctrl+C clear                            │
+│           ╰────────────────╯        ╰────────╯           │ ──────────────────────────────────────────────────────── │
+│                                                          │ Project pulse                                            │
+│                         ⣾ ready                          │ ⏳ bashls .sh .bash .zsh                                 │
+│                     [ ⬢ Fake Model ]                     │ ──────────────────────────────────────────────────────── │
+│                     [ 📦 fakelocal ]                     │ Session trail                                            │
+│                                                          │ ▸ SLOW please count (1m ago)                             │
+│                                                          │                                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+╰──────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────╯
+
+ user
+
+ hi
+
+
+ gajae
+ tick 0 tick 1 tick 2
+ ⬢ fake-model · 0.0% / ⑂ master ?1 / 📁 ~/agent-parity-facts/gjc/work ─────── tick 0 tick 1 tick 2 / ⤴ 3.3/s / v0.18.12
+╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ > Type your message... Alt+Enter: Queue (busy) · Shift+Tab: Thinking · Ctrl+L: Model · Ctrl+R: History · Shift+Ent… │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

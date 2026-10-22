@@ -1,0 +1,40 @@
+
+  ┃
+  ┃  run ls
+  ┃
+
+  ┃
+  ┃  $ ls
+  ┃
+  ┃  README.md
+  ┃
+
+     README.md
+
+     ▣  Build · Big Pickle · 1m 17s
+
+  ┃
+  ┃  run the shell command: touch created.txt
+  ┃
+
+     $ touch created.txt
+
+     ▣  Build · Big Pickle
+
+
+
+
+
+
+
+
+  ┃
+  ┃  △ Permission required
+  ┃    # Shell command
+  ┃
+  ┃  $ touch created.txt
+  ┃
+  ┃
+  ┃   Allow once   Allow always   Reject                                 ctrl+f fullscreen  ⇆ select  enter confirm
+  ┃
+

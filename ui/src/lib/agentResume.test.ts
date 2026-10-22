@@ -4,6 +4,7 @@ import {
   agentProviderSessionsEqual,
   agentResumeCapability,
   buildResumeArgv,
+  canCaptureAuthoritativeProviderSession,
   canResumeAgent,
   extractAgentProviderSession,
   getAgentResumeArgv,
@@ -244,8 +245,7 @@ describe("agentResume adapter module", () => {
       });
     });
 
-    it("returns null for unsupported / unidentifiable agents (cline, windsurf, aider, unknown, etc.)", () => {
-      expect(extractAgentProviderSession("cline", { session_id: "cline-1" })).toBeNull();
+    it("returns null for unsupported / unidentifiable agents (windsurf, aider, unknown, etc.)", () => {
       expect(extractAgentProviderSession("windsurf", { session_id: "windsurf-1" })).toBeNull();
       expect(extractAgentProviderSession("aider", { session_id: "aider-1" })).toBeNull();
       expect(extractAgentProviderSession("unknown", { session_id: "unk-1" })).toBeNull();
@@ -282,7 +282,6 @@ describe("agentResume adapter module", () => {
       expect(canResumeAgent("copilot")).toBe(true);
       expect(canResumeAgent("cursor")).toBe(true);
       expect(canResumeAgent("cursor-agent")).toBe(true);
-      expect(canResumeAgent("cline")).toBe(false);
       expect(canResumeAgent("windsurf")).toBe(false);
       expect(canResumeAgent("aider")).toBe(false);
       expect(canResumeAgent("notanagent")).toBe(false);
@@ -461,9 +460,31 @@ describe("agentResume adapter module", () => {
         ]);
       });
 
-      it("returns null for unsupported agents (cline, windsurf, aider, notanagent)", () => {
+      it("builds measured cline and crush resume argv", () => {
+        // local-3.md: `cline --id 1792653340197_ys4yu` reopened the session.
+        expect(getAgentResumeArgv("cline", { key: "session_id", id: "1792653340197_ys4yu" })).toEqual([
+          "cline",
+          "--id",
+          "1792653340197_ys4yu",
+        ]);
+        // remote-crush.md: `crush --session <id>` reopened the session; hooks report the UUID form.
+        expect(
+          getAgentResumeArgv("crush", { key: "session_id", id: "3df112d9-e56f-4f69-b8bb-c58b5d580e89" }),
+        ).toEqual(["crush", "--session", "3df112d9-e56f-4f69-b8bb-c58b5d580e89"]);
+        expect(canResumeAgent("cline")).toBe(true);
+        expect(canResumeAgent("crush")).toBe(true);
+      });
+
+      it("grants authoritative capture to agents with process-bound discovery only", () => {
+        for (const agent of ["omp", "grok", "droid", "cline", "crush"]) {
+          expect(canCaptureAuthoritativeProviderSession(agent)).toBe(true);
+        }
+        // crush is bound through its own `--session` argv; aider has no id resume.
+        expect(canCaptureAuthoritativeProviderSession("aider")).toBe(false);
+      });
+
+      it("returns null for unsupported agents (windsurf, aider, notanagent)", () => {
         const validSession: AgentProviderSession = { key: "session_id", id: "session-123" };
-        expect(getAgentResumeArgv("cline", validSession)).toBeNull();
         expect(getAgentResumeArgv("windsurf", validSession)).toBeNull();
         expect(getAgentResumeArgv("aider", validSession)).toBeNull();
         expect(getAgentResumeArgv("notanagent", validSession)).toBeNull();

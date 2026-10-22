@@ -1,0 +1,40 @@
+╭─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ✨ Update available! 0.160.0 -> 0.163.0                                                             │
+│ Run sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh' to update. │
+│                                                                                                     │
+│ See full release notes:                                                                             │
+│ https://github.com/openai/codex/releases/latest                                                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+  >_ OpenAI Codex (v0.160.0)
+     /private/tmp/parity-codex.l1gL
+
+  All right. What have you got?
+
+
+› run the shell command: touch created.txt && date > created.txt
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+• Working (0s • esc to interrupt)
+
+
+› Ask Codex to do anything
+
+  GPT-5.6-Luna medium · /private/tmp/parity-codex.l1gL
+  ? for shortcuts                                                                             ⚠ 4 warnings · f2 to view

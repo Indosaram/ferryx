@@ -1,0 +1,49 @@
+# omp (oh-my-pi). Measured 2026-10-22 on omp 18.12.6 (.omo-parity/facts/remote-omp.md,
+# screens/omp/*.screen). Manifests are evaluated globally and omp is pi-family, so
+# omo.toml rules also match some omp screens: every omp rule anchors on omp-only
+# chrome (the "π >" / "<spinner> <N>s >" status band, the "Allow tool:" dialog and
+# the glyph hint rows) and outranks the matching omo rule.
+id = "omp"
+version = "2026.10.22.1"
+min_engine_version = 1
+updated_at = "2026-10-22T00:00:00Z"
+aliases = ["oh-my-pi"]
+
+[[rules]]
+id = "tool_approval_blocked"
+state = "blocked"
+priority = 450
+region = "bottom_non_empty_lines(12)"
+visible_blocker = true
+contains = ["allow tool:"]
+any = [
+  { contains = ["type to deny and steer"] },
+  { contains = ["⎋ deny"] },
+]
+
+[[rules]]
+id = "ask_card_blocked"
+state = "blocked"
+priority = 440
+region = "bottom_non_empty_lines(3)"
+visible_blocker = true
+contains = ["⎋ cancel", "alt+h hide"]
+
+[[rules]]
+id = "status_band_working"
+state = "working"
+priority = 210
+region = "bottom_non_empty_lines(3)"
+visible_working = true
+line_regex = ['^\s*[\x{2800}-\x{28FF}] \d+s > ']
+
+[[rules]]
+id = "status_band_idle"
+state = "idle"
+priority = 60
+region = "bottom_non_empty_lines(3)"
+visible_idle = true
+line_regex = ['^\s*π > ']
+not = [
+  { line_regex = ['[\x{2800}-\x{28FF}]'] },
+]

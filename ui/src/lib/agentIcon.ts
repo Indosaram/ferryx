@@ -40,6 +40,9 @@ export const AGENT_LOGO_ALIASES: Record<string, keyof typeof SUPPORTED_AGENT_LOG
   agy: "antigravity",
   "antigravity-cli": "antigravity",
   "cursor-agent": "cursor",
+  // oh-my-pi's own icon is white-on-transparent (dark backgrounds only), so it
+  // shares the adaptive Pi mark rather than being hand-tinted for light chrome.
+  omp: "pi",
 };
 
 // Brands whose official mark carries no color of its own (Cursor, xAI, OpenCode,

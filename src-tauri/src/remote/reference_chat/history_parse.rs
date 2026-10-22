@@ -90,10 +90,270 @@ pub fn dispatch_reference_history(
         ReferenceNativeHistoryKind::Omo => super::history_omo::parse_omo_history(kind, &text),
         ReferenceNativeHistoryKind::Gjc => super::history_gjc::parse_reference_gjc(kind, &text),
         ReferenceNativeHistoryKind::Pi => super::history_pi::parse_pi_history(kind, &text),
+        ReferenceNativeHistoryKind::Copilot => {
+            super::history_copilot::parse_reference_copilot_history(kind, &text)
+        }
+        ReferenceNativeHistoryKind::Antigravity => {
+            super::history_antigravity::parse_reference_antigravity_history(kind, &text)
+        }
+        ReferenceNativeHistoryKind::Kimi => super::history_kimi::parse_reference_kimi_history(kind, &text),
+        ReferenceNativeHistoryKind::Grok => super::history_grok::parse_reference_grok_history(kind, &text),
+        ReferenceNativeHistoryKind::Cline => super::history_cline::parse_reference_cline_history(kind, &text),
+        ReferenceNativeHistoryKind::Opencode => {
+            super::history_opencode::parse_reference_opencode_history(kind, &text)
+        }
+        ReferenceNativeHistoryKind::Cursor => {
+            super::history_cursor::parse_reference_cursor_history(kind, &text)
+        }
+        ReferenceNativeHistoryKind::Crush => super::history_crush::parse_reference_crush_history(kind, &text),
         ReferenceNativeHistoryKind::Unavailable => Err(format!(
             "no native history reader for `{}`; an unsupported source is disclosed, never answered with an empty conversation",
             kind.as_str()
         )),
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Shared turn assembly for the readers with no upstream port
+// ---------------------------------------------------------------------------------------
+
+/// The turn list the readers without a pinned upstream port (copilot, antigravity, kimi, grok,
+/// cline, opencode, cursor) assemble, so each of them only maps its own records.
+///
+/// The shape follows the ported readers: a user turn per prompt, then one assistant turn that
+/// every assistant record up to the next prompt merges into; a tool's result is folded into the
+/// call it answers by the agent's own call id; a turn with no parts is dropped.
+#[derive(Debug, Default)]
+pub(crate) struct ReferenceTurnLog {
+    turns: Vec<ReferenceTurn>,
+    tools: HashMap<String, (usize, usize)>,
+}
+
+impl ReferenceTurnLog {
+    /// Open a user turn.
+    pub(crate) fn user(
+        &mut self,
+        at: Option<String>,
+        source: Option<super::types::ReferenceTurnSource>,
+        parts: Vec<ReferencePart>,
+    ) {
+        self.turns.push(ReferenceTurn {
+            role: ReferenceTurnRole::User,
+            started_at: at,
+            ended_at: None,
+            source,
+            parts,
+            abandoned: None,
+        });
+    }
+
+    /// Append a streamed piece of the prompt to the user turn it continues, or open one when the
+    /// newest turn is not a user turn.
+    pub(crate) fn user_text_chunk(&mut self, at: Option<String>, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(turn) = self.turns.last_mut().filter(|turn| turn.role == ReferenceTurnRole::User) {
+            if let Some(ReferencePart::Text { text: held, .. }) = turn.parts.last_mut() {
+                held.push_str(text);
+                return;
+            }
+        }
+        self.user(at, None, vec![ReferencePart::Text { text: text.to_string(), phase: None }]);
+    }
+
+    /// The assistant turn the next part lands in, opened when the newest turn is not one.
+    fn assistant(&mut self, at: Option<&str>) -> usize {
+        let open = self
+            .turns
+            .last()
+            .is_some_and(|turn| turn.role == ReferenceTurnRole::Assistant);
+        if !open {
+            self.turns.push(ReferenceTurn {
+                role: ReferenceTurnRole::Assistant,
+                started_at: at.map(str::to_string),
+                ended_at: None,
+                source: None,
+                parts: Vec::new(),
+                abandoned: None,
+            });
+        }
+        let index = self.turns.len() - 1;
+        if let Some(at) = at {
+            self.turns[index].ended_at = Some(at.to_string());
+        }
+        index
+    }
+
+    /// Add an assistant part.
+    pub(crate) fn part(&mut self, at: Option<&str>, part: ReferencePart) {
+        let index = self.assistant(at);
+        self.turns[index].parts.push(part);
+    }
+
+    /// Append streamed assistant prose (`thinking` for reasoning) to the turn's last part of the
+    /// same kind, so a chunked answer reads as one part.
+    pub(crate) fn stream_text(&mut self, at: Option<&str>, text: &str, thinking: bool) {
+        if text.is_empty() {
+            return;
+        }
+        let index = self.assistant(at);
+        let parts = &mut self.turns[index].parts;
+        let merged = match (parts.last_mut(), thinking) {
+            (Some(ReferencePart::Text { text: held, .. }), false)
+            | (Some(ReferencePart::Thinking { text: held }), true) => {
+                held.push_str(text);
+                true
+            }
+            _ => false,
+        };
+        if !merged {
+            parts.push(if thinking {
+                ReferencePart::Thinking { text: text.to_string() }
+            } else {
+                ReferencePart::Text { text: text.to_string(), phase: None }
+            });
+        }
+    }
+
+    /// Add a tool call, filed under the agent's own call id until its result arrives.
+    pub(crate) fn tool(&mut self, at: Option<&str>, key: &str, name: &str, summary: String, input: String) {
+        let index = self.assistant(at);
+        self.turns[index].parts.push(ReferencePart::Tool {
+            name: name.to_string(),
+            summary,
+            input,
+            output: String::new(),
+            error: None,
+            skill: None,
+            output_ref: None,
+            output_size: None,
+            images: Vec::new(),
+        });
+        if !key.is_empty() {
+            self.tools
+                .insert(key.to_string(), (index, self.turns[index].parts.len() - 1));
+        }
+    }
+
+    /// Fold a result into the call it answers. A result whose call is not in the log (it was
+    /// before the page) is skipped, never shown as a call of its own.
+    pub(crate) fn tool_output(&mut self, at: Option<&str>, key: &str, output: String, is_error: bool) {
+        let Some(&(turn, part)) = self.tools.get(key) else {
+            return;
+        };
+        if let Some(at) = at {
+            self.turns[turn].ended_at = Some(at.to_string());
+        }
+        if let Some(part) = self.turns[turn].parts.get_mut(part) {
+            fold_reference_tool_output(part, output, key, is_error);
+        }
+    }
+
+    /// The assembled turns; a turn with no parts is dropped.
+    pub(crate) fn finish(self) -> Vec<ReferenceTurn> {
+        self.turns
+            .into_iter()
+            .filter(|turn| !turn.parts.is_empty())
+            .collect()
+    }
+}
+
+/// `trimOutput` for the readers without an upstream port: set a tool part's output, cut at
+/// [`REFERENCE_CODEX_TOOL_OUTPUT_CHARS`] characters (the goal tools at the whole-output cap) and
+/// keep the call id the rest is fetched by.
+pub(crate) fn fold_reference_tool_output(part: &mut ReferencePart, output: String, reference: &str, is_error: bool) {
+    let ReferencePart::Tool {
+        name,
+        output: slot,
+        output_ref,
+        output_size,
+        error,
+        ..
+    } = part
+    else {
+        return;
+    };
+    let limit = if REFERENCE_CODEX_WHOLE_OUTPUT_TOOLS.contains(&name.as_str()) {
+        REFERENCE_CODEX_WHOLE_OUTPUT_CHARS
+    } else {
+        REFERENCE_CODEX_TOOL_OUTPUT_CHARS
+    };
+    let length = output.chars().count();
+    if length <= limit {
+        *slot = output;
+    } else {
+        *slot = format!("{}\n… trimmed", output.chars().take(limit).collect::<String>());
+        *output_ref = Some(reference.to_string());
+        *output_size = Some(length as u64);
+    }
+    if is_error {
+        *error = Some(true);
+    }
+}
+
+/// A tool call's arguments as the page shows them: pretty JSON, or nothing for no arguments.
+pub(crate) fn reference_tool_input(arguments: Option<&Value>) -> String {
+    match arguments {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
+        Some(value) => serde_json::to_string_pretty(value).unwrap_or_default(),
+    }
+}
+
+/// A tool call's one-line summary: the call's own `description`/`summary` argument (as
+/// `agent_transcript::tool_call_summary` reads it), else the first non-blank string argument; its
+/// first line, at most 200 characters.
+pub(crate) fn reference_tool_summary(arguments: Option<&Value>) -> String {
+    let Some(Value::Object(arguments)) = arguments else {
+        return String::new();
+    };
+    ["description", "summary"]
+        .iter()
+        .filter_map(|key| arguments.get(*key))
+        .chain(arguments.values())
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .and_then(|value| value.lines().next())
+        .map(|line| line.chars().take(200).collect())
+        .unwrap_or_default()
+}
+
+/// A unix time in milliseconds as the RFC 3339 UTC string every other reader carries
+/// (`YYYY-MM-DDTHH:MM:SS.fffZ`). `None` before 1970 or past year 9999.
+pub(crate) fn reference_unix_millis_iso(millis: i64) -> Option<String> {
+    if !(0..=253_402_300_799_999).contains(&millis) {
+        return None;
+    }
+    let days = millis.div_euclid(86_400_000);
+    let in_day = millis.rem_euclid(86_400_000);
+    // Howard Hinnant's `civil_from_days`.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        in_day / 3_600_000,
+        in_day / 60_000 % 60,
+        in_day / 1_000 % 60,
+        in_day % 1_000
+    ))
+}
+
+/// A JSON timestamp field as RFC 3339: an ISO string is kept, a number is read in `unit_ms`
+/// milliseconds per unit (1000 for seconds, 1 for milliseconds).
+pub(crate) fn reference_timestamp(value: Option<&Value>, unit_ms: f64) -> Option<String> {
+    match value? {
+        Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
+        Value::Number(number) => reference_unix_millis_iso((number.as_f64()? * unit_ms).round() as i64),
+        _ => None,
     }
 }
 
@@ -1728,7 +1988,9 @@ fn codex_shell_read_pattern() -> &'static Regex {
 mod tests {
     use super::*;
     use crate::remote::reference_chat::{
-        history_claude, history_gjc, history_omp, history_omo, history_pi,
+        history_antigravity, history_claude, history_cline, history_copilot, history_crush,
+        history_cursor, history_gjc, history_grok, history_kimi, history_omp, history_omo,
+        history_opencode, history_pi,
     };
 
     /// The family lanes' own fixtures, read here to prove the dispatcher routes each kind to the
@@ -1738,6 +2000,34 @@ mod tests {
     const OMO_AUTHENTIC: &str = include_str!("fixtures/omo/session-authentic.jsonl");
     const GJC_NORMAL: &str = include_str!("fixtures/gjc/normal.jsonl");
     const PI_NORMAL: &str = include_str!("fixtures/pi/normal.jsonl");
+    const COPILOT_SESSION: &str = include_str!("fixtures/copilot/history/session.jsonl");
+    const ANTIGRAVITY_TOOLS: &str = include_str!("fixtures/antigravity/history/tool-session.jsonl");
+    const KIMI_WIRE: &str = include_str!("fixtures/kimi/history/slash-command.wire.jsonl");
+    const GROK_UPDATES: &str = include_str!("fixtures/grok/history/updates.jsonl");
+    const CLINE_DOCUMENT: &str = include_str!("fixtures/cline/history/1792653340197_ys4yu.messages.json");
+
+    /// A projected Cursor chat and OpenCode session: the readers parse one message per line.
+    const CURSOR_PROJECTION: &str = concat!(
+        r#"{"role":"user","content":"<user_info>\nctx\n</user_info>"}"#,
+        "\n",
+        r#"{"role":"user","content":[{"type":"text","text":"<user_query>\nhi\n</user_query>"}]}"#,
+        "\n",
+        r#"{"role":"assistant","content":[{"type":"text","text":"Hello there"}]}"#,
+        "\n",
+    );
+    const OPENCODE_PROJECTION: &str = concat!(
+        r#"{"id":"m1","time_created":1792653365533,"info":{"role":"user"},"parts":[{"type":"text","text":"run ls"}]}"#,
+        "\n",
+        r#"{"id":"m2","time_created":1792653366022,"info":{"role":"assistant"},"parts":[{"type":"text","text":"README.md"}]}"#,
+        "\n",
+    );
+    /// A projected Crush session (`history_crush::crush_projection` of the measured rows).
+    const CRUSH_PROJECTION: &str = concat!(
+        r#"{"id":"m1","created_at":1792652762,"role":"user","parts":[{"type":"text","data":{"text":"SLOW please answer"}}]}"#,
+        "\n",
+        r#"{"id":"m2","created_at":1792652762,"role":"assistant","parts":[{"type":"text","data":{"text":"Mock reply done."}}]}"#,
+        "\n",
+    );
 
     /// This lane's own Codex fixtures live inline: plan task 2's scope is this one file, so the
     /// Codex records are constants here instead of a `fixtures/codex/` directory.
@@ -1882,6 +2172,48 @@ mod tests {
                 "터미널 주소좀 줘봐",
                 parse(CODEX_NORMAL),
             ),
+            (
+                ReferenceNativeHistoryKind::Copilot,
+                COPILOT_SESSION,
+                "run the shell command: touch probe.txt",
+                history_copilot::parse_copilot_transcript(COPILOT_SESSION),
+            ),
+            (
+                ReferenceNativeHistoryKind::Antigravity,
+                ANTIGRAVITY_TOOLS,
+                "Use your generate_image tool",
+                history_antigravity::parse_antigravity_transcript(ANTIGRAVITY_TOOLS),
+            ),
+            (
+                ReferenceNativeHistoryKind::Kimi,
+                KIMI_WIRE,
+                "/usage",
+                history_kimi::parse_kimi_wire(KIMI_WIRE),
+            ),
+            (
+                ReferenceNativeHistoryKind::Grok,
+                GROK_UPDATES,
+                "PARITY_TOOL remove a file",
+                history_grok::parse_grok_updates(GROK_UPDATES),
+            ),
+            (
+                ReferenceNativeHistoryKind::Cursor,
+                CURSOR_PROJECTION,
+                "Hello there",
+                history_cursor::parse_cursor_projection(CURSOR_PROJECTION),
+            ),
+            (
+                ReferenceNativeHistoryKind::Opencode,
+                OPENCODE_PROJECTION,
+                "run ls",
+                history_opencode::parse_opencode_projection(OPENCODE_PROJECTION),
+            ),
+            (
+                ReferenceNativeHistoryKind::Crush,
+                CRUSH_PROJECTION,
+                "SLOW please answer",
+                history_crush::parse_crush_projection(CRUSH_PROJECTION),
+            ),
         ];
         for (kind, bytes, prompt, expected) in families {
             assert!(!expected.is_empty(), "{} reads the fixture", kind.as_str());
@@ -1895,6 +2227,12 @@ mod tests {
                 kind.as_str()
             );
         }
+        // Cline's stream is the projection of its document, not the document itself.
+        let cline = history_cline::cline_messages_projection(CLINE_DOCUMENT).expect("readable");
+        let dispatched = dispatch_reference_history(ReferenceNativeHistoryKind::Cline, cline.as_bytes())
+            .expect("cline dispatches");
+        assert_eq!(dispatched, history_cline::parse_cline_messages(&cline));
+        assert!(serde_json::to_string(&dispatched).expect("serializes").contains("touch probe2.txt"));
     }
 
     #[test]
@@ -1916,6 +2254,17 @@ mod tests {
             (ReferenceNativeHistoryKind::Gjc, history_gjc::parse_reference_gjc),
             (ReferenceNativeHistoryKind::Pi, history_pi::parse_pi_history),
             (ReferenceNativeHistoryKind::Codex, parse_codex_history),
+            (ReferenceNativeHistoryKind::Copilot, history_copilot::parse_reference_copilot_history),
+            (
+                ReferenceNativeHistoryKind::Antigravity,
+                history_antigravity::parse_reference_antigravity_history,
+            ),
+            (ReferenceNativeHistoryKind::Kimi, history_kimi::parse_reference_kimi_history),
+            (ReferenceNativeHistoryKind::Grok, history_grok::parse_reference_grok_history),
+            (ReferenceNativeHistoryKind::Cline, history_cline::parse_reference_cline_history),
+            (ReferenceNativeHistoryKind::Opencode, history_opencode::parse_reference_opencode_history),
+            (ReferenceNativeHistoryKind::Cursor, history_cursor::parse_reference_cursor_history),
+            (ReferenceNativeHistoryKind::Crush, history_crush::parse_reference_crush_history),
         ] {
             assert!(
                 parse_family(own, CLAUDE_NORMAL).is_ok(),
@@ -1929,6 +2278,14 @@ mod tests {
                 ReferenceNativeHistoryKind::Omo,
                 ReferenceNativeHistoryKind::Gjc,
                 ReferenceNativeHistoryKind::Pi,
+                ReferenceNativeHistoryKind::Copilot,
+                ReferenceNativeHistoryKind::Antigravity,
+                ReferenceNativeHistoryKind::Kimi,
+                ReferenceNativeHistoryKind::Grok,
+                ReferenceNativeHistoryKind::Cline,
+                ReferenceNativeHistoryKind::Opencode,
+                ReferenceNativeHistoryKind::Cursor,
+                ReferenceNativeHistoryKind::Crush,
                 ReferenceNativeHistoryKind::Unavailable,
             ] {
                 if kind == own {

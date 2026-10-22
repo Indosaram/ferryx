@@ -13,6 +13,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AttentionAskPanel } from "./notification/AttentionAskPanel";
 
 import {
+  AGENT_HISTORY_PROVIDERS,
+  agentHistoryProviderLabel,
   readAgentHistory,
   searchAgentHistory,
   type AgentHistoryEntry,
@@ -299,8 +301,11 @@ export function AgentHistoryDialog({
                 }}
                 className="h-8 rounded-md border border-input bg-background px-2.5 text-xs text-foreground outline-none focus:border-ring"
               >
-                <option value="claude">Claude</option>
-                <option value="codex">Codex</option>
+                {AGENT_HISTORY_PROVIDERS.map((candidate) => (
+                  <option key={candidate} value={candidate}>
+                    {agentHistoryProviderLabel(candidate)}
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -390,7 +395,7 @@ export function AgentHistoryDialog({
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0">
                           <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
-                            {entry.provider}
+                            {agentHistoryProviderLabel(entry.provider)}
                           </span>
                           <span
                             className="truncate font-mono text-xs font-semibold text-foreground"

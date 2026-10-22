@@ -111,6 +111,21 @@ describe("agentAutoResume", () => {
       expect(collectAutoResumeCandidates(state)).toEqual([]);
     });
 
+    it("auto-resumes omp, grok, droid, cline and crush", () => {
+      const session = (id: string, agentType: string): TerminalSession =>
+        ({ ...agentSession(id), agentType } as TerminalSession);
+      const state = createMockState({
+        sessions: {
+          omp: session("omp", "omp"),
+          grok: session("grok", "grok"),
+          droid: session("droid", "droid"),
+          cline: session("cline", "cline"),
+          crush: session("crush", "crush"),
+        },
+      });
+      expect([...collectAutoResumeCandidates(state)].sort()).toEqual(["cline", "crush", "droid", "grok", "omp"]);
+    });
+
     it("prioritizes the active tab, then open tabs, then remaining sessions", () => {
       const state = createMockState({
         layout: {

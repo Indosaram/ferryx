@@ -1,0 +1,40 @@
+
+/private/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/agentfacts.LjGR/repo-agy
+
+Do you trust the contents of this project?
+
+Antigravity CLI requires permission to read, edit, and execute files here.
+
+> Yes, I trust this folder
+  No, exit
+
+  ↑/↓ Navigate · enter Confirm
+                                                                                                 Gemini 4 Argon · medium
+1u
+
+      ▄▀▀▄        Antigravity CLI 1.4.5
+     ▀▀▀▀▀▀       user@example.invalid (Google AI Ultra)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Argon (Medium)
+   ▄▀▀    ▀▀▄     /private/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/agentfacts.LjGR/repo-agy
+  ▄▀▀      ▀▀▄
+
+⚠ Warning
+  ⎿  "Claude Opus 4.6 (Thinking)" is no longer available. Using "Gemini 4 Argon (Medium)".
+
+⚠ Warning
+  ⎿  Invalid "unsandboxed" permission rules found; they are ignored and grant nothing:
+       ~/.gemini/antigravity-cli/settings.json:
+         • unsandboxed(*)
+
+     Fix: replace "unsandboxed" with "command" (e.g. command(git status)), or remove the rule. Edit the file directly
+     or use /permissions.
+
+
+ ┃ Meet Gemini 4 Argon
+ ┃ Google’s most capable frontier model is now available in Antigravity. Built for complex, multi-step agentic
+ ┃ workflows, and deep reasoning.
+ ┃ esc to dismiss
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                  Gemini 4 Argon · medium

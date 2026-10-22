@@ -7,6 +7,11 @@ use sha2::{Digest, Sha256};
 use serde_json::Value;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
+mod readers_envelope;
+mod readers_json;
+mod readers_pi;
+mod readers_sqlite;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum HistoryError { Unsupported, InvalidRequest, NotFound, SourceChanged, OutsideRoot, Io, ProviderOwned, InvalidIdentity }
@@ -23,14 +28,32 @@ pub struct Page<T> { pub items: Vec<T>, pub next_cursor: Option<String>, pub par
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECORD: usize = 1024 * 1024;
 const MAX_FILES: usize = 1000;
-struct Source { root: PathBuf, path: PathBuf, hash: String, entry: Entry }
+/// Every provider whose CLI keeps a readable store. The wire name is the `CanonicalProvider`
+/// serde name AND the `resolve_agent_resume_plan` agent type, so the three stay in step.
+pub const PROVIDERS: [CanonicalProvider; 15] = [
+    CanonicalProvider::Claude, CanonicalProvider::Codex, CanonicalProvider::Omo, CanonicalProvider::Pi,
+    CanonicalProvider::Omp, CanonicalProvider::Gjc, CanonicalProvider::Antigravity, CanonicalProvider::Opencode,
+    CanonicalProvider::Copilot, CanonicalProvider::Cursor, CanonicalProvider::Kimi, CanonicalProvider::Cline,
+    CanonicalProvider::Grok, CanonicalProvider::Droid, CanonicalProvider::Crush,
+];
+pub fn provider_wire(provider: CanonicalProvider) -> &'static str {
+    use CanonicalProvider::*;
+    match provider { Codex => "codex", Claude => "claude", Omo => "omo", Pi => "pi", Omp => "omp", Gjc => "gjc", Antigravity => "antigravity", Opencode => "opencode", Copilot => "copilot", Cursor => "cursor", Kimi => "kimi", Cline => "cline", Grok => "grok", Droid => "droid", Crush => "crush" }
+}
+pub fn provider_from_wire(name: &str) -> Option<CanonicalProvider> { PROVIDERS.into_iter().find(|p| provider_wire(*p) == name) }
+/// A located conversation inside a provider root: a file plus, for stores that pack many
+/// conversations into one database, the row key (`locator`) and its project path (`context`).
+#[derive(Debug, Clone)]
+struct Candidate { root: PathBuf, path: PathBuf, locator: Option<String>, context: Option<String> }
+struct Decoded { used: usize, hash: String, entry: Entry, messages: Vec<Message>, warnings: Vec<String> }
+struct Source { cand: Candidate, hash: String, entry: Entry }
 pub struct History { roots: Vec<(CanonicalProvider, PathBuf)>, sources: HashMap<String, Source> }
 impl History {
     pub fn new(roots: Vec<(CanonicalProvider, PathBuf)>) -> Self { Self { roots, sources: HashMap::new() } }
     pub fn search(&mut self, provider: &str, cwd: Option<&str>, query: &str, cursor: Option<&str>, limit: usize) -> Result<Page<Entry>> {
-        let provider = match provider { "codex" => CanonicalProvider::Codex, "claude" => CanonicalProvider::Claude, _ => return Err(HistoryError::Unsupported) };
+        let provider = provider_from_wire(provider).ok_or(HistoryError::Unsupported)?;
         if query.len() > 4096 { return Err(HistoryError::InvalidRequest); }
-        let mut warnings = vec![]; let mut files = vec![]; let mut visited = 0;
+        let mut warnings = vec![]; let mut cands: Vec<Candidate> = vec![]; let mut visited = 0;
         for (_, root) in self.roots.iter().filter(|(p,_)| *p == provider) {
             // A configured root that is itself a symlink would silently redirect every read to
             // another tree, so it is refused by name instead of being followed.
@@ -39,23 +62,24 @@ impl History {
                 Ok(_) => {}
                 Err(_) => { warnings.push("ROOT_UNAVAILABLE".into()); continue; }
             }
-            match root.canonicalize() { Ok(root) => walk(&root, &root, &mut files, &mut visited, &mut warnings), Err(_) => warnings.push("ROOT_UNAVAILABLE".into()) }
+            match root.canonicalize() { Ok(root) => collect(provider, &root, &mut cands, &mut visited, &mut warnings), Err(_) => warnings.push("ROOT_UNAVAILABLE".into()) }
         }
-        files.sort();
+        cands.sort_by(|a,b| (&a.path, &a.locator).cmp(&(&b.path, &b.locator)));
         let mut budget = MAX_BYTES; let mut items = vec![]; let mut fingerprints = String::new();
         let mut sources = HashMap::new();
-        for (root,path) in files {
-            let bytes = match load(&root, &path, budget) { Ok(b) => b, Err(e) => {warnings.push(format!("{e:?}")); continue;} };
-            budget -= bytes.len();
-            let hash = digest(&bytes); fingerprints.push_str(&hash);
-            let (mut entry, messages, issues) = match parse(provider, &bytes) { Ok(v) => v, Err(e) => {warnings.push(format!("{e:?}")); continue;} };
+        for cand in cands {
+            let decoded = match decode(provider, &cand, budget) { Ok(v) => v, Err(e) => {warnings.push(format!("{e:?}")); continue;} };
+            budget -= decoded.used.min(budget);
+            fingerprints.push_str(&decoded.hash);
+            let mut entry = decoded.entry;
             // Transcript formats do not carry a per-message timestamp we can rely on, so the file's
             // own modification time is the honest activity signal for range filtering.
-            entry.modified_ms = std::fs::metadata(&path).and_then(|meta| meta.modified()).ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|since| since.as_millis() as u64);
-            warnings.extend(issues);
-            let key = digest(format!("{:?}:{}:{hash}",provider,path.display()).as_bytes()); entry.entry_key = key.clone();
-            if cwd.is_none_or(|cwd| cwd == entry.cwd) && (query.is_empty() || messages.iter().any(|m| m.text.to_lowercase().contains(&query.to_lowercase()))) { items.push(entry.clone()); }
-            sources.insert(key, Source { root, path, hash, entry });
+            entry.modified_ms = std::fs::metadata(&cand.path).and_then(|meta| meta.modified()).ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|since| since.as_millis() as u64);
+            warnings.extend(decoded.warnings);
+            let key = digest(format!("{:?}:{}:{}:{}",provider,cand.path.display(),cand.locator.as_deref().unwrap_or(""),decoded.hash).as_bytes());
+            entry.entry_key = key.clone();
+            if cwd.is_none_or(|cwd| cwd == entry.cwd) && (query.is_empty() || decoded.messages.iter().any(|m| m.text.to_lowercase().contains(&query.to_lowercase()))) { items.push(entry.clone()); }
+            sources.insert(key, Source { cand, hash: decoded.hash, entry });
         }
         let stamp = digest(format!("{provider:?}:{cwd:?}:{query}:{fingerprints}").as_bytes());
         let page = page(items, cursor, limit, &stamp, warnings)?;
@@ -65,47 +89,133 @@ impl History {
     }
     pub fn read(&self, key: &str, cursor: Option<&str>, limit: usize) -> Result<Page<Message>> {
         let s = self.sources.get(key).ok_or(HistoryError::NotFound)?;
-        let bytes = self.validate(s)?;
-        let (_, messages, warnings) = parse(s.entry.provider, &bytes)?;
-        page(messages, cursor, limit, &s.hash, warnings)
+        let decoded = self.validate(s)?;
+        page(decoded.messages, cursor, limit, &s.hash, decoded.warnings)
     }
-    fn validate(&self, s: &Source) -> Result<Vec<u8>> {
-        let bytes = load(&s.root, &s.path, MAX_BYTES)?;
-        if digest(&bytes) != s.hash { return Err(HistoryError::SourceChanged); }
-        Ok(bytes)
+    fn validate(&self, s: &Source) -> Result<Decoded> {
+        let decoded = decode(s.entry.provider, &s.cand, MAX_BYTES)?;
+        if decoded.hash != s.hash { return Err(HistoryError::SourceChanged); }
+        Ok(decoded)
     }
     pub fn resume<T>(&self, key: &str, registered_cwd: &str, host: &str, owner: ConversationOwner, claims: &impl ResumeBoundary<T>) -> Result<T> {
         let s = self.sources.get(key).ok_or(HistoryError::NotFound)?;
         self.validate(s)?;
         if s.entry.cwd != registered_cwd || !Path::new(registered_cwd).is_dir() { return Err(HistoryError::OutsideRoot); }
-        let agent_type = match s.entry.provider {CanonicalProvider::Codex => "codex", CanonicalProvider::Claude => "claude"};
+        let agent_type = provider_wire(s.entry.provider);
         crate::terminal::shell::resolve_agent_resume_plan(agent_type, &s.entry.provider_session).map_err(|_| HistoryError::InvalidIdentity)?;
         claims.claim_and_spawn(ConversationClaimKey { host_id: host.into(), provider: s.entry.provider, conversation_id: s.entry.provider_session.id.clone() }, owner, &s.entry.cwd, TerminalStartup::AgentResume {agent_type: agent_type.into(), provider_session: s.entry.provider_session.clone()})
     }
 }
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+/// The working directory the provider's own store records for session `id`, read through the same
+/// readers as `search`. Machine spawn uses it to prove that a remote resume targets the session's
+/// own project (gap C27). `NotFound` when no record carries `id`; `InvalidIdentity` when the
+/// matching records disagree or carry no cwd (copilot never writes one; kimi and cursor only when
+/// their md5 folder cannot be mapped back to a path).
+pub fn session_cwd(roots: &[(CanonicalProvider, PathBuf)], provider: CanonicalProvider, id: &str) -> Result<PathBuf> {
+    let id = checked_id(id)?;
+    let mut cands = vec![]; let mut warnings = vec![];
+    for (_, root) in roots.iter().filter(|(p, _)| *p == provider) {
+        // Same refusal as `search`: a symlinked root would redirect the proof to another tree.
+        match fs::symlink_metadata(root) { Ok(meta) if !meta.file_type().is_symlink() => {} _ => continue }
+        let Ok(root) = root.canonicalize() else { continue };
+        match provider {
+            CanonicalProvider::Crush => { let mut visited = 0; collect(provider, &root, &mut cands, &mut visited, &mut warnings); }
+            _ => walk_named(provider, &root, &root, &id, &mut cands, &mut 0),
+        }
+    }
+    let mut found: Option<String> = None;
+    for cand in cands.iter().filter(|cand| cand.locator.as_deref().is_none_or(|locator| locator == id)) {
+        let Ok(decoded) = decode(provider, cand, MAX_BYTES) else { continue };
+        if decoded.entry.provider_session.id != id { continue; }
+        if decoded.entry.cwd.is_empty() || found.as_ref().is_some_and(|old| old != &decoded.entry.cwd) { return Err(HistoryError::InvalidIdentity); }
+        found = Some(decoded.entry.cwd);
+    }
+    found.map(PathBuf::from).ok_or(HistoryError::NotFound)
+}
+/// `walk` narrowed to one session: every file store names the session's file or folder after its
+/// id, so only accepted files whose path carries `id` are decoded. The entry cap is far above
+/// `MAX_FILES` because a lookup must not miss an old session in a large store.
+fn walk_named(provider: CanonicalProvider, root: &Path, dir: &Path, id: &str, out: &mut Vec<Candidate>, visited: &mut usize) {
+    const MAX_LOOKUP_ENTRIES: usize = 100_000;
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if *visited >= MAX_LOOKUP_ENTRIES { return; } *visited += 1;
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_dir() { walk_named(provider, root, &entry.path(), id, out, visited); }
+        else if kind.is_file() && entry.file_name().to_str().is_some_and(|name| accepts(provider, name)) && entry.path().to_string_lossy().contains(id) {
+            out.push(Candidate { root: root.into(), path: entry.path(), locator: None, context: None });
+        }
+    }
+}
+/// Which files inside a provider root hold one conversation each. Databases that pack many
+/// conversations into one file enumerate their rows instead and are handled by their reader.
+fn collect(provider: CanonicalProvider, root: &Path, out: &mut Vec<Candidate>, visited: &mut usize, warnings: &mut Vec<String>) {
+    use CanonicalProvider::*;
+    match provider {
+        Opencode => readers_sqlite::opencode_sources(root, out, warnings),
+        Crush => readers_sqlite::crush_sources(root, out, warnings),
+        Antigravity => readers_sqlite::antigravity_sources(root, out, warnings),
+        _ => walk(root, root, &|name| accepts(provider, name), out, visited, warnings),
+    }
+}
+fn accepts(provider: CanonicalProvider, name: &str) -> bool {
+    use CanonicalProvider::*;
+    match provider {
+        Codex | Claude | Omo | Pi | Omp | Gjc | Copilot | Droid => name.ends_with(".jsonl"),
+        Kimi => name == "context.jsonl",
+        Grok => name == "summary.json",
+        Cursor => name == "store.db",
+        Cline => name.ends_with(".json") && !name.ends_with(".messages.json"),
+        Opencode | Crush | Antigravity => false,
+    }
+}
+fn decode(provider: CanonicalProvider, cand: &Candidate, budget: usize) -> Result<Decoded> {
+    use CanonicalProvider::*;
+    match provider {
+        Codex | Claude => {
+            let bytes = load(&cand.root, &cand.path, budget)?;
+            let (entry, messages, warnings) = parse(provider, &bytes)?;
+            Ok(Decoded { used: bytes.len(), hash: digest(&bytes), entry, messages, warnings })
+        }
+        Omo | Pi | Omp | Gjc => readers_pi::decode(provider, cand, budget),
+        Copilot => readers_envelope::copilot(cand, budget),
+        Droid => readers_envelope::droid(cand, budget),
+        Kimi => readers_envelope::kimi(cand, budget),
+        Grok => readers_envelope::grok(cand, budget),
+        Cline => readers_json::cline(cand, budget),
+        Opencode => readers_sqlite::opencode(cand),
+        Crush => readers_sqlite::crush(cand),
+        Cursor => readers_sqlite::cursor(cand),
+        Antigravity => readers_sqlite::antigravity(cand, budget),
+    }
+}
 // Layered containment defences:
 // 1. The walk never descends into symlinked entries (`SYMLINK_REJECTED`).
-// 2. `load` rejects a symlink in ANY component of the relative path and additionally requires
+// 2. `guard` rejects a symlink in ANY component of the relative path and additionally requires
 //    the canonicalized file to stay inside the canonicalized root.
 // 3. A residual check-then-open race remains inherent to path-based std::fs (accepted, not silent).
-fn walk(root: &Path, dir: &Path, files: &mut Vec<(PathBuf,PathBuf)>, visited: &mut usize, warnings: &mut Vec<String>) {
+fn walk(root: &Path, dir: &Path, accept: &dyn Fn(&str) -> bool, out: &mut Vec<Candidate>, visited: &mut usize, warnings: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) { Ok(v) => v, Err(_) => {warnings.push("DIRECTORY_UNAVAILABLE".into()); return;} };
     for entry in entries {
         if *visited >= MAX_FILES { warnings.push("SCAN_LIMIT".into()); break; } *visited += 1;
         let entry = match entry {Ok(v) => v, Err(_) => {warnings.push("ENTRY_UNAVAILABLE".into()); continue;}};
         let kind = match entry.file_type() {Ok(v) => v, Err(_) => {warnings.push("ENTRY_UNAVAILABLE".into()); continue;}};
         if kind.is_symlink() { warnings.push("SYMLINK_REJECTED".into()); }
-        else if kind.is_dir() { walk(root,&entry.path(),files,visited,warnings); }
-        else if kind.is_file() && entry.path().extension().is_some_and(|s| s == "jsonl") { files.push((root.into(),entry.path())); }
+        else if kind.is_dir() { walk(root,&entry.path(),accept,out,visited,warnings); }
+        else if kind.is_file() && entry.file_name().to_str().is_some_and(accept) { out.push(Candidate {root:root.into(),path:entry.path(),locator:None,context:None}); }
     }
 }
-fn load(root: &Path, path: &Path, budget: usize) -> Result<Vec<u8>> {
+fn guard(root: &Path, path: &Path) -> Result<()> {
     // Reject every symlink component, not only final filename.
     let relative = path.strip_prefix(root).map_err(|_| HistoryError::OutsideRoot)?;
     let mut checked = root.to_path_buf();
     for part in relative.components() { checked.push(part); if fs::symlink_metadata(&checked).map_err(|_|HistoryError::NotFound)?.file_type().is_symlink() {return Err(HistoryError::OutsideRoot);} }
     if !path.canonicalize().map_err(|_|HistoryError::NotFound)?.starts_with(root) {return Err(HistoryError::OutsideRoot);}
+    Ok(())
+}
+fn load(root: &Path, path: &Path, budget: usize) -> Result<Vec<u8>> {
+    guard(root, path)?;
     let file = fs::File::open(path).map_err(|_|HistoryError::Io)?;
     let before = file.metadata().map_err(|_|HistoryError::Io)?;
     if !before.is_file() || before.len() > budget as u64 {return Err(HistoryError::InvalidRequest);}
@@ -115,18 +225,50 @@ fn load(root: &Path, path: &Path, budget: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 fn field(v: &Value, key: &str) -> Option<String> { v.get(key).and_then(Value::as_str).map(str::to_owned) }
+/// A JSON number or string carried as the store's own version marker.
+fn version_field(v: &Value, key: &str) -> Option<String> {
+    match v.get(key) { Some(Value::String(s)) => Some(s.clone()), Some(Value::Number(n)) => Some(n.to_string()), _ => None }
+}
+/// Decode one JSONL record per line, keeping the source line number as the message ordinal.
+fn records(bytes: &[u8], warnings: &mut Vec<String>) -> Vec<(usize, Value)> {
+    let mut out = vec![];
+    for (ordinal, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        if line.len() > MAX_RECORD {warnings.push("RECORD_LIMIT".into()); continue;}
+        if !line.ends_with(b"\n") {warnings.push("PARTIAL_RECORD".into()); continue;}
+        if line.iter().all(|b| b.is_ascii_whitespace()) { continue; }
+        match serde_json::from_slice(line) { Ok(v) => out.push((ordinal, v)), Err(_) => warnings.push("CORRUPT_RECORD".into()) }
+    }
+    out
+}
+/// Message text is either a bare string or an array of typed parts; only the text parts render.
+fn content_text(content: &Value) -> String {
+    if let Some(text) = content.as_str() { return text.to_owned(); }
+    content.as_array().map(|parts| parts.iter().filter(|p| matches!(p["type"].as_str(),Some("text"|"input_text"|"output_text"))).filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default()
+}
+/// A tool call shown as one `tool` message: the tool name, then its arguments when it has any.
+fn tool_text(name: &str, arguments: &str) -> String {
+    if arguments.trim().is_empty() { name.to_owned() } else { format!("{name} {arguments}") }
+}
+/// Identity the resume path will have to accept, checked at parse time so a malformed store can
+/// never reach `resolve_agent_resume_plan`.
+fn checked_id(id: &str) -> Result<String> {
+    match crate::terminal::shell::validate_agent_session_id(id) { Ok(valid) if valid == id => Ok(valid), _ => Err(HistoryError::InvalidIdentity) }
+}
+fn checked_cwd(cwd: &str) -> Result<String> {
+    if Path::new(cwd).is_absolute() { Ok(cwd.to_owned()) } else { Err(HistoryError::InvalidIdentity) }
+}
+fn make_entry(provider: CanonicalProvider, id: String, cwd: String, version: Option<String>, parent_id: Option<String>, transcript_path: Option<String>) -> Entry {
+    Entry { entry_key: String::new(), provider, provider_session: AgentProviderSession { key: AgentProviderSessionKey::SessionId, id, transcript_path }, cwd, version, parent_id, modified_ms: None }
+}
 fn parse(provider: CanonicalProvider, bytes: &[u8]) -> Result<(Entry,Vec<Message>,Vec<String>)> {
     let mut identity: Option<(String,String)> = None; let mut version = None; let mut parent_id = None; let mut messages = vec![]; let mut warnings = vec![];
     let mut claude_ancestry = vec![];
-    for (ordinal,line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
-        if line.len() > MAX_RECORD {warnings.push("RECORD_LIMIT".into()); continue;}
-        if !line.ends_with(b"\n") {warnings.push("PARTIAL_RECORD".into()); continue;}
-        let v: Value = match serde_json::from_slice(line) {Ok(v) => v, Err(_) => {warnings.push("CORRUPT_RECORD".into()); continue;}};
+    for (ordinal, v) in records(bytes, &mut warnings) {
         let kind = v["type"].as_str().unwrap_or("");
         let metadata = match provider { CanonicalProvider::Codex if kind == "session_meta" => Some((&v["payload"],"id","cli_version")), CanonicalProvider::Claude if kind == "user" || kind == "assistant" => Some((&v,"sessionId","version")), _ => None };
         if let Some((meta,id_key,version_key)) = metadata {
             if let (Some(id),Some(cwd)) = (field(meta,id_key),field(meta,"cwd")) {
-                if crate::terminal::shell::validate_agent_session_id(&id).ok().as_deref() != Some(&id) || !Path::new(&cwd).is_absolute() {return Err(HistoryError::InvalidIdentity);}
+                let (id, cwd) = (checked_id(&id)?, checked_cwd(&cwd)?);
                 if identity.as_ref().is_some_and(|old| old != &(id.clone(),cwd.clone())) {return Err(HistoryError::InvalidIdentity);}
                 identity = Some((id,cwd)); version = field(meta,version_key).or(version); parent_id = field(meta,"forked_from_id").or(parent_id);
             }
@@ -136,8 +278,7 @@ fn parse(provider: CanonicalProvider, bytes: &[u8]) -> Result<(Entry,Vec<Message
             if provider == CanonicalProvider::Claude {
                 claude_ancestry.push((ordinal, field(&v,"uuid").or_else(||field(m,"id")), field(&v,"parentUuid")));
             }
-            let content = &m["content"];
-            let text = if let Some(text) = content.as_str() {text.to_owned()} else {content.as_array().map(|parts| parts.iter().filter(|p| matches!(p["type"].as_str(),Some("text"|"input_text"|"output_text"))).filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default()};
+            let text = content_text(&m["content"]);
             if !text.is_empty() {messages.push(Message {ordinal, role: field(m,"role").unwrap_or_else(||kind.into()), text, id: field(&v,"uuid").or_else(||field(m,"id")), parent_id: field(&v,"parentUuid")});}
         }
     }
@@ -152,7 +293,7 @@ fn parse(provider: CanonicalProvider, bytes: &[u8]) -> Result<(Entry,Vec<Message
         messages.retain(|message| active.contains(&message.ordinal));
     }
     let (id,cwd) = identity.ok_or(HistoryError::InvalidIdentity)?;
-    Ok((Entry {entry_key:String::new(),provider,provider_session:AgentProviderSession {key:AgentProviderSessionKey::SessionId,id,transcript_path:None},cwd,version,parent_id,modified_ms:None},messages,warnings))
+    Ok((make_entry(provider,id,cwd,version,parent_id,None),messages,warnings))
 }
 fn page<T: Clone>(items: Vec<T>, cursor: Option<&str>, limit: usize, stamp: &str, warnings: Vec<String>) -> Result<Page<T>> {
     if limit == 0 || limit > 100 { return Err(HistoryError::InvalidRequest); }

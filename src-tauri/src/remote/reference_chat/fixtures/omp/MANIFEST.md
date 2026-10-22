@@ -53,6 +53,7 @@ exercises it. A variant with no fixture would be an unexplained gap, so there is
 | 43 | Prose that merely mentions the tag is the user's text | `skill-activity.ts:41-63` | `skill-invocation.jsonl` (s4) |
 | 44 | `model_change` / `thinking_level_change` are not turns | `conversation-metadata.ts:64-66` | `basic-session.jsonl` (mc1, tl1) |
 | 45 | A message-level-only `result` is never read; a message-level `callId` still names the call | `transcript-records.ts:27`, `:35` | `record-aliases.jsonl` (r3 -> `""`, r2 -> `callId` mapped) |
+| 46 | omp 18.12.6's line-1 `{"type":"title"}` record, `title_change` and `custom` bookkeeping are not turns | none (omp 18.12.6 store, captured) | `omp-18.12.6-title-record.jsonl` (captured, `/home/indo` redacted) |
 
 ## Deliberate non-port, with its reason
 

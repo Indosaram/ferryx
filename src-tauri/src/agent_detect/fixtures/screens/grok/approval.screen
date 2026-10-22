@@ -1,0 +1,40 @@
+
+  master ~/a/grok/proj                                                                       1.4K / 128K │ [Dashboard]
+
+
+     ❯ PARITY_TOOL remove a file                                                                             4:13 PM
+
+
+     ◆ Running probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ◆ probe… 4.5s                                                                                4.5s ⇣1.36k [↓][stop]
+
+  ┃
+  ┃  ›  probe
+  ┃  │ rm -f parity-approval-probe.txt && curl -s https://example.com -o /dev/null
+  ┃  ← → narrow scope
+  ┃
+  ┃  1 (○) Yes, and don't ask again for anything (always-approve mode)
+  ┃  2 (●) Yes, proceed
+  ┃  3 (○) No, reject (type to add feedback)
+  ┃  4 (○) Never allow: rm -f
+  ┃
+
+  1/4:select  │  Tab:next option  │  ←/→:scope  │  Ctrl+o:always-approve  │  Ctrl+c:cancel  │  Esc:scrollback
+

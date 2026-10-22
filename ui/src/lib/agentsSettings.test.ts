@@ -242,6 +242,36 @@ describe("agentsSettings persistence and pure helpers", () => {
       ]);
     });
 
+    it("migrates a custom agent whose name became built-in into an override instead of dropping it", () => {
+      localStorage.setItem(
+        AGENTS_SETTINGS_STORAGE_KEY,
+        JSON.stringify({
+          version: 1,
+          defaultAgentId: "grok",
+          overrides: { grok: { enabled: true } },
+          custom: [
+            { name: "Grok", command: "/opt/bin/grok", args: "--yolo" },
+            { name: "omp", command: "omp" },
+          ],
+        }),
+      );
+
+      const loaded = loadAgentSettings();
+      expect(loaded.custom).toEqual([]);
+      expect(loaded.defaultAgentId).toBe("grok");
+      expect(loaded.overrides.grok).toEqual({ enabled: true, command: "/opt/bin/grok", args: "--yolo" });
+      expect(loaded.overrides.omp).toEqual({ command: "omp", args: "" });
+    });
+
+    it("probes every first-class agent binary by default", () => {
+      for (const name of ["pi", "copilot", "grok", "kimi", "cline", "omp"]) {
+        expect(AGENT_CANDIDATES).toContain(name);
+      }
+      expect(detectionTargets(DEFAULT_AGENT_SETTINGS)).toEqual(
+        expect.arrayContaining(["pi", "copilot", "grok", "kimi", "cline", "omp"]),
+      );
+    });
+
     it("builds detection targets from resolved commands including custom agents", () => {
       const settings: AgentSettings = {
         version: 1,

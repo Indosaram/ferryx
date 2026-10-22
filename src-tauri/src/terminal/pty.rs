@@ -145,6 +145,22 @@ fn apply_agent_state_tcp_env(cmd: &mut CommandBuilder) {
     cmd.env("FERRYX_AGENT_STATE_TOKEN", token);
 }
 
+/// Points herdr-aware agents (crush's `internal/herdr` reporter) at the agent-state socket, which
+/// answers herdr `pane.report_agent` requests, with the pane id set to the Ferryx session id.
+///
+/// A pane that already carries `HERDR_ENV` belongs to a user running real herdr: its variables pass
+/// through untouched. Unix only: herdr reports over a unix socket, and the Windows ingress is a
+/// loopback TCP port that requires a token herdr clients never send.
+#[cfg(any(unix, test))]
+fn apply_herdr_env(cmd: &mut CommandBuilder, session_id: &str, socket_path: &str) {
+    if cmd.get_env("HERDR_ENV").is_some() {
+        return;
+    }
+    cmd.env("HERDR_ENV", "1");
+    cmd.env("HERDR_SOCKET_PATH", socket_path);
+    cmd.env("HERDR_PANE_ID", session_id);
+}
+
 /// Reads the daemon-published rendezvous record: the port on the first line, the token on the
 /// second. The daemon renames the whole record into place, so a torn pair cannot be observed;
 /// a record missing either half is still read as "not published yet" and never reaches a pane.
@@ -167,6 +183,32 @@ fn parse_agent_state_rendezvous(record: &str) -> Option<(u16, String)> {
 #[cfg(test)]
 mod agent_state_rendezvous_tests {
     use super::parse_agent_state_rendezvous;
+
+    #[test]
+    fn herdr_env_points_crush_at_the_agent_state_socket_for_this_pane() {
+        let mut cmd = super::CommandBuilder::new("/bin/sh");
+        cmd.env_remove("HERDR_ENV");
+        super::apply_herdr_env(&mut cmd, "session-42", "/tmp/rorca-501/agent-state.sock");
+        let get = |key: &str| cmd.get_env(key).and_then(|v| v.to_str()).map(str::to_owned);
+        assert_eq!(get("HERDR_ENV").as_deref(), Some("1"));
+        assert_eq!(
+            get("HERDR_SOCKET_PATH").as_deref(),
+            Some("/tmp/rorca-501/agent-state.sock")
+        );
+        assert_eq!(get("HERDR_PANE_ID").as_deref(), Some("session-42"));
+    }
+
+    #[test]
+    fn herdr_env_of_a_user_running_real_herdr_passes_through_untouched() {
+        let mut cmd = super::CommandBuilder::new("/bin/sh");
+        cmd.env("HERDR_ENV", "1");
+        cmd.env("HERDR_SOCKET_PATH", "/run/user/herdr.sock");
+        cmd.env("HERDR_PANE_ID", "herdr-pane-3");
+        super::apply_herdr_env(&mut cmd, "session-42", "/tmp/rorca-501/agent-state.sock");
+        let get = |key: &str| cmd.get_env(key).and_then(|v| v.to_str()).map(str::to_owned);
+        assert_eq!(get("HERDR_SOCKET_PATH").as_deref(), Some("/run/user/herdr.sock"));
+        assert_eq!(get("HERDR_PANE_ID").as_deref(), Some("herdr-pane-3"));
+    }
 
     #[test]
     fn parse_accepts_only_a_complete_pair() {
@@ -483,10 +525,11 @@ impl PtyManager {
         // daemon may have inherited from its own environment.
         if self.agent_integration.enabled() {
             #[cfg(unix)]
-            cmd.env(
-                "FERRYX_AGENT_STATE_SOCKET",
-                crate::daemon::agent_state_socket_path(),
-            );
+            {
+                let socket = crate::daemon::agent_state_socket_path();
+                cmd.env("FERRYX_AGENT_STATE_SOCKET", &socket);
+                apply_herdr_env(&mut cmd, &session_id, &socket);
+            }
             #[cfg(not(unix))]
             apply_agent_state_tcp_env(&mut cmd);
         } else {

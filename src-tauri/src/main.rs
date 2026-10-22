@@ -8,6 +8,11 @@ fn main() {
     if let Some(code) = ferryx_lib::ssh::transport_unix::run_supervisor_mode() {
         std::process::exit(code);
     }
+    // Agent lifecycle hooks run this once per event, so it stays ahead of every other setup step
+    // and never fails: the reporter always exits 0.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == ferryx_lib::cli::agent_hook::AGENT_HOOK_SUBCOMMAND) {
+        std::process::exit(ferryx_lib::cli::agent_hook::run(std::env::args_os().skip(2)));
+    }
     // Both launch modes need this before anything opens a file: launchd gives an app a soft
     // descriptor limit of 256, and a terminal daemon spends roughly three descriptors per live
     // session, so the inherited default is exhausted after a few dozen sessions and the next

@@ -61,12 +61,7 @@ impl DaemonSessionService {
             }
         }
         let agent = report.agent.as_deref().ok_or("AGENT_RESUME_UNSUPPORTED")?;
-        // Admit only process-bound discovery adapters. Providers whose current
-        // adapter falls back to newest-transcript/CWD guessing remain unsupported.
-        if !matches!(
-            agent,
-            "omo" | "claude" | "codex" | "copilot" | "cursor" | "cursor-agent" | "kimi" | "gjc"
-        ) {
+        if !crate::terminal::resume_cwd::machine_admits_agent(agent) {
             return Err("AGENT_RESUME_UNSUPPORTED".into());
         }
         let provider = report
@@ -252,5 +247,35 @@ impl DaemonSessionService {
             serde_json::json!(committed),
         );
         Ok(committed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::terminal::resume_cwd::machine_admits_agent;
+
+    #[test]
+    fn machine_admission_covers_process_bound_discovery_only() {
+        for agent in [
+            "omo",
+            "claude",
+            "codex",
+            "copilot",
+            "cursor",
+            "cursor-agent",
+            "kimi",
+            "gjc",
+            "omp",
+            "grok",
+            "droid",
+            "cline",
+            "crush",
+        ] {
+            assert!(machine_admits_agent(agent), "{agent} must be admitted");
+        }
+        // CWD/newest-transcript guesses, and agents with no discovery adapter at all.
+        for agent in ["antigravity", "opencode", "pi", "aider", ""] {
+            assert!(!machine_admits_agent(agent), "{agent} must stay unsupported");
+        }
     }
 }

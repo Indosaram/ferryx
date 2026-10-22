@@ -1,0 +1,40 @@
+
+ │ SLOW please answer                                                                   ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+                                                                                        ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+   Mock reply done.                                                                      Charm™               v0.98.1
+                                                                                        ▄▀▀▀▀ █▀▀▀▄ █   █ ▄▀▀▀▀ █   █
+   ◇ Mock One via Mock in 25s ────────────────────────────────────────────────────────  █     █▀▀▀▄ █   █ ▀▀▀▀█ █▀▀▀█
+                                                                                         ▀▀▀▀ ▀   ▀  ▀▀▀  ▀▀▀▀  ▀   ▀
+ │ RUNCMD create the probe file                                                         ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+
+   ● Bash touch parity-probe.txt                                                      	Mock reply done.
+
+   Requesting permission...                                                             master
+                                                                                        ~/agent-parity-
+                        ╭──────────────────────────────────────────────────────────────────────╮ush/proj
+                        │  Permission Required ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱  │
+                        │                                                                      │ne via Mock
+                        │ Tool bash                                                            │) $0.00
+                        │ Path ~/agent-parity-facts/crush/proj                                 │
+                        │ Desc create probe file                                               │ Files ──────────────
+                        │                                                                      │
+                        │                                                                      │
+                        │   touch parity-probe.txt                                             │
+                        │                                                                      │─────────────────────
+                        │                                                                      │
+                        │                             Allow      Allow for Session      Deny   │
+                        │                                                                      │
+                        │ ←/→ choose • enter confirm • esc exit                                │─────────────────────
+                        ╰──────────────────────────────────────────────────────────────────────╯
+                                                                                        None
+
+                                                                                        Skills ──────────────────────
+
+                                                                                        ● crush-config
+                                                                                        ● crush-hooks
+   > Working!                                                                           ● diagnose-crash
+ :::                                                                                    ● jq
+ :::                                                                                    ● omarchy
+
+ esc cancel • tab focus chat • shift+tab mode • / or ctrl+p commands • ctrl+l models • ctrl+b toggle sidebar …
+

@@ -131,8 +131,55 @@ fn last_segment(command: &str) -> Option<&str> {
 /// Interpreters whose entry point, not the binary itself, names the agent.
 const INTERPRETERS: [&str; 6] = ["node", "bun", "python", "python3", "sh", "bash"];
 
+/// A listed interpreter, or a versioned CPython binary (`python3.12`) that a console-script
+/// shebang such as aider's resolves to.
+fn is_interpreter(name: &str) -> bool {
+    is_named(name, &INTERPRETERS)
+        || (name.len() > 8
+            && name
+                .get(..8)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("python3."))
+            && name[8..].bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Interpreter flags whose argument is inline code, not an entry point: what follows them
+/// (`sh -c omo`) is never the script that names the agent.
+const INLINE_CODE_FLAGS: [&str; 3] = ["-c", "-e", "--eval"];
+
+/// Entry-point basenames too generic to name an agent on their own (`dist/bundle/cli.js`).
+const GENERIC_ENTRY_POINTS: [&str; 3] = ["cli", "index", "main"];
+
+/// Package directories that identify the agent behind a generic entry point. Order matters:
+/// omo runs the senpi bundle with an `omo-ai` extension, so `omo-ai` must win over senpi.
+const PACKAGE_AGENTS: [(&str, &str); 4] = [
+    ("omo-ai", "omo"),
+    ("@code-yeongyu/senpi", "pi"),
+    ("oh-my-pi", "omp"),
+    ("omp", "omp"),
+];
+
+/// The agent a generic entry point belongs to: the first package directory that appears as
+/// whole path segments anywhere in the argument list, with either path separator.
+fn package_agent(tokens: &[&str]) -> Option<&'static str> {
+    PACKAGE_AGENTS.iter().find_map(|&(package, agent)| {
+        let expected: Vec<&str> = package.split('/').collect();
+        tokens
+            .iter()
+            .any(|token| {
+                let segments: Vec<&str> = token.trim_matches('"').split(['/', '\\']).collect();
+                segments.windows(expected.len()).any(|window| {
+                    window
+                        .iter()
+                        .zip(&expected)
+                        .all(|(segment, wanted)| segment.eq_ignore_ascii_case(wanted))
+                })
+            })
+            .then_some(agent)
+    })
+}
+
 /// Agent executable or entry-point names, lowercase because the comparison ignores case.
-const AGENT_NAMES: [&str; 12] = [
+const AGENT_NAMES: [&str; 18] = [
     "claude",
     "codex",
     "omo",
@@ -145,6 +192,12 @@ const AGENT_NAMES: [&str; 12] = [
     "copilot",
     "cline",
     "antigravity",
+    "agy",
+    "pi",
+    "omp",
+    "aider",
+    "crush",
+    "droid",
 ];
 
 fn is_agent(command: &str) -> bool {
@@ -152,15 +205,25 @@ fn is_agent(command: &str) -> bool {
     let Some(program) = tokens.first().copied() else {
         return false;
     };
-    let candidate = if is_named(executable_name(program), &INTERPRETERS) {
+    let candidate = if is_interpreter(executable_name(program)) {
         // Interpreter entry points, not arbitrary arguments such as `echo omo`. The script is
-        // the argument that follows the program; a command line that carries none still ends
-        // in its entry point, so the last path segment of the line is the fallback.
-        tokens
-            .get(1)
-            .copied()
-            .or_else(|| last_segment(command))
-            .unwrap_or("")
+        // the first argument after the interpreter's own flags (`node --no-warnings=X agent`);
+        // a command line that carries none still ends in its entry point, so the last path
+        // segment of the line is the fallback.
+        let mut arguments = tokens.iter().skip(1).copied();
+        let script = loop {
+            match arguments.next() {
+                Some(flag) if is_named(flag, &INLINE_CODE_FLAGS) => return false,
+                Some(flag) if flag.starts_with('-') => continue,
+                other => break other,
+            }
+        };
+        let script = script.or_else(|| last_segment(command)).unwrap_or("");
+        if is_named(agent_name(script), &GENERIC_ENTRY_POINTS) {
+            // A bundled CLI (`senpi/dist/bundle/cli.js`) is named by its package, not its file.
+            return package_agent(&tokens).is_some();
+        }
+        script
     } else {
         program
     };
@@ -604,6 +667,101 @@ mod tests {
         assert!(is_agent("codex"));
         assert!(!is_agent("/bin/zsh"));
         assert!(!is_agent("powershell.exe"));
+    }
+
+    #[test]
+    fn agent_identity_covers_every_supported_agent_name() {
+        for name in ["agy", "pi", "omp", "aider", "crush", "droid"] {
+            assert!(is_agent(name), "{name}");
+            assert!(is_agent(&format!("/usr/local/bin/{name} --resume")), "{name}");
+            assert!(is_agent(&format!("/usr/bin/node /opt/{name}.js")), "{name}");
+        }
+        assert!(is_agent(r"C:\Users\dev\.local\bin\agy.exe"));
+    }
+
+    #[test]
+    fn agent_identity_reads_measured_launch_command_lines() {
+        // Each argv below was read with `ps -axo args` while the agent ran.
+        // aider: a console script under a versioned CPython.
+        assert!(is_agent(
+            "/Users/x/.local/share/uv/tools/aider-chat/bin/python3.12 /Users/x/.local/bin/aider"
+        ));
+        // pi: a node-shebang symlink in node_modules/.bin.
+        assert!(is_agent("node /Users/x/proj/node_modules/.bin/pi"));
+        // omo: the senpi bundle loaded with the omo-ai extension.
+        assert!(is_agent(
+            "/Users/x/.bun/bin/bun /Users/x/.bun/install/global/node_modules/@code-yeongyu/senpi/dist/bundle/cli.js --extension /Users/x/.bun/install/global/node_modules/omo-ai/plugin --session 01a15ec8"
+        ));
+        // A generic entry point outside a known package is not an agent.
+        assert!(!is_agent("node --inspect /x/server.js"));
+        assert!(!is_agent("node /x/app/dist/cli.js --port 3000"));
+        assert!(!is_agent("/usr/bin/python3.12 /x/manage.py runserver"));
+        assert!(!is_agent("node -e omo"));
+    }
+
+    #[test]
+    fn agent_identity_reads_measured_parity_launch_argv() {
+        // gjc: bun runs the bin symlink, whose basename is `gjc` (.omo-parity/facts/remote-gjc.md:18).
+        assert!(is_agent(
+            "bun /home/indo/.local/share/mise/installs/node/26.8.1/bin/gjc --model fakelocal/fake-model --tools ask,read,bash"
+        ));
+        // opencode: native Mach-O, fresh and resumed (.omo-parity/facts/local.md:171).
+        assert!(is_agent("opencode"));
+        assert!(is_agent("opencode -s ses_e9d6ab0a6ffe947zqzT8h7XHYX"));
+        // cursor-agent: the launcher's `exec -a` keeps the symlink path as argv[0] while the
+        // real executable is the bundled node (.omo-parity/facts/local-3.md:149-152).
+        assert!(is_agent(
+            "/Users/indo/.local/bin/cursor-agent --use-system-ca /Users/indo/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4/index.js"
+        ));
+        assert!(is_agent(
+            "/Users/indo/.local/bin/cursor-agent --use-system-ca /Users/indo/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4/index.js --resume 9371cc0a-d5c0-4cca-bcae-cae24632e1b5"
+        ));
+        // grok: the ~/.grok/bin symlink, fresh and resumed (.omo-parity/facts/remote-grok.md:54-55).
+        assert!(is_agent("/home/indo/.grok/bin/grok"));
+        assert!(is_agent(
+            "/home/indo/.grok/bin/grok --resume 01a16274-a688-7e73-b6fc-434bc7781be4"
+        ));
+        // kimi: the uv tool's python runs the ~/.local/bin/kimi script (.omo-parity/facts/local-2.md:212,216).
+        assert!(is_agent(
+            "/Users/indo/.local/share/uv/tools/kimi-cli/bin/python /Users/indo/.local/bin/kimi"
+        ));
+        assert!(is_agent(
+            "/Users/indo/.local/share/uv/tools/kimi-cli/bin/python /Users/indo/.local/bin/kimi -S eca66b4f-a89b-4979-9f13-cbe3f35b5991"
+        ));
+        // cline: native binary, its resume form, and the hub-daemon child (.omo-parity/facts/local.md:107).
+        assert!(is_agent("cline"));
+        assert!(is_agent("cline --id 1792653433537_85evt"));
+        assert!(is_agent(
+            ".../@cline/cli-darwin-arm64/bin/cline --cline-hub-daemon --cwd <repo> --host 127.0.0.1 --port 25463 --pathname /hub"
+        ));
+        // droid: native ELF, argv[0] `droid` (.omo-parity/facts/remote-droid.md:41).
+        assert!(is_agent("droid"));
+    }
+
+    #[test]
+    fn generic_entry_points_resolve_to_their_package_agent() {
+        let senpi = "/g/node_modules/@code-yeongyu/senpi/dist/bundle/cli.js";
+        assert_eq!(
+            package_agent(&command_tokens(&format!(
+                "bun {senpi} --extension /g/node_modules/omo-ai/plugin"
+            ))),
+            Some("omo")
+        );
+        assert_eq!(
+            package_agent(&command_tokens(&format!("node {senpi}"))),
+            Some("pi")
+        );
+        assert_eq!(
+            package_agent(&command_tokens("node /g/node_modules/oh-my-pi/dist/cli.js")),
+            Some("omp")
+        );
+        assert_eq!(
+            package_agent(&command_tokens(r"node.exe C:\g\node_modules\omp\dist\index.js")),
+            Some("omp")
+        );
+        assert!(is_agent(&format!("node {senpi}")));
+        assert!(is_agent("node /g/node_modules/oh-my-pi/dist/cli.js"));
+        assert_eq!(package_agent(&command_tokens("node /x/app/dist/cli.js")), None);
     }
 
     #[test]

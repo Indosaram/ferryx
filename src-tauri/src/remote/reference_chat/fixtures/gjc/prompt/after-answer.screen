@@ -1,0 +1,40 @@
+╭─── gjc v0.18.12 · package install · GJC Forge ──────────────────────────────────────────────────────────────────────╮
+│                                                          │                                                          │
+│                        GJC Forge                         │ What's New                                               │
+│                   shape · act · prove                    │ ▸ Added the task.compactSubagentPanel setting. When it i…│
+│                                                          │ ──────────────────────────────────────────────────────── │
+│           ╭────────────────╮        ╭────────╮           │ Flow keys                                                │
+│           ╰──────╮      ╭──╯     ╭──╯  ╭─────╯           │ / commands · … /help                                     │
+│                  ╰──────╯    ╭───╯  ╭──╯                 │ ──────────────────────────────────────────────────────── │
+│                  ╭──────╮    ╰───╮  ╰──╮                 │ Project pulse                                            │
+│ …                                                        │ …                                                        │
+╰──────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────╯
+
+ user
+
+ ASKME now
+
+
+ gajae
+ tick 0 tick 1 tick 2
+
+ user
+
+ ASKME again
+
+
+ Ask 1 questions
+  └─ [q1] · options:2
+    Which color should I use?
+      ├─ ☐ Red
+      └─ ☐ Blue
+ ✔ Ask
+  Which color should I use?
+  └─ ☑ Blue
+
+ gajae
+ tick 0 tick 1 tick 2
+ ⬢ fake-model · 0.0% / ⑂ master ?1 / 📁 ~/agent-parity-facts/gjc/work ────────────────────────────── ⤴ 3.3/s / v0.18.12
+╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ > Type your message... Alt+Enter: Queue (busy) · Shift+Tab: Thinking · Ctrl+L: Model · Ctrl+R: History · Shift+Ent… │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

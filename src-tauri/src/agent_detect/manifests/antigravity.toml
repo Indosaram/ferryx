@@ -28,6 +28,18 @@ priority = 100
 region = "whole_recent"
 visible_working = true
 line_regex = ['^\s*[\u2800-\u28FF]+\s+\p{Alphabetic}+\w*ing\b']
+# cline's working row " ⠏ Thinking... (esc to cancel)" (screens/cline/working.screen)
+# has the same shape; agy's footer hint carries no parentheses. So do grok's
+# "⠹ Responding… 8.9s ... [stop]" (screens/grok/working.screen) and gjc's
+# " ⠏ Working… ⟦esc⟧" (screens/gjc/working.screen), which agy never draws.
+# cursor-agent's " ⠠⠜ Working" / " ⠠⠛ Running  34 tokens" row sits above its
+# "→ Add a follow-up" composer (screens/cursor-agent/live-working, live-running).
+not = [
+  { line_regex = ['\(esc to cancel\)\s*$'] },
+  { line_regex = ['\[stop\]\s*$'] },
+  { line_regex = ['[\[⟦⟨]esc[\]⟧⟩]\s*$'] },
+  { line_regex = ['^\s*→ Add a follow-up\b'] },
+]
 
 [[rules]]
 id = "background_tasks_working"
@@ -36,3 +48,39 @@ priority = 90
 region = "bottom_non_empty_lines(5)"
 visible_working = true
 line_regex = ['(?i)·\s*[1-9][0-9]*\s+task']
+
+# Antigravity CLI 1.4.4 (measured 2026-10-22, .omo-parity/facts/screens/agy/):
+# the composer is a bare ">" between two full-width rules, and the footer under
+# it reads "esc to cancel  <model>" during a turn and "? for shortcuts  <model>"
+# otherwise. claude draws "❯" and codex "›", so the bare ">" between rules plus
+# the footer is agy-exclusive. The working rule outranks omo's spinner_working,
+# which also sees the "⣾  Generating..." row.
+
+[[rules]]
+id = "composer_footer_working"
+state = "working"
+priority = 205
+region = "bottom_non_empty_lines(4)"
+visible_working = true
+line_regex = ['^>\s*$', '^─{20,}\s*$', '^esc to cancel\s{2,}\S']
+
+[[rules]]
+id = "composer_footer_idle"
+state = "idle"
+priority = 70
+region = "bottom_non_empty_lines(4)"
+visible_idle = true
+line_regex = ['^>\s*$', '^─{20,}\s*$', '^\? for shortcuts\s{2,}\S']
+
+# First-run workspace trust gate (screens/agy/trust.screen). Codex asks "Do you trust
+# the contents of this directory?"; agy says "project" and names itself. The gate stays
+# in scrollback after it is answered (screens/agy/lc-working.screen), so the rule also
+# needs the live menu at the bottom.
+
+[[rules]]
+id = "trust_folder_blocked"
+state = "blocked"
+priority = 320
+region = "bottom_non_empty_lines(8)"
+visible_blocker = true
+contains = ["do you trust the contents of this project?", "yes, i trust this folder", "↑/↓ navigate · enter confirm"]

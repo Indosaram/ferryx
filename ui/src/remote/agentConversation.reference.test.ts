@@ -198,6 +198,21 @@ describe("reference history page parsing", () => {
     expect(JSON.parse(JSON.stringify(page))).toEqual(page);
   });
 
+  it("accepts every native source the gateway's readers emit", () => {
+    for (const source of [
+      "copilot-transcript",
+      "antigravity-transcript",
+      "kimi-transcript",
+      "grok-transcript",
+      "cline-transcript",
+      "opencode-transcript",
+      "cursor-transcript",
+      "crush-transcript",
+    ] as const) {
+      expect(parseReferenceHistoryPage(nativeBody({ source })).source).toBe(source);
+    }
+  });
+
   it("parses an explicit scrollback page as a page, not an error", () => {
     const page = parseReferenceHistoryPage(
       nativeBody({

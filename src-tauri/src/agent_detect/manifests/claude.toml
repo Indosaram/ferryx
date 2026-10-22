@@ -78,6 +78,34 @@ all = [
   ] },
 ]
 
+# Measured 2026-10-22 (claude 2.1.296/2.1.308, .omo-parity/facts/screens/claude/). While a
+# turn runs, the mode footer under the composer gains "esc to interrupt"
+# ("⏸ manual mode on · esc to interrupt · ← for agents", local1-working.screen;
+# "⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents", lc-working.screen).
+# Priority 210 beats omo esc_cancel_working (150) and omo spinner_working (200).
+[[rules]]
+id = "mode_footer_working"
+state = "working"
+priority = 210
+region = "bottom_non_empty_lines(1)"
+visible_working = true
+line_regex = ['^\s*(?:⏵⏵|⏸)\s+(?:auto|manual) mode on\b.*·\s*esc to interrupt\b']
+
+# Between turns the same footer has no "esc to interrupt" and sits under the "❯" composer
+# framed by two full-width rules (idle, after-turn-idle, done, resumed captures).
+[[rules]]
+id = "mode_footer_idle"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(4)"
+visible_idle = true
+line_regex = [
+  '^\s*(?:⏵⏵|⏸)\s+(?:auto|manual) mode on\b',
+  '^❯',
+  '^─{20,}\s*$',
+]
+not = [{ contains = ["esc to interrupt"] }]
+
 [[rules]]
 id = "osc_title_idle"
 state = "idle"

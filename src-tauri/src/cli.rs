@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
+pub mod agent_hook;
 pub mod billing;
 pub mod direct_trust;
 

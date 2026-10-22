@@ -1041,9 +1041,11 @@ impl DaemonSessionService {
                 agent_type,
                 provider_session,
             } => {
-                // Only OMO currently has an ID-based authoritative transcript/CWD resolver.
-                // Other providers' argv support alone cannot prove transcript ownership.
-                if agent_type != "omo" || provider_session.transcript_path.is_some() {
+                // The publish side's list, minus agents whose store records no cwd: argv support
+                // alone cannot prove transcript ownership, so every spawn is cwd-proven below.
+                if !crate::terminal::resume_cwd::machine_spawn_admits_agent(agent_type)
+                    || provider_session.transcript_path.is_some()
+                {
                     return Err("AGENT_RESUME_UNSUPPORTED".into());
                 }
                 Some(TerminalStartup::AgentResume {
@@ -1129,6 +1131,8 @@ impl DaemonSessionService {
                 | "OPERATION_OUTCOME_UNKNOWN"
                 | "REQUEST_CONFLICT"
                 | "AGENT_RESUME_UNSUPPORTED"
+                | "AGENT_TRANSCRIPT_UNVERIFIED"
+                | "AGENT_CWD_MISMATCH"
                 | "DAEMON_RETIRING" => code,
                 _ => "INVALID_PATH".into(),
             },
@@ -2382,29 +2386,25 @@ impl DaemonSessionService {
                         {
                             return Err("AGENT_RESUME_UNSUPPORTED".to_string().into());
                         }
-                    }
-                    crate::terminal::resume_cwd::resolve_agent_resume_cwd(spawn_startup.as_ref())
-                        .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?
-                } else {
-                    resume_cwd
-                };
-                if machine.is_some() {
-                    if let Some(resume) = &resume_cwd {
+                        // Already on a blocking worker: the store lookup reads the user's files.
                         let requested = cwd
                             .as_ref()
                             .map(PathBuf::from)
                             .unwrap_or_else(|| default_cwd.clone());
-                        let requested = fs::canonicalize(requested)
-                            .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?;
-                        let resume = fs::canonicalize(resume)
-                            .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?;
-                        if resume != requested {
-                            return Err(SpawnError::InvalidAgentResume(
-                                "Provider CWD does not match the selected target".into(),
-                            ));
-                        }
+                        Some(
+                            crate::terminal::resume_cwd::verify_machine_resume_cwd(
+                                agent_type,
+                                provider_session,
+                                &requested,
+                            )
+                            .map_err(|code| SpawnError::Other(code.to_string()))?,
+                        )
+                    } else {
+                        None
                     }
-                }
+                } else {
+                    resume_cwd
+                };
                 let cwd = resume_cwd
                     .map(|path| path.to_string_lossy().into_owned())
                     .or(cwd);

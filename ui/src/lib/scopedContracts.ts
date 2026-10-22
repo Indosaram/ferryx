@@ -19,7 +19,10 @@ export interface InventorySnapshot<T> {
   readonly completeness: InventoryCompleteness;
   readonly unavailableHosts: readonly string[];
 }
-export type CanonicalProvider = "codex" | "claude";
+/** Mirrors `CanonicalProvider` in `src-tauri/src/scoped_contracts.rs` (serde camelCase). */
+export type CanonicalProvider =
+  | "codex" | "claude" | "omo" | "pi" | "omp" | "gjc" | "antigravity" | "opencode"
+  | "copilot" | "cursor" | "kimi" | "cline" | "grok" | "droid" | "crush";
 export type TransitionKind = "waiting" | "working" | "idle" | "taskComplete" | "stopped" | "removed";
 export type TransitionSource =
   | { readonly kind: "provider"; readonly provider: CanonicalProvider; readonly requestId: string | null }

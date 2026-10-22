@@ -2,6 +2,9 @@
 # verified upstream (shared.ts interruptHint, approval-gate.ts gate titles,
 # welcome.ts box title). Manifests are evaluated globally, so every rule must
 # stay gjc-exclusive - bare shared pi-family patterns belong to omo.toml.
+# gjc 0.18.12 (measured 2026-10-22, .omo-parity/facts/remote-gjc.md and
+# screens/gjc/*.screen) renders the interrupt hint with theme brackets
+# (default " ⠏ Working… ⟦esc⟧", also ⟨esc⟩ and ASCII [esc]) and indents the line.
 id = "gjc"
 version = "2026.08.31.1"
 min_engine_version = 1
@@ -20,15 +23,23 @@ any = [
 ]
 
 [[rules]]
+id = "ask_selector_blocked"
+state = "blocked"
+priority = 390
+region = "bottom_non_empty_lines(8)"
+visible_blocker = true
+contains = ["other (type your own)", "pgup/pgdn/ctrl+u/d: question"]
+
+[[rules]]
 id = "esc_hint_working"
 state = "working"
 priority = 210
 region = "bottom_non_empty_lines(5)"
 visible_working = true
 all = [
-  { line_regex = ['(?i)\[esc\]\s*$'] },
+  { line_regex = ['(?i)[\[⟦⟨]esc[\]⟧⟩]\s*$'] },
   { any = [
-    { line_regex = ['^[\x{2800}-\x{28FF}]'] },
+    { line_regex = ['^\s*[\x{2800}-\x{28FF}]'] },
     { contains = ["running…"] },
   ] },
 ]
@@ -40,3 +51,15 @@ priority = 60
 region = "whole_recent"
 visible_idle = true
 contains = ["gjc forge"]
+
+# The welcome box scrolls away after a few turns; the idle composer hint stays.
+# While a turn runs the same hint reads "Enter: Steer · Alt+Enter: Queue · ...".
+
+[[rules]]
+id = "composer_idle"
+state = "idle"
+priority = 60
+region = "bottom_non_empty_lines(3)"
+visible_idle = true
+contains = ["type your message...", "alt+enter: queue (busy)"]
+not = [{ contains = ["enter: steer"] }]

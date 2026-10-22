@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentHistoryEntry, AgentHistoryMessage, AgentHistoryPage } from "../lib/agentHistory";
+import { AGENT_HISTORY_PROVIDERS, agentHistoryProviderLabel } from "../lib/agentHistory";
 import { AgentHistoryDialog, type AgentHistoryServices } from "./AgentHistoryDialog";
 
 afterEach(cleanup);
@@ -81,6 +82,44 @@ async function renderSettled(element: Parameters<typeof render>[0]) {
 }
 
 describe("AgentHistoryDialog", () => {
+  it("offers every provider with a readable store and searches the chosen one", async () => {
+    const { services } = createMockServices({
+      search: vi.fn(async () => ({ items: [], nextCursor: null, partial: false, warnings: [] })),
+    });
+
+    const view = await renderSettled(
+      <AgentHistoryDialog
+        workspaceId="ws-1"
+        projectName="Test Project"
+        cwd="/repo/project-a"
+        onClose={vi.fn()}
+        onResume={vi.fn()}
+        services={services}
+      />,
+    );
+
+    const select = view.getByLabelText("Provider:") as HTMLSelectElement;
+    expect([...select.options].map((option) => option.value)).toEqual([...AGENT_HISTORY_PROVIDERS]);
+    expect([...select.options].map((option) => option.textContent)).toEqual(
+      AGENT_HISTORY_PROVIDERS.map((provider) => agentHistoryProviderLabel(provider)),
+    );
+
+    await act(async () => {
+      fireEvent.change(select, { target: { value: "opencode" } });
+    });
+    await act(async () => {
+      fireEvent.click(view.getByRole("button", { name: /^Search$/i }));
+    });
+
+    expect(services.search).toHaveBeenCalledWith({
+      provider: "opencode",
+      cwd: "/repo/project-a",
+      query: "",
+      cursor: null,
+      limit: 20,
+    });
+  });
+
   it("searching renders exactly the returned entries", async () => {
     const { services } = createMockServices();
 

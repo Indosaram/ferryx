@@ -14,6 +14,31 @@ any = [
   { contains = ["esc dismiss"], any = [{ contains = ["enter confirm"] }, { contains = ["enter submit"] }, { contains = ["enter toggle"] }] },
 ]
 
+# Measured 2026-10-22 (opencode 1.18.18, .omo-parity/facts/screens/opencode/*approval*):
+# "△ Permission required" above the "Allow once   Allow always   Reject" buttons. The broad
+# permission_required stays at 300 because crush's "Permission Required" dialog matches it
+# case-insensitively; this anchored rule outranks omo approval_footer_blocked (400).
+[[rules]]
+id = "permission_buttons_blocked"
+state = "blocked"
+priority = 420
+region = "whole_recent"
+visible_blocker = true
+line_regex = [
+  '△ Permission required',
+  'Allow once\s+Allow always\s+Reject',
+]
+
+# Measured 2026-10-22 (opencode/{working,lc-working,local1-working}.screen): while a turn runs
+# the bottom line is the progress bar "■■■■■⬝⬝⬝  esc interrupt ... ctrl+p commands".
+[[rules]]
+id = "progress_bar_working"
+state = "working"
+priority = 210
+region = "bottom_non_empty_lines(1)"
+visible_working = true
+line_regex = ['^\s*[■⬝]+\s+esc interrupt\b']
+
 [[rules]]
 id = "interrupt_hint_working"
 state = "working"
@@ -31,7 +56,9 @@ any = [
 id = "opencode_prompt_idle"
 state = "idle"
 priority = 70
-region = "bottom_non_empty_lines(3)"
+# 4 lines: on the welcome screen (opencode/idle.screen) the cwd footer wraps onto a second
+# line under the "tab agents  ctrl+p commands" hint.
+region = "bottom_non_empty_lines(4)"
 visible_idle = true
 any = [
   { contains = ["Ask anything"] },
@@ -39,5 +66,6 @@ any = [
 ]
 not = [
   { contains = ["esc to interrupt"] },
+  { contains = ["esc interrupt"] },
   { contains = ["Permission required"] },
 ]

@@ -91,7 +91,7 @@ fn resolve_agent_icon(agent: &str) -> Option<&'static [u8]> {
         "grok" => Some(include_bytes!("../../resources/agent-menu-icons/grok.png")),
         "kimi" => Some(include_bytes!("../../resources/agent-menu-icons/kimi.png")),
         "cline" => Some(include_bytes!("../../resources/agent-menu-icons/cline.png")),
-        "pi" => Some(include_bytes!("../../resources/agent-menu-icons/pi.png")),
+        "pi" | "omp" => Some(include_bytes!("../../resources/agent-menu-icons/pi.png")),
         "gjc" => Some(include_bytes!("../../resources/agent-menu-icons/gjc.png")),
         _ => None,
     }
@@ -291,6 +291,7 @@ mod tests {
             "kimi",
             "cline",
             "pi",
+            "omp",
             "gjc",
         ] {
             assert!(

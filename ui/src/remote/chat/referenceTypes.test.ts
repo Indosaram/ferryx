@@ -296,7 +296,17 @@ describe("reference registry mapping", () => {
     expect(referenceNativeKindFromRegistryId("omo")).toBe("omo");
     expect(referenceNativeKindFromRegistryId("gjc")).toBe("gjc");
     expect(referenceNativeKindFromRegistryId("pi")).toBe("pi");
-    for (const unknown of ["mimo-code", "cursor-agent", "prime-agent", "openclaw", ""]) {
+    expect(referenceNativeKindFromRegistryId("copilot")).toBe("copilot");
+    expect(referenceNativeKindFromRegistryId("antigravity")).toBe("antigravity");
+    expect(referenceNativeKindFromRegistryId("agy")).toBe("antigravity");
+    expect(referenceNativeKindFromRegistryId("kimi")).toBe("kimi");
+    expect(referenceNativeKindFromRegistryId("grok")).toBe("grok");
+    expect(referenceNativeKindFromRegistryId("cline")).toBe("cline");
+    expect(referenceNativeKindFromRegistryId("opencode")).toBe("opencode");
+    expect(referenceNativeKindFromRegistryId("cursor")).toBe("cursor");
+    expect(referenceNativeKindFromRegistryId("cursor-agent")).toBe("cursor");
+    expect(referenceNativeKindFromRegistryId("crush")).toBe("crush");
+    for (const unknown of ["mimo-code", "aider", "droid", "prime-agent", "openclaw", ""]) {
       expect(referenceNativeKindFromRegistryId(unknown)).toBe("unavailable");
       expect(referenceNativeKindIsNative(referenceNativeKindFromRegistryId(unknown))).toBe(false);
     }
@@ -309,6 +319,14 @@ describe("reference registry mapping", () => {
     expect(referenceNativeKindOfSource("omo-transcript")).toBe("omo");
     expect(referenceNativeKindOfSource("gjc-transcript")).toBe("gjc");
     expect(referenceNativeKindOfSource("pi-transcript")).toBe("pi");
+    expect(referenceNativeKindOfSource("copilot-transcript")).toBe("copilot");
+    expect(referenceNativeKindOfSource("antigravity-transcript")).toBe("antigravity");
+    expect(referenceNativeKindOfSource("kimi-transcript")).toBe("kimi");
+    expect(referenceNativeKindOfSource("grok-transcript")).toBe("grok");
+    expect(referenceNativeKindOfSource("cline-transcript")).toBe("cline");
+    expect(referenceNativeKindOfSource("opencode-transcript")).toBe("opencode");
+    expect(referenceNativeKindOfSource("cursor-transcript")).toBe("cursor");
+    expect(referenceNativeKindOfSource("crush-transcript")).toBe("crush");
     expect(referenceNativeKindOfSource("scrollback")).toBe("unavailable");
   });
 });

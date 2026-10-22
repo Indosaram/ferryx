@@ -58,3 +58,74 @@ priority = 90
 region = "bottom_non_empty_lines(8)"
 visible_working = true
 line_regex = ['^\s*(⬡|⬢|[\u2800-\u28FF]+)\s+\p{Alphabetic}+\w*ing\b']
+# cline's measured working row " ⠏ Thinking... (esc to cancel)" (.omo-parity/facts/screens/
+# cline/working.screen) matched this rule; cline thinking_row_working owns it.
+not = [{ line_regex = ['\(esc to cancel\)\s*$'] }]
+
+# Measured 2026-10-22 (cursor-agent 2026.10.19-6bbf2c4 logged in, .omo-parity/facts/
+# cursor-live-screens.md, fixtures/screens/cursor-agent/live-*.screen).
+
+# Login wall "Press any key to log in..." under the "Cursor Agent" banner
+# (live-trust.screen and login-required.screen are this same screen).
+[[rules]]
+id = "login_wall_blocked"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+visible_blocker = true
+line_regex = ['^\s*Cursor Agent\s*$', '^\s*Press any key to log in\.\.\.\s*$']
+
+# First-run "⚠ Workspace Trust Required" box. Once [a] is pressed the box stays in
+# scrollback with "⏳ Trusting workspace..." under the [q] line, which the veto excludes.
+[[rules]]
+id = "trust_folder_blocked"
+state = "blocked"
+priority = 950
+region = "whole_recent"
+visible_blocker = true
+contains = ["workspace trust required", "do you trust the contents of this directory?", "[a] trust this workspace", "[q] quit"]
+not = [{ contains = ["trusting workspace..."] }]
+
+# Shell approval card: "$ touch probe.txt Waiting for approval..." then "Run this
+# command?" and the option rows. omo approval_footer_blocked (400) also matches
+# "waiting for approval", so this outranks it.
+[[rules]]
+id = "run_command_card_blocked"
+state = "blocked"
+priority = 420
+region = "bottom_non_empty_lines(10)"
+visible_blocker = true
+line_regex = [
+  '^\s*Run this command\?\s*$',
+  '^\s*(?:→\s+)?Run \(once\) \(y\)\s*$',
+  '^\s*(?:→\s+)?Skip & tell the agent what to do instead \(esc or n\)\s*$',
+]
+
+# While a turn runs the composer line ends in "ctrl+c to stop" above the "Auto" model
+# line (live-working, live-running). Anchored on "→ Add a follow-up" so a dev server's
+# bare "ctrl+c to stop" (see the dropped stop_hint_working above) never matches.
+# Priority 120 beats antigravity spinner_working (100), which also takes " ⠠⠜ Working".
+[[rules]]
+id = "composer_working"
+state = "working"
+priority = 120
+region = "bottom_non_empty_lines(6)"
+visible_working = true
+line_regex = [
+  '^\s*→ Add a follow-up\s+ctrl\+c to stop\s*$',
+  '^\s*Auto(?:\s+·\s+[0-9.]+%)?\s*$',
+]
+
+# Between turns the same composer has no "ctrl+c to stop" (live-idle; a typed but
+# unsent prompt replaces the placeholder in live-composer-typed).
+[[rules]]
+id = "composer_idle"
+state = "idle"
+priority = 60
+region = "bottom_non_empty_lines(5)"
+visible_idle = true
+line_regex = [
+  '^\s*→ \S',
+  '^\s*Auto(?:\s+·\s+[0-9.]+%)?\s*$',
+]
+not = [{ contains = ["ctrl+c to stop"] }]

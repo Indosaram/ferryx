@@ -71,6 +71,7 @@ use std::sync::{Mutex, OnceLock};
 
 use futures_util::future::BoxFuture;
 use regex::Regex;
+use sha2::{Digest, Sha256};
 
 use crate::scoped_contracts::{DeliveryReceipt, DeliveryStage, ScopeError, ScopeErrorCode};
 
@@ -94,7 +95,7 @@ use super::prompt_omp::{detect_omp_prompt_card, remember_omp_prompt, OmpPromptCa
 use super::prompt_pi::{parse_pi_prompt, pi_answer_error_code, plan_pi_answer, PI_AGENT};
 use super::types::{
     reference_draft_key, ReferenceKeyStep, ReferencePrompt, ReferencePromptAnswer,
-    ReferencePromptAnswerPayload, ReferencePromptDetector, ReferencePromptKind,
+    ReferencePromptAnswerPayload, ReferencePromptDetector, ReferencePromptKind, ReferencePromptOption,
     ReferenceScreenSnapshot, ReferenceTargetRef, REFERENCE_OUTCOME_UNKNOWN_CODE,
 };
 
@@ -173,6 +174,10 @@ const CODEX_FOOTER_SPAN: usize = 3;
 // ---------------------------------------------------------------------------------------------
 
 /// One of the reference's five prompt families.
+///
+/// The families after [Self::Omo] are Ferryx's own screen readers for agents the reference does
+/// not name. Each reads only the screens captured live for its agent (or, where no live capture
+/// exists, the agent's installed source), and each answers through a [ScreenPromptCard].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReferencePromptFamily {
     Claude,
@@ -180,11 +185,35 @@ pub enum ReferencePromptFamily {
     Omo,
     Omp,
     Pi,
+    Opencode,
+    Copilot,
+    Cline,
+    Crush,
+    Grok,
+    Aider,
+    Kimi,
+    Gjc,
+    Cursor,
 }
 
 impl ReferencePromptFamily {
     /// Every family, in the order the reference's `parsePrompt` reaches the arms.
-    pub const ALL: [Self; 5] = [Self::Codex, Self::Omp, Self::Claude, Self::Pi, Self::Omo];
+    pub const ALL: [Self; 14] = [
+        Self::Codex,
+        Self::Omp,
+        Self::Claude,
+        Self::Pi,
+        Self::Omo,
+        Self::Opencode,
+        Self::Copilot,
+        Self::Cline,
+        Self::Crush,
+        Self::Grok,
+        Self::Aider,
+        Self::Kimi,
+        Self::Gjc,
+        Self::Cursor,
+    ];
 
     /// The registry id this family's arm runs for.
     pub fn agent(self) -> &'static str {
@@ -194,6 +223,15 @@ impl ReferencePromptFamily {
             Self::Omo => REFERENCE_OMO_AGENT,
             Self::Omp => super::prompt_omp::OMP_AGENT_ID,
             Self::Pi => PI_AGENT,
+            Self::Opencode => super::prompt_opencode::REFERENCE_OPENCODE_AGENT,
+            Self::Copilot => super::prompt_copilot::REFERENCE_COPILOT_AGENT,
+            Self::Cline => super::prompt_cline::REFERENCE_CLINE_AGENT,
+            Self::Crush => super::prompt_crush::REFERENCE_CRUSH_AGENT,
+            Self::Grok => super::prompt_grok::REFERENCE_GROK_AGENT,
+            Self::Aider => super::prompt_aider::REFERENCE_AIDER_AGENT,
+            Self::Kimi => super::prompt_kimi::REFERENCE_KIMI_AGENT,
+            Self::Gjc => super::prompt_gjc::REFERENCE_GJC_AGENT,
+            Self::Cursor => super::prompt_cursor::REFERENCE_CURSOR_AGENT,
         }
     }
 
@@ -208,16 +246,44 @@ impl ReferencePromptFamily {
             Self::Omo => super::prompt_omo::detect_reference_omo_prompt,
             Self::Omp => super::prompt_omp::detect_omp_prompt,
             Self::Pi => super::prompt_pi::parse_pi_prompt,
+            Self::Opencode => super::prompt_opencode::detect_reference_opencode_prompt,
+            Self::Copilot => super::prompt_copilot::detect_reference_copilot_prompt,
+            Self::Cline => super::prompt_cline::detect_reference_cline_prompt,
+            Self::Crush => super::prompt_crush::detect_reference_crush_prompt,
+            Self::Grok => super::prompt_grok::detect_reference_grok_prompt,
+            Self::Aider => super::prompt_aider::detect_reference_aider_prompt,
+            Self::Kimi => super::prompt_kimi::detect_reference_kimi_prompt,
+            Self::Gjc => super::prompt_gjc::detect_reference_gjc_prompt,
+            Self::Cursor => super::prompt_cursor::detect_reference_cursor_prompt,
         }
+    }
+
+    /// The screen reader of a family answered through a [ScreenPromptCard], if it is one.
+    fn screen_reader(self) -> Option<fn(&str) -> Option<ScreenPromptCard>> {
+        let reader: fn(&str) -> Option<ScreenPromptCard> = match self {
+            Self::Opencode => super::prompt_opencode::parse_opencode_prompt,
+            Self::Copilot => super::prompt_copilot::parse_copilot_prompt,
+            Self::Cline => super::prompt_cline::parse_cline_prompt,
+            Self::Crush => super::prompt_crush::parse_crush_prompt,
+            Self::Grok => super::prompt_grok::parse_grok_prompt,
+            Self::Aider => super::prompt_aider::parse_aider_prompt,
+            Self::Kimi => super::prompt_kimi::parse_kimi_prompt,
+            Self::Gjc => super::prompt_gjc::parse_gjc_prompt,
+            Self::Cursor => super::prompt_cursor::parse_cursor_prompt,
+            Self::Claude | Self::Codex | Self::Omo | Self::Omp | Self::Pi => return None,
+        };
+        Some(reader)
     }
 
     /// Does this family read a card on a pane this agent names?
     ///
     /// The OmO arm runs for `omo`, for a pane with no agent, and — after the family's own
     /// readers — for `pi` and `claude`, which herdr names an OmO pane while it waits.
+    /// The cursor arm also runs for its launcher name `cursor-agent`.
     pub fn reads_agent(self, agent: &str) -> bool {
         match self {
             Self::Omo => omo_reads_forms(agent),
+            Self::Cursor => super::prompt_cursor::cursor_reads_agent(agent),
             other => agent == other.agent(),
         }
     }
@@ -225,21 +291,159 @@ impl ReferencePromptFamily {
     /// The family whose arm of the chain runs for this agent, when one does.
     pub fn of_agent(agent: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|family| {
-            matches!(family, Self::Claude | Self::Codex | Self::Omp | Self::Pi)
-                && family.reads_agent(agent)
+            !matches!(family, Self::Omo) && family.reads_agent(agent)
         })
         .or_else(|| Self::Omo.reads_agent(agent).then_some(Self::Omo))
     }
 }
 
-/// Compile-time proof that all five families ship the frozen detector shape (§6).
-const _: [ReferencePromptDetector; 5] = [
+/// Compile-time proof that every family ships the frozen detector shape (§6).
+const _: [ReferencePromptDetector; 14] = [
     super::prompt_claude::detect_reference_claude_prompt,
     super::prompt_codex::detect_reference_codex_prompt,
     super::prompt_omo::detect_reference_omo_prompt,
     super::prompt_omp::detect_omp_prompt,
     super::prompt_pi::parse_pi_prompt,
+    super::prompt_opencode::detect_reference_opencode_prompt,
+    super::prompt_copilot::detect_reference_copilot_prompt,
+    super::prompt_cline::detect_reference_cline_prompt,
+    super::prompt_crush::detect_reference_crush_prompt,
+    super::prompt_grok::detect_reference_grok_prompt,
+    super::prompt_aider::detect_reference_aider_prompt,
+    super::prompt_kimi::detect_reference_kimi_prompt,
+    super::prompt_gjc::detect_reference_gjc_prompt,
+    super::prompt_cursor::detect_reference_cursor_prompt,
 ];
+
+// ---------------------------------------------------------------------------------------------
+// The screen card: one menu read off the screen, with each option's own evidenced keys
+// ---------------------------------------------------------------------------------------------
+
+/// A prompt read off an agent's screen, with the keys that answer each option.
+///
+/// The families Ferryx reads itself (every family after [ReferencePromptFamily::Omo]) answer an
+/// option with the keys their agent's own UI takes, as measured on a live pane or read from the
+/// agent's shipped source. An option whose keys are not evidenced carries `None`: the card still
+/// shows it, and an answer that picks it is refused rather than guessed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenPromptCard {
+    pub family: ReferencePromptFamily,
+    pub prompt: ReferencePrompt,
+    /// One entry per option, in the option order.
+    pub option_keys: Vec<Option<Vec<ReferenceKeyStep>>>,
+    /// The steps before and after a typed answer, when the prompt takes one.
+    pub custom_keys: Option<(Vec<ReferenceKeyStep>, Vec<ReferenceKeyStep>)>,
+}
+
+impl ScreenPromptCard {
+    /// A card whose id names what the prompt says (never its cursor), like every other family.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        family: ReferencePromptFamily,
+        kind: ReferencePromptKind,
+        title: String,
+        question: String,
+        body: Option<String>,
+        labels: Vec<String>,
+        option_keys: Vec<Option<Vec<ReferenceKeyStep>>>,
+        custom_keys: Option<(Vec<ReferenceKeyStep>, Vec<ReferenceKeyStep>)>,
+    ) -> Self {
+        let custom_option_index = custom_keys.as_ref().map(|_| labels.len() as u32);
+        let payload = serde_json::json!({
+            "agent": family.agent(),
+            "kind": kind,
+            "title": title,
+            "question": question,
+            "body": body,
+            "options": labels,
+            "custom_option_index": custom_option_index,
+        });
+        let digest = Sha256::digest(payload.to_string().as_bytes());
+        let mut id: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        id.truncate(12);
+        Self {
+            family,
+            prompt: ReferencePrompt {
+                id,
+                agent: family.agent().to_string(),
+                kind,
+                title,
+                question,
+                body,
+                options: labels
+                    .into_iter()
+                    .map(|label| ReferencePromptOption { label, description: None })
+                    .collect(),
+                multi_select: false,
+                custom_option_index,
+                queued: None,
+                steps: Vec::new(),
+                fallback: None,
+            },
+            option_keys,
+            custom_keys,
+        }
+    }
+
+    /// The keys that answer this card: one option, or a typed answer where the prompt takes one.
+    pub fn answer_steps(
+        &self,
+        answer: &ReferencePromptAnswer,
+    ) -> Result<Vec<ReferenceKeyStep>, ScopeErrorCode> {
+        if !answer.is_single_choice() || answer.option_indices.is_some() {
+            // None of these readers reads a multiple choice.
+            return Err(ScopeErrorCode::InvalidRequest);
+        }
+        if let Some(text) = answer.custom_text.as_deref() {
+            let text = text.trim();
+            let Some((before, after)) = self.custom_keys.as_ref() else {
+                return Err(ScopeErrorCode::Unsupported);
+            };
+            if text.is_empty() {
+                return Err(ScopeErrorCode::Unsupported);
+            }
+            let mut steps = before.clone();
+            steps.push(ReferenceKeyStep::typed(text));
+            steps.extend(after.iter().cloned());
+            return Ok(steps);
+        }
+        let index = answer.option_index.ok_or(ScopeErrorCode::InvalidRequest)? as usize;
+        match self.option_keys.get(index) {
+            Some(Some(keys)) => Ok(keys.clone()),
+            Some(None) => Err(ScopeErrorCode::Unsupported),
+            None => Err(ScopeErrorCode::InvalidRequest),
+        }
+    }
+}
+
+/// One named key per step: the moves from row `from` to row `to`.
+pub(super) fn screen_row_moves(from: usize, to: usize) -> Vec<ReferenceKeyStep> {
+    let key = if to > from { "down" } else { "up" };
+    (0..from.abs_diff(to)).map(|_| ReferenceKeyStep::keys([key])).collect()
+}
+
+/// Every line of the screen with its escape sequences off, nothing else changed.
+pub(super) fn raw_screen_lines(screen: &str) -> Vec<String> {
+    screen_lines(screen)
+}
+
+/// A line without its escape sequences and without every box side bar (`│`, `┃`) and space at
+/// either end, so a row of a box nested in another box reads as its own text.
+pub(super) fn strip_box_bars(raw: &str) -> String {
+    re_ansi()
+        .replace_all(raw, "")
+        .trim_matches(|c: char| c == '│' || c == '┃' || c.is_whitespace())
+        .to_string()
+}
+
+/// The screen's lines with every box side bar off, blanks and rules dropped.
+pub(super) fn bare_screen_lines(screen: &str) -> Vec<String> {
+    screen_lines(screen)
+        .iter()
+        .map(|line| strip_box_bars(line))
+        .filter(|line| !line.is_empty() && !is_screen_divider(line))
+        .collect()
+}
 
 // ---------------------------------------------------------------------------------------------
 // The private card each answer is planned from
@@ -260,6 +464,8 @@ pub enum ReferencePromptCard {
     /// pi keeps its cursor inside the prompt id (`pi_prompt_cursor`), so the state this module
     /// holds for it is only the card it was detected from.
     Pi(ReferencePrompt),
+    /// A family Ferryx reads off the screen itself, with each option's own keys.
+    Screen(ScreenPromptCard),
 }
 
 impl ReferencePromptCard {
@@ -271,6 +477,7 @@ impl ReferencePromptCard {
             Self::Omo(_) => ReferencePromptFamily::Omo,
             Self::Omp(_) => ReferencePromptFamily::Omp,
             Self::Pi(_) => ReferencePromptFamily::Pi,
+            Self::Screen(card) => card.family,
         }
     }
 
@@ -282,6 +489,7 @@ impl ReferencePromptCard {
             Self::Omo(card) => &card.prompt,
             Self::Omp(card) => &card.prompt,
             Self::Pi(prompt) => prompt,
+            Self::Screen(card) => &card.prompt,
         }
     }
 
@@ -409,7 +617,11 @@ fn detect_card(
         _ if agent == REFERENCE_OMO_AGENT || agent.is_empty() => {
             omo_card(agent, screen, session).map(ReferencePromptCard::Omo)
         }
-        _ => None,
+        // Ferryx's own screen readers: each runs only for the registry id it names.
+        _ => ReferencePromptFamily::of_agent(agent)
+            .and_then(ReferencePromptFamily::screen_reader)
+            .and_then(|read| read(screen))
+            .map(ReferencePromptCard::Screen),
     }
 }
 
@@ -513,6 +725,7 @@ fn plan_answer_keys(
         ReferencePromptCard::Pi(_) => {
             plan_pi_answer(prompt, answer).map_err(|_| pi_answer_error_code())
         }
+        ReferencePromptCard::Screen(card) => card.answer_steps(answer),
     }
 }
 
@@ -1547,14 +1760,17 @@ mod tests {
         // The detectors the integration reaches through the family list are the families' own
         // frozen entry points: each claims its own id and refuses another family's screen.
         for family in ReferencePromptFamily::ALL {
+            let Some(fixture) = fixture_for(family) else {
+                continue;
+            };
             let detector = family.detector();
             assert!(
-                detector(family.agent(), fixture_for(family)).is_some(),
+                detector(family.agent(), fixture).is_some(),
                 "{}'s own detector reads its own fixture",
                 family.agent()
             );
             assert!(
-                detector("grok", fixture_for(family)).is_none(),
+                detector("prime-agent", fixture).is_none(),
                 "{} claims no provider the reference does not name",
                 family.agent()
             );
@@ -1562,14 +1778,25 @@ mod tests {
         assert!(ReferencePromptFamily::Codex.detector()("pi", PI_DIALOG).is_none());
     }
 
-    fn fixture_for(family: ReferencePromptFamily) -> &'static str {
-        match family {
+    /// A captured prompt per family; kimi has none (its tests render one from the installed
+    /// source).
+    fn fixture_for(family: ReferencePromptFamily) -> Option<&'static str> {
+        Some(match family {
             ReferencePromptFamily::Claude => CLAUDE_QUESTION,
             ReferencePromptFamily::Codex => CODEX_MENU,
             ReferencePromptFamily::Omo => OMO_FORM,
             ReferencePromptFamily::Omp => OMP_QUESTION,
             ReferencePromptFamily::Pi => PI_DIALOG,
-        }
+            ReferencePromptFamily::Opencode => SCREEN_FAMILY_CAPTURES[0].1,
+            ReferencePromptFamily::Copilot => SCREEN_FAMILY_CAPTURES[1].1,
+            ReferencePromptFamily::Cline => SCREEN_FAMILY_CAPTURES[2].1,
+            ReferencePromptFamily::Crush => SCREEN_FAMILY_CAPTURES[3].1,
+            ReferencePromptFamily::Grok => SCREEN_FAMILY_CAPTURES[4].1,
+            ReferencePromptFamily::Aider => SCREEN_FAMILY_CAPTURES[5].1,
+            ReferencePromptFamily::Gjc => SCREEN_FAMILY_CAPTURES[6].1,
+            ReferencePromptFamily::Cursor => SCREEN_FAMILY_CAPTURES[10].1,
+            ReferencePromptFamily::Kimi => return None,
+        })
     }
 
     fn family_of(agent: &str) -> ReferencePromptFamily {
@@ -1584,7 +1811,14 @@ mod tests {
 
     #[test]
     fn a_detector_never_claims_a_provider_the_reference_does_not_name() {
-        for agent in ["grok", "opencode", "cursor", "prime-agent", "droid"] {
+        // cursor has its own family since the logged-in capture (prompt_cursor.rs); it still
+        // reaches no arm of the reference's chain on the reference fixtures.
+        for agent in ["cursor", "cursor-agent"] {
+            for screen in [CLAUDE_QUESTION, CODEX_MENU, OMP_QUESTION, PI_DIALOG, OMO_FORM] {
+                assert!(detect_reference_prompt(agent, screen).is_none(), "{agent} read a reference fixture");
+            }
+        }
+        for agent in ["prime-agent", "droid", "antigravity", "agy"] {
             for screen in [CLAUDE_QUESTION, CODEX_MENU, OMP_QUESTION, PI_DIALOG, OMO_FORM] {
                 assert!(
                     detect_reference_prompt(agent, screen).is_none(),
@@ -1598,6 +1832,74 @@ mod tests {
         assert!(detect_reference_prompt("codex", CLAUDE_QUESTION).is_none());
         assert!(detect_reference_prompt("omp", PI_DIALOG).is_none());
         assert!(detect_reference_prompt("pi", OMP_QUESTION).is_none());
+    }
+
+    /// The live approval/question captures of every screen-read family, by the agent that drew it.
+    const SCREEN_FAMILY_CAPTURES: [(&str, &str); 11] = [
+        ("opencode", include_str!("fixtures/opencode/prompt/approval.screen")),
+        ("copilot", include_str!("fixtures/copilot/prompt/approval.screen")),
+        ("cline", include_str!("fixtures/cline/prompt/approval.screen")),
+        ("crush", include_str!("fixtures/crush/prompt/approval.screen")),
+        ("grok", include_str!("fixtures/grok/prompt/approval.screen")),
+        ("aider", include_str!("fixtures/aider/prompt/approval-run-shell.screen")),
+        ("gjc", include_str!("fixtures/gjc/prompt/approval-ask.screen")),
+        ("omp", include_str!("fixtures/omp/prompt/approval.screen")),
+        ("omp", include_str!("fixtures/omp/prompt/question-single.screen")),
+        ("omp", include_str!("fixtures/omp/prompt/question-multi.screen")),
+        ("cursor", include_str!("fixtures/cursor/prompt/approval.screen")),
+    ];
+
+    #[test]
+    fn every_live_capture_is_a_card_for_its_own_agent_through_the_chain() {
+        for (agent, screen) in SCREEN_FAMILY_CAPTURES {
+            let card = detect_reference_prompt_card_in_session(agent, screen, &ReferencePromptSession::default())
+                .unwrap_or_else(|| panic!("{agent}'s live capture is a card"));
+            assert_eq!(card.prompt().agent, agent);
+            assert_eq!(card.family().agent(), agent);
+            assert_eq!(ReferencePromptFamily::of_agent(agent), Some(card.family()));
+            // The chain remembers the card, and the pure planner answers its first option.
+            let keys = reference_answer_keys(card.prompt(), &option(0));
+            if card.prompt().multi_select {
+                assert!(keys.is_err(), "{agent}: a multiple choice is not a single pick");
+            } else {
+                assert!(!keys.unwrap().is_empty(), "{agent}: option 0 plans keys");
+            }
+        }
+    }
+
+    #[test]
+    fn no_agent_reads_another_agents_live_capture() {
+        let agents = [
+            "claude", "codex", "omo", "omp", "pi", "opencode", "copilot", "cline", "crush", "grok",
+            "aider", "kimi", "gjc", "cursor",
+        ];
+        for (owner, screen) in SCREEN_FAMILY_CAPTURES {
+            for agent in agents {
+                if agent == owner {
+                    continue;
+                }
+                assert!(
+                    detect_reference_prompt(agent, screen).is_none(),
+                    "{agent} read {owner}'s capture"
+                );
+            }
+        }
+        // And no new family reads the reference families' own fixtures.
+        for agent in ["opencode", "copilot", "cline", "crush", "grok", "aider", "kimi", "gjc", "cursor"] {
+            for screen in [CLAUDE_QUESTION, CODEX_MENU, OMP_QUESTION, PI_DIALOG, OMO_FORM] {
+                assert!(detect_reference_prompt(agent, screen).is_none(), "{agent} read a reference fixture");
+            }
+        }
+    }
+
+    #[test]
+    fn every_screen_family_is_reached_by_its_own_registry_id() {
+        for family in ReferencePromptFamily::ALL {
+            if family.screen_reader().is_none() {
+                continue;
+            }
+            assert_eq!(ReferencePromptFamily::of_agent(family.agent()), Some(family));
+        }
     }
 
     #[test]

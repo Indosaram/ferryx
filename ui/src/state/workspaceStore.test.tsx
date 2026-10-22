@@ -21,7 +21,7 @@ import { emitNativeTerminalPresentation, getDurableNativeBinding, resetNativeTer
 import { createLayoutState } from "./layout";
 import { clearHmrWorkspaceState } from "./hmrWorkspaceState";
 import { clearWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
-const { useWorkspaceStore, workspaceReducer, selectGlobalUnreadBadgeCount, hasNavigableSession } = await import("./workspaceStore");
+const { useWorkspaceStore, workspaceReducer, selectGlobalUnreadBadgeCount, hasNavigableSession, PROVIDER_SESSION_PROBE_AGENTS } = await import("./workspaceStore");
 type WorkspaceServices = import("./workspaceStore").WorkspaceServices;
 type WorkspaceState = import("./workspaceStore").WorkspaceState;
 
@@ -2180,5 +2180,23 @@ describe("FOCUS_EXISTING_SESSION navigation", () => {
     // Acknowledging exactly the focused pane drops the count by one; the sibling remains.
     expect(selectGlobalUnreadBadgeCount(focused, "ws-main")).toBe(1);
     expect(focused.activityBySessionId?.["session-2"]?.seen).toBe(false);
+  });
+});
+
+describe("provider session probe allowlist", () => {
+  it("probes every agent the daemon can discover from the pane's process tree", () => {
+    for (const agent of ["opencode", "omp", "grok", "droid", "cline", "crush"]) {
+      expect(PROVIDER_SESSION_PROBE_AGENTS).toContain(agent);
+    }
+    // aider has no daemon discovery adapter.
+    expect(PROVIDER_SESSION_PROBE_AGENTS).not.toContain("aider");
+  });
+
+  it("does not probe pi, whose daemon discovery is only a newest-transcript-in-cwd guess", () => {
+    // senpi keeps no transcript open and its PI_SESSION_FILE is empty in a clean pane
+    // (.omo-parity/facts/local-1.md:344), so `pi_session_id` (src-tauri/src/ipc/agents.rs) ends in
+    // the cwd fallback. A guess there would bind another conversation in the same directory; pi's
+    // capture comes from its extension report (ctx.sessionManager) instead.
+    expect(PROVIDER_SESSION_PROBE_AGENTS).not.toContain("pi");
   });
 });

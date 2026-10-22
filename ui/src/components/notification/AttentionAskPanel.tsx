@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import {
+  AGENT_HISTORY_PROVIDERS,
   readAgentHistory,
   searchAgentHistory,
   type AgentHistoryEntry,
@@ -45,7 +46,9 @@ export const ATTENTION_ASK_RANGES: AttentionAskRange[] = [
 
 export const DEFAULT_ASK_RANGE_ID = "3h";
 
-const ASK_PROVIDERS: AgentHistoryProvider[] = ["claude", "codex"];
+// Every provider with a readable store is scanned; a provider whose CLI is absent simply returns
+// an empty page with a ROOT_UNAVAILABLE warning.
+const ASK_PROVIDERS: readonly AgentHistoryProvider[] = AGENT_HISTORY_PROVIDERS;
 const ASK_ENTRY_LIMIT = 24;
 const ASK_EVIDENCE_LIMIT = 6;
 const ASK_SNIPPETS_PER_ENTRY = 3;
@@ -98,14 +101,28 @@ export async function collectAskEvidence(
   let partial = false;
   const candidates: AgentHistoryEntry[] = [];
 
-  for (const provider of ASK_PROVIDERS) {
-    const page = await services.search({
-      provider,
-      cwd: null,
-      query,
-      cursor: null,
-      limit: ASK_ENTRY_LIMIT,
-    });
+  const failures: unknown[] = [];
+  const pages = await Promise.all(
+    ASK_PROVIDERS.map(async (provider) => {
+      try {
+        return await services.search({
+          provider,
+          cwd: null,
+          query,
+          cursor: null,
+          limit: ASK_ENTRY_LIMIT,
+        });
+      } catch (caught) {
+        // One unreadable store must not silence the other providers; report it and keep scanning.
+        failures.push(caught);
+        return { items: [], nextCursor: null, partial: true, warnings: [`SEARCH_FAILED:${provider}`] };
+      }
+    }),
+  );
+  // When no store could be searched at all, an empty answer would read as "nothing found";
+  // surface the failure instead.
+  if (failures.length === ASK_PROVIDERS.length) throw failures[0];
+  for (const page of pages) {
     if (page.partial) partial = true;
     warnings.push(...(page.warnings ?? []));
     candidates.push(...page.items.filter((entry) => isWithinRange(entry, range, now)));
@@ -124,7 +141,9 @@ export async function collectAskEvidence(
     if (snippets.length > 0) evidence.push({ entry, snippets });
   }
 
-  return { evidence, scanned, partial, warnings };
+  // Sixteen providers report the same warning (an absent store, a scan limit) over and over;
+  // the panel only needs to say it once.
+  return { evidence, scanned, partial, warnings: [...new Set(warnings)] };
 }
 
 export interface AttentionAskPanelProps {

@@ -1,0 +1,40 @@
+
+ ● Copilot CLI version 1.0.102 downloaded. Restart to update.
+
+ > run the shell command: touch probe.txt
+
+ ✗ Model call failed: The requested model is not supported. (Request ID: D240:2F6274:1721CFE:1AFAC9A:6AD9B9E5)
+
+ ✗ Model call failed: The requested model is not supported. (Request ID: D240:2F6274:1723DA1:1AFD174:6AD9B9F1)
+
+ ✗ Model call failed: The requested model is not supported. (Request ID: D240:2F6274:1725D79:1AFF585:6AD9B9F9)
+
+ ✗ Model call failed: The requested model is not supported. (Request ID: D240:2F6274:17284EF:1B021F8:6AD9BA01)
+
+ ● Operation cancelled by user
+
+ ● Model changed to: gpt-4.1. The new model will be used for the next conversation.
+
+ > run the shell command: touch probe.txt
+
+ ○ Create an empty file named probe.txt
+ $ touch probe.txt
+
+
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ Create an empty file named probe.txt                                                                               │
+ │                                                                                                                    │
+ │ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ │
+ │ │ touch probe.txt                                                                                                │ │
+ │ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
+ │                                                                                                                    │
+ │ Do you want to run this command?                                                                                   │
+ │                                                                                                                    │
+ │ ❯ 1. Yes                                                                                                           │
+ │   2. Yes, and approve `touch` for the rest of the running session                                                  │
+ │   3. No, and tell Copilot what to do differently (Esc)                                                             │
+ │                                                                                                                    │
+ │ Confirm with number keys or ↑↓ keys and Enter, Cancel with Esc                                                     │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+

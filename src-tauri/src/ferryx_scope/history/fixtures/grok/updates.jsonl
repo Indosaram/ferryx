@@ -1,0 +1,5 @@
+{"timestamp":1792653174,"method":"_x.ai/session/update","params":{"sessionId":"01a16274-a688-7e73-b6fc-434bc7781be4","update":{"sessionUpdate":"hook_execution","event_name":"session_start","runs":[]}}}
+{"timestamp":1792653180,"method":"session/update","params":{"sessionId":"01a16274-a688-7e73-b6fc-434bc7781be4","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"grok-user-sentinel"},"_meta":{"modelId":"fake-model","promptIndex":0}}}}
+{"timestamp":1792653180,"method":"session/update","params":{"sessionId":"01a16274-a688-7e73-b6fc-434bc7781be4","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"run_terminal_command","rawInput":{"command":"redacted"}}}}
+{"timestamp":1792653181,"method":"session/update","params":{"sessionId":"01a16274-a688-7e73-b6fc-434bc7781be4","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"grok-assistant"}}}}
+{"timestamp":1792653182,"method":"session/update","params":{"sessionId":"01a16274-a688-7e73-b6fc-434bc7781be4","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"-sentinel"}}}}

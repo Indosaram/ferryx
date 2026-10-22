@@ -1,0 +1,31 @@
+
+
+                                 █████████    █████████     ████████    ███   █████████
+                                 ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                 ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                 ███    ███   █████████    ███    ███   ███   ███    ███
+                                 ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                 ███    ███   ███    ███   ███    ███   ███   ███    ███
+                                 █████████    ███    ███    ████████    ███   █████████
+
+                                                        v0.247.0
+
+                         TIP: Run /readiness-report to evaluate this repo for agent readiness.
+
+                                   shift+tab to cycle modes · ctrl+N to cycle models
+                                        ctrl+L for autonomy · tab for reasoning
+
+                                  Skills (…)  MCPs (0) ✗  Connectors (…)  AGENTS.md ✗
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                      │
+│ Welcome to Factory CLI                                                                                               │
+│ Factory is an AI-powered software development assistant that helps you build, understand, and improve your code.     │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+Please login with your Factory account to continue.
+
+> Login
+  Sign into a Factory Private deployment
+  Exit

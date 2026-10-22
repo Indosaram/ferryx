@@ -22,6 +22,21 @@ const WAITING_AT_SEGMENT_START_RE = new RegExp(`^${WAITING_WORDS_SOURCE}(?![\\w-
 const DONE_AT_SEGMENT_START_RE = new RegExp(`^${DONE_WORDS_SOURCE}(?![\\w-])`, "i");
 const DONE_GLYPH_RE = /^[◇*](?:\s|$)/u;
 const WORKING_RE = /\b(working|thinking|running|executing|processing)\b/i;
+/**
+ * omp titles carry no agent name: `π > <label>` idle, `π <spinner> <label>` working,
+ * `π ! <label>` waiting on an ask card or tool approval, `π: <label>` with title state off, and
+ * a static `π : <label>` while working where no spinner can be drawn (WSL, Windows fallback).
+ * The spinner follows `tui.titleSpinner`: braille (default), pulse `○◔◑◕●`, or line `-\|/`.
+ */
+const OMP_TITLE_RE = /^π(?: ([>!:\u2800-\u28FF○◔◑◕●|/\\-])(?: (.*))?|: ?(.*))$/u;
+/** A title that opens with `Action Required` (grok's `⚠ Action Required - …`) is waiting on the user. */
+const ACTION_REQUIRED_LEAD_RE = /^action required\b/i;
+
+function parseOmpTitle(normalized: string): { marker: string | undefined; label: string } | null {
+  const match = OMP_TITLE_RE.exec(normalized);
+  if (!match) return null;
+  return { marker: match[1], label: (match[2] ?? match[3] ?? "").trim() };
+}
 
 export interface KnownAgent {
   pattern: RegExp;
@@ -36,13 +51,21 @@ export const KNOWN_AGENT_MATCHERS: KnownAgent[] = [
   { pattern: /\b(?:claude code|claude)\b/i, type: "claude", name: "Claude Code" },
   { pattern: /\bcodex\b/i, type: "codex", name: "Codex" },
   { pattern: /\bopencode\b/i, type: "opencode", name: "OpenCode" },
+  // opencode names a titled session `OC | <session title>`.
+  { pattern: /OC(?= \| )/i, type: "opencode", name: "OpenCode" },
   { pattern: /\b(?:omp|oh-my-pi)\b/i, type: "omp", name: "OMP" },
+  // pi (senpi) titles read `senpi - <dir>` / `senpi - Running <tool>`; omo keeps its own `omo` titles.
+  { pattern: /senpi(?= - )/i, type: "pi", name: "Pi" },
   { pattern: /\bpi\b/i, type: "pi", name: "Pi" },
   { pattern: /\baider\b/i, type: "aider", name: "Aider" },
   { pattern: /\bcursor\b/i, type: "cursor", name: "Cursor" },
   { pattern: /\bgrok\b/i, type: "grok", name: "Grok" },
+  // grok ends every non-default title with ` - grok`: `<title> - grok`, `⠴ - Responding - grok`.
+  { pattern: /(?=.* - grok$)/i, type: "grok", name: "Grok" },
   { pattern: /\bdevin\b/i, type: "devin", name: "Devin" },
   { pattern: /\bdroid\b/i, type: "droid", name: "Droid" },
+  // droid writes `⛬ <session title>`, falling back to `⛬ Droid`.
+  { pattern: /⛬(?: droid\b)?/i, type: "droid", name: "Droid" },
   { pattern: /\bhermes\b/i, type: "hermes", name: "Hermes" },
   { pattern: /\bkimi\b/i, type: "kimi", name: "Kimi" },
   { pattern: /\bgoose\b/i, type: "goose", name: "Goose" },
@@ -100,7 +123,16 @@ export function classifyTerminalTitleActivity(rawTitle: string): TerminalActivit
   const normalized = normalizeTerminalTitle(rawTitle);
   if (!normalized) return null;
 
+  // omp's marker is authoritative, so words in its session label never decide the status.
+  const omp = parseOmpTitle(normalized);
+  if (omp) {
+    if (omp.marker === "!") return "waiting";
+    if (omp.marker === undefined || omp.marker === ">") return null;
+    return "working";
+  }
+
   if (normalized.includes("✋") || WAITING_AT_END_RE.test(normalized)) return "waiting";
+  if (ACTION_REQUIRED_LEAD_RE.test(normalized.replace(LEADING_DECORATION_RE, ""))) return "waiting";
   if (DONE_AT_END_RE.test(normalized) || DONE_GLYPH_RE.test(normalized)) return "done";
 
   // A live spinner is direct evidence of active work, so a status word that merely
@@ -156,6 +188,18 @@ export function parseAgentTitle(rawTitle: string): ParsedAgentInfo | null {
       agentType: "claude",
       name: "Claude Code",
       task: "Claude Code",
+      state: resolveParsedAgentState(normalized),
+      displayTitle: normalized,
+    };
+  }
+
+  const omp = parseOmpTitle(normalized);
+  if (omp) {
+    return {
+      isAgent: true,
+      agentType: "omp",
+      name: "OMP",
+      task: omp.label || "OMP",
       state: resolveParsedAgentState(normalized),
       displayTitle: normalized,
     };

@@ -1,0 +1,6 @@
+{"type":"title","v":1,"title":"redacted-title","source":"auto","updatedAt":"2026-10-22T07:09:30.231Z","pad":"   "}
+{"type":"session","version":3,"id":"01a16270-e358-7635-88e4-1b2f84460057","timestamp":"2026-10-22T07:08:47.832Z","cwd":"__CWD__"}
+{"type":"model_change","id":"7153409f","parentId":null,"timestamp":"2026-10-22T07:08:47.912Z","runtime":{"version":"18.12.6"},"model":"parity-mock/mock-model","resolvedModelIsFallback":false}
+{"type":"message","id":"dc45e285","parentId":"7153409f","timestamp":"2026-10-22T07:09:15.195Z","runtime":{"version":"18.12.6"},"message":{"role":"user","content":[{"type":"text","text":"omp-user-sentinel"}],"attribution":"user","timestamp":1792652955132}}
+{"type":"message","id":"f0b304b3","parentId":"dc45e285","timestamp":"2026-10-22T07:09:20.154Z","runtime":{"version":"18.12.6"},"message":{"role":"toolResult","toolCallId":"call_1","toolName":"bash","content":[{"type":"text","text":"omp-toolresult-sentinel"}],"isError":false,"timestamp":1792652960153}}
+{"type":"message","id":"fedbe2d5","parentId":"f0b304b3","timestamp":"2026-10-22T07:09:20.184Z","runtime":{"version":"18.12.6"},"message":{"role":"assistant","content":[{"type":"text","text":"omp-assistant-sentinel"}],"api":"openai-completions","provider":"parity-mock","model":"mock-model","stopReason":"stop","timestamp":1792652960180}}

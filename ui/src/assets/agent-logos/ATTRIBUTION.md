@@ -28,6 +28,12 @@ adaptive below so they invert for dark chrome. Never hand-tint a brand logo.
 | `droid.svg` | Factory Droid | [factory.ai `favicon.svg`](https://factory.ai/favicon.svg) | adaptive monochrome (backing plate removed) |
 | `gjc.png` | Gajae-Code (GJC) | [Yeachan-Heo/gajae-code `assets/character.png`](https://github.com/Yeachan-Heo/gajae-code/blob/main/assets/character.png), MIT | brand color |
 
+
+`omp` (oh-my-pi) has no file here: it resolves to `pi.svg` through `AGENT_LOGO_ALIASES`.
+Its official icon ([can1357/oh-my-pi `assets/icon.svg`](https://github.com/can1357/oh-my-pi/blob/main/assets/icon.svg), MIT)
+is a Pi glyph drawn in `#fafafa` on a transparent canvas, so it is invisible on light chrome and
+could only be shipped by hand-tinting it, which this directory forbids.
+
 `aider.png` and `crush.png` are raster because neither project publishes a vector mark;
 both are downscaled to 128x128 from the official artwork. `gjc.png` is the official
 character mark with the bundled wordmark band cropped away, fitted to 128x128 on a

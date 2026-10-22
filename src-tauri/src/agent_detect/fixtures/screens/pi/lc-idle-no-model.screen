@@ -1,0 +1,40 @@
+
+ senpi v2026.10.16
+ esc interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+ Tip: Use /efforts <level> to set the reasoning effort for the current model; /efforts alone lists the levels it
+ supports.
+ ↳ Want the full story on any tip? Ask about it — the give-me-tips skill has the tour.
+
+[Skills]
+  agent-channeltalk, agent-channeltalkbot, agent-discord +36 more (ctrl+o)
+
+[Extensions]
+  cmux-session.ts, ferryx-agent-state.ts, herdr-agent-state.ts, orca-agent-status.ts, orca-prefill.ts,
+orca-titlebar-spinner.ts
+
+
+ Warning: Non-recommended model 'unknown': odd behavior is the default state; a working session is the anomaly.
+
+ Settings: settings.json (JSON)
+
+ Warning: No models available. Use /login to log into a provider via OAuth or API key. See:
+   /Users/indo/.senpi/agent/runtime/d7669b2db560a617-6e4044c3d021/docs/providers.md
+   /Users/indo/.senpi/agent/runtime/d7669b2db560a617-6e4044c3d021/docs/models.md
+
+
+ Update Available
+ New version 2026.10.21-1 is available.
+ senpi update
+ Changelog: https://github.com/code-yeongyu/senpi/blob/v2026.10.21-1/packages/coding-agent/CHANGELOG.md
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/private/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/agentfacts.LjGR/repo-pi • main • ?/0 (0.0%) (auto)      unknown
+
+

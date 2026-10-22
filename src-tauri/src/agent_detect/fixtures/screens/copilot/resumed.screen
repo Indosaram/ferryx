@@ -1,0 +1,40 @@
+ ✗ Model call failed: The requested model is not supported. (Request ID: D240:2F6274:1725D79:1AFF585:6AD9B9F9)
+
+ ✗ Model call failed: The requested model is not supported. (Request ID: D240:2F6274:17284EF:1B021F8:6AD9BA01)
+
+ ● Model changed to: gpt-4.1. The new model will be used for the next conversation.
+
+ > run the shell command: touch probe.txt
+
+ ✓ Create an empty file named probe.txt
+ $ touch probe.txt
+    └ 1 line...
+
+ ● The file probe.txt has been created (or its timestamp updated).
+
+ ● Logged in as user: Indosaram
+
+ ● Connected to GitHub MCP Server
+
+ ● Copilot CLI version 1.0.102 downloaded. Restart to update.
+
+ /private/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/agentfacts.LjGR/repo-copilot[⎇ main*]           gpt-4.1 (1x)
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ >  Enter @ to mention files or / for commands
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Ctrl+c Exit · Ctrl+r Expand recent
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

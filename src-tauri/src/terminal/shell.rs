@@ -237,6 +237,20 @@ pub fn resolve_agent_resume_plan(
                 args: vec!["--resume".to_string(), validated_id],
             })
         }
+        "cline" => {
+            ensure_key(AgentProviderSessionKey::SessionId)?;
+            Ok(ShellCommandPlan {
+                program: "cline".to_string(),
+                args: vec!["--id".to_string(), validated_id],
+            })
+        }
+        "crush" => {
+            ensure_key(AgentProviderSessionKey::SessionId)?;
+            Ok(ShellCommandPlan {
+                program: "crush".to_string(),
+                args: vec!["--session".to_string(), validated_id],
+            })
+        }
         #[cfg(all(test, unix))]
         "ferryx-test-agent" => {
             ensure_key(AgentProviderSessionKey::SessionId)?;
@@ -1187,6 +1201,25 @@ mod tests {
                 None,
                 "cursor-agent",
                 vec!["--resume", "sess-17"],
+            ),
+            // Measured: `cline --id 1792653340197_ys4yu` reopened the session (local-3.md).
+            (
+                "cline",
+                AgentProviderSessionKey::SessionId,
+                "1792653340197_ys4yu",
+                None,
+                "cline",
+                vec!["--id", "1792653340197_ys4yu"],
+            ),
+            // Measured: `crush --session 7f7fbfa62dd136ec` reopened the session; the hook and
+            // herdr id is the UUID form, which `--session` also accepts (remote-crush.md).
+            (
+                "crush",
+                AgentProviderSessionKey::SessionId,
+                "3df112d9-e56f-4f69-b8bb-c58b5d580e89",
+                None,
+                "crush",
+                vec!["--session", "3df112d9-e56f-4f69-b8bb-c58b5d580e89"],
             ),
         ];
 

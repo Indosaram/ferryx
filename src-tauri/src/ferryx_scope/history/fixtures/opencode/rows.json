@@ -1,0 +1,1 @@
+{"message":{"role":"user","time":{"created":1792653365461},"agent":"build","model":{"providerID":"opencode","modelID":"big-pickle"}},"textPart":{"type":"text","text":"opencode-user-sentinel"},"toolPart":{"type":"tool","tool":"bash","callID":"call_1","state":{"status":"completed","input":{"command":"redacted"},"output":"redacted","title":"redacted"}}}

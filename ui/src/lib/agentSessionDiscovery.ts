@@ -19,6 +19,10 @@ const OMO_STORE_RE = new RegExp(`(?:^|/)\\.omo/sessions/[^/]+/[^/]+_(${UUID_PATT
 const GJC_STORE_RE = new RegExp(`(?:^|/)(?:\\.gjc/agent|gjc)(?:/profiles/[^/]+)?/sessions/[^/]+/[^/]+_([0-9a-fA-F-]{8,64})\\.jsonl$`);
 const ANTIGRAVITY_STORE_RE = new RegExp(`(?:^|/)\\.gemini/antigravity-cli/conversations/(${UUID_PATTERN})\\.db(?:-(?:wal|shm))?$`);
 const PI_STORE_RE = new RegExp(`(?:^|/)\\.pi(?:/agent)?/sessions/[^/]+/[^/]+_(${UUID_PATTERN})\\.jsonl$`);
+const OMP_STORE_RE = new RegExp(`(?:^|/)\\.omp/(?:profiles/[^/]+/)?agent/sessions/[^/]+/[^/]+_(${UUID_PATTERN})\\.jsonl$`);
+const GROK_STORE_RE = new RegExp(`(?:^|/)\\.grok/sessions/[^/]+/(${UUID_PATTERN})/[^/]+$`);
+const DROID_STORE_RE = new RegExp(`(?:^|/)\\.factory/sessions/[^/]+/(${UUID_PATTERN})\\.(?:jsonl|settings\\.json)$`);
+const CLINE_STORE_RE = /(?:^|\/)\.cline\/data\/sessions\/(\d+_[a-z0-9]{5})\/\1(?:\.messages)?\.json$/;
 
 /**
  * Agent types whose session ID cannot be discovered via open-file inspection.
@@ -57,6 +61,15 @@ function matchesAgentCommand(command: string, agentType: string): boolean {
   }
   if (normalizedAgent === "antigravity") {
     return baseName === "agy";
+  }
+  if (normalizedAgent === "omp") {
+    // The bun install runs `bun ~/.bun/bin/omp`; omp's `bun …/cli.js __omp_worker_*` helpers are not the agent.
+    const entry = command.trim().split(/\s+/)[1] ?? "";
+    return baseName === "omp" || (baseName === "bun" && extractCommandBaseName(entry) === "omp");
+  }
+  if (normalizedAgent === "cline") {
+    // The detached hub daemon serves every pane, so it never identifies this pane's session.
+    return baseName === "cline" && !command.includes("--cline-hub-daemon");
   }
 
   return baseName === normalizedAgent;
@@ -157,6 +170,22 @@ export function extractSessionIdFromPath(agentType: string, filePath: string): s
     }
     case "pi": {
       const match = PI_STORE_RE.exec(normalizedPath);
+      return match ? match[1]! : null;
+    }
+    case "omp": {
+      const match = OMP_STORE_RE.exec(normalizedPath);
+      return match ? match[1]! : null;
+    }
+    case "grok": {
+      const match = GROK_STORE_RE.exec(normalizedPath);
+      return match ? match[1]! : null;
+    }
+    case "droid": {
+      const match = DROID_STORE_RE.exec(normalizedPath);
+      return match ? match[1]! : null;
+    }
+    case "cline": {
+      const match = CLINE_STORE_RE.exec(normalizedPath);
       return match ? match[1]! : null;
     }
     default:

@@ -81,6 +81,8 @@ base64 = "0.23"
 image = { version = "0.25", default-features = false, features = ["png"] }
 bytes = "1.12"
 libc = "0.2"
+# kimi keys its session folders by md5(cwd); the history reader re-derives it to recover the cwd.
+md-5 = "0.10"
 anyhow = "1.0"
 thiserror = "2.0"
 tracing = "0.1"

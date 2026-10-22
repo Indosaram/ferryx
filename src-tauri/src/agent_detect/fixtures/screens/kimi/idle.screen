@@ -1,0 +1,40 @@
+╭─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                 │
+│   ▐█▛█▛█▌  Welcome to Kimi Code CLI!                                                            │
+│   ▐█████▌  Send /help for help information.                                                     │
+│                                                                                                 │
+│  Directory: /private/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/agentfacts.LjGR/repo-kimi  │
+│  Session: cb0ab2dd-f2e4-4a49-9c8b-843d866bb8f2                                                  │
+│  Model: kimi-for-coding (powered by kimi-k2.5)                                                  │
+│                                                                                                 │
+│  Tip: Kimi Code Web UI, a GUI version of Kimi Code, is now in technical preview.                │
+│       Type /web to switch, or next time run `kimi web` directly.                                │
+│                                                                                                 │
+│  New version available: 1.50.0. Please run `uv tool upgrade kimi-cli` to upgrade.               │
+│                                                                                                 │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
+indo@repo-kimi💫
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+16:40  agent (kimi-for-coding, thinking)  new version found, run `uv tool upgrade kimi-cli` to upgrade     context: 0.0%

@@ -8,6 +8,26 @@ import net from "node:net";
 
 const AGENT_ID = "omo";
 
+// omo and pi run the same senpi engine and load the same `<agentDir>/extensions`: omo's launcher
+// points senpi at ~/.omo/agent, and a bare senpi given SENPI_CODING_AGENT_DIR=~/.omo/agent loads
+// omo's directory too. The file's declared id therefore cannot tell them apart, so within that
+// family the identity comes from the process itself. omo always launches the engine with
+// `--extension <omo-ai>/plugin` (measured argv), and argv, unlike the environment, is not
+// inherited by a pi started from an omo shell. Any other declared id (omp) is reported as declared.
+function reportedAgentId(): string {
+  if (AGENT_ID !== "omo" && AGENT_ID !== "pi") return AGENT_ID;
+  const argv: string[] = typeof process !== "undefined" && Array.isArray(process.argv) ? process.argv : [];
+  const execPath = typeof process !== "undefined" && typeof process.execPath === "string" ? process.execPath : "";
+  const base = (value: string) => value.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  const omoPlugin = argv.some((arg, index) => {
+    const value = arg.startsWith("--extension=") ? arg.slice("--extension=".length) : arg;
+    const flagged = value !== arg || ((argv[index - 1] === "--extension" || argv[index - 1] === "-e") && index > 0);
+    return flagged && /(^|[\\/])omo-ai[\\/]plugin[\\/]?$/i.test(value);
+  });
+  const omoBinary = ["omo", "omo.exe"].includes(base(execPath));
+  return omoPlugin || omoBinary ? "omo" : "pi";
+}
+
 const socketPath = process.env.FERRYX_AGENT_STATE_SOCKET;
 const statePort = Number(process.env.FERRYX_AGENT_STATE_PORT);
 const stateToken = process.env.FERRYX_AGENT_STATE_TOKEN;
@@ -55,7 +75,7 @@ function providerSessionFromContext(ctx): unknown {
 
 function send(state: AgentState, providerSession?: unknown, detail?: string): void {
   if (!enabled()) return;
-  const payload = `${JSON.stringify({ type: "agentState", sessionId, state, agent: AGENT_ID, providerSession, detail, token: tcpEnabled ? stateToken : undefined })}\n`;
+  const payload = `${JSON.stringify({ type: "agentState", sessionId, state, agent: reportedAgentId(), providerSession, detail, token: tcpEnabled ? stateToken : undefined })}\n`;
   sendChain = sendChain.then(
     () =>
       new Promise<void>((resolve) => {
@@ -148,6 +168,34 @@ export default function (pi): void {
     if (!rootSession || ctx?.isIdle?.() !== true) return;
     agentActive = false;
     publishState(false, ctx);
+  });
+
+  // omp never emits `agent_settled`; its run ends with `agent_end`, whose `willContinue` says
+  // whether another run follows. Only an explicit `false` settles, so a runtime that sends
+  // `agent_end` without the field keeps relying on `agent_settled`. Both reaching idle is
+  // harmless: publishState drops a repeated state.
+  pi.on("agent_end", (event, ctx) => {
+    if (!rootSession || event?.willContinue !== false) return;
+    agentActive = false;
+    publishState(false, ctx);
+  });
+
+  // omp's tool approval dialog (`Allow tool: <name>`) waits on the user without going through the
+  // question tool, so it is tracked alongside questions under its own key namespace.
+  pi.on("tool_approval_requested", (event, ctx) => {
+    if (!rootSession) return;
+    const callId = typeof event?.toolCallId === "string" ? event.toolCallId : undefined;
+    if (callId === undefined) return;
+    const toolName = typeof event?.toolName === "string" ? event.toolName : undefined;
+    blockingQuestions.set(`tool-approval:${callId}`, toolName ? `Allow tool: ${toolName}` : undefined);
+    publishState(false, ctx);
+  });
+
+  pi.on("tool_approval_resolved", (event, ctx) => {
+    if (!rootSession) return;
+    const callId = typeof event?.toolCallId === "string" ? event.toolCallId : undefined;
+    if (callId === undefined) return;
+    if (blockingQuestions.delete(`tool-approval:${callId}`)) publishState(false, ctx);
   });
 
   pi.events?.on?.("ask-user:asked", (data) => {

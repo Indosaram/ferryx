@@ -1,0 +1,40 @@
+
+                                            ████████████
+                                               ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                               ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                               ▒▒  ██                  █
+                                                   ██       v18.12.6
+
+                        Tip: Bulk data to classify or triage? Say `jevify` in your message — the
+                         eval kernel's `judge()` processes the batch and you read only what it
+                                           flags — watch it glow as you type
+
+
+ hello slow probe
+
+
+ Working slowly ..............
+
+
+ RUNTOOL now
+
+
+ Running it.
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ $ echo parity-approval-probe                                                                                         │
+╰─── elapsed 5.0s ─────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+  ⎋ Working…
+╭─ Allow tool: bash ───────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Command: echo parity-approval-probe                                                                                  │
+│ ❯ Approve                                                                                                            │
+│   Approve bash for this session                                                                                      │
+│   Deny                                                                                                               │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ↑/↓ choose · ⏎ select · Ctrl+⏎/Ctrl+Q approve · ⎋ deny · Ctrl+O details · type to deny and steer                     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ⠹ 5s > ⬢ Parity Mock > 📁 ~/agent-parity-facts/work > ⑂ master ▶───6%────────────────────────────────╎─────┃──────128K─
+╰─
+
+

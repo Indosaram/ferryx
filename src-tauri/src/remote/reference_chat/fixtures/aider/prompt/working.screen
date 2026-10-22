@@ -1,0 +1,40 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Aider v0.86.2
+Model: openai/claude-haiku-4-5 with diff edit format
+Git repo: .git with 1 files
+Repo-map: using 1024 tokens, auto refresh
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> /add calc.py
+
+Added calc.py to the chat
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+calc.py
+> Add a function sub(a, b) that returns a - b to calc.py.
+
+I'll add a sub(a, b) function to calc.py that returns the difference of a and b.
+
+calc.py
+
+
+<<<<<<< SEARCH
+def add(a, b):
+    return a + b
+=======
+def add(a, b):
+    return a + b
+
+
+def
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -13,7 +13,7 @@ const EXTENSION_PATH = path.resolve(
 );
 const SOCKET_PATH = "/tmp/ferryx-ext-test.sock";
 
-type Captured = { state: string; detail?: string };
+type Captured = { state: string; detail?: string; agent?: string };
 
 const captured: Captured[] = [];
 let moduleCounter = 0;
@@ -46,13 +46,16 @@ function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
   });
 }
 
-async function loadExtension() {
+// Mirrors the daemon's per-agent rewrite (`rewrite_identity` in daemon/agent_extension.rs).
+async function loadExtension(agent = "omo") {
   process.env.FERRYX_AGENT_STATE_SOCKET = SOCKET_PATH;
   process.env.FERRYX_SESSION_ID = "session-ext-test";
   delete process.env.FERRYX_AGENT_STATE_PORT;
   delete process.env.FERRYX_AGENT_STATE_TOKEN;
 
-  const source = readFileSync(EXTENSION_PATH, "utf8");
+  const source = readFileSync(EXTENSION_PATH, "utf8")
+    .replace("// FERRYX_INTEGRATION_ID=omo", `// FERRYX_INTEGRATION_ID=${agent}`)
+    .replace('const AGENT_ID = "omo";', `const AGENT_ID = "${agent}";`);
   const compiled = transformSync(source, { loader: "ts", format: "esm", target: "es2022" }).code;
   moduleCounter += 1;
   // Bun's resolver rejects long data: URLs (NameTooLong), so each load gets its own file.
@@ -104,9 +107,9 @@ describe("ferryx-agent-state extension", () => {
       socket.on("close", () => {
         for (const line of buffer.split("\n")) {
           if (line.trim().length === 0) continue;
-          const payload = JSON.parse(line) as { type?: string; state?: string; detail?: string };
+          const payload = JSON.parse(line) as { type?: string; state?: string; detail?: string; agent?: string };
           if (payload.type === "agentState" && typeof payload.state === "string") {
-            recordCapture({ state: payload.state, detail: payload.detail });
+            recordCapture({ state: payload.state, detail: payload.detail, agent: payload.agent });
           }
         }
       });
@@ -218,5 +221,30 @@ describe("ferryx-agent-state extension", () => {
 
     await waitFor(() => captured.at(-1)?.state === "idle");
     expect(captured.at(-1)?.detail).toBeUndefined();
+  });
+
+  // omo and pi (senpi) share one extensions directory when SENPI_CODING_AGENT_DIR=~/.omo/agent,
+  // so whichever identity the file declares, the report must name the process that loaded it.
+  // Measured argv: omo runs `bun …/senpi/dist/bundle/cli.js --extension …/omo-ai/plugin`, pi runs
+  // `bun …/senpi/dist/bundle/cli.js` (.omo-parity/facts/local-1.md:295,370).
+  it.each([
+    ["omo", ["/bin/bun", "/g/@code-yeongyu/senpi/dist/bundle/cli.js", "--extension", "/g/omo-ai/plugin", "--session", "x"], "omo"],
+    ["omo", ["/bin/bun", "/g/@code-yeongyu/senpi/dist/bundle/cli.js"], "pi"],
+    ["pi", ["/bin/bun", "/g/@code-yeongyu/senpi/dist/bundle/cli.js", "--extension=/g/omo-ai/plugin"], "omo"],
+    ["pi", ["/bin/bun", "/g/@code-yeongyu/senpi/dist/bundle/cli.js", "-e", "/tmp/probe.ts"], "pi"],
+    ["omp", ["/bin/bun", "/g/omo-ai/plugin"], "omp"],
+  ])("a %s-declared file run as %j reports %s", async (declared, argv, expected) => {
+    const savedArgv = process.argv;
+    process.argv = argv;
+    try {
+      const load = await loadExtension(declared);
+      const h = makeHarness();
+      load(h.pi);
+      h.emit("session_start", h.tuiCtx);
+      await waitFor(() => captured.length >= 1);
+      expect(captured.at(-1)?.agent).toBe(expected);
+    } finally {
+      process.argv = savedArgv;
+    }
   });
 });

@@ -1,0 +1,40 @@
+
+                                            ████████████
+                                               ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                               ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                               ▒▒  ██                  █
+                                                   ██       v18.12.6
+
+                        Tip: Bulk data to classify or triage? Say `jevify` in your message — the
+                         eval kernel's `judge()` processes the batch and you read only what it
+                                           flags — watch it glow as you type
+
+
+ hello slow probe
+
+
+ Working slowly ..............
+
+
+ RUNTOOL now
+
+
+ Running it.
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ $ echo parity-approval-probe                                                                                         │
+├─── Output ───────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ parity-approval-probe                                                                                                │
+╰─── Wall: 0.03s · Timeout: 300s ──────────────────────────────────────────────────────────────────────────────────────╯
+
+ Done. The command ran.
+
+ π > ⬢ Parity Mock > 📁 ~/agent-parity-facts/work > ⑂ master ▶───6%──────────────────────────────────╎─────┃───────128K─
+╰─
+
+
+
+
+
+
+

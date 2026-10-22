@@ -1571,6 +1571,67 @@ type AgentStateIngressReport = (
     Option<String>,
 );
 
+/// Agents whose built-in herdr reporter Ferryx accepts on the agent-state socket. Every pane gets
+/// `HERDR_ENV`, so any herdr-aware agent may report there; only an agent named here, and measured
+/// to send the `pane.report_agent` envelope, is turned into state. crush: `internal/herdr/client.go`.
+#[cfg(any(unix, test))]
+const HERDR_REPORTING_AGENTS: &[&str] = &["crush"];
+
+/// Translates one herdr `pane.report_agent` request into Ferryx's agent-state report.
+///
+/// The pane id is the Ferryx session id (`HERDR_PANE_ID` is set to `FERRYX_SESSION_ID`), and a
+/// non-empty `agent_session_id` is the provider session the agent resumes with. `pane.release_agent`
+/// carries no state and is not translated: publishing `idle` on release would replace the retained
+/// provider session, and the foreground watcher already releases a pane whose agent exited.
+#[cfg(any(unix, test))]
+fn translate_herdr_report(line: &str) -> Option<AgentStateReport> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if value.get("method")?.as_str()? != "pane.report_agent" {
+        return None;
+    }
+    let params = value.get("params")?;
+    let agent = params.get("agent")?.as_str()?.trim().to_ascii_lowercase();
+    if !HERDR_REPORTING_AGENTS.contains(&agent.as_str()) {
+        return None;
+    }
+    let session_id = params.get("pane_id")?.as_str()?.trim();
+    if session_id.is_empty() {
+        return None;
+    }
+    let provider_session = params
+        .get("agent_session_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| AgentProviderSession {
+            key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+            id: id.to_string(),
+            transcript_path: None,
+        });
+    Some(AgentStateReport {
+        session_id: session_id.to_string(),
+        state: params.get("state")?.as_str()?.to_string(),
+        agent: Some(agent),
+        provider_session,
+        detail: None,
+    })
+}
+
+/// The reply line a herdr client reads, and discards, after each request it sends. Any `pane.*`
+/// request is answered, including ones Ferryx does not translate, so the client never waits out
+/// its timeout. Lines without a `method` are Ferryx's own reports, which expect no reply.
+#[cfg(any(unix, test))]
+fn herdr_response_line(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if !value.get("method")?.as_str()?.starts_with("pane.") {
+        return None;
+    }
+    let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let mut response = serde_json::json!({ "id": id, "result": {} }).to_string();
+    response.push('\n');
+    Some(response)
+}
+
 /// How the ingress must present one report's provider identity to admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IngressAdmissionIdentity {
@@ -1801,6 +1862,65 @@ mod agent_state_transport_tests {
             None
         );
         assert_eq!(transport_token_from_line("not json"), None);
+    }
+
+    /// The envelope crush's `internal/herdr` client sends, as measured on omarchy.
+    fn crush_report(state: &str, agent_session_id: &str) -> String {
+        format!(
+            r#"{{"id":"crush:report:1761000000000000000","method":"pane.report_agent","params":{{"pane_id":"pane-7","source":"crush","agent":"crush","state":"{state}","seq":3,"agent_session_id":"{agent_session_id}"}}}}"#
+        )
+    }
+
+    #[test]
+    fn crush_herdr_reports_translate_every_measured_state() {
+        let session = "3df112d9-e56f-4f69-b8bb-c58b5d580e89";
+        for state in ["idle", "working", "blocked"] {
+            let (session_id, parsed_state, agent, provider, detail) =
+                DaemonServer::parse_herdr_report(&crush_report(state, session))
+                    .unwrap_or_else(|| panic!("crush {state} report must be accepted"));
+            assert_eq!(session_id, "pane-7", "pane_id is the Ferryx session id");
+            assert_eq!(parsed_state, state);
+            assert_eq!(agent.as_deref(), Some("crush"));
+            let provider = provider.expect("agent_session_id becomes the provider session");
+            assert_eq!(provider.key, AgentProviderSessionKey::SessionId);
+            assert_eq!(provider.id, session);
+            assert_eq!(provider.transcript_path, None);
+            assert_eq!(detail, None);
+        }
+        // The first report crush sends, before any prompt, has an empty session id.
+        let (_, state, _, provider, _) =
+            DaemonServer::parse_herdr_report(&crush_report("idle", "")).expect("init report");
+        assert_eq!(state, "idle");
+        assert_eq!(provider, None, "an empty agent_session_id is not a provider session");
+    }
+
+    #[test]
+    fn herdr_lines_outside_the_crush_report_are_not_translated() {
+        let release = r#"{"id":"crush:release:1","method":"pane.release_agent","params":{"pane_id":"pane-7","source":"crush","agent":"crush"}}"#;
+        assert_eq!(DaemonServer::parse_herdr_report(release), None);
+        assert!(
+            herdr_response_line(release).is_some(),
+            "release is still answered so crush does not wait out its timeout"
+        );
+        let unknown_agent = crush_report("working", "s").replace(r#""agent":"crush""#, r#""agent":"other""#);
+        assert_eq!(DaemonServer::parse_herdr_report(&unknown_agent), None);
+        assert_eq!(DaemonServer::parse_herdr_report(&crush_report("bogus", "s")), None);
+        assert_eq!(
+            DaemonServer::parse_herdr_report(&crush_report("idle", "s").replace("pane-7", "")),
+            None
+        );
+        // Ferryx's own report is neither a herdr request nor answered.
+        let own = r#"{"type":"agentState","sessionId":"s1","state":"idle"}"#;
+        assert_eq!(DaemonServer::parse_herdr_report(own), None);
+        assert_eq!(herdr_response_line(own), None);
+    }
+
+    #[test]
+    fn a_herdr_request_is_answered_with_one_json_line_echoing_its_id() {
+        let response = herdr_response_line(&crush_report("working", "s")).expect("reply");
+        assert!(response.ends_with('\n') && response.matches('\n').count() == 1);
+        let value: serde_json::Value = serde_json::from_str(response.trim()).expect("json");
+        assert_eq!(value["id"], "crush:report:1761000000000000000");
     }
 
     #[test]
@@ -2034,6 +2154,97 @@ mod agent_integration_tests {
             Some(dir.join("remote-config.json")),
             Some(dir.join("remote-auth.json")),
         )
+    }
+
+    /// Runs `env` in a pane with no inherited herdr, returning what it printed.
+    async fn pane_env_without_user_herdr(server: &DaemonServer) -> String {
+        let mut cmd = portable_pty::CommandBuilder::new("/usr/bin/env");
+        cmd.env_remove("HERDR_ENV");
+        let (_id, mut rx) = server
+            .terminal_service
+            .pty_manager()
+            .spawn(cmd, 200, 50)
+            .expect("spawn env pane");
+        let mut out = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while let Some(chunk) = rx.recv().await {
+                out.extend_from_slice(&chunk);
+            }
+        })
+        .await
+        .expect("env pane output ends when env exits");
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[tokio::test]
+    async fn panes_get_herdr_env_exactly_when_they_get_the_agent_state_socket() {
+        let data = tempfile::tempdir().unwrap();
+        let server = server_at(data.path());
+        let env = pane_env_without_user_herdr(&server).await;
+        assert!(env.contains("HERDR_ENV=1"), "{env}");
+        assert!(
+            env.contains(&format!("HERDR_SOCKET_PATH={}", agent_state_socket_path())),
+            "{env}"
+        );
+        let session = env
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("FERRYX_SESSION_ID="))
+            .expect("pane has a session id")
+            .to_owned();
+        assert!(env.contains(&format!("HERDR_PANE_ID={session}")), "{env}");
+
+        server.agent_integration.set(false).expect("disable integration");
+        let env = pane_env_without_user_herdr(&server).await;
+        assert!(env.contains("FERRYX_SESSION_ID="), "the pane ran env: {env}");
+        assert!(!env.contains("HERDR_"), "{env}");
+    }
+
+    #[tokio::test]
+    async fn a_crush_herdr_report_reaches_the_state_hub_and_is_answered() {
+        let data = tempfile::tempdir().unwrap();
+        let server = Arc::new(server_at(data.path()));
+        let session_id = "crush-herdr-pane".to_string();
+        let mut subscription = server.agent_states.subscribe(&session_id);
+        let (client, server_side) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(Arc::clone(&server).serve_agent_state_connection(
+            Arc::clone(&server.agent_states),
+            server.session_service.clone(),
+            crate::scoped_contracts::Epoch(server.epoch),
+            server_side,
+        ));
+        let (read_half, mut write_half) = client.into_split();
+        let mut reader = BufReader::new(read_half);
+        let report = format!(
+            "{{\"id\":\"crush:report:42\",\"method\":\"pane.report_agent\",\"params\":{{\"pane_id\":\"{session_id}\",\"source\":\"crush\",\"agent\":\"crush\",\"state\":\"blocked\",\"seq\":4,\"agent_session_id\":\"3df112d9-e56f-4f69-b8bb-c58b5d580e89\"}}}}\n"
+        );
+        write_half.write_all(report.as_bytes()).await.unwrap();
+
+        let mut reply = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut reply))
+            .await
+            .expect("crush waits only 500 ms for its reply")
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(reply.trim()).expect("one JSON line");
+        assert_eq!(reply["id"], "crush:report:42");
+
+        let published = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let update = subscription.receiver.recv().await.expect("hub stays open");
+                if update.state.session_id == session_id {
+                    return update.state;
+                }
+            }
+        })
+        .await
+        .expect("the report must reach the hub");
+        assert_eq!(published.state, "blocked");
+        assert_eq!(published.agent.as_deref(), Some("crush"));
+        assert_eq!(
+            published.provider_session.map(|provider| provider.id).as_deref(),
+            Some("3df112d9-e56f-4f69-b8bb-c58b5d580e89")
+        );
+        drop(write_half);
+        task.await.expect("connection ends when crush hangs up");
     }
 
     #[tokio::test]
@@ -3568,6 +3779,17 @@ impl DaemonServer {
         line: &str,
     ) -> Option<AgentStateIngressReport> {
         let report = serde_json::from_str::<AgentStateReport>(line.trim()).ok()?;
+        Self::admit_agent_state_report(report)
+    }
+
+    /// Parses one herdr `pane.report_agent` line from a known herdr-reporting agent.
+    #[cfg(any(unix, test))]
+    fn parse_herdr_report(line: &str) -> Option<AgentStateIngressReport> {
+        translate_herdr_report(line).and_then(Self::admit_agent_state_report)
+    }
+
+    /// Rejects states the UI cannot render and drops a provider session the agent cannot resume.
+    fn admit_agent_state_report(report: AgentStateReport) -> Option<AgentStateIngressReport> {
         if !matches!(report.state.as_str(), "working" | "blocked" | "idle") {
             return None;
         }
@@ -3782,20 +4004,44 @@ impl DaemonServer {
                 let sessions = sessions.clone();
                 let server = Arc::clone(&server);
                 while clients.try_join_next().is_some() {}
-                clients.spawn(async move {
-                    let mut reader = BufReader::new(stream);
-                    let mut line = String::new();
-                    while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
-                        if let Some(report) = Self::parse_agent_state_report(&line) {
-                            server
-                                .ingest_agent_state_report(&states, &sessions, epoch, report)
-                                .await;
-                        }
-                        line.clear();
-                    }
-                });
+                clients.spawn(server.serve_agent_state_connection(states, sessions, epoch, stream));
             }
         }))
+    }
+
+    /// Serves one connection on the unix agent-state socket: Ferryx's own `agentState` reports,
+    /// and herdr `pane.*` requests from agents that report through `HERDR_SOCKET_PATH`.
+    ///
+    /// herdr lines carry no token. They are accepted only here, where the 0600 socket is the
+    /// ownership boundary, and never on the loopback TCP ingress, which needs this boot's token.
+    #[cfg(unix)]
+    async fn serve_agent_state_connection(
+        self: Arc<Self>,
+        states: Arc<AgentStateHub>,
+        sessions: Arc<DaemonSessionService>,
+        epoch: crate::scoped_contracts::Epoch,
+        stream: tokio::net::UnixStream,
+    ) {
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+            if let Some(response) = herdr_response_line(&line) {
+                // Answer before ingesting: the herdr client gives up after 500 ms, and admission
+                // may wait on a blocking journal read.
+                if let Err(error) = write_half.write_all(response.as_bytes()).await {
+                    tracing::debug!(%error, "herdr client left before its reply");
+                }
+                if let Some(report) = Self::parse_herdr_report(&line) {
+                    self.ingest_agent_state_report(&states, &sessions, epoch, report)
+                        .await;
+                }
+            } else if let Some(report) = Self::parse_agent_state_report(&line) {
+                self.ingest_agent_state_report(&states, &sessions, epoch, report)
+                    .await;
+            }
+            line.clear();
+        }
     }
 
     /// Windows/Linux counterpart of the unix socket ingress: a loopback TCP listener the bundled

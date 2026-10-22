@@ -48,6 +48,25 @@
 //! id's *content* — including the `null`s upstream emits for `body` and for every option's
 //! `description` — is identical, so the id is deterministic and changes with the menu text.
 //! Nothing on the wire compares a Ferryx id against a Herdr id.
+//!
+//! ## The live omp 18.12.6 screens
+//!
+//! The pinned patterns were read off herdr's fixtures (`enter select · ↑/↓ move · esc cancel`, a
+//! two-row `Approve`/`Deny` menu). omp 18.12.6, measured on omarchy
+//! (`.omo-parity/facts/remote-omp.md` §3.4, §3.5, §8 and `facts/screens/omp/{approval,
+//! question-single,question-multi}.screen`), draws the hints with glyphs and the approval with a
+//! third row, so each pattern also accepts the live text:
+//!
+//! * question hint `⏎ select · n note · ↑/↓ move · ⎋ cancel · Alt+H hide`; multiple-choice hint
+//!   `␣ toggle · ⏎ submit · ↑/↓ move · ⇥/←/→ question · ⎋ cancel · Alt+H hide`. The live multiple
+//!   choice submits with `⏎` (the hint's own `⏎ submit`, remote-omp.md §8), not the pin's `tab`,
+//!   `enter`.
+//! * approval: the header is the box's own top border `╭─ Allow tool: bash ─…╮`; the rows are
+//!   `Approve` (`Approve Once` when grants exist), `Approve <subject> for this session`, `Deny`
+//!   (upstream `packages/coding-agent/src/tools/approval.ts:576,708,740-743,757` per remote-omp.md
+//!   §3.4); the footer `↑/↓ choose · ⏎ select · … · ⎋ deny · … · type to deny and steer`; and the
+//!   status band (`⠹ 5s > …`, §3.3) stays drawn under the box. Enter took the highlighted
+//!   `Approve` (measured, §3.4), and arrows move (`↑/↓ choose`).
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -77,10 +96,12 @@ pub const OMP_PROMPT_DETECTOR: ReferencePromptDetector = detect_omp_prompt;
 /// card is always present.
 pub const OMP_PROMPT_CARD_LIMIT: usize = 64;
 
-/// `OMP_SINGLE_HINT_RE` (`:13`).
-const OMP_SINGLE_HINT: &str = r"(?i)enter select.*↑/↓ move.*esc cancel";
-/// `OMP_MULTI_HINT_RE` (`:14`).
-const OMP_MULTI_HINT: &str = r"(?i)space/enter toggle.*↑/↓ move.*esc cancel";
+/// `OMP_SINGLE_HINT_RE` (`:13`), plus the live 18.12.6 glyph hint.
+const OMP_SINGLE_HINT: &str = r"(?i)(?:enter|⏎) select.*↑/↓ move.*(?:esc|⎋) cancel";
+/// `OMP_MULTI_HINT_RE` (`:14`), plus the live 18.12.6 glyph hint.
+const OMP_MULTI_HINT: &str = r"(?i)(?:space/enter|␣) toggle.*↑/↓ move.*(?:esc|⎋) cancel";
+/// The live multiple-choice hint, whose `⏎ submit` submits without the pin's `tab`.
+const OMP_LIVE_MULTI_HINT: &str = r"␣ toggle.*⏎ submit";
 /// `ANSI_RE` (`:10`).
 const ANSI_RE: &str = r"\x1b\[[0-?]*[ -/]*[@-~]";
 /// `SELECTED_RE` (`:11`).
@@ -95,13 +116,19 @@ const ROW_MARKER_RE: &str = r"^[○●◉◯☐☑☒✓]\s*";
 const CUSTOM_ROW_RE: &str = r"(?i)^Other \(type your own\)$";
 /// The suffix `parseOmpQuestion` strips from an option's label (`:283`).
 const RECOMMENDED_RE: &str = r"(?i) \(Recommended\)$";
-/// `parseOmpApproval`'s header (`:1093`).
-const APPROVAL_HEADER_RE: &str = r"(?i)^\s*Allow tool:\s*\S+";
-/// One `Approve`/`Deny` row, with the cursor marker `parseOmpApproval` reads (`:1098`).
-const APPROVAL_ROW_RE: &str = r"(?i)^([›>❯•])?\s*(Approve|Deny)$";
+/// `parseOmpApproval`'s header (`:1093`), also when it is the live box's top border.
+const APPROVAL_HEADER_RE: &str = r"(?i)^[╭─\s]*(Allow tool:\s*\S+)";
+/// One `Approve`/`Deny` row, with the cursor marker `parseOmpApproval` reads (`:1098`), plus the
+/// live rows `Approve Once` and `Approve <subject> for this session`.
+const APPROVAL_ROW_RE: &str =
+    r"(?i)^([›>❯•])?\s*(Approve|Approve Once|Approve \S.* for this session|Deny)$";
 /// `promptTailIsActive`'s omp-approval branch (`:1621`). The second alternative is
-/// deliberately unanchored, exactly as upstream writes it.
-const APPROVAL_TAIL_RE: &str = r"(?i)^(?:[›>❯•]\s*)?(?:Approve|Deny)$|esc.*cancel";
+/// deliberately unanchored, exactly as upstream writes it. The third is the live footer.
+const APPROVAL_TAIL_RE: &str =
+    r"(?i)^(?:[›>❯•]\s*)?(?:Approve|Deny)$|esc.*cancel|⎋ deny.*type to deny and steer";
+/// The live status band omp keeps drawn under a card: a braille spinner and seconds while
+/// working, `π >` while idle (remote-omp.md §3.2, §3.3).
+const STATUS_BAND_RE: &str = r"^(?:[\x{2800}-\x{28FF}] \d+s|π) > ";
 /// The lines `nearestQuestion` refuses to read as a question (`:170-173`).
 const PLANNING_RE: &str = r"(?i)^Planning:";
 const SUBMIT_TAB_RE: &str = r"^[←→].*Submit";
@@ -161,6 +188,9 @@ pub struct OmpPromptCard {
     pub checked_option_indices: Vec<usize>,
     /// The `Other (type your own)` row's index among the menu rows (`:283`).
     pub custom_menu_index: Option<usize>,
+    /// The keys that leave a multiple choice once its rows are toggled: the pin's `tab`, `enter`,
+    /// or the live hint's `⏎ submit`.
+    pub submit_keys: Vec<String>,
 }
 
 impl OmpPromptCard {
@@ -231,8 +261,7 @@ impl OmpPromptCard {
                 keys.push(KEY_SPACE.to_string());
                 cursor = option_index;
             }
-            keys.push(KEY_TAB.to_string());
-            keys.push(KEY_ENTER.to_string());
+            keys.extend(self.submit_keys.iter().cloned());
             return Ok(key_steps(&keys));
         }
 
@@ -334,6 +363,8 @@ struct Patterns {
     approval_header: Regex,
     approval_row: Regex,
     approval_tail: Regex,
+    live_multi_hint: Regex,
+    status_band: Regex,
     planning: Regex,
     submit_tab: Regex,
     task_row: Regex,
@@ -359,6 +390,8 @@ fn patterns() -> &'static Patterns {
             approval_header: compile(APPROVAL_HEADER_RE),
             approval_row: compile(APPROVAL_ROW_RE),
             approval_tail: compile(APPROVAL_TAIL_RE),
+            live_multi_hint: compile(OMP_LIVE_MULTI_HINT),
+            status_band: compile(STATUS_BAND_RE),
             planning: compile(PLANNING_RE),
             submit_tab: compile(SUBMIT_TAB_RE),
             task_row: compile(TASK_ROW_RE),
@@ -562,7 +595,13 @@ fn parse_omp_question(screen: &str) -> Option<OmpPromptCard> {
         return None;
     }
     // The same wrapped window the hint was found with: a narrow pane wraps the toggle hint.
-    let multi_select = patterns.multi_hint.is_match(&wrapped(&lines, hint_index, HINT_SPAN));
+    let hint = wrapped(&lines, hint_index, HINT_SPAN);
+    let multi_select = patterns.multi_hint.is_match(&hint);
+    let submit_keys = if patterns.live_multi_hint.is_match(&hint) {
+        vec![KEY_ENTER.to_string()]
+    } else {
+        vec![KEY_TAB.to_string(), KEY_ENTER.to_string()]
+    };
     let question = nearest_question(&lines, start_divider)?;
 
     let options: Vec<ReferencePromptOption> = option_rows
@@ -613,6 +652,7 @@ fn parse_omp_question(screen: &str) -> Option<OmpPromptCard> {
             .map(|(index, _)| index)
             .collect(),
         custom_menu_index: Some(custom_index),
+        submit_keys,
     })
 }
 
@@ -632,12 +672,26 @@ fn parse_omp_approval(screen: &str) -> Option<OmpPromptCard> {
         let selected = captures.get(1).is_some();
         rows.push(MenuRow { label, selected, checked: false, line_index: index });
     }
-    // Exactly two rows, one of them under the cursor (`:1100`).
-    if rows.len() != 2 || rows.iter().filter(|row| row.selected).count() != 1 {
+    // The pin's two rows, or the live three, with `Deny` last and one row under the cursor
+    // (`:1100`; approval.ts ends the choice list with `"Deny"`, `:757`).
+    let deny_last = rows.last().is_some_and(|row| row.label.eq_ignore_ascii_case("Deny"));
+    let approves_first = rows
+        .iter()
+        .take(rows.len().saturating_sub(1))
+        .all(|row| !row.label.eq_ignore_ascii_case("Deny"));
+    if !(2..=3).contains(&rows.len())
+        || !deny_last
+        || !approves_first
+        || rows.iter().filter(|row| row.selected).count() != 1
+    {
         return None;
     }
     let selected_index = rows.iter().position(|row| row.selected)?;
-    let header = clean_line(&lines[header_index]);
+    let header = patterns
+        .approval_header
+        .captures(&clean_line(&lines[header_index]))
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().to_string())?;
     let body: String = lines[(header_index + 1)..rows[0].line_index]
         .iter()
         .map(|line| clean_line(line))
@@ -681,6 +735,7 @@ fn parse_omp_approval(screen: &str) -> Option<OmpPromptCard> {
         selected_index,
         checked_option_indices: Vec::new(),
         custom_menu_index: None,
+        submit_keys: Vec::new(),
     })
 }
 
@@ -688,10 +743,14 @@ fn parse_omp_approval(screen: &str) -> Option<OmpPromptCard> {
 fn omp_prompt_tail_is_active(responder: OmpPromptResponder, screen: &str) -> bool {
     let patterns = patterns();
     let clean_lines: Vec<String> = strip_ansi(screen).split('\n').map(|line| clean_line(line)).collect();
-    let visible: Vec<String> = clean_lines
+    let mut visible: Vec<String> = clean_lines
         .into_iter()
         .filter(|line| !line.is_empty() && !is_divider(line))
         .collect();
+    // The live status band stays drawn under the card; it is not output that ended the card.
+    while visible.last().is_some_and(|line| patterns.status_band.is_match(line)) {
+        visible.pop();
+    }
     match responder {
         OmpPromptResponder::Question => {
             tail_ends(&visible, &patterns.single_hint) || tail_ends(&visible, &patterns.multi_hint)
@@ -753,6 +812,12 @@ mod tests {
     const APPROVAL_THREE_ROWS: &str = include_str!("fixtures/omp-prompt/approval-three-rows.txt");
     const APPROVAL_STALE: &str = include_str!("fixtures/omp-prompt/approval-stale.txt");
     const NOT_OMP_HINT: &str = include_str!("fixtures/omp-prompt/not-omp-hint.txt");
+    // Live omp 18.12.6 captures, verbatim (`.omo-parity/facts/screens/omp/`).
+    const LIVE_APPROVAL: &str = include_str!("fixtures/omp/prompt/approval.screen");
+    const LIVE_QUESTION_SINGLE: &str = include_str!("fixtures/omp/prompt/question-single.screen");
+    const LIVE_QUESTION_MULTI: &str = include_str!("fixtures/omp/prompt/question-multi.screen");
+    const LIVE_IDLE: &str = include_str!("fixtures/omp/prompt/idle.screen");
+    const LIVE_WORKING: &str = include_str!("fixtures/omp/prompt/working.screen");
 
     fn labels(prompt: &ReferencePrompt) -> Vec<&str> {
         prompt.options.iter().map(|option| option.label.as_str()).collect()
@@ -1090,5 +1155,73 @@ mod tests {
             vec![ReferenceKeyStep::keys([KEY_ENTER])]
         );
         assert_eq!(OMP_PROMPT_DETECTOR(OMP_AGENT_ID, QUESTION_SINGLE).map(|prompt| prompt.id), Some(prompt.id));
+    }
+
+    #[test]
+    fn live_omp_approval_reads_its_three_rows_under_the_status_band() {
+        let card = card(LIVE_APPROVAL);
+        assert_eq!(card.responder, OmpPromptResponder::Approval);
+        assert_eq!(card.prompt.kind, ReferencePromptKind::Approval);
+        assert_eq!(card.prompt.title, "Allow tool: bash");
+        assert_eq!(card.prompt.body.as_deref(), Some("Command: echo parity-approval-probe"));
+        assert_eq!(labels(&card.prompt), vec!["Approve", "Approve bash for this session", "Deny"]);
+        assert_eq!(card.selected_index, 0);
+        // Measured: Enter on the highlighted Approve approved the call (remote-omp.md §3.4).
+        assert_eq!(card.answer_steps(&pick(0)).unwrap(), vec![ReferenceKeyStep::keys([KEY_ENTER])]);
+        assert_eq!(
+            card.answer_steps(&pick(2)).unwrap(),
+            vec![
+                ReferenceKeyStep::keys([KEY_DOWN]),
+                ReferenceKeyStep::keys([KEY_DOWN]),
+                ReferenceKeyStep::keys([KEY_ENTER]),
+            ]
+        );
+    }
+
+    #[test]
+    fn live_omp_single_question_reads_the_glyph_hint() {
+        let card = card(LIVE_QUESTION_SINGLE);
+        assert_eq!(card.responder, OmpPromptResponder::Question);
+        assert_eq!(card.prompt.question, "Which color do you prefer?");
+        assert_eq!(labels(&card.prompt), vec!["Red", "Blue"]);
+        assert!(!card.prompt.multi_select);
+        assert_eq!(card.prompt.custom_option_index, Some(2));
+        assert_eq!(card.answer_steps(&pick(0)).unwrap(), vec![ReferenceKeyStep::keys([KEY_ENTER])]);
+        assert_eq!(
+            card.answer_steps(&typed("green")).unwrap(),
+            vec![
+                ReferenceKeyStep::keys([KEY_DOWN]),
+                ReferenceKeyStep::keys([KEY_DOWN]),
+                ReferenceKeyStep::keys([KEY_ENTER]),
+                ReferenceKeyStep::typed("green"),
+                ReferenceKeyStep::keys([KEY_ENTER]),
+            ]
+        );
+    }
+
+    #[test]
+    fn live_omp_multi_question_toggles_with_space_and_submits_with_enter() {
+        let card = card(LIVE_QUESTION_MULTI);
+        assert!(card.prompt.multi_select);
+        assert_eq!(card.prompt.question, "Which fruits?");
+        assert_eq!(labels(&card.prompt), vec!["Apple", "Pear"]);
+        assert!(card.checked_option_indices.is_empty());
+        assert_eq!(
+            card.answer_steps(&pick_many(&[1])).unwrap(),
+            vec![
+                ReferenceKeyStep::keys([KEY_DOWN]),
+                ReferenceKeyStep::keys([KEY_SPACE]),
+                ReferenceKeyStep::keys([KEY_ENTER]),
+            ]
+        );
+    }
+
+    #[test]
+    fn live_omp_idle_and_working_screens_are_not_prompts() {
+        assert!(detect_omp_prompt_card(OMP_AGENT_ID, LIVE_IDLE).is_none());
+        assert!(detect_omp_prompt_card(OMP_AGENT_ID, LIVE_WORKING).is_none());
+        for agent in ["claude", "codex", "pi", "gjc", "opencode"] {
+            assert!(detect_omp_prompt(agent, LIVE_APPROVAL).is_none());
+        }
     }
 }

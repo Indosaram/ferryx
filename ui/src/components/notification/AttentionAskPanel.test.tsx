@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentHistoryEntry, AgentHistoryMessage, AgentHistoryPage } from "../../lib/agentHistory";
+import { AGENT_HISTORY_PROVIDERS } from "../../lib/agentHistory";
 import {
   AttentionAskPanel,
   collectAskEvidence,
@@ -56,7 +57,7 @@ describe("isWithinRange", () => {
 describe("collectAskEvidence", () => {
   const threeHours = { id: "3h", label: "3시간", ms: 3 * 60 * 60 * 1000 };
 
-  it("queries both providers and keeps only in-range entries", async () => {
+  it("queries every provider with a readable store and keeps only in-range entries", async () => {
     const search = vi.fn(async (request: { provider: string }) => ({
       items: [
         entry({ entryKey: `${request.provider}-recent`, provider: request.provider as "claude", modifiedMs: NOW - 1000 }),
@@ -75,8 +76,36 @@ describe("collectAskEvidence", () => {
 
     const result = await collectAskEvidence("about", threeHours, services({ search, read }), NOW);
 
-    expect(search).toHaveBeenCalledTimes(2);
-    expect(result.evidence.map((item) => item.entry.entryKey).sort()).toEqual(["claude-recent", "codex-recent"]);
+    expect(search).toHaveBeenCalledTimes(AGENT_HISTORY_PROVIDERS.length);
+    expect(search.mock.calls.map(([request]) => request.provider)).toEqual([...AGENT_HISTORY_PROVIDERS]);
+    expect(result.scanned).toBe(AGENT_HISTORY_PROVIDERS.length);
+    expect(result.evidence.every((item) => item.entry.entryKey.endsWith("-recent"))).toBe(true);
+  });
+
+  it("keeps scanning when one provider store cannot be searched", async () => {
+    const search = vi.fn(async (request: { provider: string }) => {
+      if (request.provider === "cursor") throw new Error("store unreadable");
+      return {
+        items: request.provider === "claude" ? [entry({ entryKey: "survivor" })] : [],
+        nextCursor: null,
+        partial: false,
+        warnings: [],
+      };
+    });
+    const read = vi.fn(async () => ({ items: [message("we discussed the router")], nextCursor: null, partial: false, warnings: [] }));
+
+    const result = await collectAskEvidence("router", threeHours, services({ search, read }), NOW);
+
+    expect(result.evidence.map((item) => item.entry.entryKey)).toEqual(["survivor"]);
+    expect(result.warnings).toContain("SEARCH_FAILED:cursor");
+    expect(result.partial).toBe(true);
+  });
+
+  it("reports a repeated warning only once", async () => {
+    const search = vi.fn(async () => ({ items: [], nextCursor: null, partial: true, warnings: ["ROOT_UNAVAILABLE"] }));
+    const result = await collectAskEvidence("anything", threeHours, services({ search }), NOW);
+
+    expect(result.warnings).toEqual(["ROOT_UNAVAILABLE"]);
   });
 
   it("keeps an entry only when a message actually matches the question", async () => {

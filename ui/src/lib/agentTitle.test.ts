@@ -216,6 +216,97 @@ describe("agentTitle parser & normalizer", () => {
       expect(pi?.agentType).toBe("pi");
       expect(pi?.task).toBe("computing primes");
     });
+
+    // Measured tmux #{pane_title} values from omp 18.12.6 (.omo-parity/facts/remote-omp.md section 4).
+    it("detects omp's 'π' titles and reads idle, working, and waiting from the marker", () => {
+      const idle = parseAgentTitle("π > work");
+      expect(idle?.isAgent).toBe(true);
+      expect(idle?.agentType).toBe("omp");
+      expect(idle?.name).toBe("OMP");
+      expect(idle?.task).toBe("work");
+      expect(idle?.state).toBe("starting");
+      expect(classifyTerminalTitleActivity("π > Parity probe")).toBeNull();
+      expect(parseAgentTitle("\x1b]0;π > Parity probe\x07")?.task).toBe("Parity probe");
+
+      for (const title of ["π ⠼ work", "π ⠙ work"]) {
+        const working = parseAgentTitle(title);
+        expect(working?.agentType).toBe("omp");
+        expect(working?.task).toBe("work");
+        expect(working?.state).toBe("working");
+      }
+
+      for (const title of ["π ! work", "π ! Parity probe"]) {
+        const waiting = parseAgentTitle(title);
+        expect(waiting?.agentType).toBe("omp");
+        expect(waiting?.state).toBe("waiting");
+      }
+    });
+
+    // Measured OSC titles from .omo-parity/facts (F2 gap rows); each case fails without its matcher.
+    it("detects opencode's titled-session form 'OC | <session title>'", () => {
+      // facts/local.md:172 and facts/local-1.md:237
+      for (const [title, task] of [
+        ["OC | Create probe.txt with touch", "Create probe.txt with touch"],
+        ["OC | Directory listing with ls", "Directory listing with ls"],
+      ]) {
+        const parsed = parseAgentTitle(title);
+        expect(parsed?.isAgent).toBe(true);
+        expect(parsed?.agentType).toBe("opencode");
+        expect(parsed?.task).toBe(task);
+        expect(parsed?.state).toBe("starting");
+      }
+      // facts/local.md:172 (idle, before the session has a title)
+      expect(parseAgentTitle("OpenCode")?.agentType).toBe("opencode");
+    });
+
+    it("detects pi (senpi) 'senpi - ' titles while omo keeps its own titles", () => {
+      // facts/local.md:184
+      const idle = parseAgentTitle("senpi - repo-pi");
+      expect(idle?.isAgent).toBe(true);
+      expect(idle?.agentType).toBe("pi");
+      expect(idle?.task).toBe("repo-pi");
+      expect(idle?.state).toBe("starting");
+      // facts/local-1.md:326-330
+      expect(parseAgentTitle("senpi - Running eval")?.state).toBe("working");
+      expect(parseAgentTitle("senpi - Create created.txt with touch - parity-pi.tqp0")?.agentType).toBe("pi");
+      // facts/local-1.md:336: the omo run titles itself 'omo …'
+      expect(parseAgentTitle("omo: refactoring layout components")?.agentType).toBe("omo");
+    });
+
+    it("detects grok's trailing ' - grok' titles with spinner and Action Required states", () => {
+      // facts/remote-grok.md:100
+      const idle = parseAgentTitle("PARITY_TOOL remove a file - grok");
+      expect(idle?.isAgent).toBe(true);
+      expect(idle?.agentType).toBe("grok");
+      expect(idle?.state).toBe("starting");
+      // facts/remote-grok.md:101-102
+      for (const title of ["⠴ - Responding - grok", "⠹ - Responding - PARITY_TOOL remove a file - grok"]) {
+        const working = parseAgentTitle(title);
+        expect(working?.agentType).toBe("grok");
+        expect(working?.state).toBe("working");
+      }
+      // facts/remote-grok.md:103
+      const waiting = parseAgentTitle("⚠ Action Required - ⠴ - probe… - PARITY_TOOL remove a file - grok");
+      expect(waiting?.agentType).toBe("grok");
+      expect(waiting?.state).toBe("waiting");
+    });
+
+    it("detects droid's '⛬ Droid' title", () => {
+      // facts/remote-droid.md:48
+      const droid = parseAgentTitle("\x1b]0;⛬ Droid\x07");
+      expect(droid?.isAgent).toBe(true);
+      expect(droid?.agentType).toBe("droid");
+      expect(droid?.name).toBe("Droid");
+      expect(droid?.state).toBe("starting");
+    });
+
+    it("detects cline's 'Cline' title", () => {
+      // facts/local.md:108
+      const cline = parseAgentTitle("Cline");
+      expect(cline?.isAgent).toBe(true);
+      expect(cline?.agentType).toBe("cline");
+      expect(cline?.name).toBe("Cline");
+    });
   });
 
   describe("idle agent-name-only titles", () => {

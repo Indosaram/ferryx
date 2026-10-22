@@ -31,7 +31,9 @@ fn paging_append_corrupt_partial_deleted_and_unsupported() {
     assert_eq!(h.read(key,first.next_cursor.as_deref(),1).unwrap_err(),HistoryError::SourceChanged);
     let p = h.search("codex",None,"sentinel",None,100).unwrap(); assert!(p.partial); assert!(p.warnings.contains(&"CORRUPT_RECORD".into())); assert!(p.warnings.contains(&"PARTIAL_RECORD".into()));
     fs::remove_file(root.path().join("log.jsonl")).unwrap(); assert_eq!(h.read(&p.items[0].entry_key,None,100).unwrap_err(),HistoryError::NotFound);
-    assert_eq!(h.search("pi",None,"",None,100).unwrap_err(),HistoryError::Unsupported);
+    // aider keeps one per-repo markdown log with no session id, so it has no history provider.
+    assert_eq!(h.search("aider",None,"",None,100).unwrap_err(),HistoryError::Unsupported);
+    assert_eq!(h.search("",None,"",None,100).unwrap_err(),HistoryError::Unsupported);
     assert_eq!(h.search("codex",None,"",None,101).unwrap_err(),HistoryError::InvalidRequest);
 }
 #[cfg(unix)]
@@ -50,6 +52,26 @@ fn symlink_roots_and_files_are_rejected() {
     let mut h = History::new(vec![(CanonicalProvider::Codex,outside.path().join("root-link"))]);
     let p = h.search("codex",None,"",None,100).unwrap();
     assert!(p.warnings.contains(&"ROOT_SYMLINK_REJECTED".into()),"configured symlink root must not silently redirect");
+}
+
+/// The multi-document readers (cline, grok, antigravity) open a second file next to the
+/// one the walk found. That sibling goes through the same containment guard, so a symlink planted
+/// in a provider store cannot be used to read an arbitrary file.
+#[cfg(unix)]
+#[test]
+fn symlinked_sibling_transcript_is_not_followed_out_of_the_root() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap(); let outside = tempfile::tempdir().unwrap();
+    let cwd = root.path().to_string_lossy().into_owned();
+    let session = root.path().join("1792653340197_ys4yu"); fs::create_dir_all(&session).unwrap();
+    fs::write(session.join("1792653340197_ys4yu.json"),json!({"version":1,"session_id":"1792653340197_ys4yu","cwd":cwd,"provider":"cline"}).to_string()).unwrap();
+    fs::write(outside.path().join("stolen.json"),json!({"sessionId":"1792653340197_ys4yu","messages":[{"id":"m1","role":"user","content":[{"type":"text","text":"escaped-sibling-sentinel"}]}]}).to_string()).unwrap();
+    symlink(outside.path().join("stolen.json"),session.join("1792653340197_ys4yu.messages.json")).unwrap();
+    let mut h = History::new(vec![(CanonicalProvider::Cline,root.path().into())]);
+    assert_eq!(h.search("cline",None,"escaped-sibling-sentinel",None,100).unwrap().items.len(),0,"a symlinked sibling document must not be read");
+    let p = h.search("cline",None,"",None,100).unwrap();
+    assert!(p.warnings.contains(&"TRANSCRIPT_UNAVAILABLE".into()),"refusing the sibling must be reported, not hidden");
+    assert!(h.read(&p.items[0].entry_key,None,100).unwrap().items.is_empty());
 }
 
 #[cfg(unix)]

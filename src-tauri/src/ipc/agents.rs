@@ -72,12 +72,29 @@ pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Opti
             | "antigravity"
             | "opencode"
             | "pi"
+            | "omp"
+            | "grok"
+            | "droid"
+            | "cline"
+            | "crush"
     ) {
         return None;
     }
 
-    let agent_pid = process_table_entries()
-        .and_then(|entries| descendant_agent_pid(&entries, root_pid, normalized));
+    let entries = process_table_entries();
+    let agent_pid = entries
+        .as_deref()
+        .and_then(|entries| descendant_agent_pid(entries, root_pid, normalized));
+    // A resumed grok, droid, cline or crush names its session in its own argv, which binds the id
+    // to this pane's process. The open-file walk stays first because it follows a conversation the
+    // agent switched to after launch, which the launch argv cannot.
+    let resumed_id = |pid: u32| {
+        let (_, _, args) = entries
+            .as_deref()?
+            .iter()
+            .find(|(entry_pid, _, _)| *entry_pid == pid)?;
+        resume_id_from_args(normalized, args)
+    };
     match agent_pid {
         Some(pid) if normalized == "omo" => omo_session_id_from_environment(pid, normalized)
             .or_else(|| lsof_session_id(pid, normalized)),
@@ -87,6 +104,13 @@ pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Opti
         None if normalized == "opencode" => opencode_session_id(None, root_pid),
         Some(pid) if normalized == "pi" => pi_session_id(Some(pid), root_pid),
         None if normalized == "pi" => pi_session_id(None, root_pid),
+        Some(pid) if matches!(normalized, "grok" | "droid" | "cline") => {
+            lsof_session_id(pid, normalized).or_else(|| resumed_id(pid))
+        }
+        // crush keeps every session of a project in one `.crush/crush.db`, so no open file names
+        // the session; only the resume argv does.
+        Some(pid) if normalized == "crush" => resumed_id(pid),
+        None if normalized == "crush" => None,
         Some(pid) => lsof_session_id(pid, normalized),
         None => lsof_session_id(root_pid, normalized),
     }
@@ -224,8 +248,63 @@ fn args_match_agent(agent_type: &str, args: &str) -> bool {
                 || basename == "pi.js"
                 || args.to_ascii_lowercase().contains("/pi-coding-agent")
         }
+        // The bun install runs `bun ~/.bun/bin/omp`, so the entry script is argv[1]; omp's own
+        // worker helpers run `bun …/dist/cli.js __omp_worker_*` and must not match.
+        "omp" => {
+            basename == "omp"
+                || (basename == "bun"
+                    && args.split_whitespace().nth(1).is_some_and(|entry| {
+                        entry
+                            .rsplit(['/', '\\'])
+                            .next()
+                            .is_some_and(|name| name.eq_ignore_ascii_case("omp"))
+                    }))
+        }
+        // The npm install runs `node …/bin/crush` with the Go binary `…/@charmland/crush/bin/crush`
+        // as its child; a Go or Homebrew install is the bare binary.
+        "grok" | "droid" | "crush" => basename == normalized_agent,
+        // The npm shim runs `node ~/.bun/bin/cline` and the native `cline` binary is its child;
+        // the detached `--cline-hub-daemon` serves sessions for other panes too.
+        "cline" => basename == "cline" && !args.contains("--cline-hub-daemon"),
         _ => false,
     }
+}
+
+/// The session a resumed agent was launched with, read from that agent's own argv: grok
+/// `--resume <id>`, droid `--resume <id>` or `droid resume <id>`, cline `--id <id>`, crush
+/// `--session/-s <id>`. Only ids in the provider's own shape are accepted, so a grok title or a
+/// missing value is not an id.
+fn resume_id_from_args(agent_type: &str, args: &str) -> Option<String> {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    let flags: &[&str] = match agent_type {
+        "grok" => &["--resume", "-r"],
+        "droid" => &["--resume", "-r", "resume"],
+        "cline" => &["--id"],
+        "crush" => &["--session", "-s"],
+        _ => return None,
+    };
+    let value = tokens
+        .windows(2)
+        .find(|pair| flags.contains(&pair[0]))
+        .map(|pair| pair[1])
+        .or_else(|| {
+            tokens.iter().find_map(|token| {
+                let (flag, value) = token.split_once('=')?;
+                flags.contains(&flag).then_some(value)
+            })
+        })?;
+    let valid = match agent_type {
+        "cline" => is_cline_session_id(value),
+        "crush" => is_valid_uuid(value) || is_crush_session_hash(value),
+        _ => is_valid_uuid(value),
+    };
+    valid.then(|| value.to_string())
+}
+
+// crush prints and accepts the 16-hex XXH3 hash of the session UUID (`crush -s 7f7fbfa62dd136ec`)
+// as well as the UUID itself. Hash prefixes also resolve, but only the full hash is accepted here.
+fn is_crush_session_hash(id: &str) -> bool {
+    id.len() == 16 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn descendant_agent_pid(
@@ -403,6 +482,12 @@ fn lsof_session_id(pid: u32, _agent_type: &str) -> Option<String> {
 
 #[cfg(not(windows))]
 fn lsof_session_id(pid: u32, agent_type: &str) -> Option<String> {
+    // Linux can name a process's open files without lsof, which minimal hosts (Arch, containers)
+    // often lack: every /proc/<pid>/fd entry is a symlink to the open path.
+    #[cfg(target_os = "linux")]
+    if let Some(id) = proc_fd_session_id(std::path::Path::new(&format!("/proc/{pid}/fd")), agent_type) {
+        return Some(id);
+    }
     let lsof = resolve_tool("lsof")?;
     let stdout = probe_stdout(
         "lsof",
@@ -415,6 +500,15 @@ fn lsof_session_id(pid: u32, agent_type: &str) -> Option<String> {
         .find_map(|path| extract_session_id_from_path(agent_type, path))
 }
 
+/// The session named by any open file of a process, read from its `/proc/<pid>/fd` symlinks.
+#[cfg(any(target_os = "linux", test))]
+fn proc_fd_session_id(fd_dir: &std::path::Path, agent_type: &str) -> Option<String> {
+    std::fs::read_dir(fd_dir)
+        .ok()?
+        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+        .find_map(|target| extract_session_id_from_path(agent_type, &target.to_string_lossy()))
+}
+
 fn extract_session_id_from_path(agent_type: &str, path: &str) -> Option<String> {
     let agent_type = if agent_type == "cursor-agent" {
         "cursor"
@@ -424,6 +518,24 @@ fn extract_session_id_from_path(agent_type: &str, path: &str) -> Option<String> 
     let normalized = path.replace('\\', "/");
     if agent_type.eq_ignore_ascii_case("gjc") {
         return gjc_session_id_from_path(&normalized);
+    }
+    match agent_type {
+        "grok" => return grok_session_id_from_path(&normalized),
+        "droid" => return droid_session_id_from_path(&normalized),
+        "cline" => return cline_session_id_from_path(&normalized),
+        // omp writes `<agentDir>/sessions/<cwd-slug>/<ts>_<UUIDv7>.jsonl`, agentDir defaulting to
+        // `~/.omp/agent`; a named profile uses `~/.omp/profiles/<name>/agent`.
+        "omp" => {
+            let in_default = normalized.contains("/.omp/agent/sessions/");
+            let in_profile = normalized.contains("/.omp/profiles/")
+                && normalized.contains("/agent/sessions/");
+            return if in_default || in_profile {
+                uuid_from_session_path(&normalized)
+            } else {
+                None
+            };
+        }
+        _ => {}
     }
     let markers: &[&str] = match agent_type {
         "claude" => &["/.claude/projects/"],
@@ -436,7 +548,13 @@ fn extract_session_id_from_path(agent_type: &str, path: &str) -> Option<String> 
         // reader and the resume-cwd search scan both - so both spellings identify an omo
         // transcript, and neither is a guess at another program's file.
         "omo" => &["/.omo/agent/sessions/", "/.omo/sessions/"],
-        "pi" => &["/.pi/"],
+        // The measured pi is senpi (facts/local.md:181): its store is
+        // `<agentDir>/sessions/--<cwd slug>--/<ts>_<uuid>.jsonl` with agentDir
+        // `$SENPI_CODING_AGENT_DIR`, else `~/.senpi/agent` (facts/local-1.md:341-344). Upstream pi
+        // keeps `~/.pi/`.
+        "pi" => {
+            return pi_session_id_from_path(&normalized, |key| env::var_os(key));
+        }
         "antigravity" => &["/.gemini/antigravity-cli/conversations/"],
         _ => return None,
     };
@@ -446,6 +564,55 @@ fn extract_session_id_from_path(agent_type: &str, path: &str) -> Option<String> 
         return None;
     }
     uuid_from_session_path(&normalized)
+}
+
+const PI_STORE_MARKERS: [&str; 2] = ["/.pi/", "/.senpi/agent/sessions/"];
+
+fn pi_session_id_from_path(
+    normalized: &str,
+    get_env: impl Fn(&str) -> Option<OsString>,
+) -> Option<String> {
+    let in_marker = PI_STORE_MARKERS.iter().any(|marker| normalized.contains(*marker));
+    let in_env_root = senpi_agent_dir(&get_env).is_some_and(|dir| {
+        let root = format!(
+            "{}/sessions/",
+            dir.to_string_lossy().replace('\\', "/").trim_end_matches('/')
+        );
+        normalized.starts_with(&root)
+    });
+    if in_marker || in_env_root {
+        uuid_from_session_path(normalized)
+    } else {
+        None
+    }
+}
+
+/// `SENPI_CODING_AGENT_DIR`, the agent dir senpi uses instead of `~/.senpi/agent`.
+fn senpi_agent_dir(get_env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    get_env("SENPI_CODING_AGENT_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Every pi session root: `$SENPI_CODING_AGENT_DIR/sessions` when set, senpi's default
+/// `~/.senpi/agent/sessions`, and upstream pi's `~/.pi/agent/sessions`. The override is the
+/// daemon's own value, which a pane may not share, so the default stays searched beside it.
+fn pi_session_roots(get_env: impl Fn(&str) -> Option<OsString>) -> Vec<PathBuf> {
+    let home = get_env("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| get_env("USERPROFILE").filter(|value| !value.is_empty()))
+        .map(PathBuf::from);
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let candidates = senpi_agent_dir(&get_env)
+        .into_iter()
+        .chain(home.iter().flat_map(|home| [home.join(".senpi/agent"), home.join(".pi/agent")]))
+        .map(|dir| dir.join("sessions"));
+    for root in candidates {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
 }
 
 fn uuid_from_session_path(path: &str) -> Option<String> {
@@ -458,6 +625,62 @@ fn uuid_from_session_path(path: &str) -> Option<String> {
                 && part.as_bytes().get(23) == Some(&b'-')
         })
         .map(str::to_string)
+}
+
+/// The path components below `marker`, or `None` when the path is outside that store.
+fn components_after_marker<'a>(path: &'a str, marker: &str) -> Option<Vec<&'a str>> {
+    let start = path.find(marker)? + marker.len();
+    Some(path[start..].split('/').filter(|part| !part.is_empty()).collect())
+}
+
+// grok keeps one directory per session: `~/.grok/sessions/<url-encoded cwd>/<id>/<file>`, where
+// grok-minted ids are UUIDv7. The id is the directory directly under the cwd group, so a file
+// beside the groups (the global `session_search.sqlite`) carries none.
+fn grok_session_id_from_path(path: &str) -> Option<String> {
+    let parts = components_after_marker(path, "/.grok/sessions/")?;
+    match parts.as_slice() {
+        [_group, id, _file, ..] if is_valid_uuid(id) => Some((*id).to_string()),
+        _ => None,
+    }
+}
+
+// droid writes `~/.factory/sessions/<cwd with / replaced by ->/<uuid>.jsonl` plus a sibling
+// `<uuid>.settings.json`; the cwd slug may itself contain UUID-shaped text, so only the file
+// name is read.
+fn droid_session_id_from_path(path: &str) -> Option<String> {
+    let parts = components_after_marker(path, "/.factory/sessions/")?;
+    let [_slug, file] = parts.as_slice() else {
+        return None;
+    };
+    let id = file
+        .strip_suffix(".settings.json")
+        .or_else(|| file.strip_suffix(".jsonl"))?;
+    is_valid_uuid(id).then(|| id.to_string())
+}
+
+// cline keeps a directory per session, `~/.cline/data/sessions/<id>/<id>.json` and
+// `<id>.messages.json`, with ids shaped `<epoch-ms>_<5 [a-z0-9]>`, not UUIDs.
+fn cline_session_id_from_path(path: &str) -> Option<String> {
+    let parts = components_after_marker(path, "/.cline/data/sessions/")?;
+    let [id, file] = parts.as_slice() else {
+        return None;
+    };
+    let stem = file
+        .strip_suffix(".messages.json")
+        .or_else(|| file.strip_suffix(".json"))?;
+    (stem == *id && is_cline_session_id(id)).then(|| (*id).to_string())
+}
+
+fn is_cline_session_id(id: &str) -> bool {
+    let Some((millis, suffix)) = id.split_once('_') else {
+        return false;
+    };
+    !millis.is_empty()
+        && millis.bytes().all(|b| b.is_ascii_digit())
+        && suffix.len() == 5
+        && suffix
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
 fn is_valid_uuid(val: &str) -> bool {
@@ -663,21 +886,16 @@ fn pi_session_id(agent_pid: Option<u32>, root_pid: u32) -> Option<String> {
         .and_then(crate::ipc::terminal::process_cwd)
         .or_else(|| crate::ipc::terminal::process_cwd(root_pid))?;
     let cwd_str = cwd.to_string_lossy();
-    pi_session_id_from_session_dir(&cwd_str)
+    pi_session_id_from_session_dirs(&pi_session_roots(|key| env::var_os(key)), &cwd_str)
 }
 
-fn pi_session_id_from_session_dir(cwd: &str) -> Option<String> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)?;
+/// The newest transcript for `cwd` across every pi session root.
+fn pi_session_id_from_session_dirs(roots: &[PathBuf], cwd: &str) -> Option<String> {
     let safe_dir = encode_pi_safe_path(cwd);
-    let session_dir = home.join(".pi/agent/sessions").join(safe_dir);
-    if !session_dir.is_dir() {
-        return None;
-    }
-
-    let mut entries: Vec<_> = std::fs::read_dir(&session_dir)
-        .ok()?
+    let mut entries: Vec<_> = roots
+        .iter()
+        .filter_map(|root| std::fs::read_dir(root.join(&safe_dir)).ok())
+        .flatten()
         .filter_map(|e| e.ok())
         .filter(|e| {
             e.path()
@@ -705,8 +923,9 @@ fn pi_session_id_from_session_dir(cwd: &str) -> Option<String> {
 
 // GJC (gajae-code) stores managed sessions at
 // ~/.gjc/agent/sessions/<v2-scope>/<timestamp>_<sessionId>.jsonl; XDG data homes
-// flatten the `agent/` segment (optionally under profiles/<profile>/). Session
-// IDs are short hex strings, NOT UUIDs, so the ID is read from the file name.
+// flatten the `agent/` segment (optionally under profiles/<profile>/). gjc mints
+// session IDs as UUIDv7 (`Bun.randomUUIDv7()`); the ID is read from the file name,
+// whose `<timestamp>_` prefix the parser strips.
 fn gjc_session_id_from_path(path: &str) -> Option<String> {
     let in_agent_layout = path.contains("/.gjc/agent/sessions/");
     let in_xdg_layout = match path.find("/gjc/") {
@@ -1136,6 +1355,202 @@ mod tests {
         );
     }
 
+    // Store paths and ids below are measured (.omo-parity/facts remote-omp.md, remote-grok.md,
+    // remote-droid.md, local-3.md, remote-gjc.md).
+    #[test]
+    fn session_discovery_extracts_measured_omp_grok_droid_cline_store_paths() {
+        assert_eq!(
+            extract_session_id_from_path(
+                "omp",
+                "/home/indo/.omp/agent/sessions/-agent-parity-facts-work/2026-10-22T07-08-47-832Z_01a16270-e358-7635-88e4-1b2f84460057.jsonl",
+            ),
+            Some("01a16270-e358-7635-88e4-1b2f84460057".to_string())
+        );
+        assert_eq!(
+            extract_session_id_from_path(
+                "omp",
+                "/home/indo/.omp/profiles/work/agent/sessions/-agent-parity-facts-work/2026-10-22T07-08-47-832Z_01a16270-e358-7635-88e4-1b2f84460057.jsonl",
+            ),
+            Some("01a16270-e358-7635-88e4-1b2f84460057".to_string())
+        );
+        assert_eq!(
+            extract_session_id_from_path(
+                "omp",
+                "/home/indo/.pi/agent/sessions/-x/2026-10-22T07-08-47-832Z_01a16270-e358-7635-88e4-1b2f84460057.jsonl",
+            ),
+            None
+        );
+
+        assert_eq!(
+            extract_session_id_from_path(
+                "grok",
+                "/home/indo/.grok/sessions/%2Fhome%2Findo%2Fagent-parity-facts%2Fgrok%2Fproj/01a16274-a688-7e73-b6fc-434bc7781be4/updates.jsonl",
+            ),
+            Some("01a16274-a688-7e73-b6fc-434bc7781be4".to_string())
+        );
+        assert_eq!(
+            extract_session_id_from_path("grok", "/home/indo/.grok/sessions/session_search.sqlite"),
+            None
+        );
+
+        assert_eq!(
+            extract_session_id_from_path(
+                "droid",
+                "/home/indo/.factory/sessions/-home-indo-agent-parity-facts-droid-work/d08d895d-058f-4f86-aa21-48d7dbdcaa9f.jsonl",
+            ),
+            Some("d08d895d-058f-4f86-aa21-48d7dbdcaa9f".to_string())
+        );
+        assert_eq!(
+            extract_session_id_from_path(
+                "droid",
+                "/home/indo/.factory/sessions/-home-indo-agent-parity-facts-droid-work/d08d895d-058f-4f86-aa21-48d7dbdcaa9f.settings.json",
+            ),
+            Some("d08d895d-058f-4f86-aa21-48d7dbdcaa9f".to_string())
+        );
+        assert_eq!(
+            extract_session_id_from_path("droid", "/home/indo/.factory/host.json"),
+            None
+        );
+
+        assert_eq!(
+            extract_session_id_from_path(
+                "cline",
+                "/Users/indo/.cline/data/sessions/1792653340197_ys4yu/1792653340197_ys4yu.json",
+            ),
+            Some("1792653340197_ys4yu".to_string())
+        );
+        assert_eq!(
+            extract_session_id_from_path(
+                "cline",
+                "/Users/indo/.cline/data/sessions/1792653340197_ys4yu/1792653340197_ys4yu.messages.json",
+            ),
+            Some("1792653340197_ys4yu".to_string())
+        );
+        assert_eq!(
+            extract_session_id_from_path(
+                "cline",
+                "/Users/indo/.cline/data/sessions/1792653340197_ys4yu/other_ys4yu.json",
+            ),
+            None
+        );
+        // gjc mints UUIDv7 ids; the measured file name still parses.
+        assert_eq!(
+            extract_session_id_from_path(
+                "gjc",
+                "/home/indo/.gjc/agent/sessions/v2-scope/2026-10-22T07-12-55-764Z_01a16274-abd4-7581-8f9c-22214661ef6a.jsonl",
+            ),
+            Some("01a16274-abd4-7581-8f9c-22214661ef6a".to_string())
+        );
+    }
+
+    // Measured on omarchy (grok 1.0.67, no lsof installed): a freshly launched grok holds
+    // `<group>/<id>/events.jsonl` open, so the /proc fd walk is how a fresh pane gets its id.
+    #[cfg(unix)]
+    #[test]
+    fn proc_fd_walk_captures_a_fresh_grok_session_from_its_open_events_file() {
+        let fd_dir = tempfile::tempdir().expect("fd dir");
+        let open = "/home/indo/.grok/sessions/%2Ftmp%2Ffx-grok-tkCR/01a16459-7484-7793-9e7d-90f67df3379f/events.jsonl";
+        std::os::unix::fs::symlink("/dev/null", fd_dir.path().join("0")).expect("stdin link");
+        std::os::unix::fs::symlink(open, fd_dir.path().join("7")).expect("session link");
+        assert_eq!(
+            proc_fd_session_id(fd_dir.path(), "grok"),
+            Some("01a16459-7484-7793-9e7d-90f67df3379f".to_string())
+        );
+        assert_eq!(proc_fd_session_id(fd_dir.path(), "droid"), None);
+    }
+
+    #[test]
+    fn args_match_agent_recognizes_measured_omp_grok_droid_cline_argv() {
+        assert!(args_match_agent("omp", "bun /home/indo/.bun/bin/omp"));
+        assert!(args_match_agent(
+            "omp",
+            "bun /home/indo/.bun/bin/omp --model parity-mock/mock-model --resume 01a16270"
+        ));
+        assert!(!args_match_agent(
+            "omp",
+            "bun /home/indo/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js __omp_worker_daemon_broker"
+        ));
+        assert!(args_match_agent("grok", "/home/indo/.grok/bin/grok"));
+        assert!(!args_match_agent("grok", "/home/indo/.grok/bin/agent"));
+        assert!(args_match_agent("droid", "droid"));
+        assert!(args_match_agent(
+            "cline",
+            "/Users/indo/.bun/install/global/node_modules/@cline/cli-darwin-arm64/bin/cline --hooks-dir /tmp/parity-cline-hooks.2BXn"
+        ));
+        assert!(!args_match_agent(
+            "cline",
+            "/x/@cline/cli-darwin-arm64/bin/cline --cline-hub-daemon --cwd /private/tmp/parity-cline.HDLw --host 127.0.0.1 --port 25463 --pathname /hub"
+        ));
+    }
+
+    #[test]
+    fn resume_id_from_args_reads_measured_resume_argv() {
+        assert_eq!(
+            resume_id_from_args(
+                "grok",
+                "/home/indo/.grok/bin/grok --resume 01a16274-a688-7e73-b6fc-434bc7781be4"
+            )
+            .as_deref(),
+            Some("01a16274-a688-7e73-b6fc-434bc7781be4")
+        );
+        // A grok title is a valid --resume value but not a session id.
+        assert_eq!(resume_id_from_args("grok", "grok --resume PARITY_TOOL"), None);
+        assert_eq!(
+            resume_id_from_args("droid", "droid --resume d08d895d-058f-4f86-aa21-48d7dbdcaa9f")
+                .as_deref(),
+            Some("d08d895d-058f-4f86-aa21-48d7dbdcaa9f")
+        );
+        assert_eq!(
+            resume_id_from_args(
+                "cline",
+                "/Users/indo/.bun/install/global/node_modules/@cline/cli-darwin-arm64/bin/cline --hooks-dir /tmp/parity-cline-hooks.2BXn --id 1792653340197_ys4yu"
+            )
+            .as_deref(),
+            Some("1792653340197_ys4yu")
+        );
+        assert_eq!(resume_id_from_args("cline", "cline --hooks-dir /tmp/h"), None);
+        // remote-crush.md section 1: the npm wrapper and its Go child both carry the resume flag.
+        assert_eq!(
+            resume_id_from_args(
+                "crush",
+                "/home/indo/.local/share/mise/installs/node/26.8.1/lib/node_modules/@charmland/crush/bin/crush --session 7f7fbfa62dd136ec"
+            )
+            .as_deref(),
+            Some("7f7fbfa62dd136ec")
+        );
+        assert_eq!(
+            resume_id_from_args("crush", "crush -s 3df112d9-e56f-4f69-b8bb-c58b5d580e89")
+                .as_deref(),
+            Some("3df112d9-e56f-4f69-b8bb-c58b5d580e89")
+        );
+        assert_eq!(resume_id_from_args("crush", "crush --session 7f7f"), None);
+        assert_eq!(resume_id_from_args("crush", "crush --continue"), None);
+        assert_eq!(resume_id_from_args("claude", "claude --resume id"), None);
+    }
+
+    #[test]
+    fn crush_discovery_binds_the_go_binary_under_its_npm_wrapper() {
+        // Measured process tree, remote-crush.md section 1.
+        let entries = vec![
+            (557000, 1, "/bin/zsh".to_string()),
+            (
+                557321,
+                557000,
+                "/home/indo/.local/share/mise/installs/node/26.8.1/bin/node /home/indo/.local/share/mise/installs/node/26.8.1/bin/crush --session 7f7fbfa62dd136ec".to_string(),
+            ),
+            (
+                557375,
+                557321,
+                "/home/indo/.local/share/mise/installs/node/26.8.1/lib/node_modules/@charmland/crush/bin/crush --session 7f7fbfa62dd136ec".to_string(),
+            ),
+        ];
+        assert_eq!(descendant_agent_pid(&entries, 557000, "crush"), Some(557375));
+        assert!(!args_match_agent(
+            "crush",
+            "/home/indo/.local/share/mise/installs/node/26.8.1/bin/node /home/indo/.local/share/mise/installs/node/26.8.1/bin/crush"
+        ));
+    }
+
     #[test]
     fn parse_ps_entries_preserves_long_args() {
         let stdout = concat!(
@@ -1387,6 +1802,74 @@ mod tests {
             extract_session_id_from_path("pi", "/tmp/unrelated.jsonl"),
             None
         );
+    }
+
+    /// The measured senpi transcript (facts/local-1.md:341-344, facts/local.md:34).
+    const SENPI_MEASURED_PATH: &str = "/Users/indo/.senpi/agent/sessions/--private-tmp-parity-pi.tqp0--/2026-10-22T07-24-18-316Z_01a1627f-160c-731c-9a7c-2069a9dd8b54.jsonl";
+
+    #[test]
+    fn pi_discovery_reads_the_measured_senpi_store() {
+        let id = "01a1627f-160c-731c-9a7c-2069a9dd8b54";
+        let no_env = |_: &str| None;
+        assert_eq!(pi_session_id_from_path(SENPI_MEASURED_PATH, no_env), Some(id.to_string()));
+        // Windows separators normalise to the same marker.
+        let windows = SENPI_MEASURED_PATH.replace("/Users/indo", r"C:\Users\indo").replace('/', r"\");
+        assert_eq!(extract_session_id_from_path("pi", &windows), Some(id.to_string()));
+        // A senpi sibling that is not a session store carries no pi session.
+        assert_eq!(
+            pi_session_id_from_path(&format!("/Users/indo/.senpi/agent/runtime/{id}.jsonl"), no_env),
+            None
+        );
+    }
+
+    #[test]
+    fn pi_discovery_honours_senpi_coding_agent_dir() {
+        // The functional measured run used SENPI_CODING_AGENT_DIR=$HOME/.omo/agent
+        // (facts/local-1.md:341-344): the transcript sits under that root, not ~/.senpi.
+        let id = "01a16281-1b66-764d-87a3-4ea9321c5bd8";
+        let path = format!("/srv/agent-root/sessions/--private-tmp-parity-pi.tqp0--/2026-10-22T07-26-30-758Z_{id}.jsonl");
+        let root = OsString::from("/srv/agent-root/");
+        let with_env = |key: &str| (key == "SENPI_CODING_AGENT_DIR").then(|| root.clone());
+        assert_eq!(pi_session_id_from_path(&path, with_env), Some(id.to_string()));
+        assert_eq!(pi_session_id_from_path(&path, |_: &str| None), None, "no marker, no override");
+        let other = OsString::from("/srv/agent-rootless");
+        assert_eq!(
+            pi_session_id_from_path(&path, |key: &str| (key == "SENPI_CODING_AGENT_DIR").then(|| other.clone())),
+            None
+        );
+    }
+
+    #[test]
+    fn pi_cwd_fallback_searches_senpi_then_upstream_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let home_os = home.path().as_os_str().to_os_string();
+        let roots = pi_session_roots(|key: &str| (key == "HOME").then(|| home_os.clone()));
+        assert_eq!(
+            roots,
+            vec![home.path().join(".senpi/agent/sessions"), home.path().join(".pi/agent/sessions")]
+        );
+        let custom = home.path().join("custom");
+        let custom_os = custom.as_os_str().to_os_string();
+        let overridden = pi_session_roots(|key: &str| match key {
+            "HOME" => Some(home_os.clone()),
+            "SENPI_CODING_AGENT_DIR" => Some(custom_os.clone()),
+            _ => None,
+        });
+        assert_eq!(overridden.first(), Some(&custom.join("sessions")));
+        assert!(overridden.contains(&home.path().join(".senpi/agent/sessions")));
+
+        let cwd = "/private/tmp/parity-pi.tqp0";
+        let id = "01a1627f-160c-731c-9a7c-2069a9dd8b54";
+        let dir = home.path().join(".senpi/agent/sessions").join(encode_pi_safe_path(cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("2026-10-22T07-24-18-316Z_{id}.jsonl")), "{}\n").unwrap();
+        assert_eq!(pi_session_id_from_session_dirs(&roots, cwd), Some(id.to_string()));
+        // Upstream pi alone (no senpi root) still resolves.
+        let upstream_id = "12345678-1234-1234-1234-123456789abc";
+        let upstream = home.path().join(".pi/agent/sessions").join(encode_pi_safe_path(cwd));
+        std::fs::create_dir_all(&upstream).unwrap();
+        std::fs::write(upstream.join(format!("2026-09-02T16-00-00-000Z_{upstream_id}.jsonl")), "{}\n").unwrap();
+        assert_eq!(pi_session_id_from_session_dirs(&roots[1..], cwd), Some(upstream_id.to_string()));
     }
 
     #[test]

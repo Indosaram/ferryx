@@ -1,0 +1,39 @@
+# crush (charmbracelet). Measured 2026-10-22 on crush v0.98.1
+# (.omo-parity/facts/remote-crush.md, screens/crush/*.screen). The input placeholder
+# is randomized per launch, so working/idle anchor on the bottom help line. crush's
+# help line also carries "ctrl+p commands", which opencode_prompt_idle matches, so
+# every crush rule outranks the overlapping opencode rule.
+id = "crush"
+version = "2026.10.22.1"
+min_engine_version = 1
+updated_at = "2026-10-22T00:00:00Z"
+aliases = ["charm-crush"]
+
+[[rules]]
+id = "permission_dialog_blocked"
+state = "blocked"
+priority = 320
+region = "whole_recent"
+visible_blocker = true
+contains = ["permission required", "allow for session"]
+
+[[rules]]
+id = "esc_cancel_footer_working"
+state = "working"
+priority = 120
+region = "bottom_non_empty_lines(1)"
+visible_working = true
+line_regex = ['^\s*esc cancel • tab focus chat']
+
+[[rules]]
+id = "help_footer_idle"
+state = "idle"
+priority = 80
+region = "bottom_non_empty_lines(1)"
+visible_idle = true
+contains = ["shift+tab mode", "ctrl+l models"]
+any = [
+  { contains = ["tab focus chat"] },
+  { contains = ["tab change focus"] },
+]
+not = [{ contains = ["esc cancel"] }]

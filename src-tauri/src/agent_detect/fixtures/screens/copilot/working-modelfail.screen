@@ -1,0 +1,40 @@
+copilot
+
+󰀵 indo  …/parity-copilot.6yV2   main   16:02 
+ copilot
+ Welcome to GitHub Copilot CLI
+ Version 0.0.375 · Commit fe4913f
+
+ Copilot can write, test and debug code right from your terminal. Describe a task to get started or enter ? for help.
+ Copilot uses AI, check for mistakes.
+
+ ● Logged in as user: Indosaram
+
+ ● Connected to GitHub MCP Server
+
+ ● Copilot CLI version 1.0.102 downloaded. Restart to update.
+
+ > run ls
+
+ ✗ Model call failed: The requested model is not supported. (Request ID: FBAB:844CD:16A837F:1919025:6AD9B544)
+
+ ✗ Model call failed: The requested model is not supported. (Request ID: FBAB:844CD:16AB775:191C833:6AD9B54B)
+
+ ✗ Model call failed: The requested model is not supported. (Request ID: FBAB:844CD:16AE9DD:191FED6:6AD9B553)
+
+ ✗ Model call failed: The requested model is not supported. (Request ID: FBAB:844CD:16B2D1B:1924767:6AD9B55B)
+
+ ✗ Model call failed: The requested model is not supported. (Request ID: FBAB:844CD:16B79C8:1929A3A:6AD9B565)
+
+ ◉ Thinking (Esc to cancel)
+
+ /private/tmp/parity-copilot.6yV2[⎇ main]                                                        claude-haiku-4.5 (1x)
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ >  Enter @ to mention files or / for commands
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Ctrl+c Exit · Ctrl+r Expand recent
+
+
+
+
+

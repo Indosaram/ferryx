@@ -20,7 +20,7 @@ import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { AgentHistoryDialog } from "./components/AgentHistoryDialog";
 import { buildAttentionRows, liveActivityLookup, type AttentionRow } from "./features/ferryx/attention/attentionModel";
-import type { AgentHistoryEntry } from "./lib/agentHistory";
+import { agentHistoryProviderLabel, type AgentHistoryEntry } from "./lib/agentHistory";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
 import { TerminalFileLinkActions } from "./components/TerminalFileLinkActions";
@@ -4184,7 +4184,7 @@ function WorkspaceApp({
                   },
                 },
               });
-              const label = entry.provider.charAt(0).toUpperCase() + entry.provider.slice(1);
+              const label = agentHistoryProviderLabel(entry.provider);
               if (targetWorktree) {
                 await openTab(targetWorktree, label, backendSessionId);
               }

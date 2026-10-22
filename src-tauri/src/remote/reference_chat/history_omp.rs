@@ -977,6 +977,9 @@ mod tests {
     const RECORD_ALIASES: &str = include_str!("fixtures/omp/record-aliases.jsonl");
     const SETTLED_TURN_BOUNDARY: &str = include_str!("fixtures/omp/settled-turn-boundary.jsonl");
     const SKILL_INVOCATION: &str = include_str!("fixtures/omp/skill-invocation.jsonl");
+    /// The first turn of a real omp 18.12.6 session (`.omo-parity/facts/raw-omp/sample-session.jsonl`),
+    /// which opens with a `{"type":"title",…}` record before the session header.
+    const OMP_18_12_6_TITLE_RECORD: &str = include_str!("fixtures/omp/omp-18.12.6-title-record.jsonl");
 
     fn parse(fixture: &str) -> Vec<ReferenceTurn> {
         parse_omp_transcript(OMP_HISTORY_KIND, fixture).expect("the omp family parses")
@@ -1283,6 +1286,29 @@ mod tests {
             }
             other => panic!("expected a tool part, got {:?}", other.kind()),
         }
+    }
+
+    #[test]
+    fn omp_18_12_6_session_with_a_leading_title_record_parses() {
+        // omp 18.12.6 writes `{"type":"title",…}` on line 1, before the `session` header, and
+        // `title_change` / `custom` bookkeeping between messages. None of them is a turn.
+        let turns = parse(OMP_18_12_6_TITLE_RECORD);
+        assert_eq!(turns.len(), 2, "one prompt and its answer");
+        assert_eq!(turns[0].role, ReferenceTurnRole::User);
+        assert_eq!(turns[0].started_at.as_deref(), Some("2026-10-22T07:09:15.195Z"));
+        assert_eq!(text_of(&turns[0].parts[0]), "RUNTOOL again");
+        let answer = &turns[1];
+        assert_eq!(
+            kinds(answer),
+            vec![ReferencePartKind::Text, ReferencePartKind::Tool, ReferencePartKind::Text]
+        );
+        assert_eq!(text_of(&answer.parts[0]), "Running it.");
+        let (name, _summary, input, output, error) = tool_of(&answer.parts[1]);
+        assert_eq!(name, "bash");
+        assert!(input.contains("echo parity-approval-probe"), "input was {input}");
+        assert_eq!(output, "parity-approval-probe\n");
+        assert!(!error);
+        assert_eq!(text_of(&answer.parts[2]), "Done. The command ran.");
     }
 
     #[test]

@@ -2815,11 +2815,11 @@ async fn a_chat_submit_is_refused_when_the_screen_history_has_a_replay_gap() {
 #[tokio::test]
 async fn a_chat_submit_to_an_agent_without_a_prompt_detector_ignores_a_replay_gap() {
     let session_id = "reference-route-post-gap-no-detector".to_string();
-    assert!(super::prompts::ReferencePromptFamily::of_agent("opencode").is_none());
+    assert!(super::prompts::ReferencePromptFamily::of_agent("droid").is_none());
     let hub = crate::terminal::TerminalOutputHub::default();
     hub.register_session(&session_id);
     hub.record_initial_size(&session_id, 80, 24);
-    hub.publish(&session_id, b"opencode ready\r\n".to_vec())
+    hub.publish(&session_id, b"droid ready\r\n".to_vec())
         .expect("output published");
     hub.publish_gap(&session_id).expect("gap published");
     hub.publish(&session_id, b"\rworking...".to_vec())
@@ -2851,7 +2851,7 @@ async fn a_chat_submit_to_an_agent_without_a_prompt_detector_ignores_a_replay_ga
             "epoch": epoch,
             "backendSessionId": session_id,
         },
-        "registryId": "opencode",
+        "registryId": "droid",
         "params": { "text": "hello", "origin": "chat" },
     });
     let (status, response) = server

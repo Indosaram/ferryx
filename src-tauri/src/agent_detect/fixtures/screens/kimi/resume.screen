@@ -1,0 +1,40 @@
+╭────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                    │
+│   ▐█▛█▛█▌  Welcome to Kimi Code CLI!                                               │
+│   ▐█████▌  Send /help for help information.                                        │
+│                                                                                    │
+│  Directory: /private/tmp/parity-kimi.EUl4                                          │
+│  Session: eca66b4f-a89b-4979-9f13-cbe3f35b5991                                     │
+│  Model: kimi-for-coding (powered by kimi-k2.5)                                     │
+│                                                                                    │
+│  Tip: Kimi Code Web UI, a GUI version of Kimi Code, is now in technical preview.   │
+│       Type /web to switch, or next time run `kimi web` directly.                   │
+│                                                                                    │
+│  New version available: 1.50.0. Please run `uv tool upgrade kimi-cli` to upgrade.  │
+│                                                                                    │
+╰────────────────────────────────────────────────────────────────────────────────────╯
+indo✨ Run the shell command: ls
+indo@parity-kimi.EUl4💫
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+16:14  agent (kimi-for-coding, thinking)  new version found, run `uv tool upgrade kimi-cli` to upgrade     context: 0.0%

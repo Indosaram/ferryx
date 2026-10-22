@@ -1,0 +1,1 @@
+{"event":"PreToolUse","session_id":"3df112d9-e56f-4f69-b8bb-c58b5d580e89","cwd":"/home/indo/agent-parity-facts/crush/proj","tool_name":"bash","tool_input":{"command":"touch parity-probe.txt","description":"create probe file"}}

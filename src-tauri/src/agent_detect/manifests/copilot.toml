@@ -51,3 +51,28 @@ visible_working = true
 # Generic "esc to cancel" / "esc cancel" / "esc interrupt" match any interactive shell/CLI/fzf.
 # Copilot CLI generation cancel requires "esc again to cancel".
 contains = ["esc again to cancel"]
+
+# Measured 2026-10-22 (Copilot CLI 0.0.375, .omo-parity/facts/screens/copilot/). While a turn
+# runs a status row "∙ Thinking (Esc to cancel)" / "◎ Thinking (Esc to cancel)" /
+# "◉ Thinking (Esc to cancel)" sits above the cwd line and the composer box, whose footer
+# reads "Ctrl+c Exit · Ctrl+r Expand recent".
+[[rules]]
+id = "thinking_row_working"
+state = "working"
+priority = 105
+region = "bottom_non_empty_lines(7)"
+visible_working = true
+contains = ["ctrl+c exit · ctrl+r expand recent"]
+line_regex = ['^\s*[∙◎◉]\s+\S.*\(Esc to cancel\)\s*$']
+
+# The composer ">  Enter @ to mention files or / for commands" framed by two rules, above
+# the "Ctrl+c Exit · Ctrl+r Expand recent" footer (idle, after-turn, resumed captures).
+# The working row above it outranks this rule.
+[[rules]]
+id = "composer_idle"
+state = "idle"
+priority = 85
+region = "bottom_non_empty_lines(4)"
+visible_idle = true
+contains = ["enter @ to mention files or / for commands"]
+line_regex = ['^\s*Ctrl\+c Exit · Ctrl\+r Expand recent']

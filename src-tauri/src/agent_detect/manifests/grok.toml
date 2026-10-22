@@ -32,6 +32,21 @@ aliases = ["grok-build"]
 # The startup splash draws its logo with braille characters, so working
 # rules must anchor on the [stop] chip, not on a bare spinner glyph.
 # Dropped for Ferryx global evaluation: osc_title_working (regex '\S' treated ANY non-empty title as grok working).
+#
+# Grok Build 1.0.67 (measured 2026-10-22, .omo-parity/facts/remote-grok.md and
+# screens/grok/*.screen): the shortcuts hint reads "Ctrl+x:shortcuts" wherever
+# Ctrl+. is unreliable (tmux, Windows, WSL), a running turn shows
+# "Ctrl+c:cancel" and never "Esc:cancel", and the permission footer says
+# "Ctrl+o:always-approve" instead of "Ctrl+o:yolo". The rules below accept both
+# the 0.2.x and the 1.0.x strings.
+
+[[rules]]
+id = "device_auth_blocked"
+state = "blocked"
+priority = 405
+region = "whole_recent"
+visible_blocker = true
+contains = ["approve in your browser to finish signing in", "waiting for approval"]
 
 [[rules]]
 id = "osc_title_blocked"
@@ -55,7 +70,19 @@ state = "blocked"
 priority = 380
 region = "bottom_non_empty_lines(2)"
 visible_blocker = true
-contains = [":select", "ctrl+o:yolo", "ctrl+c:cancel"]
+contains = [":select", "ctrl+c:cancel"]
+any = [
+  { contains = ["ctrl+o:yolo"] },
+  { contains = ["ctrl+o:always-approve"] },
+]
+
+[[rules]]
+id = "trust_folder_blocked"
+state = "blocked"
+priority = 385
+region = "whole_recent"
+visible_blocker = true
+contains = ["grok build may run or modify contents in this directory", "yes, proceed", "no, quit"]
 
 [[rules]]
 id = "question_dialog_hints_blocked"
@@ -120,7 +147,10 @@ state = "working"
 priority = 190
 region = "bottom_non_empty_lines(2)"
 visible_working = true
-contains = ["esc:cancel", "ctrl+.:shortcuts"]
+any = [
+  { contains = ["esc:cancel", "ctrl+.:shortcuts"] },
+  { contains = ["ctrl+c:cancel"], any = [{ contains = ["ctrl+.:shortcuts"] }, { contains = ["ctrl+x:shortcuts"] }] },
+]
 
 # Pre-0.2.x working chrome kept for older Grok Build releases.
 
@@ -141,8 +171,21 @@ state = "idle"
 priority = 100
 region = "bottom_non_empty_lines(2)"
 visible_idle = true
-contains = ["ctrl+.:shortcuts"]
+any = [
+  { contains = ["ctrl+.:shortcuts"] },
+  { contains = ["ctrl+x:shortcuts"] },
+]
 not = [
   { contains = ["esc:cancel"] },
   { contains = ["ctrl+c:cancel"] },
 ]
+
+# Welcome card of a new session (1.0.67): no footer hint, only the menu.
+
+[[rules]]
+id = "welcome_menu_idle"
+state = "idle"
+priority = 95
+region = "whole_recent"
+visible_idle = true
+contains = ["grok build", "new worktree", "resume session"]

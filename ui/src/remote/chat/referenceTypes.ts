@@ -57,6 +57,14 @@ export type ReferenceHistorySource =
   | "omo-transcript"
   | "gjc-transcript"
   | "pi-transcript"
+  | "copilot-transcript"
+  | "antigravity-transcript"
+  | "kimi-transcript"
+  | "grok-transcript"
+  | "cline-transcript"
+  | "opencode-transcript"
+  | "cursor-transcript"
+  | "crush-transcript"
   | "scrollback";
 
 /** How honestly the page's turns are sourced. */
@@ -70,6 +78,14 @@ export type ReferenceNativeHistoryKind =
   | "omo"
   | "gjc"
   | "pi"
+  | "copilot"
+  | "antigravity"
+  | "kimi"
+  | "grok"
+  | "cline"
+  | "opencode"
+  | "cursor"
+  | "crush"
   | "unavailable";
 
 export type ReferenceTurnRole = "user" | "assistant";
@@ -498,6 +514,25 @@ export function referenceNativeKindFromRegistryId(registryId: string): Reference
       return "gjc";
     case "pi":
       return "pi";
+    case "copilot":
+      return "copilot";
+    // `agentIcon.ts` AGENT_LOGO_ALIASES: agy and cursor-agent are the same agents.
+    case "antigravity":
+    case "agy":
+      return "antigravity";
+    case "kimi":
+      return "kimi";
+    case "grok":
+      return "grok";
+    case "cline":
+      return "cline";
+    case "opencode":
+      return "opencode";
+    case "cursor":
+    case "cursor-agent":
+      return "cursor";
+    case "crush":
+      return "crush";
     default:
       return "unavailable";
   }

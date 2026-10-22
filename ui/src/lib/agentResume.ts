@@ -14,7 +14,7 @@ export const PROVIDER_TRANSCRIPT_PATH_MAX_LENGTH = 4096;
 export const RESUMABLE_TUI_AGENTS = [
   "claude", "codex", "antigravity", "opencode", "pi", "prime-agent",
   "mimo-code", "droid", "grok", "devin", "omp", "omo", "kimi", "gjc",
-  "copilot", "cursor", "cursor-agent",
+  "copilot", "cursor", "cursor-agent", "cline", "crush",
 ] as const;
 
 export type ResumableTuiAgent = (typeof RESUMABLE_TUI_AGENTS)[number];
@@ -43,6 +43,8 @@ const RESUME_BUILDERS: Readonly<Record<string, ResumeArgvBuilder>> = {
   copilot: { key: "session_id", binary: "copilot", args: (id) => ["--resume", id] },
   cursor: { key: "session_id", binary: "cursor-agent", args: (id) => ["--resume", id] },
   "cursor-agent": { key: "session_id", binary: "cursor-agent", args: (id) => ["--resume", id] },
+  cline: { key: "session_id", binary: "cline", args: (id) => ["--id", id] },
+  crush: { key: "session_id", binary: "crush", args: (id) => ["--session", id] },
 };
 
 export function providerSessionKeyForAgent(agentType: string): AgentProviderSessionKey | null {
@@ -60,6 +62,11 @@ export const AUTHORITATIVE_RECONNECT_AGENTS = [
   "antigravity",
   "opencode",
   "pi",
+  "omp",
+  "grok",
+  "droid",
+  "cline",
+  "crush",
 ] as const;
 
 export function canCaptureAuthoritativeProviderSession(agentType: string): boolean {

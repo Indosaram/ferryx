@@ -1,0 +1,41 @@
+
+      ▄▀▀▄        Antigravity CLI 1.4.4
+     ▀▀▀▀▀▀       user@example.invalid (Google AI Ultra)
+    ▀▀▀▀▀▀▀▀      GPT-OSS 120B (Medium)
+   ▄▀▀    ▀▀▄     /tmp/parity-agy.RC6w
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Run the shell command: ssh -V
+
+⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 38h55m6s.
+Error ID: c140118e-4959-4583-8797-d9e68137c874-1
+
+> /model
+  ⎿  Model set to Gemini 3.8 Flash (Medium)
+
+────────────────────────────────────────────────────────────
+> Run the shell command: ssh -V
+
+⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 38h54m14s.
+Error ID: c140118e-4959-4583-8797-d9e68137c874-3
+
+> /model
+  ⎿  Model set to GPT-OSS 120B (Medium)
+
+────────────────────────────────────────────────────────────
+> Run the shell command: ssh -V
+⣾  Generating...
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                                                                      GPT-OSS 120B (Medium)
+
+
+
+
+
+
+
+
+

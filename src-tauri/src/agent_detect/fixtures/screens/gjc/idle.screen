@@ -1,0 +1,40 @@
+╭─── gjc v0.18.12 · package install · GJC Forge ──────────────────────────────────────────────────────────────────────╮
+│                                                          │                                                          │
+│                                                          │ What's New                                               │
+│                                                          │ ▸ Added the task.compactSubagentPanel setting. When it i…│
+│                                                          │ ▸ --credential, --prefer-credential, /credential, gjc ac…│
+│                                                          │ ▸ Reload user settings and model configuration in open L…│
+│                                                          │ ▸ Added global auth.credentialPreferences: an ordered li…│
+│                                                          │ ▸ Added gjc accounts prefer <provider> <account>[=<perce…│
+│                                                          │ ▸ gjc migrate now imports Claude Code CLAUDE.md and Code…│
+│                                                          │ ▸ models.yml accepts provider-level and per-model stream…│
+│                                                          │ ▸ Document project-scoped Parallel Search MCP setup for …│
+│                        GJC Forge                         │ ▸ Add /provider status to show each configured provider'…│
+│                   shape · act · prove                    │ ▸ reportissue tool (opt-in via reportIssue.enabled): the…│
+│                                                          │ … /changelog for full notes                              │
+│           ╭────────────────╮        ╭────────╮           │ ──────────────────────────────────────────────────────── │
+│           ╰──────╮      ╭──╯     ╭──╯  ╭─────╯           │ Flow keys                                                │
+│                  ╰──────╯    ╭───╯  ╭──╯                 │ / commands · # actions · ! shell · $ python · ? keymap   │
+│                  ╭──────╮    ╰───╮  ╰──╮                 │ Ctrl+L model · Shift+Tab reasoning · Tab complete        │
+│           ╭──────╯      ╰──╮     ╰──╮  ╰─────╮           │ Ctrl+J newline · Ctrl+C clear                            │
+│           ╰────────────────╯        ╰────────╯           │ ──────────────────────────────────────────────────────── │
+│                                                          │ Project pulse                                            │
+│                         ⣾ ready                          │ ⏳ bashls .sh .bash .zsh                                 │
+│                     [ ⬢ Fake Model ]                     │ ──────────────────────────────────────────────────────── │
+│                     [ 📦 fakelocal ]                     │ Session trail                                            │
+│                                                          │ No saved trails                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+│                                                          │                                                          │
+╰──────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────╯
+ ⬢ fake-model · 9.7% / ⑂ master ?1 / 📁 ~/agent-parity-facts/gjc/work ──────────────────────────────────────── v0.18.12
+╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ > Type your message... Alt+Enter: Queue (busy) · Shift+Tab: Thinking · Ctrl+L: Model · Ctrl+R: History · Shift+Ent… │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

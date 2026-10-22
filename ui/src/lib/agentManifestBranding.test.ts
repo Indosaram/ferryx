@@ -3,14 +3,14 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { SUPPORTED_AGENT_LOGOS } from "./agentIcon";
+import { resolveAgentLogo } from "./agentIcon";
 
 const projectRoot = resolve(import.meta.dirname, "../../..");
 const manifestDir = resolve(projectRoot, "src-tauri/src/agent_detect/manifests");
 
 // Cross-language coupling that fails silently: Rust reports the winning manifest's `id`
-// verbatim, and resolveAgentLogo is an exact map lookup with no alias resolution, so an
-// id that is not a logo key leaves the pane detectable but unbrandable.
+// verbatim, and an id that resolveAgentLogo (logo keys plus AGENT_LOGO_ALIASES) cannot map
+// leaves the pane detectable but unbrandable.
 function shippedManifestIds(): { file: string; id: string }[] {
   return readdirSync(manifestDir)
     .filter((file) => file.endsWith(".toml"))
@@ -31,12 +31,11 @@ describe("agent manifest ids are brandable", () => {
   });
 
   it("every shipped manifest id resolves to a bundled brand icon", () => {
-    const logoKeys = Object.keys(SUPPORTED_AGENT_LOGOS);
     const unbrandable = shippedManifestIds()
-      .filter((m) => !logoKeys.includes(m.id))
+      .filter((m) => resolveAgentLogo(m.id) === null)
       .map((m) => `${m.file} -> id "${m.id}"`);
 
-    expect(unbrandable, "manifest ids must be keys of SUPPORTED_AGENT_LOGOS").toEqual([]);
+    expect(unbrandable, "manifest ids must resolve through resolveAgentLogo").toEqual([]);
   });
 
   it("keeps manifest ids lowercase so the resolveAgentLogo lookup matches", () => {

@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"01a16281-1b66-764d-87a3-4ea9321c5bd8","timestamp":"2026-10-22T07:26:30.758Z","cwd":"__CWD__"}
+{"type":"model_change","id":"d88c71ec","parentId":null,"timestamp":"2026-10-22T07:26:41.439Z","provider":"mahoquot","modelId":"claude-opus-5-5"}
+{"type":"thinking_level_change","id":"a721b83a","parentId":"d88c71ec","timestamp":"2026-10-22T07:26:41.439Z","thinkingLevel":"medium","thinkingSelection":{"level":"medium","source":"explicit"}}
+{"type":"message","id":"4fe5b503","parentId":"a721b83a","timestamp":"2026-10-22T07:28:33.026Z","message":{"role":"user","content":[{"type":"text","text":"omo-user-sentinel"}],"timestamp":1792654112473}}
+{"type":"message","id":"f4a450dd","parentId":"4fe5b503","timestamp":"2026-10-22T07:28:40.100Z","message":{"role":"assistant","content":[{"type":"text","text":"omo-assistant-sentinel"},{"type":"toolCall","id":"toolu_014dUw7FXa6Q2cHGYYDRg3ZL","name":"todo","arguments":{"op":"init"}}],"role_note":"content carries text and toolCall parts"}}
+{"type":"session_info","id":"4b9a262e","parentId":"f4a450dd","timestamp":"2026-10-22T07:28:52.856Z","name":"redacted-title"}

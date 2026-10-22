@@ -9,6 +9,12 @@ export const AGENT_CANDIDATES = [
   "cursor-agent",
   "droid",
   "crush",
+  "pi",
+  "copilot",
+  "grok",
+  "kimi",
+  "cline",
+  "omp",
 ] as const;
 
 export type AgentCandidate = (typeof AGENT_CANDIDATES)[number];
@@ -179,7 +185,17 @@ export function loadAgentSettings(storage?: Storage | null): AgentSettings {
       const name = normalizeCustomAgentName(entry.name);
       const command = entry.command.trim();
       if (!name || !command) continue;
-      if ((AGENT_CANDIDATES as readonly string[]).includes(name)) continue;
+      if ((AGENT_CANDIDATES as readonly string[]).includes(name)) {
+        // A custom agent registered before its name became built-in keeps its
+        // command and args as an override instead of being dropped on upgrade.
+        const existing = overrides[name] ?? {};
+        overrides[name] = {
+          ...existing,
+          command: existing.command ?? command,
+          args: existing.args ?? (typeof entry.args === "string" ? entry.args : ""),
+        };
+        continue;
+      }
       if (seen.has(name)) continue;
       seen.add(name);
       custom.push({

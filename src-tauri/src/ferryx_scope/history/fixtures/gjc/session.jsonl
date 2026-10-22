@@ -1,0 +1,5 @@
+{"type":"session","version":5,"starredPatchVersion":1,"id":"01a16274-abd4-7581-8f9c-22214661ef6a","timestamp":"2026-10-22T07:12:55.764Z","cwd":"__CWD__"}
+{"type":"model_change","id":"683ae2aa","parentId":null,"timestamp":"2026-10-22T07:12:56.135Z","model":"fakelocal/fake-model"}
+{"type":"message","id":"51eb5e75","parentId":"683ae2aa","timestamp":"2026-10-22T07:13:16.227Z","message":{"role":"user","content":[{"type":"text","text":"gjc-user-sentinel"}],"attribution":"user","timestamp":1792653195803}}
+{"type":"message","id":"399fe13e","parentId":"51eb5e75","timestamp":"2026-10-22T07:13:17.744Z","message":{"role":"assistant","content":[{"type":"text","text":"gjc-assistant-sentinel"}],"api":"openai-completions","provider":"fakelocal","model":"fake-model","stopReason":"stop","timestamp":1792653196238}}
+{"type":"message","id":"26019b19","parentId":"399fe13e","timestamp":"2026-10-22T07:13:29.499Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_1","name":"ask","arguments":{"questions":[{"id":"q1","question":"redacted-question"}]}}],"stopReason":"toolUse","timestamp":1792653209486}}

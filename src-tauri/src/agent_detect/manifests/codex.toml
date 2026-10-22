@@ -52,6 +52,22 @@ visible_working = true
 line_regex = ['^[\x{2800}-\x{28FF}\s]*Working \([^)]*esc to interrupt\)(?:.*)?$']
 not = [{ contains = ["Conversation interrupted"] }]
 
+# Measured 2026-10-22 (codex 0.156.1/0.160.0, .omo-parity/facts/screens/codex/*working*):
+# the row "• Working (0s • esc to interrupt)" sits above the "› Ask Codex to do anything"
+# composer and one or two footer lines, out of reach of screen_working_fallback's 3 lines.
+# The composer line keeps the senpi "• Working (… esc to interrupt)" row (omo/pi) out.
+# Priority 210 beats omo esc_cancel_working (150) and omo spinner_working (200).
+[[rules]]
+id = "composer_working"
+state = "working"
+priority = 210
+region = "bottom_non_empty_lines(5)"
+visible_working = true
+line_regex = [
+  '^\s*•\s+Working \([^)]*esc to interrupt\)',
+  '^›\s+Ask Codex to do anything',
+]
+
 [[rules]]
 id = "codex_prompt_idle"
 state = "idle"
@@ -60,6 +76,8 @@ region = "bottom_non_empty_lines(3)"
 visible_idle = true
 any = [
   { contains = ["Ask Codex anything"] },
+  # Measured composer placeholder (codex 0.156.1/0.160.0 idle, done, resumed captures).
+  { line_regex = ['^›\s+Ask Codex to do anything'] },
   { line_regex = ['^\s*>\s*$'] },
 ]
 not = [

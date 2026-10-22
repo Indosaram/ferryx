@@ -124,6 +124,19 @@ pub struct InventoryTransition {
 pub enum CanonicalProvider {
     Codex,
     Claude,
+    Omo,
+    Pi,
+    Omp,
+    Gjc,
+    Antigravity,
+    Opencode,
+    Copilot,
+    Cursor,
+    Kimi,
+    Cline,
+    Grok,
+    Droid,
+    Crush,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -1,0 +1,40 @@
+     ▀▀▀▀▀▀       user@example.invalid (Google AI Ultra)
+    ▀▀▀▀▀▀▀▀      GPT-OSS 120B (Medium)
+   ▄▀▀    ▀▀▄     /tmp/parity-agy.RC6w
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Run the shell command: ssh -V
+
+⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 38h55m6s.
+Error ID: c140118e-4959-4583-8797-d9e68137c874-1
+
+────────────────────────────────────────────────────────────
+> Run the shell command: ssh -V
+
+⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 38h54m14s.
+Error ID: c140118e-4959-4583-8797-d9e68137c874-3
+
+────────────────────────────────────────────────────────────
+> Run the shell command: ssh -V
+
+⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 97h24m49s.
+Error ID: c140118e-4959-4583-8797-d9e68137c874-5
+
+⚠ Warning
+  ⎿  Invalid "unsandboxed" permission rules found; they are ignored and grant nothing:
+       ~/.gemini/antigravity-cli/settings.json:
+         • unsandboxed(*)
+
+     Fix: replace "unsandboxed" with "command" (e.g. command(git status)), or remove the rule. Edit the file directly
+     or use /permissions.
+
+
+ ┃ Meet Gemini 4 Argon
+ ┃ Google’s most capable frontier model is now available in Antigravity. Built for complex, multi-step agentic
+ ┃ workflows, and deep reasoning.
+ ┃ esc to dismiss
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                    GPT-OSS 120B (Medium)

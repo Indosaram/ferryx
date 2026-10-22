@@ -1,0 +1,40 @@
+
+ ✗ Model call failed: The requested model is not supported. (Request ID: FBAB:844CD:16B2D1B:1924767:6AD9B55B)
+
+ ✗ Model call failed: The requested model is not supported. (Request ID: FBAB:844CD:16B79C8:1929A3A:6AD9B565)
+
+ ● Operation cancelled by user
+
+ ● Model changed to: gpt-4.1. The new model will be used for the next conversation.
+
+ > run ls
+
+ ✓ List files in the current directory
+ $ ls
+    └ 2 lines...
+
+ ● README.md is the only file in the current directory.
+
+ > run the shell command: touch probe.txt
+
+ ○ Create an empty file named probe.txt
+ $ touch probe.txt
+
+
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ Create an empty file named probe.txt                                                                               │
+ │                                                                                                                    │
+ │ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ │
+ │ │ touch probe.txt                                                                                                │ │
+ │ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
+ │                                                                                                                    │
+ │ Do you want to run this command?                                                                                   │
+ │                                                                                                                    │
+ │ ❯ 1. Yes                                                                                                           │
+ │   2. Yes, and approve `touch` for the rest of the running session                                                  │
+ │   3. No, and tell Copilot what to do differently (Esc)                                                             │
+ │                                                                                                                    │
+ │ Confirm with number keys or ↑↓ keys and Enter, Cancel with Esc                                                     │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+

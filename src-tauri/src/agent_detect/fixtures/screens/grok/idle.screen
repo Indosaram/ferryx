@@ -1,0 +1,40 @@
+
+   master ~/a/grok/proj
+
+
+
+
+
+   ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+   │                                                                                                                │
+   │  ⠀⠀⠀⠀⠀⠀⣀⣀⡀⠀⠀⠀⢀⠄   Grok Build  1.0.67                                                                           │
+   │  ⠀⠀⠀⣠⣾⠿⠛⠛⠛⠛⢀⡴⠁⠀                                                                                                │
+   │  ⠀⠀⣼⡟⠁⠀⠀⠀⢀⡴⠻⣿⡀⠀   Changelog                                                                                    │
+   │  ⠀⠀⣿⡇⠀⠀⠀⠔⠁⠀⠀⣿⡇⠀                                                                                                │
+   │  ⠀⠀⢹⣷⠀⠀⠀⠀⠀⢀⣴⡿⠀⠀    • Worktrees also use their main checkout's saved "always allow" answers, so you are not …   │
+   │  ⠀⢀⠞⠁⠠⢶⣶⣶⣶⠿⠋⠀⠀⠀    • Headless grok -p runs exit when their work is done instead of hanging when a backgroun…   │
+   │  ⠐⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀    • Prompt suggestions follow vim mode: with [ui].vim_mode on, Tab moves focus to the scro…   │
+   │                                                                                                                │
+   │                   New worktree                                                                         ctrl+w  │
+   │                   Resume session                                                                       ctrl+r  │
+   │                   Changelog                                                                                    │
+   │                   Quit                                                                                 ctrl+q  │
+   │                                                                                                                │
+   ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────── Parity Fake ─╯
+
+                                                                                   Logged in with API key  │  [stable]
+

@@ -186,6 +186,51 @@ describe("agentSessionDiscovery", () => {
       expect(extractSessionIdFromPath("cursor", wrongDir)).toBeNull();
     });
 
+    // Store paths below are measured: remote-omp.md, remote-grok.md, remote-droid.md, local-3.md.
+    it("extracts measured omp, grok, droid and cline session ids", () => {
+      expect(
+        extractSessionIdFromPath(
+          "omp",
+          "/home/indo/.omp/agent/sessions/-agent-parity-facts-work/2026-10-22T07-08-47-832Z_01a16270-e358-7635-88e4-1b2f84460057.jsonl",
+        ),
+      ).toBe("01a16270-e358-7635-88e4-1b2f84460057");
+      expect(
+        extractSessionIdFromPath(
+          "grok",
+          "/home/indo/.grok/sessions/%2Fhome%2Findo%2Fagent-parity-facts%2Fgrok%2Fproj/01a16274-a688-7e73-b6fc-434bc7781be4/updates.jsonl",
+        ),
+      ).toBe("01a16274-a688-7e73-b6fc-434bc7781be4");
+      expect(extractSessionIdFromPath("grok", "/home/indo/.grok/sessions/session_search.sqlite")).toBeNull();
+      expect(
+        extractSessionIdFromPath(
+          "droid",
+          "/home/indo/.factory/sessions/-home-indo-agent-parity-facts-droid-work/d08d895d-058f-4f86-aa21-48d7dbdcaa9f.jsonl",
+        ),
+      ).toBe("d08d895d-058f-4f86-aa21-48d7dbdcaa9f");
+      expect(
+        extractSessionIdFromPath(
+          "cline",
+          "/Users/indo/.cline/data/sessions/1792653340197_ys4yu/1792653340197_ys4yu.messages.json",
+        ),
+      ).toBe("1792653340197_ys4yu");
+      expect(
+        extractSessionIdFromPath("cline", "/Users/indo/.cline/data/sessions/1792653340197_ys4yu/other.json"),
+      ).toBeNull();
+    });
+
+    it("finds omp under its bun launcher and the native cline binary, never their helpers", () => {
+      const snapshot: ProcessSnapshot = [
+        { pid: 10, ppid: 1, command: "/bin/zsh" },
+        { pid: 11, ppid: 10, command: "bun /home/indo/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js __omp_worker_daemon_broker" },
+        { pid: 12, ppid: 10, command: "bun /home/indo/.bun/bin/omp" },
+        { pid: 20, ppid: 1, command: "/bin/zsh" },
+        { pid: 21, ppid: 20, command: "/x/@cline/cli-darwin-arm64/bin/cline --cline-hub-daemon --cwd /private/tmp/parity-cline.HDLw --host 127.0.0.1 --port 25463 --pathname /hub" },
+        { pid: 22, ppid: 20, command: "/Users/indo/.bun/install/global/node_modules/@cline/cli-darwin-arm64/bin/cline --hooks-dir /tmp/parity-cline-hooks.2BXn" },
+      ];
+      expect(findAgentPid(snapshot, 10, "omp")).toBe(12);
+      expect(findAgentPid(snapshot, 20, "cline")).toBe(22);
+    });
+
     it("extracts session id for kimi with valid and invalid paths", () => {
       const validPath = `/Users/x/.kimi/sessions/a1b2c3d4e5/${UUID}/conversation.json`;
       const validDirPath = `/Users/x/.kimi/sessions/a1b2c3d4e5/${UUID}`;

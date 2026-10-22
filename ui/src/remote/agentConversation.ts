@@ -896,6 +896,14 @@ const REFERENCE_HISTORY_SOURCES: readonly ReferenceHistorySource[] = [
   "omo-transcript",
   "gjc-transcript",
   "pi-transcript",
+  "copilot-transcript",
+  "antigravity-transcript",
+  "kimi-transcript",
+  "grok-transcript",
+  "cline-transcript",
+  "opencode-transcript",
+  "cursor-transcript",
+  "crush-transcript",
   "scrollback",
 ];
 

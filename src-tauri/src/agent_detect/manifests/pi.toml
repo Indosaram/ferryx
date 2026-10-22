@@ -1,0 +1,58 @@
+# pi (senpi without the omo plugin). Measured 2026-10-22 (.omo-parity/facts/screens/pi/).
+# pi draws the same senpi chrome as omo, so its screens also match omo.toml rules.
+# The difference is the footer: omo adds an "OmO Native" / "mem:<id>" tag line and
+# pi does not. Every pi rule needs the senpi context meter and vetoes the omo tags,
+# and outranks the omo rule it shadows.
+id = "pi"
+version = "2026.10.22.1"
+min_engine_version = 1
+updated_at = "2026-10-22T00:00:00Z"
+aliases = ["senpi"]
+
+[[rules]]
+id = "permission_dialog_blocked"
+state = "blocked"
+priority = 410
+region = "bottom_non_empty_lines(12)"
+visible_blocker = true
+contains = ["permission required:", "deny with feedback"]
+line_regex = ['\d+(?:\.\d+)?[kKmM]?/\d+(?:\.\d+)?[kKmM] \((?:\d+(?:\.\d+)?%|\?)\)']
+not = [
+  { contains = ["omo native"] },
+  { line_regex = ['\bmem:[a-z0-9-]+'] },
+]
+
+[[rules]]
+id = "working_line_working"
+state = "working"
+priority = 205
+region = "bottom_non_empty_lines(5)"
+visible_working = true
+line_regex = [
+  '• Working \([^)]*esc to interrupt\)',
+  '\d+(?:\.\d+)?[kKmM]?/\d+(?:\.\d+)?[kKmM] \((?:\d+(?:\.\d+)?%|\?)\)',
+]
+not = [
+  { contains = ["omo native"] },
+  { line_regex = ['\bmem:[a-z0-9-]+'] },
+]
+
+[[rules]]
+id = "footer_idle"
+state = "idle"
+priority = 45
+region = "bottom_non_empty_lines(4)"
+visible_idle = true
+# Without a configured model the meter reads "?/0 (0.0%)" (screens/pi/lc-idle-no-model.screen).
+any = [
+  { line_regex = ['\d+(?:\.\d+)?[kKmM]?/\d+(?:\.\d+)?[kKmM] \((?:\d+(?:\.\d+)?%|\?)\)'] },
+  { line_regex = ['^\S.* • \?/0 \(0\.0%\) \(auto\)'] },
+]
+not = [
+  { line_regex = ['[\x{2800}-\x{28FF}]'] },
+  { contains = ["to interrupt"] },
+  { contains = ["waiting for your answer"] },
+  { contains = ["permission required"] },
+  { contains = ["omo native"] },
+  { line_regex = ['\bmem:[a-z0-9-]+'] },
+]

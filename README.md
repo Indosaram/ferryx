@@ -62,8 +62,9 @@ pipeline, giving crisp font rasterization and low-latency throughput.
 
 ### Multi-agent workspaces
 
-Run parallel AI coding agents (Claude Code, Codex, Gemini CLI) in isolated split panes
-with real-time status indicators.
+Run parallel AI coding agents (OmO, Claude Code, Codex, Antigravity, OpenCode, pi, omp, GJC,
+GitHub Copilot CLI, Cursor CLI, Grok, Kimi, Cline, Aider, Crush, Droid) in isolated split
+panes with real-time status indicators.
 
 - Isolated worktree per agent
 - Live status indicators

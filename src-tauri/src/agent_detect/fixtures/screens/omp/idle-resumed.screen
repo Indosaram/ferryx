@@ -1,0 +1,40 @@
+
+                                            ████████████
+                                               ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                               ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                               ▒▒  ██                  █
+                                                   ██       v18.12.6
+
+                         Tip: `/copy code` grabs the last code block to your clipboard — `/copy
+                                        cmd` grabs the last shell/python command
+
+
+ RUNTOOL again
+
+
+ Running it.
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ $ echo parity-approval-probe                                                                                         │
+├─── Output ───────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ parity-approval-probe                                                                                                │
+╰─── Wall: 0.02s · Timeout: 300s ──────────────────────────────────────────────────────────────────────────────────────╯
+
+ Done. The command ran.
+
+                                                                                                            Parity probe
+ π > ⬢ Parity Mock > 📁 ~/agent-parity-facts/work > ⑂ master ▶───6%──────────────────────────────────╎─────┃───────128K─
+╰─
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -552,6 +552,12 @@ if (import.meta.hot) import.meta.hot.dispose(() => {
 /** Lower bound between two fallback session-id probes for the same pane and agent. */
 const PROVIDER_SESSION_PROBE_INTERVAL_MS = 2_000;
 
+/** Manifest ids whose provider session the daemon can discover from the pane's process tree. */
+export const PROVIDER_SESSION_PROBE_AGENTS: readonly string[] = [
+  "claude", "codex", "copilot", "cursor", "cursor-agent", "kimi", "omo", "gjc", "antigravity",
+  "opencode", "omp", "grok", "droid", "cline", "crush",
+];
+
 /**
  * Provider sessions arrive as freshly materialized IPC payloads, so reference equality is
  * meaningless: compare by value or every agent heartbeat churns the session map.
@@ -1142,7 +1148,7 @@ export function useWorkspaceStore({
         !stateRef.current.sessions[resolved.sessionId]?.workspaceId.startsWith("daemon:")
         && !payload.providerSession
         && payload.manifestId
-        && ["claude", "codex", "copilot", "cursor", "cursor-agent", "kimi", "omo", "gjc", "antigravity"].includes(payload.manifestId)
+        && PROVIDER_SESSION_PROBE_AGENTS.includes(payload.manifestId)
       ) {
         const discoveryAgent = payload.manifestId === "cursor-agent" ? "cursor" : payload.manifestId;
         // An agent starts new conversations inside the same pane and process (`/new`), so its

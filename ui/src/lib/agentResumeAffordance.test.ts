@@ -33,14 +33,39 @@ describe("agentResumeAffordance", () => {
 describe("getAgentReconnectAffordance", () => {
   it("does not advertise reconnect for argv-only agents without authoritative capture", () => {
     const session = createSession({
-      agentType: "droid",
-      providerSession: { key: "session_id", id: "droid-session" },
+      agentType: "devin",
+      providerSession: { key: "session_id", id: "devin-session" },
     });
     expect(getAgentReconnectAffordance(session)).toMatchObject({
       status: "unsupported",
       canReconnect: false,
       reason: expect.stringContaining("authoritative session capture"),
     });
+  });
+
+  it("returns enabled Reconnect for exited omp, grok, droid, cline and crush sessions with measured ids", () => {
+    // Ids and argv from .omo-parity/facts: remote-omp.md, remote-grok.md, remote-droid.md, local-3.md,
+    // remote-crush.md.
+    const cases = [
+      { agentType: "omp", id: "01a16270-e358-7635-88e4-1b2f84460057", argv: ["omp", "--resume", "01a16270-e358-7635-88e4-1b2f84460057"] },
+      { agentType: "grok", id: "01a16274-a688-7e73-b6fc-434bc7781be4", argv: ["grok", "--resume", "01a16274-a688-7e73-b6fc-434bc7781be4"] },
+      { agentType: "droid", id: "d08d895d-058f-4f86-aa21-48d7dbdcaa9f", argv: ["droid", "--resume", "d08d895d-058f-4f86-aa21-48d7dbdcaa9f"] },
+      { agentType: "cline", id: "1792653340197_ys4yu", argv: ["cline", "--id", "1792653340197_ys4yu"] },
+      { agentType: "crush", id: "7f7fbfa62dd136ec", argv: ["crush", "--session", "7f7fbfa62dd136ec"] },
+    ];
+    for (const { agentType, id, argv } of cases) {
+      const session = createSession({
+        id: `pane-term-${agentType}`,
+        agentType,
+        providerSession: { key: "session_id", id },
+      });
+      expect(getAgentReconnectAffordance(session)).toMatchObject({
+        status: "idle",
+        canReconnect: true,
+        agentType,
+        argv,
+      });
+    }
   });
 
   it("returns enabled Reconnect for an exited OpenCode session with authoritative capture", () => {
