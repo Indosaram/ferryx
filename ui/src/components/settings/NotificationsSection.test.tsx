@@ -172,6 +172,7 @@ describe("NotificationsSection", () => {
       outcome: "permission-required",
       testSubmitted: false,
     });
+    native.requestNotificationPermission.mockResolvedValue({ granted: false });
 
     render(<NotificationsSection />);
 
