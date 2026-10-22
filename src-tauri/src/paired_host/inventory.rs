@@ -27,7 +27,12 @@ pub enum InventoryError {
     GenerationExhausted,
     #[error("Legacy credential migration is pending")]
     MigrationPending,
+    #[error("loopback http relay requires FERRYX_ALLOW_INSECURE_RELAY")]
+    InsecureRelay,
 }
+/// Shown on a saved loopback `http` host when the insecure-relay opt-in is off.
+pub const INSECURE_LOOPBACK_RELAY: &str =
+    "loopback http relay requires FERRYX_ALLOW_INSECURE_RELAY";
 type Result<T> = std::result::Result<T, InventoryError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +67,10 @@ pub struct HostView {
     pub ssh_host_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
+    /// Why this saved host cannot be used. Absent when the row is available.
+    /// Omitted from the wire when none, so an older client still decodes a healthy list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 // Deliberately no Debug or outward Serialize on inputs or credential leases.
@@ -160,6 +169,8 @@ pub struct Inventory {
     cancellations: BTreeMap<String, watch::Sender<bool>>,
     fenced: bool,
     loopback_http: bool,
+    /// Saved loopback http rows kept on disk but not usable without the opt-in.
+    insecure: BTreeMap<String, String>,
 }
 impl std::fmt::Debug for Inventory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -168,7 +179,9 @@ impl std::fmt::Debug for Inventory {
 }
 
 pub fn normalize_origin(input: &str) -> Result<String> {
-    normalize_origin_policy(input, false)
+    // A self-hosted relay on this machine without TLS is the same opt-in the daemon's own
+    // relay client honours (`FERRYX_ALLOW_INSECURE_RELAY`); without it, pairing is HTTPS only.
+    normalize_origin_policy(input, crate::remote::relay_client::is_insecure_relay_allowed())
 }
 fn normalize_origin_policy(input: &str, loopback_http: bool) -> Result<String> {
     if input.trim() != input || input.chars().any(char::is_control) {
@@ -203,6 +216,26 @@ fn normalize_origin_policy(input: &str, loopback_http: bool) -> Result<String> {
     }
     Ok(url.origin().ascii_serialization())
 }
+
+/// A stored origin that is a loopback `http` relay and nothing else wrong with the URL.
+fn saved_loopback_http_origin(origin: &str) -> bool {
+    normalize_origin_policy(origin, true).ok().as_deref() == Some(origin)
+        && normalize_origin_policy(origin, false).is_err()
+}
+
+fn insecure_entries(disk: &Disk, loopback_http: bool) -> BTreeMap<String, String> {
+    let mut marked = BTreeMap::new();
+    if loopback_http {
+        return marked;
+    }
+    for (id, row) in &disk.hosts {
+        if saved_loopback_http_origin(&row.relay_origin) {
+            marked.insert(id.clone(), INSECURE_LOOPBACK_RELAY.to_string());
+        }
+    }
+    marked
+}
+
 #[cfg(test)]
 pub(super) fn normalize_test_loopback_origin(input: &str) -> Result<String> {
     normalize_origin_policy(input, true)
@@ -278,10 +311,14 @@ fn load(path: &Path, loopback_http: bool) -> Result<Disk> {
         }
     }
     for (id, row) in &disk.hosts {
-        if normalize_origin_policy(&row.relay_origin, loopback_http)
+        let origin_matches = normalize_origin_policy(&row.relay_origin, loopback_http)
             .ok()
             .as_ref()
-            != Some(&row.relay_origin)
+            == Some(&row.relay_origin);
+        // Turning the opt-in off must not reject the file. The row stays; list marks it.
+        let tolerated_loopback =
+            !origin_matches && !loopback_http && saved_loopback_http_origin(&row.relay_origin);
+        if (!origin_matches && !tolerated_loopback)
             || host_key(&row.relay_origin, &row.machine_id).ok().as_ref() != Some(id)
             || !valid_text(&row.display_label, 256)
             || disk.generations.get(id) != Some(&row.generation)
@@ -306,7 +343,10 @@ fn load(path: &Path, loopback_http: bool) -> Result<Disk> {
 
 impl Inventory {
     pub fn open(private_data_dir: &Path) -> Result<Self> {
-        Self::open_policy(private_data_dir, false)
+        Self::open_policy(
+            private_data_dir,
+            crate::remote::relay_client::is_insecure_relay_allowed(),
+        )
     }
     /// Isolated native fixtures only; not compiled into production binaries.
     #[cfg(test)]
@@ -316,6 +356,7 @@ impl Inventory {
     fn open_policy(private_data_dir: &Path, loopback_http: bool) -> Result<Self> {
         let path = private_data_dir.join(FILE_NAME);
         let disk = load(&path, loopback_http)?;
+        let insecure = insecure_entries(&disk, loopback_http);
         Ok(Self {
             path,
             disk,
@@ -323,27 +364,33 @@ impl Inventory {
             cancellations: BTreeMap::new(),
             fenced: false,
             loopback_http,
+            insecure,
         })
     }
     pub fn list(&self) -> Vec<HostView> {
         self.disk
             .hosts
             .iter()
-            .map(|(id, row)| HostView {
-                host_id: id.clone(),
-                relay_origin: row.relay_origin.clone(),
-                machine_id: row.machine_id.clone(),
-                display_label: row.display_label.clone(),
-                grant_scope: row.grant_scope,
-                generation: row.generation,
-                auth_status: if self.fenced {
-                    AuthStatus::Unknown
-                } else {
-                    row.auth_status
-                },
-                online: !self.fenced && self.online.get(id).copied().unwrap_or(false),
-                ssh_host_id: row.ssh_host_id.clone(),
-                device_id: row.device_id.clone(),
+            .map(|(id, row)| {
+                let unavailable_reason = self.insecure.get(id).cloned();
+                let blocked = self.fenced || unavailable_reason.is_some();
+                HostView {
+                    host_id: id.clone(),
+                    relay_origin: row.relay_origin.clone(),
+                    machine_id: row.machine_id.clone(),
+                    display_label: row.display_label.clone(),
+                    grant_scope: row.grant_scope,
+                    generation: row.generation,
+                    auth_status: if blocked {
+                        AuthStatus::Unknown
+                    } else {
+                        row.auth_status
+                    },
+                    online: !blocked && self.online.get(id).copied().unwrap_or(false),
+                    ssh_host_id: row.ssh_host_id.clone(),
+                    device_id: row.device_id.clone(),
+                    unavailable_reason,
+                }
             })
             .collect()
     }
@@ -404,6 +451,9 @@ impl Inventory {
     }
     pub fn capture(&mut self, id: &str, generation: Epoch) -> Result<CredentialLease> {
         self.validate_generation(id, generation)?;
+        if self.insecure.contains_key(id) {
+            return Err(InventoryError::InsecureRelay);
+        }
         let row = &self.disk.hosts[id];
         if row.auth_status != AuthStatus::Paired {
             return Err(InventoryError::Unauthorized);

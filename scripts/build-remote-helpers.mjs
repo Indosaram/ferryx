@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, mkdtempSync, renameSync, rmSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, mkdtempSync, renameSync, rmSync, readdirSync, realpathSync } from "node:fs";
 import { resolve, join, dirname, relative, isAbsolute } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const TARGETS = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"];
@@ -228,7 +229,27 @@ export function validateBundledHelpers({ repoRoot = REPO_ROOT, resourcesDir = jo
   return { ok: true, sourceFingerprint: expectedFingerprint };
 }
 
-if (import.meta.main) {
+// Bun sets `import.meta.main`. Node does not, so a direct `node script --check-bundled`
+// used to load the module and exit 0 without comparing the fingerprint.
+function invokedDirectly() {
+  if (import.meta.main === true) return true;
+  if (typeof process === "undefined" || !process.argv?.[1]) return false;
+  try {
+    const entry = realpathSync(process.argv[1]);
+    const self = realpathSync(fileURLToPath(import.meta.url));
+    return entry === self;
+  } catch {
+    return false;
+  }
+}
+
+const direct = invokedDirectly();
+if (!direct && typeof process !== "undefined" && process.argv?.includes("--check-bundled")) {
+  console.error("\n[helper-freshness-gate ERROR] --check-bundled was set but this module is not the process entry point, so the check did not run.\n");
+  process.exit(1);
+}
+
+if (direct) {
   const arg = process.argv[2];
   if (arg === "--check-bundled") {
     const repoRoot = process.argv[3] ? resolve(process.argv[3]) : REPO_ROOT;

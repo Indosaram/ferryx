@@ -19,6 +19,7 @@ pub mod browser;
 pub mod cli;
 pub mod clipboard_image;
 pub mod daemon;
+pub mod hub_runtime;
 pub mod dag;
 pub mod ipc;
 #[cfg(target_os = "macos")]

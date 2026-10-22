@@ -126,8 +126,59 @@ ${envXml}
     const launcher = `${layout.root}\\legacy-daemon.cmd`;
     const script = ['@echo off', ...Object.entries(env).map(([k, v]) => `set "${k}=${v}"`), `"${executable}" --daemon 1>>"${legacyLogs.stdout}" 2>>"${legacyLogs.stderr}"`, ''].join('\r\n');
     await agent.call('writeFile', { file: launcher, content: script });
-    await agent.call('exec', { command: 'schtasks', args: ['/Create', '/TN', task(null), '/SC', 'ONLOGON', '/TR', launcher, '/F'] });
-    return agent.call('exec', { command: 'schtasks', args: ['/Run', '/TN', task(null)] });
+    // The legacy task's recorded definition, as the baseline (493fae45 supervisor_windows.rs
+    // ensure_with) wrote it before every /Create: <LOCALAPPDATA>\Ferryx\supervisor\<name>.xml in
+    // UTF-16. HEAD migrates the legacy task only by that record (migrate_legacy_task_with), so a
+    // bare /SC ONLOGON task was never migrated (run-int2-all Q13).
+    // whoami, not %USERDOMAIN%\%USERNAME%: an SSH logon reports USERDOMAIN=WORKGROUP, which the
+    // Task Scheduler cannot map to an account (only2 Q13: "(9,32):UserId:WORKGROUP\sook").
+    const user = (await agent.call('exec', { command: 'whoami', args: [] })).stdout.trim();
+    const xmlFile = `${layout.root}\\legacy-task.xml`;
+    // Headless: a console launcher opens a Windows Terminal tab that takes the foreground from the
+    // QA GUI launches (only3 Q13 g15/g16 run-dialog-not-identified with that window in front).
+    await agent.call('writeFile', { file: xmlFile, content: legacyTaskXml(user, 'conhost.exe', `--headless cmd.exe /c "${launcher}"`) });
+    const recordName = `${task(null).replace('\\', '-')}.xml`;
+    const ps = `${layout.root}\\legacy-task-record.ps1`;
+    await agent.call('writeFile', { file: ps, content: [
+      "$ErrorActionPreference = 'Stop'",
+      "$dir = Join-Path $env:LOCALAPPDATA 'Ferryx\\supervisor'",
+      'New-Item -ItemType Directory -Force -Path $dir | Out-Null',
+      `$out = Join-Path $dir '${recordName}'`,
+      `[IO.File]::WriteAllText($out, [IO.File]::ReadAllText('${xmlFile}'), [Text.Encoding]::Unicode)`,
+      'Write-Output $out', ''].join('\r\n') });
+    const recorded = await agent.call('exec', { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ps] });
+    if (recorded.status !== 0) return recorded;
+    return createLegacyNonElevated(recorded.stdout.trim());
+  }
+
+  /**
+   * /Create and /Run of the legacy task from the user's non-elevated logon token, as the baseline
+   * GUI registered it. A task the elevated SSH session creates cannot be re-imported by the
+   * non-elevated GUI ("access denied", 09-elevation-probe.txt), so HEAD's legacy migration failed
+   * (only3 Q13 "schtasks /Create failed"). A short-lived ONLOGON helper task (no /RU: LIMITED) runs it.
+   */
+  async function createLegacyNonElevated(record) {
+    const helper = `Ferryx\\${base}-legacy-create`;
+    const script = `${layout.root}\\legacy-task-create.ps1`;
+    const out = `${layout.root}\\legacy-task-create.json`;
+    await agent.call('writeFile', { file: script, content: [
+      "$ErrorActionPreference = 'Continue'",
+      `$c = schtasks /Create /TN '${task(null)}' /XML '${record}' /F 2>&1 | Out-String; $cs = $LASTEXITCODE`,
+      '$r = \'\'; $rs = $null',
+      `if ($cs -eq 0) { $r = schtasks /Run /TN '${task(null)}' 2>&1 | Out-String; $rs = $LASTEXITCODE }`,
+      `[IO.File]::WriteAllText('${out}.tmp', (@{ create = $cs; run = $rs; stdout = $c + $r } | ConvertTo-Json -Compress))`,
+      `Move-Item -Force '${out}.tmp' '${out}'`, ''].join('\r\n') });
+    const made = await agent.call('exec', { command: 'schtasks', args: ['/Create', '/TN', helper, '/SC', 'ONLOGON', '/TR', `conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File ${script}`, '/F'] });
+    if (made.status !== 0) return made;
+    try {
+      const ran = await agent.call('exec', { command: 'schtasks', args: ['/Run', '/TN', helper] });
+      if (ran.status !== 0) return ran;
+      if (!await agent.call('waitPath', { file: out, deadlineMs: 60_000 })) return { status: 1, stdout: '', stderr: `no ${out} within 60000ms` };
+      const r = JSON.parse(await agent.call('readFile', { file: out }));
+      return { status: r.create === 0 && r.run === 0 ? 0 : 1, stdout: r.stdout ?? '', stderr: '', create: r.create, run: r.run, nonElevated: true };
+    } finally {
+      await agent.call('exec', { command: 'schtasks', args: ['/Delete', '/TN', helper, '/F'] });
+    }
   }
 
   /** Teardown of one QA job of this run. Called only after its owner pid was killed or exited. */
@@ -154,6 +205,10 @@ ${envXml}
     }
     await agent.call('exec', { command: 'schtasks', args: ['/End', '/TN', name] });
     await agent.call('exec', { command: 'schtasks', args: ['/Delete', '/TN', name, '/F'] });
+    // The legacy definition record installLegacy wrote, if the product left it behind.
+    if (name === task(null)) {
+      await agent.call('exec', { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', `Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Ferryx\supervisor\${name.replace('\\', '-')}.xml') -ErrorAction SilentlyContinue`] });
+    }
     return true;
   }
 
@@ -176,6 +231,48 @@ ${envXml}
   }
 
   return { inspect, windowsTree, listQaJobs, start, installLegacy, installQaEnvDropIn, remove, jobName, label, unit, task, base };
+}
+
+/** The baseline task definition (493fae45 render_task_xml), launching the QA legacy launcher. */
+export function legacyTaskXml(user, command, args = null) {
+  const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Keeps the Ferryx terminal daemon running for this user and restarts it after a crash.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${esc(user)}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>${esc(user)}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>${esc(command)}</Command>
+${args === null ? '' : `      <Arguments>${esc(args)}</Arguments>\n`}\
+    </Exec>
+  </Actions>
+</Task>
+`;
 }
 
 /** QA-only variables a QA-named unit needs (HEAD supervisor_linux QA_NAME_KEYS + QA_BARRIER_KEYS). */

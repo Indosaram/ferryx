@@ -193,10 +193,23 @@ const SECRET_FERRYX_KEYS: [&str; 1] = ["FERRYX_MACHINE_TOKEN"];
 /// Subdirectory of `$XDG_RUNTIME_DIR` (systemd's `%t` in a user unit) holding the secret env file.
 const SECRET_ENV_SUBDIR: &str = "ferryx";
 
+/// Hub settings the successor must see after RequestUpgrade. `FERRYX_HUB=on` and
+/// `FERRYX_HUB_*` paths are configuration. A hub token stays in the runtime env file.
+fn hub_config_key(key: &str) -> bool {
+    key == "FERRYX_HUB" || key.starts_with("FERRYX_HUB_")
+}
+
+fn hub_secret_key(key: &str) -> bool {
+    hub_config_key(key)
+        && (key.ends_with("_TOKEN") || key.ends_with("_SECRET") || key.ends_with("_PASSWORD"))
+}
+
 fn forwarded_key(key: &str) -> bool {
     let locale = key == "LANG" || key == "LANGUAGE" || key.starts_with("LC_");
     let locale = locale && key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
-    locale || FORWARDED_FERRYX_KEYS.contains(&key)
+    locale
+        || FORWARDED_FERRYX_KEYS.contains(&key)
+        || (hub_config_key(key) && !hub_secret_key(key))
 }
 
 /// QA barrier channel of a `local-split-qa` build (todo 12): forwarded only into a QA-named unit,
@@ -251,7 +264,9 @@ pub(crate) fn forwarded_env(vars: &[(OsString, OsString)]) -> Vec<(String, Strin
 
 /// The secrets of `vars` the daemon needs after a supervisor restart.
 pub(crate) fn secret_env(vars: &[(OsString, OsString)]) -> Vec<(String, String)> {
-    filtered_env(vars, |key| SECRET_FERRYX_KEYS.contains(&key))
+    filtered_env(vars, |key| {
+        SECRET_FERRYX_KEYS.contains(&key) || hub_secret_key(key)
+    })
 }
 
 /// `$XDG_RUNTIME_DIR/ferryx/<name>.env`, the file the unit's `EnvironmentFile=-%t/ferryx/%N.env`
@@ -1122,6 +1137,45 @@ mod tests {
         assert_eq!(secret_keys, ["FERRYX_MACHINE_TOKEN"]);
         let agent = vars(&[("FERRYX_AGENT_STATE_TOKEN", "per-session")]);
         assert!(secret_env(&agent).is_empty(), "per-session tokens are not daemon secrets");
+    }
+
+    /// RequestUpgrade starts the successor from this unit. `FERRYX_HUB=on` and hub paths have to
+    /// arrive with it; a hub token uses the runtime env file, not the unit on disk.
+    #[test]
+    fn unit_forwards_hub_env_and_keeps_hub_tokens_out_of_the_unit() {
+        let env = vars(&[
+            ("FERRYX_DATA_DIR", "/home/u/.ferryx"),
+            ("FERRYX_HUB", "on"),
+            ("FERRYX_HUB_DB", "/home/u/.ferryx/hub/hub.sqlite"),
+            ("FERRYX_HUB_WORKSPACE", "slk"),
+            ("FERRYX_HUB_TRACKER_TOKEN", "tracker-secret"),
+            ("FERRYX_SESSION_ID", "nope"),
+        ]);
+        let keys: Vec<String> = forwarded_env(&env).into_iter().map(|(key, _)| key).collect();
+        assert_eq!(
+            keys,
+            [
+                "FERRYX_DATA_DIR",
+                "FERRYX_HUB",
+                "FERRYX_HUB_DB",
+                "FERRYX_HUB_WORKSPACE",
+            ]
+        );
+        let unit = render_unit(Path::new("/opt/ferryx/ferryx"), &env).unwrap();
+        assert!(unit.contains("Environment=\"FERRYX_HUB=on\"\n"), "{unit}");
+        assert!(
+            unit.contains("Environment=\"FERRYX_HUB_DB=/home/u/.ferryx/hub/hub.sqlite\"\n"),
+            "{unit}"
+        );
+        assert!(
+            unit.contains("Environment=\"FERRYX_HUB_WORKSPACE=slk\"\n"),
+            "{unit}"
+        );
+        assert!(!unit.contains("FERRYX_HUB_TRACKER_TOKEN"), "{unit}");
+        assert!(!unit.contains("tracker-secret"), "{unit}");
+        assert!(!unit.contains("FERRYX_SESSION_ID"), "{unit}");
+        let secret_keys: Vec<String> = secret_env(&env).into_iter().map(|(key, _)| key).collect();
+        assert_eq!(secret_keys, ["FERRYX_HUB_TRACKER_TOKEN"]);
     }
 
     #[test]

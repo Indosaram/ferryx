@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createAgent } from './lib/agent.mjs';
-import { counterTags, mergeRoutedSessions, sshOwnerProbeTarget, installV1QaEnv, nextCounterTag, restartCounters, faultTarget, pairSessions, seedPair, successorDataConn, describeWithRoutes, ownedStagePattern, commitEvidence } from './scenarios/q07-q09.mjs';
+import { counterTags, mergeRoutedSessions, sshOwnerProbeTarget, installV1QaEnv, nextCounterTag, restartCounters, faultTarget, pairSessions, seedPair, successorDataConn, describeWithRoutes, ownedStagePattern, commitEvidence, stageGeneration } from './scenarios/q07-q09.mjs';
 import { createJobs, qaEnvDropIn, QA_UNIT_ENV_KEYS } from './lib/jobs.mjs';
-import { Q11, Q12 } from './scenarios/q10-q13.mjs';
+import { Q11, Q12, closeAllSessions } from './scenarios/q10-q13.mjs';
+import { nonceRoundTrip, LINE_EDITOR_READY } from './scenarios/common.mjs';
 import { daemonLogFile, teardownRun } from './run.mjs';
 import { stagePattern } from './lib/receipts.mjs';
 import { newSummary } from './lib/summary.mjs';
@@ -21,6 +22,63 @@ test('fix 1: upgrade steps wait for the counters seedPair started, not the step 
 test('fix 2: the SSH-owning generation is probed, not the step predecessor', () => {
   // B_C: the step predecessor is B (906546) but the SSH session stays on A.
   assert.equal(sshOwnerProbeTarget({ sshOwnerPid: 900001 }, { pid: 906546 }), 900001);
+});
+
+test('run-int2-all Q08 reattached session: the echo command is typed only after zsh redraws its line editor', async () => {
+  // Ctrl-C at an idle zsh prompt then the command at once: zsh dropped the "p" ("rintf: command
+  // not found", Q08-nonce-NONCE_3564458615F7.json). A fake zsh drops the first byte of any write
+  // that arrives before it has re-armed its line editor (ESC[?2004h) after the Ctrl-C.
+  let out = 'repo master \u276f \x1b[?2004h';
+  let ready = true;
+  const conn = {
+    call: async (frame) => {
+      if (frame.type === 'attach') return { type: 'attachOk' };
+      let data = Buffer.from(frame.data, 'base64').toString();
+      if (data === '\u0003') {
+        ready = false;
+        setImmediate(() => { out += `\x1b[?2004l\r\r\nrepo master \u276f ${LINE_EDITOR_READY}`; ready = true; });
+        return { type: 'writeOk' };
+      }
+      if (!ready) data = data.slice(1);
+      const m = /'(NONCE[^']*)' '([^']*)'/.exec(data);
+      out += data + (data.startsWith('printf') && m ? `\r\n${m[1]}${m[2]}\r\n` : `\r\nzsh: command not found: ${data.split(' ')[0]}\r\n`);
+      return { type: 'writeOk' };
+    },
+    outputOf: async () => out,
+    waitOutput: async (sid, marker, ms, { since = 0 } = {}) => {
+      for (let i = 0; i < 50 && !out.slice(since).includes(marker); i += 1) await new Promise((r) => setImmediate(r));
+      const t = out.slice(since);
+      return t.includes(marker) ? { text: t, count: t.split(marker).length - 1 } : { timedOut: true, text: t, count: 0 };
+    },
+  };
+  const result = { assertions: [], evidence: [] };
+  const ctx = { platform: 'linux', evidenceDir: '/e', writeEvidence: async () => {} };
+  await nonceRoundTrip(ctx, conn, 'L', result, 'reattached session');
+  const echoed = result.assertions.find((a) => /echoed exactly once/.test(a.name));
+  assert.equal(echoed.ok, true, JSON.stringify(echoed.detail));
+});
+
+test('run-int2-all Q08 A_B: the staged runtime is waited for, not read once right after the GUI launch', async () => {
+  // The B GUI staged its runtime ~14s after the harness read the path and sent RequestUpgrade
+  // (runlog-gui-g12 armed 23:48:38.3; daemon.log refused at 23:48:24.8 "does not exist").
+  const runDir = mkdtempSync(path.join(os.tmpdir(), 'q08-stage-'));
+  const { methods } = createAgent({ platform: 'linux', runId: RUN, runDir });
+  const stagedRoot = path.join(runDir, 'data', 'daemon-runtime');
+  const ctx = { platform: 'linux', stagedRoot, keys: { B: '2026.1018.1-40296911' }, agent: { call: (m, p) => methods[m](p) } };
+  const pending = stageGeneration(ctx, { name: 'B' });
+  // The stager (runtime_stage.rs stage_from) fills a temp dir and renames it into place.
+  const tmp = path.join(stagedRoot, '2026.1018.1-40296911.tmp-1-0');
+  mkdirSync(tmp, { recursive: true });
+  writeFileSync(path.join(tmp, 'ferryx'), 'daemon');
+  renameSync(tmp, path.join(stagedRoot, '2026.1018.1-40296911'));
+  const staged = await pending;
+  assert.equal(staged.present, true);
+  assert.equal(staged.exe, path.join(stagedRoot, '2026.1018.1-40296911', 'ferryx'));
+  assert.equal(staged.key, '2026.1018.1-40296911');
+  // Never staged: bounded, reported absent; the watched generation dir itself is not created.
+  const never = await stageGeneration({ ...ctx, keys: { C: '2026.1018.1-ef262e84' } }, { name: 'C' }, { deadlineMs: 100 });
+  assert.equal(never.present, false);
+  assert.equal(existsSync(path.join(stagedRoot, '2026.1018.1-ef262e84')), false);
 });
 
 test('fix 3: waitLog with fromLine ignores receipts written before the offset', async () => {
@@ -121,6 +179,7 @@ test('rerun2 Q08 B_C: an upgrade step restarts the counters its nonce round trip
       writes.push([frame.sessionId, Buffer.from(frame.data, 'base64').toString()]);
       return { type: 'writeOk' };
     },
+    outputOf: async () => '',
     waitOutput: async (sid, marker) => ({ text: marker, count: 1 }),
   };
   const pair = { local: 'L', ssh: 'S', tag: 'Q08' };
@@ -167,6 +226,7 @@ test('rerun2d Q08b: a local-only pair (no SSH leg) is seeded, restarted and asse
   const frames = [];
   const conn = {
     call: async (frame) => { frames.push(frame); return frame.type === 'attach' ? { type: 'attachOk' } : { type: 'writeOk' }; },
+    outputOf: async () => '',
     waitOutput: async (sid, marker) => ({ text: marker, count: 1 }),
   };
   const agent = { call: async (m) => (m === 'controlOpen' ? { handle: null } : m === 'readFile' ? JSON.stringify({ pid: 7 }) : m === 'probe' ? { executable: '/x' } : null) };
@@ -260,5 +320,20 @@ test('rerun2h Q08b: a recovered owner must show commit-sent before authority-rec
   const head = [stage(1, 'predecessor-prepared'), stage(1, 'predecessor-committed')];
   assert.equal(commitEvidence({ stages: head, predPid: 1, succPid: 2, guiDriven: false, ownedLine: adoptedLine }).ok, true);
   assert.equal(commitEvidence({ stages: full, predPid: 1, succPid: 2, guiDriven: false, ownedLine: recoveredLine }).ok, false);
+});
+
+test('run-all-fix all2 Q13: sessions left from earlier scenarios are closed before the zero-session check', async () => {
+  // The legacy owner listed Q08's SSH pair (fd805ced, 717906d9) besides Q13's own session.
+  const live = new Set(['own', 'fd805ced', '717906d9']);
+  const conn = {
+    call: async (frame) => {
+      if (frame.type === 'close') { live.delete(frame.sessionId); return { type: 'closeOk' }; }
+      if (frame.type === 'listSessions') return { type: 'listSessionsOk', sessions: [...live] };
+      throw new Error(`unexpected ${frame.type}`);
+    },
+  };
+  const drained = await closeAllSessions(conn, 'own');
+  assert.deepEqual(drained.after.sessions, []);
+  assert.deepEqual(drained.foreign.map((f) => f.id), ['fd805ced', '717906d9']);
 });
 

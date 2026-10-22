@@ -11,7 +11,7 @@ import {
   enterKey,
 } from './common.mjs';
 import { startSshd, sshRestoreSession, recordSshHelper } from '../lib/sshd.mjs';
-import { typeVerified } from '../lib/typeverified.mjs';
+import { typeVerified, renderEcho, renderConptyInput } from '../lib/typeverified.mjs';
 import { legacyLogFiles } from '../lib/jobs.mjs';
 
 export const OPTOUT_FILE = 'daemon-supervisor.optout'; // supervisor.rs OPTOUT_FILE_NAME, in <FERRYX_DATA_DIR>/remote
@@ -123,6 +123,8 @@ export async function Q10(ctx, result) {
   // (Q08b's v1bump) may legitimately hold the registration.
   const regBefore = await loginRegistration(ctx, key);
   assertion(result, 'newest generation registered for login before opt-out', autostarts(regBefore) === true, regBefore.raw?.slice?.(0, 400) ?? regBefore.raw);
+  // The owner's own tree right before the toggle: Q00's watchdog was replaced long ago (run-int2-all Q10).
+  const treeBefore = ctx.platform === 'windows' ? await ctx.jobs.windowsTree(ctx.stagedRoot, { ownerPid: owner.pid }) : null;
   const toggle = await toggleAutostartOffThroughSettings(ctx, optout, guiLog);
   if (toggle.before) await evidence(ctx, result, 'settings-before-space.png.b64', toggle.before.toString('base64'));
   if (toggle.after) await evidence(ctx, result, 'settings-after-space.png.b64', toggle.after.toString('base64'));
@@ -134,8 +136,8 @@ export async function Q10(ctx, result) {
   assertion(result, 'opt-out removed login autostart', autostarts(regAfter) === false, regAfter.raw?.slice?.(0, 400) ?? regAfter.raw);
   assertSameOwner(result, owner, ownerAfter, 'opt-out toggle never stops the running owner');
   if (ctx.platform === 'windows') {
-    const tree = await ctx.jobs.windowsTree(ctx.stagedRoot);
-    assertion(result, 'task re-import kept watchdog and daemon pids (carry-over todo 10 N4)', tree.watchdog?.pid === ctx.state.watchdog?.pid && tree.daemon?.pid === owner.pid, tree);
+    const tree = await ctx.jobs.windowsTree(ctx.stagedRoot, { ownerPid: owner.pid });
+    assertion(result, 'task re-import kept watchdog and daemon pids (carry-over todo 10 N4)', Boolean(treeBefore?.watchdog) && tree.watchdog?.pid === treeBefore.watchdog.pid && tree.daemon?.pid === owner.pid, { before: treeBefore, after: tree });
     ctx.carry.push({ item: 'todo 10 N4: /Create /XML /F re-import keeps watchdog and daemon alive', evidence: path.posix.join(ctx.evidenceDir, 'Q10-toggle.json') });
   }
   // Opted-out launch with an Absent owner: the newest generation still starts through its OS job.
@@ -325,6 +327,15 @@ export function appenderCommand(platform, file) {
   return `powershell -NoProfile -Command "Write-Output ('Q11APPEND' + 'READY'); while ($true) { $l = [Console]::ReadLine(); if ($null -eq $l) { break }; Add-Content -LiteralPath '${file}' -Value $l }"${enterKey(platform)}`;
 }
 
+/**
+ * Q11 marker. Windows: lowercase only. MahoRD on maho-win drops Shift+letter (run-int2-all Q11:
+ * the first key "U" never echoed in two runs), and a plain key press is delivered.
+ */
+export function q11Marker(platform) {
+  const marker = nonce('UNCERTAIN').replace('_', '');
+  return platform === 'windows' ? marker.toLowerCase() : marker;
+}
+
 /** The appended lines with CRLF (Add-Content on Windows) read as LF. */
 export function appendedText(text) {
   return String(text ?? '').replace(/\r\n/g, '\n');
@@ -396,20 +407,32 @@ export async function Q11(ctx, result) {
   }
   // Type the marker into that tab. The remote tty echoes it, which proves the keystrokes reached
   // this session; cat has not read it yet (canonical mode holds the line until Enter). MahoRD drops
-  // keys from a typed burst on omarchy (lib/typeverified.mjs), so each key is confirmed by its echo.
-  const marker = nonce('UNCERTAIN').replace('_', '');
-  const since = await conn.outputLength(sid);
+  // and repeats keys on omarchy (lib/typeverified.mjs), so the echoed line is driven to the marker
+  // key by key and a surplus key is erased; the tty's erase echo means the raw output need not hold
+  // the marker contiguously, so the rendered input line is what must equal it.
+  const marker = q11Marker(ctx.platform);
+  // Windows: ConPTY repaints the whole screen per key (ESC[H), so the typed line is the row after
+  // the appender's ready line in the last repaint (renderConptyInput), read from before that line.
+  const conpty = ctx.platform === 'windows';
+  const since = conpty ? appenderSince : await conn.outputLength(sid);
+  const render = conpty ? (raw) => renderConptyInput(raw, APPENDER_READY) : renderEcho;
   // Keys go to the foreground window: make it the GUI that attached (Windows: gui.focus).
   const focused = await ctx.gui.focus(ctx.state.gui);
   await evidence(ctx, result, 'focus.json', { beforeEscape: attached.focus ?? null, beforeTyping: focused });
   let typed;
   try {
-    typed = await typeVerified({ mahord: ctx.mahord, text: marker, waitEcho: (prefix, ms) => conn.waitOutput(sid, prefix, ms, { since }) });
+    typed = await typeVerified({
+      mahord: ctx.mahord,
+      text: marker,
+      render,
+      echo: async () => String(await conn.outputOf(sid) ?? '').slice(since),
+      waitMore: (length, ms) => conn.waitOutput(sid, '', ms, { since: since + length }),
+    });
   } catch (error) {
     typed = { error: error.detail ?? String(error?.message ?? error) };
   }
-  const echoed = await conn.waitOutput(sid, marker, 1_000, { since });
-  if (!assertion(result, 'the marker typed through the GUI reached the SSH session', !typed.error && !echoed.timedOut && echoed.count === 1, { typed, echoed })) return;
+  const echoed = render(String(await conn.outputOf(sid) ?? '').slice(since));
+  if (!assertion(result, 'the marker typed through the GUI reached the SSH session', !typed.error && echoed === marker, { typed, echoed })) return;
   // Arm the hold only now: the GUI input queue is serialized, so a held keystroke would block the
   // rest of the marker. Enter is the uncertain write that commits the marker line to cat.
   const receipts = hjoin(ctx.layout.barriers, 'write-ack-hold.receipt.jsonl');
@@ -563,6 +586,21 @@ export async function recordLegacyJobProcess(ctx, executable, prior, { deadlineM
   }
 }
 
+/**
+ * Closes ownId and every other session the daemon lists, then lists again. foreign: the sessions
+ * this scenario did not spawn, with each close response.
+ */
+export async function closeAllSessions(conn, ownId) {
+  const closed = [{ id: ownId, resp: await conn.call(D.close(ownId)) }];
+  const before = await conn.call(D.listSessions());
+  const foreign = [];
+  for (const id of before.sessions ?? []) {
+    if (id === ownId) continue;
+    foreign.push({ id, resp: await conn.call(D.close(id)) });
+  }
+  return { closed, foreign, before, after: foreign.length ? await conn.call(D.listSessions()) : before };
+}
+
 export async function Q13(ctx, result) {
   if (!ctx.artifacts.baseline) return block(result, 'ARTIFACT_MISSING', 'pre-plan baseline daemon binary not built');
   const retired = await retireOwner(ctx);
@@ -623,11 +661,15 @@ export async function Q13(ctx, result) {
     assertion(result, 'legacy job lost login autostart without being stopped', reg, legacyJob.unitFileState ?? null);
   }
   // Zero-session explicit end of the legacy daemon (stand-in for logout/reboot).
-  await conn.call(D.close(sp.sessionId));
-  const listed = await conn.call(D.listSessions());
+  // Earlier scenarios' sessions live in the run's session store and follow it into the legacy owner
+  // (run-all-fix all2: Q08's SSH pair fd805ced/717906d9, listed again here once Q08 completed instead
+  // of throwing; its exception recovery used to close them). Every listed session is this run's.
+  const drained = await closeAllSessions(conn, sp.sessionId);
+  await evidence(ctx, result, 'legacy-drain.json', drained);
+  const listed = drained.after;
   const desc = await conn.call(D.describeLiveSessions()).catch(() => null);
   const zero = (desc?.type === 'describeLiveSessionsOk' ? liveSessions(desc).length : listed.sessions?.length ?? -1) === 0;
-  assertion(result, 'legacy live count is zero before the explicit shutdown', zero, { listed, desc });
+  assertion(result, 'legacy live count is zero before the explicit shutdown', zero, { listed, desc, foreign: drained.foreign });
   if (!zero) return;
   await ctx.gui.quit(ctx.state.gui);
   const exit = ctx.agent.call('waitExit', { pid: legacyPid, deadlineMs: 30_000 });

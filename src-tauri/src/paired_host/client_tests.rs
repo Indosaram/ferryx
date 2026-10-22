@@ -1719,3 +1719,54 @@ async fn file_read_over_lost_direct_retries_once_over_relay() {
     cleanup(root, task).await;
 }
 
+#[test]
+fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
+    use crate::agent_control::AgentControlOp;
+    let send = Operation::AgentControl {
+        op: AgentControlOp::Send {
+            session_id: "s-1".into(),
+            text: "hi".into(),
+            request_id: Some("same-id".into()),
+        },
+    };
+    assert!(send.is_mutation());
+    assert_eq!(send.agent_control_mutation_id().as_deref(), Some("same-id"));
+    let route = send.route().expect("send route");
+    assert_eq!(route.capability, Some("agentControlRemoteV1"));
+    assert_eq!(
+        route.segments,
+        vec!["agent-control", "sessions", "s-1", "send"]
+    );
+    assert_eq!(route.method, Method::POST);
+    assert!(
+        route.request_id.is_none(),
+        "agent control does not enter the workspace journal"
+    );
+    assert!(!route.idempotent);
+
+    let wait = Operation::AgentControl {
+        op: AgentControlOp::Wait {
+            session_id: "s-1".into(),
+            until: "idle".into(),
+            after_revision: Some("rev".into()),
+            after: 4,
+            timeout_ms: 300_000,
+        },
+    };
+    assert!(!wait.is_mutation());
+    let route = wait.route().expect("wait route");
+    assert_eq!(
+        route.segments,
+        vec!["agent-control", "sessions", "s-1", "wait"]
+    );
+    assert_eq!(route.method, Method::GET);
+    assert_eq!(route.budget_secs, Some(315));
+    assert!(route.idempotent);
+    assert!(route.request_id.is_none());
+
+    let v1_only = ["agentControlV1"];
+    assert!(
+        !v1_only.iter().any(|cap| Some(*cap) == route.capability),
+        "a v1-only peer does not satisfy agentControlRemoteV1"
+    );
+}

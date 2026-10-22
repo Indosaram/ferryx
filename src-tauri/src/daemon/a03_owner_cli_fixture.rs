@@ -239,12 +239,16 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         }).await.map_err(anyhow::Error::msg)?;
         let local_capabilities = {
             let mut capabilities = vec!["machinePairingV1", "sshPasswordV1", "dagStreamingV1"];
-            if server.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1"); }
+            if server.paired_hosts.available().await {
+                capabilities.push("pairedHostInventoryV1");
+                capabilities.push(crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY);
+            }
             capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY);
             // Mirrors the daemon's GetCapabilities surface: handover advertises ownership transfer.
             #[cfg(unix)]
             capabilities.push("sessionOwnershipTransferV1");
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
             capabilities
         };
         handshake(&socket, &local_capabilities).await?;
@@ -299,6 +303,8 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             if server.remote_state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok()) {
                 capabilities.push(crate::remote::dag_api::DAG_STREAM_CAPABILITY);
             }
+            capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
             serde_json::json!(capabilities)
         } else { serde_json::json!([]) };
         ensure!(value["capabilities"] == expected_capabilities, "machine capability contract mismatch");

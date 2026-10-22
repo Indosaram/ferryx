@@ -1975,12 +1975,31 @@ impl DaemonClient {
     pub fn outer_deadline_for_request(request: &DaemonRequest) -> Duration {
         match request {
             DaemonRequest::PairedHostOperation { request: op } => {
-                if op.operation.is_mutation() {
+                if let crate::paired_host::client::Operation::AgentControl {
+                    op: crate::agent_control::AgentControlOp::Wait { timeout_ms, .. },
+                } = &op.operation
+                {
+                    std::time::Duration::from_millis(
+                        (*timeout_ms)
+                            .min(crate::agent_control::policy::AGENT_CONTROL_TIMEOUT_MAX_MS)
+                            .saturating_add(15_000),
+                    )
+                } else if op.operation.is_mutation() {
                     Self::PAIRED_MUTATION_OUTER_TIMEOUT
                 } else {
                     Self::PAIRED_QUERY_OUTER_TIMEOUT
                 }
             }
+            DaemonRequest::AgentControl { request, .. } => match request {
+                crate::agent_control::AgentControlOp::Wait { timeout_ms, .. } => {
+                    std::time::Duration::from_millis(
+                        (*timeout_ms)
+                            .min(crate::agent_control::policy::AGENT_CONTROL_TIMEOUT_MAX_MS)
+                            .saturating_add(15_000),
+                    )
+                }
+                _ => Self::PAIRED_DEFAULT_OUTER_TIMEOUT,
+            },
             DaemonRequest::PairedTerminalReattach { .. } => Self::PAIRED_REATTACH_OUTER_TIMEOUT,
             DaemonRequest::RemoteWrite { .. } | DaemonRequest::RemoteResize { .. } => {
                 Self::REMOTE_CONTROL_OUTER_TIMEOUT
@@ -2209,6 +2228,7 @@ impl DaemonClient {
             | Operation::DagStream { .. }
             | Operation::FileRead { .. }
             | Operation::Operation { .. } => None,
+            Operation::AgentControl { op } => op.mutation_request_id(),
         };
         let transport_error = |error: crate::paired_host::service::ServiceError| ClientError {
             code: error.code,
