@@ -297,23 +297,31 @@ export class ProcessRegistry {
     return this.entries.has(pid);
   }
 
-  /** Re-validates a recorded pid. Returns 'match' | 'gone' | 'mismatch' | 'unrecorded'. */
+  /**
+   * Re-validates a recorded pid. Returns 'match' | 'gone' | 'reused' | 'mismatch' | 'unrecorded'.
+   * 'reused': the pid now names a process with a different exact start time than the recorded one.
+   * A pid names one process at a time, so the recorded process has exited (all3: g9's pid 7716
+   * was g28's launcher nine minutes later). Without both start times there is no such proof, and
+   * the same start under another executable stays 'mismatch'.
+   */
   async check(pid) {
     const entry = this.entries.get(pid);
     if (!entry) return 'unrecorded';
     const live = await this.probe(pid);
     if (!live) return 'gone';
+    const knownStarts = entry.startTime !== null && live.startTime !== null && live.startTime !== undefined;
+    if (knownStarts && String(live.startTime) !== String(entry.startTime)) return 'reused';
     if (norm(live.executable, this.platform) !== norm(entry.executable, this.platform)) return 'mismatch';
-    if (entry.startTime !== null && live.startTime !== null && live.startTime !== undefined && String(live.startTime) !== String(entry.startTime)) return 'mismatch';
     return 'match';
   }
 
+  /** Signals a recorded pid that still matches; false when the recorded process is gone or its pid was reused (never signalled). */
   async kill(pid, sig = 'SIGTERM') {
     const state = await this.check(pid);
     this.log.push({ op: 'kill', pid, sig, state });
     if (state === 'unrecorded') throw new GuardError('KILL_REFUSED', `pid ${pid} was never recorded by this run`);
     if (state === 'mismatch') throw new GuardError('KILL_REFUSED', `pid ${pid} no longer runs its recorded executable`);
-    if (state === 'gone') return false;
+    if (state === 'gone' || state === 'reused') return false;
     await this.signal(pid, sig);
     return true;
   }

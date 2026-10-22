@@ -375,6 +375,7 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
     const t = await agent.call('teardownRecorded');
     summary.teardown.killed = t.killed.map((e) => ({ pid: e.pid, role: e.role }));
     summary.teardown.refused = t.refused;
+    summary.teardown.gone = (t.gone ?? []).map((e) => ({ pid: e.pid, role: e.role }));
   });
   if (locked.length) await step('copy-locked-logs', async () => { for (const name of locked) await copyLog(name); });
   // Windows: a GUI still alive during the first pass re-registers its missing generation task
