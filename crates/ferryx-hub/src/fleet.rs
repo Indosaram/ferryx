@@ -61,7 +61,9 @@ pub async fn list_persisted(
                 .fetch_optional(pool)
                 .await
                 .unwrap_or(None);
-        if let Some(sessions) = row.and_then(|(text,)| serde_json::from_str::<Vec<Value>>(&text).ok()) {
+        if let Some(sessions) =
+            row.and_then(|(text,)| serde_json::from_str::<Vec<Value>>(&text).ok())
+        {
             cache.insert(host.clone(), sessions);
         }
     }
@@ -169,7 +171,8 @@ mod tests {
         let control = Arc::new(RecordingControl::default());
         *control.result.lock().unwrap() = json!({"sessions": [{"sessionId": "remote-pane"}]});
         let hosts = vec!["h1".to_string()];
-        let first = list_persisted(control.as_ref(), &pool, &hosts, Duration::from_millis(30)).await;
+        let first =
+            list_persisted(control.as_ref(), &pool, &hosts, Duration::from_millis(30)).await;
         assert!(!first[0].stale);
 
         // A new caller with no in-memory state, and the host now hangs.

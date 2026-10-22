@@ -66,6 +66,19 @@ pub fn typesafe_env(config: &BTreeMap<String, String>) -> Vec<(String, String)> 
         .collect()
 }
 
+pub fn typesafe_from_env() -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for key in ["TYPESAFE_API_KEY", "TYPESAFE_URL", "TYPESAFE_MODEL"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim().to_owned();
+            if !value.is_empty() {
+                map.insert(key.to_owned(), value);
+            }
+        }
+    }
+    map
+}
+
 pub fn default_judge_bin() -> PathBuf {
     let on_path = std::env::var_os("PATH").is_some_and(|path| {
         std::env::split_paths(&path).any(|dir| dir.join("typesafe-judge").is_file())
@@ -98,6 +111,10 @@ impl Judge {
 
     /// Offline fallback used when typesafe-judge is not installed. Tests and a hub
     /// with no judge binary still settle a claim whose signals already passed.
+    pub fn installed() -> bool {
+        default_judge_bin().is_file()
+    }
+
     pub fn fallback_yes() -> Self {
         Self {
             typesafe: BTreeMap::new(),

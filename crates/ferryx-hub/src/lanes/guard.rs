@@ -73,12 +73,65 @@ pub struct HostLoad {
 }
 
 impl HostLoad {
+    /// Reads `/proc` on Linux and `statvfs` everywhere else it is available.
+    /// A metric that cannot be read admits, so a missing proc file does not stall lanes.
+    pub fn sample(active_lanes: u64) -> Self {
+        Self {
+            load: read_load().unwrap_or(0.0),
+            mem_free_pct: read_mem_free_pct().unwrap_or(100),
+            disk_free_gb: read_disk_free_gb().unwrap_or(100),
+            active_lanes,
+        }
+    }
+
     pub fn admit(self, thresholds: &GuardThresholds) -> bool {
         self.active_lanes < thresholds.lanes_max
             && self.load < thresholds.load_alert
             && self.mem_free_pct >= thresholds.mem_free_min_pct
             && self.disk_free_gb >= thresholds.disk_free_min_gb
     }
+}
+
+pub fn parse_loadavg(text: &str) -> Option<f64> {
+    text.split_whitespace().next()?.parse().ok()
+}
+
+pub fn parse_meminfo(text: &str) -> Option<u32> {
+    let mut total = None;
+    let mut available = None;
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(key) = parts.next() else { continue };
+        let Some(value) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        match key {
+            "MemTotal:" => total = Some(value),
+            "MemAvailable:" => available = Some(value),
+            _ => {}
+        }
+    }
+    let (total, available) = (total?, available?);
+    if total == 0 {
+        return None;
+    }
+    Some(((available.saturating_mul(100)) / total) as u32)
+}
+
+fn read_load() -> Option<f64> {
+    let text = std::fs::read_to_string("/proc/loadavg").ok()?;
+    parse_loadavg(&text)
+}
+
+fn read_mem_free_pct() -> Option<u32> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    parse_meminfo(&text)
+}
+
+fn read_disk_free_gb() -> Option<u64> {
+    let path = std::ffi::CString::new("/").ok()?;
+    let (_total, free) = crate::readiness::disk_sample(&path)?;
+    Some(free / 1_000_000_000)
 }
 
 #[cfg(test)]
@@ -111,5 +164,14 @@ mod tests {
             ..ok
         }
         .admit(&thresholds));
+    }
+
+    #[test]
+    fn proc_parsers_read_load_and_available_memory() {
+        assert_eq!(parse_loadavg("1.25 0.9 0.8 1/2 3"), Some(1.25));
+        let meminfo = "MemTotal: 1000 kB\nMemAvailable: 250 kB\n";
+        assert_eq!(parse_meminfo(meminfo), Some(25));
+        let sample = HostLoad::sample(0);
+        assert!(sample.mem_free_pct <= 100);
     }
 }

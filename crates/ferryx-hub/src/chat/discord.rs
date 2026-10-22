@@ -12,7 +12,73 @@ use crate::error::Result;
 pub const PLATFORM: &str = "discord";
 
 pub fn bot_token() -> Option<String> {
-    secret_from_env("DISCORD_TOKEN")
+    secret_from_env("DISCORD_BOT_TOKEN").or_else(|| secret_from_env("DISCORD_TOKEN"))
+}
+
+pub fn should_auto_thread(enabled: bool, in_thread: bool) -> bool {
+    enabled && !in_thread
+}
+
+pub fn auto_thread_name(text: &str) -> String {
+    let name: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let name: String = name.chars().take(80).collect();
+    if name.is_empty() {
+        "thread".into()
+    } else {
+        name
+    }
+}
+
+pub fn approval_components(options: &[(&str, &str)]) -> serde_json::Value {
+    serde_json::json!({
+        "type": 1,
+        "components": options.iter().map(|(label, custom_id)| serde_json::json!({
+            "type": 2,
+            "style": 1,
+            "label": label,
+            "custom_id": custom_id
+        })).collect::<Vec<_>>()
+    })
+}
+
+pub async fn issue_pairing(
+    pool: &sqlx::SqlitePool,
+    platform: &str,
+    user_id: &str,
+    code: &str,
+) -> crate::error::Result<()> {
+    let now = crate::storage::now_rfc3339();
+    sqlx::query(
+        "INSERT OR REPLACE INTO pairing_codes(code, platform, user_id, created_at, expires_at) VALUES(?,?,?,?,?)",
+    )
+    .bind(code)
+    .bind(platform)
+    .bind(user_id)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn consume_pairing(
+    pool: &sqlx::SqlitePool,
+    code: &str,
+) -> crate::error::Result<Option<String>> {
+    let user: Option<String> = sqlx::query_scalar(
+        "SELECT user_id FROM pairing_codes WHERE code = ? AND consumed_at IS NULL",
+    )
+    .bind(code)
+    .fetch_optional(pool)
+    .await?;
+    if user.is_some() {
+        sqlx::query("UPDATE pairing_codes SET consumed_at = ? WHERE code = ?")
+            .bind(crate::storage::now_rfc3339())
+            .bind(code)
+            .execute(pool)
+            .await?;
+    }
+    Ok(user)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -228,5 +294,26 @@ mod tests {
             }
             other => panic!("expected approval, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn pairing_is_single_use_and_threads_are_named() {
+        assert!(should_auto_thread(true, false));
+        assert!(!should_auto_thread(true, true));
+        assert_eq!(auto_thread_name("  hello   thread  "), "hello thread");
+        let components = approval_components(&[("Yes", "ferryx:approval:1")]);
+        assert_eq!(
+            components["components"][0]["custom_id"],
+            "ferryx:approval:1"
+        );
+        let pool = crate::storage::memory().await.unwrap();
+        issue_pairing(&pool, "discord", "user-1", "123456")
+            .await
+            .unwrap();
+        assert_eq!(
+            consume_pairing(&pool, "123456").await.unwrap().as_deref(),
+            Some("user-1")
+        );
+        assert!(consume_pairing(&pool, "123456").await.unwrap().is_none());
     }
 }

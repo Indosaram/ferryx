@@ -103,22 +103,66 @@ pub fn normalize_slack_home(raw: &str) -> Option<String> {
     (!channel.is_empty()).then_some(channel)
 }
 
-/// Token from `NAME`, or from the file named by `NAME_FILE` when that is set.
-/// A `*_FILE` value wins so a secret file is not ignored in favor of an empty env var.
+/// Token from `NAME_FILE`, then `NAME`, then `~/.omon/secrets/<name>` for the known
+/// gateway files. A `*_FILE` value wins so a secret file is not ignored in favor of an
+/// empty env var. The value itself is never logged.
 pub fn secret_from_env(name: &str) -> Option<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    secret_from_lookup(
+        name,
+        |key| std::env::var(key).ok(),
+        |path| std::fs::read_to_string(path).ok(),
+        home.as_deref(),
+    )
+}
+
+pub fn secret_from_lookup(
+    name: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+    read: impl Fn(&Path) -> Option<String>,
+    home: Option<&Path>,
+) -> Option<String> {
     let file_key = format!("{name}_FILE");
-    if let Ok(path) = std::env::var(&file_key) {
-        let text = std::fs::read_to_string(&path).ok()?;
+    if let Some(path) = lookup(&file_key) {
+        let text = read(Path::new(path.trim()))?;
         let trimmed = text.trim().to_owned();
         if trimmed.is_empty() {
             return None;
         }
         return Some(trimmed);
     }
-    std::env::var(name)
-        .ok()
+    if let Some(value) = lookup(name)
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+    {
+        return Some(value);
+    }
+    let file = omon_secret_name(name)?;
+    let home = home?;
+    let text = read(&home.join(".omon").join("secrets").join(file))?;
+    let trimmed = text.trim().to_owned();
+    if trimmed.is_empty() || !omon_prefix_ok(name, &trimmed) {
+        return None;
+    }
+    Some(trimmed)
+}
+
+fn omon_secret_name(name: &str) -> Option<&'static str> {
+    match name {
+        "SLACK_BOT_TOKEN" => Some("slack-bot-token"),
+        "SLACK_APP_TOKEN" => Some("slack-app-token"),
+        "DISCORD_TOKEN" | "DISCORD_BOT_TOKEN" => Some("discord-bot-token"),
+        "OPENAI_API_KEY" | "OMON_STT_API_KEY" | "OMON_TTS_API_KEY" => Some("openai-api-key"),
+        _ => None,
+    }
+}
+
+fn omon_prefix_ok(name: &str, value: &str) -> bool {
+    match name {
+        "SLACK_BOT_TOKEN" => value.starts_with("xoxb-"),
+        "SLACK_APP_TOKEN" => value.starts_with("xapp-"),
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +204,44 @@ mod tests {
         assert_eq!(config.slack_home_channel.as_deref(), Some(" from-file "));
         config.apply_slack_home_override(Some("CHOME,COTHER"));
         assert_eq!(config.slack_home_channel.as_deref(), Some("CHOME"));
+    }
+
+    #[test]
+    fn an_omon_secret_file_is_used_when_the_environment_is_empty() {
+        let dir = std::env::temp_dir().join(format!("ferryx-hub-secret-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".omon/secrets")).unwrap();
+        std::fs::write(
+            dir.join(".omon/secrets/slack-bot-token"),
+            "xoxb-from-file\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".omon/secrets/slack-app-token"),
+            "not-an-app-token\n",
+        )
+        .unwrap();
+        let bot = secret_from_lookup(
+            "SLACK_BOT_TOKEN",
+            |_| None,
+            |path| std::fs::read_to_string(path).ok(),
+            Some(&dir),
+        );
+        assert_eq!(bot.as_deref(), Some("xoxb-from-file"));
+        let app = secret_from_lookup(
+            "SLACK_APP_TOKEN",
+            |_| None,
+            |path| std::fs::read_to_string(path).ok(),
+            Some(&dir),
+        );
+        assert!(app.is_none());
+        let env = secret_from_lookup(
+            "SLACK_BOT_TOKEN",
+            |key| (key == "SLACK_BOT_TOKEN").then(|| "xoxb-from-env".into()),
+            |_| None,
+            Some(&dir),
+        );
+        assert_eq!(env.as_deref(), Some("xoxb-from-env"));
     }
 
     fn tempfile_dir() -> PathBuf {
