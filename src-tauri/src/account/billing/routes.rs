@@ -679,10 +679,11 @@ pub struct EntitlementResponse {
     pub org_id: Option<String>,
     pub role: Option<String>,
     pub manage_url: Option<String>,
+    pub paid_plans_open: bool,
 }
 
 impl EntitlementResponse {
-    fn from_evaluation(evaluation: &OwnerEvaluation) -> Self {
+    fn from_evaluation(evaluation: &OwnerEvaluation, paid_plans: PaidPlans) -> Self {
         let entitlement = &evaluation.entitlement;
         let effective_seats = is_team_plan(entitlement.effective_plan)
             .then(|| evaluation.snapshot.seats.max(TEAM_MIN_SEATS));
@@ -707,18 +708,20 @@ impl EntitlementResponse {
             org_id: evaluation.scope.org_id.clone(),
             role: evaluation.scope.role.clone(),
             manage_url,
+            paid_plans_open: matches!(paid_plans, PaidPlans::Open),
         }
     }
 }
 
 pub async fn billing_entitlement(
     State(state): State<Arc<AccountState>>,
+    Extension(config): Extension<Arc<BillingConfig>>,
     headers: HeaderMap,
 ) -> Result<Json<EntitlementResponse>, ApiError> {
     require_billing_enabled(&state)?;
     let user = session_user(&state, &headers).await?;
     let evaluation = evaluate_user(&state, &user.user_id, billing_now()).await?;
-    Ok(Json(EntitlementResponse::from_evaluation(&evaluation)))
+    Ok(Json(EntitlementResponse::from_evaluation(&evaluation, config.paid_plans)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1105,7 +1108,7 @@ pub async fn billing_quantity(
         })
     })
     .await?;
-    Ok(Json(EntitlementResponse::from_evaluation(&evaluation)))
+    Ok(Json(EntitlementResponse::from_evaluation(&evaluation, config.paid_plans)))
 }
 
 #[derive(Debug, Deserialize)]

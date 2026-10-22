@@ -1426,6 +1426,7 @@ async fn checkout_is_coming_soon_by_default() {
     assert_eq!(status, 200, "the entitlement read stays open");
     assert_eq!(entitlement["plan"], "free");
     assert_eq!(entitlement["machineLimit"], 1);
+    assert_eq!(entitlement["paidPlansOpen"], false);
 }
 
 #[tokio::test]
@@ -1459,6 +1460,9 @@ async fn checkout_opens_with_paid_plans_flag() {
         "https://store.lemonsqueezy.com/checkout/buy/stub"
     );
     assert_eq!(server.stub.data.lock().checkouts.len(), 1);
+    let (status, entitlement) = get_entitlement(&server, &client, Some(&token)).await;
+    assert_eq!(status, 200);
+    assert_eq!(entitlement["paidPlansOpen"], true);
 }
 
 #[tokio::test]
