@@ -1,14 +1,14 @@
 # omo-gateway to ferryx hub cutover
 
-The ferryx daemon starts the hub. Slack, Discord, and voice stay idle until a token or speech key is present. The dashboard listens on `127.0.0.1:9119` and serves `~/.omon/web` plus `/api/health`, `/api/tracker`, cron, approvals, and logs.
+The ferryx daemon opens the hub only after `ferryx hub start` (the cutover script sends it after omo is unloaded) or with `FERRYX_HUB=on`. A fresh hub database stays stopped, because the hub reads the same `~/.omon/secrets` Slack tokens as omo and would otherwise open a second Socket Mode connection. Slack, Discord, and voice stay idle until a token or speech key is present. The dashboard listens on `127.0.0.1:9119` and serves `~/.omon/web` plus `/api/health`, `/api/tracker`, cron, approvals, and logs.
 
 Two Socket Mode connections must not overlap. Unload `ai.omon.gateway` and `ai.omon.gateway-watchdog` before the ferryx hub opens Slack.
 
 A Discord `/voice join` binds that voice channel to the text channel's session. Each utterance is sent to the same pane a typed message in that channel uses, and the spoken reply is the assistant text that pane adds once the turn is idle.
 
-The cron scheduler sleeps until the earliest `next_run_at`. Creating or triggering a job wakes it. A due job runs its payload command, posts Slack and Discord deliveries, and records a cron problem. The third consecutive failure opens a remediation lane. A publishing rerun still needs the owner token on the cron socket. The dashboard `POST /api/cron/jobs/{id}/trigger` returns 409 for a publishing job and 404 for an unknown id, and it does not re-enable a paused job. `[SILENT]` and `wakeAgent: false` are stored on the run and are not posted.
+The cron scheduler sleeps until the earliest `next_run_at`. Creating or triggering a job wakes it. A due job runs its payload command, posts Slack and Discord deliveries, and records a cron problem. The third consecutive failure opens a remediation lane. A publishing rerun still needs the owner token on the cron socket. The dashboard `POST /api/cron/jobs/{id}/trigger` returns 409 for a publishing job and for a paused job, and 404 for an unknown id. An enabled job only moves `next_run_at` to now. Approving a remediation problem does not run a disabled job. `[SILENT]` and `wakeAgent: false` are stored on the run and are not posted.
 
-The hub control socket is `~/.ferryx/hub/control.sock`. `ferryx hub stop` and `ferryx hub start` write one JSON line to it. Those commands drop or bind the hub's chat, cron, and HTTP tasks. They do not restart `com.ferryx.daemon`, so live PTY sessions stay up. `hub stop` is stored in the hub database, so the next daemon start leaves those tasks down until `hub start`. Cron run-now clients keep using `~/.omon/cron-run-now.sock`. The same line protocol is also bound at `~/.ferryx/hub/cron.sock` and `~/.ferryx/hub/cron-run-now.sock`. A disabled job is not run from that socket unless the line is `{"id":"...","force":true}`. A run-now result is posted to the job's deliver target. An origin-less `origin`, `slack`, `all`, or `discord` target uses the Slack home channel copied at import. Job scripts run with their working directory set to the omo `WorkingDirectory` recorded at import.
+The hub control socket is `~/.ferryx/hub/control.sock`. `ferryx hub stop` and `ferryx hub start` write one JSON line to it. Those commands drop or bind the hub's chat, cron, and HTTP tasks. They do not restart `com.ferryx.daemon`, so live PTY sessions stay up. A fresh hub database, a missing `hub_stopped` row, and an unreadable flag all stay stopped. `hub stop` stores `hub_stopped = 1`. `hub start` stores `hub_stopped = 0`, so the next daemon start brings the tasks back. `FERRYX_HUB=on` starts them even when the flag is missing. `FERRYX_HUB=off` still skips the hub. Cron run-now clients keep using `~/.omon/cron-run-now.sock`. The same line protocol is also bound at `~/.ferryx/hub/cron.sock` and `~/.ferryx/hub/cron-run-now.sock`. A disabled job is not run from that socket unless the line is `{"id":"...","force":true}`. A run-now result is posted to the job's deliver target. An origin-less `origin`, `slack`, `all`, or `discord` target uses the Slack home channel copied at import. Job scripts run with their working directory set to the omo `WorkingDirectory` recorded at import.
 
 `ferryx hub` and `ferryx-cli hub` both dispatch the hub command. The GUI binary does not open a window for that subcommand.
 
@@ -55,10 +55,11 @@ A real import skips tracker rows whose deleted parent would fail a foreign key a
 `scripts/hub-cutover.sh` refuses to run without `--yes`. On macOS it:
 
 1. Snapshots the live database with `sqlite3 .backup` while omo is still running.
-2. Dry-runs `ferryx hub migrate` against that snapshot, then imports it. The script working directory is the live database's directory. If either step fails, omo is still loaded.
+2. Dry-runs `ferryx hub migrate` against that snapshot, then imports it. The script working directory is the live database's directory. `imported_from` records the live database path, not the snapshot. If either step fails, omo is still loaded.
 3. Boots out `ai.omon.gateway-watchdog` and `ai.omon.gateway` only after the import succeeds.
 4. Waits until that gateway process is gone.
-5. Sends `ferryx hub start` on the control socket. It does not `kickstart -k` the daemon. If bootout or start fails, both launch agents are loaded again.
+5. Snapshots the live database again and migrates that copy before `hub start`, so rows written between the first snapshot and bootout are carried over. Changed cron `enabled` / `next_run_at`, issue state, and inbox decision status are updated. New rows are inserted.
+6. Sends `ferryx hub start` on the control socket. It does not `kickstart -k` the daemon. If bootout, the delta import, or start fails, both launch agents are loaded again.
 
 ```bash
 scripts/hub-cutover.sh cutover --ferryx /path/to/ferryx --yes

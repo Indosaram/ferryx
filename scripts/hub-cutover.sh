@@ -148,12 +148,16 @@ if [[ "$MODE" == "cutover" ]]; then
     echo "sqlite3 is required to snapshot the live database; omo was left running" >&2
     exit 1
   fi
-  SNAP="$(mktemp "${TMPDIR:-/tmp}/omo-gateway.XXXXXXXX.backup")"
+  SNAP=""
+  DELTA=""
   booted_out=0
   restore_omo() {
     local status=$?
-    if [[ -n "${SNAP:-}" ]]; then
+    if [[ -n "${SNAP}" ]]; then
       rm -f "$SNAP"
+    fi
+    if [[ -n "${DELTA}" ]]; then
+      rm -f "$DELTA"
     fi
     if [[ "$status" != 0 && "$booted_out" == 1 ]]; then
       echo "cutover failed (exit ${status}); loading omo again" >&2
@@ -162,6 +166,7 @@ if [[ "$MODE" == "cutover" ]]; then
     fi
   }
   trap restore_omo EXIT
+  SNAP="$(mktemp "${TMPDIR:-/tmp}/omo-gateway.XXXXXXXX.backup")"
   # Consistent read of the live database. omo keeps its sockets until the copy
   # is in the hub database.
   if ! sqlite3 "$DB" ".backup '$SNAP'"; then
@@ -174,7 +179,7 @@ if [[ "$MODE" == "cutover" ]]; then
     exit 1
   fi
   echo "migrate ${SNAP}"
-  if ! "$FERRYX_BIN" hub migrate --from-omo "$SNAP" --cwd "$ORIG_DIR"; then
+  if ! "$FERRYX_BIN" hub migrate --from-omo "$SNAP" --cwd "$ORIG_DIR" --imported-from "$DB"; then
     echo "migrate failed; omo was left running" >&2
     exit 1
   fi
@@ -185,6 +190,20 @@ if [[ "$MODE" == "cutover" ]]; then
   bootout "$WATCHDOG_LABEL" || true
   bootout "$GATEWAY_LABEL"
   wait_until_gone "$GATEWAY_LABEL"
+  # Rows written after the first snapshot. omo is unloaded, so this backup is the
+  # last consistent copy. Re-import updates changed cron, issue, and inbox rows.
+  DELTA="$(mktemp "${TMPDIR:-/tmp}/omo-gateway-delta.XXXXXXXX.backup")"
+  if ! sqlite3 "$DB" ".backup '$DELTA'"; then
+    echo "could not snapshot ${DB} after bootout; loading omo again" >&2
+    exit 1
+  fi
+  echo "migrate delta ${DB}"
+  if ! "$FERRYX_BIN" hub migrate --from-omo "$DELTA" --cwd "$ORIG_DIR" --imported-from "$DB"; then
+    echo "delta migrate failed; loading omo again" >&2
+    exit 1
+  fi
+  rm -f "$DELTA"
+  DELTA=""
   if "$FERRYX_BIN" hub start; then
     echo "hub start sent on the control socket; the daemon was not restarted"
   else

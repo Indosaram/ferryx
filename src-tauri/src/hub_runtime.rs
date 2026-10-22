@@ -131,6 +131,7 @@ impl TaskLauncher for DaemonBridge {
 pub fn run_hub_cli(args: &[String]) -> i32 {
     let mut source = None;
     let mut cwd = None;
+    let mut record_as = None;
     let mut dry = false;
     let mut rest = args.iter().skip(2);
     match rest.next().map(String::as_str) {
@@ -138,7 +139,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
         Some("start") => return hub_control(ferryx_hub::control::ControlOp::Start),
         Some("migrate") => {}
         _ => {
-            eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--dry-run]");
+            eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
             eprintln!("       ferryx hub stop | start");
             return 2;
         }
@@ -148,6 +149,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             "--dry-run" => dry = true,
             "--from-omo" => source = rest.next().map(std::path::PathBuf::from),
             "--cwd" => cwd = rest.next().map(std::path::PathBuf::from),
+            "--imported-from" => record_as = rest.next().map(std::path::PathBuf::from),
             other if !other.starts_with('-') && source.is_none() => {
                 source = Some(std::path::PathBuf::from(other));
             }
@@ -190,7 +192,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             }
         };
         let path = config.database_path.clone().unwrap_or_else(ferryx_hub::hub::default_database_path);
-        match ferryx_hub::import::open_and_migrate(&path, &source, dry, cwd.as_deref()).await {
+        match ferryx_hub::import::open_and_migrate(&path, &source, dry, cwd.as_deref(), record_as.as_deref()).await {
             Ok(report) => {
                 println!("dry_run {dry}");
                 println!("issues {}", report.issues);
@@ -289,7 +291,9 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_schema(&hub.pool).await {
         tracing::warn!(%error, "kibitzer schema was not created");
     }
-    let stopped = ferryx_hub::control::is_stopped(&hub.pool).await.unwrap_or(false);
+    // Fail closed: a fresh or unreadable hub database does not open Slack next to omo.
+    let forced_on = std::env::var("FERRYX_HUB").ok().as_deref() == Some("on");
+    let stopped = !forced_on && ferryx_hub::control::is_stopped(&hub.pool).await.unwrap_or(true);
     let launch = HubLaunch {
         server,
         config,
@@ -308,7 +312,7 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     let running = Arc::new(tokio::sync::Mutex::new(generation));
     serve_control(running, launch);
     if stopped {
-        tracing::info!("ferryx hub stayed stopped until hub start");
+        tracing::info!("ferryx hub stayed stopped until hub start (or FERRYX_HUB=on)");
     } else {
         tracing::info!("ferryx hub is up");
     }

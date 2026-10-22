@@ -24,7 +24,11 @@ pub fn control_socket(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".ferryx").join("hub").join("control.sock")
 }
 
-/// `hub stop` writes this so the next daemon start leaves hub tasks down.
+/// `hub stop` writes `hub_stopped = 1` and `hub start` writes `hub_stopped = 0`.
+/// A hub database with neither is a fresh install. It stays stopped too, because the
+/// hub reads omo's own `~/.omon/secrets` Slack tokens and would otherwise open a second
+/// Socket Mode connection next to a running omo-gateway. Only an explicit `hub start`
+/// (the cutover script sends one after omo is unloaded) or `FERRYX_HUB=on` opens it.
 pub async fn mark_stopped(pool: &sqlx::SqlitePool) -> Result<()> {
     sqlx::query(
         "INSERT INTO hub_meta(key, value) VALUES('hub_stopped', '1')
@@ -36,9 +40,12 @@ pub async fn mark_stopped(pool: &sqlx::SqlitePool) -> Result<()> {
 }
 
 pub async fn clear_stopped(pool: &sqlx::SqlitePool) -> Result<()> {
-    sqlx::query("DELETE FROM hub_meta WHERE key = 'hub_stopped'")
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "INSERT INTO hub_meta(key, value) VALUES('hub_stopped', '0')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -47,7 +54,7 @@ pub async fn is_stopped(pool: &sqlx::SqlitePool) -> Result<bool> {
         sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'hub_stopped'")
             .fetch_optional(pool)
             .await?;
-    Ok(value.as_deref() == Some("1"))
+    Ok(value.as_deref() != Some("0"))
 }
 
 pub fn control_line(op: ControlOp) -> &'static str {
@@ -100,6 +107,11 @@ mod tests {
     #[tokio::test]
     async fn a_stop_stays_stopped_until_start_clears_it() {
         let pool = crate::storage::memory().await.unwrap();
+        assert!(
+            is_stopped(&pool).await.unwrap(),
+            "a fresh hub stays down until an explicit start"
+        );
+        clear_stopped(&pool).await.unwrap();
         assert!(!is_stopped(&pool).await.unwrap());
         mark_stopped(&pool).await.unwrap();
         assert!(is_stopped(&pool).await.unwrap());

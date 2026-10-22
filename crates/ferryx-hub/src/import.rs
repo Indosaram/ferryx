@@ -116,7 +116,9 @@ async fn copy_lanes(from: &SqlitePool, into: &SqlitePool) -> Result<u64> {
     ) in rows
     {
         let inserted = sqlx::query(
-            "INSERT OR IGNORE INTO lanes(key,title,lead_session_key,cwd,brief_path,session_key,omo_thread_id,status,done_signals,claim_evidence,claim_at,turns_run,last_activity_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO lanes(key,title,lead_session_key,cwd,brief_path,session_key,omo_thread_id,status,done_signals,claim_evidence,claim_at,turns_run,last_activity_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) \
+             ON CONFLICT(key) DO UPDATE SET title = excluded.title, lead_session_key = excluded.lead_session_key, cwd = excluded.cwd, brief_path = excluded.brief_path, session_key = excluded.session_key, omo_thread_id = excluded.omo_thread_id, status = excluded.status, done_signals = excluded.done_signals, claim_evidence = excluded.claim_evidence, claim_at = excluded.claim_at, turns_run = excluded.turns_run, last_activity_at = excluded.last_activity_at \
+             WHERE lanes.title IS NOT excluded.title OR lanes.lead_session_key IS NOT excluded.lead_session_key OR lanes.cwd IS NOT excluded.cwd OR lanes.brief_path IS NOT excluded.brief_path OR lanes.session_key IS NOT excluded.session_key OR lanes.omo_thread_id IS NOT excluded.omo_thread_id OR lanes.status IS NOT excluded.status OR lanes.done_signals IS NOT excluded.done_signals OR lanes.claim_evidence IS NOT excluded.claim_evidence OR lanes.claim_at IS NOT excluded.claim_at OR lanes.turns_run IS NOT excluded.turns_run OR lanes.last_activity_at IS NOT excluded.last_activity_at",
         )
         .bind(key)
         .bind(title)
@@ -258,11 +260,13 @@ pub async fn preview_from_omo(source: &Path) -> Result<ImportReport> {
 /// Opens `dest` and imports, or counts the source when `dry_run` is set.
 /// A dry run does not create `dest` or its parent directory.
 /// `cwd` overrides the working directory recorded for job scripts.
+/// `record_as` is the path stored in `imported_from` when the bytes came from a snapshot.
 pub async fn open_and_migrate(
     dest: &Path,
     source: &Path,
     dry_run: bool,
     cwd: Option<&Path>,
+    record_as: Option<&Path>,
 ) -> Result<ImportReport> {
     if dry_run {
         return preview_from_omo(source).await;
@@ -279,11 +283,19 @@ pub async fn open_and_migrate(
     if let Some(cwd) = cwd.filter(|cwd| !cwd.as_os_str().is_empty()) {
         remember_working_directory(&pool, cwd).await?;
     }
+    if let Some(record_as) = record_as.filter(|path| !path.as_os_str().is_empty()) {
+        let text = record_as.to_string_lossy();
+        sqlx::query("INSERT OR REPLACE INTO hub_meta(key, value) VALUES('imported_from', ?)")
+            .bind(text.as_ref())
+            .execute(&pool)
+            .await?;
+    }
     pool.close().await;
     Ok(report)
 }
 
-/// Idempotent copy. A second run inserts nothing new. SQL errors are returned.
+/// Idempotent copy. A second run inserts nothing new. Cron rows, issue rows, and
+/// inbox rows whose source values changed are updated. SQL errors are returned.
 /// `dry_run` counts source rows and writes nothing, including the destination file.
 pub async fn migrate_from_omo(
     pool: &SqlitePool,
@@ -562,8 +574,14 @@ async fn copy_named(from: &SqlitePool, into: &SqlitePool, table: &str) -> Result
         .await?
         .saturating_sub(selected.len() as u64);
     let placeholders = vec!["?"; shared.len()].join(", ");
-    let insert_sql = format!("INSERT OR IGNORE INTO {table} ({list}) VALUES ({placeholders})");
     let primary = primary_key(into, table).await?;
+    let insert_sql = if refreshes_on_conflict(table) {
+        refresh_sql(table, &shared, &primary).unwrap_or_else(|| {
+            format!("INSERT OR IGNORE INTO {table} ({list}) VALUES ({placeholders})")
+        })
+    } else {
+        format!("INSERT OR IGNORE INTO {table} ({list}) VALUES ({placeholders})")
+    };
     let mut copied = 0u64;
     for row in selected {
         let mut values = Vec::with_capacity(shared.len());
@@ -637,6 +655,44 @@ async fn orphan_guards(
     Ok((projection.join(", "), filter))
 }
 
+/// Tables whose rows can change in omo between the cutover snapshot and bootout.
+fn refreshes_on_conflict(table: &str) -> bool {
+    matches!(
+        table,
+        "tracker_issues" | "inbox_items" | "inbox_decisions" | "inbox_cursors" | "action_proposals"
+    )
+}
+
+fn refresh_sql(table: &str, columns: &[&str], primary: &[String]) -> Option<String> {
+    if primary.is_empty() || primary.iter().any(|key| !columns.contains(&key.as_str())) {
+        return None;
+    }
+    let updates: Vec<&str> = columns
+        .iter()
+        .copied()
+        .filter(|column| !primary.iter().any(|key| key.as_str() == *column))
+        .collect();
+    if updates.is_empty() {
+        return None;
+    }
+    let list = columns.join(", ");
+    let placeholders = vec!["?"; columns.len()].join(", ");
+    let set = updates
+        .iter()
+        .map(|column| format!("{column} = excluded.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let changed = updates
+        .iter()
+        .map(|column| format!("{table}.{column} IS NOT excluded.{column}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let conflict = primary.join(", ");
+    Some(format!(
+        "INSERT INTO {table} ({list}) VALUES ({placeholders}) ON CONFLICT({conflict}) DO UPDATE SET {set} WHERE {changed}"
+    ))
+}
+
 async fn primary_key(pool: &SqlitePool, table: &str) -> Result<Vec<String>> {
     let sql = format!("SELECT name FROM pragma_table_info('{table}') WHERE pk > 0 ORDER BY pk");
     Ok(sqlx::query_scalar(&sql).fetch_all(pool).await?)
@@ -702,7 +758,9 @@ async fn copy_cron_jobs(from: &SqlitePool, into: &SqlitePool) -> Result<u64> {
     for (id, session_key, expression, payload_json, enabled, next_run_at) in rows {
         let (_, delivery) = crate::schedule::map_payload(&payload_json)?;
         let inserted = sqlx::query(
-            "INSERT OR IGNORE INTO scheduled_jobs(id, session_key, expression, payload_json, enabled, next_run_at, delivery_json) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO scheduled_jobs(id, session_key, expression, payload_json, enabled, next_run_at, delivery_json) VALUES(?,?,?,?,?,?,?) \
+             ON CONFLICT(id) DO UPDATE SET session_key = excluded.session_key, expression = excluded.expression, payload_json = excluded.payload_json, enabled = excluded.enabled, next_run_at = excluded.next_run_at, delivery_json = excluded.delivery_json \
+             WHERE scheduled_jobs.session_key IS NOT excluded.session_key OR scheduled_jobs.expression IS NOT excluded.expression OR scheduled_jobs.payload_json IS NOT excluded.payload_json OR scheduled_jobs.enabled IS NOT excluded.enabled OR scheduled_jobs.next_run_at IS NOT excluded.next_run_at OR scheduled_jobs.delivery_json IS NOT excluded.delivery_json",
         )
         .bind(&id)
         .bind(&session_key)
@@ -1119,12 +1177,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_second_import_refreshes_cron_issue_and_inbox_state() {
+        let dir = scratch("refresh");
+        let source = dir.join("omo.sqlite");
+        raw_db(
+            &source,
+            "
+            CREATE TABLE tracker_users (id TEXT PRIMARY KEY, name TEXT, display_name TEXT, email TEXT, avatar_color TEXT, kind TEXT, model TEXT, is_me INTEGER, created_at TEXT);
+            INSERT INTO tracker_users VALUES ('u1','ada','Ada',NULL,'#000','human',NULL,1,'2020-01-01T00:00:00Z');
+            CREATE TABLE tracker_teams (id TEXT PRIMARY KEY, key TEXT, name TEXT, icon TEXT, color TEXT, issue_seq INTEGER, system INTEGER, cycles_enabled INTEGER, cycle_weeks INTEGER, triage_enabled INTEGER, created_at TEXT, sort_order REAL);
+            INSERT INTO tracker_teams VALUES ('t1','AGT','Agents','bot','#fff',1,0,0,2,0,'2020-01-01T00:00:00Z',0);
+            CREATE TABLE tracker_states (id TEXT PRIMARY KEY, team_id TEXT, name TEXT, type TEXT, color TEXT, position REAL, lane_status TEXT, description TEXT);
+            INSERT INTO tracker_states VALUES ('s1','t1','Todo','unstarted','#fff',0,NULL,NULL);
+            INSERT INTO tracker_states VALUES ('s2','t1','Done','completed','#0f0',1,NULL,NULL);
+            CREATE TABLE tracker_issues (id TEXT PRIMARY KEY, team_id TEXT, number INTEGER, identifier TEXT, title TEXT, description TEXT, state_id TEXT, priority INTEGER, creator_id TEXT, created_at TEXT, updated_at TEXT);
+            INSERT INTO tracker_issues VALUES ('i1','t1',1,'AGT-1','Gate','body','s1',0,'u1','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z');
+            CREATE TABLE cron_jobs (id TEXT, session_key TEXT, expression TEXT, payload_json TEXT, enabled INTEGER, next_run_at TEXT, created_at TEXT);
+            INSERT INTO cron_jobs VALUES ('c1',NULL,'every 15m','{}',1,'2099-01-01T00:00:00Z','2020-01-01T00:00:00Z');
+            CREATE TABLE inbox_items (id TEXT PRIMARY KEY, source TEXT, source_ref TEXT, thread_ref TEXT, author TEXT, title TEXT, snippet TEXT, received_at TEXT, link TEXT, raw_hash TEXT, collected_at TEXT);
+            INSERT INTO inbox_items VALUES ('in1','github','ref-1',NULL,'octo','ci','red','2020-01-01T00:00:00Z',NULL,'hash','2020-01-01T00:00:00Z');
+            CREATE TABLE inbox_decisions (item_id TEXT PRIMARY KEY, class TEXT, reason TEXT, status TEXT, decided_at TEXT);
+            INSERT INTO inbox_decisions VALUES ('in1','owner','because','open','2020-01-01T00:00:00Z');
+            ",
+        )
+        .await;
+        let dest = storage::memory().await.unwrap();
+        let first = migrate_from_omo(&dest, &source, false).await.unwrap();
+        assert_eq!(first.issues, 1);
+        assert_eq!(first.cron_jobs, 1);
+        raw_db(
+            &source,
+            "
+            UPDATE tracker_issues SET state_id = 's2', title = 'Moved' WHERE id = 'i1';
+            UPDATE cron_jobs SET enabled = 0, next_run_at = '2020-06-01T00:00:00Z' WHERE id = 'c1';
+            UPDATE inbox_decisions SET status = 'done' WHERE item_id = 'in1';
+            ",
+        )
+        .await;
+        let again = migrate_from_omo(&dest, &source, false).await.unwrap();
+        assert_eq!(again.issues, 1);
+        assert_eq!(again.cron_jobs, 1);
+        assert_eq!(again.tables["inbox_decisions"], 1);
+        let state: (String, String) =
+            sqlx::query_as("SELECT state_id, title FROM tracker_issues WHERE id = 'i1'")
+                .fetch_one(&dest)
+                .await
+                .unwrap();
+        assert_eq!(state, ("s2".into(), "Moved".into()));
+        let cron: (i64, String) =
+            sqlx::query_as("SELECT enabled, next_run_at FROM scheduled_jobs WHERE id = 'c1'")
+                .fetch_one(&dest)
+                .await
+                .unwrap();
+        assert_eq!(cron, (0, "2020-06-01T00:00:00Z".into()));
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM inbox_decisions WHERE item_id = 'in1'")
+                .fetch_one(&dest)
+                .await
+                .unwrap();
+        assert_eq!(status, "done");
+        let third = migrate_from_omo(&dest, &source, false).await.unwrap();
+        assert_eq!(third.issues, 0);
+        assert_eq!(third.cron_jobs, 0);
+        assert_eq!(third.tables.get("inbox_decisions").copied().unwrap_or(0), 0);
+        dest.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn a_dry_run_does_not_create_the_destination_and_cwd_can_be_recorded() {
         let dir = scratch("dry-dest");
         let source = dir.join("omo.sqlite");
         raw_db(&source, "CREATE TABLE unused (id INTEGER);").await;
         let dest = dir.join("missing").join("hub.sqlite");
-        let report = open_and_migrate(&dest, &source, true, None).await.unwrap();
+        let report = open_and_migrate(&dest, &source, true, None, None)
+            .await
+            .unwrap();
         assert_eq!(report.issues, 0);
         assert!(!dest.exists());
         assert!(!dir.join("missing").exists());
@@ -1147,7 +1275,8 @@ mod tests {
             omo_working_directory(&work.join("omon_gateway.db"), Some(&home)),
             work
         );
-        let imported = open_and_migrate(&dest, &snap, false, Some(&work))
+        let live = dir.join("omon_gateway.db");
+        let imported = open_and_migrate(&dest, &snap, false, Some(&work), Some(&live))
             .await
             .unwrap();
         assert_eq!(imported.issues, 0);
@@ -1158,6 +1287,12 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(recorded, work.to_string_lossy());
+        let imported_from: String =
+            sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'imported_from'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(imported_from, live.to_string_lossy());
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

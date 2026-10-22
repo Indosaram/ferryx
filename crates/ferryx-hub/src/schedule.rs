@@ -568,7 +568,9 @@ pub async fn approve_problem(
         .bind(problem_id.to_string())
         .execute(pool)
         .await?;
-    run_native_job(pool, &job_id, true, true).await
+    // Approval does not override `enabled`. A disabled job stays unrun until
+    // someone passes force on the cron socket.
+    run_native_job(pool, &job_id, true, false).await
 }
 
 fn failed_receipt(job_id: &str, error: &str) -> RunReceipt {
@@ -1914,5 +1916,33 @@ mod tests {
         assert_eq!(deliveries[0].job_id, "home");
         assert_eq!(deliveries[0].targets[0].platform, "slack");
         assert_eq!(deliveries[0].targets[0].chat_id, "C0HOME");
+    }
+
+    #[tokio::test]
+    async fn approving_a_problem_does_not_run_a_disabled_job() {
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled) VALUES('paused','every 1m','{\"command\":\"printf hi\"}',0), ('live','every 1m','{\"command\":\"printf hi\"}',1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO cron_problems(id, job_id, summary, created_at, owner_token, status) VALUES('7','paused','boom','2020-01-01T00:00:00Z','tok','open'), ('8','live','boom','2020-01-01T00:00:00Z','tok','open')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let refused = approve_problem(&pool, 7, "tok").await.unwrap();
+        assert_eq!(refused.status, "failed");
+        assert_eq!(
+            refused.error.as_deref(),
+            Some("cron job paused is disabled; pass force to run it")
+        );
+        let runs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM cron_runs WHERE job_id = 'paused'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(runs, 0);
+        let allowed = approve_problem(&pool, 8, "tok").await.unwrap();
+        assert_eq!(allowed.status, "succeeded");
+        assert_eq!(allowed.output.as_deref(), Some("hi"));
     }
 }

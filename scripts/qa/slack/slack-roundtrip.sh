@@ -37,6 +37,8 @@ META="$(python3 -c 'import uuid;print(uuid.uuid4())')"
 echo "{\"metaSessionId\":\"$META\"}" > "$ROOT/hub-config.json"
 # A clean environment: no hub kill switch, relay token, or notify delay inherited from the shell.
 unset FERRYX_HUB FERRYX_MACHINE_TOKEN FERRYX_HUB_TRACKER_TOKEN FERRYX_HUB_IMPORT FERRYX_HUB_SUPERVISOR_PANE
+# A fresh hub database stays stopped until `hub start`; this isolated daemon opts in.
+export FERRYX_HUB=on
 export FERRYX_RUNTIME_DIR="$ROOT/runtime" FERRYX_DATA_DIR="$ROOT/data" FERRYX_HUB_DB="$ROOT/hub/hub.sqlite"
 export FERRYX_HUB_CONFIG="$ROOT/hub-config.json" FERRYX_HUB_WORKSPACE=slk FERRYX_HUB_TRACKER_ADDR=127.0.0.1:47813
 export FERRYX_HUB_NOTIFY_AFTER_SECS="${SLK_NOTIFY_AFTER_SECS:-3}" FERRYX_HUB_QUIET_HOURS=off

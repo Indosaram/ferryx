@@ -159,8 +159,8 @@ async fn create_cron(State(state): State<HttpState>, Json(body): Json<Value>) ->
 
 async fn trigger_cron(State(state): State<HttpState>, UrlPath(id): UrlPath<String>) -> Response {
     // Same gate as the run-now socket: a publishing job is not rerun from the dashboard.
-    let stored: Option<String> =
-        match sqlx::query_scalar("SELECT payload_json FROM scheduled_jobs WHERE id = ?")
+    let stored: Option<(String, i64)> =
+        match sqlx::query_as("SELECT payload_json, enabled FROM scheduled_jobs WHERE id = ?")
             .bind(&id)
             .fetch_optional(&state.pool)
             .await
@@ -170,7 +170,7 @@ async fn trigger_cron(State(state): State<HttpState>, UrlPath(id): UrlPath<Strin
                 return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
             }
         };
-    let Some(payload_json) = stored else {
+    let Some((payload_json, enabled)) = stored else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "cron job not found"})),
@@ -185,9 +185,19 @@ async fn trigger_cron(State(state): State<HttpState>, UrlPath(id): UrlPath<Strin
         )
             .into_response();
     }
+    // A paused job stays paused. Triggering it used to set enabled = 1, so one click
+    // silently resumed its schedule for good. Resume it, or run it once on the cron
+    // socket with {"id":...,"force":true}.
+    if enabled != 1 {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "cron job is paused; resume it first or run it once with force on the cron socket"})),
+        )
+            .into_response();
+    }
     let now = now_rfc3339();
     let _ = sqlx::query(
-        "UPDATE scheduled_jobs SET enabled = 1, next_run_at = ?, updated_at = ? WHERE id = ?",
+        "UPDATE scheduled_jobs SET next_run_at = ?, updated_at = ? WHERE id = ? AND enabled = 1",
     )
     .bind(&now)
     .bind(&now)
@@ -665,5 +675,45 @@ mod tests {
         let (enabled, next): (i64, String) = sqlx::query_as("SELECT enabled, next_run_at FROM scheduled_jobs WHERE id = 'omon-playstore-daily-publish'")
             .fetch_one(&pool).await.unwrap();
         assert_eq!((enabled, next.as_str()), (0, "2099-01-01T00:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn the_dashboard_trigger_leaves_a_paused_job_paused() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled, next_run_at) VALUES('paused','0 0 * * *','{\"command\":\"true\"}',0,'2099-01-01T00:00:00Z'), ('live','0 0 * * *','{\"command\":\"true\"}',1,'2099-01-01T00:00:00Z')")
+            .execute(&pool).await.unwrap();
+        let app = router(pool.clone(), std::env::temp_dir());
+        for (id, want) in [("paused", StatusCode::CONFLICT), ("live", StatusCode::OK)] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/cron/jobs/{id}/trigger"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), want, "{id}");
+        }
+        let rows: Vec<(String, i64, String)> =
+            sqlx::query_as("SELECT id, enabled, next_run_at FROM scheduled_jobs ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (rows[0].1, rows[0].2.as_str() < "2099"),
+            (1, true),
+            "live job is due now"
+        );
+        assert_eq!(
+            (rows[1].1, rows[1].2.as_str()),
+            (0, "2099-01-01T00:00:00Z"),
+            "paused job untouched"
+        );
     }
 }
