@@ -198,6 +198,8 @@ enum Command {
 enum RecoveryTestEvent {
     Scheduled,
     Completed { failed: bool },
+    /// One relay->direct upgrade attempt finished.
+    Upgraded { epoch: u64, direct: bool },
 }
 struct Owner {
     sender: mpsc::Sender<Command>,
@@ -754,6 +756,14 @@ impl Runtime {
             let mut proxy = proxy;
             let mut receiver = receiver;
             let mut authority = proxy.subscribe_authority();
+            // Relay->direct upgrade. Subscribed before the first poll so a route
+            // published from here on is seen; a route already live is picked up
+            // by the initial re-check. One attempt per direct route epoch.
+            let route_host = proxy.descriptor().host_id.clone();
+            let mut route_events = Some(crate::paired_host::direct_route::GLOBAL_DIRECT_ROUTES.subscribe());
+            let mut route_recheck = true;
+            let mut upgrade_due: Option<u64> = None;
+            let mut upgrade_tried: Option<u64> = None;
             tokio::select! { biased;
                 _ = cancelled.wait_for(|cancelled| *cancelled) => {},
                 _ = async {
@@ -778,6 +788,11 @@ impl Runtime {
                 .checked_sub(PERSIST_MIN_INTERVAL)
                 .unwrap_or_else(tokio::time::Instant::now);
             loop {
+                if std::mem::take(&mut route_recheck) {
+                    if let Some((_, epoch)) = crate::paired_host::direct_route::GLOBAL_DIRECT_ROUTES.direct_for(&route_host) {
+                        if upgrade_tried.is_none_or(|tried| epoch > tried) { upgrade_due = upgrade_due.max(Some(epoch)); }
+                    }
+                }
                 *task_live.lock() = proxy.live_state();
                 let (outcome, exit_code) = proxy.outcome();
                 *actor_status.lock() = (outcome.into(), proxy.controller(), exit_code, proxy.blocked_reason().map(str::to_owned));
@@ -799,6 +814,32 @@ impl Runtime {
                             recovery_at = Some(tokio::time::Instant::now());
                             #[cfg(test)]
                             let _ = recovery_events.send(RecoveryTestEvent::Scheduled);
+                        }
+                    }
+                    event = async { route_events.as_mut().expect("guarded").recv().await }, if route_events.is_some() => match event {
+                        Ok(event) if event.host_id == route_host => {
+                            if matches!(event.state, crate::paired_host::direct_route::RouteState::Direct { .. })
+                                && upgrade_tried.is_none_or(|tried| event.epoch > tried) {
+                                upgrade_due = upgrade_due.max(Some(event.epoch));
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => route_recheck = true,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => route_events = None,
+                    },
+                    // Make-before-break: the relay transport stays live until the
+                    // direct attach is validated. Mailbox commands wait (bounded by
+                    // the upgrade timeout) instead of being refused, so no input is
+                    // dropped; generation-0 input lands on whichever transport is
+                    // current afterwards, and nothing is ever resent.
+                    _ = async {}, if upgrade_due.is_some() => {
+                        let epoch = upgrade_due.take().expect("guarded");
+                        if proxy.relay_attached() {
+                            upgrade_tried = Some(epoch);
+                            let direct = matches!(proxy.upgrade_direct(epoch).await, Ok(true));
+                            #[cfg(test)]
+                            let _ = recovery_events.send(RecoveryTestEvent::Upgraded { epoch, direct });
+                            if direct { keepalive.reset(); }
                         }
                     }
                     command = receiver.recv() => match command {
@@ -1363,6 +1404,10 @@ impl Runtime {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "paired_upgrade_tests.rs"]
+mod upgrade_tests;
 
 #[cfg(test)]
 mod tests {

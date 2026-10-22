@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 type Result<T> = std::result::Result<T, ClientError>;
+/// Bound on one relay->direct upgrade. Input queued in the owner mailbox while
+/// it runs must still be answered well inside the 30s operation deadline.
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(10);
 fn error(code: &str) -> ClientError {
     ClientError::local(code)
 }
@@ -289,6 +292,41 @@ impl Proxy {
     pub(crate) fn mark_disconnected(&mut self) {
         self.transport = None;
         self.controller = None;
+    }
+    /// A live stream riding the relay (no direct epoch) that may move to direct.
+    pub(crate) fn relay_attached(&self) -> bool {
+        !self.exited
+            && self.blocked.is_none()
+            && self.controller.is_some()
+            && self.transport.as_ref().is_some_and(|t| t.direct_epoch.is_none())
+    }
+    /// Make-before-break move of a live relay stream onto direct route `epoch`.
+    ///
+    /// The relay transport stays installed while the direct socket attaches from
+    /// the retained cursor; it is replaced (and dropped) only after the direct
+    /// handshake is fully validated, so a failure leaves the relay stream as it
+    /// was. The caller does not read the relay meanwhile, so the direct replay
+    /// starts exactly after the last published byte. Never CreateSession, never
+    /// replays input, never resets the hub. Returns whether the stream is now on
+    /// a direct route.
+    pub(crate) async fn upgrade_direct(&mut self, epoch: u64) -> Result<bool> {
+        let routes = &crate::paired_host::direct_route::GLOBAL_DIRECT_ROUTES;
+        if !self.relay_attached() || routes.direct_for(&self.descriptor.host_id).map(|(_, e)| e) != Some(epoch) {
+            return Ok(false);
+        }
+        let Some(service) = self.recovery.clone() else {
+            return Ok(false);
+        };
+        let result = tokio::time::timeout(UPGRADE_TIMEOUT, self.attach(&MachineClient::new(), &service, false))
+            .await
+            .map_err(|_| error("TIMEOUT"))
+            .and_then(|attached| attached);
+        if let Err(failure) = &result {
+            if crate::paired_host::direct_client::is_transport_failure(failure) {
+                routes.mark_disconnected(&self.descriptor.host_id, epoch, std::time::Instant::now());
+            }
+        }
+        result.map(|()| self.transport.as_ref().is_some_and(|t| t.direct_epoch.is_some()))
     }
     #[cfg(feature = "local-split-qa")]
     pub(crate) fn qa_route_receipt(&self) -> std::result::Result<PairedRouteReceipt, &'static str> {
