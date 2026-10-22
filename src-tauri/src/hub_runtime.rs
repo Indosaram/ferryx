@@ -479,7 +479,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                             tracing::warn!(%error, "discord message was not recorded for the inbox");
                         }
                     }
-                    if let Err(error) = ferryx_hub::chat::discord::apply_dispatch(&frame, &meta, &profiles, bridge.as_ref()).await {
+                    if let Err(error) = ferryx_hub::chat::discord::apply_dispatch(&pool, &frame, &meta, &profiles, bridge.as_ref()).await {
                         tracing::warn!(%error, "discord frame was not applied");
                     }
                 }

@@ -39,6 +39,17 @@ const OWNER_ONLY: &str = "Only the owner can run that command.";
 const HUDDLE_OFF: &str =
     "Slack huddles are off. Set OMON_SLACK_HUDDLE_ENABLED=true and restart the hub.";
 
+fn process_started() -> chrono::DateTime<chrono::Utc> {
+    static START: std::sync::OnceLock<chrono::DateTime<chrono::Utc>> = std::sync::OnceLock::new();
+    *START.get_or_init(chrono::Utc::now)
+}
+
+pub(crate) fn uptime_secs() -> i64 {
+    (chrono::Utc::now() - process_started())
+        .num_seconds()
+        .max(0)
+}
+
 /// One stdin line for the huddle sidecar. The sidecar process is `bun` plus the
 /// bundled `index.mjs`. A missing bun or a timeout is returned to the caller.
 pub async fn run_huddle_sidecar(line: &str) -> Result<String> {
@@ -247,7 +258,8 @@ async fn status(env: &SlashEnv<'_>) -> Result<SlashReply> {
         .fetch_one(env.pool)
         .await?;
     Ok(SlashReply::public(format!(
-        "Active sessions: {sessions}\nMemory entries: {memories}\nLedger entries: {ledger}"
+        "Active sessions: {sessions}\nMemory entries: {memories}\nUptime: {}s\nLedger entries: {ledger}",
+        uptime_secs()
     )))
 }
 
@@ -266,47 +278,55 @@ async fn cron(env: &SlashEnv<'_>, action: &str) -> Result<SlashReply> {
 async fn skill(env: &SlashEnv<'_>, action: &str, arg: Option<&str>) -> Result<SlashReply> {
     match action {
         "list" | "search" => {
-            let rows: Vec<(String, String)> = sqlx::query_as(
-                "SELECT bot_id, name FROM bot_profiles ORDER BY name",
-            )
-            .fetch_all(env.pool)
-            .await?;
-            let shown: Vec<_> = rows
+            let names = crate::tools::list_skills(crate::tools::skills_root(&serde_json::json!({})));
+            let shown: Vec<_> = names
                 .into_iter()
-                .filter(|(_, name)| arg.is_none_or(|query| name.contains(query)))
-                .map(|(id, name)| format!("• `{id}` {name}"))
+                .filter(|name| arg.is_none_or(|query| name.contains(query)))
                 .collect();
+            let total = shown.len();
             if shown.is_empty() {
-                return Ok(SlashReply::public("(none)"));
+                return Ok(SlashReply::public(format!(
+                    "📚 *Available OMO Skills* ({total} total):\n_(none)_"
+                )));
             }
-            Ok(SlashReply::public(shown.join("\n")))
+            Ok(SlashReply::public(format!(
+                "📚 *Available OMO Skills* ({total} total):\n`{}`\n_(Use `/omo-skill read <skill_name>` to inspect)_",
+                shown.join("`, `")
+            )))
         }
         "read" => {
             let Some(name) = arg else {
                 return Ok(SlashReply::private("Usage: `/omo-skill read <name>`"));
             };
-            let prompt: Option<String> = sqlx::query_scalar(
-                "SELECT system_prompt FROM bot_profiles WHERE name = ? OR bot_id = ?",
-            )
-            .bind(name)
-            .bind(name)
-            .fetch_optional(env.pool)
-            .await?;
+            let root = crate::tools::skills_root(&serde_json::json!({}));
+            let text = root.as_ref().and_then(|root| {
+                crate::cron_exec::find_skill_file(root, name)
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+            });
             Ok(SlashReply::public(
-                prompt.unwrap_or_else(|| format!("No skill named `{name}`.")),
+                text.unwrap_or_else(|| format!("No skill named `{name}`.")),
             ))
         }
         "run" => {
             let Some(name) = arg else {
                 return Ok(SlashReply::private("Usage: `/omo-skill run <name>`"));
             };
-            let prompt: Option<String> = sqlx::query_scalar(
-                "SELECT system_prompt FROM bot_profiles WHERE name = ? OR bot_id = ?",
-            )
-            .bind(name)
-            .bind(name)
-            .fetch_optional(env.pool)
-            .await?;
+            let root = crate::tools::skills_root(&serde_json::json!({}));
+            let from_file = root.as_ref().and_then(|root| {
+                crate::cron_exec::find_skill_file(root, name)
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+            });
+            let prompt: Option<String> = if from_file.is_some() {
+                from_file
+            } else {
+                sqlx::query_scalar(
+                    "SELECT system_prompt FROM bot_profiles WHERE name = ? OR bot_id = ?",
+                )
+                .bind(name)
+                .bind(name)
+                .fetch_optional(env.pool)
+                .await?
+            };
             let Some(prompt) = prompt.filter(|text| !text.trim().is_empty()) else {
                 return Ok(SlashReply::public(format!("No skill named `{name}`.")));
             };
@@ -508,7 +528,10 @@ async fn pair(env: &SlashEnv<'_>, invocation: &SlashInvocation, code: &str) -> R
         Some(user_id) => SlashReply::public(format!(
             "✅ Successfully paired and authorized user <@{user_id}>!"
         )),
-        None => SlashReply::private("❌ Invalid pairing code."),
+        None => {
+            crate::chat::discord::note_pairing_failure(env.pool, code).await?;
+            SlashReply::private("❌ Invalid pairing code.")
+        }
     })
 }
 

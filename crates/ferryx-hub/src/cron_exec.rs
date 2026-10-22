@@ -138,16 +138,36 @@ pub async fn run_payload(
     model: &dyn ModelTurn,
     skills_root: Option<&Path>,
 ) -> Result<Executed> {
+    if job_id == crate::inbox::DIGEST_JOB_ID {
+        if payload.get("deliver").and_then(Value::as_str) != Some("origin") {
+            return Err(HubError::message(
+                "digest delivery must remain owner DM only",
+            ));
+        }
+        let text = crate::inbox::build_scheduled_digest(pool, chrono::Utc::now()).await?;
+        return Ok(Executed {
+            deliver: text.is_some(),
+            output: text.unwrap_or_default(),
+            monitor_hash: None,
+        });
+    }
     if payload.get("monitor_script").is_some() && payload.get("monitor_url").is_some() {
         return Err(HubError::message(format!(
             "cron job {job_id} sets both monitor_script and monitor_url"
         )));
     }
-    let script_output = if let Some(script) = script_from_payload(payload) {
-        Some(run_script(&script, timeout_secs(payload)).await?)
+    let script = script_from_payload(payload);
+    let script_output = if let Some(script) = script.as_deref() {
+        Some(run_script(script, timeout_secs(payload)).await?)
     } else {
         None
     };
+    let no_agent = payload.get("no_agent").and_then(Value::as_bool) == Some(true);
+    if no_agent && script.is_none() {
+        return Err(HubError::message(format!(
+            "Hermes job {job_id} specifies no_agent=true but has no script"
+        )));
+    }
     if let Some(output) = script_output.as_deref() {
         if !crate::cron::parse_wake_gate(output) {
             return Ok(Executed {
@@ -156,6 +176,30 @@ pub async fn run_payload(
                 monitor_hash: None,
             });
         }
+        let prompt_waiting = payload
+            .get("prompt")
+            .or_else(|| payload.get("message"))
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+            || payload
+                .get("brief_file")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty());
+        if output.trim().is_empty() && prompt_waiting {
+            return Ok(Executed {
+                output: String::new(),
+                deliver: false,
+                monitor_hash: None,
+            });
+        }
+    }
+    if no_agent {
+        let output = script_output.clone().unwrap_or_default();
+        return Ok(Executed {
+            deliver: should_post(&output),
+            output,
+            monitor_hash: None,
+        });
     }
     let monitor_hash = match monitor_hash(pool, job_id, payload).await? {
         Monitor::Same => {
@@ -168,20 +212,6 @@ pub async fn run_payload(
         Monitor::Changed(hash) => Some(hash),
         Monitor::Absent => None,
     };
-    let no_agent = payload.get("no_agent").and_then(Value::as_bool) == Some(true);
-    if no_agent {
-        let output = script_output.clone().unwrap_or_default();
-        if output.trim().is_empty() {
-            return Err(HubError::message(format!(
-                "cron job {job_id} specifies no_agent but has no script output"
-            )));
-        }
-        return Ok(Executed {
-            deliver: should_post(&output),
-            output,
-            monitor_hash,
-        });
-    }
     let prompt = read_prompt(payload).await?;
     let names = skill_names(payload);
     let skills = match skills_root {
@@ -225,7 +255,25 @@ pub async fn run_payload(
         task.push('\n');
         task.push_str(&context);
     }
-    let output = model.complete(&task).await?;
+    let model_id = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    let toolsets = payload
+        .get("enabled_toolsets")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let output = model.complete_with(&task, model_id, &toolsets).await?;
     Ok(Executed {
         deliver: should_post(&output),
         output,
@@ -265,6 +313,7 @@ fn timeout_secs(payload: &Value) -> u64 {
         .or_else(|| payload.get("timeout_seconds"))
         .or_else(|| payload.get("timeout"))
         .or_else(|| payload.get("script_timeout"))
+        .or_else(|| payload.get("script_timeout_seconds"))
         .and_then(Value::as_u64)
         .unwrap_or(30)
 }
@@ -340,8 +389,9 @@ async fn run_script(script: &str, timeout_secs: u64) -> Result<String> {
     .map_err(|error| HubError::message(error.to_string()))?;
     if !output.status.success() {
         return Err(HubError::message(format!(
-            "cron script failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "cron script failed with {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -509,5 +559,145 @@ mod tests {
             *self.0.lock().unwrap() = prompt.to_owned();
             Ok("shipped".into())
         }
+    }
+
+    struct Routed(std::sync::Mutex<(String, Vec<String>)>);
+
+    #[async_trait]
+    impl ModelTurn for Routed {
+        async fn complete(&self, _prompt: &str) -> Result<String> {
+            Ok("unused".into())
+        }
+
+        async fn complete_with(
+            &self,
+            prompt: &str,
+            model: Option<&str>,
+            toolsets: &[String],
+        ) -> Result<String> {
+            *self.0.lock().unwrap() = (model.unwrap_or("").to_owned(), toolsets.to_vec());
+            assert!(prompt.contains("[Script output]"));
+            assert!(prompt.contains("rows=3"));
+            Ok("report".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn live_job_shapes_match_the_gateway() {
+        let pool = crate::storage::memory().await.unwrap();
+        let model = StaticModel("should-not-run".into());
+        let missing = run_payload(
+            &pool,
+            "bare",
+            &serde_json::json!({"no_agent": true, "deliver": "local"}),
+            &model,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(missing.contains("no_agent=true but has no script"));
+        let failed = run_payload(
+            &pool,
+            "scripted",
+            &serde_json::json!({"no_agent": true, "script": "echo nope 1>&2; exit 3", "timeout_seconds": 30}),
+            &model,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(failed.contains("cron script failed with Some(3)"));
+        let skipped = run_payload(
+            &pool,
+            "empty-script",
+            &serde_json::json!({"script": "true", "prompt": "write the report", "timeout_secs": 30}),
+            &model,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!skipped.deliver);
+        assert!(skipped.output.is_empty());
+        let routed = Routed(std::sync::Mutex::new((String::new(), Vec::new())));
+        let agent = run_payload(
+            &pool,
+            "vpn-mall",
+            &serde_json::json!({
+                "script": "printf rows=3",
+                "prompt": "publish",
+                "model": "mahoquot/gemini-3.8-flash-high",
+                "enabled_toolsets": ["terminal", "browser", "file"],
+                "deliver": "slack:C0C9XG5FP8W",
+                "schedule": {"kind": "cron", "expr": "0 9 * * *", "timezone": "Asia/Seoul"}
+            }),
+            &routed,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent.output, "report");
+        let (model_id, toolsets) = routed.0.lock().unwrap().clone();
+        assert_eq!(model_id, "mahoquot/gemini-3.8-flash-high");
+        assert_eq!(toolsets, vec!["terminal", "browser", "file"]);
+        let timed = run_payload(
+            &pool,
+            "slow",
+            &serde_json::json!({"no_agent": true, "script": "sleep 5", "timeout_seconds": 1}),
+            &model,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(timed.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn the_inbox_digest_job_lists_owner_work_and_skips_a_second_run_today() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO inbox_items(id, source, source_ref, title, snippet, received_at, raw_hash, collected_at) VALUES('m1','mail','r','Sign','please',?, 'h', ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES('m1','owner','needs you','open',?)",
+        )
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let payload = serde_json::json!({
+            "deliver": "origin",
+            "attach_to_session": false,
+            "origin": {"platform": "slack", "chat_id": "D0C9HNVUK5M", "user_id": "U04", "bot_id": "B0"},
+            "schedule": {"kind": "cron", "expr": "0 9 * * *", "timezone": "Asia/Seoul"}
+        });
+        let model = StaticModel("no".into());
+        let first = run_payload(&pool, "omon:inbox-digest", &payload, &model, None)
+            .await
+            .unwrap();
+        assert!(first.deliver);
+        assert!(first.output.contains("Owner tasks"));
+        assert!(first.output.contains("Sign"));
+        sqlx::query(
+            "INSERT INTO cron_runs(id, job_id, status, started_at, finished_at, output) VALUES('d1','omon:inbox-digest','succeeded',?,?,?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(&first.output)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let second = run_payload(&pool, "omon:inbox-digest", &payload, &model, None)
+            .await
+            .unwrap();
+        assert!(!second.deliver);
+        assert!(second.output.is_empty());
     }
 }

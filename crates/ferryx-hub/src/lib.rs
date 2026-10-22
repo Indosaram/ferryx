@@ -6,12 +6,16 @@
 
 pub mod agent_control;
 pub mod autonomy;
+pub mod browser;
 pub mod chat;
 pub mod config;
 pub mod context;
 pub mod control;
 pub mod cron;
 pub mod cron_exec;
+pub mod discord_surface;
+#[cfg(feature = "hub-discord")]
+pub mod discord_voice;
 pub mod effect;
 pub mod error;
 pub mod fleet;
@@ -27,15 +31,18 @@ pub mod ledger;
 pub mod mcp;
 pub mod memory;
 pub mod meta;
+pub mod owner_alert;
 pub mod readiness;
 pub mod schedule;
 pub mod security;
 pub mod sessions;
 pub mod storage;
+pub mod table_image;
 pub mod tools;
 pub mod tracker;
 pub mod tracker_linear;
 pub mod voice;
+pub mod voice_pcm;
 
 pub use config::{secret_from_env, HubConfig};
 pub use error::{HubError, Result};

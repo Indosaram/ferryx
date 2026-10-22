@@ -140,6 +140,105 @@ pub fn paginate_replies(
     }
 }
 
+/// Live `conversations.replies`. `base` is `https://slack.com/api` unless a test overrides it.
+/// Pages stop on the same cursor rules as [`paginate_replies`].
+pub async fn conversations_replies(
+    base: &str,
+    token: &str,
+    channel: &str,
+    ts: &str,
+) -> crate::error::Result<Vec<serde_json::Value>> {
+    #[cfg(any(feature = "hub-slack", feature = "hub-discord", feature = "hub-voice"))]
+    {
+        fetch_replies(base, token, channel, ts).await
+    }
+    #[cfg(not(any(feature = "hub-slack", feature = "hub-discord", feature = "hub-voice")))]
+    {
+        let _ = (base, token, channel, ts);
+        Err(crate::error::HubError::message(
+            "conversations.replies needs hub-slack, hub-discord, or hub-voice",
+        ))
+    }
+}
+
+#[cfg(any(feature = "hub-slack", feature = "hub-discord", feature = "hub-voice"))]
+async fn fetch_replies(
+    base: &str,
+    token: &str,
+    channel: &str,
+    ts: &str,
+) -> crate::error::Result<Vec<serde_json::Value>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|error| crate::error::HubError::message(error.to_string()))?;
+    let mut all = Vec::new();
+    let mut walk = ReplyWalk::default();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut url = format!(
+            "{}/conversations.replies?channel={}&ts={}&limit=200",
+            base.trim_end_matches('/'),
+            urlencoding_query(channel),
+            urlencoding_query(ts)
+        );
+        if let Some(cursor) = cursor.as_deref() {
+            url.push_str("&cursor=");
+            url.push_str(&urlencoding_query(cursor));
+        }
+        let response = client
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| crate::error::HubError::message(error.to_string()))?;
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|error| crate::error::HubError::message(error.to_string()))?;
+        if body.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
+            let err = body
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            return Err(crate::error::HubError::message(format!(
+                "conversations.replies {err}"
+            )));
+        }
+        let messages = body
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let next = body
+            .pointer("/response_metadata/next_cursor")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|cursor| !cursor.is_empty())
+            .map(str::to_owned);
+        let again = paginate_replies(&mut all, messages, &mut walk, next.clone());
+        if !again {
+            break;
+        }
+        cursor = next;
+    }
+    Ok(all)
+}
+
+#[cfg(any(feature = "hub-slack", feature = "hub-discord", feature = "hub-voice"))]
+fn urlencoding_query(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// Reads `pages` of `{messages, next_cursor}` the way a Slack thread is walked.
 pub fn walk_pages(pages: &serde_json::Value) -> Vec<serde_json::Value> {
     let mut all = Vec::new();
@@ -231,5 +330,42 @@ mod tests {
             }
         }
         assert_eq!(collected.len(), MAX_REPLIES_PAGES);
+    }
+
+    #[cfg(any(feature = "hub-slack", feature = "hub-discord", feature = "hub-voice"))]
+    #[tokio::test]
+    async fn conversations_replies_walks_every_cursor_page() {
+        use serde_json::json;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = axum::Router::new().route(
+            "/conversations.replies",
+            axum::routing::get(|request: axum::extract::Request| async move {
+                let query = request.uri().query().unwrap_or("");
+                let body = if query.contains("cursor=page-2") {
+                    json!({"ok": true, "messages": [{"ts": "100.000002", "text": "one"}]})
+                } else {
+                    json!({
+                        "ok": true,
+                        "messages": [{"ts": "100.000001", "text": "root"}],
+                        "response_metadata": {"next_cursor": "page-2"}
+                    })
+                };
+                axum::Json(body)
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let messages = conversations_replies(
+            &format!("http://127.0.0.1:{port}"),
+            "xoxb-test",
+            "C0",
+            "100.000001",
+        )
+        .await
+        .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["text"], "one");
     }
 }

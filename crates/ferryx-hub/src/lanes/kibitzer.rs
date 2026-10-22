@@ -175,6 +175,18 @@ pub async fn ensure_lead(pool: &SqlitePool, lead: &str) -> Result<()> {
 #[async_trait]
 pub trait ModelTurn: Send + Sync {
     async fn complete(&self, prompt: &str) -> Result<String>;
+
+    /// Cron agent jobs pass the Hermes model id and `enabled_toolsets`.
+    /// The default ignores both and runs [`Self::complete`].
+    async fn complete_with(
+        &self,
+        prompt: &str,
+        model: Option<&str>,
+        toolsets: &[String],
+    ) -> Result<String> {
+        let _ = (model, toolsets);
+        self.complete(prompt).await
+    }
 }
 
 const KIBITZER_PROMPT: &str = "Return only JSON with exactly wake (boolean), reason (string), suggested (string), target_lane (string or null). Decide whether the owner needs proactive action. Do not perform actions.";

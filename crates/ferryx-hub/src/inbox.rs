@@ -212,6 +212,101 @@ where
     Ok(stored)
 }
 
+pub const DIGEST_JOB_ID: &str = "omon:inbox-digest";
+
+/// One KST-day digest. A succeeded run already stored today suppresses a second copy.
+/// Open owner and bot decisions, auth-expired cursors, and yesterday's cron count are the body.
+pub async fn build_scheduled_digest(
+    pool: &SqlitePool,
+    now: DateTime<Utc>,
+) -> Result<Option<String>> {
+    let local = now.with_timezone(&chrono_tz::Asia::Seoul);
+    let midnight = local
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|naive| naive.and_local_timezone(chrono_tz::Asia::Seoul).single())
+        .map(|at| at.with_timezone(&Utc))
+        .unwrap_or(now);
+    let delivered: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cron_runs
+         WHERE job_id = ? AND status = 'succeeded' AND output <> ''
+           AND finished_at IS NOT NULL AND julianday(finished_at) >= julianday(?)",
+    )
+    .bind(DIGEST_JOB_ID)
+    .bind(midnight.to_rfc3339())
+    .fetch_one(pool)
+    .await?;
+    if delivered > 0 {
+        return Ok(None);
+    }
+    let owner: Vec<(String, String)> = sqlx::query_as(
+        "SELECT COALESCE(NULLIF(i.title, ''), i.snippet), i.source
+           FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
+          WHERE d.class = 'owner' AND d.status = 'open' ORDER BY d.decided_at",
+    )
+    .fetch_all(pool)
+    .await?;
+    let bot: Vec<(String, String)> = sqlx::query_as(
+        "SELECT COALESCE(NULLIF(i.title, ''), i.snippet), i.source
+           FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
+          WHERE d.class = 'bot' AND d.status = 'open' ORDER BY d.decided_at",
+    )
+    .fetch_all(pool)
+    .await?;
+    let errors: Vec<(String,)> = sqlx::query_as(
+        "SELECT source FROM inbox_cursors WHERE error IS NOT NULL AND (
+            lower(error) LIKE '%auth_expired%' OR lower(error) LIKE '%unauthorized%'
+            OR lower(error) LIKE '%login%' OR error LIKE '%401%') ORDER BY source",
+    )
+    .fetch_all(pool)
+    .await?;
+    let since = (now - chrono::Duration::hours(24)).to_rfc3339();
+    let runs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cron_runs WHERE finished_at IS NOT NULL AND julianday(finished_at) >= julianday(?)",
+    )
+    .bind(&since)
+    .fetch_one(pool)
+    .await?;
+    let failed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cron_runs WHERE status = 'failed' AND finished_at IS NOT NULL AND julianday(finished_at) >= julianday(?)",
+    )
+    .bind(&since)
+    .fetch_one(pool)
+    .await?;
+    if owner.is_empty() && bot.is_empty() && errors.is_empty() && runs == 0 {
+        return Ok(None);
+    }
+    let render = |rows: &[(String, String)]| -> String {
+        if rows.is_empty() {
+            return "(none)".into();
+        }
+        rows.iter()
+            .map(|(title, source)| format!("- [{source}] {title}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let mut message = format!(
+        "## Owner tasks\n{}\n\n## Bot proposals\n{}",
+        render(&owner),
+        render(&bot)
+    );
+    message.push_str(&format!("\n\nUsage: {runs} cron runs in the last day"));
+    if failed > 0 {
+        message.push_str(&format!("\n\n## Cron\n- {failed} failed"));
+    }
+    if !errors.is_empty() {
+        message.push_str("\n\n## Source authentication\n");
+        message.push_str(
+            &errors
+                .iter()
+                .map(|(source,)| format!("- [{source}] login required"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    Ok(Some(message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

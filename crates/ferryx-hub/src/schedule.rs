@@ -655,21 +655,28 @@ pub fn parse_run_now(line: &str) -> Result<String> {
         .ok_or_else(|| HubError::message("cron-run-now needs an id"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedJob {
+    pub id: String,
+    /// `next_run_at` captured before the claim clears it. That instant is `last_occurrence`.
+    pub occurrence: Option<String>,
+}
+
 pub async fn claim_due(
     pool: &SqlitePool,
     now: DateTime<Utc>,
     owner_pid: u32,
-) -> Result<Vec<String>> {
+) -> Result<Vec<ClaimedJob>> {
     let now_text = now.to_rfc3339();
     let lease = (now + LEASE).to_rfc3339();
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT id FROM scheduled_jobs WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at",
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT id, next_run_at FROM scheduled_jobs WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at",
     )
     .bind(&now_text)
     .fetch_all(pool)
     .await?;
     let mut claimed = Vec::new();
-    for (id,) in rows {
+    for (id, occurrence) in rows {
         let run_id = uuid::Uuid::new_v4().to_string();
         sqlx::query("INSERT INTO cron_runs(id, job_id, status, owner_pid, lease_until, started_at) VALUES(?,?, 'running', ?, ?, ?)")
             .bind(&run_id)
@@ -684,9 +691,67 @@ pub async fn claim_due(
             .bind(&id)
             .execute(pool)
             .await?;
-        claimed.push(id);
+        claimed.push(ClaimedJob { id, occurrence });
     }
     Ok(claimed)
+}
+
+/// Cron wall clock uses `schedule.timezone` when the payload has one, then `timezone` / `tz`.
+/// An empty name means UTC, which is what the cron crate uses when no zone is stored.
+pub fn payload_timezone(payload: &Value) -> Option<&str> {
+    payload
+        .pointer("/schedule/timezone")
+        .or_else(|| payload.get("timezone"))
+        .or_else(|| payload.get("tz"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
+fn job_expression(column: &str, payload: &Value) -> String {
+    let column = column.trim();
+    if !column.is_empty() {
+        return column.to_owned();
+    }
+    payload
+        .pointer("/schedule/expr")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|expr| !expr.is_empty())
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn should_disable_after(completed: u64, times: Option<u64>) -> bool {
+    matches!(times, Some(limit) if limit > 0 && completed >= limit)
+}
+
+/// Bumps `repeat.completed` the way omo does, creating `repeat` when the payload has none.
+fn increment_repeat_completed(payload: &mut Value) -> (Option<u64>, u64) {
+    if let Some(repeat) = payload.get_mut("repeat") {
+        if let Some(obj) = repeat.as_object_mut() {
+            let times = obj.get("times").and_then(Value::as_u64);
+            let completed = obj.get("completed").and_then(Value::as_u64).unwrap_or(0) + 1;
+            obj.insert("completed".to_owned(), Value::from(completed));
+            return (times, completed);
+        }
+    }
+    let times = payload.get("times").and_then(Value::as_u64);
+    let completed = payload
+        .get("completed")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        + 1;
+    if let Some(obj) = payload.as_object_mut() {
+        if times.is_some() {
+            obj.insert("completed".to_owned(), Value::from(completed));
+        } else {
+            let mut repeat_obj = serde_json::Map::new();
+            repeat_obj.insert("completed".to_owned(), Value::from(completed));
+            obj.insert("repeat".to_owned(), Value::Object(repeat_obj));
+        }
+    }
+    (times, completed)
 }
 
 pub async fn finish_run(
@@ -695,6 +760,7 @@ pub async fn finish_run(
     ok: bool,
     error: Option<&str>,
     output: &str,
+    occurrence: Option<&str>,
 ) -> Result<()> {
     let now = Utc::now();
     let status = if ok { "succeeded" } else { "failed" };
@@ -717,23 +783,71 @@ pub async fn finish_run(
     let Some((expression, failures, payload_json)) = row else {
         return Ok(());
     };
-    let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
-    let tz = payload
-        .get("timezone")
-        .or_else(|| payload.get("tz"))
-        .and_then(Value::as_str);
-    let (next, consecutive) = if ok {
-        (next_run_tz(&expression, now, tz).ok(), 0_i64)
+    let mut payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
+    let expression = job_expression(&expression, &payload);
+    let tz = payload_timezone(&payload).map(str::to_owned);
+    let (times, completed) = increment_repeat_completed(&mut payload);
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("last_status".to_owned(), Value::String(status.to_owned()));
+        obj.insert("last_run_at".to_owned(), Value::String(now.to_rfc3339()));
+        if let Some(occurrence) = occurrence {
+            obj.insert(
+                "last_occurrence".to_owned(),
+                Value::String(occurrence.to_owned()),
+            );
+        }
+        if ok {
+            obj.insert("last_error".to_owned(), Value::Null);
+            obj.insert("last_delivery_error".to_owned(), Value::Null);
+            obj.remove("retry_at");
+        } else {
+            let err = error.unwrap_or("cron run failed").to_owned();
+            let lower = err.to_lowercase();
+            obj.insert("last_error".to_owned(), Value::String(err.clone()));
+            if lower.contains("deliver") || lower.contains("discord") {
+                obj.insert("last_delivery_error".to_owned(), Value::String(err));
+            } else {
+                obj.insert("last_delivery_error".to_owned(), Value::Null);
+            }
+        }
+    }
+    let limit_reached = should_disable_after(completed, times);
+    let (next, consecutive, enabled) = if expression.starts_with("once:") || limit_reached {
+        (
+            None,
+            if ok {
+                0_i64
+            } else {
+                failures.saturating_add(1)
+            },
+            0_i64,
+        )
+    } else if ok {
+        match next_run_tz(&expression, now, tz.as_deref()) {
+            Ok(next) => (Some(next), 0_i64, 1_i64),
+            Err(_) => (None, 0_i64, 0_i64),
+        }
     } else {
         let consecutive = failures.saturating_add(1);
         (
-            next_run_after_failure(&expression, now, consecutive as u32, tz)?,
+            next_run_after_failure(&expression, now, consecutive as u32, tz.as_deref())?,
             consecutive,
+            1_i64,
         )
     };
-    sqlx::query("UPDATE scheduled_jobs SET next_run_at = ?, consecutive_failures = ?, updated_at = ? WHERE id = ?")
+    if !ok {
+        if let Some(next) = next {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("retry_at".to_owned(), Value::String(next.to_rfc3339()));
+            }
+        }
+    }
+    let payload_json = serde_json::to_string(&payload).unwrap_or(payload_json);
+    sqlx::query("UPDATE scheduled_jobs SET next_run_at = ?, consecutive_failures = ?, enabled = ?, payload_json = ?, updated_at = ? WHERE id = ?")
         .bind(next.map(|t| t.to_rfc3339()))
         .bind(consecutive)
+        .bind(enabled)
+        .bind(payload_json)
         .bind(now_rfc3339())
         .bind(job_id)
         .execute(pool)
@@ -888,7 +1002,11 @@ pub async fn drive_due_with(
 ) -> Result<Vec<DueDelivery>> {
     let claimed = claim_due(pool, now, std::process::id()).await?;
     let mut deliveries = Vec::new();
-    for job_id in claimed {
+    for ClaimedJob {
+        id: job_id,
+        occurrence,
+    } in claimed
+    {
         let payload_json: Option<String> =
             sqlx::query_scalar("SELECT payload_json FROM scheduled_jobs WHERE id = ?")
                 .bind(&job_id)
@@ -921,7 +1039,15 @@ pub async fn drive_due_with(
                 crate::cron_exec::commit_monitor(pool, &job_id, hash).await?;
             }
         }
-        finish_run(pool, &job_id, ok, error.as_deref(), &output).await?;
+        finish_run(
+            pool,
+            &job_id,
+            ok,
+            error.as_deref(),
+            &output,
+            occurrence.as_deref(),
+        )
+        .await?;
         note_run_health(
             pool,
             &job_id,
@@ -1330,9 +1456,17 @@ mod tests {
             .await
             .unwrap();
         let claimed = claim_due(&pool, Utc::now(), 9).await.unwrap();
-        assert_eq!(claimed, vec!["job".to_string()]);
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["job"]
+        );
+        let occurrence = claimed[0].occurrence.clone();
+        assert_eq!(occurrence.as_deref(), Some(due.as_str()));
         assert!(claim_due(&pool, Utc::now(), 9).await.unwrap().is_empty());
-        finish_run(&pool, "job", false, Some("boom"), "")
+        finish_run(&pool, "job", false, Some("boom"), "", occurrence.as_deref())
             .await
             .unwrap();
         let incidents: i64 =
@@ -1347,6 +1481,43 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(failures, 1);
+        let payload: String =
+            sqlx::query_scalar("SELECT payload_json FROM scheduled_jobs WHERE id = 'job'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["last_status"], "failed");
+        assert_eq!(payload["last_error"], "boom");
+        assert!(payload["last_delivery_error"].is_null());
+        assert_eq!(payload["last_occurrence"], due);
+        assert_eq!(payload["repeat"]["completed"], 1);
+        assert!(payload["retry_at"].as_str().is_some());
+    }
+
+    #[test]
+    fn seoul_cron_wall_clock_is_midnight_utc_and_a_missing_zone_stays_utc() {
+        let after = DateTime::parse_from_rfc3339("2026-10-22T00:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let seoul = next_run_tz("0 9 * * *", after, Some("Asia/Seoul")).unwrap();
+        assert_eq!(
+            seoul,
+            DateTime::parse_from_rfc3339("2026-10-23T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        let utc = next_run_tz("0 9 * * *", after, None).unwrap();
+        assert_eq!(
+            utc,
+            DateTime::parse_from_rfc3339("2026-10-22T09:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        let mut payload = serde_json::json!({"schedule": {"timezone": "Asia/Seoul"}});
+        assert_eq!(payload_timezone(&payload), Some("Asia/Seoul"));
+        payload = serde_json::json!({"timezone": "UTC"});
+        assert_eq!(payload_timezone(&payload), Some("UTC"));
     }
 
     #[test]

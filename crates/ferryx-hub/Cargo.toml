@@ -12,7 +12,7 @@ default = []
 # Slack Socket Mode ingress and egress. Off unless the daemon is built with this feature.
 hub-slack = ["dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util"]
 # Discord gateway adapter. Off unless the daemon is built with this feature.
-hub-discord = ["dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util"]
+hub-discord = ["dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util", "dep:songbird"]
 # Speech client. Idle until a speech key is configured. The huddle sidecar is bun.
 hub-voice = ["dep:reqwest"]
 
@@ -36,6 +36,9 @@ uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "json", "multipart"] }
 tokio-tungstenite = { version = "0.26", optional = true, features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", optional = true }
+songbird = { version = "0.5.0", optional = true, default-features = false, features = ["driver", "gateway", "rustls", "receive", "tungstenite"] }
+usvg = "0.48.1"
+resvg = "0.48.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }

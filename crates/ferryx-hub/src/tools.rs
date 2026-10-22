@@ -1,5 +1,5 @@
 //! Gateway tools the agent and the action loop call.
-//! Browser stays a sidecar: this process does not pretend to drive one.
+//! Browser drives Camofox through the Chrome CDP port, the same client omo uses.
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -35,13 +35,11 @@ pub async fn dispatch(
         "file" => file_op(args, approved).await,
         "web" => web_get(args).await,
         "memory" => memory_op(pool, args).await,
-        "message_context" => Ok(json!({"messages": crate::context::walk_pages(args)})),
+        "message_context" => message_context(args).await,
         "cron" => cron_list(pool).await,
         "skills" => Ok(json!({"skills": list_skills(skills_root(args))})),
         "mcp" => mcp_list(pool).await,
-        "browser" => Err(HubError::message(
-            "browser sidecar is not attached; set FERRYX_HUB_BROWSER_URL to drive one",
-        )),
+        "browser" => crate::browser::execute(args).await,
         other => Err(HubError::message(format!("unknown gateway tool: {other}"))),
     }
 }
@@ -167,6 +165,36 @@ async fn cron_list(pool: &SqlitePool) -> Result<Value> {
     )
 }
 
+async fn message_context(args: &Value) -> Result<Value> {
+    if args.get("pages").is_some() {
+        return Ok(json!({"messages": crate::context::walk_pages(args)}));
+    }
+    let channel = args.get("channel").and_then(Value::as_str);
+    let ts = args
+        .get("ts")
+        .or_else(|| args.get("thread_ts"))
+        .and_then(Value::as_str);
+    if let (Some(channel), Some(ts)) = (channel, ts) {
+        let token = args
+            .get("token")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| crate::config::secret_from_env("SLACK_BOT_TOKEN"));
+        let Some(token) = token.filter(|token| !token.is_empty()) else {
+            return Err(HubError::message(
+                "message_context needs SLACK_BOT_TOKEN to call conversations.replies",
+            ));
+        };
+        let base = args
+            .get("base")
+            .and_then(Value::as_str)
+            .unwrap_or("https://slack.com/api");
+        let messages = crate::context::conversations_replies(base, &token, channel, ts).await?;
+        return Ok(json!({"messages": messages}));
+    }
+    Ok(json!({"messages": crate::context::walk_pages(args)}))
+}
+
 async fn mcp_list(pool: &SqlitePool) -> Result<Value> {
     let _ = pool;
     let listed = crate::mcp::tool_list();
@@ -177,7 +205,7 @@ async fn mcp_list(pool: &SqlitePool) -> Result<Value> {
     Ok(json!({"tools": tools}))
 }
 
-fn skills_root(args: &Value) -> Option<std::path::PathBuf> {
+pub(crate) fn skills_root(args: &Value) -> Option<std::path::PathBuf> {
     args.get("root")
         .and_then(Value::as_str)
         .map(std::path::PathBuf::from)
@@ -185,9 +213,16 @@ fn skills_root(args: &Value) -> Option<std::path::PathBuf> {
             std::env::var_os("HERMES_HOME")
                 .map(|root| std::path::PathBuf::from(root).join("skills"))
         })
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| {
+                std::path::PathBuf::from(home)
+                    .join(".hermes")
+                    .join("skills")
+            })
+        })
 }
 
-fn list_skills(root: Option<std::path::PathBuf>) -> Vec<String> {
+pub(crate) fn list_skills(root: Option<std::path::PathBuf>) -> Vec<String> {
     let Some(root) = root else {
         return Vec::new();
     };

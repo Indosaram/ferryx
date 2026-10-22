@@ -22,7 +22,7 @@ A dry-run against the live file should report:
 
 | row | count |
 | --- | --- |
-| cron_jobs_enabled | 14 |
+| cron_jobs_enabled | 16 |
 | lanes | 28 |
 | lane_threads | 4 |
 | issues | 83 |

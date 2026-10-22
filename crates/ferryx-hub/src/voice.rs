@@ -105,6 +105,34 @@ impl VoiceSettings {
     pub fn max_speech(&self) -> Duration {
         self.max_speech
     }
+
+    /// Why `/voice join` cannot start, when [`Self::ready`] is false.
+    pub fn unavailable_reason(&self) -> Option<&'static str> {
+        if self.ready() {
+            return None;
+        }
+        if !self.enabled {
+            return Some("Discord voice is disabled (OMON_VOICE_ENABLED=false).");
+        }
+        if self.stt.is_none() || self.tts.is_none() {
+            return Some(
+                "Discord voice needs an API key. Set OPENAI_API_KEY, or OMON_STT_API_KEY and OMON_TTS_API_KEY.",
+            );
+        }
+        None
+    }
+}
+
+/// Prefixes a transcript so the agent session can tell speech from typed text.
+pub fn format_voice_transcript(speaker: Option<&str>, transcript: &str) -> String {
+    let transcript = transcript.trim();
+    if transcript.is_empty() {
+        return String::new();
+    }
+    match speaker.map(str::trim).filter(|speaker| !speaker.is_empty()) {
+        Some(speaker) => format!("[voice] {speaker}: {transcript}"),
+        None => format!("[voice] {transcript}"),
+    }
 }
 
 pub fn stt_url(endpoint: &SpeechEndpoint) -> String {
@@ -446,6 +474,23 @@ mod tests {
         assert_eq!(&wav[..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
         assert_eq!(i16::from_le_bytes([wav[44], wav[45]]), 1);
+        assert_eq!(
+            format_voice_transcript(Some("<@7>"), " hello "),
+            "[voice] <@7>: hello"
+        );
+        assert!(format_voice_transcript(None, "  ").is_empty());
+        assert_eq!(
+            off.unavailable_reason(),
+            Some("Discord voice is disabled (OMON_VOICE_ENABLED=false).")
+        );
+        let missing =
+            VoiceSettings::from_lookup(&|name| (name == "OMON_VOICE_ENABLED").then(|| "on".into()));
+        assert_eq!(
+            missing.unavailable_reason(),
+            Some(
+                "Discord voice needs an API key. Set OPENAI_API_KEY, or OMON_STT_API_KEY and OMON_TTS_API_KEY."
+            )
+        );
     }
 
     #[cfg(feature = "hub-voice")]

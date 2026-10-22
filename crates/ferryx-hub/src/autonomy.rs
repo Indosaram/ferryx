@@ -7,7 +7,7 @@
 //! `verified` is written only after the calendar command prints the item key back.
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use chrono_tz::Asia::Seoul;
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -104,8 +104,27 @@ impl ActionLoop {
     /// Unseen inbox rows become one lane event and `enqueued` outcomes.
     /// A full daily cap leaves them unseen so the next flush can still emit them.
     pub async fn flush(&self, now: DateTime<Utc>) -> Result<Option<i64>> {
+        let _ = crate::owner_alert::sweep(&self.pool, &self.lead_session_key, now).await?;
         let mut items = unseen_inbox(&self.pool).await?;
         items.extend(requeue_stale(&self.pool, now).await?);
+        let foreign = foreign_lead_items(&self.pool, &self.lead_session_key).await?;
+        let stamp = now.to_rfc3339();
+        let mut owned = Vec::new();
+        for item in items {
+            if foreign.iter().any(|key| key == &item.item_key) {
+                sqlx::query(
+                    "INSERT INTO action_loop_seen(item_key, seen_at) VALUES(?,?)
+                     ON CONFLICT(item_key) DO NOTHING",
+                )
+                .bind(&item.item_key)
+                .bind(&stamp)
+                .execute(&self.pool)
+                .await?;
+                continue;
+            }
+            owned.push(item);
+        }
+        let items = owned;
         if items.is_empty() {
             return Ok(None);
         }
@@ -131,8 +150,15 @@ impl ActionLoop {
         if items.len() > MAX_LISTED_ITEMS {
             body.push_str(&format!("\n… {} more", items.len() - MAX_LISTED_ITEMS));
         }
-        let event_id =
-            insert_event(&self.pool, &self.lead_session_key, "action_loop", &body).await?;
+        let release_at = in_quiet_hours_kst(now).then(|| next_0800_kst(now).to_rfc3339());
+        let event_id = insert_event(
+            &self.pool,
+            &self.lead_session_key,
+            "action_loop",
+            &body,
+            release_at.as_deref(),
+        )
+        .await?;
         let stamp = now.to_rfc3339();
         for item in &items {
             sqlx::query(
@@ -231,8 +257,14 @@ impl ActionLoop {
             };
             let stamp = now_rfc3339();
             let body = format!("{status} {key}: {detail}");
-            let event_id =
-                insert_event(&self.pool, &self.lead_session_key, "action_report", &body).await?;
+            let event_id = insert_event(
+                &self.pool,
+                &self.lead_session_key,
+                "action_report",
+                &body,
+                None,
+            )
+            .await?;
             sqlx::query(
                 "INSERT INTO action_loop_outcomes(item_key, lane_event_id, kind, source, line, status, detail, attempts, enqueued_at, updated_at)
                  VALUES(?,?, 'proposal', 'ledger', ?, ?, ?, 1, ?, ?)
@@ -331,24 +363,70 @@ fn kst_day_start(now: DateTime<Utc>) -> DateTime<Utc> {
         .unwrap_or(now)
 }
 
+fn in_quiet_hours_kst(now: DateTime<Utc>) -> bool {
+    now.with_timezone(&Seoul).hour() < 8
+}
+
+fn next_0800_kst(now: DateTime<Utc>) -> DateTime<Utc> {
+    let kst = now.with_timezone(&Seoul);
+    let eight = chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap_or_default();
+    let date = if kst.hour() < 8 {
+        kst.date_naive()
+    } else {
+        kst.date_naive() + chrono::Duration::days(1)
+    };
+    date.and_time(eight)
+        .and_local_timezone(Seoul)
+        .single()
+        .map(|at| at.with_timezone(&Utc))
+        .unwrap_or(now)
+}
+
+async fn foreign_lead_items(pool: &SqlitePool, lead: &str) -> Result<Vec<String>> {
+    let rows = sqlx::query_scalar(
+        "SELECT o.item_key FROM action_loop_outcomes o
+         JOIN lane_events e ON e.id = o.lane_event_id
+         WHERE e.lead_session_key <> ?",
+    )
+    .bind(lead)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+#[derive(sqlx::FromRow)]
+struct UnseenInbox {
+    id: String,
+    source: String,
+    line: String,
+    link: Option<String>,
+    class: Option<String>,
+}
+
 async fn unseen_inbox(pool: &SqlitePool) -> Result<Vec<LoopItem>> {
-    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT id, source, COALESCE(NULLIF(title, ''), snippet), link FROM inbox_items i
+    let rows: Vec<UnseenInbox> = sqlx::query_as(
+        "SELECT i.id AS id, i.source AS source, COALESCE(NULLIF(i.title, ''), i.snippet) AS line, i.link AS link, d.class AS class
+         FROM inbox_items i
+         LEFT JOIN inbox_decisions d ON d.item_id = i.id
          WHERE NOT EXISTS (
              SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'inbox:' || i.id
          )
-         ORDER BY received_at",
+         ORDER BY i.received_at",
     )
     .fetch_all(pool)
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, source, line, link)| LoopItem {
-            item_key: format!("inbox:{id}"),
-            kind: "inbox".into(),
-            source,
-            line,
-            link,
+        .map(|row| LoopItem {
+            item_key: format!("inbox:{}", row.id),
+            kind: if row.class.as_deref() == Some("owner") {
+                "inbox_owner".into()
+            } else {
+                "inbox".into()
+            },
+            source: row.source,
+            line: row.line,
+            link: row.link,
             attempts: 1,
         })
         .collect())
@@ -377,14 +455,21 @@ async fn requeue_stale(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<Loop
         .collect())
 }
 
-async fn insert_event(pool: &SqlitePool, lead: &str, kind: &str, body: &str) -> Result<i64> {
+async fn insert_event(
+    pool: &SqlitePool,
+    lead: &str,
+    kind: &str,
+    body: &str,
+    release_at: Option<&str>,
+) -> Result<i64> {
     let id = sqlx::query(
-        "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES(NULL,?,?,?,?)",
+        "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at, release_at) VALUES(NULL,?,?,?,?,?)",
     )
     .bind(lead)
     .bind(kind)
     .bind(body)
     .bind(now_rfc3339())
+    .bind(release_at)
     .execute(pool)
     .await?
     .last_insert_rowid();
@@ -436,6 +521,22 @@ pub async fn record_outcome(
         return Err(HubError::message(format!(
             "{item_key} is already verified and cannot be overwritten with {status}"
         )));
+    }
+    if status == "executed" && external_id.is_none() {
+        if let Some(item_id) = item_key.strip_prefix("inbox:") {
+            let kind: Option<String> =
+                sqlx::query_scalar("SELECT kind FROM action_loop_outcomes WHERE item_key = ?")
+                    .bind(item_key)
+                    .fetch_optional(pool)
+                    .await?;
+            if kind.as_deref() == Some("inbox_owner")
+                && !crate::owner_alert::delivered(pool, item_id).await?
+            {
+                return Err(HubError::message(format!(
+                    "`{item_key}` needs the owner and the gateway has no delivered owner alert for it yet, so `executed` would claim he was told when he was not"
+                )));
+            }
+        }
     }
     let proof = if status == "verified" {
         let id = external_id.ok_or_else(|| HubError::message("verified needs an external id"))?;
@@ -606,6 +707,106 @@ mod tests {
         .unwrap();
         assert_eq!(status, "verified");
         let _ = std::fs::remove_file(script);
+    }
+
+    #[test]
+    fn quiet_hours_are_before_0800_kst() {
+        let quiet = DateTime::parse_from_rfc3339("2026-10-21T22:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(in_quiet_hours_kst(quiet));
+        assert_eq!(
+            next_0800_kst(quiet),
+            DateTime::parse_from_rfc3339("2026-10-21T23:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        let day = DateTime::parse_from_rfc3339("2026-10-22T03:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(!in_quiet_hours_kst(day));
+    }
+
+    #[tokio::test]
+    async fn a_foreign_lead_keeps_the_item_and_quiet_hours_hold_delivery() {
+        let pool = crate::storage::memory().await.unwrap();
+        let quiet = DateTime::parse_from_rfc3339("2026-10-21T22:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        sqlx::query(
+            "INSERT INTO inbox_items(id, source, source_ref, snippet, title, received_at, raw_hash, collected_at) VALUES('i1','mail','m1','ping','Ping',?,'h',?)",
+        )
+        .bind(quiet.to_rfc3339())
+        .bind(quiet.to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES('i1','owner','needs you','open',?)",
+        )
+        .bind(quiet.to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let first = ActionLoop::new(pool.clone(), "lead-a").with_cap(24);
+        assert!(first.flush(quiet).await.unwrap().is_some());
+        let kind: String =
+            sqlx::query_scalar("SELECT kind FROM action_loop_outcomes WHERE item_key = 'inbox:i1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(kind, "inbox_owner");
+        let release: String =
+            sqlx::query_scalar("SELECT release_at FROM lane_events WHERE kind = 'action_loop'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(release, next_0800_kst(quiet).to_rfc3339());
+        sqlx::query("DELETE FROM action_loop_seen")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let second = ActionLoop::new(pool.clone(), "lead-b").with_cap(24);
+        assert!(second.flush(quiet).await.unwrap().is_none());
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM lane_events WHERE kind = 'action_loop'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(events, 1);
+        sqlx::query("DELETE FROM delivery_obligations")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let refused = record_outcome(
+            &pool,
+            "inbox:i1",
+            "executed",
+            None,
+            Some("surfaced"),
+            &Readback::from_env(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(refused.contains("no delivered owner alert"));
+        sqlx::query(
+            "INSERT INTO delivery_obligations(id, state, body, updated_at) VALUES('obl:owner-alert:i1','delivered','told',?)",
+        )
+        .bind(quiet.to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+        record_outcome(
+            &pool,
+            "inbox:i1",
+            "executed",
+            None,
+            Some("surfaced"),
+            &Readback::from_env(),
+        )
+        .await
+        .unwrap();
     }
 
     impl ActionLoop {

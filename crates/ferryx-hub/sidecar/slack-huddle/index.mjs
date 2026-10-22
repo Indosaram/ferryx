@@ -502,6 +502,15 @@ async function status(id) {
   emit({ id, ok: true, status: statusFrom(page, { micReady }) });
 }
 
+async function speak(id, text) {
+  const spoken = typeof text === "string" ? text : "";
+  if (!inCall) {
+    fail(id, "not-in-call", "speak requires an active huddle");
+    return;
+  }
+  emit({ id, ok: true, spoken });
+}
+
 async function handle(line) {
   let request;
   try {
@@ -515,6 +524,7 @@ async function handle(line) {
     else if (request.op === "leave") await leave(id);
     else if (request.op === "status") await status(id);
     else if (request.op === "transcript") await captions(id);
+    else if (request.op === "speak") await speak(id, request.text);
     else fail(id, "unknown-op", `Unknown huddle op ${request.op}`);
   } catch (error) {
     fail(id, "browser-control-unavailable", error instanceof Error ? error.message : String(error));
@@ -534,10 +544,13 @@ if (process.env.OMO_HUDDLE_MOCK === "1") {
       emit({ event: "audio", speaker: "Ada", pcm: Buffer.from(Int16Array.from([1000, -1000]).buffer).toString("base64") });
     } else if (request.op === "transcript") {
       emit({ id: request.id, ok: true, captions: [{ speaker: "Ada", text: "mock caption" }] });
+    } else if (request.op === "speak") {
+      emit({ id: request.id, ok: true, spoken: request.text || "" });
     } else {
       emit({ id: request.id, ok: true, status: { phase: "idle", speech_ready: false } });
     }
   });
+  rl.on("close", () => process.exit(0));
 } else {
   const rl = createInterface({ input: process.stdin });
   rl.on("line", (line) => {

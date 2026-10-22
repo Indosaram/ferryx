@@ -421,8 +421,35 @@ async fn apply_interactive(
             Err(error)
         }
         Ok(None) => {
-            log_interactive(&user, "ignored", "", "");
-            Ok(SlackFrame::Ignore)
+            if crate::chat::buttons::payload_has_button(&payload) {
+                match crate::chat::buttons::run_button_clicks(
+                    &payload,
+                    owner_id,
+                    &crate::chat::buttons::button_actions_path(),
+                )
+                .await
+                {
+                    Ok(lines) => {
+                        let text = if lines.is_empty() {
+                            "완료했습니다.".to_owned()
+                        } else {
+                            lines.join("\n")
+                        };
+                        let _ = post_ephemeral(&target, &user, &text).await;
+                        log_interactive(&user, "button", "", "");
+                        Ok(SlackFrame::Ignore)
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        let _ = post_ephemeral(&target, &user, &message).await;
+                        log_interactive(&user, "button_failed", "", &message);
+                        Ok(SlackFrame::Ignore)
+                    }
+                }
+            } else {
+                log_interactive(&user, "ignored", "", "");
+                Ok(SlackFrame::Ignore)
+            }
         }
         Ok(Some(op)) => {
             let target = click_target(&payload, Some(&op));
@@ -597,6 +624,11 @@ async fn post_message(
     if bot_token().is_none() {
         return Ok(false);
     }
+    let (text, tables) = if blocks.is_none() {
+        crate::table_image::transform_markdown_tables(text)
+    } else {
+        (text.to_owned(), Vec::new())
+    };
     let mut body = json!({ "channel": session.channel_id, "text": text });
     if let Some(blocks) = blocks {
         body["blocks"] = blocks;
@@ -610,11 +642,41 @@ async fn post_message(
             &session.channel_id,
             session.thread_id.as_deref(),
             session.thread_id.as_deref(),
-            text,
+            &text,
         )
         .await;
+        upload_tables(session, &tables).await?;
     }
     Ok(posted)
+}
+
+#[cfg(feature = "hub-slack")]
+async fn upload_tables(
+    session: &super::session::SessionKey,
+    tables: &[crate::table_image::RenderedTable],
+) -> Result<()> {
+    for (index, table) in tables.iter().enumerate() {
+        if let Err(error) = upload_external(
+            &session.channel_id,
+            session.thread_id.as_deref(),
+            &table.filename,
+            table.image_bytes.clone(),
+            &table.filename,
+        )
+        .await
+        {
+            let fallback = crate::table_image::fallback_text(&tables[index..]);
+            if !fallback.is_empty() {
+                let mut body = json!({ "channel": session.channel_id, "text": fallback });
+                if let Some(thread) = &session.thread_id {
+                    body["thread_ts"] = json!(thread);
+                }
+                let _ = slack_method("chat.postMessage", body).await;
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 /// Slack external upload: getUploadURLExternal, POST the bytes, completeUploadExternal.

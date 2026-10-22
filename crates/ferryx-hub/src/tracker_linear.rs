@@ -1423,12 +1423,7 @@ async fn session_op(
     text: &str,
 ) -> (StatusCode, Json<Value>) {
     let message = format!("{op} {machine}:{session_id} {text}");
-    if let Err(error) = sqlx::query("INSERT INTO hub_log(at, level, message) VALUES(?, 'info', ?)")
-        .bind(now_rfc3339())
-        .bind(&message)
-        .execute(pool)
-        .await
-    {
+    if let Err(error) = crate::http::record_log(pool, "info", &message).await {
         return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
     (

@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod buttons;
 pub mod commands;
 pub mod debounce;
 pub mod discord;

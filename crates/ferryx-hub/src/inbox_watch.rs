@@ -781,16 +781,18 @@ pub async fn spawn(pool: SqlitePool) -> Result<()> {
     let imsg_events = events.clone();
     let imsg_shutdown = shutdown_rx.clone();
     let imsg = tokio::spawn(async move {
-        supervise_command(imsg_shutdown, move || {
+        let health_pool = imsg_pool.clone();
+        supervise_command("imessage", &health_pool, imsg_shutdown, move || {
             let pool = imsg_pool.clone();
             let events = imsg_events.clone();
             async move { run_imsg_once(&pool, &events).await }
         })
         .await;
     });
+    let mail_pool = pool.clone();
     let mail_events = events;
     let mail = tokio::spawn(async move {
-        supervise_command(shutdown_rx, move || {
+        supervise_command("mail", &mail_pool, shutdown_rx, move || {
             let events = mail_events.clone();
             async move { run_mail_once(&events).await }
         })
@@ -802,6 +804,8 @@ pub async fn spawn(pool: SqlitePool) -> Result<()> {
 }
 
 async fn supervise_command<F, Fut>(
+    source: &str,
+    pool: &SqlitePool,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     mut run_once: F,
 ) where
@@ -836,6 +840,26 @@ async fn supervise_command<F, Fut>(
             }
         };
         let wait = backoff.step(run, started.elapsed());
+        let status = match run {
+            WatcherRun::Completed => "ok",
+            WatcherRun::AuthFailed => "auth_failed",
+            WatcherRun::Failed => "failed",
+        };
+        let detail = if tail.is_empty() {
+            None
+        } else {
+            Some(tail.as_str())
+        };
+        let _ = sqlx::query(
+            "INSERT INTO inbox_watcher_health(source, status, detail, updated_at) VALUES(?,?,?,?)
+             ON CONFLICT(source) DO UPDATE SET status = excluded.status, detail = excluded.detail, updated_at = excluded.updated_at",
+        )
+        .bind(source)
+        .bind(status)
+        .bind(detail)
+        .bind(crate::storage::now_rfc3339())
+        .execute(pool)
+        .await;
         if !tail.is_empty() {
             tracing::warn!(%tail, "inbox watcher exited");
         }

@@ -15,6 +15,7 @@ pub struct HeadlessEngine<T> {
     workspace: Workspace,
     system_prompt: Option<String>,
     model: Option<String>,
+    toolsets: Vec<String>,
 }
 
 impl<T: OmoTransport> HeadlessEngine<T> {
@@ -24,11 +25,22 @@ impl<T: OmoTransport> HeadlessEngine<T> {
             workspace,
             system_prompt: None,
             model: None,
+            toolsets: Vec::new(),
         }
     }
 
     pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn with_toolsets(mut self, toolsets: Vec<String>) -> Self {
+        self.toolsets = toolsets;
         self
     }
 
@@ -41,7 +53,7 @@ impl<T: OmoTransport> HeadlessEngine<T> {
                 self.system_prompt.as_deref(),
                 self.model.as_deref(),
                 Some(&self.workspace),
-                None,
+                (!self.toolsets.is_empty()).then_some(self.toolsets.as_slice()),
             ),
             protocol::turn_start_request("pending", prompt, self.model.as_deref()),
         ];
@@ -106,23 +118,38 @@ impl UrlModel {
 #[async_trait]
 impl crate::lanes::kibitzer::ModelTurn for UrlModel {
     async fn complete(&self, prompt: &str) -> Result<String> {
+        self.complete_with(prompt, None, &[]).await
+    }
+
+    async fn complete_with(
+        &self,
+        prompt: &str,
+        model: Option<&str>,
+        toolsets: &[String],
+    ) -> Result<String> {
         if self.url.trim().is_empty() {
             return Err(HubError::message("omo model backend URL is not configured"));
         }
         #[cfg(feature = "hub-slack")]
         {
-            let engine = HeadlessEngine::new(
+            let mut engine = HeadlessEngine::new(
                 WebsocketTransport {
                     url: self.url.clone(),
                 },
                 self.workspace.clone(),
             )
             .with_prompt(prompt);
-            return engine.turn(prompt).await;
+            if let Some(model) = model {
+                engine = engine.with_model(model);
+            }
+            if !toolsets.is_empty() {
+                engine = engine.with_toolsets(toolsets.to_vec());
+            }
+            engine.turn(prompt).await
         }
         #[cfg(not(feature = "hub-slack"))]
         {
-            let _ = prompt;
+            let _ = (prompt, model, toolsets);
             Err(HubError::message(
                 "omo websocket transport is compiled with hub-slack",
             ))

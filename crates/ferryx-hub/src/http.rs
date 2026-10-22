@@ -308,7 +308,28 @@ async fn tools() -> Json<Value> {
 }
 
 async fn skills() -> Json<Value> {
-    Json(json!({"skills": []}))
+    let names = crate::tools::list_skills(crate::tools::skills_root(&json!({})));
+    Json(json!({"skills": names}))
+}
+
+fn log_bus() -> &'static tokio::sync::broadcast::Sender<String> {
+    static BUS: std::sync::OnceLock<tokio::sync::broadcast::Sender<String>> =
+        std::sync::OnceLock::new();
+    BUS.get_or_init(|| tokio::sync::broadcast::channel(256).0)
+}
+
+pub async fn record_log(pool: &SqlitePool, level: &str, message: &str) -> Result<(), sqlx::Error> {
+    let at = now_rfc3339();
+    let id = sqlx::query("INSERT INTO hub_log(at, level, message) VALUES(?,?,?)")
+        .bind(&at)
+        .bind(level)
+        .bind(message)
+        .execute(pool)
+        .await?
+        .last_insert_rowid();
+    let entry = json!({"id": id, "at": at, "level": level, "message": message}).to_string();
+    let _ = log_bus().send(entry);
+    Ok(())
 }
 
 async fn config() -> Json<Value> {
@@ -329,12 +350,72 @@ async fn logs(State(state): State<HttpState>) -> Response {
     .into_response()
 }
 
-async fn logs_ws(ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(|mut socket| async move {
-        let _ = socket
-            .send(Message::Text(r#"{"kind":"ready"}"#.into()))
-            .await;
-    })
+async fn logs_ws(ws: WebSocketUpgrade, State(state): State<HttpState>) -> Response {
+    ws.on_upgrade(move |socket| handle_logs_socket(socket, state.pool))
+}
+
+async fn handle_logs_socket(mut socket: axum::extract::ws::WebSocket, pool: SqlitePool) {
+    let mut receiver = log_bus().subscribe();
+    if socket
+        .send(Message::Text(r#"{"kind":"ready"}"#.into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let rows: Vec<(i64, String, String, String)> =
+        sqlx::query_as("SELECT id, at, level, message FROM hub_log ORDER BY id DESC LIMIT 100")
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+    let mut last_sent = 0_i64;
+    for (id, at, level, message) in rows.into_iter().rev() {
+        last_sent = id;
+        let text =
+            json!({"type":"log","entry":{"id": id, "at": at, "level": level, "message": message}})
+                .to_string();
+        if socket.send(Message::Text(text.into())).await.is_err() {
+            return;
+        }
+    }
+    loop {
+        tokio::select! {
+            entry = receiver.recv() => {
+                match entry {
+                    Ok(entry) => {
+                        let parsed: Value = serde_json::from_str(&entry).unwrap_or(Value::String(entry));
+                        let id = parsed.get("id").and_then(Value::as_i64).unwrap_or(0);
+                        if id <= last_sent {
+                            continue;
+                        }
+                        last_sent = id;
+                        let text = json!({"type":"log","entry": parsed}).to_string();
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        let text = json!({"type":"warning","message": format!("skipped {skipped} log entries")}).to_string();
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 async fn static_or_missing(
