@@ -10,6 +10,133 @@ use crate::error::HubError;
 use crate::error::Result;
 
 pub const PLATFORM: &str = "discord";
+pub const INTENT_GUILDS: u64 = 1;
+pub const INTENT_GUILD_VOICE_STATES: u64 = 1 << 7;
+pub const INTENT_GUILD_MESSAGES: u64 = 1 << 9;
+pub const INTENT_DIRECT_MESSAGES: u64 = 1 << 12;
+pub const INTENT_MESSAGE_CONTENT: u64 = 1 << 15;
+pub const PAIRING_TTL_SECONDS: i64 = 3600;
+pub const PAIRING_RATE_LIMIT_SECONDS: i64 = 600;
+
+/// `GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT`, plus voice when asked.
+pub fn gateway_intents(voice_receive: bool) -> u64 {
+    let base =
+        INTENT_GUILDS | INTENT_GUILD_MESSAGES | INTENT_DIRECT_MESSAGES | INTENT_MESSAGE_CONTENT;
+    if voice_receive {
+        base | INTENT_GUILD_VOICE_STATES
+    } else {
+        base
+    }
+}
+
+pub fn voice_receive_from_env() -> bool {
+    matches!(
+        std::env::var("DISCORD_VOICE_RECEIVE")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+pub fn heartbeat_millis(frame: &serde_json::Value) -> Option<u64> {
+    if frame.get("op").and_then(serde_json::Value::as_i64) != Some(10) {
+        return None;
+    }
+    frame
+        .pointer("/d/heartbeat_interval")
+        .and_then(serde_json::Value::as_u64)
+}
+
+pub fn heartbeat_frame(seq: Option<i64>) -> serde_json::Value {
+    serde_json::json!({"op": 1, "d": seq})
+}
+
+pub fn identify_body(token: &str, intents: u64) -> serde_json::Value {
+    serde_json::json!({
+        "op": 2,
+        "d": {
+            "token": token,
+            "intents": intents,
+            "properties": {"os": "linux", "browser": "ferryx-hub", "device": "ferryx-hub"}
+        }
+    })
+}
+
+/// 2s, doubling, capped at 60s. Attempt 0 waits 2s.
+pub fn reconnect_backoff(attempt: u32) -> std::time::Duration {
+    let shift = attempt.min(5);
+    std::time::Duration::from_secs((2u64 << shift).min(60))
+}
+
+/// Discord's channel message limit: 5 posts per 5 seconds.
+pub struct ChannelRate {
+    limit: usize,
+    window: std::time::Duration,
+    hits: std::collections::HashMap<String, std::collections::VecDeque<std::time::Instant>>,
+}
+
+impl ChannelRate {
+    pub fn discord_messages() -> Self {
+        Self {
+            limit: 5,
+            window: std::time::Duration::from_secs(5),
+            hits: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn reserve(&mut self, key: &str, now: std::time::Instant) -> std::time::Duration {
+        let hits = self.hits.entry(key.to_owned()).or_default();
+        let mut at = now;
+        loop {
+            let in_window = hits
+                .iter()
+                .filter(|hit| **hit <= at && at.saturating_duration_since(**hit) < self.window)
+                .count();
+            if in_window < self.limit {
+                hits.push_back(at);
+                return at.saturating_duration_since(now);
+            }
+            let oldest = hits
+                .iter()
+                .copied()
+                .filter(|hit| *hit <= at)
+                .min()
+                .unwrap_or(at);
+            let next = oldest + self.window;
+            at = if next > at { next } else { at + self.window };
+        }
+    }
+}
+
+pub fn should_auto_create_thread(
+    auto_thread_enabled: bool,
+    is_guild_text: bool,
+    is_explicit_mention: bool,
+    is_free_channel: bool,
+    is_reply: bool,
+) -> bool {
+    auto_thread_enabled && is_guild_text && is_explicit_mention && !is_free_channel && !is_reply
+}
+
+pub fn derive_auto_thread_name(content: &str, bot_user_id: &str) -> String {
+    let mention = format!("<@{bot_user_id}>");
+    let stripped = content.replace(&mention, " ");
+    let collapsed = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        "Conversation".to_owned()
+    } else if trimmed.chars().count() > 80 {
+        let capped: String = trimmed.chars().take(77).collect();
+        format!("{capped}...")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+pub fn thread_start_body(name: &str) -> serde_json::Value {
+    serde_json::json!({"name": name, "auto_archive_duration": 1440})
+}
 
 pub fn bot_token() -> Option<String> {
     secret_from_env("DISCORD_BOT_TOKEN").or_else(|| secret_from_env("DISCORD_TOKEN"))
@@ -47,15 +174,37 @@ pub async fn issue_pairing(
     user_id: &str,
     code: &str,
 ) -> crate::error::Result<()> {
-    let now = crate::storage::now_rfc3339();
+    let now = chrono::Utc::now();
+    let existing: Option<(String, String)> = sqlx::query_as(
+        "SELECT expires_at, created_at FROM pairing_codes
+         WHERE platform = ? AND user_id = ? AND consumed_at IS NULL
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(platform)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some((expires_at, created_at)) = existing {
+        let expires = chrono::DateTime::parse_from_rfc3339(&expires_at).ok();
+        let created = chrono::DateTime::parse_from_rfc3339(&created_at).ok();
+        let still_valid = expires.is_some_and(|at| at > now);
+        let recent = created.is_some_and(|at| {
+            now.signed_duration_since(at.with_timezone(&chrono::Utc))
+                < chrono::TimeDelta::seconds(PAIRING_RATE_LIMIT_SECONDS)
+        });
+        if still_valid && recent {
+            return Ok(());
+        }
+    }
+    let expires = (now + chrono::TimeDelta::seconds(PAIRING_TTL_SECONDS)).to_rfc3339();
     sqlx::query(
         "INSERT OR REPLACE INTO pairing_codes(code, platform, user_id, created_at, expires_at) VALUES(?,?,?,?,?)",
     )
     .bind(code)
     .bind(platform)
     .bind(user_id)
-    .bind(&now)
-    .bind(&now)
+    .bind(now.to_rfc3339())
+    .bind(expires)
     .execute(pool)
     .await?;
     Ok(())
@@ -65,12 +214,16 @@ pub async fn consume_pairing(
     pool: &sqlx::SqlitePool,
     code: &str,
 ) -> crate::error::Result<Option<String>> {
-    let user: Option<String> = sqlx::query_scalar(
-        "SELECT user_id FROM pairing_codes WHERE code = ? AND consumed_at IS NULL",
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT user_id, expires_at FROM pairing_codes WHERE code = ? AND consumed_at IS NULL",
     )
     .bind(code)
     .fetch_optional(pool)
     .await?;
+    let user = row.and_then(|(user, expires_at)| {
+        let expires = chrono::DateTime::parse_from_rfc3339(&expires_at).ok()?;
+        (expires > chrono::Utc::now()).then_some(user)
+    });
     if user.is_some() {
         sqlx::query("UPDATE pairing_codes SET consumed_at = ? WHERE code = ?")
             .bind(crate::storage::now_rfc3339())
@@ -187,6 +340,13 @@ pub async fn post_if_configured(session: &super::session::SessionKey, text: &str
     let Some(token) = bot_token() else {
         return Ok(false);
     };
+    let delay = message_rate()
+        .lock()
+        .await
+        .reserve(&session.channel_id, std::time::Instant::now());
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -229,12 +389,35 @@ pub async fn publish(session: &super::session::SessionKey, text: &str) -> Result
 }
 
 #[cfg(feature = "hub-discord")]
+fn message_rate() -> &'static tokio::sync::Mutex<ChannelRate> {
+    static RATE: std::sync::OnceLock<tokio::sync::Mutex<ChannelRate>> = std::sync::OnceLock::new();
+    RATE.get_or_init(|| tokio::sync::Mutex::new(ChannelRate::discord_messages()))
+}
+
+#[cfg(feature = "hub-discord")]
 pub async fn connect_gateway<F, Fut>(mut on_frame: F) -> Result<()>
 where
     F: FnMut(Value) -> Fut + Send,
     Fut: std::future::Future<Output = ()> + Send,
 {
     let token = bot_token().ok_or_else(|| HubError::config("DISCORD_TOKEN is not set"))?;
+    let mut attempt = 0u32;
+    loop {
+        match run_gateway_session(&token, &mut on_frame).await {
+            Ok(()) => attempt = 0,
+            Err(error) => tracing::warn!(%error, attempt, "discord gateway session ended"),
+        }
+        tokio::time::sleep(reconnect_backoff(attempt)).await;
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+#[cfg(feature = "hub-discord")]
+async fn run_gateway_session<F, Fut>(token: &str, on_frame: &mut F) -> Result<()>
+where
+    F: FnMut(Value) -> Fut + Send,
+    Fut: std::future::Future<Output = ()> + Send,
+{
     let client = reqwest::Client::new();
     let gateway: Value = client
         .get("https://discord.com/api/v10/gateway/bot")
@@ -249,29 +432,73 @@ where
         .get("url")
         .and_then(Value::as_str)
         .ok_or_else(|| HubError::message("discord gateway url missing"))?;
-    let (mut socket, _) = tokio_tungstenite::connect_async(format!("{url}/?v=10&encoding=json"))
+    let (socket, _) = tokio_tungstenite::connect_async(format!("{url}/?v=10&encoding=json"))
         .await
         .map_err(|error| HubError::message(error.to_string()))?;
     use futures_util::{SinkExt, StreamExt};
-    let identify = serde_json::json!({
-        "op": 2,
-        "d": {"token": token, "intents": 33280, "properties": {"os": "linux", "browser": "ferryx-hub", "device": "ferryx-hub"}}
-    });
-    socket
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            identify.to_string().into(),
-        ))
-        .await
-        .map_err(|error| HubError::message(error.to_string()))?;
-    while let Some(message) = socket.next().await {
-        let message = message.map_err(|error| HubError::message(error.to_string()))?;
-        if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
-            if let Ok(frame) = serde_json::from_str::<Value>(&text) {
-                on_frame(frame).await;
+    let (mut write, mut read) = socket.split();
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(8);
+    let writer = tokio::spawn(async move {
+        while let Some(text) = out_rx.recv().await {
+            if write
+                .send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
+                .await
+                .is_err()
+            {
+                break;
             }
         }
+    });
+    let seq = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(-1));
+    let mut heartbeat: Option<tokio::task::JoinHandle<()>> = None;
+    let mut identified = false;
+    while let Some(message) = read.next().await {
+        let message = message.map_err(|error| HubError::message(error.to_string()))?;
+        let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+            continue;
+        };
+        let Ok(frame) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let op = frame.get("op").and_then(Value::as_i64);
+        if op == Some(10) && !identified {
+            let millis = heartbeat_millis(&frame).unwrap_or(41250);
+            let beat_tx = out_tx.clone();
+            let beat_seq = std::sync::Arc::clone(&seq);
+            heartbeat = Some(tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_millis(millis));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    let current = beat_seq.load(std::sync::atomic::Ordering::Relaxed);
+                    let body = heartbeat_frame((current >= 0).then_some(current));
+                    if beat_tx.send(body.to_string()).await.is_err() {
+                        break;
+                    }
+                }
+            }));
+            let identify = identify_body(token, gateway_intents(voice_receive_from_env()));
+            out_tx
+                .send(identify.to_string())
+                .await
+                .map_err(|error| HubError::message(error.to_string()))?;
+            identified = true;
+            continue;
+        }
+        if op == Some(0) {
+            if let Some(number) = frame.get("s").and_then(Value::as_i64) {
+                seq.store(number, std::sync::atomic::Ordering::Relaxed);
+            }
+            on_frame(frame).await;
+        }
     }
-    Ok(())
+    drop(out_tx);
+    if let Some(task) = heartbeat {
+        task.abort();
+    }
+    let _ = writer.await;
+    Err(HubError::message("discord gateway closed"))
 }
 
 #[cfg(test)]
@@ -323,5 +550,39 @@ mod tests {
             Some("user-1")
         );
         assert!(consume_pairing(&pool, "123456").await.unwrap().is_none());
+    }
+
+    #[test]
+    fn intents_heartbeat_threads_and_the_channel_rate_match_discord() {
+        assert_eq!(gateway_intents(false), 37377);
+        assert_eq!(gateway_intents(true), 37377 + INTENT_GUILD_VOICE_STATES);
+        let hello = json!({"op": 10, "d": {"heartbeat_interval": 41250}});
+        assert_eq!(heartbeat_millis(&hello), Some(41250));
+        assert_eq!(heartbeat_frame(Some(4))["op"], 1);
+        assert_eq!(reconnect_backoff(0), std::time::Duration::from_secs(2));
+        assert_eq!(reconnect_backoff(5), std::time::Duration::from_secs(60));
+        assert!(should_auto_create_thread(true, true, true, false, false));
+        assert!(!should_auto_create_thread(true, true, true, false, true));
+        assert_eq!(
+            derive_auto_thread_name("<@9> hello thread", "9"),
+            "hello thread"
+        );
+        let profiles = super::super::router::ProfileRouter::from_json(
+            r#"[{"name":"a","channel":"11","pane_session_id":"pane-a"},{"name":"b","channel":"22","pane_session_id":"pane-b"}]"#,
+        );
+        assert_eq!(
+            profiles
+                .match_route(None, 22, None)
+                .unwrap()
+                .pane_session_id
+                .as_deref(),
+            Some("pane-b")
+        );
+        let start = std::time::Instant::now();
+        let mut rate = ChannelRate::discord_messages();
+        for _ in 0..5 {
+            assert!(rate.reserve("C", start).is_zero());
+        }
+        assert_eq!(rate.reserve("C", start), std::time::Duration::from_secs(5));
     }
 }

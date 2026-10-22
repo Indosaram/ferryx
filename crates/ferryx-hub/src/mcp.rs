@@ -77,7 +77,7 @@ pub async fn dispatch(context: &McpContext, request: &Value) -> Value {
     }
 }
 
-fn tool_list() -> Vec<Value> {
+pub(crate) fn tool_list() -> Vec<Value> {
     let session = json!({"type": "string", "description": "Pane session id from agents.list"});
     let host = json!({"type": "string", "description": "Paired host id; omit for this machine"});
     let request_id = json!({"type": "string", "description": "Idempotency key; reuse it when retrying the same input"});

@@ -464,12 +464,21 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         let discord_bridge = launch.bridge.clone();
         let discord_profiles = launch.profiles.clone();
         let discord_meta = launch.meta_session_id.clone();
+        let discord_pool = launch.hub.pool.clone();
         tasks.push(tokio::spawn(async move {
             if let Err(error) = ferryx_hub::chat::discord::connect_gateway(move |frame| {
                 let bridge = discord_bridge.clone();
                 let profiles = discord_profiles.clone();
                 let meta = discord_meta.clone();
+                let pool = discord_pool.clone();
                 async move {
+                    if let Ok(ferryx_hub::chat::discord::DiscordDispatch::Inbound(inbound)) =
+                        ferryx_hub::chat::discord::handle_dispatch(&frame)
+                    {
+                        if let Err(error) = ferryx_hub::inbox_watch::note_gateway(&pool, &inbound).await {
+                            tracing::warn!(%error, "discord message was not recorded for the inbox");
+                        }
+                    }
                     if let Err(error) = ferryx_hub::chat::discord::apply_dispatch(&frame, &meta, &profiles, bridge.as_ref()).await {
                         tracing::warn!(%error, "discord frame was not applied");
                     }
@@ -478,6 +487,27 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             .await
             {
                 tracing::warn!(%error, "discord gateway stopped");
+            }
+        }));
+    }
+    if ferryx_hub::inbox_watch::inbox_enabled() {
+        let inbox_pool = launch.hub.pool.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(error) = ferryx_hub::inbox_watch::spawn(inbox_pool).await {
+                tracing::warn!(%error, "inbox watchers stopped");
+            }
+        }));
+    }
+    if ferryx_hub::autonomy::action_loop_enabled() {
+        let action_pool = launch.hub.pool.clone();
+        let lead = launch
+            .config
+            .meta_session_id
+            .clone()
+            .unwrap_or_else(|| "meta".into());
+        tasks.push(tokio::spawn(async move {
+            if let Err(error) = ferryx_hub::autonomy::serve(action_pool, lead).await {
+                tracing::warn!(%error, "action loop stopped");
             }
         }));
     }
@@ -504,6 +534,11 @@ async fn post_cron_delivery(item: &ferryx_hub::schedule::DueDelivery) -> Option<
         }
     }
     if errors.is_empty() {
+        if let Some(ack) = &item.ack {
+            if let Err(error) = ferryx_hub::schedule::run_ack(ack).await {
+                return Some(error.to_string());
+            }
+        }
         None
     } else {
         Some(errors.join("; "))

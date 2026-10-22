@@ -216,6 +216,11 @@ pub async fn apply_frame_with(
     }
     let (_ack, frame) = handle_frame(text, owner_id)?;
     if let SlackFrame::Inbound(inbound) = &frame {
+        if let Some(pool) = pool {
+            if let Err(error) = crate::inbox_watch::note_gateway(pool, inbound).await {
+                tracing::warn!(%error, "slack message was not recorded for the inbox");
+            }
+        }
         super::router::route_inbound(inbound, profiles, meta_session_id, control).await?;
     }
     if let (SlackFrame::Command(invocation), Some(pool)) = (&frame, pool) {

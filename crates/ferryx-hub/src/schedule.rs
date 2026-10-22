@@ -454,17 +454,17 @@ pub async fn run_native_job(pool: &SqlitePool, job_id: &str, approved: bool) -> 
     .bind(&started)
     .execute(pool)
     .await?;
-    let outcome = match script_from_payload(&payload) {
-        Some(script) => run_shell(&script).await,
-        None => Ok(payload
-            .get("prompt")
-            .or_else(|| payload.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned()),
-    };
+    let model = cron_model();
+    let skills = skills_root_from_env();
+    let outcome =
+        crate::cron_exec::run_payload(pool, job_id, &payload, &model, skills.as_deref()).await;
+    if let Ok(executed) = &outcome {
+        if let Some(hash) = &executed.monitor_hash {
+            let _ = crate::cron_exec::commit_monitor(pool, job_id, hash).await;
+        }
+    }
     let (status, output, error) = match outcome {
-        Ok(output) => ("succeeded", Some(output), None),
+        Ok(executed) => ("succeeded", Some(executed.output), None),
         Err(error) => ("failed", None, Some(error.to_string())),
     };
     sqlx::query(
@@ -758,6 +758,8 @@ pub struct DueDelivery {
     pub job_id: String,
     pub text: String,
     pub targets: Vec<Delivery>,
+    /// Run after every target was posted. Empty when the scheduler is not delivering.
+    pub ack: Option<String>,
 }
 
 /// Same fault with different pids, timestamps, or hex ids shares one signature.
@@ -839,7 +841,29 @@ fn expected_output_miss(payload: &Value, output: &str) -> Option<String> {
 /// Claims every due job, runs its command, and returns the texts that should be posted.
 /// Silence and `wakeAgent: false` stay in the run row and are not delivered.
 pub async fn drive_due_now(pool: &SqlitePool) -> Result<Vec<DueDelivery>> {
-    drive_due(pool, Utc::now()).await
+    let model = cron_model();
+    let skills = skills_root_from_env();
+    drive_due_with(pool, Utc::now(), &model, skills.as_deref()).await
+}
+
+fn cron_model() -> crate::meta::backend::UrlModel {
+    let url = std::env::var("FERRYX_HUB_OMO_URL")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| crate::cron_exec::OMO_APP_SERVER.to_owned());
+    crate::meta::backend::UrlModel::new(url)
+}
+
+fn skills_root_from_env() -> Option<std::path::PathBuf> {
+    if let Some(root) = std::env::var_os("HERMES_HOME") {
+        return Some(std::path::PathBuf::from(root).join("skills"));
+    }
+    std::env::var_os("HOME").map(|home| {
+        std::path::PathBuf::from(home)
+            .join(".hermes")
+            .join("skills")
+    })
 }
 
 pub async fn next_wait_now(pool: &SqlitePool) -> Result<Duration> {
@@ -847,6 +871,21 @@ pub async fn next_wait_now(pool: &SqlitePool) -> Result<Duration> {
 }
 
 pub async fn drive_due(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<DueDelivery>> {
+    drive_due_with(
+        pool,
+        now,
+        &crate::cron_exec::StaticModel(String::new()),
+        None,
+    )
+    .await
+}
+
+pub async fn drive_due_with(
+    pool: &SqlitePool,
+    now: DateTime<Utc>,
+    model: &dyn crate::lanes::kibitzer::ModelTurn,
+    skills_root: Option<&std::path::Path>,
+) -> Result<Vec<DueDelivery>> {
     let claimed = claim_due(pool, now, std::process::id()).await?;
     let mut deliveries = Vec::new();
     for job_id in claimed {
@@ -865,19 +904,23 @@ pub async fn drive_due(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<DueD
             continue;
         };
         let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
-        let outcome = match script_from_payload(&payload) {
-            Some(script) => run_shell(&script).await,
-            None => Ok(payload
-                .get("prompt")
-                .or_else(|| payload.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned()),
+        let executed =
+            crate::cron_exec::run_payload(pool, &job_id, &payload, model, skills_root).await;
+        let (ok, output, error, deliver, monitor_hash) = match executed {
+            Ok(executed) => (
+                true,
+                executed.output,
+                None,
+                executed.deliver,
+                executed.monitor_hash,
+            ),
+            Err(error) => (false, String::new(), Some(error.to_string()), false, None),
         };
-        let (ok, output, error) = match outcome {
-            Ok(output) => (true, output, None),
-            Err(error) => (false, String::new(), Some(error.to_string())),
-        };
+        if ok {
+            if let Some(hash) = monitor_hash.as_deref() {
+                crate::cron_exec::commit_monitor(pool, &job_id, hash).await?;
+            }
+        }
         finish_run(pool, &job_id, ok, error.as_deref(), &output).await?;
         note_run_health(
             pool,
@@ -889,7 +932,7 @@ pub async fn drive_due(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<DueD
             &payload,
         )
         .await?;
-        if ok && should_deliver(&output) {
+        if ok && deliver && should_deliver(&output) {
             let mut targets = delivery_targets(&payload);
             if targets.is_empty() {
                 if let Ok(delivery_json) = sqlx::query_scalar::<_, String>(
@@ -909,11 +952,31 @@ pub async fn drive_due(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<DueD
                     job_id,
                     text: output,
                     targets,
+                    ack: ack_command(&payload),
                 });
+            } else if let Some(ack) = ack_command(&payload) {
+                let _ = run_ack(&ack).await;
+            }
+        } else if ok {
+            if let Some(ack) = ack_command(&payload) {
+                let _ = run_ack(&ack).await;
             }
         }
     }
     Ok(deliveries)
+}
+
+pub fn ack_command(payload: &Value) -> Option<String> {
+    payload
+        .get("ack_command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+pub async fn run_ack(command: &str) -> Result<()> {
+    run_shell(command).await.map(|_| ())
 }
 
 async fn note_run_health(

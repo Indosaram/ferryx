@@ -5,11 +5,14 @@
 #![deny(clippy::print_stdout)]
 
 pub mod agent_control;
+pub mod autonomy;
 pub mod chat;
 pub mod config;
 pub mod context;
 pub mod control;
 pub mod cron;
+pub mod cron_exec;
+pub mod effect;
 pub mod error;
 pub mod fleet;
 pub mod http;
@@ -17,16 +20,19 @@ pub mod hub;
 pub mod import;
 pub mod inbox;
 pub mod inbox_sources;
+pub mod inbox_watch;
 pub mod judge;
 pub mod lanes;
 pub mod ledger;
 pub mod mcp;
+pub mod memory;
 pub mod meta;
 pub mod readiness;
 pub mod schedule;
 pub mod security;
 pub mod sessions;
 pub mod storage;
+pub mod tools;
 pub mod tracker;
 pub mod tracker_linear;
 pub mod voice;

@@ -62,6 +62,108 @@ pub fn pack(messages: &[String], memory: &[String], max_chars: usize) -> String 
     out
 }
 
+/// Pages one context pack reads per thread before it stops.
+pub const MAX_REPLIES_PAGES: usize = 20;
+
+/// Slack `conversations.replies` walk. Pages are deduped by `ts`. A real
+/// `next_cursor` continues the walk; a repeated cursor stops it. With no cursor,
+/// a page that adds nothing new is the end, and the walk also stops at 20 pages.
+#[derive(Default)]
+pub struct ReplyWalk {
+    cursor: Option<String>,
+    newest: Option<(u64, u64)>,
+    newest_raw: Option<String>,
+    seen: std::collections::HashSet<String>,
+    pages: usize,
+}
+
+impl ReplyWalk {
+    pub fn oldest(&self) -> Option<&str> {
+        if self.cursor.is_some() {
+            return None;
+        }
+        self.newest_raw.as_deref()
+    }
+
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
+    }
+}
+
+fn ts_parts(ts: &str) -> Option<(u64, u64)> {
+    let (secs, frac) = ts.split_once('.')?;
+    let secs: u64 = secs.parse().ok()?;
+    let padded = format!("{frac:0<6}");
+    Some((secs, padded.get(..6)?.parse().ok()?))
+}
+
+/// Returns true when another page should be requested.
+pub fn paginate_replies(
+    all_replies: &mut Vec<serde_json::Value>,
+    chunk: Vec<serde_json::Value>,
+    walk: &mut ReplyWalk,
+    next_cursor: Option<String>,
+) -> bool {
+    walk.pages += 1;
+    let mut fresh = 0usize;
+    for message in chunk {
+        let Some(ts) = message
+            .get("ts")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if !walk.seen.insert(ts.clone()) {
+            continue;
+        }
+        fresh += 1;
+        if let Some(parts) = ts_parts(&ts) {
+            if walk.newest.is_none_or(|newest| parts > newest) {
+                walk.newest = Some(parts);
+                walk.newest_raw = Some(ts.clone());
+            }
+        }
+        all_replies.push(message);
+    }
+    if walk.pages >= MAX_REPLIES_PAGES {
+        return false;
+    }
+    match next_cursor {
+        Some(cursor) if walk.cursor.as_deref() != Some(cursor.as_str()) => {
+            walk.cursor = Some(cursor);
+            true
+        }
+        Some(_) => false,
+        None if walk.cursor.is_some() => false,
+        None => fresh > 0,
+    }
+}
+
+/// Reads `pages` of `{messages, next_cursor}` the way a Slack thread is walked.
+pub fn walk_pages(pages: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut all = Vec::new();
+    let mut walk = ReplyWalk::default();
+    let Some(pages) = pages.get("pages").and_then(serde_json::Value::as_array) else {
+        return all;
+    };
+    for page in pages {
+        let messages = page
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let cursor = page
+            .get("next_cursor")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        if !paginate_replies(&mut all, messages, &mut walk, cursor) {
+            break;
+        }
+    }
+    all
+}
+
 fn push_capped(out: &mut String, kind: &str, text: &str, max_chars: usize) {
     if out.chars().count() >= max_chars {
         return;
@@ -92,5 +194,42 @@ mod tests {
         );
         assert!(rendered.contains("Precedents:\nallow git status\n"));
         assert!(rendered.contains("Lanes in this thread:\n- none\n"));
+    }
+
+    #[test]
+    fn slack_thread_pages_dedupe_the_parent_and_follow_the_cursor() {
+        use serde_json::json;
+        let mut all = Vec::new();
+        let mut walk = ReplyWalk::default();
+        let parent = json!({"ts": "100.000001", "text": "root"});
+        let reply = json!({"ts": "100.000002", "text": "one"});
+        assert!(paginate_replies(
+            &mut all,
+            vec![parent.clone(), reply.clone()],
+            &mut walk,
+            Some("cursor-2".into()),
+        ));
+        assert!(!paginate_replies(
+            &mut all,
+            vec![parent, reply, json!({"ts": "100.000003", "text": "two"})],
+            &mut walk,
+            Some("cursor-2".into()),
+        ));
+        assert_eq!(all.len(), 3);
+        assert_eq!(walk.cursor(), Some("cursor-2"));
+        let mut stopped = ReplyWalk::default();
+        let mut collected = Vec::new();
+        for index in 1..=MAX_REPLIES_PAGES {
+            let keep_going = paginate_replies(
+                &mut collected,
+                vec![json!({"ts": format!("200.{index:06}")})],
+                &mut stopped,
+                None,
+            );
+            if !keep_going {
+                break;
+            }
+        }
+        assert_eq!(collected.len(), MAX_REPLIES_PAGES);
     }
 }
