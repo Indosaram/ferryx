@@ -82,7 +82,8 @@ describe("resolveAccountOrigin Contract & Session Retention Regressions", () => 
   );
 
   it("Scenario 4: Previously cached fallback != candidate re-probes safely, calls fetch exactly once, and recovers to candidate when healthy", async () => {
-    const candidate = "https://relay.ferryx.dev";
+    const candidate = "https://relay.example.com";
+    expect(candidate).not.toBe(DEFAULT_ACCOUNT_ORIGIN);
     sessionStorage.setItem(`${ACCOUNT_ORIGIN_PROBE_STORAGE_KEY}:${candidate}`, DEFAULT_ACCOUNT_ORIGIN);
 
     const fetchSpy = vi.fn().mockImplementation(async () =>

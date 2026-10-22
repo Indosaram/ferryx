@@ -411,6 +411,11 @@ async function openWorktreeSheet(): Promise<HTMLElement> {
   return screen.getByRole("tablist", { name: /terminal tabs/i });
 }
 
+// Tapping a tab closes the sheet and unmounts its rows, so a row captured before the tap is stale.
+async function sheetTab(name: string): Promise<HTMLElement> {
+  return within(await openWorktreeSheet()).getByRole("tab", { name });
+}
+
 describe("account worktree picker", () => {
   afterEach(() => cleanup());
 
@@ -545,7 +550,7 @@ describe("selection request lifetime", () => {
         fireEvent.click(target);
         await host.postA.promise;
       });
-      expect(target).toBeDisabled();
+      expect(await sheetTab("dev")).toBeDisabled();
       try {
         expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
       } catch (error) {
@@ -554,9 +559,9 @@ describe("selection request lifetime", () => {
         throw error;
       }
       await act(async () => { await vi.advanceTimersByTimeAsync(5999); });
-      expect(target).toBeDisabled();
+      expect(await sheetTab("dev")).toBeDisabled();
       await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-      expect(target).toBeEnabled();
+      expect(await sheetTab("dev")).toBeEnabled();
       await openWorktreeSheet();
       expect(screen.getByRole("button", { name: "Next terminal tab" })).toBeEnabled();
       expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-editor");
@@ -615,7 +620,7 @@ describe("selection request lifetime", () => {
         host.responseA.resolve(jsonResponse({}, outcome !== "http-failure"));
         await host.responseA.promise;
       });
-      expect(targetB).toBeDisabled();
+      expect(await sheetTab("editor")).toBeDisabled();
       expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-editor");
       expect(within(await openWorktreeSheet()).getByRole("tab", { name: "tests" })).toHaveAttribute("aria-selected", "true");
       if (!acceptedB) {
@@ -629,13 +634,13 @@ describe("selection request lifetime", () => {
           await host.confirmationRead.promise;
         });
         expect(host.readCount()).toBe(3);
-        expect(targetB).toBeDisabled();
+        expect(await sheetTab("editor")).toBeDisabled();
       }
       // B expires at its original start + 6000, not at either response + 6000.
       await act(async () => { await vi.advanceTimersByTimeAsync(3999); });
-      expect(targetB).toBeDisabled();
+      expect(await sheetTab("editor")).toBeDisabled();
       await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-      expect(targetB).toBeEnabled();
+      expect(await sheetTab("editor")).toBeEnabled();
       expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-tests");
       host.unmount();
       expect(vi.getTimerCount()).toBe(0);
@@ -2004,7 +2009,7 @@ describe("Remote UI Components", () => {
     fireEvent.doubleClick(optimisticTerminal);
 
     // Tab buttons should be disabled during pending selection
-    expect(devTab).toBeDisabled();
+    expect(await sheetTab("Dev Server")).toBeDisabled();
 
     // Resolve POST request
     await act(async () => {
@@ -2031,8 +2036,8 @@ describe("Remote UI Components", () => {
       );
     });
 
-    await waitFor(() => {
-      expect(devTab).toBeEnabled();
+    await waitFor(async () => {
+      expect(await sheetTab("Dev Server")).toBeEnabled();
     });
     expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
     expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
@@ -2450,8 +2455,8 @@ describe("Remote UI Components", () => {
     fireEvent.click(devTab);
 
     // After failure resolves, optimistic override reverts and lock is released
-    await waitFor(() => {
-      expect(devTab).toBeEnabled();
+    await waitFor(async () => {
+      expect(await sheetTab("Dev Server")).toBeEnabled();
     });
     expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-editor");
   });
@@ -2494,6 +2499,7 @@ describe("Remote UI Components", () => {
     expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
 
     // Disconnect now lives in the Machines drawer, behind a confirmation step.
+    await openWorktreeSheet();
     fireEvent.click(screen.getByRole("button", { name: "Machines" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
 
@@ -2829,7 +2835,7 @@ describe("Remote UI Components", () => {
       expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
 
       // 2. Retained activity: Dev Server tab in sheet retains working state indicator
-      expect(within(tablist).getByTestId("tab-working-indicator")).toBeInTheDocument();
+      expect(within(await openWorktreeSheet()).getByTestId("tab-working-indicator")).toBeInTheDocument();
 
       // 3. Retained chat mode transition: can switch to chat mode and back without losing selection
       fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
