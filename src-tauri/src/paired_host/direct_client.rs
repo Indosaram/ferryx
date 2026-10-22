@@ -184,6 +184,7 @@ mod tests {
             online: true,
             ssh_host_id: None,
             device_id: None,
+            unavailable_reason: None,
         }
     }
 
