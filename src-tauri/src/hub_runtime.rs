@@ -253,6 +253,22 @@ fn state_run(
     entry.2
 }
 
+/// The pending prompt of an `agents.read` result as a card the owner notice can carry.
+fn approval_card(session_id: &str, read: &Value) -> Option<ferryx_hub::sessions::watch::ApprovalCard> {
+    let pending = read.pointer("/session/pending")?;
+    let prompt_id = pending.get("id").and_then(Value::as_str)?.to_owned();
+    let screen_revision = read.pointer("/session/screenRevision").and_then(Value::as_str)?.to_owned();
+    let options: Vec<String> = pending
+        .get("options")
+        .and_then(Value::as_array)?
+        .iter()
+        .map(|option| option.get("label").and_then(Value::as_str).unwrap_or("").to_owned())
+        .collect();
+    (!options.is_empty() && pending.get("multiSelect").and_then(Value::as_bool) != Some(true)).then(|| {
+        ferryx_hub::sessions::watch::ApprovalCard { session_id: session_id.to_owned(), prompt_id, screen_revision, options }
+    })
+}
+
 async fn on_agent_event(
     hub: &Arc<Hub>,
     control: &DaemonBridge,
@@ -262,10 +278,12 @@ async fn on_agent_event(
 ) -> Result<(), HubError> {
     let session_id = observation.session_id.clone();
     let mut question = None;
+    let mut approval = None;
     let mut screen_readable = observation.screen_revision.is_some() && observation.state_source != AgentStateSource::None;
     if observation.prompt_id.is_some() {
         if let Ok(value) = control.execute(None, AgentOp::Read { session_id: session_id.clone() }).await {
             question = value.pointer("/session/pending/question").and_then(Value::as_str).map(str::to_owned);
+            approval = approval_card(&session_id, &value);
             if value.pointer("/session/screen/text").and_then(Value::as_str).unwrap_or("").is_empty() {
                 screen_readable = false;
             }
@@ -285,6 +303,7 @@ async fn on_agent_event(
         last_assistant: String::new(),
         watched,
         machine_failed: false,
+        approval,
     };
     hub.ingest(&obs).await?;
     let reading = Reading {

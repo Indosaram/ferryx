@@ -92,6 +92,19 @@ pub struct Notice {
     pub target: String,
     pub kind: String,
     pub text: String,
+    /// The pending prompt behind a question or blocked notice, so the owner can answer it
+    /// from the notice. None for a completion or a pane with no detected prompt.
+    pub approval: Option<ApprovalCard>,
+}
+
+/// A detected prompt a notice can carry as buttons. An answer is checked against
+/// `screen_revision`, so a card for a screen that moved on is refused, not misfired.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ApprovalCard {
+    pub session_id: String,
+    pub prompt_id: String,
+    pub screen_revision: String,
+    pub options: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +120,7 @@ pub struct Observation {
     pub last_assistant: String,
     pub watched: bool,
     pub machine_failed: bool,
+    pub approval: Option<ApprovalCard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,9 +183,12 @@ impl Watcher {
             {
                 continue;
             }
+            // A held notice keeps its first-seen time but carries the latest prompt revision.
+            let approval = notice.approval.clone();
             state
                 .pending
                 .entry(notice.dedupe_key.clone())
+                .and_modify(|(held, _)| held.approval = approval)
                 .or_insert((notice, now));
         }
 
@@ -255,6 +272,7 @@ fn session_notices(obs: &Observation, was_streaming: Option<bool>) -> Vec<Notice
                 "⛔ {} · {}: waiting on a terminal question (`{shown}`)",
                 obs.machine, obs.name
             ),
+            approval: obs.approval.clone(),
         });
     }
     if let Some(question) = obs.question.as_deref() {
@@ -264,6 +282,7 @@ fn session_notices(obs: &Observation, was_streaming: Option<bool>) -> Vec<Notice
             target: obs.target.clone(),
             kind: "question".into(),
             text: format!("❓ {} · {}: {question}", obs.machine, obs.name),
+            approval: obs.approval.clone(),
         });
     }
     if obs.watched && was_streaming == Some(true) && !obs.streaming {
@@ -275,6 +294,7 @@ fn session_notices(obs: &Observation, was_streaming: Option<bool>) -> Vec<Notice
                 "✅ {} · {} turn complete (`{shown}`)",
                 obs.machine, obs.name
             ),
+            approval: None,
         });
     }
     notices
@@ -336,6 +356,7 @@ mod tests {
             last_assistant: "done".into(),
             watched: true,
             machine_failed: false,
+            approval: None,
         }
     }
 

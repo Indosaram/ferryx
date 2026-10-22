@@ -31,6 +31,38 @@ pub async fn chat_reply(
     Ok(id)
 }
 
+/// An owner notice. On Slack a detected prompt is posted as answer buttons under the text;
+/// the stored outbox row is the text alone, so a later flush never replays a stale card.
+pub async fn chat_reply_card(
+    pool: &SqlitePool,
+    session: &SessionKey,
+    text: &str,
+    approval: Option<&crate::sessions::watch::ApprovalCard>,
+) -> Result<i64> {
+    let Some(card) = approval else {
+        return chat_reply(pool, session, text, None).await;
+    };
+    let inserted = sqlx::query(
+        "INSERT INTO chat_outbox(session_key, platform, text, created_at) VALUES(?,?,?,?)",
+    )
+    .bind(session.storage_key())
+    .bind(&session.platform)
+    .bind(text)
+    .bind(now_rfc3339())
+    .execute(pool)
+    .await?;
+    let id = inserted.last_insert_rowid();
+    let posted = if session.platform.eq_ignore_ascii_case("slack") {
+        super::slack::publish_card(session, text, card).await?
+    } else {
+        publish(session, text).await?
+    };
+    if posted {
+        mark_delivered(pool, id).await?;
+    }
+    Ok(id)
+}
+
 async fn publish(session: &SessionKey, text: &str) -> Result<bool> {
     if session.platform.eq_ignore_ascii_case("slack") {
         return super::slack::publish(session, text).await;

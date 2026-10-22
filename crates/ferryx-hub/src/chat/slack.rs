@@ -17,6 +17,27 @@ pub enum SlackFrame {
     Ignore,
 }
 
+/// Slack Web API base. `FERRYX_HUB_SLACK_API` may point it at a loopback stand-in for a
+/// local round-trip check; any other host is ignored so a token is never sent elsewhere.
+pub fn api_base() -> String {
+    std::env::var("FERRYX_HUB_SLACK_API")
+        .ok()
+        .and_then(|value| is_loopback_api(&value).then(|| value.trim_end_matches('/').to_owned()))
+        .unwrap_or_else(|| "https://slack.com/api".into())
+}
+
+fn is_loopback_api(value: &str) -> bool {
+    let rest = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"))
+        .unwrap_or("");
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once(':').map_or(host, |(name, port)| {
+        if port.chars().all(|c| c.is_ascii_digit()) { name } else { host }
+    });
+    !host.contains('@') && matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+}
+
 pub fn app_token() -> Option<String> {
     secret_from_env("SLACK_APP_TOKEN")
 }
@@ -126,19 +147,86 @@ pub fn ack_for(text: &str) -> Result<Value> {
     Ok(json!({ "envelope_id": envelope }))
 }
 
+/// Block Kit for a notice with a detected prompt: the text, then one button per option.
+/// Each button value is `ferryx:approval:{session}:{prompt}:{revision}:{index}:once`, which
+/// `slack_approval_op` turns back into an Answer for the owner only. A part that would not
+/// survive the `:` split yields no buttons, so a card is never answerable by the wrong value.
+pub fn approval_blocks(text: &str, card: &crate::sessions::watch::ApprovalCard) -> Option<Value> {
+    let parts = [&card.session_id, &card.prompt_id, &card.screen_revision];
+    if card.options.is_empty() || parts.iter().any(|part| part.is_empty() || part.contains(':')) {
+        return None;
+    }
+    let buttons: Vec<Value> = card
+        .options
+        .iter()
+        .take(25)
+        .enumerate()
+        .map(|(index, label)| {
+            let label: String = if label.trim().is_empty() {
+                format!("Option {}", index + 1)
+            } else {
+                label.chars().take(75).collect()
+            };
+            json!({
+                "type": "button",
+                "action_id": format!("ferryx_approval_{index}"),
+                "text": {"type": "plain_text", "text": label, "emoji": false},
+                "value": format!(
+                    "{}{}:{}:{}:{index}:once",
+                    "ferryx:approval:", card.session_id, card.prompt_id, card.screen_revision
+                ),
+            })
+        })
+        .collect();
+    let section: String = text.chars().take(2900).collect();
+    Some(json!([
+        {"type": "section", "text": {"type": "mrkdwn", "text": section}},
+        {"type": "actions", "block_id": format!("ferryx_approval_{}", card.prompt_id), "elements": buttons},
+    ]))
+}
+
+/// Posts a notice with answer buttons. Without valid buttons it is the plain text post.
+pub async fn publish_card(
+    session: &super::session::SessionKey,
+    text: &str,
+    card: &crate::sessions::watch::ApprovalCard,
+) -> Result<bool> {
+    #[cfg(feature = "hub-slack")]
+    {
+        return post_message(session, text, approval_blocks(text, card)).await;
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (session, text, card);
+        Ok(false)
+    }
+}
+
 /// Posts `text` when `SLACK_BOT_TOKEN` is set. No token reports that nothing was sent.
 #[cfg(feature = "hub-slack")]
 pub async fn post_if_configured(session: &super::session::SessionKey, text: &str) -> Result<bool> {
+    post_message(session, text, None).await
+}
+
+#[cfg(feature = "hub-slack")]
+async fn post_message(
+    session: &super::session::SessionKey,
+    text: &str,
+    blocks: Option<Value>,
+) -> Result<bool> {
     let Some(token) = bot_token() else {
         return Ok(false);
     };
     let mut body = json!({ "channel": session.channel_id, "text": text });
+    if let Some(blocks) = blocks {
+        body["blocks"] = blocks;
+    }
     if let Some(thread) = &session.thread_id {
         body["thread_ts"] = json!(thread);
     }
     let client = reqwest::Client::new();
     let response = client
-        .post("https://slack.com/api/chat.postMessage")
+        .post(format!("{}/chat.postMessage", api_base()))
         .bearer_auth(token)
         .json(&body)
         .send()
@@ -168,17 +256,47 @@ pub async fn publish(session: &super::session::SessionKey, text: &str) -> Result
     }
 }
 
+/// Runs Socket Mode for as long as the hub is up. Slack closes every socket from time to
+/// time (a `disconnect` frame, a refresh, a network drop), so each end opens a new one with
+/// a capped backoff. Only a refused token (`invalid_auth` and friends) stops the loop.
 #[cfg(feature = "hub-slack")]
 pub async fn connect_socket_mode<F, Fut>(mut on_frame: F) -> Result<()>
 where
     F: FnMut(String) -> Fut + Send,
     Fut: std::future::Future<Output = ()> + Send,
 {
+    let mut backoff = std::time::Duration::from_secs(1);
+    loop {
+        match socket_session(&mut on_frame).await {
+            Ok(()) => backoff = std::time::Duration::from_secs(1),
+            Err(error) if is_fatal_slack_error(&error.to_string()) => return Err(error),
+            Err(error) => {
+                tracing::warn!(%error, "slack socket mode dropped; reconnecting");
+                backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
+            }
+        }
+        tokio::time::sleep(backoff).await;
+    }
+}
+
+fn is_fatal_slack_error(message: &str) -> bool {
+    ["is not set", "invalid_auth", "not_authed", "account_inactive", "token_revoked", "not_allowed_token_type"]
+        .iter()
+        .any(|needle| message.contains(needle))
+}
+
+/// One Socket Mode connection, until Slack asks to disconnect or the socket ends.
+#[cfg(feature = "hub-slack")]
+async fn socket_session<F, Fut>(on_frame: &mut F) -> Result<()>
+where
+    F: FnMut(String) -> Fut + Send,
+    Fut: std::future::Future<Output = ()> + Send,
+{
     let app = app_token().ok_or_else(|| HubError::config("SLACK_APP_TOKEN is not set"))?;
-    let bot = bot_token().ok_or_else(|| HubError::config("SLACK_BOT_TOKEN is not set"))?;
+    bot_token().ok_or_else(|| HubError::config("SLACK_BOT_TOKEN is not set"))?;
     let client = reqwest::Client::new();
     let opened = client
-        .post("https://slack.com/api/apps.connections.open")
+        .post(format!("{}/apps.connections.open", api_base()))
         .bearer_auth(app)
         .send()
         .await
@@ -200,28 +318,100 @@ where
         .await
         .map_err(|error| HubError::message(error.to_string()))?;
     use futures_util::{SinkExt, StreamExt};
-    let _ = bot;
+    tracing::info!("slack socket mode connected");
     while let Some(message) = socket.next().await {
         let message = message.map_err(|error| HubError::message(error.to_string()))?;
-        if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
-            if let Ok(ack) = ack_for(&text) {
-                socket
-                    .send(tokio_tungstenite::tungstenite::Message::Text(
-                        ack.to_string().into(),
-                    ))
-                    .await
-                    .map_err(|error| HubError::message(error.to_string()))?;
-                on_frame(text.to_string()).await;
+        match message {
+            tokio_tungstenite::tungstenite::Message::Text(text) => {
+                if is_disconnect(&text) {
+                    let _ = socket.close(None).await;
+                    return Ok(());
+                }
+                if let Ok(ack) = ack_for(&text) {
+                    socket
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            ack.to_string().into(),
+                        ))
+                        .await
+                        .map_err(|error| HubError::message(error.to_string()))?;
+                    on_frame(text.to_string()).await;
+                }
             }
+            tokio_tungstenite::tungstenite::Message::Ping(payload) => {
+                let _ = socket
+                    .send(tokio_tungstenite::tungstenite::Message::Pong(payload))
+                    .await;
+            }
+            tokio_tungstenite::tungstenite::Message::Close(_) => return Ok(()),
+            _ => {}
         }
     }
     Ok(())
+}
+
+/// Slack's `{"type":"disconnect"}` frame: this socket is about to close; open another.
+pub fn is_disconnect(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|frame| frame.get("type").and_then(Value::as_str).map(|kind| kind == "disconnect"))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent_control::RecordingControl;
+
+    #[test]
+    fn the_api_override_is_loopback_only() {
+        assert!(is_loopback_api("http://127.0.0.1:9999/api"));
+        assert!(is_loopback_api("http://localhost:1/api"));
+        assert!(!is_loopback_api("https://evil.example/api"));
+        assert!(!is_loopback_api("http://127.0.0.1@evil.example/api"));
+        assert!(!is_loopback_api("http://127.0.0.1.evil.example/api"));
+    }
+
+    #[test]
+    fn a_disconnect_frame_reconnects_and_a_refused_token_stops() {
+        assert!(is_disconnect(r#"{"type":"disconnect","reason":"refresh_requested"}"#));
+        assert!(!is_disconnect(r#"{"type":"hello"}"#));
+        assert!(is_fatal_slack_error("slack connections.open failed: {\"ok\":false,\"error\":\"invalid_auth\"}"));
+        assert!(!is_fatal_slack_error("connection reset by peer"));
+    }
+
+    #[tokio::test]
+    async fn an_approval_card_button_round_trips_into_an_owner_answer() {
+        let card = crate::sessions::watch::ApprovalCard {
+            session_id: "pane-1".into(),
+            prompt_id: "abc123".into(),
+            screen_revision: "v1-rev".into(),
+            options: vec!["Yes".into(), "No".into()],
+        };
+        let blocks = approval_blocks("❓ ship it?", &card).unwrap();
+        let value = blocks[1]["elements"][1]["value"].as_str().unwrap().to_owned();
+        assert_eq!(value, "ferryx:approval:pane-1:abc123:v1-rev:1:once");
+        let frame = json!({"envelope_id":"e9","type":"interactive","payload":{"type":"block_actions",
+            "user":{"id":"UOWNER"},"actions":[{"value": value}]}}).to_string();
+        let control = RecordingControl::default();
+        apply_frame(&frame, "UOWNER", "meta", &crate::chat::router::ProfileRouter::new(vec![]), &control)
+            .await
+            .unwrap();
+        match &control.ops()[0].1 {
+            AgentOp::Answer { session_id, prompt_id, screen_revision, answer, .. } => {
+                assert_eq!((session_id.as_str(), prompt_id.as_str(), screen_revision.as_str()), ("pane-1", "abc123", "v1-rev"));
+                assert_eq!(answer["optionIndex"], 1);
+            }
+            other => panic!("expected an answer, got {other:?}"),
+        }
+        // A stranger's click on the same card is refused and types nothing.
+        let stranger = frame.replace("UOWNER", "USTRANGER");
+        let control = RecordingControl::default();
+        assert!(apply_frame(&stranger, "UOWNER", "meta", &crate::chat::router::ProfileRouter::new(vec![]), &control).await.is_err());
+        assert!(control.ops().is_empty());
+        // A part with ':' would be split wrong, so no buttons are offered.
+        let bad = crate::sessions::watch::ApprovalCard { prompt_id: "a:b".into(), ..card };
+        assert!(approval_blocks("x", &bad).is_none());
+    }
 
     #[test]
     fn a_message_frame_acks_and_becomes_an_inbound() {

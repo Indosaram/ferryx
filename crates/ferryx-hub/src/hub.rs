@@ -85,8 +85,13 @@ impl Hub {
         for notice in &outcome.due {
             if self.watcher.deliver(notice, now).await? {
                 let session = self.owner_session();
-                if let Err(error) =
-                    crate::chat::reply::chat_reply(&self.pool, &session, &notice.text, None).await
+                if let Err(error) = crate::chat::reply::chat_reply_card(
+                    &self.pool,
+                    &session,
+                    &notice.text,
+                    notice.approval.as_ref(),
+                )
+                .await
                 {
                     tracing::warn!(%error, key = %notice.dedupe_key, "owner notice is stored but was not posted");
                 }
@@ -191,6 +196,7 @@ mod tests {
             last_assistant: String::new(),
             watched: true,
             machine_failed: false,
+            approval: None,
         }
     }
 
