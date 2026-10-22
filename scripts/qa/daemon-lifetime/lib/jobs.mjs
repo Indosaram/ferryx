@@ -130,7 +130,9 @@ ${envXml}
     // ensure_with) wrote it before every /Create: <LOCALAPPDATA>\Ferryx\supervisor\<name>.xml in
     // UTF-16. HEAD migrates the legacy task only by that record (migrate_legacy_task_with), so a
     // bare /SC ONLOGON task was never migrated (run-int2-all Q13).
-    const user = (await agent.call('exec', { command: 'cmd.exe', args: ['/d', '/c', 'echo %USERDOMAIN%\\%USERNAME%'] })).stdout.trim();
+    // whoami, not %USERDOMAIN%\%USERNAME%: an SSH logon reports USERDOMAIN=WORKGROUP, which the
+    // Task Scheduler cannot map to an account (only2 Q13: "(9,32):UserId:WORKGROUP\sook").
+    const user = (await agent.call('exec', { command: 'whoami', args: [] })).stdout.trim();
     const xmlFile = `${layout.root}\\legacy-task.xml`;
     await agent.call('writeFile', { file: xmlFile, content: legacyTaskXml(user, launcher) });
     const recordName = `${task(null).replace('\\', '-')}.xml`;

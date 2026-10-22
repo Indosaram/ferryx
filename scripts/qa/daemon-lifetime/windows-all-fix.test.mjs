@@ -16,7 +16,7 @@ const ESC = '\x1b';
 
 // ---- Q09: retireOwner speaks the owner's own data protocol and reports a refused connection ----
 
-function retireWorld({ protocol = 6, refuse = false } = {}) {
+function retireWorld({ protocol = 6, refuse = false, resetOnRetire = false, exitsOnReset = true } = {}) {
   const w = { alive: new Set([7]), sessions: new Set(['s1']), opens: [], closes: [] };
   const agent = { call: async (method, p = {}) => {
     switch (method) {
@@ -31,13 +31,18 @@ function retireWorld({ protocol = 6, refuse = false } = {}) {
       case 'call': {
         const f = p.frame;
         if (f.op === 'Hello') return { ok: true, pid: 7, protocol_version: protocol };
-        if (f.op === 'RetireWhenIdle') { if (w.sessions.size) return { ok: true, live: w.sessions.size }; w.alive.delete(7); return { ok: true, live: 0 }; }
+        if (f.op === 'RetireWhenIdle') {
+          if (w.sessions.size) return { ok: true, live: w.sessions.size };
+          if (resetOnRetire) { if (exitsOnReset) w.alive.delete(7); throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }); }
+          w.alive.delete(7); return { ok: true, live: 0 };
+        }
         if (f.type === 'describeLiveSessions') return { type: 'describeLiveSessionsOk', sessions: [...w.sessions].map((backendId) => ({ backendId })) };
         if (f.type === 'close') { w.closes.push(f.sessionId); w.sessions.delete(f.sessionId); return { type: 'closeOk' }; }
         return { type: 'unexpected' };
       }
       // As summary.test.mjs ownerWorld: an owner with open sessions never exits on retire.
-      case 'waitExit': return w.alive.has(p.pid) && w.sessions.size > 0 ? { timedOut: true } : { pid: p.pid, exitedAt: 1 };
+      // waitExit is subscribed before RetireWhenIdle is sent: read the owner's liveness after it.
+      case 'waitExit': await new Promise((r) => setImmediate(r)); return w.alive.has(p.pid) ? { timedOut: true } : { pid: p.pid, exitedAt: 1 };
       default: throw new Error('unexpected ' + method);
     }
   } };
@@ -57,6 +62,15 @@ test('Q09 retire: a refused data connection is reported in the result, never swa
   const r = await retireOwner(ctx);
   assert.equal(r.retired, false);
   assert.match(String(r.dataError), /protocolMismatch/);
+});
+
+test('Q09 retire: an idle owner that exits before its RetireWhenIdle reply is retired, never thrown (only2 ECONNRESET)', async () => {
+  const gone = await retireOwner(retireWorld({ protocol: 6, resetOnRetire: true }).ctx);
+  assert.equal(gone.retired, true);
+  assert.match(String(gone.replyError), /ECONNRESET/);
+  // A lost reply alone is not a retirement: the owner must also be seen to exit.
+  const stuck = await retireOwner(retireWorld({ protocol: 6, resetOnRetire: true, exitsOnReset: false }).ctx);
+  assert.equal(stuck.retired, false);
 });
 
 // ---- Q10 / Q09: the watchdog compared is the owner's own tree, read at the time ----
@@ -140,6 +154,7 @@ function windowsJobsWorld() {
   const agent = { call: async (method, p) => {
     calls.push([method, p]);
     if (method === 'exec' && p.command === 'powershell.exe' && p.args.includes('-File')) return { status: 0, stdout: record + '\r\n', stderr: '' };
+    if (method === 'exec' && p.command === 'whoami') return { status: 0, stdout: 'desktop-1lapjmp\\sook\r\n', stderr: '' };
     return { status: 0, stdout: '', stderr: '' };
   } };
   const layout = isolationLayout('C:\\q\\' + RUN, 'windows');
@@ -153,6 +168,8 @@ test('Q13 Windows legacy install writes the UTF-16 definition record before /Cre
   const xml = writes.find((p) => p.file.endsWith('legacy-task.xml'))?.content;
   assert.ok(xml, 'task XML rendered into the run dir');
   assert.match(xml, /<LogonTrigger>/);
+  // The account whoami names (an SSH logon's USERDOMAIN is WORKGROUP, which schtasks cannot map).
+  assert.match(xml, /<UserId>desktop-1lapjmp\\sook<\/UserId>/);
   assert.match(xml, /<Command>[^<]*legacy-daemon\.cmd<\/Command>/);
   const script = writes.find((p) => p.file.endsWith('legacy-task-record.ps1'))?.content;
   assert.match(script, /\[Text\.Encoding\]::Unicode/);
