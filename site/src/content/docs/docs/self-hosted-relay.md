@@ -5,7 +5,7 @@ description: Complete operations guide for building, deploying, configuring, and
 
 Ferryx connects remote clients and headless daemons over WebSocket tunnels brokered by `ferryx-relay`. You can run your own relay instance on any standard Linux server, VPS, or container environment.
 
-This guide provides an end-to-end operational reference for building the binary from source, deploying it securely behind a reverse proxy with TLS, managing environment variables, enrolling desktop and headless daemons, connecting mobile browsers, and maintaining daemon uptime.
+This guide provides an end-to-end operational reference for building the binary from source, serving HTTPS (directly with built-in Let's Encrypt certificates, or behind a reverse proxy), managing environment variables, enrolling desktop and headless daemons, connecting mobile browsers, and maintaining daemon uptime.
 
 ## Architecture and Separation of Concerns
 
@@ -104,7 +104,12 @@ sudo install -m 755 src-tauri/target/release/ferryx-relay /usr/local/bin/ferryx-
 | Variable / Option | CLI Argument | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `FERRYX_DEPLOYMENT_MODE` | none | unset (required) | Deployment mode: must be set explicitly to `selfhost` for private relays or `commercial` for managed relays. |
-| `FERRYX_RELAY_PORT` | `--port <u16>` | `8787` | TCP port for the HTTP and WebSocket listener. |
+| `FERRYX_RELAY_PORT` | `--port <u16>` | `8787` (`443` when TLS is enabled) | TCP port for the HTTP(S) and WebSocket listener. |
+| `FERRYX_RELAY_TLS_DOMAIN` | `--tls-domain <name>` | unset | Enables built-in HTTPS with automatic Let's Encrypt certificates for this name. Repeat the flag or comma-separate names for several domains. See [Built-in HTTPS](#built-in-https-no-reverse-proxy). |
+| `FERRYX_RELAY_TLS_CONTACT` | `--tls-contact <email>` | unset | Contact email for the ACME account (expiry and policy notices). |
+| `FERRYX_RELAY_TLS_CACHE_DIR` | `--tls-cache-dir <path>` | `~/.ferryx/relay-tls` | Persists the ACME account key and issued certificates across restarts. |
+| `FERRYX_RELAY_TLS_STAGING` | `--tls-staging` | off | `1` uses the Let's Encrypt staging directory (untrusted test certificates, generous rate limits). |
+| `FERRYX_RELAY_TLS_CERT` / `FERRYX_RELAY_TLS_KEY` | `--tls-cert <pem>` / `--tls-key <pem>` | unset | Serve your own PEM certificate chain and private key instead of ACME. Both are required together and cannot be combined with the ACME options. |
 | `FERRYX_ACCOUNT_ORIGIN` | none | `https://relay.ferryx.dev` | Canonical public HTTPS URL for account auth and magic links. |
 | `FERRYX_ACCOUNT_RELAY_ORIGIN` | none | Value of `FERRYX_ACCOUNT_ORIGIN` | Public WebSocket relay URL advertised in machine records. |
 | `FERRYX_ACCOUNT_DATA_DIR` | none | `~/.ferryx/account-data` | Directory where signing keys, accounts, and mail are stored. |
@@ -237,9 +242,77 @@ sudo systemctl status ferryx-relay
 
 ---
 
+## Built-in HTTPS (No Reverse Proxy)
+
+`ferryx-relay` can terminate TLS itself and listen directly on port 443, with no reverse proxy
+and no tunnel in front. Without any TLS option it keeps serving plain HTTP on 8787 exactly as
+before.
+
+### Automatic Let's Encrypt certificates
+
+```bash
+export FERRYX_DEPLOYMENT_MODE=selfhost
+ferryx-relay --tls-domain relay.example.com --tls-contact ops@example.com
+```
+
+- Certificates are obtained and renewed in-process using the **TLS-ALPN-01** challenge, which is
+  answered on the HTTPS port itself. Only port 443 must be reachable from the internet; port 80
+  is not used.
+- The DNS name must resolve directly to this host. TLS-ALPN-01 cannot pass through a
+  TLS-terminating proxy or CDN (for example a proxied Cloudflare record or a cloudflared tunnel);
+  use a DNS-only record.
+- The ACME account key and certificates are stored in `FERRYX_RELAY_TLS_CACHE_DIR` (default
+  `~/.ferryx/relay-tls`, created with mode `0700`). Keep this directory across restarts and
+  upgrades: losing it forces a new issuance and can hit Let's Encrypt rate limits.
+- Try a new deployment with `--tls-staging` (or `FERRYX_RELAY_TLS_STAGING=1`) first. Staging
+  certificates are not browser-trusted, but staging limits are generous.
+- Certificate events (cached certificate deployed, new certificate issued, cache writes,
+  TLS-ALPN-01 validations, errors) are logged to stderr with the `ferryx-relay: tls:` prefix,
+  so `journalctl -u ferryx-relay` shows them.
+- When TLS is enabled the port defaults to `443`; `--port`/`FERRYX_RELAY_PORT` still override it.
+- Only the TLS handshake has a timeout (10 s). Established connections, including the
+  long-lived daemon control and terminal WebSockets, get no extra idle timeout.
+- Rate limiting keeps using the real TCP peer address of each client.
+
+### Your own certificate
+
+```bash
+ferryx-relay --tls-cert /etc/ferryx/tls/fullchain.pem --tls-key /etc/ferryx/tls/privkey.pem
+```
+
+The certificate file holds the PEM chain (leaf first); the key file holds a PKCS#8, PKCS#1 or SEC1
+PEM private key. The files are read once at startup, so restart the relay after renewing them.
+
+A missing or unreadable certificate, a mismatched key, or an unwritable cache directory stops
+startup with a `ferryx-relay: ...` message naming the file and exit status 2.
+
+### Binding port 443 as a non-root service
+
+Ports below 1024 need `CAP_NET_BIND_SERVICE` on Linux. Grant only that capability to the
+service instead of running it as root. Add to the `[Service]` section of
+`/etc/systemd/system/ferryx-relay.service` (or a drop-in):
+
+```ini
+[Service]
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+Environment=FERRYX_RELAY_TLS_DOMAIN=relay.example.com
+Environment=FERRYX_RELAY_TLS_CONTACT=ops@example.com
+Environment=FERRYX_RELAY_TLS_CACHE_DIR=/var/lib/ferryx/relay-tls
+# Remove FERRYX_RELAY_PORT=8787 (or set it to 443) so the relay listens on 443.
+```
+
+Then `sudo systemctl daemon-reload && sudo systemctl restart ferryx-relay`. Open TCP 443 in the
+host firewall. Without systemd, `sudo setcap 'cap_net_bind_service=+ep' /usr/local/bin/ferryx-relay`
+grants the same right to the binary; it has to be re-applied after every binary replacement.
+
+---
+
 ## Reverse Proxy Setup (HTTPS and WebSocket)
 
-The relay requires HTTPS and WebSocket connection upgrades. Do not expose port 8787 directly over cleartext HTTP on public networks.
+Use this instead of [Built-in HTTPS](#built-in-https-no-reverse-proxy) when a proxy already
+fronts the host. The relay requires HTTPS and WebSocket connection upgrades. Do not expose port 8787 directly over cleartext HTTP on public networks.
 
 ### Nginx Configuration
 

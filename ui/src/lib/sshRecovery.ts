@@ -57,7 +57,7 @@ export function startSshRecovery(options: {
   }
   const ids = new Set(sessionMap.keys());
 
-  const list = options.list ?? listTerminalSessions;
+  const list = coalesceListCalls(options.list ?? listTerminalSessions);
   const probe = options.status ?? getTerminalRemoteStatus;
   const retry = options.retry ?? retryTerminalRemoteSession;
   const clock = options.clock ?? defaultRecoveryClock;
@@ -570,5 +570,33 @@ export function startSshRecovery(options: {
       }
       schedulers.clear();
     },
+  };
+}
+
+/**
+ * One list call in flight at a time. Callers that arrive while it runs share a single follow-up
+ * call, so each still sees a result issued after it asked, but a burst of remote status events
+ * cannot queue one list per event behind the shared daemon connection.
+ */
+export function coalesceListCalls<T>(list: () => Promise<T>): () => Promise<T> {
+  let inFlight: Promise<T> | null = null;
+  let queued: Promise<T> | null = null;
+  const run = (): Promise<T> => {
+    const current = list().finally(() => {
+      if (inFlight === current) inFlight = null;
+    });
+    inFlight = current;
+    return current;
+  };
+  return () => {
+    if (!inFlight) return run();
+    if (!queued) {
+      const next = inFlight.catch(() => undefined).then(() => {
+        queued = null;
+        return run();
+      });
+      queued = next;
+    }
+    return queued;
   };
 }
