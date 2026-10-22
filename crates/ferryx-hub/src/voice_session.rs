@@ -126,6 +126,16 @@ pub async fn respond_with_speaker(
         ctx.control.as_ref(),
     )
     .await?;
+    if let Err(error) = crate::chat::router::remember_inbound_origin(
+        &ctx.pool,
+        &inbound,
+        &ctx.profiles,
+        &ctx.meta_session_id,
+    )
+    .await
+    {
+        tracing::warn!(%error, "voice chat origin was not stored");
+    }
     let before = before?;
     let revision = (!before.revision.is_empty()).then(|| before.revision.clone());
     ctx.control

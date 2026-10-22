@@ -395,6 +395,12 @@ pub async fn apply_dispatch(
     match &parsed {
         DiscordDispatch::Inbound(inbound) => {
             super::router::route_inbound(inbound, profiles, meta_session_id, control).await?;
+            if let Err(error) =
+                super::router::remember_inbound_origin(pool, inbound, profiles, meta_session_id)
+                    .await
+            {
+                tracing::warn!(%error, "discord chat origin was not stored");
+            }
         }
         DiscordDispatch::Approval(click) => {
             let op =

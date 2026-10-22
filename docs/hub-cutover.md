@@ -12,6 +12,8 @@ The hub control socket is `~/.ferryx/hub/control.sock`. `ferryx hub stop` and `f
 
 `ferryx hub` and `ferryx-cli hub` both dispatch the hub command. The GUI binary does not open a window for that subcommand.
 
+`FERRYX_HUB_NOTIFY=actionable` is the default. Slack and Discord then receive approval cards, a question or a pane waiting on input, a failed turn, a crashed worker, a cron failure (and the line that a remediation lane opened), and the final result of a task the owner started from Slack or Discord, replied in that thread. Plain turn-complete and progress notices are not posted. Every notice, including a suppressed turn-complete, stays in `session_watch_notices` and the dashboard activity log (`/api/logs`). `FERRYX_HUB_NOTIFY=all` also posts turn-complete notices to the home channel. `OMON_SESSION_NOTIFY` is the same switch and loses to `FERRYX_HUB_NOTIFY`. When neither variable is set, `hub_meta.notify_mode` is used. omo-gateway has no stored notify mode; import copies `session_notify`, `FERRYX_HUB_NOTIFY`, or `OMON_SESSION_NOTIFY` from `config.yaml`, `config.yml`, `config.json`, or `.env` next to the omo database when one of those keys is present, and leaves the default when they are absent.
+
 ## Live database
 
 The gateway's launchd job uses WorkingDirectory `/Users/indo/code/project/omon-gateway`. The database is `omon_gateway.db` in that directory, which is `~/code/project/omon-gateway/omon_gateway.db`. It is not `~/.omon/gateway.db`.

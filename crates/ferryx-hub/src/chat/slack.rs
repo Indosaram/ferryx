@@ -222,6 +222,14 @@ pub async fn apply_frame_with(
             }
         }
         super::router::route_inbound(inbound, profiles, meta_session_id, control).await?;
+        if let Some(pool) = pool {
+            if let Err(error) =
+                super::router::remember_inbound_origin(pool, inbound, profiles, meta_session_id)
+                    .await
+            {
+                tracing::warn!(%error, "slack chat origin was not stored");
+            }
+        }
     }
     if let (SlackFrame::Command(invocation), Some(pool)) = (&frame, pool) {
         let url = std::env::var("FERRYX_HUB_OMO_URL")

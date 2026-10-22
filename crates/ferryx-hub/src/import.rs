@@ -35,6 +35,7 @@ pub async fn import_once(pool: &SqlitePool, source: &Path) -> Result<ImportRepor
             .execute(pool)
             .await?;
     }
+    store_imported_notify_mode(pool, source).await?;
     let copied = copy_state(&from, pool).await?;
     let report = ImportReport {
         lanes: copied.lanes,
@@ -313,6 +314,7 @@ pub async fn migrate_from_omo(
             .execute(pool)
             .await?;
     }
+    store_imported_notify_mode(pool, source).await?;
     let copied = copy_state(&from, pool).await?;
     sqlx::query("INSERT OR REPLACE INTO hub_meta(key, value) VALUES('imported_from', ?)")
         .bind(source.to_string_lossy().as_ref())
@@ -785,6 +787,108 @@ pub async fn imported_slack_home(pool: &SqlitePool) -> Result<Option<String>> {
     Ok(value.and_then(|value| crate::config::normalize_slack_home(&value)))
 }
 
+async fn store_imported_notify_mode(pool: &SqlitePool, source: &Path) -> Result<()> {
+    let Some(mode) = notify_mode_from_omo_config(source) else {
+        return Ok(());
+    };
+    sqlx::query("INSERT OR REPLACE INTO hub_meta(key, value) VALUES('notify_mode', ?)")
+        .bind(mode.as_str())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// `session_notify`, `FERRYX_HUB_NOTIFY`, or `OMON_SESSION_NOTIFY` from the omo config
+/// next to the database. Absent keys stay absent so the hub default remains.
+pub fn notify_mode_from_omo_config(database: &Path) -> Option<crate::sessions::watch::NotifyMode> {
+    for (name, text) in omo_config_texts(database) {
+        if let Some(mode) = notify_mode_in_config_text(&text, &name) {
+            return Some(mode);
+        }
+    }
+    None
+}
+
+fn omo_config_texts(database: &Path) -> Vec<(String, String)> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = database.parent() {
+        dirs.push(dir.to_path_buf());
+        if let Some(parent) = dir.parent() {
+            if parent != dir {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for dir in dirs {
+        for name in ["config.yaml", "config.yml", "config.json", ".env"] {
+            let path = dir.join(name);
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                found.push((name.to_owned(), text.chars().take(65_536).collect()));
+            }
+        }
+    }
+    found
+}
+
+fn notify_mode_in_config_text(
+    text: &str,
+    name: &str,
+) -> Option<crate::sessions::watch::NotifyMode> {
+    if name.ends_with(".json") {
+        let value: serde_json::Value = serde_json::from_str(text).ok()?;
+        let raw = value
+            .get("session_notify")
+            .or_else(|| value.get("sessionNotify"))
+            .or_else(|| value.get("FERRYX_HUB_NOTIFY"))
+            .or_else(|| value.get("OMON_SESSION_NOTIFY"))
+            .and_then(|item| item.as_str())?;
+        return crate::sessions::watch::NotifyMode::parse(raw);
+    }
+    if name == ".env" {
+        return notify_mode_from_env_file(text);
+    }
+    notify_mode_from_yaml(text)
+}
+
+fn notify_mode_from_env_file(text: &str) -> Option<crate::sessions::watch::NotifyMode> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let (key, value) = line.split_once('=')?;
+        if key.trim() != "FERRYX_HUB_NOTIFY" && key.trim() != "OMON_SESSION_NOTIFY" {
+            continue;
+        }
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        return crate::sessions::watch::NotifyMode::parse(value);
+    }
+    None
+}
+
+fn notify_mode_from_yaml(text: &str) -> Option<crate::sessions::watch::NotifyMode> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        if !matches!(
+            key.trim(),
+            "session_notify" | "FERRYX_HUB_NOTIFY" | "OMON_SESSION_NOTIFY"
+        ) {
+            continue;
+        }
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        return crate::sessions::watch::NotifyMode::parse(value);
+    }
+    None
+}
+
 /// `SLACK_HOME_CHANNEL` from the omo-gateway config next to the database.
 ///
 /// Looks in the database directory, then its parent, at `config.yaml`, `config.yml`,
@@ -906,6 +1010,53 @@ mod tests {
             Some("CHOME")
         );
         assert!(slack_home_from_yaml("discord:\n  home_channel: \"999\"\n").is_none());
+    }
+
+    #[test]
+    fn an_omo_config_notify_mode_is_read_only_when_present() {
+        use crate::sessions::watch::NotifyMode;
+        assert_eq!(
+            notify_mode_from_yaml("slack:\n  home_channel: \"C1\"\nsession_notify: all\n"),
+            Some(NotifyMode::All)
+        );
+        assert!(notify_mode_from_yaml("slack:\n  home_channel: \"C1\"\n").is_none());
+        assert_eq!(
+            notify_mode_from_env_file("export OMON_SESSION_NOTIFY=\"actionable\"\n"),
+            Some(NotifyMode::Actionable)
+        );
+        assert!(notify_mode_from_env_file("OMON_SESSION_NOTIFY=verbose\n").is_none());
+        let json = r#"{"sessionNotify":"all","slackHomeChannel":"C1"}"#;
+        assert_eq!(
+            notify_mode_in_config_text(json, "config.json"),
+            Some(NotifyMode::All)
+        );
+    }
+
+    #[tokio::test]
+    async fn import_stores_notify_mode_when_the_omo_config_names_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferryx-hub-notify-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.yaml"), "session_notify: all\n").unwrap();
+        let source = dir.join("omo.sqlite");
+        let source_pool = storage::connect(&source).await.unwrap();
+        source_pool.close().await;
+        let dest = storage::memory().await.unwrap();
+        import_once(&dest, &source).await.unwrap();
+        let stored: String =
+            sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'notify_mode'")
+                .fetch_one(&dest)
+                .await
+                .unwrap();
+        assert_eq!(stored, "all");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

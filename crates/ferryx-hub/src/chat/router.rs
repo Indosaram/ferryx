@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use sha2::{Digest, Sha256};
+use sqlx::SqlitePool;
 
 use super::fence::fence_untrusted;
 use super::session::{SessionContext, SessionKey};
@@ -390,6 +391,57 @@ pub async fn route_inbound(
     };
     control.execute(None, op.clone()).await?;
     Ok(op)
+}
+
+/// Remembers that this pane's next completion belongs to the chat that started it.
+pub async fn remember_chat_origin(
+    pool: &SqlitePool,
+    pane_session_id: &str,
+    origin: &SessionKey,
+) -> Result<()> {
+    if pane_session_id.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("INSERT OR REPLACE INTO hub_meta(key, value) VALUES(?, ?)")
+        .bind(format!("chat_origin:{pane_session_id}"))
+        .bind(origin.storage_key())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Same memory, using the pane `route_inbound` just targeted.
+pub async fn remember_inbound_origin(
+    pool: &SqlitePool,
+    inbound: &Inbound,
+    profiles: &ProfileRouter,
+    meta_session_id: &str,
+) -> Result<()> {
+    let (key, session_id) = inbound_target(inbound, profiles, meta_session_id);
+    remember_chat_origin(pool, &session_id, &key).await
+}
+
+/// Reads and clears the chat that started this pane, if one was stored.
+pub async fn take_chat_origin(
+    pool: &SqlitePool,
+    pane_session_id: &str,
+) -> Result<Option<SessionKey>> {
+    if pane_session_id.is_empty() {
+        return Ok(None);
+    }
+    let meta_key = format!("chat_origin:{pane_session_id}");
+    let stored: Option<String> = sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = ?")
+        .bind(&meta_key)
+        .fetch_optional(pool)
+        .await?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    sqlx::query("DELETE FROM hub_meta WHERE key = ?")
+        .bind(&meta_key)
+        .execute(pool)
+        .await?;
+    Ok(SessionKey::from_storage_key(&stored).ok())
 }
 
 /// Slack `ts` or Discord message id when the platform sent one. Otherwise a hash of the text,

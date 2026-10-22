@@ -257,3 +257,11 @@ strip = "symbols"
 [profile.release.build-override]
 strip = "none"
 
+# Xcode 27.1 applies the same strip to proc-macro dylibs in dev and test
+# builds (`mis-aligned LINKEDIT` on libsqlx_macros). Keep those unstripped too.
+[profile.dev.build-override]
+strip = "none"
+
+[profile.test.build-override]
+strip = "none"
+

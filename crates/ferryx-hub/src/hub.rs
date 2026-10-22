@@ -14,7 +14,7 @@ use crate::config::HubConfig;
 use crate::error::Result;
 use crate::import::import_once;
 use crate::sessions::watch::ObserveOutcome;
-use crate::sessions::watch::{NotifyPolicy, Observation, Watcher};
+use crate::sessions::watch::{owner_post, NotifyPolicy, Observation, Watcher};
 
 pub struct Hub {
     pub pool: SqlitePool,
@@ -55,7 +55,9 @@ impl Hub {
         {
             config.slack_home_channel = Some(channel);
         }
-        let watcher = Arc::new(Watcher::new(pool.clone(), NotifyPolicy::from_env()));
+        let mut policy = NotifyPolicy::from_env();
+        policy.mode = crate::sessions::watch::effective_notify_mode(&pool).await?;
+        let watcher = Arc::new(Watcher::new(pool.clone(), policy));
         Ok(Arc::new(Self {
             pool,
             control,
@@ -104,20 +106,64 @@ impl Hub {
         let outcome = self.watcher.on_observation(observation, now).await?;
         for notice in &outcome.due {
             if self.watcher.deliver(notice, now).await? {
-                let session = self.owner_session();
-                if let Err(error) = crate::chat::reply::chat_reply_card(
-                    &self.pool,
-                    &session,
-                    &notice.text,
-                    notice.approval.as_ref(),
-                )
-                .await
-                {
-                    tracing::warn!(%error, key = %notice.dedupe_key, "owner notice is stored but was not posted");
+                let level = if matches!(
+                    notice.kind.as_str(),
+                    "failure" | "error" | "crash" | "failed" | "remediation"
+                ) {
+                    "error"
+                } else {
+                    "info"
+                };
+                if let Err(error) = crate::http::record_log(&self.pool, level, &notice.text).await {
+                    tracing::warn!(%error, key = %notice.dedupe_key, "notice was not written to the activity log");
+                }
+                if owner_post(self.watcher.mode(), &notice.kind) {
+                    let session = self.owner_session();
+                    if let Err(error) = crate::chat::reply::chat_reply_card(
+                        &self.pool,
+                        &session,
+                        &notice.text,
+                        notice.approval.as_ref(),
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, key = %notice.dedupe_key, "owner notice is stored but was not posted");
+                    }
+                }
+                if matches!(notice.kind.as_str(), "completion" | "failure") {
+                    self.reply_to_origin(observation, &notice.text).await;
                 }
             }
         }
         Ok(outcome)
+    }
+
+    /// Final result of a task the owner started from Slack or Discord, in that thread.
+    /// Actionable mode does this instead of posting the home-channel turn-complete.
+    async fn reply_to_origin(&self, observation: &Observation, notice_text: &str) {
+        let origin = match crate::chat::router::take_chat_origin(
+            &self.pool,
+            &observation.session_id,
+        )
+        .await
+        {
+            Ok(origin) => origin,
+            Err(error) => {
+                tracing::warn!(%error, session = %observation.session_id, "chat origin was not read");
+                return;
+            }
+        };
+        let Some(origin) = origin else {
+            return;
+        };
+        let text = if observation.last_assistant.trim().is_empty() {
+            notice_text
+        } else {
+            observation.last_assistant.as_str()
+        };
+        if let Err(error) = crate::chat::reply::chat_reply(&self.pool, &origin, text, None).await {
+            tracing::warn!(%error, session = %observation.session_id, "origin result was not posted");
+        }
     }
 
     fn arm(self: &Arc<Self>, target: String, at: DateTime<Utc>) {
@@ -190,6 +236,7 @@ pub fn default_database_path() -> PathBuf {
 mod tests {
     use super::*;
     use crate::agent_control::RecordingControl;
+    use crate::sessions::watch::NotifyMode;
 
     fn hub(pool: SqlitePool, notify_after: std::time::Duration) -> Arc<Hub> {
         hub_with(pool, notify_after, HubConfig::default())
@@ -200,6 +247,15 @@ mod tests {
         notify_after: std::time::Duration,
         config: HubConfig,
     ) -> Arc<Hub> {
+        hub_mode(pool, notify_after, config, NotifyMode::Actionable)
+    }
+
+    fn hub_mode(
+        pool: SqlitePool,
+        notify_after: std::time::Duration,
+        config: HubConfig,
+        mode: NotifyMode,
+    ) -> Arc<Hub> {
         Arc::new(Hub {
             pool: pool.clone(),
             control: Arc::new(RecordingControl::default()),
@@ -208,6 +264,7 @@ mod tests {
                 NotifyPolicy {
                     notify_after,
                     quiet_hours: None,
+                    mode,
                 },
             )),
             config,
@@ -229,7 +286,34 @@ mod tests {
             last_assistant: String::new(),
             watched: true,
             machine_failed: false,
+            failed: false,
             approval: None,
+        }
+    }
+
+    fn turn(streaming: bool, failed: bool) -> Observation {
+        Observation {
+            target: "local:pane".into(),
+            machine: "local".into(),
+            session_id: "pane".into(),
+            name: "pane".into(),
+            message_count: 3,
+            streaming,
+            blocking_question: false,
+            question: None,
+            last_assistant: "shipped the patch".into(),
+            watched: true,
+            machine_failed: false,
+            failed,
+            approval: None,
+        }
+    }
+
+    fn home_config() -> HubConfig {
+        HubConfig {
+            owner_slack_id: Some("UOWNER".into()),
+            slack_home_channel: Some("CHOME".into()),
+            ..HubConfig::default()
         }
     }
 
@@ -343,5 +427,118 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         assert!(notices(&pool).await.is_empty());
+    }
+
+    async fn finish_turn(hub: &Arc<Hub>, failed: bool) {
+        hub.ingest(&turn(true, false)).await.unwrap();
+        hub.ingest(&turn(false, failed)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_turn_complete_is_logged_and_not_posted() {
+        let pool = crate::storage::memory().await.unwrap();
+        let hub = hub_with(pool.clone(), std::time::Duration::ZERO, home_config());
+        finish_turn(&hub, false).await;
+        let outbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(outbox, 0);
+        let logged: String = sqlx::query_scalar("SELECT message FROM hub_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(logged.contains("turn complete"), "{logged}");
+        assert!(logged.contains("shipped the patch"), "{logged}");
+        let stored = notices(&pool).await;
+        assert_eq!(stored.len(), 1, "{stored:?}");
+        assert_eq!(stored[0].1, "completion");
+    }
+
+    #[tokio::test]
+    async fn a_failed_turn_and_a_crashed_worker_are_posted() {
+        let pool = crate::storage::memory().await.unwrap();
+        let hub = hub_with(pool.clone(), std::time::Duration::ZERO, home_config());
+        finish_turn(&hub, true).await;
+        let mut crashed = turn(false, false);
+        crashed.target = "local:worker".into();
+        crashed.session_id = "worker".into();
+        crashed.machine_failed = true;
+        hub.ingest(&crashed).await.unwrap();
+        let outbox = crate::chat::reply::pending(&pool).await.unwrap();
+        assert_eq!(outbox.len(), 2, "{outbox:?}");
+        assert!(outbox.iter().any(|row| row.2.contains("turn failed")));
+        assert!(outbox
+            .iter()
+            .any(|row| row.2.contains("worker unavailable")));
+        for row in &outbox {
+            let session = SessionKey::from_storage_key(&row.1).unwrap();
+            assert_eq!(session.channel_id, "CHOME");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_explicit_request_result_is_replied_to_its_origin() {
+        let pool = crate::storage::memory().await.unwrap();
+        let origin = SessionKey::new(
+            "slack",
+            None::<String>,
+            "CORIGIN",
+            Some("123.456".to_owned()),
+            "UOWNER",
+        );
+        sqlx::query("INSERT INTO hub_meta(key, value) VALUES('chat_origin:pane', ?)")
+            .bind(origin.storage_key())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let hub = hub_with(pool.clone(), std::time::Duration::ZERO, home_config());
+        finish_turn(&hub, false).await;
+        let queued: Vec<(String, String)> =
+            sqlx::query_as("SELECT session_key, text FROM chat_outbox ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        let session = SessionKey::from_storage_key(&queued[0].0).unwrap();
+        assert_eq!(session.channel_id, "CORIGIN");
+        assert_eq!(session.thread_id.as_deref(), Some("123.456"));
+        assert_eq!(queued[0].1, "shipped the patch");
+        let left: Option<String> =
+            sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'chat_origin:pane'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert!(left.is_none(), "the origin is consumed by the result");
+    }
+
+    #[tokio::test]
+    async fn all_mode_posts_the_turn_complete_and_the_origin_result() {
+        let pool = crate::storage::memory().await.unwrap();
+        let origin = SessionKey::new("slack", None::<String>, "CORIGIN", None::<String>, "UOWNER");
+        sqlx::query("INSERT INTO hub_meta(key, value) VALUES('chat_origin:pane', ?)")
+            .bind(origin.storage_key())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let hub = hub_mode(
+            pool.clone(),
+            std::time::Duration::ZERO,
+            home_config(),
+            NotifyMode::All,
+        );
+        finish_turn(&hub, false).await;
+        let queued: Vec<(String, String)> =
+            sqlx::query_as("SELECT session_key, text FROM chat_outbox ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued.len(), 2, "{queued:?}");
+        let home = SessionKey::from_storage_key(&queued[0].0).unwrap();
+        assert_eq!(home.channel_id, "CHOME");
+        assert!(queued[0].1.contains("turn complete"));
+        let back = SessionKey::from_storage_key(&queued[1].0).unwrap();
+        assert_eq!(back.channel_id, "CORIGIN");
+        assert_eq!(queued[1].1, "shipped the patch");
     }
 }

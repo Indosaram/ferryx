@@ -1176,11 +1176,53 @@ async fn note_run_health(
         .bind(job_id)
         .fetch_one(pool)
         .await?;
+        let mut remediation_opened = false;
         if remediation_due(failures as u32, open_lane > 0) {
             open_remediation(pool, job_id, problem_id, &detail).await?;
+            remediation_opened = true;
         }
+        announce_cron_failure(pool, job_id, &detail, remediation_opened).await;
     }
     Ok(())
+}
+
+async fn announce_cron_failure(
+    pool: &SqlitePool,
+    job_id: &str,
+    detail: &str,
+    remediation_opened: bool,
+) {
+    let mut text = format!("cron {job_id} failed: {detail}");
+    if remediation_opened {
+        text.push_str("\nremediation lane opened");
+    }
+    if let Err(error) = crate::http::record_log(pool, "error", &text).await {
+        tracing::warn!(%error, %job_id, "cron failure was not written to the activity log");
+    }
+    let mode = crate::sessions::watch::effective_notify_mode(pool)
+        .await
+        .unwrap_or(crate::sessions::watch::NotifyMode::Actionable);
+    if !crate::sessions::watch::owner_post(mode, "failure") {
+        return;
+    }
+    let channel = match crate::import::imported_slack_home(pool).await {
+        Ok(Some(channel)) => channel,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%error, %job_id, "cron failure has no slack home to post to");
+            return;
+        }
+    };
+    let session = crate::chat::session::SessionKey::new(
+        "slack",
+        None::<String>,
+        channel,
+        None::<String>,
+        "owner",
+    );
+    if let Err(error) = crate::chat::reply::chat_reply(pool, &session, &text, None).await {
+        tracing::warn!(%error, %job_id, "cron failure was logged but not posted");
+    }
 }
 
 async fn record_problem(
@@ -1944,5 +1986,84 @@ mod tests {
         let allowed = approve_problem(&pool, 8, "tok").await.unwrap();
         assert_eq!(allowed.status, "succeeded");
         assert_eq!(allowed.output.as_deref(), Some("hi"));
+    }
+
+    #[tokio::test]
+    async fn a_new_cron_failure_is_logged_and_posted_only_to_a_stored_home_channel() {
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled, consecutive_failures) VALUES('broken','every 1m','{}',1,3)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        note_run_health(
+            &pool,
+            "broken",
+            "run-1",
+            "failed",
+            "",
+            Some("disk full"),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let logged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM hub_log WHERE message LIKE 'cron broken failed:%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(logged, 1);
+        let message: String = sqlx::query_scalar("SELECT message FROM hub_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(message.contains("remediation lane opened"), "{message}");
+        let outbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(outbox, 0);
+        note_run_health(
+            &pool,
+            "broken",
+            "run-1",
+            "failed",
+            "",
+            Some("disk full"),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let logged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM hub_log WHERE message LIKE 'cron broken failed:%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(logged, 1, "a duplicate problem is not announced again");
+        sqlx::query("INSERT INTO hub_meta(key, value) VALUES('slack_home_channel', 'CHOME')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        note_run_health(
+            &pool,
+            "broken",
+            "run-2",
+            "failed",
+            "",
+            Some("socket refused"),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let queued: Vec<(String, String)> =
+            sqlx::query_as("SELECT session_key, text FROM chat_outbox")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        assert!(queued[0].1.contains("cron broken failed: socket refused"));
+        let session = crate::chat::session::SessionKey::from_storage_key(&queued[0].0).unwrap();
+        assert_eq!(session.channel_id, "CHOME");
     }
 }

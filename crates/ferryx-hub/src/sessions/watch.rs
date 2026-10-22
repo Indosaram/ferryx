@@ -14,10 +14,86 @@ pub const DEFAULT_NOTIFY_AFTER: Duration = Duration::from_secs(30 * 60);
 pub const DEFAULT_QUIET_HOURS: (u32, u32) = (0, 8);
 const KST: TimeDelta = TimeDelta::hours(9);
 
+/// Which owner-facing notices are posted to Slack or Discord.
+///
+/// `Actionable` is the default: questions, approvals, failures, and the result of a
+/// task the owner started from chat. Plain turn-complete and progress notices stay
+/// in the ledger. `All` also posts those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifyMode {
+    Actionable,
+    All,
+}
+
+impl NotifyMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "actionable" => Some(Self::Actionable),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Actionable => "actionable",
+            Self::All => "all",
+        }
+    }
+}
+
+/// `FERRYX_HUB_NOTIFY` wins, then `OMON_SESSION_NOTIFY`. An unknown value is ignored.
+pub fn notify_mode_from_env() -> Option<NotifyMode> {
+    std::env::var("FERRYX_HUB_NOTIFY")
+        .ok()
+        .or_else(|| std::env::var("OMON_SESSION_NOTIFY").ok())
+        .as_deref()
+        .and_then(NotifyMode::parse)
+}
+
+/// Env wins over `hub_meta.notify_mode`. Missing or unknown storage stays actionable.
+pub async fn effective_notify_mode(pool: &SqlitePool) -> Result<NotifyMode> {
+    if let Some(mode) = notify_mode_from_env() {
+        return Ok(mode);
+    }
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'notify_mode'")
+            .fetch_optional(pool)
+            .await?;
+    Ok(stored
+        .as_deref()
+        .and_then(NotifyMode::parse)
+        .unwrap_or(NotifyMode::Actionable))
+}
+
+/// Whether this notice kind is posted to the owner channel for `mode`.
+///
+/// Suppressed kinds are still recorded in the ledger. An explicit chat origin is a
+/// separate reply and is not decided here.
+pub fn owner_post(mode: NotifyMode, kind: &str) -> bool {
+    if mode == NotifyMode::All {
+        return true;
+    }
+    matches!(
+        kind,
+        "question"
+            | "blocked"
+            | "approval"
+            | "failure"
+            | "error"
+            | "crash"
+            | "failed"
+            | "remediation"
+            | "explicit"
+            | "origin_result"
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotifyPolicy {
     pub notify_after: Duration,
     pub quiet_hours: Option<(u32, u32)>,
+    pub mode: NotifyMode,
 }
 
 impl Default for NotifyPolicy {
@@ -25,6 +101,7 @@ impl Default for NotifyPolicy {
         Self {
             notify_after: DEFAULT_NOTIFY_AFTER,
             quiet_hours: Some(DEFAULT_QUIET_HOURS),
+            mode: NotifyMode::Actionable,
         }
     }
 }
@@ -43,6 +120,9 @@ impl NotifyPolicy {
             .or_else(|_| std::env::var("OMON_SESSION_QUIET_HOURS"))
         {
             policy.quiet_hours = parse_quiet_hours(&value);
+        }
+        if let Some(mode) = notify_mode_from_env() {
+            policy.mode = mode;
         }
         policy
     }
@@ -131,6 +211,9 @@ pub struct Observation {
     pub last_assistant: String,
     pub watched: bool,
     pub machine_failed: bool,
+    /// The turn ended in a failure, error, or crash. A streaming-to-idle edge then
+    /// emits `failure` instead of `completion`.
+    pub failed: bool,
     pub approval: Option<ApprovalCard>,
 }
 
@@ -166,6 +249,10 @@ impl Watcher {
         }
     }
 
+    pub fn mode(&self) -> NotifyMode {
+        self.policy.mode
+    }
+
     pub async fn on_observation(
         &self,
         obs: &Observation,
@@ -178,8 +265,8 @@ impl Watcher {
 
         // Observations arrive one session at a time, so this one only speaks for its own
         // target. A question or block that is no longer on this target's screen is withdrawn;
-        // a completion already happened and stays until it is sent. Other targets' pending
-        // notices are untouched.
+        // a completion or a failure already happened and stays until it is sent. Other
+        // targets' pending notices are untouched.
         let present: HashSet<String> = notices
             .iter()
             .map(|notice| notice.dedupe_key.clone())
@@ -189,6 +276,7 @@ impl Watcher {
             notice.target != obs.target
                 || present.contains(key)
                 || notice.kind == "completion"
+                || notice.kind == "failure"
                 || machine_failed
         });
         for notice in notices {
@@ -300,12 +388,44 @@ fn session_notices(obs: &Observation, was_streaming: Option<bool>) -> Vec<Notice
         });
     }
     if obs.watched && was_streaming == Some(true) && !obs.streaming {
+        let (prefix, kind, headline) = if obs.failed {
+            (
+                "f",
+                "failure",
+                format!("⛔ {} · {} turn failed (`{shown}`)", obs.machine, obs.name),
+            )
+        } else {
+            (
+                "c",
+                "completion",
+                format!(
+                    "✅ {} · {} turn complete (`{shown}`)",
+                    obs.machine, obs.name
+                ),
+            )
+        };
+        let mut text = headline;
+        let excerpt = compact(&obs.last_assistant.replace(['\n', '\r'], " "), 300);
+        let excerpt = excerpt.trim();
+        if !excerpt.is_empty() {
+            text.push_str("\n↳ ");
+            text.push_str(excerpt);
+        }
         notices.push(Notice {
-            dedupe_key: format!("c:{}:{}", obs.target, obs.message_count),
+            dedupe_key: format!("{prefix}:{}:{}", obs.target, obs.message_count),
             target: obs.target.clone(),
-            kind: "completion".into(),
+            kind: kind.into(),
+            text,
+            approval: None,
+        });
+    }
+    if obs.machine_failed {
+        notices.push(Notice {
+            dedupe_key: format!("f:{}", obs.target),
+            target: obs.target.clone(),
+            kind: "failure".into(),
             text: format!(
-                "✅ {} · {} turn complete (`{shown}`)",
+                "⛔ {} · {}: worker unavailable (`{shown}`)",
                 obs.machine, obs.name
             ),
             approval: None,
@@ -370,6 +490,7 @@ mod tests {
             last_assistant: "done".into(),
             watched: true,
             machine_failed: false,
+            failed: false,
             approval: None,
         }
     }
@@ -380,6 +501,7 @@ mod tests {
         let policy = NotifyPolicy {
             notify_after: Duration::ZERO,
             quiet_hours: None,
+            mode: NotifyMode::Actionable,
         };
         let now = DateTime::parse_from_rfc3339("2026-10-21T02:00:00Z")
             .unwrap()
@@ -414,6 +536,7 @@ mod tests {
         let policy = NotifyPolicy {
             notify_after: Duration::from_secs(60),
             quiet_hours: None,
+            mode: NotifyMode::Actionable,
         };
         let start = DateTime::parse_from_rfc3339("2026-10-21T02:00:00Z")
             .unwrap()
@@ -486,6 +609,25 @@ mod tests {
         assert!(plain.contains("same-prompt"));
         assert!(plain.contains("local:pane"));
         assert!(plain.contains("needs the owner"));
+    }
+
+    #[test]
+    fn actionable_mode_posts_questions_and_failures_and_holds_turn_complete() {
+        assert!(owner_post(NotifyMode::Actionable, "question"));
+        assert!(owner_post(NotifyMode::Actionable, "blocked"));
+        assert!(owner_post(NotifyMode::Actionable, "failure"));
+        assert!(owner_post(NotifyMode::Actionable, "remediation"));
+        assert!(!owner_post(NotifyMode::Actionable, "completion"));
+        assert!(!owner_post(NotifyMode::Actionable, "progress"));
+        assert!(!owner_post(NotifyMode::Actionable, "working"));
+        assert!(owner_post(NotifyMode::All, "completion"));
+        assert!(owner_post(NotifyMode::All, "progress"));
+        assert_eq!(NotifyMode::parse(" ALL "), Some(NotifyMode::All));
+        assert_eq!(
+            NotifyMode::parse("actionable"),
+            Some(NotifyMode::Actionable)
+        );
+        assert!(NotifyMode::parse("verbose").is_none());
     }
 
     #[test]

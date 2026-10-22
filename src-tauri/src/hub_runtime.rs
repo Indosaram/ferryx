@@ -731,6 +731,10 @@ async fn on_agent_event(
         last_assistant: String::new(),
         watched,
         machine_failed: false,
+        failed: observation.kind.as_deref().is_some_and(|kind| {
+            let kind = kind.to_ascii_lowercase();
+            kind.contains("fail") || kind.contains("error") || kind.contains("crash")
+        }),
         approval,
     };
     hub.ingest(&obs).await?;
