@@ -124,6 +124,92 @@ impl TaskLauncher for DaemonBridge {
     }
 }
 
+/// `ferryx hub migrate --from-omo <db> [--dry-run]` copies live gateway state.
+/// The report is row counts only.
+pub fn run_hub_cli(args: &[String]) -> i32 {
+    let mut source = None;
+    let mut dry = false;
+    let mut rest = args.iter().skip(2);
+    if rest.next().map(String::as_str) != Some("migrate") {
+        eprintln!("usage: ferryx hub migrate --from-omo <db> [--dry-run]");
+        return 2;
+    }
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--dry-run" => dry = true,
+            "--from-omo" => source = rest.next().map(std::path::PathBuf::from),
+            other if !other.starts_with('-') && source.is_none() => {
+                source = Some(std::path::PathBuf::from(other));
+            }
+            other => {
+                eprintln!("unknown argument {other}");
+                return 2;
+            }
+        }
+    }
+    let Some(source) = source else {
+        eprintln!("usage: ferryx hub migrate --from-omo <db> [--dry-run]");
+        return 2;
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("runtime: {error}");
+            return 1;
+        }
+    };
+    runtime.block_on(async move {
+        let config = match HubConfig::load() {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("config: {error}");
+                return 1;
+            }
+        };
+        let path = config.database_path.clone().unwrap_or_else(ferryx_hub::hub::default_database_path);
+        if let Some(parent) = path.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                eprintln!("database directory: {error}");
+                return 1;
+            }
+        }
+        let pool = match ferryx_hub::storage::connect(&path).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                eprintln!("database: {error}");
+                return 1;
+            }
+        };
+        match ferryx_hub::import::migrate_from_omo(&pool, &source, dry).await {
+            Ok(report) => {
+                println!("dry_run {dry}");
+                println!("issues {}", report.issues);
+                println!("teams {}", report.teams);
+                println!("states {}", report.states);
+                println!("labels {}", report.labels);
+                println!("activity {}", report.activity);
+                println!("cron_jobs {}", report.cron_jobs);
+                println!("inbox_items {}", report.inbox_items);
+                println!("proposals {}", report.proposals);
+                println!("allowlist {}", report.allowlist);
+                println!("bot_profiles {}", report.bot_profiles);
+                println!("lanes {}", report.lanes);
+                if let Some(channel) = report.slack_home_channel.as_deref() {
+                    println!("slack_home_channel {channel}");
+                }
+                for (name, count) in &report.tables {
+                    println!("table {name} {count}");
+                }
+                0
+            }
+            Err(error) => {
+                eprintln!("migrate: {error}");
+                1
+            }
+        }
+    })
+}
+
 /// Opens the hub after the daemon has announced ready. Failures are returned to the caller,
 /// which logs them and leaves the daemon up.
 pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
@@ -158,12 +244,17 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     tokio::spawn(async move {
         let mut answered = std::collections::HashSet::new();
         let mut runs = std::collections::HashMap::new();
+        let mut last_nudge = None;
         loop {
             match events.recv().await {
                 Ok(observation) => {
+                    let idle = matches!(observation.state, AgentControlState::Idle);
                     let run = state_run(&mut runs, &observation);
                     if let Err(error) = on_agent_event(&watch_hub, watch_bridge.as_ref(), &mut answered, run, observation).await {
                         tracing::debug!(%error, "hub observer event was not applied");
+                    }
+                    if idle && ferryx_hub::lanes::kibitzer::take_nudge_now(&mut last_nudge) {
+                        tracing::info!("kibitzer nudge due");
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -171,17 +262,31 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
             }
         }
     });
-    if let Some(addr) = config.tracker_addr.clone() {
-        let token = config.tracker_owner_token.clone().unwrap_or_default();
-        let router = ferryx_hub::tracker::Tracker::new(hub.pool.clone(), token).router();
-        tokio::spawn(async move {
-            match tokio::net::TcpListener::bind(&addr).await {
-                Ok(listener) => {
-                    if let Err(error) = axum::serve(listener, router).await {
-                        tracing::warn!(%error, "tracker stopped");
-                    }
+    if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_schema(&hub.pool).await {
+        tracing::warn!(%error, "kibitzer schema was not created");
+    }
+    let addr = config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
+    let router = ferryx_hub::http::router(hub.pool.clone(), ferryx_hub::http::web_root());
+    tokio::spawn(async move {
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                tracing::info!(%addr, "hub http listening");
+                if let Err(error) = axum::serve(listener, router).await {
+                    tracing::warn!(%error, "hub http stopped");
                 }
-                Err(error) => tracing::warn!(%error, addr, "tracker did not bind"),
+            }
+            Err(error) => tracing::warn!(%error, %addr, "hub http did not bind"),
+        }
+    });
+    if let Some(url) = (!config.supervisor_pane).then(|| config.supervisor_listen_url.clone()).flatten() {
+        let command = config.supervisor_command.clone();
+        let state_dir = ferryx_hub::meta::supervisor::state_dir_from_home().unwrap_or_else(|| std::path::PathBuf::from(".ferryx/hub"));
+        tokio::spawn(async move {
+            let supervisor = ferryx_hub::meta::supervisor::DaemonSupervisor::new(url, command, state_dir);
+            if let Err(error) = supervisor.ensure().await {
+                tracing::warn!(%error, "omo app-server was not started");
+            } else {
+                tracing::info!("omo app-server backend is armed");
             }
         });
     }

@@ -51,7 +51,7 @@ required-features = ["native-terminal"]
 tauri-build = { version = "2", features = [] }
 
 [features]
-default = ["native-terminal"]
+default = ["native-terminal", "hub-slack", "hub-discord", "hub-voice"]
 # Task 3 private QA barrier channel for the pane-liveness diagnostic
 # classifier headless harness. Compile-time gated; never enabled in release
 # builds. No code outside #[cfg(feature = "local-split-qa")] is reachable.
@@ -67,7 +67,8 @@ native-terminal = [
     "dep:bytemuck",
     "dep:pollster",
 ]
-# Hub connectors. Off in the default daemon. Discord and voice stay off unless requested.
+# Hub connectors. Cargo cannot scope default features to macOS, so every OS build
+# includes them. They stay idle until a token or speech key is present.
 hub-slack = ["ferryx-hub/hub-slack"]
 hub-discord = ["ferryx-hub/hub-discord"]
 hub-voice = ["ferryx-hub/hub-voice"]
