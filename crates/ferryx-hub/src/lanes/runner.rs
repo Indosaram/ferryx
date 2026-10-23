@@ -43,11 +43,16 @@ impl LaneRunner {
             return Err(HubError::message(format!("lane {key} is paused")));
         }
         let mut session_id = pane.unwrap_or_default();
+        let mut cwd = cwd;
         if status == "queued" {
             if !self.load.admit(&self.thresholds) {
                 return Err(HubError::message(format!(
                     "guard refused to launch lane {key}"
                 )));
+            }
+            // omo's auto worktree: a lane at a repository root gets its own checkout.
+            if let Some(tree) = super::worktree::create(&self.pool, key, &cwd).await? {
+                cwd = tree;
             }
             session_id = self.launcher.launch_pane(&cwd, &[]).await?;
             set_pane(&self.pool, key, &session_id).await?;
@@ -73,6 +78,9 @@ impl LaneRunner {
                     },
                 )
                 .await?;
+        } else {
+            // A reopened lane gets its removed worktree back before the pane is read.
+            super::worktree::restore(&self.pool, key).await?;
         }
         let reading = self
             .control

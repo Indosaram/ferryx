@@ -552,9 +552,16 @@ async fn lane_state_transition(
             ))
         }
     };
-    crate::lanes::state::transition(pool, lane_key, target, reason.as_deref())
-        .await
-        .map_err(|error| error.to_string())?;
+    if target == LaneStatus::Closed {
+        // omo closes through the close intent: worktree removed, unmerged branch reported.
+        crate::lanes::worktree::close(pool, lane_key, reason.as_deref())
+            .await
+            .map_err(|error| error.to_string())?;
+    } else {
+        crate::lanes::state::transition(pool, lane_key, target, reason.as_deref())
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     crate::tracker_lanes::sync(pool)
         .await
         .map_err(|error| error.to_string())

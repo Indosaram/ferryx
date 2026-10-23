@@ -374,9 +374,15 @@ async fn call_tool(
                 .parse()
                 .map_err(|error: state::UnknownLaneStatus| error.to_string())?;
             let reason = args.get("reason").and_then(Value::as_str);
-            transition(&context.pool, &key, status, reason)
-                .await
-                .map_err(|error| error.to_string())?;
+            if status == LaneStatus::Closed {
+                crate::lanes::worktree::close(&context.pool, &key, reason)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            } else {
+                transition(&context.pool, &key, status, reason)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
             Ok(json!({"key": key, "status": status.as_str()}))
         }
         "lane.drive" => {

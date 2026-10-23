@@ -285,6 +285,24 @@ pub(crate) async fn apply_frame_routed(
             if let Err(error) = crate::inbox_watch::note_gateway(pool, inbound).await {
                 tracing::warn!(%error, "slack message was not recorded for the inbox");
             }
+            // omo: the owner's reply in a finished lane's thread reopens that lane.
+            if let (Some(thread_ts), Some(message_id)) =
+                (inbound.thread_id.as_deref(), inbound.event_id.as_deref())
+            {
+                let reply = crate::lanes::owner_replies::OwnerReply {
+                    channel: &inbound.channel_id,
+                    thread_ts,
+                    author: &inbound.user_id,
+                    owner: owner_id,
+                    message_id,
+                    text: &inbound.text,
+                };
+                match crate::lanes::owner_replies::intercept(pool, control, &reply).await {
+                    Ok(true) => return Ok(SlackFrame::Ignore),
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(%error, "lane owner reply was not applied"),
+                }
+            }
         }
     }
     // With the omo turn path installed, a message no profile routes to a lane pane becomes an
@@ -1676,6 +1694,55 @@ mod tests {
         .unwrap();
         assert!(matches!(parsed, SlackFrame::Approval(_)));
         assert!(matches!(control.ops()[0].1, AgentOp::Answer { .. }));
+    }
+
+    #[tokio::test]
+    async fn an_owner_reply_in_a_closed_lane_thread_reopens_the_lane_instead_of_routing() {
+        use crate::lanes::state::{insert_lane, set_pane, transition, LaneStatus};
+        let pool = crate::storage::memory().await.unwrap();
+        insert_lane(&pool, "ledger", "Ledger", "lead", "/tmp", "file marker")
+            .await
+            .unwrap();
+        set_pane(&pool, "ledger", "lane-pane").await.unwrap();
+        transition(&pool, "ledger", LaneStatus::Working, Some("launched"))
+            .await
+            .unwrap();
+        transition(&pool, "ledger", LaneStatus::Closed, Some("forced: done"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE lanes SET thread_channel_id = 'slack:C1:50.1' WHERE key = 'ledger'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let frame = r#"{"envelope_id":"e9","type":"events_api","payload":{"event":{"type":"message","channel":"C1","user":"UOWNER","text":"one more thing","ts":"60.1","thread_ts":"50.1"}}}"#;
+        let control = RecordingControl::default();
+        let routed = apply_frame_routed(
+            frame,
+            "UOWNER",
+            "meta-pane",
+            &crate::chat::router::ProfileRouter::new(vec![]),
+            &control,
+            Some(&pool),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(routed, SlackFrame::Ignore));
+        let sends: Vec<String> = control
+            .ops()
+            .into_iter()
+            .filter_map(|(_, op)| match op {
+                AgentOp::Send { session_id, .. } => Some(session_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sends, vec!["lane-pane".to_owned()]);
+        let status: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key = 'ledger'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "working");
     }
 
     #[tokio::test]
