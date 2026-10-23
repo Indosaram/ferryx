@@ -14,6 +14,7 @@ pub mod context;
 pub mod control;
 pub mod cron;
 pub mod cron_exec;
+pub mod cron_remediate;
 pub mod dashboard_api;
 pub mod discord_surface;
 #[cfg(feature = "hub-discord")]

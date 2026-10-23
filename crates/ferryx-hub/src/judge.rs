@@ -15,6 +15,8 @@ pub enum Purpose {
     EventWake,
     KibitzerWake,
     InboxClass,
+    /// omo-gateway cron remediation: the root cause of a failed cron job.
+    CronCause,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

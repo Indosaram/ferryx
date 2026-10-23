@@ -821,6 +821,11 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         launch.hub.owner_session().storage_key(),
     )));
     tasks.push(tokio::spawn(ferryx_hub::retention::serve(launch.hub.pool.clone())));
+    // omo's cron triage and auto-fix: queued cron problems go to the remediator.
+    tasks.push(tokio::spawn(ferryx_hub::cron_remediate::serve(
+        launch.hub.pool.clone(),
+        Some(launch.hub.owner_session().storage_key()),
+    )));
     for task in &tasks {
         HUB_TASKS.track(task);
     }

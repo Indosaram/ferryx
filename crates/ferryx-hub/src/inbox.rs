@@ -291,8 +291,18 @@ pub async fn build_scheduled_digest(
         render(&bot)
     );
     message.push_str(&format!("\n\nUsage: {runs} cron runs in the last day"));
-    if failed > 0 {
-        message.push_str(&format!("\n\n## Cron\n- {failed} failed"));
+    let remediation = crate::cron_remediate::digest_section(pool, now).await?;
+    if failed > 0 || remediation.is_some() {
+        message.push_str("\n\n## Cron");
+        if failed > 0 {
+            message.push_str(&format!("\n- {failed} failed"));
+        }
+        if let Some(section) = remediation {
+            for line in section.lines().skip(1) {
+                message.push('\n');
+                message.push_str(line);
+            }
+        }
     }
     if !errors.is_empty() {
         message.push_str("\n\n## Source authentication\n");

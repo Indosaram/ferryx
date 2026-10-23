@@ -29,13 +29,13 @@ pub struct LaneRunner {
 
 impl LaneRunner {
     pub async fn drive(&self, key: &str) -> Result<DriveReport> {
-        let row: Option<(String, String, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT status, cwd, title, done_signals, omo_thread_id FROM lanes WHERE key = ?",
+        let row: Option<(String, String, String, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT status, cwd, title, done_signals, omo_thread_id, brief_path FROM lanes WHERE key = ?",
         )
         .bind(key)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((status, cwd, title, done_signals, pane)) = row else {
+        let Some((status, cwd, title, done_signals, pane, brief_path)) = row else {
             return Err(HubError::message(format!("lane {key} not found")));
         };
         let mut session_id = pane.unwrap_or_default();
@@ -48,8 +48,16 @@ impl LaneRunner {
             session_id = self.launcher.launch_pane(&cwd, &[]).await?;
             set_pane(&self.pool, key, &session_id).await?;
             transition(&self.pool, key, LaneStatus::Working, Some("launched")).await?;
+            // A lane with a brief file (cron remediation) sends the brief with the title.
+            let brief = match brief_path.trim() {
+                "" => String::new(),
+                path => tokio::fs::read_to_string(path)
+                    .await
+                    .map(|brief| format!("\n\n{brief}"))
+                    .unwrap_or_default(),
+            };
             let text = format!(
-                "{title}\n\nDone = {done_signals}\n\nClaim completion with a standalone line: [CLAIM_DONE] {key} | <checkable evidence>. A [REPORT] done line is not a claim."
+                "{title}{brief}\n\nDone = {done_signals}\n\nClaim completion with a standalone line: [CLAIM_DONE] {key} | <checkable evidence>. A [REPORT] done line is not a claim."
             );
             self.control
                 .execute(
