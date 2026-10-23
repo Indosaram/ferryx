@@ -107,7 +107,23 @@ async fn bootstrap(State(pool): State<SqlitePool>) -> (StatusCode, Json<Value>) 
     }
 }
 
+/// omo's `api::prepare`: inbox requests are mirrored before the tracker is read.
+async fn prepare(pool: &SqlitePool) {
+    if let Err(error) = crate::tracker_lanes::sync(pool).await {
+        tracing::warn!(%error, "tracker lane sync failed");
+    }
+    if let Err(error) = crate::tracker_requests::sync(pool).await {
+        tracing::warn!(%error, "tracker request sync failed");
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn issue_values_for_test(pool: &SqlitePool) -> Vec<Value> {
+    list_issue_values(pool, None, false).await.unwrap()
+}
+
 async fn bootstrap_value(pool: &SqlitePool) -> Result<Value> {
+    prepare(pool).await;
     let users = sqlx::query(
         "SELECT id, name, display_name, email, avatar_color, kind, model, is_me, created_at FROM tracker_users ORDER BY created_at",
     )
@@ -272,6 +288,7 @@ async fn list_issue_values(
     team_id: Option<&str>,
     include_archived: bool,
 ) -> Result<Vec<Value>> {
+    prepare(pool).await;
     let rows: Vec<String> = if let Some(team) = team_id {
         sqlx::query_scalar(
             "SELECT id FROM tracker_issues WHERE team_id = ? ORDER BY sort_order, number",
