@@ -8,21 +8,21 @@ HTTPS/WSS only; insecure LAN HTTP hosts are intentionally not supported yet.
 
 ## Build
 
-Install Node, Rust, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
-From the repository root install dependencies (`npm install`, then
-`npm --prefix ui install`). Mobile uses the root Tauri CLI.
+Install Bun, Rust, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+From the repository root install dependencies (`bun install`, then
+`bun install --cwd ui`). Mobile uses the root Tauri CLI, run on Bun.
 
 Android requires JDK 17, SDK platforms 35 and 36 (the Tauri runtime uses 36),
 Build Tools 34/35, NDK 27.2.12479018, and JAVA_HOME/ANDROID_HOME/NDK_HOME.
 
 ```sh
 cd mobile
-npm run android:init
-npm run android:build -- --debug --target aarch64 --apk
+bun run android:init
+bun run android:build -- --debug --target aarch64 --apk
 ```
 
 The init wrapper pins Gradle 8.9 and AGP 8.7.3 instead of unavailable preview
-SDK defaults, and fixes the generated Node callback path. The Tauri runtime's
+SDK defaults, and fixes the generated Tauri CLI callback path. The Tauri runtime's
 compileSdk 36 emits an AGP compatibility warning. Generated SDK projects are
 ignored and recreated locally. Do not rerun raw `tauri android init` afterward.
 
@@ -30,17 +30,17 @@ On macOS with Xcode and iOS Rust targets:
 
 ```sh
 cd mobile
-npm run ios:init
-npm run ios:dev
+bun run ios:init
+bun run ios:dev
 # Distribution also needs the owner's Apple team/signing setup.
-npm run ios:build
+bun run ios:build
 ```
 
 iOS is configured, NOT compiled or run in this change. No Apple team or signing
 identity is guessed, and no App Store/TestFlight deployment is performed.
 
-Frontend-only validation: `npm --prefix ui run build:mobile`.
-`npm --prefix ui run build` continues to build the desktop/web UI separately.
+Frontend-only validation: `bun run --cwd ui build:mobile`.
+`bun run --cwd ui build` continues to build the desktop/web UI separately.
 
 ## QA status (2026-10-19)
 

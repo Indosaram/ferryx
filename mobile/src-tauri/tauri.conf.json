@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.ferryx.mobile",
   "build": {
-    "beforeDevCommand": "npm --prefix ../ui run dev:mobile",
+    "beforeDevCommand": "bun run --cwd ../ui dev:mobile",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm --prefix ../ui run build:mobile",
+    "beforeBuildCommand": "bun run --cwd ../ui build:mobile",
     "frontendDist": "../../ui/dist-mobile"
   },
   "app": {
