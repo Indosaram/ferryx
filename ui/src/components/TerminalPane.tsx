@@ -245,7 +245,10 @@ export function TerminalPane({
   };
 
   const handleOpenNewShell = async () => {
-    if (isPending || !onOpenNewShell) return;
+    // A local reconnecting overlay is itself "pending", but the user must always be able to escape a
+    // session that may never come back (e.g. every PTY died with an OS reboot). Only a replacement
+    // already in flight (`pendingLocal`) blocks that escape.
+    if ((isPending && !isLocalReconnecting) || pendingLocal || !onOpenNewShell) return;
     setPendingLocal(true);
     setReplacementError(null);
     try {
@@ -640,6 +643,18 @@ export function TerminalPane({
                       <span>{recoveryState?.reason ?? "Reconnecting session..."}</span>
                     </div>
                     {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
+                    {onOpenNewShell ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={canRetryRecovery ? "ghost" : "secondary"}
+                        aria-label="Open new shell"
+                        onClick={handleOpenNewShell}
+                        className="w-full max-w-[220px]"
+                      >
+                        <span>Open new shell</span>
+                      </Button>
+                    ) : null}
                   </>
                 ) : canRetryRecovery || affordance.canReconnect ? (
                   <Button
@@ -765,6 +780,18 @@ export function TerminalPane({
                       <span>{recoveryState?.reason ?? "Reconnecting to session..."}</span>
                     </div>
                     {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
+                    {onOpenNewShell ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={canRetryRecovery ? "ghost" : "secondary"}
+                        aria-label="Open new shell"
+                        onClick={handleOpenNewShell}
+                        className="w-full max-w-[220px]"
+                      >
+                        <span>Open new shell</span>
+                      </Button>
+                    ) : null}
                   </>
                 ) : isStandbyShell && isPending ? (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">

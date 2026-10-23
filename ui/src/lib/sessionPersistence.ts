@@ -412,6 +412,7 @@ export function deserializeWorkspaceState(
   workspaceId: string,
   persistedSession: PersistedWorkspaceSession,
   liveBackendSessionIds?: LiveSessionInventory,
+  options?: { hostBootMs?: number | null },
 ): WorkspaceState | null {
   const ws = persistedSession.workspaces?.[workspaceId];
   if (!ws) return null;
@@ -420,6 +421,9 @@ export function deserializeWorkspaceState(
   if ((workspaceId.startsWith("daemon:") || ws.target?.kind === "pairedDaemon") &&
     !hasValidProjectTarget({ ...ws, workspaceId })) return null;
   const isV2 = (persistedSession.version ?? 1) >= 2;
+  const hostBootMs = typeof options?.hostBootMs === "number" && Number.isFinite(options.hostBootMs)
+    ? options.hostBootMs
+    : null;
 
   const browserSettings = loadBrowserSettings();
   const restoreBrowser = browserSettings.restoreTabsOnLaunch;
@@ -541,6 +545,16 @@ export function deserializeWorkspaceState(
 
     const isSshSession = ws.target?.kind === "ssh" || workspaceId.startsWith("ssh:");
     const isPairedSession = ws.target?.kind === "pairedDaemon";
+    // daemonEpoch is the owning local daemon's start wall-clock (ms). A daemon that started
+    // before the host booted cannot have survived the reboot, nor can its PTYs: this is
+    // positive exit evidence, unlike inventory absence (INV-1).
+    const persistedEpochMs = persistedEpoch !== null && /^\d+$/.test(persistedEpoch.trim())
+      ? Number(persistedEpoch.trim())
+      : null;
+    const isPreBootLocal = !isSshSession && !isPairedSession && Boolean(persistedBackendSessionId) &&
+      hostBootMs !== null && persistedEpochMs !== null && Number.isSafeInteger(persistedEpochMs) &&
+      persistedEpochMs < hostBootMs &&
+      !(sess.spawnIntent && (!sess.spawnIntent.ready || sess.spawnIntent.cancelRequested));
     const persistedLifecycle: TerminalLifecycle = "working";
     let isReconnecting = false;
     let isBlockedConflict = false;
@@ -560,6 +574,12 @@ export function deserializeWorkspaceState(
       lastOutputSequence = daemonEpoch === persistedEpoch ? persistedSequence : null;
       lifecycle = "working";
       processState = "running";
+    } else if (isPreBootLocal) {
+      backendSessionId = null;
+      daemonEpoch = null;
+      lastOutputSequence = null;
+      lifecycle = "exited";
+      processState = "standby";
     } else if (!hasLiveSessionQuery || !isAuthoritative) {
       // When we have not heard an authoritative daemon answer (e.g. during launch / handover
       // reconciliation), a persisted session is assumed alive and treated as reconnecting.
@@ -661,7 +681,7 @@ export function deserializeWorkspaceState(
         }
       }
     }
-    if (!isSshSession && !isPairedSession && persistedBackendSessionId && lifecycle === "exited") {
+    if (!isSshSession && !isPairedSession && !isPreBootLocal && persistedBackendSessionId && lifecycle === "exited") {
       const live = liveSessionMap.get(persistedBackendSessionId);
       const epoch = live?.daemonEpoch ?? globalLiveEpoch;
       // Absence in a new epoch cannot establish death in a draining predecessor.
@@ -703,7 +723,7 @@ export function deserializeWorkspaceState(
       lifecycle,
       daemonEpoch,
       lastOutputSequence,
-      incarnation: sess.incarnation ?? null,
+      incarnation: isPreBootLocal ? null : sess.incarnation ?? null,
       attachTuple: sess.attachTuple,
       agentType,
       agentSessionId,
@@ -742,7 +762,7 @@ export function deserializeWorkspaceState(
           details: { delivery: "ambiguous" },
         },
       });
-    } else if (persistedIncarnation) {
+    } else if (persistedIncarnation && !isPreBootLocal) {
       sessions[localSessionId].incarnation = persistedIncarnation;
     }
     // Completed spawns restore as ordinary durable sessions. Only unfinished or

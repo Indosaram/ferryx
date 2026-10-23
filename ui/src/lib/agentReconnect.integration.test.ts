@@ -254,6 +254,67 @@ describe("agent reconnect cross-layer contracts", () => {
     vi.useRealTimers();
   });
 
+  it("auto-resumes an agent whose persisted daemon epoch predates the host boot instead of leaving it reconnecting", async () => {
+    vi.useFakeTimers();
+    saveGeneralSettings({ sessionRestorePolicy: "eager" });
+    resetAgentAutoResumeGuard();
+    clearAgentReconnectInflightForTests();
+    const hostBootMs = 1_792_794_761_000;
+    const persisted: PersistedWorkspaceSession = {
+      version: 2,
+      timestamp: hostBootMs - 60_000,
+      activeWorkspaceId: "ws-reboot",
+      workspaces: {
+        "ws-reboot": {
+          workspaceId: "ws-reboot",
+          repoRoot: "/repo",
+          worktrees: [{ path: "/repo", branch: "main", head: "123", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repo",
+          layout: {
+            splitMode: "none", primaryTabId: "tab-1", secondaryTabId: null, activeTabId: "tab-1",
+            tabs: [
+              { id: "tab-1", kind: "terminal", label: "OMO", terminal: { primarySessionId: "agent-1", paneTree: { type: "leaf", leafId: "leaf-1" }, sessionIdsByLeafId: { "leaf-1": "agent-1" }, activeLeafId: "leaf-1", expandedLeafId: null } },
+            ],
+          },
+          terminalSessions: {
+            "agent-1": {
+              localSessionId: "agent-1", backendSessionId: "backend-dead", daemonEpoch: String(hostBootMs - 3_600_000),
+              incarnation: "inc-dead", cwd: "/repo", worktreePath: "/repo", createdAt: 1, agentType: "omo",
+              providerSession: { key: "session_id", id: "omo-uuid-1" },
+            },
+          },
+        },
+      },
+    };
+
+    const restored = deserializeWorkspaceState("ws-reboot", persisted, { authoritative: true, daemonEpoch: String(hostBootMs + 50_000), sessions: [] }, { hostBootMs });
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+    expect(restored.sessions["agent-1"].backendSessionId).toBeNull();
+    expect(restored.sessions["agent-1"].remoteConnectionState).toBeUndefined();
+
+    let state = restored;
+    const spawn = vi.fn(async ({ startup }) => ({
+      sessionId: `backend-${startup.providerSession.id}`,
+      daemonEpoch: String(hostBootMs + 50_000),
+      session: { sessionId: `backend-${startup.providerSession.id}`, workspaceId: "ws-reboot", worktree: null, cwd: "/repo", cols: 80, rows: 24, running: true },
+    }));
+    const dispatch = (action: any) => { state = workspaceReducer(state, action); };
+    scheduleAgentAutoResume({
+      workspaceId: "ws-reboot",
+      state: restored,
+      recoveredFromHmr: false,
+      reconnect: (sessionId) => reconnectAgentSession(sessionId, { getSessions: () => state.sessions, dispatch, spawn, attach: vi.fn(async () => undefined) }),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ startup: expect.objectContaining({ providerSession: { key: "session_id", id: "omo-uuid-1" } }) }));
+    expect(state.sessions["agent-1"].backendSessionId).toBe("backend-omo-uuid-1");
+
+    resetGeneralSettings();
+    vi.useRealTimers();
+  });
+
   it("adopts live existing daemon session on AGENT_SESSION_CONFLICT without calling closeTerminal", async () => {
     const session = coldAgent();
     let state: WorkspaceState = {

@@ -21,6 +21,7 @@ pub mod clipboard_image;
 pub mod daemon;
 pub mod hub_runtime;
 pub mod dag;
+pub mod host_boot;
 pub mod ipc;
 #[cfg(target_os = "macos")]
 pub mod macos_file_drop;
@@ -1615,6 +1616,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_terminal_attach,
         cmd_terminal_history_snapshot,
         cmd_terminal_describe,
+        cmd_host_boot_time_ms,
         cmd_terminal_get_cwd,
         cmd_terminal_write,
         cmd_terminal_resize,

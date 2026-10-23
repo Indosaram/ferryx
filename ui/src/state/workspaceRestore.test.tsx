@@ -15,6 +15,7 @@ vi.mock("../lib/tauri", async (importOriginal) => {
 });
 
 import { createLayoutState } from "./layout";
+import { isStandbyBackendSessionId } from "../lib/sessionLifecycle";
 import {
   useWorkspaceStore,
   setLocalRecoveryPersistence,
@@ -99,6 +100,23 @@ describe("workspaceRestore coordinator", () => {
     await preloadWorkspaceSnapshots(["local", pairedId], async () => persisted, async () => { throw new Error("offline"); });
     expect(getWorkspaceSnapshot(pairedId)?.sessions["sess-1"]).toMatchObject({ backendSessionId: "paired-proxy", remoteConnectionState: "reconnecting", lastOutputSequence: null });
     expect(getWorkspaceSnapshot("local")?.layout.tabs[0].id).toBe("tab-1");
+    expect(tauriMocks.spawnTerminal).not.toHaveBeenCalled();
+  });
+
+  it("passes the injected host boot time through so pre-boot local sessions restore process-absent", async () => {
+    const bootMs = 1_800_000_000_000;
+    const persisted = persistedSingleTerminal("local-boot", "backend-pre-boot", String(bootMs - 1));
+    const hostBootTimeMsFn = vi.fn(async () => bootMs);
+    await preloadWorkspaceSnapshots(["local-boot"], async () => persisted, async () => null, hostBootTimeMsFn);
+    expect(hostBootTimeMsFn).toHaveBeenCalledTimes(1);
+    const session = getWorkspaceSnapshot("local-boot")?.sessions["sess-1"];
+    // Process-absent: null (eager policy) or the frontend-only standby identity (lazy policy),
+    // never the retained pre-boot backend id awaiting reconnect.
+    expect(session?.lifecycle).toBe("exited");
+    expect(session?.backendSessionId === null || isStandbyBackendSessionId(session?.backendSessionId ?? "")).toBe(true);
+    expect(session?.backendSessionId).not.toBe("backend-pre-boot");
+    expect(session?.daemonEpoch).toBeNull();
+    expect(session?.remoteConnectionState).toBeUndefined();
     expect(tauriMocks.spawnTerminal).not.toHaveBeenCalled();
   });
 

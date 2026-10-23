@@ -1903,3 +1903,104 @@ describe("sessionPersistenceKey", () => {
     expect(sessionPersistenceKey(exited)).not.toBe(sessionPersistenceKey(base));
   });
 });
+
+describe("host boot time as exit evidence for local sessions", () => {
+  const BOOT_MS = 1_800_000_000_000;
+  const PRE_BOOT = String(BOOT_MS - 60_000);
+  const POST_BOOT = String(BOOT_MS + 60_000);
+
+  function omoState(workspaceId: string, daemonEpoch: string | null | undefined): WorkspaceState {
+    const state = workspaceState();
+    state.sessions["sess-1"] = {
+      ...state.sessions["sess-1"],
+      workspaceId,
+      daemonEpoch: daemonEpoch as string | null | undefined,
+      incarnation: "life-1",
+      lastOutputSequence: "45",
+      agentType: "omo",
+      agentSessionId: "omo-sess-123",
+      providerSession: { key: "session_id", id: "omo-sess-123" },
+    };
+    return state;
+  }
+
+  function expectProcessAbsent(restored: WorkspaceState | null) {
+    const session = restored!.sessions["sess-1"];
+    expect(session).toMatchObject({
+      backendSessionId: null,
+      daemonEpoch: null,
+      lastOutputSequence: null,
+      lifecycle: "exited",
+      processState: "standby",
+      incarnation: null,
+      agentType: "omo",
+      agentSessionId: "omo-sess-123",
+      providerSession: { key: "session_id", id: "omo-sess-123" },
+    });
+    expect(session.remoteConnectionState).toBeUndefined();
+  }
+
+  function expectRetained(restored: WorkspaceState | null, epoch: string | null) {
+    expect(restored!.sessions["sess-1"]).toMatchObject({
+      backendSessionId: "backend-1",
+      daemonEpoch: epoch,
+      remoteConnectionState: "reconnecting",
+    });
+  }
+
+  it("treats a local session whose daemon started before boot as process-absent", () => {
+    const saved = serializeWorkspaceState("default", "/workspace/main", omoState("default", PRE_BOOT));
+    expectProcessAbsent(deserializeWorkspaceState("default", saved, [], { hostBootMs: BOOT_MS }));
+  });
+
+  it("wins regardless of inventory shape (null and authoritative empty)", () => {
+    const saved = serializeWorkspaceState("default", "/workspace/main", omoState("default", PRE_BOOT));
+    expectProcessAbsent(deserializeWorkspaceState("default", saved, null, { hostBootMs: BOOT_MS }));
+    expectProcessAbsent(deserializeWorkspaceState("default", saved, { complete: false, sessions: [] }, { hostBootMs: BOOT_MS }));
+    expectProcessAbsent(deserializeWorkspaceState("default", saved, { authoritative: true, daemonEpoch: POST_BOOT, sessions: [] }, { hostBootMs: BOOT_MS }));
+  });
+
+  it("is unchanged when the boot time is unknown", () => {
+    const saved = serializeWorkspaceState("default", "/workspace/main", omoState("default", PRE_BOOT));
+    const baseline = deserializeWorkspaceState("default", saved, null);
+    expectRetained(baseline, PRE_BOOT);
+    expect(deserializeWorkspaceState("default", saved, null, { hostBootMs: null })).toEqual(baseline);
+    expect(deserializeWorkspaceState("default", saved, null, { hostBootMs: Number.NaN })).toEqual(baseline);
+    expect(deserializeWorkspaceState("default", saved, null, {})).toEqual(baseline);
+  });
+
+  it("is unchanged when the daemon epoch is at or after boot", () => {
+    for (const epoch of [POST_BOOT, String(BOOT_MS)]) {
+      const saved = serializeWorkspaceState("default", "/workspace/main", omoState("default", epoch));
+      const restored = deserializeWorkspaceState("default", saved, null, { hostBootMs: BOOT_MS });
+      expectRetained(restored, epoch);
+      expect(restored).toEqual(deserializeWorkspaceState("default", saved, null));
+    }
+  });
+
+  it("is unchanged when the daemon epoch is missing or non-numeric", () => {
+    for (const epoch of [undefined, "not-a-number", "12abc"]) {
+      const saved = serializeWorkspaceState("default", "/workspace/main", omoState("default", epoch));
+      const restored = deserializeWorkspaceState("default", saved, null, { hostBootMs: BOOT_MS });
+      expect(restored!.sessions["sess-1"]).toMatchObject({ backendSessionId: "backend-1", remoteConnectionState: "reconnecting" });
+      expect(restored).toEqual(deserializeWorkspaceState("default", saved, null));
+    }
+  });
+
+  it("does not apply to ssh workspaces", () => {
+    const workspaceId = "ssh:host-a:/workspace/main";
+    const saved = serializeWorkspaceState(workspaceId, "/workspace/main", omoState(workspaceId, PRE_BOOT));
+    const restored = deserializeWorkspaceState(workspaceId, saved, [], { hostBootMs: BOOT_MS });
+    expectRetained(restored, PRE_BOOT);
+    expect(restored).toEqual(deserializeWorkspaceState(workspaceId, saved, []));
+  });
+
+  it("does not apply to paired daemon workspaces", () => {
+    const workspaceId = `daemon:${"a".repeat(64)}`;
+    const project = { target: { kind: "pairedDaemon" as const, hostId: "host-a" }, remoteWorkspaceId: "remote-root" };
+    const saved = serializeWorkspaceState(workspaceId, "/workspace/main", omoState(workspaceId, PRE_BOOT), null, project);
+    const restored = deserializeWorkspaceState(workspaceId, saved, [], { hostBootMs: BOOT_MS });
+    expectRetained(restored, PRE_BOOT);
+    expect(restored).toEqual(deserializeWorkspaceState(workspaceId, saved, []));
+  });
+});

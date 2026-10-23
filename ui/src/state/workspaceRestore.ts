@@ -9,7 +9,7 @@ import {
   registerSessionSnapshot,
   setSessionSleeping,
 } from "../lib/sessionLifecycle";
-import { isTauriRuntime, listTerminalSessions, loadSession } from "../lib/tauri";
+import { getHostBootTimeMs, isTauriRuntime, listTerminalSessions, loadSession } from "../lib/tauri";
 import { defaultTauriTransport } from "../lib/terminalTransport/tauriTransport";
 import type { PersistedWorkspaceSession } from "../lib/types";
 import { switchDebug } from "../lib/switchDebug";
@@ -98,6 +98,8 @@ export type UseWorkspaceRestoreOptions = {
       }
     | null
   >;
+  /** Host boot wall-clock (ms); pre-boot local daemon epochs prove process exit. */
+  hostBootTimeMsFn?: () => Promise<number | null>;
   enabled?: boolean;
 };
 
@@ -183,6 +185,7 @@ export async function preloadWorkspaceSnapshots(
   loadSessionFn: () => Promise<unknown> = loadSession,
   listLiveBackendSessionIdsFn: UseWorkspaceRestoreOptions["listLiveBackendSessionIdsFn"] =
     defaultListLiveBackendSessionIds,
+  hostBootTimeMsFn: () => Promise<number | null> = getHostBootTimeMs,
 ): Promise<void> {
   switchDebug("workspace.preload.start", { workspaceIds });
   const persistedSession = (await loadSessionFn()) as PersistedWorkspaceSession | null;
@@ -193,14 +196,15 @@ export async function preloadWorkspaceSnapshots(
     }
     return;
   }
-  let liveBackendIds;
-  try { liveBackendIds = await listLiveBackendSessionIdsFn(); }
-  catch (error) {
-    // Inventory failure is uncertainty, not loss of the persisted identity. Loading
-    // the persisted session itself still rejects before this boundary.
-    console.warn("Restore deferred daemon reconciliation:", error);
-    liveBackendIds = null;
-  }
+  const [liveBackendIds, hostBootMs] = await Promise.all([
+    Promise.resolve().then(() => listLiveBackendSessionIdsFn()).catch((error: unknown) => {
+      // Inventory failure is uncertainty, not loss of the persisted identity. Loading
+      // the persisted session itself still rejects before this boundary.
+      console.warn("Restore deferred daemon reconciliation:", error);
+      return null;
+    }),
+    Promise.resolve().then(() => hostBootTimeMsFn()).catch(() => null),
+  ]);
   switchDebug("workspace.preload.loaded", {
     workspaceIds,
     persistedWorkspaceIds: Object.keys(persistedSession.workspaces ?? {}),
@@ -216,6 +220,7 @@ export async function preloadWorkspaceSnapshots(
       workspaceId,
       persistedSession,
       liveBackendIds,
+      { hostBootMs },
     );
     if (!restoredState) {
       switchDebug("workspace.preload.missing", { workspaceId });
@@ -251,6 +256,7 @@ export function useWorkspaceRestore({
   reconcileLocalSessions,
   loadSessionFn = loadSession,
   listLiveBackendSessionIdsFn = defaultListLiveBackendSessionIds,
+  hostBootTimeMsFn = getHostBootTimeMs,
   enabled = true,
 }: UseWorkspaceRestoreOptions): WorkspaceRestoreStatus {
   const reconcileLocalSessionsRef = useRef(reconcileLocalSessions);
@@ -350,12 +356,13 @@ export function useWorkspaceRestore({
           return;
         }
 
-        let liveBackendIds;
-        try { liveBackendIds = await listLiveBackendSessionIdsFn(); }
-        catch (error) {
-          console.warn("Restore deferred daemon reconciliation:", error);
-          liveBackendIds = null;
-        }
+        const [liveBackendIds, hostBootMs] = await Promise.all([
+          Promise.resolve().then(() => listLiveBackendSessionIdsFn()).catch((error: unknown) => {
+            console.warn("Restore deferred daemon reconciliation:", error);
+            return null;
+          }),
+          Promise.resolve().then(() => hostBootTimeMsFn()).catch(() => null),
+        ]);
         if (cancelled) return;
         switchDebug("workspace.restore.loaded", {
           workspaceId,
@@ -367,7 +374,7 @@ export function useWorkspaceRestore({
               : typeof liveBackendIds,
         });
 
-        const restoredState = deserializeWorkspaceState(workspaceId, session, liveBackendIds);
+        const restoredState = deserializeWorkspaceState(workspaceId, session, liveBackendIds, { hostBootMs });
         if (cancelled) return;
 
         const hasRestoredTabs =
@@ -445,7 +452,7 @@ export function useWorkspaceRestore({
         setWorkspaceRestoreStatus(workspaceId, "idle");
       }
     };
-  }, [enabled, workspaceId, recoveredFromHmr, restoreWorkspace, loadSessionFn, listLiveBackendSessionIdsFn]);
+  }, [enabled, workspaceId, recoveredFromHmr, restoreWorkspace, loadSessionFn, listLiveBackendSessionIdsFn, hostBootTimeMsFn]);
 
   const status = useSyncExternalStore(subscribeRestoreStatus, () => getWorkspaceRestoreStatus(workspaceId));
 

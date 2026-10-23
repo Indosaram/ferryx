@@ -668,6 +668,39 @@ describe("TerminalPane native routing contract", () => {
     expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();
   });
 
+  it("offers Open new shell on a reconnecting local agent session without recovery state", async () => {
+    const onOpenNewShell = vi.fn().mockResolvedValue(undefined);
+    const reconnectingAgent: TerminalSession = {
+      ...createSession("session-agent-reconnecting"),
+      agentType: "omo",
+      remoteConnectionState: "reconnecting",
+    };
+    render(<TerminalPane session={reconnectingAgent} active={true} onOpenNewShell={onOpenNewShell} />);
+
+    expect(screen.getAllByText("Reconnecting session...").length).toBeGreaterThan(0);
+    const button = screen.getByRole("button", { name: "Open new shell" });
+    expect(button).not.toBeDisabled();
+    fireEvent.click(button);
+    await waitFor(() => expect(onOpenNewShell).toHaveBeenCalledWith("session-agent-reconnecting"));
+    expect(onOpenNewShell).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers Open new shell on a reconnecting local shell session without recovery state", async () => {
+    const onOpenNewShell = vi.fn().mockResolvedValue(undefined);
+    const reconnectingShell: TerminalSession = {
+      ...createSession("session-shell-reconnecting"),
+      remoteConnectionState: "reconnecting",
+    };
+    render(<TerminalPane session={reconnectingShell} active={true} onOpenNewShell={onOpenNewShell} />);
+
+    expect(screen.getByText("Reconnecting to session...")).toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "Open new shell" });
+    expect(button).not.toBeDisabled();
+    fireEvent.click(button);
+    await waitFor(() => expect(onOpenNewShell).toHaveBeenCalledWith("session-shell-reconnecting"));
+    expect(onOpenNewShell).toHaveBeenCalledTimes(1);
+  });
+
   it("offers Reconnect shell on an exited local session when backendSessionId is present and onReconnect is wired", () => {
     const onReconnect = vi.fn();
     const onOpenNewShell = vi.fn();

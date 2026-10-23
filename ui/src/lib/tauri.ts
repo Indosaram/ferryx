@@ -250,6 +250,17 @@ export async function getInitialProject() {
   return invokeCommand<RegisteredProject>("cmd_project_initial");
 }
 
+/** Host boot wall-clock in ms since UNIX epoch; null when unknown or outside the desktop shell. */
+export async function getHostBootTimeMs(): Promise<number | null> {
+  if (!isTauri()) return null;
+  try {
+    const value = await invokeCommand<number | null>("cmd_host_boot_time_ms");
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 export function describeRejection(reason: unknown): string {
   if (reason instanceof Error) return `${reason.name}: ${reason.message}`;
   try {
