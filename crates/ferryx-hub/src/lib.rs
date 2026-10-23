@@ -14,6 +14,7 @@ pub mod context;
 pub mod control;
 pub mod cron;
 pub mod cron_exec;
+pub mod dashboard_api;
 pub mod discord_surface;
 #[cfg(feature = "hub-discord")]
 pub mod discord_voice;

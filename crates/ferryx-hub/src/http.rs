@@ -11,6 +11,7 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
+use crate::dashboard_api as api;
 use crate::readiness::classify_disk_pressure;
 use crate::storage::now_rfc3339;
 
@@ -21,24 +22,35 @@ pub struct HttpState {
 }
 
 pub fn router(pool: SqlitePool, web_root: PathBuf) -> Router {
+    api::mark_started();
     let tracker = crate::tracker_linear::router().with_state(pool.clone());
     Router::new()
-        .route("/api/health", get(health))
+        .route("/api/health", get(api::health))
         .route("/api/ready", get(ready))
         .route("/api/readiness", get(ready))
-        .route("/api/status", get(status))
-        .route("/api/sessions", get(sessions))
-        .route("/api/cron/jobs", get(cron_jobs).post(create_cron))
+        .route("/api/status", get(api::status))
+        .route("/api/sessions", get(api::list_sessions))
+        .route("/api/sessions/{id}", get(api::get_session).delete(api::delete_session))
+        .route("/api/sessions/{id}/messages", get(api::list_messages))
+        .route("/api/sessions/{id}/chat", post(api::post_chat))
+        .route("/api/sessions/{id}/stop", post(api::stop_session))
+        .route("/api/sessions/{id}/ws", get(api::session_ws))
+        .route("/api/cron/jobs", get(api::list_cron_jobs).post(api::create_cron_job))
+        .route(
+            "/api/cron/jobs/{id}",
+            get(api::get_cron_job).put(api::update_cron_job).delete(api::delete_cron_job),
+        )
         .route("/api/cron/jobs/{id}/trigger", post(trigger_cron))
-        .route("/api/cron/jobs/{id}/pause", post(pause_cron))
-        .route("/api/cron/jobs/{id}/resume", post(resume_cron))
-        .route("/api/cron/runs", get(cron_runs))
-        .route("/api/approvals/pending", get(pending_approvals))
+        .route("/api/cron/jobs/{id}/pause", post(api::pause_cron_job))
+        .route("/api/cron/jobs/{id}/resume", post(api::resume_cron_job))
+        .route("/api/cron/runs", get(api::list_cron_runs))
+        .route("/api/approvals/pending", get(api::pending_approvals))
         .route("/api/approvals/{id}/resolve", post(resolve_approval))
-        .route("/api/approvals/allowlist", get(allowlist))
-        .route("/api/autonomy/precedents", get(precedents))
-        .route("/api/bots", get(bots))
-        .route("/api/memory", get(memory))
+        .route("/api/approvals/allowlist", get(api::allowlist))
+        .route("/api/autonomy/precedents", get(api::precedents))
+        .route("/api/bots", get(api::list_bots).post(api::create_bot))
+        .route("/api/bots/{id}", get(api::get_bot).put(api::update_bot).delete(api::delete_bot))
+        .route("/api/memory", get(api::memory))
         .route("/api/tools", get(tools))
         .route("/api/skills", get(skills))
         .route("/api/config", get(config))
@@ -46,20 +58,16 @@ pub fn router(pool: SqlitePool, web_root: PathBuf) -> Router {
         .route("/api/logs/ws", get(logs_ws))
         .nest("/api/tracker", tracker)
         .fallback(static_or_missing)
+        .layer(axum::middleware::from_fn(api::validate_host_and_origin))
         .with_state(HttpState { pool, web_root })
 }
 
 pub fn web_root() -> PathBuf {
-    if let Some(path) = crate::hub_env::var_os("FERRYX_HUB_WEB_ROOT") {
-        return PathBuf::from(path);
-    }
-    crate::hub_env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".omon").join("web"))
-        .unwrap_or_else(|| PathBuf::from(".omon/web"))
-}
-
-async fn health() -> Json<Value> {
-    Json(json!({"ok": true, "service": "ferryx-hub"}))
+    api::web_root_from(
+        crate::hub_env::var_os("FERRYX_HUB_WEB_ROOT"),
+        crate::hub_env::var_os("DASHBOARD_WEB_ROOT"),
+        crate::hub_env::var_os("HOME"),
+    )
 }
 
 async fn ready() -> Json<Value> {
@@ -71,90 +79,6 @@ async fn ready() -> Json<Value> {
         "ok": true,
         "disk": classify_disk_pressure(total, free)
     }))
-}
-
-async fn status(State(state): State<HttpState>) -> Response {
-    let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or(0);
-    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scheduled_jobs")
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or(0);
-    Json(json!({"ok": true, "sessions": sessions, "cronJobs": jobs})).into_response()
-}
-
-async fn sessions(State(state): State<HttpState>) -> Response {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT session_key, platform, channel_id FROM sessions ORDER BY updated_at DESC",
-    )
-    .fetch_all(&state.pool)
-    .await
-    .unwrap_or_default();
-    let external: Vec<(String, String)> =
-        sqlx::query_as("SELECT lane_key, goal FROM external_sessions ORDER BY lane_key")
-            .fetch_all(&state.pool)
-            .await
-            .unwrap_or_default();
-    Json(json!({
-        "sessions": rows.into_iter().map(|(key, platform, channel)| json!({"session_key": key, "platform": platform, "channel_id": channel})).collect::<Vec<_>>(),
-        "external": external.into_iter().map(|(lane, goal)| json!({"lane_key": lane, "goal": goal})).collect::<Vec<_>>()
-    }))
-    .into_response()
-}
-
-async fn cron_jobs(State(state): State<HttpState>) -> Response {
-    let rows: Vec<(String, String, i64, Option<String>)> = sqlx::query_as(
-        "SELECT id, expression, enabled, next_run_at FROM scheduled_jobs ORDER BY id",
-    )
-    .fetch_all(&state.pool)
-    .await
-    .unwrap_or_default();
-    Json(json!({
-        "jobs": rows.into_iter().map(|(id, expression, enabled, next)| json!({
-            "id": id, "expression": expression, "enabled": enabled == 1, "next_run_at": next
-        })).collect::<Vec<_>>()
-    }))
-    .into_response()
-}
-
-async fn create_cron(State(state): State<HttpState>, Json(body): Json<Value>) -> Response {
-    let id = body
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned();
-    let expression = body.get("expression").and_then(Value::as_str).unwrap_or("");
-    let payload = body.get("payload").cloned().unwrap_or_else(|| json!({}));
-    if id.is_empty() || expression.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "id and expression are required"})),
-        )
-            .into_response();
-    }
-    let payload_json = payload.to_string();
-    let delivery = match crate::schedule::map_payload(&payload_json) {
-        Ok((_, delivery)) => delivery,
-        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-    };
-    let inserted = sqlx::query(
-        "INSERT INTO scheduled_jobs(id, expression, payload_json, enabled, delivery_json) VALUES(?,?,?,1,?)",
-    )
-    .bind(&id)
-    .bind(expression)
-    .bind(&payload_json)
-    .bind(&delivery)
-    .execute(&state.pool)
-    .await;
-    match inserted {
-        Ok(_) => {
-            crate::schedule::poke_scheduler();
-            (StatusCode::CREATED, Json(json!({"id": id}))).into_response()
-        }
-        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-    }
 }
 
 async fn trigger_cron(State(state): State<HttpState>, UrlPath(id): UrlPath<String>) -> Response {
@@ -208,52 +132,6 @@ async fn trigger_cron(State(state): State<HttpState>, UrlPath(id): UrlPath<Strin
     Json(json!({"id": id, "next_run_at": now})).into_response()
 }
 
-async fn pause_cron(State(state): State<HttpState>, UrlPath(id): UrlPath<String>) -> Response {
-    set_enabled(&state.pool, &id, false).await
-}
-
-async fn resume_cron(State(state): State<HttpState>, UrlPath(id): UrlPath<String>) -> Response {
-    set_enabled(&state.pool, &id, true).await
-}
-
-async fn set_enabled(pool: &SqlitePool, id: &str, enabled: bool) -> Response {
-    let _ = sqlx::query("UPDATE scheduled_jobs SET enabled = ?, updated_at = ? WHERE id = ?")
-        .bind(i64::from(enabled))
-        .bind(now_rfc3339())
-        .bind(id)
-        .execute(pool)
-        .await;
-    Json(json!({"id": id, "enabled": enabled})).into_response()
-}
-
-async fn cron_runs(State(state): State<HttpState>) -> Response {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT id, job_id, status FROM cron_runs ORDER BY started_at DESC LIMIT 100",
-    )
-    .fetch_all(&state.pool)
-    .await
-    .unwrap_or_default();
-    Json(json!({
-        "runs": rows.into_iter().map(|(id, job, status)| json!({"id": id, "job_id": job, "status": status})).collect::<Vec<_>>()
-    }))
-    .into_response()
-}
-
-async fn pending_approvals(State(state): State<HttpState>) -> Response {
-    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
-        "SELECT id, signature, effect, summary FROM action_proposals WHERE state = 'pending' ORDER BY id",
-    )
-    .fetch_all(&state.pool)
-    .await
-    .unwrap_or_default();
-    Json(json!({
-        "approvals": rows.into_iter().map(|(id, signature, effect, summary)| json!({
-            "id": id, "signature": signature, "effect": effect, "summary": summary
-        })).collect::<Vec<_>>()
-    }))
-    .into_response()
-}
-
 async fn resolve_approval(
     State(state): State<HttpState>,
     UrlPath(id): UrlPath<i64>,
@@ -274,46 +152,6 @@ async fn resolve_approval(
     }
 }
 
-async fn allowlist(State(state): State<HttpState>) -> Response {
-    let rows: Vec<String> =
-        sqlx::query_scalar("SELECT pattern_key FROM approval_allowlist ORDER BY pattern_key")
-            .fetch_all(&state.pool)
-            .await
-            .unwrap_or_default();
-    Json(json!({"allowlist": rows})).into_response()
-}
-
-async fn precedents(State(state): State<HttpState>) -> Response {
-    let rows: Vec<(String, String, String)> =
-        sqlx::query_as("SELECT signature, scope, decision FROM action_precedents ORDER BY id")
-            .fetch_all(&state.pool)
-            .await
-            .unwrap_or_default();
-    Json(json!({
-        "precedents": rows.into_iter().map(|(signature, scope, decision)| json!({
-            "signature": signature, "scope": scope, "decision": decision
-        })).collect::<Vec<_>>()
-    }))
-    .into_response()
-}
-
-async fn bots(State(state): State<HttpState>) -> Response {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT bot_id, name, custom_settings_json FROM bot_profiles ORDER BY bot_id",
-    )
-    .fetch_all(&state.pool)
-    .await
-    .unwrap_or_default();
-    Json(json!({
-        "bots": rows.into_iter().map(|(id, name, settings)| json!({
-            "bot_id": id,
-            "name": name,
-            "settings": public_settings(&settings)
-        })).collect::<Vec<_>>()
-    }))
-    .into_response()
-}
-
 pub fn public_settings(text: &str) -> Value {
     let mut value: Value = serde_json::from_str(text).unwrap_or_else(|_| json!({}));
     if let Some(object) = value.as_object_mut() {
@@ -326,18 +164,6 @@ pub fn public_settings(text: &str) -> Value {
         });
     }
     value
-}
-
-async fn memory(State(state): State<HttpState>) -> Response {
-    let rows: Vec<(String, String)> =
-        sqlx::query_as("SELECT id, content FROM memories ORDER BY updated_at DESC LIMIT 100")
-            .fetch_all(&state.pool)
-            .await
-            .unwrap_or_default();
-    Json(json!({
-        "memories": rows.into_iter().map(|(id, content)| json!({"id": id, "content": content})).collect::<Vec<_>>()
-    }))
-    .into_response()
 }
 
 async fn tools() -> Json<Value> {
@@ -524,7 +350,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/health")
+                    .uri("http://127.0.0.1/api/health")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -535,7 +361,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/ready")
+                    .uri("http://127.0.0.1/api/ready")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -543,7 +369,7 @@ mod tests {
             .unwrap();
         assert_eq!(ready.status(), StatusCode::OK);
         let created = app.clone().oneshot(
-            Request::builder().method("POST").uri("/api/cron/jobs").header("content-type", "application/json")
+            Request::builder().method("POST").uri("http://127.0.0.1/api/cron/jobs").header("content-type", "application/json")
                 .body(Body::from(r#"{"id":"daily","expression":"every 15m","payload":{"deliver":"slack:C1"}}"#)).unwrap(),
         ).await.unwrap();
         assert_eq!(created.status(), StatusCode::CREATED);
@@ -551,7 +377,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/cron/jobs")
+                    .uri("http://127.0.0.1/api/cron/jobs")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -568,7 +394,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/approvals/pending")
+                    .uri("http://127.0.0.1/api/approvals/pending")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -584,7 +410,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/approvals/{id}/resolve"))
+                    .uri(format!("http://127.0.0.1/api/approvals/{id}/resolve"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"decision":"deny"}"#))
                     .unwrap(),
@@ -598,7 +424,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/bots")
+                    .uri("http://127.0.0.1/api/bots")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -615,7 +441,7 @@ mod tests {
         assert!(bots_body.contains("dark"));
         let page = app
             .clone()
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("http://127.0.0.1/").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(page.status(), StatusCode::OK);
@@ -626,7 +452,7 @@ mod tests {
         let tools = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/tools")
+                    .uri("http://127.0.0.1/api/tools")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -664,7 +490,7 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri(format!("/api/cron/jobs/{id}/trigger"))
+                        .uri(format!("http://127.0.0.1/api/cron/jobs/{id}/trigger"))
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -692,7 +518,7 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri(format!("/api/cron/jobs/{id}/trigger"))
+                        .uri(format!("http://127.0.0.1/api/cron/jobs/{id}/trigger"))
                         .body(Body::empty())
                         .unwrap(),
                 )
