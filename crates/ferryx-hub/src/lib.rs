@@ -38,6 +38,7 @@ pub mod memory;
 pub mod meta;
 pub mod owner_alert;
 pub mod readiness;
+pub mod retention;
 pub mod schedule;
 pub mod security;
 pub mod sessions;

@@ -806,6 +806,11 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             ferryx_hub::chat::slack_turn::serve_lane_events(config, pool, lead).await;
         }));
     }
+    tasks.push(tokio::spawn(ferryx_hub::owner_alert::serve_delivery(
+        launch.hub.pool.clone(),
+        launch.hub.owner_session().storage_key(),
+    )));
+    tasks.push(tokio::spawn(ferryx_hub::retention::serve(launch.hub.pool.clone())));
     for task in &tasks {
         HUB_TASKS.track(task);
     }
