@@ -274,7 +274,13 @@ where
             let cursor = cursor_of(&pool, source.as_str()).await?;
             match fetch(*source, cursor).await {
                 Ok(Some((items, next))) => {
-                    let _ = ingest_parsed(&pool, *source, items, &next, &judge, now).await?;
+                    // Items are committed before triage. A judge timeout or a missing judge
+                    // leaves them pending for the next pass; it must not end the inbox loop.
+                    if let Err(error) =
+                        ingest_parsed(&pool, *source, items, &next, &judge, now).await
+                    {
+                        tracing::warn!(source = source.as_str(), %error, "inbox items stored but not triaged");
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -476,7 +482,7 @@ pub enum WatcherExit {
 }
 
 pub async fn run_json(program: &str, args: &[String]) -> Result<Value> {
-    let output = tokio::process::Command::new(program)
+    let output = crate::child_env::command(program)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -803,6 +809,22 @@ pub async fn spawn(pool: SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// How long a watcher process must stay up before its health reads `running`.
+pub const WATCHER_RUNNING_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
+async fn write_watcher_health(pool: &SqlitePool, source: &str, status: &str, detail: Option<&str>) {
+    let _ = sqlx::query(
+        "INSERT INTO inbox_watcher_health(source, status, detail, updated_at) VALUES(?,?,?,?)
+         ON CONFLICT(source) DO UPDATE SET status = excluded.status, detail = excluded.detail, updated_at = excluded.updated_at",
+    )
+    .bind(source)
+    .bind(status)
+    .bind(detail)
+    .bind(crate::storage::now_rfc3339())
+    .execute(pool)
+    .await;
+}
+
 async fn supervise_command<F, Fut>(
     source: &str,
     pool: &SqlitePool,
@@ -818,13 +840,24 @@ async fn supervise_command<F, Fut>(
             return;
         }
         let started = std::time::Instant::now();
-        let outcome = tokio::select! {
-            exit = run_once() => exit,
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    return;
+        let run = run_once();
+        tokio::pin!(run);
+        let running_mark = tokio::time::sleep(WATCHER_RUNNING_AFTER);
+        tokio::pin!(running_mark);
+        let mut marked_running = false;
+        let outcome = loop {
+            tokio::select! {
+                exit = &mut run => break exit,
+                // A watcher that stays up past the mark started fine: replace a stale failure.
+                _ = &mut running_mark, if !marked_running => {
+                    marked_running = true;
+                    write_watcher_health(pool, source, "running", None).await;
                 }
-                continue;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                }
             }
         };
         let (run, tail) = match outcome {
@@ -850,16 +883,7 @@ async fn supervise_command<F, Fut>(
         } else {
             Some(tail.as_str())
         };
-        let _ = sqlx::query(
-            "INSERT INTO inbox_watcher_health(source, status, detail, updated_at) VALUES(?,?,?,?)
-             ON CONFLICT(source) DO UPDATE SET status = excluded.status, detail = excluded.detail, updated_at = excluded.updated_at",
-        )
-        .bind(source)
-        .bind(status)
-        .bind(detail)
-        .bind(crate::storage::now_rfc3339())
-        .execute(pool)
-        .await;
+        write_watcher_health(pool, source, status, detail).await;
         if !tail.is_empty() {
             tracing::warn!(%tail, "inbox watcher exited");
         }
@@ -913,7 +937,7 @@ async fn run_lines<F>(
 where
     F: FnMut(&str) -> Option<InboxWatcherEvent>,
 {
-    let mut child = match tokio::process::Command::new(program)
+    let mut child = match crate::child_env::command(program)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -992,6 +1016,57 @@ async fn tail_text(stderr: Option<tokio::process::ChildStderr>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_failing_judge_leaves_items_pending_and_the_loop_keeps_serving() {
+        let pool = crate::storage::memory().await.unwrap();
+        let (events, receiver) = watcher_channel();
+        events.try_send(InboxWatcherEvent::Mail).unwrap();
+        events
+            .try_send(InboxWatcherEvent::IMessage { rowid: Some(1) })
+            .unwrap();
+        drop(events);
+        let fetched = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = fetched.clone();
+        serve(
+            pool.clone(),
+            receiver,
+            Judge::forced("not-an-option"),
+            move |kind, _cursor| {
+                seen.lock().unwrap().push(kind);
+                let source = match kind {
+                    SourceKind::Mail => "mail",
+                    _ => "imessage",
+                };
+                async move {
+                    Ok(Some((
+                        vec![SourceItem {
+                            source,
+                            source_ref: format!("{source}-1"),
+                            snippet: "hello".into(),
+                            received_at: Utc::now(),
+                            thread_ref: None,
+                            author: None,
+                            title: None,
+                            link: None,
+                        }],
+                        String::new(),
+                    )))
+                }
+            },
+        )
+        .await
+        .expect("a judge failure must not end serve");
+        assert_eq!(
+            *fetched.lock().unwrap(),
+            [SourceKind::Mail, SourceKind::Imessage]
+        );
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbox_items")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 2);
+    }
 
     #[test]
     fn events_select_the_gateway_source_and_the_clis_match() {

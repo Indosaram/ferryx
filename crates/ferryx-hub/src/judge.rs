@@ -82,9 +82,8 @@ pub fn typesafe_from_env() -> BTreeMap<String, String> {
 }
 
 pub fn default_judge_bin() -> PathBuf {
-    let on_path = std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|dir| dir.join("typesafe-judge").is_file())
-    });
+    let on_path = std::env::split_paths(crate::child_env::child_path())
+        .any(|dir| dir.join("typesafe-judge").is_file());
     if !on_path {
         if let Some(home) = std::env::var_os("HOME") {
             let cargo = Path::new(&home).join(".cargo/bin/typesafe-judge");
@@ -168,7 +167,7 @@ impl Judge {
 
     async fn run_typesafe(&self, instructions: &str, options: &[&str]) -> Result<Choice> {
         let bin = default_judge_bin();
-        let mut command = tokio::process::Command::new(&bin);
+        let mut command = crate::child_env::command(&bin);
         command
             .arg("choice")
             .arg("-i")

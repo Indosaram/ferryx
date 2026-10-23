@@ -78,7 +78,7 @@ pub fn accepting_fallback(selected: &str) -> Choice {
 async fn git_output(cwd: &std::path::Path, args: &[&str]) -> Result<std::process::Output> {
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        tokio::process::Command::new("git")
+        crate::child_env::command("git")
             .arg("-C")
             .arg(cwd)
             .args(args)
@@ -214,7 +214,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
-            let status = std::process::Command::new("git")
+            let status = crate::child_env::std_command("git")
                 .arg("-C")
                 .arg(&root)
                 .args(args)

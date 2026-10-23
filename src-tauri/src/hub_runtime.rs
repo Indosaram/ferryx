@@ -266,6 +266,11 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     if std::env::var("FERRYX_HUB").ok().as_deref() == Some("off") {
         return Ok(());
     }
+    // launchd gives the daemon a minimal PATH; resolve the login-shell PATH once so inbox
+    // watchers, cron scripts, and every other hub child find imsg, zele, bun, and friends.
+    if let Err(error) = tokio::task::spawn_blocking(ferryx_hub::child_env::init).await {
+        tracing::warn!(%error, "hub child PATH was not resolved at start");
+    }
     let config = HubConfig::load().map_err(|error| error.to_string())?;
     #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
     let profiles = ferryx_hub::chat::router::ProfileRouter::new(config.profile_routes.clone());

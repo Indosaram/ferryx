@@ -172,7 +172,7 @@ pub async fn execute(
 async fn run_script(script: &str) -> Result<String> {
     let output = tokio::time::timeout(
         Duration::from_secs(30),
-        tokio::process::Command::new("sh")
+        crate::child_env::command("sh")
             .arg("-c")
             .arg(script)
             .output(),

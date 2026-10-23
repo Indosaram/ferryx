@@ -528,7 +528,7 @@ pub async fn run_native_job(
 async fn run_shell(script: &str) -> Result<String> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        tokio::process::Command::new("sh")
+        crate::child_env::command("sh")
             .arg("-c")
             .arg(script)
             .output(),
