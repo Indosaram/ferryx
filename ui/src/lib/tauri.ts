@@ -374,6 +374,14 @@ export async function listWorktrees(workspaceId: string) {
   return invokeCommand<Worktree[]>("cmd_worktree_list", { workspaceId });
 }
 
+/** A worktree Git records for the project that lives outside its folder (e.g. Orca's). */
+export type ExternalWorktree = Worktree & { createdByOrca: boolean };
+
+export async function listExternalWorktrees(workspaceId: string) {
+  if (!isTauri()) return [] as ExternalWorktree[];
+  return invokeCommand<ExternalWorktree[]>("cmd_worktree_list_external", { workspaceId });
+}
+
 export async function createWorktree(request: {
   workspaceId: string;
   worktree: WorktreeIdentity;

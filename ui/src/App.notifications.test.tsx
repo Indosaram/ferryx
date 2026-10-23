@@ -111,6 +111,7 @@ const native = {
 const { noteObservationInteraction } = await import("./lib/notificationCenter/activityRecording");
 
 vi.mock("./lib/tauri", () => ({
+  listExternalWorktrees: vi.fn(async () => []),
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
   listenDagWatchStatus: vi.fn(async () => () => undefined),
   // The notification coordinator re-consults the authoritative OS permission status before it

@@ -356,6 +356,84 @@ prunable reason gitdir gone
     }
 
     #[test]
+    fn external_worktrees_lists_only_live_checkouts_outside_the_root() {
+        let (_temp, manager) = setup_test_repo();
+        let inside = manager.worktree_path_for("ws-in", "inside").unwrap();
+        manager
+            .create_worktree(CreateWorktreeOptions::new("ws-in", "inside", &inside))
+            .unwrap();
+
+        let elsewhere = TempDir::new().unwrap();
+        let orca = elsewhere
+            .path()
+            .join("orca")
+            .join("workspaces")
+            .join("lectures")
+            .join("feat");
+        fs::create_dir_all(orca.parent().unwrap()).unwrap();
+        let plain = elsewhere.path().join("plain-checkout");
+        let gone = elsewhere.path().join("gone");
+        for (path, branch) in [(&orca, "orca-feat"), (&plain, "plain"), (&gone, "gone")] {
+            git::run_git(
+                manager.repo_root(),
+                &["worktree", "add", "-b", branch, path.to_str().unwrap()],
+            )
+            .unwrap();
+        }
+        // A removed checkout is prunable in Git and must not be offered for import.
+        fs::remove_dir_all(&gone).unwrap();
+
+        let mut external = manager.list_external_worktrees().unwrap();
+        external.sort_by(|a, b| a.worktree.path.cmp(&b.worktree.path));
+        let paths: Vec<_> = external.iter().map(|e| e.worktree.path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                fs::canonicalize(&orca).unwrap(),
+                fs::canonicalize(&plain).unwrap()
+            ]
+        );
+        assert!(external[0].created_by_orca);
+        assert_eq!(external[0].worktree.branch_short_name(), Some("orca-feat"));
+        assert!(!external[1].created_by_orca);
+
+        // The in-root listing is unchanged: outside checkouts stay out until imported.
+        let listed: Vec<_> = manager
+            .list_worktrees()
+            .unwrap()
+            .into_iter()
+            .map(|wt| wt.path)
+            .collect();
+        assert_eq!(listed.len(), 2);
+        assert!(!listed.iter().any(|path| paths.contains(path)));
+
+        // Importing one is plain project registration of its own folder.
+        let imported = WorktreeManager::try_new(&external[0].worktree.path).unwrap();
+        assert_eq!(imported.repo_root(), external[0].worktree.path);
+    }
+
+    #[test]
+    fn external_worktrees_are_empty_for_plain_folders() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = WorktreeManager::try_new(temp_dir.path()).unwrap();
+        assert!(manager.list_external_worktrees().unwrap().is_empty());
+    }
+
+    #[test]
+    fn orca_workspace_path_detection_matches_components() {
+        assert!(is_orca_workspace_path(std::path::Path::new(
+            "/Users/me/orca/workspaces/lectures/feat"
+        )));
+        assert!(!is_orca_workspace_path(std::path::Path::new(
+            "/Users/me/orca-workspaces/feat"
+        )));
+        assert!(!is_orca_workspace_path(std::path::Path::new(
+            "/Users/me/orca/other/workspaces"
+        )));
+        assert!(!is_orca_workspace_path(std::path::Path::new("/srv/repo")));
+    }
+
+    #[test]
     fn worktree_manager_rejects_filesystem_root() {
         #[cfg(unix)]
         let root = std::path::Path::new("/");

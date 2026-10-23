@@ -93,6 +93,8 @@ export const NOTIFICATION_PERMISSION_HINT_STORAGE_KEY = "ferryx.hints.notificati
 export const FILE_PREVIEW_WORD_WRAP_STORAGE_KEY = "ferryx.filePreview.wordWrap";
 export const FILE_PREVIEW_MARKDOWN_FONT_SIZE_STORAGE_KEY = "ferryx.filePreview.markdownFontSize";
 export const FILE_PREVIEW_MARKDOWN_WIDE_STORAGE_KEY = "ferryx.filePreview.markdownWide";
+/** Outside-project worktree paths the user already answered in the import prompt. */
+export const EXTERNAL_WORKTREE_PROMPTED_STORAGE_KEY = "ferryx.worktrees.externalPrompted";
 
 
 

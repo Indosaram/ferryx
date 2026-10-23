@@ -3,8 +3,8 @@ use crate::worktree::git::{
     git_worktree_list, git_worktree_prune, git_worktree_remove, inspect_worktree, run_git,
 };
 use crate::worktree::model::{
-    BranchDeletionPreview, CreateWorktreeOptions, DirtyState, OrcaWorktreeInfo, Worktree,
-    WorktreeError,
+    BranchDeletionPreview, CreateWorktreeOptions, DirtyState, ExternalWorktree, OrcaWorktreeInfo,
+    Worktree, WorktreeError,
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -543,6 +543,35 @@ impl WorktreeManager {
                 let canonical = self.canonical_allowed_path(&wt.path).ok()?;
                 wt.path = canonical;
                 Some(wt)
+            })
+            .collect())
+    }
+
+    /// Live worktrees Git records for this repository whose checkout sits outside the root jail,
+    /// such as ones Orca creates under `~/orca/workspaces`. They never join this workspace; the UI
+    /// asks the user whether to import each as its own project. Only `git worktree list` is read;
+    /// other tools' metadata files are never opened.
+    pub fn list_external_worktrees(&self) -> Result<Vec<ExternalWorktree>, WorktreeError> {
+        if !self.git_backed {
+            return Ok(Vec::new());
+        }
+        let worktrees = git_worktree_list(&self.repo_root)?;
+        Ok(worktrees
+            .into_iter()
+            .filter(|wt| !wt.bare && wt.prunable.is_none())
+            .filter_map(|mut wt| {
+                let canonical = fs::canonicalize(&wt.path).ok()?;
+                if !canonical.is_dir() {
+                    return None;
+                }
+                if self
+                    .ensure_canonical_inside_root(&wt.path, canonical.clone())
+                    .is_ok()
+                {
+                    return None;
+                }
+                wt.path = canonical;
+                Some(ExternalWorktree::new(wt))
             })
             .collect())
     }

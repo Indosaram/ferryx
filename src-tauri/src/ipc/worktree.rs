@@ -4,7 +4,8 @@ use crate::daemon::{
 };
 use crate::ipc::{run_blocking, IpcError};
 use crate::worktree::{
-    BranchDeletionPreview, DirtyState, WorkspaceRegistry, Worktree, WorktreeIdentity,
+    BranchDeletionPreview, DirtyState, ExternalWorktree, WorkspaceRegistry, Worktree,
+    WorktreeIdentity,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -119,6 +120,25 @@ pub async fn cmd_worktree_list<R: Runtime>(
             return Ok(Vec::new());
         }
         manager.list_worktrees().map_err(IpcError::from)
+    })
+    .await
+}
+
+/// Lists the registered local repository's worktrees that Git knows about but that live outside
+/// the project folder (for example Orca's). The UI asks before importing any of them; remote and
+/// paired projects have no local Git state to inspect and report none.
+#[tauri::command]
+pub async fn cmd_worktree_list_external(
+    registry: State<'_, WorkspaceRegistry>,
+    workspace_id: String,
+) -> Result<Vec<ExternalWorktree>, IpcError> {
+    if crate::ssh::projects::is_remote(&workspace_id) || workspace_id.starts_with("daemon:") {
+        return Ok(Vec::new());
+    }
+    let registry = (*registry).clone();
+    run_blocking(move || {
+        let manager = registry.manager(&workspace_id).map_err(IpcError::from)?;
+        manager.list_external_worktrees().map_err(IpcError::from)
     })
     .await
 }

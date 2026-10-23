@@ -8,6 +8,8 @@ import { CommandPalette } from "./components/CommandPalette";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
 import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./components/ProjectDialogs";
+import { ExternalWorktreeImportDialog } from "./components/ExternalWorktreeImportDialog";
+import { useExternalWorktreePrompt } from "./state/useExternalWorktreePrompt";
 import { Sidebar, type SidebarAttention } from "./components/Sidebar";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
@@ -2179,6 +2181,19 @@ function WorkspaceApp({
     setWorktreeStatuses({});
   }, []);
 
+  const externalWorktreePrompt = useExternalWorktreePrompt(activeProject, registeredProjectId, projects);
+  const handleImportedExternalWorktrees = useCallback((imported: RegisteredProject[]) => {
+    setProjects((current) => {
+      const next = [
+        ...current.filter((candidate) => !imported.some((project) => project.workspaceId === candidate.workspaceId)),
+        ...imported,
+      ];
+      projectsRef.current = next;
+      persistProjects(next);
+      return next;
+    });
+  }, []);
+
   const handleConfirmRemoveProject = useCallback(async () => {
     if (!pendingProjectRemove) return;
     const target = pendingProjectRemove;
@@ -4070,6 +4085,16 @@ function WorkspaceApp({
             }}
           />
         </Suspense>
+      ) : null}
+      {externalWorktreePrompt.prompt && !activeRemoteHost ? (
+        <ExternalWorktreeImportDialog
+          key={externalWorktreePrompt.prompt.workspaceId}
+          worktrees={externalWorktreePrompt.prompt.worktrees}
+          projects={projects}
+          onImported={handleImportedExternalWorktrees}
+          onLater={externalWorktreePrompt.later}
+          onClose={externalWorktreePrompt.close}
+        />
       ) : null}
       {isAddProjectOpen ? (
         <AddProjectDialog

@@ -38,6 +38,42 @@ impl Worktree {
     }
 }
 
+/// A linked worktree of a registered repository that lives outside its root jail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalWorktree {
+    #[serde(flatten)]
+    pub worktree: Worktree,
+    /// The checkout sits under an Orca workspaces directory (`.../orca/workspaces/...`). Judged
+    /// from the path alone; Orca's own data files are never read.
+    pub created_by_orca: bool,
+}
+
+impl ExternalWorktree {
+    pub fn new(worktree: Worktree) -> Self {
+        let created_by_orca = is_orca_workspace_path(&worktree.path);
+        Self {
+            worktree,
+            created_by_orca,
+        }
+    }
+}
+
+/// True when `path` contains the consecutive components `orca/workspaces`, the directory Orca
+/// creates its worktrees in. Component matching keeps this correct for Windows separators too.
+pub fn is_orca_workspace_path(path: &std::path::Path) -> bool {
+    let names: Vec<_> = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    names
+        .windows(2)
+        .any(|pair| pair[0] == "orca" && pair[1] == "workspaces")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrcaWorktreeInfo {

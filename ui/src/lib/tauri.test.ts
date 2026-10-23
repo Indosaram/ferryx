@@ -36,6 +36,7 @@ import {
   onNewTerminalTabMenu,
   onCloseTabMenu,
   listWorktrees,
+  listExternalWorktrees,
   startWorktreeDiskScan,
   cancelWorktreeDiskScan,
   getWorktreeDiskScanResult,
@@ -346,6 +347,14 @@ describe("Tauri IPC wrapper contract", () => {
     await listWorktrees("workspace-main");
 
     expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_list", { workspaceId: "workspace-main" });
+  });
+
+  it("lists outside-project worktrees through the external listing command", async () => {
+    core.invoke.mockResolvedValue([]);
+
+    await listExternalWorktrees("workspace-main");
+
+    expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_list_external", { workspaceId: "workspace-main" });
   });
 
   it("previews a GitHub issue through a registered workspace identity", async () => {
