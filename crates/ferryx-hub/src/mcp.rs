@@ -205,12 +205,42 @@ pub(crate) fn tool_list() -> Vec<Value> {
         .collect()
 }
 
+/// The code a supervisor input tool returns when a person paused the lane that owns the pane.
+pub const LANE_PAUSED: &str = "LANE_PAUSED";
+
+/// Pause is the person's decision: the supervisor still reads the pane but types nothing into it.
+/// Only this machine's panes belong to lanes, so a paired host's pane is never refused here.
+async fn refuse_paused_pane(
+    context: &McpContext,
+    host: Option<&str>,
+    args: &Value,
+) -> std::result::Result<(), String> {
+    if host.is_some_and(|host| host != "local") {
+        return Ok(());
+    }
+    let Some(session_id) = args.get("sessionId").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let paused = crate::lanes::supervised::session_paused(&context.pool, session_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if paused {
+        return Err(format!(
+            "{LANE_PAUSED}: the lane driving {session_id} is paused; resume it before typing here"
+        ));
+    }
+    Ok(())
+}
+
 async fn call_tool(
     context: &McpContext,
     name: &str,
     args: &Value,
 ) -> std::result::Result<Value, String> {
     let host = args.get("host").and_then(Value::as_str);
+    if matches!(name, "agents.send" | "agents.answer" | "agents.stop") {
+        refuse_paused_pane(context, host, args).await?;
+    }
     match name {
         "agents.list" => {
             if let Some(hosts) = args.get("hosts").and_then(Value::as_array) {
@@ -500,6 +530,40 @@ mod tests {
     use super::*;
     use crate::agent_control::{FixedLauncher, RecordingControl};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn a_paused_lane_refuses_supervisor_input_into_its_pane() {
+        use crate::lanes::state::{insert_lane, set_pane, transition, LaneStatus};
+        let control = Arc::new(RecordingControl::default());
+        let pool = crate::storage::memory().await.unwrap();
+        insert_lane(&pool, "ledger", "Ledger", "lead", "/repo", "file marker")
+            .await
+            .unwrap();
+        transition(&pool, "ledger", LaneStatus::Working, Some("launched"))
+            .await
+            .unwrap();
+        set_pane(&pool, "ledger", "pane-1").await.unwrap();
+        crate::lanes::pause::pause(&pool, "ledger", "desktop")
+            .await
+            .unwrap();
+        let context = McpContext {
+            control: control.clone(),
+            launcher: Arc::new(FixedLauncher::new("pane")),
+            pool,
+            meta_session_id: "meta".into(),
+            tracker_token: "t".into(),
+        };
+        let send = |session: &str| {
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agents.send",
+                "arguments":{"sessionId": session, "text":"go","requestId":"r1"}}})
+        };
+        let refused = dispatch(&context, &send("pane-1")).await;
+        assert!(refused.to_string().contains(LANE_PAUSED), "{refused}");
+        assert!(control.ops.lock().unwrap().is_empty(), "nothing reached the pane");
+        let sent = dispatch(&context, &send("pane-2")).await;
+        assert!(!sent.to_string().contains(LANE_PAUSED), "{sent}");
+        assert_eq!(control.ops.lock().unwrap().len(), 1);
+    }
 
     #[tokio::test]
     async fn tools_call_agents_list_and_chat_reply() {

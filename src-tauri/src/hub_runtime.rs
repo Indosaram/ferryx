@@ -387,6 +387,76 @@ fn hub_control(op: ferryx_hub::control::ControlOp, check: bool) -> i32 {
 /// listener. A handover commit retires it from a synchronous callback.
 static HUB_TASKS: ferryx_hub::lifecycle::TaskRegistry = ferryx_hub::lifecycle::TaskRegistry::new();
 
+/// The opened hub and its running generation, for the desktop's Supervisor view.
+type SupervisorView = (Arc<Hub>, Arc<tokio::sync::Mutex<Option<Generation>>>);
+
+/// The opened hub and its running generation, for the desktop's Supervisor view.
+static SUPERVISOR_VIEW: std::sync::OnceLock<SupervisorView> = std::sync::OnceLock::new();
+
+/// Supervisor input lines the snapshot carries, newest first.
+const SUPERVISOR_ACTIONS_MAX: usize = 50;
+
+/// What the desktop shows about supervision: whether the hub runs, the lanes it drives, the
+/// panes it watches, and the recent input it typed (or was refused). Only owner-socket input
+/// counts: the hub and agents on this machine's control socket. A phone or browser device
+/// typing over the gateway is a person, not the supervisor.
+pub async fn supervisor_snapshot(server: &DaemonServer) -> Value {
+    let actions: Vec<_> = server
+        .remote_state()
+        .agent_control_audit
+        .recent()
+        .into_iter()
+        .rev()
+        .filter(|record| {
+            record.is_input()
+                && record.device_id == "owner"
+                && !relayed_from_a_person(record.request_id.as_deref())
+        })
+        .take(SUPERVISOR_ACTIONS_MAX)
+        .collect();
+    let Some((hub, running)) = SUPERVISOR_VIEW.get() else {
+        return json!({ "hub": { "available": false, "running": false }, "lanes": [], "watched": [], "actions": actions });
+    };
+    // A daemon that handed the hub to its successor no longer drives anything.
+    let running = running.lock().await.is_some() && !HUB_TASKS.is_retired();
+    let lanes = ferryx_hub::lanes::supervised::supervised_lanes(&hub.pool).await;
+    let watched = ferryx_hub::lanes::supervised::watched_local_sessions(&hub.pool).await;
+    let error = lanes.as_ref().err().or(watched.as_ref().err()).map(ToString::to_string);
+    json!({
+        "hub": { "available": true, "running": running, "error": error },
+        "lanes": lanes.unwrap_or_default(),
+        "watched": watched.unwrap_or_default(),
+        "actions": actions,
+    })
+}
+
+/// The hub also relays a person's own words into panes over the owner socket: a Slack approval
+/// click, a chat message, a reply in a lane thread. Those are the person typing, not the supervisor.
+fn relayed_from_a_person(request_id: Option<&str>) -> bool {
+    let Some(id) = request_id else { return false };
+    id.starts_with("slack-approval:")
+        || id.starts_with("chat-")
+        || (id.starts_with("lane-") && id.contains("-owner-"))
+}
+
+/// A person pauses or resumes one lane from the desktop. Returns whether the lane is now paused.
+pub async fn set_lane_paused(server: &DaemonServer, lane_key: &str, paused: bool) -> Result<bool, String> {
+    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+        return Err("the supervisor hub is not open in this daemon".into());
+    };
+    let changed = if paused {
+        ferryx_hub::lanes::pause::pause(&hub.pool, lane_key, "desktop").await
+    } else {
+        ferryx_hub::lanes::pause::resume(&hub.pool, lane_key).await
+    };
+    changed.map_err(|error| error.to_string())?;
+    server.remote_state().emit_desktop_event(
+        crate::remote::server::agent_control_service::SUPERVISOR_CHANGED_EVENT,
+        json!({ "laneKey": lane_key }),
+    );
+    Ok(paused)
+}
+
 /// Handover commit: this daemon keeps serving retained sessions but no longer owns the hub.
 /// Slack, the cron scheduler and sockets, `:9119`, the watchers and the control listener end
 /// here, before the successor's hub starts, so there is never a second Socket Mode connection
@@ -468,6 +538,7 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
         Some(spawn_generation(&launch).await)
     };
     let running = Arc::new(tokio::sync::Mutex::new(generation));
+    let _ = SUPERVISOR_VIEW.set((Arc::clone(&launch.hub), Arc::clone(&running)));
     serve_control(running, launch);
     if stopped {
         tracing::info!("ferryx hub stayed stopped until hub start (or FERRYX_HUB=on)");
@@ -1116,6 +1187,14 @@ async fn on_agent_event(
     if let (Some(prompt_id), Some(revision)) = (observation.prompt_id.clone(), observation.screen_revision.clone()) {
         if answered.insert(prompt_id.clone()) {
             match auto_answer(&reading, &suggested) {
+                // A person paused this pane's lane: the supervisor keeps watching but types
+                // nothing. Escalations still reach the owner.
+                AutoDecision::Answer { .. }
+                    if ferryx_hub::lanes::supervised::session_paused(&hub.pool, &session_id).await? =>
+                {
+                    // Forget the prompt so a resume can still answer it.
+                    answered.remove(&prompt_id);
+                }
                 AutoDecision::Answer { .. } => {
                     let _ = control
                         .execute(
@@ -1192,6 +1271,16 @@ pub fn run_mcp() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_persons_relayed_words_are_not_supervisor_input() {
+        assert!(relayed_from_a_person(Some("slack-approval:local:pane-1:rev-42:prompt-9")));
+        assert!(relayed_from_a_person(Some("chat-lane:ledger-1700")));
+        assert!(relayed_from_a_person(Some("lane-ledger-owner-msg7")));
+        assert!(!relayed_from_a_person(Some("hub-auto-prompt-3")));
+        assert!(!relayed_from_a_person(Some("lane-ledger-drive-2")));
+        assert!(!relayed_from_a_person(None));
+    }
 
     #[test]
     fn a_failed_control_reply_exits_nonzero() {

@@ -6793,6 +6793,19 @@ impl DaemonServer {
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
                     enabled: self.agent_integration.enabled(),
                 },
+                Ok(DaemonRequest::SupervisorSnapshot) => DaemonResponse::SupervisorSnapshotOk {
+                    snapshot: crate::hub_runtime::supervisor_snapshot(&self).await,
+                },
+                Ok(DaemonRequest::SupervisorSetPaused { lane_key, paused }) => {
+                    match crate::hub_runtime::set_lane_paused(&self, &lane_key, paused).await {
+                        Ok(paused) => DaemonResponse::SupervisorSetPausedOk { paused },
+                        Err(message) => DaemonResponse::Error {
+                            message,
+                            code: Some("SUPERVISOR_UNAVAILABLE".into()),
+                            details: None,
+                        },
+                    }
+                }
                 Ok(DaemonRequest::SetAgentIntegration { enabled }) => {
                     let setting = Arc::clone(&self.agent_integration);
                     let failure = match tokio::task::spawn_blocking(move || setting.set(enabled)).await {
