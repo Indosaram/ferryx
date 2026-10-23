@@ -630,6 +630,12 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                 "slack turn path is armed (omo app-server)"
             );
             ferryx_hub::chat::slack_turn::install(config);
+            // omo's startup sweep: claims a restart left pending are never re-run.
+            match ferryx_hub::chat::report_claims::recover_stale(&launch.hub.pool).await {
+                Ok(0) => {}
+                Ok(swept) => tracing::info!(swept, "stale report claims marked unmeasurable"),
+                Err(error) => tracing::warn!(%error, "stale report claims were not swept"),
+            }
             // omo's missed-message backfill: answer what arrived while the hub was down, then
             // reconcile every few minutes. It reads with the bot token; Socket Mode is untouched.
             if let Some(config) = ferryx_hub::chat::slack_turn::installed() {

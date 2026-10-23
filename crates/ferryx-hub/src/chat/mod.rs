@@ -9,6 +9,8 @@ pub mod mrkdwn;
 #[cfg(all(test, feature = "hub-slack"))]
 mod omo_parity_e2e;
 pub mod reply;
+#[cfg(feature = "hub-slack")]
+pub mod report_claims;
 pub mod router;
 pub mod session;
 pub mod slack;

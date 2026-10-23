@@ -537,9 +537,39 @@ pub async fn run_session_turn(
     let (progress, mut interim) = tokio::sync::mpsc::unbounded_channel::<String>();
     let relay_pool = pool.clone();
     let relay_turn = turn.clone();
+    // omo's report claims: `[[measure ...]]` markers never reach the user; a Slack reply's
+    // claims are re-measured and corrected in its thread.
+    let claim_target = turn
+        .reply_channel
+        .clone()
+        .map(|channel| super::report_claims::Target {
+            session_key: storage_key.clone(),
+            channel,
+            thread: turn.reply_thread.clone(),
+            cwd: state
+                .metadata
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(std::path::PathBuf::from)
+                .or_else(|| crate::hub_env::var_os("HOME").map(std::path::PathBuf::from))
+                .unwrap_or_default(),
+        });
+    let claim_delay = super::report_claims::delay();
+    let relay_target = claim_target.clone();
     let relay = super::slack::spawn_carrying_test_api(async move {
         while let Some(text) = interim.recv().await {
-            emit(&relay_pool, &relay_turn, &text).await;
+            let (text, claims) = if super::report_claims::enabled() {
+                super::report_claims::strip_interim(&text)
+            } else {
+                (text, Vec::new())
+            };
+            if !text.trim().is_empty() {
+                emit(&relay_pool, &relay_turn, &text).await;
+            }
+            if let Some(target) = &relay_target {
+                super::report_claims::record_and_schedule(&relay_pool, target, claims, claim_delay)
+                    .await;
+            }
         }
     });
     tracing::info!(session = %storage_key, resume = request.thread_id.is_some(), "session turn started on omo app-server");
@@ -645,6 +675,13 @@ pub async fn run_session_turn(
             }
             match omo_client::final_reply(&outcome) {
                 Ok(reply) => {
+                    let (reply, claims) = match reply {
+                        Some(text) => {
+                            let (clean, claims) = super::report_claims::strip_reply(&text);
+                            (Some(clean).filter(|clean| !clean.trim().is_empty()), claims)
+                        }
+                        None => (None, Vec::new()),
+                    };
                     if let Some(text) = &reply {
                         emit(pool, &turn, text).await;
                         if turn.reply_channel.is_some() {
@@ -655,6 +692,15 @@ pub async fn run_session_turn(
                                 tracing::warn!(%error, "session reply was not stored");
                             }
                         }
+                    }
+                    if let Some(target) = &claim_target {
+                        super::report_claims::record_and_schedule(
+                            pool,
+                            target,
+                            claims,
+                            claim_delay,
+                        )
+                        .await;
                     }
                     status(&turn, "white_check_mark", true).await;
                     tracing::info!(

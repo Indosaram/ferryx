@@ -689,3 +689,43 @@ async fn e2e_a_long_owner_turn_gets_a_status_message_that_ends_done() {
     );
     assert_eq!(status_updates.last().unwrap()["text"], "완료 · 0분");
 }
+
+#[tokio::test]
+async fn e2e_a_reply_claim_is_stripped_then_remeasured_and_corrected() {
+    let marker = r#"빌드 결과는 3줄이에요. [[measure ["echo","4"] expect~"^3$"]]"#;
+    let (omo_url, _) = serve(script(&[marker], false)).await;
+    let config = config(omo_url);
+    let pool = crate::storage::memory().await.unwrap();
+    let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
+    let reply = with_test_api(base, "xoxb-test".into(), async {
+        super::report_claims::DELAY_OVERRIDE
+            .scope(std::time::Duration::from_millis(50), async {
+                let reply = run_session_turn(&config, &pool, slack_turn("빌드 어때?")).await;
+                for _ in 0..200 {
+                    if calls_of(&calls, "chat.postMessage").len() >= 2 {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                reply
+            })
+            .await
+    })
+    .await;
+    assert_eq!(reply.as_deref(), Some("빌드 결과는 3줄이에요."));
+    let posts = calls_of(&calls, "chat.postMessage");
+    assert_eq!(posts.len(), 2, "{posts:?}");
+    assert_eq!(posts[0]["text"], "빌드 결과는 3줄이에요.");
+    assert_eq!(posts[1]["thread_ts"], "100.1");
+    assert_eq!(
+        posts[1]["text"],
+        "정정: 빌드 결과는 3줄이에요. -> 실제 측정값: 4"
+    );
+    let stored: String = sqlx::query_scalar(
+        "SELECT content FROM messages WHERE role = 'assistant' ORDER BY rowid DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("[[measure"), "{stored}");
+}
