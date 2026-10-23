@@ -342,6 +342,8 @@ fn owner_failure_reason(error: &str) -> &'static str {
     .any(|needle| lower.contains(needle))
     {
         "모델이 응답하지 않았어요"
+    } else if lower.contains("timed out waiting for the turn to finish") {
+        "작업이 턴 시간 제한을 넘겨 중단됐어요"
     } else if ["quota", "429", "rate limit"]
         .iter()
         .any(|needle| lower.contains(needle))
@@ -1404,9 +1406,7 @@ mod tests {
 
     #[test]
     fn only_requests_that_would_start_the_retired_gateway_are_recognized() {
-        let frame = |command: &str| {
-            json!({"method":"item/commandExecution/requestApproval","params":{"command":command}})
-        };
+        let frame = |command: &str| json!({"method":"item/commandExecution/requestApproval","params":{"command":command}});
         for blocked in [
             "launchctl enable gui/501/ai.omon.gateway",
             "launchctl bootstrap gui/$(id -u) /Users/x/Library/LaunchAgents/ai.omon.gateway.plist 2>&1 | head -5",
@@ -1418,7 +1418,9 @@ mod tests {
             assert!(starts_retired_gateway(&frame(blocked)), "{blocked}");
         }
         // A tool call whose arguments carry the command in another shape.
-        assert!(starts_retired_gateway(&json!({"method":"item/tool/requestApproval","params":{"arguments":{"code":"subprocess.run([\"/Users/x/.omon/bin/omo-gateway\",\"run\"])"}}})));
+        assert!(starts_retired_gateway(
+            &json!({"method":"item/tool/requestApproval","params":{"arguments":{"code":"subprocess.run([\"/Users/x/.omon/bin/omo-gateway\",\"run\"])"}}})
+        ));
         for allowed in [
             "launchctl print gui/501/ai.omon.gateway",
             "launchctl list | grep ai.omon",
@@ -1527,6 +1529,10 @@ mod tests {
             "⚠️ 응답을 만들지 못했어요 (처리 중 오류가 났어요). 같은 메시지를 다시 보내 주시면 이어서 할게요."
         );
         assert!(owner_failure_text("HTTP 429").contains("모델 사용량 한도에 걸렸어요"));
+        assert!(
+            owner_failure_text("timed out waiting for the turn to finish")
+                .contains("턴 시간 제한을 넘겨 중단됐어요")
+        );
     }
 
     #[tokio::test]
