@@ -36,15 +36,15 @@ pub fn flag_on(raw: Option<&str>) -> bool {
 }
 
 pub fn action_loop_enabled() -> bool {
-    flag_on(std::env::var(ENABLED_ENV).ok().as_deref())
+    flag_on(crate::hub_env::var(ENABLED_ENV).ok().as_deref())
 }
 
 pub fn approval_ledger_enabled() -> bool {
-    flag_on(std::env::var(LEDGER_ENV).ok().as_deref())
+    flag_on(crate::hub_env::var(LEDGER_ENV).ok().as_deref())
 }
 
 pub fn daily_cap_from_env() -> i64 {
-    std::env::var(DAILY_CAP_ENV)
+    crate::hub_env::var(DAILY_CAP_ENV)
         .ok()
         .and_then(|value| value.trim().parse().ok())
         .filter(|value| *value > 0)
@@ -484,7 +484,7 @@ pub struct Readback {
 impl Readback {
     pub fn from_env() -> Self {
         Self {
-            program: std::env::var(CALENDAR_CMD_ENV)
+            program: crate::hub_env::var(CALENDAR_CMD_ENV)
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())

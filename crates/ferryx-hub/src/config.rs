@@ -39,33 +39,37 @@ pub struct HubConfig {
 impl HubConfig {
     /// File at `FERRYX_HUB_CONFIG`, then env overrides. Missing file is an empty config.
     pub fn load() -> Result<Self> {
-        let mut config = match std::env::var("FERRYX_HUB_CONFIG") {
+        let mut config = match crate::hub_env::var("FERRYX_HUB_CONFIG") {
             Ok(path) => Self::from_file(Path::new(&path))?,
             Err(_) => Self::default(),
         };
-        if let Ok(path) = std::env::var("FERRYX_HUB_DB") {
+        if let Ok(path) = crate::hub_env::var("FERRYX_HUB_DB") {
             config.database_path = Some(PathBuf::from(path));
         }
-        if let Ok(path) = std::env::var("FERRYX_HUB_IMPORT_FROM") {
+        if let Ok(path) = crate::hub_env::var("FERRYX_HUB_IMPORT_FROM") {
             config.import_from = Some(PathBuf::from(path));
         }
-        if std::env::var("FERRYX_HUB_IMPORT").ok().as_deref() == Some("1") {
+        if crate::hub_env::var("FERRYX_HUB_IMPORT").ok().as_deref() == Some("1") {
             config.import_invoked = true;
         }
-        if std::env::var("FERRYX_HUB_SUPERVISOR_PANE").ok().as_deref() == Some("1") {
+        if crate::hub_env::var("FERRYX_HUB_SUPERVISOR_PANE")
+            .ok()
+            .as_deref()
+            == Some("1")
+        {
             config.supervisor_pane = true;
         }
-        if let Ok(addr) = std::env::var("FERRYX_HUB_TRACKER_ADDR") {
+        if let Ok(addr) = crate::hub_env::var("FERRYX_HUB_TRACKER_ADDR") {
             config.tracker_addr = Some(addr);
         }
-        if let Ok(token) = std::env::var("FERRYX_HUB_TRACKER_TOKEN") {
+        if let Ok(token) = crate::hub_env::var("FERRYX_HUB_TRACKER_TOKEN") {
             config.tracker_owner_token = Some(token);
         }
-        if let Ok(id) = std::env::var("FERRYX_HUB_SLACK_OWNER") {
+        if let Ok(id) = crate::hub_env::var("FERRYX_HUB_SLACK_OWNER") {
             config.owner_slack_id = Some(id);
         }
-        config.apply_slack_home_override(std::env::var("SLACK_HOME_CHANNEL").ok().as_deref());
-        if let Ok(url) = std::env::var("FERRYX_HUB_OMO_URL") {
+        config.apply_slack_home_override(crate::hub_env::var("SLACK_HOME_CHANNEL").ok().as_deref());
+        if let Ok(url) = crate::hub_env::var("FERRYX_HUB_OMO_URL") {
             config.supervisor_listen_url = Some(url);
         }
         Ok(config)
@@ -107,10 +111,10 @@ pub fn normalize_slack_home(raw: &str) -> Option<String> {
 /// gateway files. A `*_FILE` value wins so a secret file is not ignored in favor of an
 /// empty env var. The value itself is never logged.
 pub fn secret_from_env(name: &str) -> Option<String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::hub_env::var_os("HOME").map(PathBuf::from);
     secret_from_lookup(
         name,
-        |key| std::env::var(key).ok(),
+        |key| crate::hub_env::var(key).ok(),
         |path| std::fs::read_to_string(path).ok(),
         home.as_deref(),
     )

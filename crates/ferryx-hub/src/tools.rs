@@ -210,11 +210,11 @@ pub(crate) fn skills_root(args: &Value) -> Option<std::path::PathBuf> {
         .and_then(Value::as_str)
         .map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HERMES_HOME")
+            crate::hub_env::var_os("HERMES_HOME")
                 .map(|root| std::path::PathBuf::from(root).join("skills"))
         })
         .or_else(|| {
-            std::env::var_os("HOME").map(|home| {
+            crate::hub_env::var_os("HOME").map(|home| {
                 std::path::PathBuf::from(home)
                     .join(".hermes")
                     .join("skills")

@@ -141,7 +141,7 @@ mod libc {
 }
 
 pub fn state_dir_from_home() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let home = crate::hub_env::var_os("HOME").or_else(|| crate::hub_env::var_os("USERPROFILE"))?;
     Some(Path::new(&home).join(".ferryx").join("hub"))
 }
 

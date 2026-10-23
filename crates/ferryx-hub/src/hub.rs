@@ -219,10 +219,10 @@ impl Hub {
 }
 
 pub fn default_database_path() -> PathBuf {
-    if let Ok(path) = std::env::var("FERRYX_HUB_DB") {
+    if let Ok(path) = crate::hub_env::var("FERRYX_HUB_DB") {
         return PathBuf::from(path);
     }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let home = crate::hub_env::var_os("HOME").or_else(|| crate::hub_env::var_os("USERPROFILE"));
     match home {
         Some(home) => PathBuf::from(home)
             .join(".ferryx")

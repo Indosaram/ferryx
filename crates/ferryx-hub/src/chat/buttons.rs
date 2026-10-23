@@ -77,10 +77,10 @@ pub fn button_value(action: &Value) -> Option<&str> {
 }
 
 pub fn button_actions_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("OMON_BUTTON_ACTIONS_FILE") {
+    if let Some(path) = crate::hub_env::var_os("OMON_BUTTON_ACTIONS_FILE") {
         return PathBuf::from(path);
     }
-    std::env::var_os("HOME")
+    crate::hub_env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default()
         .join(".omon")
@@ -127,7 +127,7 @@ pub async fn run_button_action(
     }
     command.env("PATH", crate::child_env::child_path());
     for key in ["HOME", "TMPDIR", "LANG", "TZ"] {
-        if let Some(value) = std::env::var_os(key) {
+        if let Some(value) = crate::hub_env::var_os(key) {
             command.env(key, value);
         }
     }

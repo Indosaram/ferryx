@@ -50,10 +50,10 @@ pub fn router(pool: SqlitePool, web_root: PathBuf) -> Router {
 }
 
 pub fn web_root() -> PathBuf {
-    if let Some(path) = std::env::var_os("FERRYX_HUB_WEB_ROOT") {
+    if let Some(path) = crate::hub_env::var_os("FERRYX_HUB_WEB_ROOT") {
         return PathBuf::from(path);
     }
-    std::env::var_os("HOME")
+    crate::hub_env::var_os("HOME")
         .map(|home| PathBuf::from(home).join(".omon").join("web"))
         .unwrap_or_else(|| PathBuf::from(".omon/web"))
 }
