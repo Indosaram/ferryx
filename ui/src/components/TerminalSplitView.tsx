@@ -70,6 +70,8 @@ import {
   type WorkspaceDropData,
 } from "./tab-dnd/tabDragTypes";
 import { TerminalPane } from "./TerminalPane";
+import { SUPERVISOR_PANE_BAR_PX, SupervisorPaneBarView } from "./supervisor/SupervisorPaneBar";
+import { actingSessionIds, paneSupervision, useSupervisor } from "../lib/supervisor";
 import { IconButton } from "./ui/IconButton";
 
 const MIN_PANE_SIZE_PX = 80;
@@ -786,6 +788,17 @@ function TabGroupView({
   if (!group) return null;
   const tabById = new Map(layout.tabs.map((tab) => [tab.id, tab]));
   const tabs = group.tabIds.map((tabId) => tabById.get(tabId)).filter((tab): tab is WorkspaceTab => Boolean(tab));
+  const { snapshot: supervisor, now: supervisorNow } = useSupervisor();
+  const supervisorActingTabIds = useMemo(() => {
+    const acting = actingSessionIds(supervisor, supervisorNow);
+    const ids: Record<string, boolean> = {};
+    for (const tab of tabs) {
+      if (tab.kind === "browser" || tab.kind === "file") continue;
+      const backend = sessions[tab.sessionId]?.backendSessionId;
+      if (backend && acting.has(backend)) ids[tab.id] = true;
+    }
+    return ids;
+  }, [supervisor, supervisorNow, tabs, sessions]);
   const activeTab = tabs.find((tab) => tab.id === group.activeTabId) ?? tabs[0] ?? null;
   const isFocused = layout.focusedGroupId === groupId;
 
@@ -823,6 +836,7 @@ function TabGroupView({
         activeTabId={activeTab?.id ?? ""}
         unreadTabIds={unreadTabIds}
         activityByTabId={activityByTabId}
+        supervisorActingTabIds={supervisorActingTabIds}
         tabDisplayById={tabDisplayById}
         {...fileTabMenuHandlers}
         onActivate={onActivateTab}
@@ -1161,6 +1175,12 @@ const PaneLeafView = React.memo(function PaneLeafView({
   );
   const flashSessionId = content.kind === "terminal" ? session.id : null;
   const flashToken = usePaneFlashToken(flashSessionId);
+  const { snapshot: supervisor, now: supervisorNow } = useSupervisor();
+  const supervision =
+    content.kind === "terminal"
+      ? paneSupervision(supervisor, session?.backendSessionId, supervisorNow, activity?.state === "waiting")
+      : null;
+  const toolbarTop = supervision ? SUPERVISOR_PANE_BAR_PX : 0;
 
   return (
     <NativeTerminalVisibilityProvider visible={tabVisible} occluded={showsDropFeedback}>
@@ -1169,7 +1189,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
         droppable.setNodeRef(node);
         leafRef.current = node;
       }}
-      className={`relative flex h-full w-full min-h-0 min-w-0 overflow-hidden bg-terminal ${
+      className={`relative flex h-full w-full min-h-0 min-w-0 flex-col overflow-hidden bg-terminal ${
         droppable.isOver ? "ring-2 ring-primary/80 ring-inset" : ""
       } ${isOnlyLeaf ? "" : `border ${isActive ? "border-primary/60" : "border-transparent"}`}`}
       data-testid="pane-leaf"
@@ -1191,8 +1211,9 @@ const PaneLeafView = React.memo(function PaneLeafView({
       }}
       onMouseMove={(event) => {
         const rect = event.currentTarget.getBoundingClientRect();
-        const relativeY = event.clientY - rect.top;
-        if (relativeY <= 20) {
+        // The supervisor bar takes the top strip; the pane toolbar reveals just below it.
+        const relativeY = event.clientY - rect.top - toolbarTop;
+        if (relativeY >= 0 && relativeY <= 20) {
           if (!isHoveredTop) setIsHoveredTop(true);
         } else {
           if (isHoveredTop) setIsHoveredTop(false);
@@ -1242,6 +1263,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
       ) : null}
       <div
         className="absolute inset-x-0 top-0 z-20 h-5 pointer-events-none"
+        style={{ top: toolbarTop }}
         data-testid="pane-toolbar-hotspot"
         onMouseEnter={() => setIsHoveredTop(true)}
         onMouseLeave={(event) => {
@@ -1257,6 +1279,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
         className={`absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing ${
           isHoveredTop || isFocusedWithin ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
         } ${draggable.isDragging ? "opacity-30" : ""}`}
+        style={{ top: toolbarTop }}
         data-testid="pane-toolbar"
         data-dnd-type="pane"
         onPointerDown={(event) => {
@@ -1342,6 +1365,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
         </div>
       </div>
 
+      {supervision ? <SupervisorPaneBarView state={supervision} now={supervisorNow} onTakeOver={focusPaneInput} /> : null}
       <div className="h-full w-full min-h-0 flex-1 overflow-hidden">
         {(() => {
           switch (content.kind) {

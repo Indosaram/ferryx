@@ -701,6 +701,14 @@ pub enum DaemonRequest {
     SetAgentIntegration {
         enabled: bool,
     },
+    /// What the supervisor drives and watches, and the input it recently typed.
+    SupervisorSnapshot,
+    /// A person pauses or resumes one supervised lane; the supervisor stops typing into it.
+    #[serde(rename_all = "camelCase")]
+    SupervisorSetPaused {
+        lane_key: String,
+        paused: bool,
+    },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
     PairedHostList,
@@ -1137,6 +1145,14 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     AgentIntegrationOk {
         enabled: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    SupervisorSnapshotOk {
+        snapshot: serde_json::Value,
+    },
+    #[serde(rename_all = "camelCase")]
+    SupervisorSetPausedOk {
+        paused: bool,
     },
     #[serde(rename_all = "camelCase")]
     AttachOk {

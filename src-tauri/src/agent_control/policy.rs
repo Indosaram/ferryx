@@ -127,6 +127,34 @@ pub struct AuditRecord {
     pub session_id: Option<String>,
     pub request_id: Option<String>,
     pub code: String,
+    /// Wall-clock milliseconds when the operation finished.
+    pub at_ms: u64,
+    /// What the operation put into the pane, shortened: the sent text or the chosen answer.
+    pub text: Option<String>,
+}
+
+/// The longest excerpt of supervisor input an audit line keeps.
+pub const AUDIT_TEXT_MAX_CHARS: usize = 160;
+
+impl AuditRecord {
+    pub fn for_op(device_id: &str, op: &AgentControlOp, code: impl Into<String>) -> Self {
+        Self {
+            device_id: device_id.to_string(),
+            op: audit_op_name(op).to_string(),
+            session_id: audit_session(op),
+            request_id: audit_request(op),
+            code: code.into(),
+            at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_millis() as u64),
+            text: audit_text(op),
+        }
+    }
+
+    /// Send, answer and stop change a pane; the rest only look at it.
+    pub fn is_input(&self) -> bool {
+        matches!(self.op.as_str(), "send" | "answer" | "stop")
+    }
 }
 
 #[derive(Debug, Default)]
@@ -178,6 +206,34 @@ pub fn audit_request(op: &AgentControlOp) -> Option<String> {
         | AgentControlOp::Stop { request_id, .. } => request_id.clone(),
         _ => None,
     }
+}
+
+/// The input an operation types, shortened to one line of at most AUDIT_TEXT_MAX_CHARS.
+pub fn audit_text(op: &AgentControlOp) -> Option<String> {
+    let raw = match op {
+        AgentControlOp::Send { text, .. } => text.clone(),
+        AgentControlOp::Answer { answer, .. } => match (&answer.custom_text, &answer.option_indices, answer.option_index) {
+            (Some(custom), _, _) if !custom.trim().is_empty() => custom.clone(),
+            (_, Some(indices), _) if !indices.is_empty() => format!(
+                "options {}",
+                indices.iter().map(|index| (index + 1).to_string()).collect::<Vec<_>>().join(", ")
+            ),
+            (_, _, Some(index)) => format!("option {}", index + 1),
+            _ => return None,
+        },
+        AgentControlOp::Stop { .. } => "Ctrl-C".to_string(),
+        _ => return None,
+    };
+    let line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.is_empty() {
+        return None;
+    }
+    if line.chars().count() <= AUDIT_TEXT_MAX_CHARS {
+        return Some(line);
+    }
+    let mut short: String = line.chars().take(AUDIT_TEXT_MAX_CHARS - 1).collect();
+    short.push('…');
+    Some(short)
 }
 
 #[cfg(test)]
@@ -259,5 +315,54 @@ mod tests {
             clamp_wait_timeout(0).unwrap_err().code,
             ScopeErrorCode::InvalidRequest
         );
+    }
+
+    #[test]
+    fn audit_lines_keep_a_short_excerpt_of_what_was_typed() {
+        let send = AgentControlOp::Send {
+            session_id: "s".into(),
+            text: "run   the\ntests\n".into(),
+            request_id: None,
+        };
+        let record = AuditRecord::for_op("hub", &send, "OK");
+        assert_eq!(record.text.as_deref(), Some("run the tests"));
+        assert!(record.is_input());
+        assert!(record.at_ms > 0);
+
+        let long = AgentControlOp::Send {
+            session_id: "s".into(),
+            text: "x".repeat(400),
+            request_id: None,
+        };
+        let excerpt = audit_text(&long).unwrap();
+        assert_eq!(excerpt.chars().count(), AUDIT_TEXT_MAX_CHARS);
+        assert!(excerpt.ends_with('…'));
+
+        let answer = |answer: crate::remote::reference_chat::types::ReferencePromptAnswer| AgentControlOp::Answer {
+            session_id: "s".into(),
+            prompt_id: "p".into(),
+            screen_revision: "r".into(),
+            answer,
+            request_id: None,
+        };
+        assert_eq!(
+            audit_text(&answer(crate::remote::reference_chat::types::ReferencePromptAnswer {
+                option_index: Some(0),
+                ..Default::default()
+            }))
+            .as_deref(),
+            Some("option 1")
+        );
+        assert_eq!(
+            audit_text(&answer(crate::remote::reference_chat::types::ReferencePromptAnswer {
+                custom_text: Some("use the cache".into()),
+                ..Default::default()
+            }))
+            .as_deref(),
+            Some("use the cache")
+        );
+        let read = AuditRecord::for_op("hub", &AgentControlOp::Read { session_id: "s".into() }, "OK");
+        assert_eq!(read.text, None);
+        assert!(!read.is_input());
     }
 }

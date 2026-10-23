@@ -566,6 +566,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::UpgradeBinary { .. }
             | DaemonRequest::RemoteSessionDetails { .. }
             | DaemonRequest::RetryRemoteSession { .. }
+            | DaemonRequest::SupervisorSnapshot
     )
 }
 
@@ -681,6 +682,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::AgentControl { .. } => "agentControl",
         DaemonRequest::GetAgentIntegration => "getAgentIntegration",
         DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
+        DaemonRequest::SupervisorSnapshot => "supervisorSnapshot",
+        DaemonRequest::SupervisorSetPaused { .. } => "supervisorSetPaused",
     }
 }
 

@@ -9,5 +9,6 @@ pub mod runner;
 pub mod settle;
 pub mod signals;
 pub mod state;
+pub mod supervised;
 pub mod threads;
 pub mod worktree;
