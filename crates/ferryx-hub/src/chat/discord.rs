@@ -138,6 +138,25 @@ pub fn thread_start_body(name: &str) -> serde_json::Value {
     serde_json::json!({"name": name, "auto_archive_duration": 1440})
 }
 
+/// Discord runs only when `FERRYX_HUB_DISCORD` is explicitly truthy. A token alone (for
+/// example one imported from an old omo plist) never connects the gateway.
+pub fn enabled() -> bool {
+    enabled_from(crate::hub_env::var("FERRYX_HUB_DISCORD").ok().as_deref())
+}
+
+pub fn enabled_from(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// The token the gateway would use, only when Discord is explicitly enabled.
+pub fn active_bot_token() -> Option<String> {
+    enabled().then(bot_token).flatten()
+}
+
 pub fn bot_token() -> Option<String> {
     secret_from_env("DISCORD_BOT_TOKEN").or_else(|| secret_from_env("DISCORD_TOKEN"))
 }
@@ -863,6 +882,9 @@ where
         if op == Some(0) {
             if let Some(number) = frame.get("s").and_then(Value::as_i64) {
                 seq.store(number, std::sync::atomic::Ordering::Relaxed);
+            }
+            if frame.get("t").and_then(Value::as_str) == Some("READY") {
+                tracing::info!("discord gateway ready");
             }
             crate::discord_voice::observe(&frame);
             on_frame(frame).await;

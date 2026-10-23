@@ -647,8 +647,10 @@ pub async fn serve_native_socket(
     let listener = bind_native_socket(&path).await?;
     loop {
         tokio::select! {
-            _ = stop.changed() => {
-                if *stop.borrow() {
+            changed = stop.changed() => {
+                // A dropped sender is a stop. `changed()` is ready on every poll after the
+                // sender is gone, so waiting for `true` here would spin a worker thread.
+                if changed.is_err() || *stop.borrow() {
                     break;
                 }
             }
@@ -1855,6 +1857,53 @@ mod tests {
             "other",
             &serde_json::json!({"external_effect": true})
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_native_socket_whose_stop_sender_is_dropped_returns_instead_of_spinning() {
+        // A dropped sender makes `changed()` ready on every poll. The 1022.5 daemon kept the
+        // listener alive in that state and burned a full core (37 CPU minutes in 40).
+        let pool = crate::storage::memory().await.unwrap();
+        let dir = std::env::temp_dir().join(format!("fx-cron-drop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.sock");
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        drop(tx);
+        let server = tokio::spawn(serve_native_socket(path.clone(), pool, rx));
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(finished, Ok(Ok(Ok(())))),
+            "serve_native_socket kept running after its stop sender was dropped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_native_socket_stops_when_true_is_sent() {
+        let pool = crate::storage::memory().await.unwrap();
+        let dir = std::env::temp_dir().join(format!("fx-cron-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.sock");
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_native_socket(path.clone(), pool, rx));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !path.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Still serving while the sender is alive and false.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!server.is_finished());
+        tx.send(true).unwrap();
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        let gone = !path.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(finished, Ok(Ok(Ok(())))));
+        assert!(gone, "a clean stop removes the socket file");
     }
 
     #[cfg(unix)]

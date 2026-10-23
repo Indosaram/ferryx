@@ -43,8 +43,13 @@ pub async fn memory() -> Result<SqlitePool> {
     let options = SqliteConnectOptions::from_str("sqlite::memory:")
         .map_err(|error| crate::error::HubError::config(error.to_string()))?
         .foreign_keys(true);
+    // The database lives only as long as its one connection, so that connection is never
+    // retired for idling or age (a long dry-run import would otherwise lose its tables).
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
+        .min_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
         .connect_with(options)
         .await?;
     migrate(&pool).await?;

@@ -71,6 +71,19 @@ fn slack_test_api() -> Option<(String, String)> {
     SLACK_API_TEST.try_with(|pair| pair.clone()).ok()
 }
 
+/// Spawns `future`, keeping a test's Slack API stand-in visible inside the new task.
+#[cfg(feature = "hub-slack")]
+pub(crate) fn spawn_carrying_test_api<F>(future: F) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    #[cfg(test)]
+    if let Some(pair) = slack_test_api() {
+        return tokio::spawn(SLACK_API_TEST.scope(pair, future));
+    }
+    tokio::spawn(future)
+}
+
 /// Turns one Socket Mode text frame into an ack plus the inbound or approval it carries.
 pub fn handle_frame(text: &str, owner_id: &str) -> Result<(Value, SlackFrame)> {
     let frame: Value = serde_json::from_str(text)
@@ -209,6 +222,42 @@ pub async fn apply_frame_with(
     pool: Option<&sqlx::SqlitePool>,
     bot_user_id: Option<&str>,
 ) -> Result<SlackFrame> {
+    #[cfg(feature = "hub-slack")]
+    let turns = super::slack_turn::installed();
+    #[cfg(not(feature = "hub-slack"))]
+    let turns: Option<&'static ()> = None;
+    apply_frame_routed(
+        text,
+        owner_id,
+        meta_session_id,
+        profiles,
+        control,
+        pool,
+        bot_user_id,
+        turns,
+    )
+    .await
+}
+
+#[cfg(feature = "hub-slack")]
+type TurnConfig = super::slack_turn::SlackTurnConfig;
+#[cfg(not(feature = "hub-slack"))]
+type TurnConfig = ();
+
+/// [`apply_frame_with`] with an explicit omo turn configuration (`None`: messages go to panes).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_frame_routed(
+    text: &str,
+    owner_id: &str,
+    meta_session_id: &str,
+    profiles: &super::router::ProfileRouter,
+    control: &dyn AgentControl,
+    pool: Option<&sqlx::SqlitePool>,
+    bot_user_id: Option<&str>,
+    turns: Option<&'static TurnConfig>,
+) -> Result<SlackFrame> {
+    #[cfg(not(feature = "hub-slack"))]
+    let _ = turns;
     let frame_value: Value = serde_json::from_str(text)
         .map_err(|error| HubError::message(format!("slack frame: {error}")))?;
     if frame_value.get("type").and_then(Value::as_str) == Some("interactive") {
@@ -221,6 +270,28 @@ pub async fn apply_frame_with(
                 tracing::warn!(%error, "slack message was not recorded for the inbox");
             }
         }
+    }
+    // With the omo turn path installed, a message no profile routes to a lane pane becomes an
+    // omo app-server turn answered in its Slack thread, as omo-gateway did. The meta pane is
+    // not used for it: no such pane exists unless the supervisor preset is launched.
+    #[cfg(feature = "hub-slack")]
+    if let (Some(turns), Some(pool)) = (turns, pool) {
+        let lane_routed = match &frame {
+            SlackFrame::Inbound(inbound) => {
+                super::router::inbound_pane(inbound, profiles, meta_session_id) != meta_session_id
+            }
+            _ => false,
+        };
+        if !lane_routed {
+            if super::slack_turn::intercept(turns, pool, &frame_value).await {
+                return Ok(frame);
+            }
+            if matches!(frame, SlackFrame::Inbound(_)) {
+                return Ok(SlackFrame::Ignore);
+            }
+        }
+    }
+    if let SlackFrame::Inbound(inbound) = &frame {
         super::router::route_inbound(inbound, profiles, meta_session_id, control).await?;
         if let Some(pool) = pool {
             if let Err(error) =
@@ -831,6 +902,12 @@ async fn attach_voice_reply(
     }
 }
 
+/// One Slack Web API call with the bot token, for callers outside this module.
+#[cfg(feature = "hub-slack")]
+pub(crate) async fn call_method(method: &str, body: Value) -> Result<bool> {
+    slack_method(method, body).await
+}
+
 #[cfg(feature = "hub-slack")]
 async fn slack_method(method: &str, body: Value) -> Result<bool> {
     let Some(token) = bot_token() else {
@@ -901,7 +978,118 @@ where
     F: FnMut(String) -> Fut + Send,
     Fut: std::future::Future<Output = ()> + Send,
 {
-    run_socket_mode(credentials_from_env, SocketPace::production(), on_frame).await
+    run_socket_mode_tracked(
+        &SOCKET_MODE,
+        credentials_from_env,
+        SocketPace::production(),
+        on_frame,
+    )
+    .await
+}
+
+/// Socket Mode state for `ferryx hub status`. It holds no token and no socket URL.
+#[derive(Debug, Default)]
+pub struct SocketModeState {
+    running: std::sync::atomic::AtomicBool,
+    connected: std::sync::atomic::AtomicBool,
+    connects: std::sync::atomic::AtomicU64,
+    last_error: std::sync::Mutex<Option<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SocketModeStatus {
+    /// The Socket Mode task is alive (it may be between reconnects).
+    pub running: bool,
+    /// A websocket is open right now.
+    pub connected: bool,
+    /// Websockets opened since the daemon started.
+    pub connects: u64,
+    pub last_error: Option<String>,
+}
+
+#[cfg_attr(not(feature = "hub-slack"), allow(dead_code))]
+impl SocketModeState {
+    pub const fn new() -> Self {
+        Self {
+            running: std::sync::atomic::AtomicBool::new(false),
+            connected: std::sync::atomic::AtomicBool::new(false),
+            connects: std::sync::atomic::AtomicU64::new(0),
+            last_error: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn snapshot(&self) -> SocketModeStatus {
+        use std::sync::atomic::Ordering;
+        SocketModeStatus {
+            running: self.running.load(Ordering::SeqCst),
+            connected: self.connected.load(Ordering::SeqCst),
+            connects: self.connects.load(Ordering::SeqCst),
+            last_error: self.last_error.lock().ok().and_then(|error| error.clone()),
+        }
+    }
+
+    fn mark_connected(&self) {
+        use std::sync::atomic::Ordering;
+        self.connects.fetch_add(1, Ordering::SeqCst);
+        self.connected.store(true, Ordering::SeqCst);
+        if let Ok(mut error) = self.last_error.lock() {
+            *error = None;
+        }
+    }
+
+    fn mark_disconnected(&self, error: Option<&str>) {
+        self.connected
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        if let (Some(message), Ok(mut slot)) = (error, self.last_error.lock()) {
+            *slot = Some(redact_socket_error(message));
+        }
+    }
+
+    /// Marks the task running until the returned guard drops. An aborted task (`hub stop`)
+    /// drops the guard too, so a stopped hub never reports a live socket.
+    fn session(&self) -> SocketModeSession<'_> {
+        self.running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        SocketModeSession(self)
+    }
+}
+
+#[cfg_attr(not(feature = "hub-slack"), allow(dead_code))]
+struct SocketModeSession<'a>(&'a SocketModeState);
+
+impl Drop for SocketModeSession<'_> {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.0.connected.store(false, Ordering::SeqCst);
+        self.0.running.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg_attr(not(feature = "hub-slack"), allow(dead_code))]
+/// Slack error text for status output: one line, no socket URL (it carries a ticket), bounded.
+fn redact_socket_error(message: &str) -> String {
+    let mut out: String = message
+        .split_whitespace()
+        .map(|word| {
+            if word.contains("wss://") || word.contains("ws://") || word.contains("xox") {
+                "<redacted>"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if out.chars().count() > 200 {
+        out = out.chars().take(200).collect::<String>() + "...";
+    }
+    out
+}
+
+static SOCKET_MODE: SocketModeState = SocketModeState::new();
+
+/// The daemon's Socket Mode state.
+pub fn socket_mode_status() -> SocketModeStatus {
+    SOCKET_MODE.snapshot()
 }
 
 #[cfg(any(test, feature = "hub-slack"))]
@@ -987,8 +1175,19 @@ enum SocketEvent {
     Closed,
 }
 
+#[cfg(all(test, feature = "hub-slack"))]
+async fn run_socket_mode<F, Fut, C>(credentials: C, pace: SocketPace, on_frame: F) -> Result<()>
+where
+    C: FnMut() -> Result<SocketCredentials> + Send,
+    F: FnMut(String) -> Fut + Send,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    run_socket_mode_tracked(&SocketModeState::new(), credentials, pace, on_frame).await
+}
+
 #[cfg(feature = "hub-slack")]
-async fn run_socket_mode<F, Fut, C>(
+async fn run_socket_mode_tracked<F, Fut, C>(
+    state: &SocketModeState,
     mut credentials: C,
     pace: SocketPace,
     mut on_frame: F,
@@ -998,10 +1197,20 @@ where
     F: FnMut(String) -> Fut + Send,
     Fut: std::future::Future<Output = ()> + Send,
 {
+    let _session = state.session();
     let mut backoff = pace.backoff_initial;
     let mut attempt = 0u64;
     loop {
-        match drive_session(&mut credentials, pace, &mut attempt, &mut on_frame).await {
+        let session =
+            drive_session(&mut credentials, pace, &mut attempt, &mut on_frame, state).await;
+        state.mark_disconnected(
+            session
+                .as_ref()
+                .err()
+                .map(|error| error.to_string())
+                .as_deref(),
+        );
+        match session {
             Ok(()) => {
                 tracing::info!(attempt, "slack socket mode session ended; reconnecting");
                 backoff = pace.backoff_initial;
@@ -1025,6 +1234,7 @@ async fn drive_session<F, Fut, C>(
     pace: SocketPace,
     attempt: &mut u64,
     on_frame: &mut F,
+    state: &SocketModeState,
 ) -> Result<()>
 where
     C: FnMut() -> Result<SocketCredentials>,
@@ -1032,6 +1242,7 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     let mut socket = connect_once(&credentials()?, pace, attempt).await?;
+    state.mark_connected();
     let mut last_rx = Instant::now();
     let mut ping_sent = false;
     loop {
@@ -1512,6 +1723,249 @@ mod tests {
     }
 
     #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn e2e_a_slack_message_becomes_an_omo_turn_answered_in_its_thread() {
+        use crate::chat::slack_turn::SlackTurnConfig;
+        use crate::meta::omo_client::mock::{serve, Script};
+        use crate::meta::omo_client::OmoClientConfig;
+        use std::sync::{Arc, Mutex};
+
+        // Mock Slack Web API: records every method call and answers ok.
+        #[derive(Clone)]
+        struct Calls(Arc<Mutex<Vec<(String, Value)>>>);
+        async fn record(
+            axum::extract::State(calls): axum::extract::State<Calls>,
+            axum::extract::Path(method): axum::extract::Path<String>,
+            axum::Json(body): axum::Json<Value>,
+        ) -> axum::Json<Value> {
+            calls.0.lock().unwrap().push((method, body));
+            axum::Json(json!({"ok": true, "ts": "999.1"}))
+        }
+        let calls = Calls(Arc::new(Mutex::new(Vec::new())));
+        let app = axum::Router::new()
+            .route("/{method}", axum::routing::post(record))
+            .with_state(calls.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        // Mock omo app-server with an approval request and two agent messages.
+        let (omo_url, omo) = serve(Script {
+            messages: vec!["looking now".into(), "**All good**: 3 items".into()],
+            resume_error: None,
+            approval: true,
+            thread_id: "thr-e2e".into(),
+        })
+        .await;
+        let dir = std::env::temp_dir().join(format!("ferryx-e2e-turn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let token_path = dir.join("omo-appserver-1.token");
+        std::fs::write(&token_path, "tok-e2e\n").unwrap();
+        let config: &'static SlackTurnConfig = Box::leak(Box::new(SlackTurnConfig {
+            omo: OmoClientConfig::new(omo_url),
+            token_path: Some(token_path),
+            allowed_users: vec!["UOWNER".into()],
+            free_channels: vec!["CHOME".into()],
+            default_model: Some("model-x".into()),
+        }));
+        let pool = crate::storage::memory().await.unwrap();
+        let control = crate::agent_control::RecordingControl::default();
+        let profiles = crate::chat::router::ProfileRouter::new(vec![]);
+        let frame = |user: &str, ts: &str, thread: Option<&str>, text: &str| {
+            let mut event = json!({"type": "message", "user": user, "channel": "CHOME", "ts": ts, "text": text});
+            if let Some(thread) = thread {
+                event["thread_ts"] = json!(thread);
+            }
+            json!({"envelope_id": format!("env-{ts}"), "type": "events_api", "payload": {
+                "team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": event
+            }})
+            .to_string()
+        };
+        let posts = |calls: &Calls| -> Vec<Value> {
+            calls
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(m, _)| m == "chat.postMessage")
+                .map(|(_, b)| b.clone())
+                .collect()
+        };
+        let wait_posts = |n: usize| {
+            let calls = calls.clone();
+            async move {
+                for _ in 0..100 {
+                    if posts(&calls).len() >= n
+                        && calls
+                            .0
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|(m, _)| m == "reactions.add")
+                            .count()
+                            >= n
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                panic!(
+                    "slack replies did not arrive: {:?}",
+                    calls.0.lock().unwrap()
+                );
+            }
+        };
+
+        SLACK_API_TEST
+            .scope(
+                (format!("http://127.0.0.1:{port}"), "xoxb-test".into()),
+                async {
+                    let first = frame("UOWNER", "100.1", None, "how are things?");
+                    apply_frame_routed(
+                        &first,
+                        "UOWNER",
+                        "meta",
+                        &profiles,
+                        &control,
+                        Some(&pool),
+                        None,
+                        Some(config),
+                    )
+                    .await
+                    .unwrap();
+                    // Two posts (interim + final) and the eyes / check reactions.
+                    wait_posts(2).await;
+                    for _ in 0..40 {
+                        if calls
+                            .0
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|(m, b)| m == "reactions.add" && b["name"] == "white_check_mark")
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    let replies = posts(&calls);
+                    assert_eq!(replies.len(), 2, "{replies:?}");
+                    assert!(replies
+                        .iter()
+                        .all(|r| r["channel"] == "CHOME" && r["thread_ts"] == "100.1"));
+                    assert_eq!(replies[0]["text"], "looking now");
+                    assert_eq!(replies[1]["text"], "*All good*: 3 items");
+                    let log = calls.0.lock().unwrap().clone();
+                    assert!(log.iter().any(|(m, b)| m == "reactions.add"
+                        && b["name"] == "eyes"
+                        && b["timestamp"] == "100.1"));
+                    assert!(log
+                        .iter()
+                        .any(|(m, b)| m == "reactions.remove" && b["name"] == "eyes"));
+                    assert!(log
+                        .iter()
+                        .any(|(m, b)| m == "reactions.add" && b["name"] == "white_check_mark"));
+
+                    // The same message redelivered by Slack does not run again; a stranger is ignored.
+                    apply_frame_routed(
+                        &first,
+                        "UOWNER",
+                        "meta",
+                        &profiles,
+                        &control,
+                        Some(&pool),
+                        None,
+                        Some(config),
+                    )
+                    .await
+                    .unwrap();
+                    let stranger = frame("USTRANGER", "100.5", None, "hi");
+                    apply_frame_routed(
+                        &stranger,
+                        "UOWNER",
+                        "meta",
+                        &profiles,
+                        &control,
+                        Some(&pool),
+                        None,
+                        Some(config),
+                    )
+                    .await
+                    .unwrap();
+
+                    // A reply in the thread resumes the same engine thread.
+                    let follow = frame("UOWNER", "100.2", Some("100.1"), "and now?");
+                    apply_frame_routed(
+                        &follow,
+                        "UOWNER",
+                        "meta",
+                        &profiles,
+                        &control,
+                        Some(&pool),
+                        None,
+                        Some(config),
+                    )
+                    .await
+                    .unwrap();
+                    wait_posts(4).await;
+                },
+            )
+            .await;
+
+        assert_eq!(posts(&calls).len(), 4);
+        assert!(
+            control.ops().is_empty(),
+            "no pane was used: {:?}",
+            control.ops()
+        );
+        let frames = omo.frames.lock().unwrap().clone();
+        let methods: Vec<&str> = frames
+            .iter()
+            .filter_map(|f| f.get("method").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "thread/start",
+                "turn/start",
+                "initialize",
+                "thread/resume",
+                "turn/start"
+            ]
+        );
+        let resume = frames
+            .iter()
+            .find(|f| f["method"] == "thread/resume")
+            .unwrap();
+        assert_eq!(resume["params"]["threadId"], "thr-e2e");
+        let turn = frames.iter().find(|f| f["method"] == "turn/start").unwrap();
+        assert_eq!(turn["params"]["model"], "model-x");
+        assert_eq!(turn["params"]["input"][0]["text"], "how are things?");
+        let approval = frames
+            .iter()
+            .find(|f| f.get("id") == Some(&json!(77)))
+            .unwrap();
+        assert_eq!(approval["result"]["decision"], "accept");
+        assert!(omo
+            .auth
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|a| a.as_deref() == Some("Bearer tok-e2e")));
+        let state: String = sqlx::query_scalar(
+            "SELECT state_json FROM sessions WHERE channel_id = 'CHOME' AND thread_id = '100.1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(state.contains("thr-e2e"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "hub-slack")]
     struct Scripted {
         steps: std::sync::Mutex<std::collections::VecDeque<std::result::Result<Value, String>>>,
         ops: std::sync::Mutex<Vec<AgentOp>>,
@@ -1938,6 +2392,64 @@ mod tests {
             "silent socket reconnected after {gap:?}, budget {budget:?}"
         );
         client.abort();
+    }
+
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn socket_mode_state_reports_a_live_socket_and_clears_when_the_task_is_aborted() {
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_port = http.local_addr().unwrap().port();
+        let ws_port = ws.local_addr().unwrap().port();
+        spawn_connections_open(http, format!("ws://127.0.0.1:{ws_port}/"));
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = ws.accept().await {
+                tokio::spawn(async move {
+                    use futures_util::StreamExt;
+                    let Ok(mut socket) = tokio_tungstenite::accept_async(tcp).await else {
+                        return;
+                    };
+                    // Answer pings so the client keeps this socket.
+                    while let Some(Ok(_)) = socket.next().await {}
+                });
+            }
+        });
+        static STATE: SocketModeState = SocketModeState::new();
+        assert!(!STATE.snapshot().running);
+        let pace = test_pace();
+        let creds = test_credentials(format!("http://127.0.0.1:{http_port}"));
+        let client = tokio::spawn(async move {
+            let _ = run_socket_mode_tracked(&STATE, move || Ok(creds.clone()), pace, |_| async {})
+                .await;
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !STATE.snapshot().connected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("socket mode never reported connected");
+        let live = STATE.snapshot();
+        assert!(live.running);
+        assert!(live.connects >= 1);
+        assert_eq!(live.last_error, None);
+        client.abort();
+        let _ = client.await;
+        let stopped = STATE.snapshot();
+        assert!(
+            !stopped.running,
+            "an aborted task (hub stop) is not running"
+        );
+        assert!(!stopped.connected, "an aborted task has no socket");
+    }
+
+    #[test]
+    fn socket_errors_in_status_drop_urls_and_tokens() {
+        let message = redact_socket_error(
+            "connect failed wss://wss-primary.slack.com/link/?ticket=abc xoxb-123 refused",
+        );
+        assert_eq!(message, "connect failed <redacted> <redacted> refused");
+        assert!(redact_socket_error(&"x".repeat(500)).chars().count() <= 203);
     }
 
     #[cfg(feature = "hub-slack")]
