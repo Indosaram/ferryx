@@ -1663,7 +1663,11 @@ pub(crate) enum IngressOutcome {
 /// write in that process. A fresh pane before its first turn, or a resumed/reconnected pane while
 /// idle, holds no session file open (0/35 /proc fd samples), and `/new` switches the session
 /// under an unchanged argv.
-const AGENTS_WITHOUT_PROCESS_BOUND_SESSION: [&str; 2] = ["claude", "omp"];
+/// cline 3.0.73, measured on this Mac (re-explore-7 G1): a fresh pane holds no session file open
+/// (0/45 lsof samples on the TUI and hub pids) and carries no `--id` in argv.
+/// crush (re-explore-7 G2): every session lives in one shared `.crush/crush.db`, so no open file
+/// names one session, and a fresh launch has no `--session` in argv.
+const AGENTS_WITHOUT_PROCESS_BOUND_SESSION: [&str; 4] = ["claude", "omp", "cline", "crush"];
 
 pub(crate) fn agent_has_no_process_bound_session(agent: &str) -> bool {
     AGENTS_WITHOUT_PROCESS_BOUND_SESSION.contains(&agent)
@@ -10945,7 +10949,7 @@ mod tests {
         // Measured: after `claude --resume A` then `/clear`, claude writes session B while its
         // argv still names A. For claude and omp the argv id is dropped, so B is admitted on its
         // own store file instead of being refused as a mismatch.
-        for agent in ["claude", "omp"] {
+        for agent in ["claude", "omp", "cline", "crush"] {
             let found = binding_discovery(agent, stale.into(), DiscoverySource::LaunchArgv);
             assert_eq!(found, None, "{agent}");
             assert_eq!(
@@ -10962,7 +10966,7 @@ mod tests {
             );
         }
         // Every other agent keeps its argv binding.
-        for agent in ["grok", "droid", "cline", "kimi", "copilot", "gjc", "crush"] {
+        for agent in ["grok", "droid", "kimi", "copilot", "gjc"] {
             assert_eq!(
                 binding_discovery(agent, stale.into(), DiscoverySource::LaunchArgv).as_deref(),
                 Some(stale),
@@ -10998,6 +11002,10 @@ mod tests {
         );
         // Every agent that does leave a process-bound record still needs discovery.
         assert!(agent_has_no_process_bound_session("omp"));
+        // A fresh cline or crush pane is the same case (re-explore-7 G1/G2, measured).
+        for agent in ["cline", "crush"] {
+            assert!(agent_has_no_process_bound_session(agent), "{agent}");
+        }
         for agent in ["omo", "codex", "grok", "kimi", "copilot", "gjc", "cursor"] {
             assert!(!agent_has_no_process_bound_session(agent), "{agent}");
             assert_eq!(
