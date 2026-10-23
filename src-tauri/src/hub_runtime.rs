@@ -630,6 +630,16 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                 "slack turn path is armed (omo app-server)"
             );
             ferryx_hub::chat::slack_turn::install(config);
+            // omo's missed-message backfill: answer what arrived while the hub was down, then
+            // reconcile every few minutes. It reads with the bot token; Socket Mode is untouched.
+            if let Some(config) = ferryx_hub::chat::slack_turn::installed() {
+                if ferryx_hub::chat::slack::app_token().is_some() {
+                    tasks.push(tokio::spawn(ferryx_hub::chat::slack_backfill::run_forever(
+                        config,
+                        launch.hub.pool.clone(),
+                    )));
+                }
+            }
         }
         tasks.push(tokio::spawn(async move {
             let supervisor = ferryx_hub::meta::supervisor::DaemonSupervisor::new(url, command, state_dir);

@@ -134,6 +134,8 @@ pub mod mock {
         calls: Calls,
         bot_user: String,
         roots: Arc<Mutex<std::collections::HashMap<String, String>>>,
+        /// Canned answers by method; a list answers one entry per call (the last repeats).
+        scripted: Arc<Mutex<std::collections::HashMap<String, Vec<Value>>>>,
     }
 
     async fn record(
@@ -162,6 +164,19 @@ pub mod mock {
             .lock()
             .unwrap()
             .push((method.clone(), body.clone()));
+        let canned = {
+            let mut scripted = state.scripted.lock().unwrap();
+            scripted.get_mut(&method).map(|answers| {
+                if answers.len() > 1 {
+                    answers.remove(0)
+                } else {
+                    answers[0].clone()
+                }
+            })
+        };
+        if let Some(answer) = canned {
+            return axum::Json(answer);
+        }
         let answer = match method.as_str() {
             "chat.postMessage" => {
                 let ts = format!("1700000000.{:06}", state.calls.lock().unwrap().len());
@@ -228,15 +243,45 @@ pub mod mock {
         String::from_utf8_lossy(&out).into_owned()
     }
 
+    async fn file(
+        axum::extract::Path(name): axum::extract::Path<String>,
+        headers: axum::http::HeaderMap,
+    ) -> (axum::http::StatusCode, String) {
+        let authorized = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("Bearer "));
+        if !authorized {
+            return (axum::http::StatusCode::FORBIDDEN, String::new());
+        }
+        (axum::http::StatusCode::OK, format!("contents of {name}"))
+    }
+
     /// Serves the mock on a loopback port; returns its base URL and the call log.
     pub async fn serve(bot_user: &str) -> (String, Calls) {
+        serve_scripted(bot_user, Vec::new()).await
+    }
+
+    /// [`serve`] with canned answers per method. `GET /files/{name}` serves a file body to a
+    /// bearer-authenticated request.
+    pub async fn serve_scripted(
+        bot_user: &str,
+        scripted: Vec<(&str, Vec<Value>)>,
+    ) -> (String, Calls) {
         let calls: Calls = Arc::new(Mutex::new(Vec::new()));
         let app = axum::Router::new()
+            .route("/files/{name}", axum::routing::get(file))
             .route("/{method}", axum::routing::post(record))
             .with_state(State {
                 calls: calls.clone(),
                 bot_user: bot_user.to_owned(),
                 roots: Arc::default(),
+                scripted: Arc::new(Mutex::new(
+                    scripted
+                        .into_iter()
+                        .map(|(method, answers)| (method.to_owned(), answers))
+                        .collect(),
+                )),
             });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();

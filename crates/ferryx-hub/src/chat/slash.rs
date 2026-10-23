@@ -302,10 +302,14 @@ async fn steer(
             user: invocation.user_id.clone(),
             text: prompt,
             key: session,
+            files: Vec::new(),
+            event: serde_json::Value::Null,
+            dm: false,
+            bot_user: String::new(),
         };
         let pool = env.pool.clone();
         super::slack::spawn_carrying_test_api(async move {
-            super::slack_turn::handle(config, &pool, admitted).await
+            super::slack_turn::handle(config, &pool, admitted).await;
         });
         return Ok(SlashReply::private(format!(
             "🎯 Steering guidance queued: `{text}`"
@@ -445,10 +449,14 @@ async fn thread(
                 message_ts: root_ts,
                 user: invocation.user_id.clone(),
                 text: starter,
+                files: Vec::new(),
+                event: serde_json::Value::Null,
+                dm: false,
+                bot_user: String::new(),
             };
             let pool = env.pool.clone();
             super::slack::spawn_carrying_test_api(async move {
-                super::slack_turn::handle(config, &pool, admitted).await
+                super::slack_turn::handle(config, &pool, admitted).await;
             });
         }
         Ok(SlashReply::public(format!("🧵 Created thread {link}.")))

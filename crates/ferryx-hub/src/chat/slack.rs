@@ -271,6 +271,12 @@ pub(crate) async fn apply_frame_routed(
     let frame_value: Value = serde_json::from_str(text)
         .map_err(|error| HubError::message(format!("slack frame: {error}")))?;
     if frame_value.get("type").and_then(Value::as_str) == Some("interactive") {
+        #[cfg(feature = "hub-slack")]
+        if let (Some(turns), Some(payload)) = (turns, frame_value.get("payload")) {
+            if super::turn_approval::handle_click(payload, &turns.allowed_users).await {
+                return Ok(SlackFrame::Ignore);
+            }
+        }
         return apply_interactive(&frame_value, owner_id, control).await;
     }
     let (_ack, frame) = handle_frame(text, owner_id)?;
@@ -1812,6 +1818,7 @@ mod tests {
             messages: vec!["looking now".into(), "**All good**: 3 items".into()],
             resume_error: None,
             approval: true,
+            approval_command: None,
             thread_id: "thr-e2e".into(),
             queued_ticks: 0,
             tick: std::time::Duration::ZERO,
@@ -1829,6 +1836,12 @@ mod tests {
             allowed_users: vec!["UOWNER".into()],
             free_channels: vec!["CHOME".into()],
             default_model: Some("model-x".into()),
+            allowed_channels: Vec::new(),
+            ignored_channels: Vec::new(),
+            thread_require_mention: false,
+            auto_thread: true,
+            allow_bots: crate::chat::slack_turn::AllowBots::None,
+            allow_all_users: false,
         }));
         let pool = crate::storage::memory().await.unwrap();
         let control = crate::agent_control::RecordingControl::default();
@@ -2002,7 +2015,11 @@ mod tests {
         assert_eq!(resume["params"]["threadId"], "thr-e2e");
         let turn = frames.iter().find(|f| f["method"] == "turn/start").unwrap();
         assert_eq!(turn["params"]["model"], "model-x");
-        assert_eq!(turn["params"]["input"][0]["text"], "how are things?");
+        // omo prefixes each Slack prompt with the message's own time (slack_ingress).
+        assert_eq!(
+            turn["params"]["input"][0]["text"],
+            "[Thu 1970-01-01 00:01:40 UTC] how are things?"
+        );
         let approval = frames
             .iter()
             .find(|f| f.get("id") == Some(&json!(77)))

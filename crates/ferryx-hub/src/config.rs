@@ -26,6 +26,10 @@ pub struct HubConfig {
     /// Slack channel for owner notices and approval cards (`SLACK_HOME_CHANNEL`).
     /// Absent means those posts go to the owner DM.
     pub slack_home_channel: Option<String>,
+    /// Where owner-facing traffic (lead, digest, alerts) goes. omo-gateway reads
+    /// `OMON_HOME_PLATFORM`; Discord is off here, so every value resolves to Slack.
+    #[serde(default)]
+    pub home_platform: Option<String>,
     pub tracker_addr: Option<String>,
     pub tracker_owner_token: Option<String>,
     pub meta_session_id: Option<String>,
@@ -78,6 +82,9 @@ impl HubConfig {
             ));
         }
         config.apply_slack_home_override(crate::hub_env::var("SLACK_HOME_CHANNEL").ok().as_deref());
+        config.home_platform = Some(
+            home_platform(crate::hub_env::var("OMON_HOME_PLATFORM").ok().as_deref()).to_owned(),
+        );
         if let Ok(url) = crate::hub_env::var("FERRYX_HUB_OMO_URL") {
             config.supervisor_listen_url = Some(url);
         }
@@ -102,6 +109,21 @@ impl HubConfig {
             self.slack_home_channel = Some(channel);
         }
     }
+}
+
+/// `OMON_HOME_PLATFORM`, resolved. omo-gateway sends owner traffic to Slack when the
+/// value is `slack` or no Discord transport is configured. Discord is turned off in
+/// ferryx (everything goes to Slack), so any value, `discord` included, is Slack.
+pub fn home_platform(raw: Option<&str>) -> &'static str {
+    if let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) {
+        if !value.eq_ignore_ascii_case("slack") {
+            tracing::info!(
+                value,
+                "OMON_HOME_PLATFORM names a platform other than Slack; Discord is off, using Slack"
+            );
+        }
+    }
+    "slack"
 }
 
 /// First Slack channel id in a comma-separated list. A leading `#` is dropped.
@@ -305,5 +327,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn every_home_platform_resolves_to_slack() {
+        for raw in [
+            None,
+            Some(""),
+            Some("slack"),
+            Some("Discord"),
+            Some("discord"),
+        ] {
+            assert_eq!(home_platform(raw), "slack");
+        }
     }
 }

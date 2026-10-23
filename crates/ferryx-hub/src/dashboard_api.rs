@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
+use crate::chat::session::SessionKey;
 use crate::http::HttpState;
 use crate::storage::now_rfc3339;
 
@@ -414,10 +415,97 @@ pub async fn delete_session(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// omo answered these with 503/400 when its chat runtime was absent. The hub has no dashboard
-/// chat runtime: Slack turns run on the omo app-server, so the web chat says so instead of 404.
-pub async fn post_chat(UrlPath(_id): UrlPath<String>) -> ApiError {
-    ApiError::new(StatusCode::SERVICE_UNAVAILABLE, CHAT_UNAVAILABLE)
+#[derive(Debug, Deserialize)]
+pub struct ChatRequest {
+    #[serde(alias = "content")]
+    message: String,
+}
+
+fn web_session_key(id: &str) -> SessionKey {
+    SessionKey::new("web", None::<String>, id, None::<String>, "dashboard")
+}
+
+/// omo's `resolve_session_key`: a stored session's key, or a dashboard-only web session.
+async fn resolve_session_key(pool: &SqlitePool, id: &str) -> Result<SessionKey, ApiError> {
+    type SessionRow = (String, Option<String>, String, Option<String>, String);
+    let row: Option<SessionRow> = sqlx::query_as(
+        "SELECT platform, guild_id, channel_id, thread_id, user_id FROM sessions WHERE session_key = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    if row.is_none() {
+        return Ok(web_session_key(id));
+    }
+    if let Ok(key) = SessionKey::from_storage_key(id) {
+        return Ok(key);
+    }
+    let (platform, guild, channel, thread, user) = row.expect("checked above");
+    Ok(SessionKey::new(platform, guild, channel, thread, user))
+}
+
+/// The session id a dashboard id streams and chats under.
+async fn resolve_storage_id(pool: &SqlitePool, id: &str) -> String {
+    match resolve_session_key(pool, id).await {
+        Ok(key) if key.platform == "web" => key.storage_key(),
+        _ => id.to_owned(),
+    }
+}
+
+pub fn chat_available() -> bool {
+    #[cfg(feature = "hub-slack")]
+    {
+        crate::chat::slack_turn::installed().is_some()
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        false
+    }
+}
+
+/// Queues the owner's message as an omo turn of the session. False without a turn runtime.
+fn submit_chat(pool: &SqlitePool, key: SessionKey, message: String) -> bool {
+    #[cfg(feature = "hub-slack")]
+    {
+        crate::chat::slack_turn::submit_dashboard_message(pool, key, message)
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (pool, key, message);
+        false
+    }
+}
+
+/// omo `POST /api/sessions/{id}/chat`: runs the message as a turn of the session on the omo
+/// app-server. A Slack session answers in its thread; a web session answers into the transcript.
+pub async fn post_chat(
+    State(state): State<HttpState>,
+    UrlPath(id): UrlPath<String>,
+    Json(request): Json<ChatRequest>,
+) -> ApiResult<Response> {
+    let message = request.message.trim();
+    if message.is_empty() {
+        return Err(ApiError::bad_request("message must not be empty"));
+    }
+    if !chat_available() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            CHAT_UNAVAILABLE,
+        ));
+    }
+    let key = resolve_session_key(&state.pool, &id).await?;
+    let session_id = key.storage_key();
+    if !submit_chat(&state.pool, key, message.to_owned()) {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            CHAT_UNAVAILABLE,
+        ));
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"queued": true, "session_id": session_id})),
+    )
+        .into_response())
 }
 
 /// Interrupts the session's running omo turn, as `/omo-stop` does.
@@ -445,10 +533,11 @@ pub async fn session_ws(
 }
 
 /// Sends `ready`, then each message stored for the session after the socket opened as an
-/// `event`, and answers `ping`. Chat and stop report the missing chat runtime, as omo did;
-/// `stop` interrupts the session's live omo turn.
+/// `event`, and answers `ping`. `message`/`chat` run an omo turn of the session (as omo's
+/// multiplexer route did); `stop` interrupts the session's live omo turn.
 async fn handle_session_socket(mut socket: WebSocket, pool: SqlitePool, id: String) {
-    let ready = json!({"type": "ready", "session_id": id, "chat_available": false});
+    let id = resolve_storage_id(&pool, &id).await;
+    let ready = json!({"type": "ready", "session_id": id, "chat_available": chat_available()});
     if socket
         .send(Message::Text(ready.to_string().into()))
         .await
@@ -495,7 +584,23 @@ async fn handle_session_socket(mut socket: WebSocket, pool: SqlitePool, id: Stri
                         match parsed.get("type").and_then(Value::as_str).unwrap_or("message") {
                             "ping" => json!({"type": "pong"}),
                             "stop" => json!({"type": "stopped", "stopped": crate::chat::turns::stop(&id)}),
-                            "message" | "chat" => json!({"type": "error", "message": CHAT_UNAVAILABLE}),
+                            "message" | "chat" => {
+                                let content = parsed.get("content").or_else(|| parsed.get("message")).and_then(Value::as_str).unwrap_or_default().trim().to_owned();
+                                if content.is_empty() {
+                                    json!({"type": "error", "message": "message must not be empty"})
+                                } else {
+                                    match resolve_session_key(&pool, &id).await {
+                                        Ok(key) => {
+                                            if submit_chat(&pool, key, content) {
+                                                json!({"type": "accepted", "session_id": id})
+                                            } else {
+                                                json!({"type": "error", "message": CHAT_UNAVAILABLE})
+                                            }
+                                        }
+                                        Err(error) => json!({"type": "error", "message": error.message}),
+                                    }
+                                }
+                            }
                             other => json!({"type": "error", "message": format!("unsupported websocket message type {other}")}),
                         }
                     }

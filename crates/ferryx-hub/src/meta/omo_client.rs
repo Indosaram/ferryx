@@ -294,14 +294,28 @@ pub fn final_reply(outcome: &TurnOutcome) -> Result<Option<String>> {
     Ok(Some(outcome.text.clone()))
 }
 
-/// Approval verdict for one engine approval frame: `None` approves, `Some(reason)` declines.
-pub fn approval_verdict(frame: &Value, cwd: Option<&str>) -> Option<String> {
-    let full_access = crate::hub_env::var("OMON_FULL_ACCESS").map_or(true, |value| {
+#[cfg(test)]
+tokio::task_local! {
+    /// Lets a test run a turn with full access off without touching the process environment.
+    pub static FULL_ACCESS_TEST: bool;
+}
+
+fn full_access() -> bool {
+    #[cfg(test)]
+    if let Ok(value) = FULL_ACCESS_TEST.try_with(|value| *value) {
+        return value;
+    }
+    crate::hub_env::var("OMON_FULL_ACCESS").map_or(true, |value| {
         !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "0" | "false" | "no" | "off"
         )
-    });
+    })
+}
+
+/// Approval verdict for one engine approval frame: `None` approves, `Some(reason)` declines.
+pub fn approval_verdict(frame: &Value, cwd: Option<&str>) -> Option<String> {
+    let full_access = full_access();
     if full_access {
         return None;
     }
@@ -320,6 +334,37 @@ pub fn approval_verdict(frame: &Value, cwd: Option<&str>) -> Option<String> {
         )),
     }
 }
+
+/// The owner's answer to an approval card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerAnswer {
+    Approve,
+    Deny,
+    /// No answer before the card expired (or the turn ended).
+    Unanswered,
+}
+
+/// Asks the owner about a tool request policy would decline (omo-gateway's approval card).
+#[async_trait::async_trait]
+pub trait Approver: Send + Sync {
+    async fn ask(&self, frame: &Value, cwd: Option<&str>, reason: &str) -> OwnerAnswer;
+}
+
+tokio::task_local! {
+    static APPROVER: std::sync::Arc<dyn Approver>;
+}
+
+/// Runs `future` (a turn) with `approver` answering requests full access would not allow.
+pub async fn with_approver<F: std::future::Future>(
+    approver: std::sync::Arc<dyn Approver>,
+    future: F,
+) -> F::Output {
+    APPROVER.scope(approver, future).await
+}
+
+/// omo's reply when the owner did not answer in time.
+pub const UNANSWERED_REASON: &str =
+    "owner has not answered yet; continue with other work and mention the pending approval in your report";
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -437,13 +482,25 @@ async fn answer_server_request(
         return Ok(true);
     }
     if protocol::is_approval_request(method) {
-        match approval_verdict(frame, cwd) {
+        let mut verdict = approval_verdict(frame, cwd);
+        if let Some(reason) = verdict.clone() {
+            if let Ok(approver) = APPROVER.try_with(std::sync::Arc::clone) {
+                verdict = match approver.ask(frame, cwd, &reason).await {
+                    OwnerAnswer::Approve => None,
+                    OwnerAnswer::Deny => Some("denied by the owner".into()),
+                    OwnerAnswer::Unanswered => Some(UNANSWERED_REASON.into()),
+                };
+            }
+        }
+        match verdict {
             None => {
                 *allowed += 1;
                 send(ws, protocol::approval_allow_response(id)).await?;
             }
             Some(reason) => {
-                *denied += 1;
+                if reason != UNANSWERED_REASON {
+                    *denied += 1;
+                }
                 send(ws, protocol::approval_denial_with_reason(id, &reason)).await?;
             }
         }
@@ -965,6 +1022,8 @@ pub mod mock {
         pub messages: Vec<String>,
         pub resume_error: Option<String>,
         pub approval: bool,
+        /// Command the approval request names (default `ls`).
+        pub approval_command: Option<String>,
         pub thread_id: String,
         /// Before acknowledging turn/start, run another turn on the thread for this many
         /// ticks (one frame each), relaying one finished message.
@@ -1056,7 +1115,7 @@ pub mod mock {
                                 }
                                 ws.send(out(json!({"jsonrpc":"2.0","id":id,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}))).await.unwrap();
                                 if script.approval {
-                                    ws.send(out(json!({"jsonrpc":"2.0","id":77,"method":"item/commandExecution/requestApproval","params":{"threadId":thread,"command":"ls"}}))).await.unwrap();
+                                    ws.send(out(json!({"jsonrpc":"2.0","id":77,"method":"item/commandExecution/requestApproval","params":{"threadId":thread,"command":script.approval_command.clone().unwrap_or_else(|| "ls".into())}}))).await.unwrap();
                                     // Wait for the answer before continuing.
                                     if let Some(Ok(Message::Text(text))) = ws.next().await {
                                         log.frames
@@ -1096,6 +1155,7 @@ mod tests {
             messages: messages.iter().map(|m| (*m).to_owned()).collect(),
             resume_error: None,
             approval: false,
+            approval_command: None,
             thread_id: "thr-new".into(),
             queued_ticks: 0,
             tick: Duration::ZERO,
@@ -1170,6 +1230,7 @@ mod tests {
     async fn a_turn_waits_for_each_reply_and_returns_the_last_message() {
         let (url, log) = serve(Script {
             approval: true,
+            approval_command: None,
             ..script(&["first", "final answer"])
         })
         .await;

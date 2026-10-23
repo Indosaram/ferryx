@@ -6,13 +6,22 @@ pub mod debounce;
 pub mod discord;
 pub mod fence;
 pub mod mrkdwn;
+#[cfg(all(test, feature = "hub-slack"))]
+mod omo_parity_e2e;
 pub mod reply;
 pub mod router;
 pub mod session;
 pub mod slack;
 #[cfg(feature = "hub-slack")]
+pub mod slack_backfill;
+#[cfg(feature = "hub-slack")]
+pub mod slack_ingress;
+#[cfg(feature = "hub-slack")]
 pub mod slack_turn;
 #[cfg(feature = "hub-slack")]
 pub mod slack_web;
 pub mod slash;
+pub mod transcript;
+#[cfg(feature = "hub-slack")]
+pub mod turn_approval;
 pub mod turns;

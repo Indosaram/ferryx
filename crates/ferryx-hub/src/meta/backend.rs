@@ -93,6 +93,8 @@ impl<T: OmoTransport> HeadlessEngine<T> {
 /// when `FERRYX_HUB_OMO_URL` is set.
 pub struct UrlModel {
     url: String,
+    /// Overrides the whole-turn cap (cron turns use omo's tighter cron ceiling).
+    total_timeout: Option<std::time::Duration>,
     #[cfg(feature = "hub-slack")]
     workspace: Workspace,
 }
@@ -106,12 +108,59 @@ impl UrlModel {
             .to_string();
         Self {
             url: url.into(),
+            total_timeout: None,
             #[cfg(feature = "hub-slack")]
             workspace: Workspace {
                 roots: vec![cwd.clone()],
                 cwd,
             },
         }
+    }
+}
+
+impl UrlModel {
+    /// omo-gateway's cron lane (`OmoConfig::cron_from_env`): `OMON_OMO_CRON_APPSERVER_URL`
+    /// overrides the app-server, and `OMON_OMO_CRON_TURN_TOTAL_TIMEOUT_SECS` caps the
+    /// whole turn (default 600s). An invalid value keeps the default and is logged.
+    pub fn for_cron(url: impl Into<String>) -> Self {
+        let url = crate::hub_env::var("OMON_OMO_CRON_APPSERVER_URL")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| url.into());
+        let mut model = Self::new(url);
+        model.total_timeout = Some(cron_total_timeout(
+            crate::hub_env::var("OMON_OMO_CRON_TURN_TOTAL_TIMEOUT_SECS")
+                .ok()
+                .as_deref(),
+        ));
+        model
+    }
+
+    pub fn total_timeout(&self) -> Option<std::time::Duration> {
+        self.total_timeout
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+pub const CRON_TURN_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+pub fn cron_total_timeout(value: Option<&str>) -> std::time::Duration {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => CRON_TURN_TOTAL_TIMEOUT,
+        Some(value) => match value.parse::<u64>().ok().filter(|secs| *secs > 0) {
+            Some(secs) => std::time::Duration::from_secs(secs),
+            None => {
+                tracing::warn!(
+                    value,
+                    "invalid OMON_OMO_CRON_TURN_TOTAL_TIMEOUT_SECS, expected a positive integer"
+                );
+                CRON_TURN_TOTAL_TIMEOUT
+            }
+        },
     }
 }
 
@@ -137,6 +186,9 @@ impl crate::lanes::kibitzer::ModelTurn for UrlModel {
             let mut config =
                 super::omo_client::OmoClientConfig::new(self.url.clone()).with_env_timeouts();
             config.workspace = Some(self.workspace.clone());
+            if let Some(total) = self.total_timeout {
+                config.total_timeout = total;
+            }
             config.token = super::supervisor::state_dir_from_home().and_then(|dir| {
                 let probe =
                     super::supervisor::DaemonSupervisor::new(self.url.clone(), Vec::new(), dir);
@@ -207,6 +259,7 @@ mod tests {
             messages: vec![decision_json.into()],
             resume_error: None,
             approval: false,
+            approval_command: None,
             thread_id: "thr-k".into(),
             queued_ticks: 0,
             tick: std::time::Duration::ZERO,
@@ -224,5 +277,17 @@ mod tests {
             .collect();
         assert_eq!(methods, ["initialize", "thread/start", "turn/start"]);
         assert_eq!(frames[2]["params"]["threadId"], "thr-k");
+    }
+
+    #[test]
+    fn the_cron_turn_ceiling_follows_omo() {
+        assert_eq!(cron_total_timeout(None), CRON_TURN_TOTAL_TIMEOUT);
+        assert_eq!(cron_total_timeout(Some(" ")), CRON_TURN_TOTAL_TIMEOUT);
+        assert_eq!(
+            cron_total_timeout(Some("120")),
+            std::time::Duration::from_secs(120)
+        );
+        assert_eq!(cron_total_timeout(Some("0")), CRON_TURN_TOTAL_TIMEOUT);
+        assert_eq!(cron_total_timeout(Some("later")), CRON_TURN_TOTAL_TIMEOUT);
     }
 }
