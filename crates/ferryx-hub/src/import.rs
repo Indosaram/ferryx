@@ -228,37 +228,17 @@ struct Copied {
     tables: BTreeMap<String, u64>,
 }
 
-/// Counts source rows. Does not open or create a destination database.
+/// Runs the whole import into an in-memory hub database and reports what it did, so a dry
+/// run prints the same counts as a first real import, including `orphans_skipped.*` and any
+/// error the real import would hit. It does not open or create a destination database.
 pub async fn preview_from_omo(source: &Path) -> Result<ImportReport> {
-    let from = storage::connect_readonly(source).await?;
-    let mut tables = BTreeMap::new();
-    for name in PARITY_TABLES {
-        tables.insert((*name).to_owned(), count_rows(&from, name).await?);
-    }
-    tables.insert("lanes".into(), count_rows(&from, "lanes").await?);
-    tables.insert("cron_jobs".into(), count_rows(&from, "cron_jobs").await?);
-    let cron_jobs_enabled = count_enabled_cron(&from).await?;
-    from.close().await;
-    Ok(ImportReport {
-        lanes: tables["lanes"],
-        issues: *tables.get("tracker_issues").unwrap_or(&0),
-        teams: *tables.get("tracker_teams").unwrap_or(&0),
-        states: *tables.get("tracker_states").unwrap_or(&0),
-        labels: *tables.get("tracker_labels").unwrap_or(&0),
-        activity: *tables.get("tracker_activity").unwrap_or(&0),
-        cron_jobs: *tables.get("cron_jobs").unwrap_or(&0),
-        inbox_items: *tables.get("inbox_items").unwrap_or(&0),
-        proposals: *tables.get("action_proposals").unwrap_or(&0),
-        allowlist: *tables.get("approval_allowlist").unwrap_or(&0),
-        bot_profiles: *tables.get("bot_profiles").unwrap_or(&0),
-        lane_threads: *tables.get("lane_thread_bindings").unwrap_or(&0),
-        cron_jobs_enabled,
-        tables,
-        ..ImportReport::default()
-    })
+    let scratch = storage::memory().await?;
+    let report = import_into(&scratch, source).await;
+    scratch.close().await;
+    report
 }
 
-/// Opens `dest` and imports, or counts the source when `dry_run` is set.
+/// Opens `dest` and imports, or previews into memory when `dry_run` is set.
 /// A dry run does not create `dest` or its parent directory.
 /// `cwd` overrides the working directory recorded for job scripts.
 /// `record_as` is the path stored in `imported_from` when the bytes came from a snapshot.
@@ -297,7 +277,7 @@ pub async fn open_and_migrate(
 
 /// Idempotent copy. A second run inserts nothing new. Cron rows, issue rows, and
 /// inbox rows whose source values changed are updated. SQL errors are returned.
-/// `dry_run` counts source rows and writes nothing, including the destination file.
+/// `dry_run` previews the import in memory and writes nothing, including the destination file.
 pub async fn migrate_from_omo(
     pool: &SqlitePool,
     source: &Path,
@@ -306,6 +286,10 @@ pub async fn migrate_from_omo(
     if dry_run {
         return preview_from_omo(source).await;
     }
+    import_into(pool, source).await
+}
+
+async fn import_into(pool: &SqlitePool, source: &Path) -> Result<ImportReport> {
     let from = storage::connect_readonly(source).await?;
     let slack_home_channel = slack_home_from_omo_config(source);
     if let Some(channel) = &slack_home_channel {
@@ -1307,8 +1291,22 @@ mod tests {
         )
         .await;
         let dest_path = dir.join("hub.sqlite");
+        // The cutover dry run printed activity 3 here and the real import 2: the dry run
+        // must predict the orphan skips, not only count source rows.
+        let dry = open_and_migrate(&dest_path, &source, true, None, None)
+            .await
+            .unwrap();
+        assert!(
+            !dest_path.exists(),
+            "a dry run does not create the destination"
+        );
+        assert_eq!(dry.activity, 2);
+        assert_eq!(dry.tables["orphans_skipped.tracker_issue_labels"], 1);
+        assert_eq!(dry.tables["orphans_skipped.tracker_activity"], 1);
         let dest = storage::connect(&dest_path).await.unwrap();
         let report = migrate_from_omo(&dest, &source, false).await.unwrap();
+        assert_eq!(dry.issues, report.issues);
+        assert_eq!(dry.tables, report.tables, "dry run and first import agree");
         assert_eq!(report.issues, 1);
         assert_eq!(report.activity, 2);
         assert_eq!(report.tables["tracker_issue_labels"], 1);

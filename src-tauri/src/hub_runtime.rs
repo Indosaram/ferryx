@@ -135,13 +135,23 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
     let mut dry = false;
     let mut rest = args.iter().skip(2);
     match rest.next().map(String::as_str) {
-        Some("stop") => return hub_control(ferryx_hub::control::ControlOp::Stop),
-        Some("start") => return hub_control(ferryx_hub::control::ControlOp::Start),
+        Some("stop") => return hub_control(ferryx_hub::control::ControlOp::Stop, false),
+        Some("start") => return hub_control(ferryx_hub::control::ControlOp::Start, false),
+        Some("status") => {
+            return match rest.next().map(String::as_str) {
+                None => hub_control(ferryx_hub::control::ControlOp::Status, false),
+                Some("--check") => hub_control(ferryx_hub::control::ControlOp::Status, true),
+                Some(other) => {
+                    eprintln!("unknown argument {other}");
+                    2
+                }
+            };
+        }
         Some("env") => return hub_env_cli(&args[3.min(args.len())..]),
         Some("migrate") => {}
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
-            eprintln!("       ferryx hub stop | start");
+            eprintln!("       ferryx hub stop | start | status [--check]");
             eprintln!(
                 "       ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
             );
@@ -315,7 +325,23 @@ fn hub_env_cli(args: &[String]) -> i32 {
     }
 }
 
-fn hub_control(op: ferryx_hub::control::ControlOp) -> i32 {
+/// Exit code for a control reply. A `"status":"failed"` reply is a failure, so the cutover
+/// script never boots omo out after a start that was not persisted, and rollback never loads
+/// omo after a stop that did not take. `--check` also needs `"healthy":true`.
+fn control_exit_code(reply: &str, check: bool) -> i32 {
+    let ok = if check {
+        ferryx_hub::control::reply_healthy(reply)
+    } else {
+        ferryx_hub::control::reply_ok(reply)
+    };
+    if ok {
+        0
+    } else {
+        1
+    }
+}
+
+fn hub_control(op: ferryx_hub::control::ControlOp, check: bool) -> i32 {
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -333,7 +359,7 @@ fn hub_control(op: ferryx_hub::control::ControlOp) -> i32 {
             match ferryx_hub::control::send_control(&path, op).await {
                 Ok(reply) => {
                     println!("{}", reply.trim());
-                    0
+                    control_exit_code(&reply, check)
                 }
                 Err(error) => {
                     eprintln!("hub control: {error}");
@@ -345,7 +371,7 @@ fn hub_control(op: ferryx_hub::control::ControlOp) -> i32 {
     }
     #[cfg(not(unix))]
     {
-        let _ = (op, path);
+        let _ = (op, path, check);
         eprintln!("hub control uses a unix socket");
         1
     }
@@ -457,6 +483,46 @@ struct HubLaunch {
     meta_session_id: String,
 }
 
+/// Whether the hub HTTP listener is bound, for `hub status`. The guard clears it when the
+/// listener task ends or is aborted by `hub stop`.
+static HTTP_BOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct HttpBound;
+
+impl HttpBound {
+    fn mark() -> Self {
+        HTTP_BOUND.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for HttpBound {
+    fn drop(&mut self) {
+        HTTP_BOUND.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
+    ferryx_hub::control::LiveHub {
+        running,
+        http_addr: config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into()),
+        http_bound: running && HTTP_BOUND.load(std::sync::atomic::Ordering::SeqCst),
+        #[cfg(feature = "hub-slack")]
+        slack_configured: ferryx_hub::chat::slack::app_token().is_some(),
+        #[cfg(feature = "hub-slack")]
+        slack: Some(ferryx_hub::chat::slack::socket_mode_status()),
+        #[cfg(not(feature = "hub-slack"))]
+        slack_configured: false,
+        #[cfg(not(feature = "hub-slack"))]
+        slack: None,
+        #[cfg(feature = "hub-discord")]
+        discord_configured: ferryx_hub::chat::discord::bot_token().is_some(),
+        #[cfg(not(feature = "hub-discord"))]
+        discord_configured: false,
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    }
+}
+
 struct Generation {
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -512,6 +578,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     tasks.push(tokio::spawn(async move {
         // A draining predecessor may still hold the port; keep trying until it lets go.
         let listener = ferryx_hub::lifecycle::bind_tcp_with_retry(&addr, Default::default()).await;
+        let _bound = HttpBound::mark();
         tracing::info!(%addr, "hub http listening");
         if let Err(error) = axum::serve(listener, router).await {
             tracing::warn!(%error, "hub http stopped");
@@ -781,7 +848,18 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                                 }
                             }
                         }
-                        Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop or start\"}\n",
+                        Ok(ferryx_hub::control::ControlOp::Status) => {
+                            let running_now = running.lock().await.is_some();
+                            let report = ferryx_hub::control::status_report(
+                                &launch.hub.pool,
+                                &live_hub(running_now, &launch.config),
+                            )
+                            .await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{report}\n").as_bytes()).await;
+                            return;
+                        }
+                        Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop, start, or status\"}\n",
                     };
                     let mut stream = reader.into_inner();
                     let _ = stream.write_all(reply.as_bytes()).await;
@@ -959,6 +1037,18 @@ pub fn run_mcp() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_control_reply_exits_nonzero() {
+        assert_eq!(control_exit_code("{\"status\":\"ok\",\"op\":\"start\"}\n", false), 0);
+        assert_eq!(
+            control_exit_code("{\"status\":\"failed\",\"error\":\"hub start was not persisted\"}\n", false),
+            1
+        );
+        assert_eq!(control_exit_code("{\"status\":\"ok\",\"healthy\":false}", false), 0);
+        assert_eq!(control_exit_code("{\"status\":\"ok\",\"healthy\":false}", true), 1);
+        assert_eq!(control_exit_code("{\"status\":\"ok\",\"healthy\":true}", true), 0);
+    }
 
     #[test]
     fn claude_and_codex_history_parsers_feed_the_hub_transcript() {
