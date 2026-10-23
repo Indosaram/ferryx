@@ -143,7 +143,6 @@ impl Judge {
         instructions: &str,
         options: &[&str],
     ) -> Result<Choice> {
-        let _ = scrub_for_external(state);
         if let Some(selected) = &self.forced {
             if options.contains(&selected.as_str()) {
                 return Ok(Choice::new(selected.clone()));
@@ -152,7 +151,7 @@ impl Judge {
                 "forced judge choice {selected} is not an option"
             )));
         }
-        match self.run_typesafe(instructions, options).await {
+        match self.run_typesafe(state, instructions, options).await {
             Ok(choice) => Ok(choice),
             Err(error) => {
                 if let Some(selected) = &self.offline_fallback {
@@ -165,11 +164,27 @@ impl Judge {
         }
     }
 
-    async fn run_typesafe(&self, instructions: &str, options: &[&str]) -> Result<Choice> {
+    async fn run_typesafe(
+        &self,
+        state: &str,
+        instructions: &str,
+        options: &[&str],
+    ) -> Result<Choice> {
         let bin = default_judge_bin();
         let mut command = crate::child_env::command(&bin);
+        // typesafe-judge refuses to decide without a state ("No state provided. Supply
+        // --state, --file, or pipe content through stdin."), and `output()` gives the child no
+        // stdin, so every call used to fail with empty stdout ("typesafe-judge declined: ").
+        let state = scrub_for_external(state);
+        let state = if state.trim().is_empty() {
+            "(no state)".to_owned()
+        } else {
+            state
+        };
         command
             .arg("choice")
+            .arg("--state")
+            .arg(state)
             .arg("-i")
             .arg(scrub_for_external(instructions))
             .arg("-q");
@@ -187,8 +202,14 @@ impl Judge {
         if output.status.success() && options.contains(&stdout.as_str()) {
             Ok(Choice::new(stdout))
         } else {
+            let stderr: String = String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .chars()
+                .take(200)
+                .collect();
             Err(HubError::message(format!(
-                "typesafe-judge declined: {stdout}"
+                "typesafe-judge declined: {stdout} ({}; {stderr})",
+                output.status
             )))
         }
     }

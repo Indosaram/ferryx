@@ -268,9 +268,58 @@ where
     F: FnMut(SourceKind, Option<String>) -> Fut + Send,
     Fut: std::future::Future<Output = Result<Option<(Vec<SourceItem>, String)>>> + Send,
 {
-    while let Some(event) = events.recv().await {
+    serve_coalesced(pool, &mut events, judge, &mut fetch, MAIL_MIN_GAP).await
+}
+
+/// Shortest gap between two mail collections. `zele mail watch` prints a line per change, so
+/// one new message can produce several events within a minute; they collapse into one fetch.
+pub const MAIL_MIN_GAP: Duration = Duration::from_secs(30);
+
+async fn serve_coalesced<F, Fut>(
+    pool: SqlitePool,
+    events: &mut tokio::sync::mpsc::Receiver<InboxWatcherEvent>,
+    judge: Judge,
+    fetch: &mut F,
+    mail_gap: Duration,
+) -> Result<()>
+where
+    F: FnMut(SourceKind, Option<String>) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<Option<(Vec<SourceItem>, String)>>> + Send,
+{
+    let mut last_mail: Option<tokio::time::Instant> = None;
+    let mut mail_deferred = false;
+    loop {
+        let due = last_mail.map(|at| at + mail_gap);
+        let mut sources: Vec<SourceKind> = Vec::new();
+        tokio::select! {
+            event = events.recv() => match event {
+                Some(event) => sources.extend_from_slice(filter_sources(&event)),
+                None => break,
+            },
+            _ = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)), if mail_deferred => {
+                sources.push(SourceKind::Mail);
+            }
+        }
+        // Everything already queued joins this pass instead of starting its own.
+        while let Ok(event) = events.try_recv() {
+            sources.extend_from_slice(filter_sources(&event));
+        }
+        let mut unique: Vec<SourceKind> = Vec::new();
+        for source in sources {
+            if !unique.contains(&source) {
+                unique.push(source);
+            }
+        }
         let now = Utc::now();
-        for source in filter_sources(&event) {
+        for source in &unique {
+            if *source == SourceKind::Mail {
+                if last_mail.is_some_and(|at| at.elapsed() < mail_gap) {
+                    mail_deferred = true;
+                    continue;
+                }
+                mail_deferred = false;
+                last_mail = Some(tokio::time::Instant::now());
+            }
             let cursor = cursor_of(&pool, source.as_str()).await?;
             match fetch(*source, cursor).await {
                 Ok(Some((items, next))) => {
@@ -501,8 +550,57 @@ pub async fn run_json(program: &str, args: &[String]) -> Result<Value> {
             output.status
         )));
     }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|error| HubError::message(format!("{program} returned invalid JSON: {error}")))
+    decode_structured_output(&output.stdout, program)
+}
+
+/// Decodes a CLI's stdout the way omo did: empty output is an empty list, then one JSON
+/// document, then NDJSON (`imsg ... --json` prints one object per line), then YAML (`zele mail
+/// list` prints YAML with `items`/`next_page`/`summary`). Only the parser error is reported,
+/// never the output itself, because it holds private message content.
+pub fn decode_structured_output(bytes: &[u8], program: &str) -> Result<Value> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Value::Array(Vec::new()));
+    }
+    let json_error = match serde_json::from_slice::<Value>(bytes) {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Option<Vec<Value>> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    if let Some(items) = lines.filter(|items| !items.is_empty()) {
+        return Ok(Value::Array(items));
+    }
+    // Only a document that starts like YAML (`key:` or `- item`) counts: a prose error such
+    // as "authorization denied (code: 23)" also parses as a one-entry YAML mapping.
+    let first = text
+        .lines()
+        .map(str::trim_end)
+        .find(|line| !line.trim().is_empty());
+    let looks_like_yaml = first.is_some_and(|line| {
+        line.starts_with("- ")
+            || line == "-"
+            || line.split_once(':').is_some_and(|(key, rest)| {
+                !key.is_empty()
+                    && key
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                    && (rest.is_empty() || rest.starts_with(' '))
+            })
+    });
+    match looks_like_yaml
+        .then(|| serde_yaml::from_slice::<Value>(bytes))
+        .and_then(std::result::Result::ok)
+    {
+        Some(value @ (Value::Object(_) | Value::Array(_))) => Ok(value),
+        _ => Err(HubError::message(format!(
+            "{program} returned invalid structured output (not JSON, NDJSON or a YAML document): {json_error}"
+        ))),
+    }
 }
 
 pub async fn fetch_imessage_with(
@@ -1028,6 +1126,59 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn a_burst_of_mail_events_collapses_into_one_fetch_plus_one_trailing() {
+        let pool = crate::storage::memory().await.unwrap();
+        let (events, mut receiver) = watcher_channel();
+        let fetched = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = fetched.clone();
+        let mut fetch = move |kind: SourceKind, _cursor: Option<String>| {
+            seen.lock()
+                .unwrap()
+                .push((kind, tokio::time::Instant::now()));
+            async move { Ok(None) }
+        };
+        let sender = events.clone();
+        let feeder = tokio::spawn(async move {
+            for _ in 0..6 {
+                sender.send(InboxWatcherEvent::Mail).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            sender
+                .send(InboxWatcherEvent::IMessage { rowid: Some(1) })
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        });
+        let serve_task = tokio::spawn(async move {
+            serve_coalesced(
+                pool,
+                &mut receiver,
+                Judge::forced("bot_can_handle"),
+                &mut fetch,
+                Duration::from_millis(250),
+            )
+            .await
+        });
+        feeder.await.unwrap();
+        drop(events);
+        serve_task.await.unwrap().unwrap();
+        let fetched = fetched.lock().unwrap().clone();
+        let mail: Vec<_> = fetched
+            .iter()
+            .filter(|(kind, _)| *kind == SourceKind::Mail)
+            .collect();
+        assert_eq!(mail.len(), 2, "{fetched:?}");
+        assert!(mail[1].1 - mail[0].1 >= Duration::from_millis(240));
+        assert_eq!(
+            fetched
+                .iter()
+                .filter(|(kind, _)| *kind == SourceKind::Imessage)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn a_failing_judge_leaves_items_pending_and_the_loop_keeps_serving() {
         let pool = crate::storage::memory().await.unwrap();
         let (events, receiver) = watcher_channel();
@@ -1076,6 +1227,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored, 2);
+    }
+
+    #[test]
+    fn structured_output_accepts_json_ndjson_yaml_and_empty() {
+        use serde_json::json;
+        assert_eq!(decode_structured_output(b"", "x").unwrap(), json!([]));
+        assert_eq!(decode_structured_output(b" \n", "x").unwrap(), json!([]));
+        assert_eq!(
+            decode_structured_output(br#"[{"id":1}]"#, "x").unwrap(),
+            json!([{"id": 1}])
+        );
+        assert_eq!(
+            decode_structured_output(b"{\"id\":1}\n{\"id\":2}\n", "imsg").unwrap(),
+            json!([{"id": 1}, {"id": 2}])
+        );
+        let yaml =
+            b"summary: 1 thread\nnext_page: null\nitems:\n  - thread_id: t1\n    subject: Hi\n";
+        let value = decode_structured_output(yaml, "zele").unwrap();
+        assert_eq!(value["items"][0]["thread_id"], json!("t1"));
+        let error = decode_structured_output(b"authorization denied (code: 23)\n", "imsg")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid structured output"), "{error}");
+        assert!(!error.contains("authorization"), "{error}");
     }
 
     #[test]

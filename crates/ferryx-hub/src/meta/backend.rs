@@ -132,20 +132,26 @@ impl crate::lanes::kibitzer::ModelTurn for UrlModel {
         }
         #[cfg(feature = "hub-slack")]
         {
-            let mut engine = HeadlessEngine::new(
-                WebsocketTransport {
-                    url: self.url.clone(),
-                },
-                self.workspace.clone(),
-            )
-            .with_prompt(prompt);
-            if let Some(model) = model {
-                engine = engine.with_model(model);
-            }
-            if !toolsets.is_empty() {
-                engine = engine.with_toolsets(toolsets.to_vec());
-            }
-            engine.turn(prompt).await
+            // Same sequence omo-gateway uses (each reply awaited, Bearer token from the
+            // supervised daemon's token file, events read until turn/completed).
+            let mut config =
+                super::omo_client::OmoClientConfig::new(self.url.clone()).with_env_timeouts();
+            config.workspace = Some(self.workspace.clone());
+            config.token = super::supervisor::state_dir_from_home().and_then(|dir| {
+                let probe =
+                    super::supervisor::DaemonSupervisor::new(self.url.clone(), Vec::new(), dir);
+                super::omo_client::token_from_file(&probe.token_path())
+            });
+            let request = super::omo_client::TurnRequest {
+                thread_id: None,
+                system_prompt: Some(prompt.to_owned()),
+                model: model.map(str::to_owned),
+                toolsets: (!toolsets.is_empty()).then(|| toolsets.to_vec()),
+                text: prompt.to_owned(),
+            };
+            super::omo_client::run_turn(&config, &request, None)
+                .await
+                .map(|outcome| outcome.text)
         }
         #[cfg(not(feature = "hub-slack"))]
         {
@@ -154,57 +160,6 @@ impl crate::lanes::kibitzer::ModelTurn for UrlModel {
                 "omo websocket transport is compiled with hub-slack",
             ))
         }
-    }
-}
-
-#[cfg(feature = "hub-slack")]
-struct WebsocketTransport {
-    url: String,
-}
-
-#[cfg(feature = "hub-slack")]
-#[async_trait]
-impl OmoTransport for WebsocketTransport {
-    async fn roundtrip(&self, frames: Vec<String>) -> Result<Vec<Value>> {
-        use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::Message;
-        let (mut socket, _) = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            tokio_tungstenite::connect_async(&self.url),
-        )
-        .await
-        .map_err(|_| HubError::message("omo websocket connect timed out"))?
-        .map_err(|error| HubError::message(error.to_string()))?;
-        for frame in frames {
-            socket
-                .send(Message::Text(frame.into()))
-                .await
-                .map_err(|error| HubError::message(error.to_string()))?;
-        }
-        let mut events = Vec::new();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        while std::time::Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let next = tokio::time::timeout(remaining, socket.next()).await;
-            let message = match next {
-                Ok(Some(Ok(message))) => message,
-                _ => break,
-            };
-            let Message::Text(text) = message else {
-                continue;
-            };
-            if let Ok(value) = serde_json::from_str::<Value>(text.as_str()) {
-                let done = value
-                    .pointer("/params/item/text")
-                    .and_then(Value::as_str)
-                    .is_some();
-                events.push(value);
-                if done {
-                    break;
-                }
-            }
-        }
-        Ok(events)
     }
 }
 
@@ -244,35 +199,27 @@ mod tests {
 
     #[cfg(feature = "hub-slack")]
     #[tokio::test]
-    async fn url_model_reads_the_assistant_event_from_the_omo_socket() {
+    async fn url_model_runs_a_full_omo_turn() {
         use crate::lanes::kibitzer::ModelTurn;
-        use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-        use axum::response::IntoResponse;
-
-        async fn handle(mut socket: WebSocket) {
-            while let Some(Ok(message)) = socket.recv().await {
-                let Message::Text(text) = message else {
-                    continue;
-                };
-                if text.contains("turn/start") {
-                    let body = r#"{"method":"item/agentMessage/delta","params":{"item":{"text":"{\"wake\":true,\"reason\":\"r\",\"suggested\":\"s\",\"target_lane\":null}"}}}"#;
-                    let _ = socket.send(Message::Text(body.into())).await;
-                    break;
-                }
-            }
-        }
-        async fn upgrade(ws: WebSocketUpgrade) -> impl IntoResponse {
-            ws.on_upgrade(handle)
-        }
-        let app = axum::Router::new().route("/ws", axum::routing::get(upgrade));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let model = UrlModel::new(format!("ws://127.0.0.1:{port}/ws"));
+        use crate::meta::omo_client::mock::{serve, Script};
+        let decision_json = r#"{"wake":true,"reason":"r","suggested":"s","target_lane":null}"#;
+        let (url, log) = serve(Script {
+            messages: vec![decision_json.into()],
+            resume_error: None,
+            approval: false,
+            thread_id: "thr-k".into(),
+        })
+        .await;
+        let model = UrlModel::new(url);
         let text = model.complete("state").await.unwrap();
         let decision = crate::lanes::kibitzer::parse_decision(&text).unwrap();
         assert!(decision.wake);
+        let frames = log.frames.lock().unwrap().clone();
+        let methods: Vec<_> = frames
+            .iter()
+            .filter_map(|f| f.get("method").and_then(Value::as_str))
+            .collect();
+        assert_eq!(methods, ["initialize", "thread/start", "turn/start"]);
+        assert_eq!(frames[2]["params"]["threadId"], "thr-k");
     }
 }

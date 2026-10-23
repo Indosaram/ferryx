@@ -63,6 +63,71 @@ impl DaemonSupervisor {
         Ok(path)
     }
 
+    pub fn log_path(&self) -> PathBuf {
+        self.state_dir
+            .join(format!("omo-appserver-{}.log", self.port()))
+    }
+
+    /// Owner-only append log for the daemon's stdout and stderr, rotated past 10 MiB.
+    fn open_log(&self) -> Option<(std::fs::File, std::fs::File)> {
+        let path = self.log_path();
+        if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 10 * 1024 * 1024) {
+            let _ = std::fs::rename(&path, path.with_extension("log.1"));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            options.mode(0o600);
+            let file = options.open(&path).ok()?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .ok()?;
+            let clone = file.try_clone().ok()?;
+            Some((file, clone))
+        }
+        #[cfg(not(unix))]
+        {
+            let file = options.open(&path).ok()?;
+            let clone = file.try_clone().ok()?;
+            Some((file, clone))
+        }
+    }
+
+    /// The token file the daemon is started with. An existing non-empty file is kept so a
+    /// daemon that outlived the previous hub (a handover) still accepts the token.
+    pub fn ensure_token_file(&self) -> Result<PathBuf> {
+        let path = self.token_path();
+        if std::fs::read_to_string(&path).is_ok_and(|token| !token.trim().is_empty()) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            }
+            return Ok(path);
+        }
+        let token = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        self.write_token_file(&token)
+    }
+
+    /// Waits until the daemon accepts connections, up to `limit`.
+    pub async fn wait_responsive(&self, limit: Duration) -> bool {
+        let until = tokio::time::Instant::now() + limit;
+        loop {
+            if self.responsive().await {
+                return true;
+            }
+            if tokio::time::Instant::now() >= until {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     pub fn record_pid(&self, pid: u32) -> Result<()> {
         std::fs::create_dir_all(&self.state_dir)?;
         std::fs::write(self.pid_path(), format!("{pid} {}", std::process::id()))?;
@@ -104,7 +169,20 @@ impl DaemonSupervisor {
             }
         }
         let mut command = crate::child_env::command(&self.command[0]);
-        command.args(&self.command[1..]).kill_on_drop(false);
+        command
+            .args(&self.command[1..])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(false);
+        match self.open_log() {
+            Some((out, err)) => {
+                command.stdout(out).stderr(err);
+            }
+            None => {
+                command
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+            }
+        }
         let child = command.spawn()?;
         let pid = child
             .id()
@@ -140,6 +218,27 @@ mod libc {
     }
 }
 
+/// omo binary for the app-server: `OMON_OMO_BIN`, else `omo` on the hub child PATH.
+pub fn omo_bin() -> String {
+    crate::hub_env::var("OMON_OMO_BIN")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "omo".into())
+}
+
+/// `<bin> app-server --listen <url> --ws-auth <token file>`, the command omo-gateway spawned.
+pub fn app_server_command(bin: &str, listen_url: &str, token_file: &Path) -> Vec<String> {
+    vec![
+        bin.to_owned(),
+        "app-server".into(),
+        "--listen".into(),
+        listen_url.to_owned(),
+        "--ws-auth".into(),
+        token_file.display().to_string(),
+    ]
+}
+
 pub fn state_dir_from_home() -> Option<PathBuf> {
     let home = crate::hub_env::var_os("HOME").or_else(|| crate::hub_env::var_os("USERPROFILE"))?;
     Some(Path::new(&home).join(".ferryx").join("hub"))
@@ -148,6 +247,31 @@ pub fn state_dir_from_home() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_token_survives_and_the_command_matches_omo_gateway() {
+        let dir = std::env::temp_dir().join(format!("ferryx-hub-sup-tok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let supervisor = DaemonSupervisor::new("ws://127.0.0.1:19742", vec![], dir.clone());
+        let path = supervisor.ensure_token_file().unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(first.len(), 64);
+        assert_eq!(supervisor.ensure_token_file().unwrap(), path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        assert!(path.ends_with("omo-appserver-19742.token"));
+        assert_eq!(
+            app_server_command("/bin/omo", "ws://127.0.0.1:19742", &path),
+            [
+                "/bin/omo",
+                "app-server",
+                "--listen",
+                "ws://127.0.0.1:19742",
+                "--ws-auth",
+                path.to_str().unwrap()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_token_file_is_owner_only_on_unix() {

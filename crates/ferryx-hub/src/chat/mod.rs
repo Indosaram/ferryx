@@ -9,4 +9,6 @@ pub mod reply;
 pub mod router;
 pub mod session;
 pub mod slack;
+#[cfg(feature = "hub-slack")]
+pub mod slack_turn;
 pub mod slash;

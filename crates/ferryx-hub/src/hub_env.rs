@@ -177,6 +177,20 @@ pub fn plist_environment(plist: &Path) -> Result<BTreeMap<String, String>> {
         .collect())
 }
 
+/// Removes every `DISCORD_*` key (and the `FERRYX_HUB_DISCORD` switch) from an import, so
+/// importing an omo plist can never turn Discord on. Returns the removed names.
+pub fn drop_discord_keys(incoming: &mut BTreeMap<String, String>) -> Vec<String> {
+    let names: Vec<String> = incoming
+        .keys()
+        .filter(|key| key.starts_with("DISCORD_") || key.as_str() == "FERRYX_HUB_DISCORD")
+        .cloned()
+        .collect();
+    for name in &names {
+        incoming.remove(name);
+    }
+    names
+}
+
 /// Merges `incoming` over the existing file at `dest` and writes it with mode 0600 through a
 /// temporary file and rename. Returns the key names written; values are never returned.
 pub fn write_merged(dest: &Path, incoming: &BTreeMap<String, String>) -> Result<Vec<String>> {
@@ -220,6 +234,29 @@ pub fn write_merged(dest: &Path, incoming: &BTreeMap<String, String>) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn discord_keys_are_never_imported() {
+        let mut incoming = BTreeMap::new();
+        for key in [
+            "DISCORD_BOT_TOKEN",
+            "DISCORD_HOME_CHANNEL",
+            "FERRYX_HUB_DISCORD",
+            "SLACK_APP_TOKEN",
+        ] {
+            incoming.insert(key.to_owned(), "x".to_owned());
+        }
+        let dropped = super::drop_discord_keys(&mut incoming);
+        assert_eq!(
+            dropped,
+            [
+                "DISCORD_BOT_TOKEN",
+                "DISCORD_HOME_CHANNEL",
+                "FERRYX_HUB_DISCORD"
+            ]
+        );
+        assert_eq!(incoming.keys().collect::<Vec<_>>(), ["SLACK_APP_TOKEN"]);
+    }
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
