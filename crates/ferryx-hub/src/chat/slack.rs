@@ -901,7 +901,118 @@ where
     F: FnMut(String) -> Fut + Send,
     Fut: std::future::Future<Output = ()> + Send,
 {
-    run_socket_mode(credentials_from_env, SocketPace::production(), on_frame).await
+    run_socket_mode_tracked(
+        &SOCKET_MODE,
+        credentials_from_env,
+        SocketPace::production(),
+        on_frame,
+    )
+    .await
+}
+
+/// Socket Mode state for `ferryx hub status`. It holds no token and no socket URL.
+#[derive(Debug, Default)]
+pub struct SocketModeState {
+    running: std::sync::atomic::AtomicBool,
+    connected: std::sync::atomic::AtomicBool,
+    connects: std::sync::atomic::AtomicU64,
+    last_error: std::sync::Mutex<Option<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SocketModeStatus {
+    /// The Socket Mode task is alive (it may be between reconnects).
+    pub running: bool,
+    /// A websocket is open right now.
+    pub connected: bool,
+    /// Websockets opened since the daemon started.
+    pub connects: u64,
+    pub last_error: Option<String>,
+}
+
+#[cfg_attr(not(feature = "hub-slack"), allow(dead_code))]
+impl SocketModeState {
+    pub const fn new() -> Self {
+        Self {
+            running: std::sync::atomic::AtomicBool::new(false),
+            connected: std::sync::atomic::AtomicBool::new(false),
+            connects: std::sync::atomic::AtomicU64::new(0),
+            last_error: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn snapshot(&self) -> SocketModeStatus {
+        use std::sync::atomic::Ordering;
+        SocketModeStatus {
+            running: self.running.load(Ordering::SeqCst),
+            connected: self.connected.load(Ordering::SeqCst),
+            connects: self.connects.load(Ordering::SeqCst),
+            last_error: self.last_error.lock().ok().and_then(|error| error.clone()),
+        }
+    }
+
+    fn mark_connected(&self) {
+        use std::sync::atomic::Ordering;
+        self.connects.fetch_add(1, Ordering::SeqCst);
+        self.connected.store(true, Ordering::SeqCst);
+        if let Ok(mut error) = self.last_error.lock() {
+            *error = None;
+        }
+    }
+
+    fn mark_disconnected(&self, error: Option<&str>) {
+        self.connected
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        if let (Some(message), Ok(mut slot)) = (error, self.last_error.lock()) {
+            *slot = Some(redact_socket_error(message));
+        }
+    }
+
+    /// Marks the task running until the returned guard drops. An aborted task (`hub stop`)
+    /// drops the guard too, so a stopped hub never reports a live socket.
+    fn session(&self) -> SocketModeSession<'_> {
+        self.running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        SocketModeSession(self)
+    }
+}
+
+#[cfg_attr(not(feature = "hub-slack"), allow(dead_code))]
+struct SocketModeSession<'a>(&'a SocketModeState);
+
+impl Drop for SocketModeSession<'_> {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.0.connected.store(false, Ordering::SeqCst);
+        self.0.running.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg_attr(not(feature = "hub-slack"), allow(dead_code))]
+/// Slack error text for status output: one line, no socket URL (it carries a ticket), bounded.
+fn redact_socket_error(message: &str) -> String {
+    let mut out: String = message
+        .split_whitespace()
+        .map(|word| {
+            if word.contains("wss://") || word.contains("ws://") || word.contains("xox") {
+                "<redacted>"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if out.chars().count() > 200 {
+        out = out.chars().take(200).collect::<String>() + "...";
+    }
+    out
+}
+
+static SOCKET_MODE: SocketModeState = SocketModeState::new();
+
+/// The daemon's Socket Mode state.
+pub fn socket_mode_status() -> SocketModeStatus {
+    SOCKET_MODE.snapshot()
 }
 
 #[cfg(any(test, feature = "hub-slack"))]
@@ -987,8 +1098,19 @@ enum SocketEvent {
     Closed,
 }
 
+#[cfg(all(test, feature = "hub-slack"))]
+async fn run_socket_mode<F, Fut, C>(credentials: C, pace: SocketPace, on_frame: F) -> Result<()>
+where
+    C: FnMut() -> Result<SocketCredentials> + Send,
+    F: FnMut(String) -> Fut + Send,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    run_socket_mode_tracked(&SocketModeState::new(), credentials, pace, on_frame).await
+}
+
 #[cfg(feature = "hub-slack")]
-async fn run_socket_mode<F, Fut, C>(
+async fn run_socket_mode_tracked<F, Fut, C>(
+    state: &SocketModeState,
     mut credentials: C,
     pace: SocketPace,
     mut on_frame: F,
@@ -998,10 +1120,20 @@ where
     F: FnMut(String) -> Fut + Send,
     Fut: std::future::Future<Output = ()> + Send,
 {
+    let _session = state.session();
     let mut backoff = pace.backoff_initial;
     let mut attempt = 0u64;
     loop {
-        match drive_session(&mut credentials, pace, &mut attempt, &mut on_frame).await {
+        let session =
+            drive_session(&mut credentials, pace, &mut attempt, &mut on_frame, state).await;
+        state.mark_disconnected(
+            session
+                .as_ref()
+                .err()
+                .map(|error| error.to_string())
+                .as_deref(),
+        );
+        match session {
             Ok(()) => {
                 tracing::info!(attempt, "slack socket mode session ended; reconnecting");
                 backoff = pace.backoff_initial;
@@ -1025,6 +1157,7 @@ async fn drive_session<F, Fut, C>(
     pace: SocketPace,
     attempt: &mut u64,
     on_frame: &mut F,
+    state: &SocketModeState,
 ) -> Result<()>
 where
     C: FnMut() -> Result<SocketCredentials>,
@@ -1032,6 +1165,7 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     let mut socket = connect_once(&credentials()?, pace, attempt).await?;
+    state.mark_connected();
     let mut last_rx = Instant::now();
     let mut ping_sent = false;
     loop {
@@ -1938,6 +2072,64 @@ mod tests {
             "silent socket reconnected after {gap:?}, budget {budget:?}"
         );
         client.abort();
+    }
+
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn socket_mode_state_reports_a_live_socket_and_clears_when_the_task_is_aborted() {
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_port = http.local_addr().unwrap().port();
+        let ws_port = ws.local_addr().unwrap().port();
+        spawn_connections_open(http, format!("ws://127.0.0.1:{ws_port}/"));
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = ws.accept().await {
+                tokio::spawn(async move {
+                    use futures_util::StreamExt;
+                    let Ok(mut socket) = tokio_tungstenite::accept_async(tcp).await else {
+                        return;
+                    };
+                    // Answer pings so the client keeps this socket.
+                    while let Some(Ok(_)) = socket.next().await {}
+                });
+            }
+        });
+        static STATE: SocketModeState = SocketModeState::new();
+        assert!(!STATE.snapshot().running);
+        let pace = test_pace();
+        let creds = test_credentials(format!("http://127.0.0.1:{http_port}"));
+        let client = tokio::spawn(async move {
+            let _ = run_socket_mode_tracked(&STATE, move || Ok(creds.clone()), pace, |_| async {})
+                .await;
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !STATE.snapshot().connected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("socket mode never reported connected");
+        let live = STATE.snapshot();
+        assert!(live.running);
+        assert!(live.connects >= 1);
+        assert_eq!(live.last_error, None);
+        client.abort();
+        let _ = client.await;
+        let stopped = STATE.snapshot();
+        assert!(
+            !stopped.running,
+            "an aborted task (hub stop) is not running"
+        );
+        assert!(!stopped.connected, "an aborted task has no socket");
+    }
+
+    #[test]
+    fn socket_errors_in_status_drop_urls_and_tokens() {
+        let message = redact_socket_error(
+            "connect failed wss://wss-primary.slack.com/link/?ticket=abc xoxb-123 refused",
+        );
+        assert_eq!(message, "connect failed <redacted> <redacted> refused");
+        assert!(redact_socket_error(&"x".repeat(500)).chars().count() <= 203);
     }
 
     #[cfg(feature = "hub-slack")]

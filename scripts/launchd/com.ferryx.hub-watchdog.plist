@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template. `scripts/hub-cutover.sh install-watchdog --yes` fills in the placeholders
+     with absolute paths: launchd runs jobs in /, so a relative script path never runs.
+     No secrets go in here. -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -7,8 +10,17 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>scripts/hub-watchdog.sh</string>
+        <string>__HUB_WATCHDOG_SCRIPT__</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>WATCHDOG_FERRYX_BIN</key>
+        <string>__FERRYX_BIN__</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__HUB_LOG__</string>
+    <key>StandardErrorPath</key>
+    <string>__HUB_LOG__</string>
     <key>StartInterval</key>
     <integer>60</integer>
     <key>RunAtLoad</key>

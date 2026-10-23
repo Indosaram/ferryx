@@ -14,6 +14,7 @@ SLACK_CHANNEL="${WATCHDOG_SLACK_CHANNEL:-}"
 FAIL_LIMIT="${WATCHDOG_FAIL_LIMIT:-3}"
 ALERT_COOLDOWN="${WATCHDOG_ALERT_COOLDOWN:-1800}"
 DRY_ALERT="${WATCHDOG_DRY_ALERT:-0}"
+FERRYX_STATUS_BIN="${WATCHDOG_FERRYX_BIN:-}"
 
 mkdir -p "$STATE_DIR"
 now() { date +%s; }
@@ -46,7 +47,22 @@ alert() {
     --data-binary "$(printf '%s' "$message" | python3 -c 'import json,sys; print(json.dumps({"channel":sys.argv[1],"text":sys.stdin.read()}))' "$SLACK_CHANNEL")"
 }
 
-if http_ok "$DASHBOARD_URL"; then
+# With WATCHDOG_FERRYX_BIN set, `hub status --check` must pass too: hub tasks running,
+# HTTP bound, Slack Socket Mode connected when configured, no failed inbox watcher.
+# /api/health alone stays 200 while Slack is disconnected.
+status_ok() {
+  [[ -z "$FERRYX_STATUS_BIN" ]] && return 0
+  "$FERRYX_STATUS_BIN" hub status --check >/dev/null 2>&1
+}
+
+reason=""
+if ! http_ok "$DASHBOARD_URL"; then
+  reason="http ${DASHBOARD_URL}"
+elif ! status_ok; then
+  reason="hub status --check"
+fi
+
+if [[ -z "$reason" ]]; then
   set_counter gateway_fail 0
   log "healthy ${DASHBOARD_URL}"
   exit 0
@@ -54,8 +70,8 @@ fi
 
 fails="$(( $(counter gateway_fail) + 1 ))"
 set_counter gateway_fail "$fails"
-log "unhealthy ${DASHBOARD_URL} fail ${fails}"
+log "unhealthy ${reason} fail ${fails}"
 if (( fails >= FAIL_LIMIT )); then
-  alert health "ferryx hub ${DASHBOARD_URL} failed ${fails} checks (label ${LABEL})"
+  alert health "ferryx hub ${reason} failed ${fails} checks (label ${LABEL})"
 fi
 exit 1
