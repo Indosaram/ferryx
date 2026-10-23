@@ -1,7 +1,11 @@
 //! typesafe-judge, then the omo fallback. `TYPESAFE_*` comes from hub config, never `~/.zshenv`.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use chrono::{NaiveDate, Utc};
+use sqlx::SqlitePool;
 
 use serde::{Deserialize, Serialize};
 
@@ -97,6 +101,94 @@ pub fn default_judge_bin() -> PathBuf {
     PathBuf::from("typesafe-judge")
 }
 
+/// omo's judge circuit breaker: this many auth/rate-limit failures in a row open it.
+pub const BREAKER_FAILURES: u32 = 5;
+/// How long an open breaker skips typesafe-judge.
+pub const BREAKER_OPEN: Duration = Duration::from_secs(30 * 60);
+
+/// omo-gateway `JevState`'s breaker half. Calls go to one judge account, so the hub keeps
+/// one breaker for every `Judge`.
+#[derive(Debug, Default)]
+pub struct Breaker {
+    consecutive_failures: u32,
+    open_until: Option<Instant>,
+    last_alert_day: Option<NaiveDate>,
+}
+
+impl Breaker {
+    /// The time the breaker stays open until, closing (and resetting) it once that passed.
+    pub fn open_until(&mut self, now: Instant) -> Option<Instant> {
+        match self.open_until {
+            Some(until) if now < until => Some(until),
+            Some(_) => {
+                self.open_until = None;
+                self.consecutive_failures = 0;
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Records a failed call; returns the owner alert when this failure opened the breaker
+    /// (at most one alert per KST day, as omo).
+    pub fn failure(
+        &mut self,
+        trigger: bool,
+        reason: &str,
+        now: Instant,
+        today: NaiveDate,
+    ) -> Option<String> {
+        // A non-trigger failure neither opens the breaker nor resets the streak.
+        if !trigger {
+            return None;
+        }
+        self.consecutive_failures += 1;
+        if self.consecutive_failures < BREAKER_FAILURES || self.open_until.is_some() {
+            return None;
+        }
+        self.open_until = Some(now + BREAKER_OPEN);
+        if self.last_alert_day == Some(today) {
+            return None;
+        }
+        self.last_alert_day = Some(today);
+        Some(format!(
+            "판정기(typesafe-judge) 차단: {BREAKER_FAILURES}회 연속 인증/요청한도 실패로 30분간 사용 중지. 마지막 오류: {}",
+            scrub_for_external(reason).chars().take(200).collect::<String>()
+        ))
+    }
+
+    pub fn success(&mut self) {
+        self.consecutive_failures = 0;
+    }
+}
+
+/// omo's `is_breaker_trigger`: HTTP 401/429 as a whole token, or an auth/rate-limit message.
+pub fn is_breaker_trigger(text: &str) -> bool {
+    static TRIGGER: OnceLock<regex::Regex> = OnceLock::new();
+    TRIGGER
+        .get_or_init(|| {
+            regex::Regex::new(r"(?i)\b(?:401|429)\b|unauthorized|rate[ _-]?limit")
+                .expect("valid regex")
+        })
+        .is_match(text)
+}
+
+fn breaker() -> &'static Mutex<Breaker> {
+    static BREAKER: OnceLock<Mutex<Breaker>> = OnceLock::new();
+    BREAKER.get_or_init(|| Mutex::new(Breaker::default()))
+}
+
+static ALERTS: OnceLock<(SqlitePool, String)> = OnceLock::new();
+
+/// Lets an opening breaker reach the owner's DM (omo's `OwnerAlerter`).
+pub fn install_alerts(pool: SqlitePool, owner_session: String) {
+    let _ = ALERTS.set((pool, owner_session));
+}
+
+fn kst_today() -> NaiveDate {
+    (Utc::now() + chrono::Duration::hours(9)).date_naive()
+}
+
 #[derive(Clone)]
 pub struct Judge {
     typesafe: BTreeMap<String, String>,
@@ -153,7 +245,22 @@ impl Judge {
                 "forced judge choice {selected} is not an option"
             )));
         }
-        match self.run_typesafe(state, instructions, options).await {
+        let open = breaker()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .open_until(Instant::now());
+        let result = match open {
+            Some(until) => Err(HubError::message(format!(
+                "judge circuit breaker open for {}s more",
+                until.saturating_duration_since(Instant::now()).as_secs()
+            ))),
+            None => {
+                let result = self.run_typesafe(state, instructions, options).await;
+                self.record(&result).await;
+                result
+            }
+        };
+        match result {
             Ok(choice) => Ok(choice),
             Err(error) => {
                 if let Some(selected) = &self.offline_fallback {
@@ -162,6 +269,38 @@ impl Judge {
                     }
                 }
                 Err(error)
+            }
+        }
+    }
+
+    async fn record(&self, result: &Result<Choice>) {
+        let alert = {
+            let mut breaker = breaker()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            match result {
+                Ok(_) => {
+                    breaker.success();
+                    None
+                }
+                Err(error) => {
+                    let reason = error.to_string();
+                    breaker.failure(
+                        is_breaker_trigger(&reason),
+                        &reason,
+                        Instant::now(),
+                        kst_today(),
+                    )
+                }
+            }
+        };
+        if let Some(message) = alert {
+            // Without a pool the opening would be invisible; always log it.
+            tracing::warn!(alert = %message, "judge circuit breaker opened");
+            if let Some((pool, owner)) = ALERTS.get() {
+                if let Err(error) = crate::owner_alert::notify_owner(pool, owner, &message).await {
+                    tracing::warn!(%error, "judge breaker alert was not sent");
+                }
             }
         }
     }
@@ -230,6 +369,41 @@ mod tests {
         assert_eq!(env, vec![("TYPESAFE_API_KEY".into(), "from-config".into())]);
         let scrubbed = scrub_for_external("token sk-abcdefghij123456");
         assert!(!scrubbed.contains("sk-abcdefghij123456"));
+    }
+
+    #[test]
+    fn five_auth_or_rate_limit_failures_open_the_breaker_for_thirty_minutes() {
+        let mut breaker = Breaker::default();
+        let start = Instant::now();
+        let day = NaiveDate::from_ymd_opt(2026, 10, 23).unwrap();
+        assert!(is_breaker_trigger("HTTP 429 Too Many Requests"));
+        assert!(is_breaker_trigger("Unauthorized"));
+        assert!(!is_breaker_trigger("request id 4291 on port 14010"));
+        for _ in 0..4 {
+            assert_eq!(breaker.failure(true, "429", start, day), None);
+        }
+        // Other failures neither open it nor reset the streak.
+        assert_eq!(breaker.failure(false, "timeout", start, day), None);
+        assert_eq!(breaker.open_until(start), None);
+        let alert = breaker
+            .failure(true, "401 Unauthorized", start, day)
+            .unwrap();
+        assert!(alert.contains("30분"));
+        assert_eq!(breaker.open_until(start), Some(start + BREAKER_OPEN));
+        // It closes after 30 minutes; reopening the same KST day does not alert again.
+        let later = start + BREAKER_OPEN + Duration::from_secs(1);
+        assert_eq!(breaker.open_until(later), None);
+        for _ in 0..5 {
+            assert_eq!(breaker.failure(true, "429", later, day), None);
+        }
+        assert!(breaker.open_until(later).is_some());
+        // A success resets the streak.
+        let mut fresh = Breaker::default();
+        for _ in 0..4 {
+            fresh.failure(true, "429", start, day);
+        }
+        fresh.success();
+        assert_eq!(fresh.failure(true, "429", start, day), None);
     }
 
     #[tokio::test]

@@ -821,6 +821,44 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         launch.hub.owner_session().storage_key(),
     )));
     tasks.push(tokio::spawn(ferryx_hub::retention::serve(launch.hub.pool.clone())));
+    // The tracker's Sessions board and SES issues read and drive panes through the hub's control.
+    ferryx_hub::tracker_sessions::install(launch.bridge.clone());
+    // omo's judge breaker alert reaches the owner through the owner alert sweep.
+    ferryx_hub::judge::install_alerts(
+        launch.hub.pool.clone(),
+        launch.hub.owner_session().storage_key(),
+    );
+    // omo's Full Disk Access owner DM, once per hub binary.
+    {
+        let pool = launch.hub.pool.clone();
+        let owner = launch.hub.owner_session().storage_key();
+        tasks.push(tokio::spawn(async move {
+            let denied = crate::permissions::check_full_disk_access()
+                == crate::permissions::PermissionStatus::Denied;
+            let identity = std::env::current_exe()
+                .and_then(std::fs::metadata)
+                .map(|meta| {
+                    let modified = meta
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |since| since.as_secs());
+                    format!("{}:{modified}", meta.len())
+                })
+                .unwrap_or_default();
+            let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+                return;
+            };
+            let marker = home.join(".ferryx").join("hub").join("fda-dm-marker");
+            if let Err(error) = ferryx_hub::owner_alert::alert_missing_full_disk_access(
+                &pool, &owner, denied, &marker, &identity,
+            )
+            .await
+            {
+                tracing::warn!(%error, "full disk access alert failed");
+            }
+        }));
+    }
     // omo's cron triage and auto-fix: queued cron problems go to the remediator.
     tasks.push(tokio::spawn(ferryx_hub::cron_remediate::serve(
         launch.hub.pool.clone(),
