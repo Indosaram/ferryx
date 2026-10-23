@@ -767,7 +767,8 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                     if let Ok(ferryx_hub::chat::discord::DiscordDispatch::Inbound(inbound)) =
                         ferryx_hub::chat::discord::handle_dispatch(&frame)
                     {
-                        if let Err(error) = ferryx_hub::inbox_watch::note_gateway(&pool, &inbound).await {
+                        // The hub config has no owner Discord id, so only author-less frames are skipped.
+                        if let Err(error) = ferryx_hub::inbox_watch::note_gateway(&pool, &inbound, "").await {
                             tracing::warn!(%error, "discord message was not recorded for the inbox");
                         }
                     }
