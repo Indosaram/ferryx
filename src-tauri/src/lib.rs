@@ -31,6 +31,8 @@ pub mod permissions;
 pub mod remote;
 #[cfg(test)]
 mod rollout_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod agent_history;
 pub mod scoped_contracts;
 pub mod session;
