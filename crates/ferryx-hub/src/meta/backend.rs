@@ -208,6 +208,9 @@ mod tests {
             resume_error: None,
             approval: false,
             thread_id: "thr-k".into(),
+            queued_ticks: 0,
+            tick: std::time::Duration::ZERO,
+            no_ack: false,
         })
         .await;
         let model = UrlModel::new(url);

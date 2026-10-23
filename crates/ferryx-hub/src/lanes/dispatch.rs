@@ -2,6 +2,7 @@
 //! This is the queue, not an in-gateway model loop.
 use sqlx::SqlitePool;
 
+use crate::chat::session::SessionKey;
 use crate::error::Result;
 use crate::storage::now_rfc3339;
 
@@ -66,6 +67,219 @@ pub async fn take_undelivered(pool: &SqlitePool) -> Result<Vec<LaneEvent>> {
         .collect())
 }
 
+/// One undelivered event as omo's `EventDispatcher` reads it.
+#[derive(Debug, Clone)]
+struct QueuedEvent {
+    id: i64,
+    lane_key: Option<String>,
+    lead: String,
+    kind: String,
+    body: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// omo-gateway's `EventDispatcher`, as one tick. Events urgent for the owner stay on the lead
+/// (the owner DM); routine ones go to the home channel session. A group is admitted when its
+/// oldest event is 30s old (urgent kinds at once), the target had no delivery in the last 30s
+/// and `admit` accepts the turn (false while the session is busy). Events are collapsed per
+/// (lane, kind) to the newest body, non-critical ones pass the wake judgment, and the rest are
+/// receipted. An event whose lead is not a session key (the old `meta` lead) can never be
+/// delivered and is receipted as misrouted.
+pub async fn dispatch_tick<A, F>(
+    pool: &SqlitePool,
+    judge: &crate::judge::Judge,
+    now: chrono::DateTime<chrono::Utc>,
+    mut admit: A,
+) -> Result<usize>
+where
+    A: FnMut(SessionKey, String) -> F,
+    F: std::future::Future<Output = bool>,
+{
+    let stamp = now.to_rfc3339();
+    let rows: Vec<(i64, Option<String>, String, String, String, String)> = sqlx::query_as(
+        "SELECT id, lane_key, lead_session_key, kind, body, created_at FROM lane_events
+         WHERE delivered_at IS NULL AND (release_at IS NULL OR release_at <= ?)
+         ORDER BY id",
+    )
+    .bind(&stamp)
+    .fetch_all(pool)
+    .await?;
+    let mut misrouted = Vec::new();
+    let mut groups = std::collections::BTreeMap::<String, Vec<QueuedEvent>>::new();
+    for (id, lane_key, lead, kind, body, created_at) in rows {
+        let Ok(lead_key) = SessionKey::from_storage_key(&lead) else {
+            misrouted.push(id);
+            continue;
+        };
+        let created_at = chrono::DateTime::parse_from_rfc3339(&created_at)
+            .map(|at| at.with_timezone(&chrono::Utc))
+            .unwrap_or(now);
+        let event = QueuedEvent {
+            id,
+            lane_key,
+            lead,
+            kind,
+            body,
+            created_at,
+        };
+        let target = if owner_dm_worthy(&event.kind, &event.body) {
+            event.lead.clone()
+        } else {
+            match super::lead::report_target(pool, &lead_key).await {
+                Some(report) => report.storage_key(),
+                None => event.lead.clone(),
+            }
+        };
+        groups.entry(target).or_default().push(event);
+    }
+    if !misrouted.is_empty() {
+        tracing::warn!(
+            events = misrouted.len(),
+            "lane events addressed to a lead that is not a session key were retired"
+        );
+        receipt(pool, &misrouted, &stamp).await?;
+    }
+    let mut admitted = 0;
+    for (target, events) in groups {
+        let Some(oldest) = events.iter().map(|event| event.created_at).min() else {
+            continue;
+        };
+        if (now - oldest).num_seconds() < 30
+            && !events.iter().any(|event| {
+                matches!(
+                    event.kind.as_str(),
+                    "done_claimed" | "dead" | "kibitzer" | "cron_report"
+                )
+            })
+        {
+            continue;
+        }
+        let last: Option<String> = sqlx::query_scalar(
+            "SELECT MAX(delivered_at) FROM lane_events WHERE lead_session_key = ? AND delivered_at IS NOT NULL",
+        )
+        .bind(&target)
+        .fetch_one(pool)
+        .await?;
+        let recent = last
+            .and_then(|last| chrono::DateTime::parse_from_rfc3339(&last).ok())
+            .is_some_and(|last| (now - last.with_timezone(&chrono::Utc)).num_seconds() < 30);
+        if recent {
+            continue;
+        }
+        let Ok(session) = SessionKey::from_storage_key(&target) else {
+            continue;
+        };
+        let mut collapsed =
+            std::collections::BTreeMap::<(Option<String>, String), (QueuedEvent, Vec<i64>)>::new();
+        for event in events {
+            let entry = collapsed
+                .entry((event.lane_key.clone(), event.kind.clone()))
+                .or_insert_with(|| (event.clone(), Vec::new()));
+            entry.1.push(event.id);
+            if event.id >= entry.0.id {
+                entry.0 = event;
+            }
+        }
+        let mut selected = Vec::new();
+        for (event, ids) in collapsed.into_values() {
+            if !critical(&event.kind, &event.body) {
+                let state = format!(
+                    "{} {}: {}",
+                    event.lane_key.as_deref().unwrap_or("-"),
+                    event.kind,
+                    event.body
+                );
+                match judge
+                    .choice(
+                        crate::judge::Purpose::EventWake,
+                        &state,
+                        "Does this event need the lead agent's judgment now?",
+                        &["yes", "no"],
+                    )
+                    .await
+                {
+                    Ok(choice) if choice.selected == "no" => {
+                        receipt(pool, &ids, &stamp).await?;
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, event_id = event.id, "event wake judgment unavailable; retaining event");
+                        continue;
+                    }
+                }
+            }
+            selected.push((event, ids));
+        }
+        selected.sort_by_key(|(event, _)| event.id);
+        let ids: Vec<i64> = selected
+            .iter()
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        let lines = selected
+            .iter()
+            .map(|(event, _)| {
+                let body: String = event
+                    .body
+                    .chars()
+                    .take(600)
+                    .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
+                    .collect();
+                format!(
+                    "{} {}: {}",
+                    event.lane_key.as_deref().unwrap_or("-"),
+                    event.kind,
+                    body
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !admit(session, format!("[LANE_EVENT]\n{lines}")).await {
+            continue;
+        }
+        tracing::info!(lead_session_key = %target, events = ids.len(), "lane event admitted to lead turn");
+        receipt(pool, &ids, &stamp).await?;
+        admitted += 1;
+    }
+    Ok(admitted)
+}
+
+async fn receipt(pool: &SqlitePool, ids: &[i64], stamp: &str) -> Result<()> {
+    for id in ids {
+        sqlx::query(
+            "UPDATE lane_events SET delivered_at = ? WHERE id = ? AND delivered_at IS NULL",
+        )
+        .bind(stamp)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// omo: only urgent events wake a turn in the owner DM ("DM으로는 급한 용무만").
+fn owner_dm_worthy(kind: &str, body: &str) -> bool {
+    match kind {
+        "inbox_urgent" | "owner_reply_failed" | "dead" | "launch_failed" | "startup_error" => true,
+        "cron_problem" => body.contains("needs_owner"),
+        _ => false,
+    }
+}
+
+/// omo: kinds that must reach the lead without the wake judgment.
+fn critical(kind: &str, body: &str) -> bool {
+    match kind {
+        "done_claimed" | "dead" | "not_done" | "inbox_urgent" | "owner_reply_failed"
+        | "cron_report" | "unmerged_branch" | "launch_failed" | "startup_error" => true,
+        "action_loop" | "no_progress" => true,
+        "cron_problem" => body.contains("needs_owner"),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +305,80 @@ mod tests {
         .await
         .unwrap();
         assert!(take_undelivered(&pool).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn lane_events_reach_the_home_channel_or_the_owner_dm_like_omo() {
+        let pool = crate::storage::memory().await.unwrap();
+        let dm = SessionKey::new("slack", None::<String>, "D0DM", None::<String>, "U0OWNER")
+            .with_bot_id("U0BOT")
+            .storage_key();
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        for (lead, kind) in [
+            (dm.as_str(), "action_loop"),
+            (dm.as_str(), "action_loop"),
+            (dm.as_str(), "inbox_urgent"),
+            ("meta", "action_loop"),
+        ] {
+            sqlx::query("INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES(NULL, ?, ?, 'item', ?)")
+                .bind(lead)
+                .bind(kind)
+                .bind(&old)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let judge = crate::judge::Judge::forced("no");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let record = seen.clone();
+        let admitted = dispatch_tick(&pool, &judge, chrono::Utc::now(), move |key, text| {
+            record.lock().unwrap().push((key.storage_key(), text));
+            async { true }
+        })
+        .await
+        .unwrap();
+        // No home channel is configured in tests, so routine events stay on the DM lead too;
+        // the DM group carries both kinds, collapsed to one action_loop line.
+        assert_eq!(admitted, 1);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen[0].0, dm);
+        assert!(seen[0].1.starts_with("[LANE_EVENT]\n"));
+        assert_eq!(seen[0].1.matches("action_loop").count(), 1);
+        assert!(seen[0].1.contains("inbox_urgent"));
+        let open: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM lane_events WHERE delivered_at IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            open, 0,
+            "the misrouted meta event is retired, the rest receipted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_busy_lead_keeps_its_events_queued() {
+        let pool = crate::storage::memory().await.unwrap();
+        let dm = SessionKey::new("slack", None::<String>, "D0DM", None::<String>, "U0OWNER")
+            .with_bot_id("U0BOT")
+            .storage_key();
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        sqlx::query("INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES(NULL, ?, 'action_loop', 'item', ?)")
+            .bind(&dm)
+            .bind(&old)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let judge = crate::judge::Judge::forced("yes");
+        let admitted = dispatch_tick(&pool, &judge, chrono::Utc::now(), |_, _| async { false })
+            .await
+            .unwrap();
+        assert_eq!(admitted, 0);
+        let open: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM lane_events WHERE delivered_at IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(open, 1);
     }
 }

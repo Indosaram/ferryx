@@ -36,6 +36,8 @@ pub struct OmoClientConfig {
     pub total_timeout: Duration,
     pub connect_timeout: Duration,
     pub workspace: Option<protocol::Workspace>,
+    /// omo-gateway's rolling turn/start acknowledgement window (30s).
+    pub ack_window: Duration,
 }
 
 impl OmoClientConfig {
@@ -47,6 +49,7 @@ impl OmoClientConfig {
             total_timeout: Duration::from_secs(3600),
             connect_timeout: Duration::from_secs(15),
             workspace: None,
+            ack_window: TURN_START_ACK_WINDOW,
         }
     }
 
@@ -96,6 +99,123 @@ pub struct TurnOutcome {
 }
 
 /// How often an interim narration may reach the user after the first one (omo-gateway: 180s).
+/// omo-gateway's rolling `turn/start` acknowledgement window.
+pub const TURN_START_ACK_WINDOW: Duration = Duration::from_secs(30);
+pub const TURN_START_ACK_TIMEOUT: &str = "timeout waiting for turn/start acknowledgement from omo app-server; submission outcome unknown, do not resubmit";
+
+fn frame_turn_id(frame: &Value) -> Option<&str> {
+    frame
+        .pointer("/params/turnId")
+        .or_else(|| frame.pointer("/params/turn/id"))
+        .and_then(Value::as_str)
+}
+
+fn is_turn_bearing(method: &str, frame: &Value) -> bool {
+    method.starts_with("turn/")
+        || method.starts_with("item/")
+        || method == "thread/status/changed"
+        || (method == "error"
+            && (frame.pointer("/params/turnId").is_some()
+                || frame.pointer("/params/turn").is_some()))
+}
+
+/// omo-gateway's `PreAckState`: turn boundaries seen before the acknowledgement and whether a
+/// busy refusal waits for the thread to go idle.
+#[derive(Default)]
+struct PreAckState {
+    events: Vec<(bool, String)>,
+    completed: std::collections::HashSet<String>,
+    refused: std::collections::HashSet<String>,
+    awaiting_idle: bool,
+    refusals: u32,
+    retry_at: Option<tokio::time::Instant>,
+}
+
+impl PreAckState {
+    fn note_refusal(&mut self, error: &str) -> bool {
+        if !is_thread_busy_error(error) {
+            return false;
+        }
+        self.refusals = self.refusals.saturating_add(1);
+        self.events.clear();
+        self.awaiting_idle = true;
+        let delay = Duration::from_secs(1 << self.refusals.saturating_sub(1).min(3));
+        self.retry_at = Some(tokio::time::Instant::now() + delay);
+        true
+    }
+
+    fn retry_due(&self, now: tokio::time::Instant) -> bool {
+        self.awaiting_idle && self.retry_at.is_some_and(|at| now >= at)
+    }
+
+    fn note_resubmitted(&mut self) {
+        self.awaiting_idle = false;
+        self.retry_at = None;
+        self.events.clear();
+    }
+
+    /// Folds one pre-acknowledgement frame of our thread. True when a fresh completion after a
+    /// refusal makes the resubmission due now.
+    fn observe(&mut self, frame: &Value, _thread_id: &str) -> bool {
+        let Some(turn) = frame_turn_id(frame) else {
+            return false;
+        };
+        if [
+            frame.pointer("/params/turn/error"),
+            frame.pointer("/params/error"),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|error| is_thread_busy_error(&error.to_string()))
+        {
+            self.refused.insert(turn.to_owned());
+            self.events.retain(|(_, id)| id != turn);
+        }
+        if self.refused.contains(turn) {
+            return false;
+        }
+        match frame.get("method").and_then(Value::as_str).unwrap_or("") {
+            "turn/started" => self.events.push((true, turn.to_owned())),
+            "turn/completed" => {
+                let fresh = self.completed.insert(turn.to_owned());
+                self.events.push((false, turn.to_owned()));
+                if self.awaiting_idle && fresh {
+                    self.retry_at = Some(tokio::time::Instant::now());
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    #[cfg(test)]
+    fn clone_follow(&mut self, acked: &str) -> (String, bool) {
+        let events = self.events.clone();
+        let out = self.follow(acked.to_owned());
+        self.events = events;
+        out
+    }
+
+    /// The acknowledged id, or the successor when the run ahead of us completed under it.
+    /// The flag says the successor has not started yet.
+    fn follow(&mut self, acked: String) -> (String, bool) {
+        let taken_over_at = self
+            .events
+            .iter()
+            .position(|(is_start, id)| !is_start && *id == acked);
+        let successor = taken_over_at.and_then(|at| {
+            self.events[at + 1..]
+                .iter()
+                .rev()
+                .find(|(is_start, id)| *is_start && *id != acked)
+                .map(|(_, id)| id.clone())
+        });
+        let waiting = taken_over_at.is_some() && successor.is_none();
+        (successor.unwrap_or(acked), waiting)
+    }
+}
+
 pub const INTERIM_REPORT_INTERVAL: Duration = Duration::from_secs(180);
 
 /// omo-gateway's rule: the first narration is the acknowledgement, later ones only when the
@@ -246,9 +366,20 @@ async fn send(ws: &mut Ws, text: String) -> Result<()> {
 
 /// Next JSON frame, or an error at `until`. Pings, pongs and binary frames are skipped.
 async fn next_frame(ws: &mut Ws, until: tokio::time::Instant, what: &str) -> Result<Value> {
+    next_frame_by(ws, until, what)
+        .await?
+        .ok_or_else(|| HubError::message(format!("timed out waiting for {what}")))
+}
+
+/// The next JSON frame, or `None` once `until` passes.
+async fn next_frame_by(
+    ws: &mut Ws,
+    until: tokio::time::Instant,
+    what: &str,
+) -> Result<Option<Value>> {
     loop {
         let message = match tokio::time::timeout_at(until, ws.next()).await {
-            Err(_) => return Err(HubError::message(format!("timed out waiting for {what}"))),
+            Err(_) => return Ok(None),
             Ok(None) => {
                 return Err(HubError::message(format!(
                     "omo app-server closed the connection while waiting for {what}"
@@ -269,7 +400,7 @@ async fn next_frame(ws: &mut Ws, until: tokio::time::Instant, what: &str) -> Res
             _ => continue,
         };
         if let Ok(value) = serde_json::from_str::<Value>(&text) {
-            return Ok(value);
+            return Ok(Some(value));
         }
     }
 }
@@ -460,42 +591,93 @@ pub async fn run_turn(
         }
     };
 
-    // turn/start, retrying while the engine still finishes an earlier run on this thread.
-    let mut early: Vec<Value> = Vec::new();
-    let mut backoff = Duration::from_secs(2);
-    let turn_id = loop {
-        send(
-            &mut ws,
-            protocol::turn_start_request(&thread_id, &request.text, request.model.as_deref()),
-        )
-        .await?;
-        let until = (tokio::time::Instant::now() + Duration::from_secs(120)).min(deadline);
-        let reply = loop {
-            let frame = next_frame(&mut ws, until, "the turn/start reply").await?;
-            if is_response_to(&frame, 3) {
-                break frame;
+    // turn/start as omo-gateway submits it (`omo_backend.rs`): the app-server acknowledges only
+    // once our prompt is dequeued, so the wait is a 30s window that this thread's activity
+    // keeps extending. Until then the thread runs something else; its finished messages are
+    // relayed, and an explicit busy refusal resubmits after 1, 2, 4, 8s or the next completion.
+    let submit = protocol::turn_start_request(&thread_id, &request.text, request.model.as_deref());
+    send(&mut ws, submit.clone()).await?;
+    let mut ack_deadline = (tokio::time::Instant::now() + config.ack_window).min(deadline);
+    let mut pre_ack = PreAckState::default();
+    let (turn_id, mut awaiting_successor) = loop {
+        let now = tokio::time::Instant::now();
+        if pre_ack.awaiting_idle {
+            if now >= deadline {
+                return Err(HubError::message(
+                    "turn/start refused: the thread is still processing another turn; not resubmitted",
+                ));
             }
-            if !answer_server_request(&mut ws, &frame, cwd, &mut allowed, &mut denied).await? {
-                early.push(frame);
+            if pre_ack.retry_due(now) {
+                send(&mut ws, submit.clone()).await?;
+                pre_ack.note_resubmitted();
+                ack_deadline = (tokio::time::Instant::now() + config.ack_window).min(deadline);
+                tracing::info!(
+                    attempt = pre_ack.refusals,
+                    "resubmitted the prompt that turn/start refused"
+                );
+                continue;
             }
+        } else if now >= ack_deadline {
+            return Err(HubError::message(TURN_START_ACK_TIMEOUT));
+        }
+        let wait = if pre_ack.awaiting_idle {
+            pre_ack.retry_at.unwrap_or(deadline).min(deadline)
+        } else {
+            ack_deadline
         };
-        match rpc_error(&reply) {
-            None => {
-                break reply
-                    .pointer("/result/turn/id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned()
-            }
-            Some(error) if is_thread_busy_error(&error) => {
-                if tokio::time::Instant::now() + backoff >= deadline {
-                    return Err(HubError::message(format!("omo turn/start failed: {error}")));
+        let Some(frame) = next_frame_by(&mut ws, wait, "the turn/start reply").await? else {
+            continue;
+        };
+        if is_response_to(&frame, 3) {
+            if let Some(error) = rpc_error(&frame) {
+                if pre_ack.note_refusal(&error) {
+                    tracing::warn!(
+                        attempt = pre_ack.refusals,
+                        "turn/start refused: the thread is still processing"
+                    );
+                    continue;
                 }
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
+                return Err(HubError::message(format!("omo turn/start failed: {error}")));
             }
-            Some(error) => {
-                return Err(HubError::message(format!("omo turn/start failed: {error}")))
+            let acked = frame
+                .pointer("/result/turn/id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| HubError::message("turn/start acknowledgement missing turn id"))?
+                .to_owned();
+            break pre_ack.follow(acked);
+        }
+        if frame.get("id").is_some() && frame.get("method").is_some() {
+            answer_server_request(&mut ws, &frame, cwd, &mut allowed, &mut denied).await?;
+            continue;
+        }
+        let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
+        if !is_turn_bearing(method, &frame)
+            || frame.pointer("/params/threadId").and_then(Value::as_str) != Some(thread_id.as_str())
+        {
+            continue;
+        }
+        if pre_ack.refusals == 0 {
+            ack_deadline =
+                ack_deadline.max((tokio::time::Instant::now() + config.ack_window).min(deadline));
+        }
+        if pre_ack.observe(&frame, &thread_id)
+            || frame_turn_id(&frame).is_some_and(|id| pre_ack.refused.contains(id))
+        {
+            continue;
+        }
+        if method == "item/completed"
+            && frame.pointer("/params/item/type").and_then(Value::as_str) == Some("agentMessage")
+        {
+            let text = frame
+                .pointer("/params/item/text")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let scrubbed = filter_reasoning(text);
+            if !scrubbed.trim().is_empty() && !is_explicit_silence(&scrubbed) {
+                if let Some(progress) = progress.as_ref() {
+                    let _ = progress.send(scrubbed);
+                }
             }
         }
     };
@@ -507,18 +689,11 @@ pub async fn run_turn(
     let mut last_relay_at: Option<tokio::time::Instant> = None;
     let mut tool_calls = 0usize;
     let mut started_items: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let ours = |frame: &Value| {
-        let id = frame.pointer("/params/turn/id").and_then(Value::as_str);
-        let thread = frame.pointer("/params/threadId").and_then(Value::as_str);
-        (turn_id.is_empty() || id.is_none() || id == Some(turn_id.as_str()))
-            && (thread.is_none() || thread == Some(thread_id.as_str()))
-    };
-    let mut pending: std::collections::VecDeque<Value> = early.into();
+    let mut turn_id = turn_id;
     let mut last_activity = tokio::time::Instant::now();
     loop {
-        let frame = match pending.pop_front() {
-            Some(frame) => frame,
-            None => {
+        let frame = {
+            {
                 let until = (last_activity + config.idle_timeout).min(deadline);
                 match next_frame(&mut ws, until, "the turn to finish").await {
                     Ok(frame) => frame,
@@ -550,6 +725,28 @@ pub async fn run_turn(
                 )));
             }
             continue;
+        }
+        // omo-gateway follows only this thread and this turn id. When the run our prompt
+        // queued behind completed under our id, the next turn that starts carries our prompt.
+        if is_turn_bearing(method, &frame) {
+            if frame.pointer("/params/threadId").and_then(Value::as_str) != Some(thread_id.as_str())
+            {
+                continue;
+            }
+            if let Some(frame_turn) = frame_turn_id(&frame) {
+                if frame_turn != turn_id {
+                    if !(awaiting_successor
+                        && delivered == 0
+                        && content.is_empty()
+                        && method == "turn/started")
+                    {
+                        continue;
+                    }
+                    tracing::info!(successor = %frame_turn, "following the turn that took over our queued prompt");
+                    turn_id = frame_turn.to_owned();
+                    awaiting_successor = false;
+                }
+            }
         }
         match method {
             "item/agentMessage/delta" => {
@@ -604,7 +801,7 @@ pub async fn run_turn(
                     }
                 }
             }
-            "turn/completed" if ours(&frame) => {
+            "turn/completed" if !awaiting_successor => {
                 let _ = ws.close(None).await;
                 let status = frame.pointer("/params/turn/status").and_then(Value::as_str);
                 return match status {
@@ -693,6 +890,12 @@ pub mod mock {
         pub resume_error: Option<String>,
         pub approval: bool,
         pub thread_id: String,
+        /// Before acknowledging turn/start, run another turn on the thread for this many
+        /// ticks (one frame each), relaying one finished message.
+        pub queued_ticks: u32,
+        pub tick: std::time::Duration,
+        /// Never acknowledge turn/start.
+        pub no_ack: bool,
     }
 
     #[allow(clippy::result_large_err)]
@@ -760,6 +963,21 @@ pub mod mock {
                                     .and_then(Value::as_str)
                                     .unwrap_or("")
                                     .to_owned();
+                                if script.no_ack {
+                                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                                    continue;
+                                }
+                                if script.queued_ticks > 0 {
+                                    ws.send(out(json!({"jsonrpc":"2.0","method":"turn/started","params":{"threadId":thread,"turn":{"id":"turn-0"}}}))).await.unwrap();
+                                    for tick in 0..script.queued_ticks {
+                                        tokio::time::sleep(script.tick).await;
+                                        ws.send(out(json!({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":thread,"turnId":"turn-0","delta":format!("bg{tick} ")}}))).await.unwrap();
+                                    }
+                                    ws.send(out(json!({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":thread,"turnId":"turn-0","item":{"type":"agentMessage","text":"background run finished"}}}))).await.unwrap();
+                                    // Another thread's frame on the same socket is ignored.
+                                    ws.send(out(json!({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-other","turnId":"turn-9","item":{"type":"agentMessage","text":"not ours"}}}))).await.unwrap();
+                                    ws.send(out(json!({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":thread,"turn":{"id":"turn-0","status":"completed"}}}))).await.unwrap();
+                                }
                                 ws.send(out(json!({"jsonrpc":"2.0","id":id,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}))).await.unwrap();
                                 if script.approval {
                                     ws.send(out(json!({"jsonrpc":"2.0","id":77,"method":"item/commandExecution/requestApproval","params":{"threadId":thread,"command":"ls"}}))).await.unwrap();
@@ -803,7 +1021,73 @@ mod tests {
             resume_error: None,
             approval: false,
             thread_id: "thr-new".into(),
+            queued_ticks: 0,
+            tick: Duration::ZERO,
+            no_ack: false,
         }
+    }
+
+    /// 2026-10-23 05:06Z: a prompt queued behind another run on its thread failed after a
+    /// fixed 120s wait. omo-gateway keeps a 30s window open while the thread is active,
+    /// relays the earlier run's finished message, and gives up only after 30s of silence.
+    #[tokio::test]
+    async fn turn_start_waits_like_omo_while_the_thread_runs_another_turn() {
+        let (url, _log) = serve(Script {
+            queued_ticks: 6,
+            tick: Duration::from_millis(150),
+            ..script(&["our answer"])
+        })
+        .await;
+        let mut config = OmoClientConfig::new(url);
+        config.ack_window = Duration::from_millis(400);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = run_turn(
+            &config,
+            &TurnRequest {
+                text: "queued".into(),
+                ..Default::default()
+            },
+            Some(tx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.turn_id, "turn-1");
+        assert_eq!(outcome.text, "our answer");
+        assert_eq!(rx.recv().await.as_deref(), Some("background run finished"));
+        assert!(rx.try_recv().is_err(), "another thread's message leaked");
+
+        let (url, _log) = serve(Script {
+            no_ack: true,
+            ..script(&["never"])
+        })
+        .await;
+        let mut config = OmoClientConfig::new(url);
+        config.ack_window = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let error = run_turn(&config, &TurnRequest::default(), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("submission outcome unknown, do not resubmit"),
+            "{error}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_prompt_whose_turn_id_the_run_ahead_completed_follows_the_successor() {
+        let mut pre = PreAckState::default();
+        let frame = |method: &str, id: &str| json!({"method": method, "params": {"threadId": "t", "turn": {"id": id}}});
+        pre.observe(&frame("turn/started", "a"), "t");
+        pre.observe(&frame("turn/completed", "a"), "t");
+        assert_eq!(pre.clone_follow("a"), ("a".to_owned(), true));
+        pre.observe(&frame("turn/started", "b"), "t");
+        assert_eq!(pre.clone_follow("a"), ("b".to_owned(), false));
+        assert_eq!(pre.clone_follow("z"), ("z".to_owned(), false));
+        assert!(pre.note_refusal("thread is already processing a turn"));
+        assert!(pre.awaiting_idle);
+        assert!(pre.observe(&frame("turn/completed", "b"), "t"));
     }
 
     #[tokio::test]

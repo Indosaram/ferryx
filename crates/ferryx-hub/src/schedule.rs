@@ -1288,10 +1288,7 @@ async fn record_problem(
     .bind(&now)
     .execute(pool)
     .await?;
-    let lead = crate::hub_env::var("OMON_LANE_DEFAULT_LEAD")
-        .ok()
-        .filter(|lead| !lead.trim().is_empty())
-        .unwrap_or_else(|| "meta".into());
+    let lead = crate::lanes::lead::default_lead_or("meta");
     crate::lanes::dispatch::enqueue(
         pool,
         job_id,
