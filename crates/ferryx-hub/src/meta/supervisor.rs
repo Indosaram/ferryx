@@ -103,7 +103,7 @@ impl DaemonSupervisor {
                 return Ok(Some(pid));
             }
         }
-        let mut command = tokio::process::Command::new(&self.command[0]);
+        let mut command = crate::child_env::command(&self.command[0]);
         command.args(&self.command[1..]).kill_on_drop(false);
         let child = command.spawn()?;
         let pid = child

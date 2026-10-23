@@ -540,7 +540,7 @@ pub async fn record_outcome(
     }
     let proof = if status == "verified" {
         let id = external_id.ok_or_else(|| HubError::message("verified needs an external id"))?;
-        let output = tokio::process::Command::new(&readback.program)
+        let output = crate::child_env::command(&readback.program)
             .args(["cal", "get", id])
             .output()
             .await

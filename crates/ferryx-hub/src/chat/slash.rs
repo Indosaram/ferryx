@@ -54,7 +54,7 @@ pub(crate) fn uptime_secs() -> i64 {
 /// bundled `index.mjs`. A missing bun or a timeout is returned to the caller.
 pub async fn run_huddle_sidecar(line: &str) -> Result<String> {
     let sidecar = crate::voice::sidecar_path();
-    let mut child = tokio::process::Command::new("bun")
+    let mut child = crate::child_env::command("bun")
         .arg(&sidecar)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

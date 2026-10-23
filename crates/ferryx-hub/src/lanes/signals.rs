@@ -378,7 +378,7 @@ async fn check_one(signal: &DoneSignal, cwd: &Path) -> SignalResult {
             }
         }
         DoneSignal::Command { argv, stdout_regex } => {
-            let mut command = tokio::process::Command::new(&argv[0]);
+            let mut command = crate::child_env::command(&argv[0]);
             command.args(&argv[1..]).current_dir(cwd);
             match tokio::time::timeout(Duration::from_secs(20), command.output()).await {
                 Ok(Ok(output)) if output.status.success() => {

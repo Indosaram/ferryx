@@ -62,7 +62,7 @@ fn effect_may_run(effect: Effect) -> bool {
 pub async fn run_command(command: &str) -> Result<String> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        tokio::process::Command::new("sh")
+        crate::child_env::command("sh")
             .arg("-c")
             .arg(command)
             .output(),

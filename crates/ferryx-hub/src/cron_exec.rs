@@ -396,7 +396,7 @@ async fn script_working_directory(pool: &sqlx::SqlitePool) -> Option<std::path::
 }
 
 async fn run_script(script: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<String> {
-    let mut command = tokio::process::Command::new("sh");
+    let mut command = crate::child_env::command("sh");
     command.arg("-c").arg(script);
     if let Some(cwd) = cwd.filter(|cwd| !cwd.as_os_str().is_empty()) {
         command.current_dir(cwd);

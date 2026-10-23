@@ -113,7 +113,7 @@ pub async fn run_button_action(
     let Some((program, base_args)) = config.command.split_first() else {
         return Err(HubError::message("button action command is empty"));
     };
-    let mut command = tokio::process::Command::new(program);
+    let mut command = crate::child_env::command(program);
     command
         .args(base_args)
         .arg(&click.action)
@@ -125,7 +125,8 @@ pub async fn run_button_action(
     if let Some(token) = &click.token {
         command.arg(token);
     }
-    for key in ["PATH", "HOME", "TMPDIR", "LANG", "TZ"] {
+    command.env("PATH", crate::child_env::child_path());
+    for key in ["HOME", "TMPDIR", "LANG", "TZ"] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
