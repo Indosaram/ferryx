@@ -27,6 +27,7 @@ pub mod hub;
 pub mod hub_env;
 pub mod import;
 pub mod inbox;
+pub mod inbox_cards;
 pub mod inbox_prefilter;
 pub mod inbox_sources;
 pub mod inbox_watch;
