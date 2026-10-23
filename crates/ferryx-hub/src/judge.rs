@@ -46,7 +46,7 @@ impl Choice {
 /// Replaces a home directory and obvious token shapes before text leaves the machine.
 pub fn scrub_for_external(input: &str) -> String {
     let mut scrubbed = input.to_owned();
-    if let Ok(home) = std::env::var("HOME") {
+    if let Ok(home) = crate::hub_env::var("HOME") {
         if !home.is_empty() {
             scrubbed = scrubbed.replace(&home, "~");
         }
@@ -71,7 +71,7 @@ pub fn typesafe_env(config: &BTreeMap<String, String>) -> Vec<(String, String)> 
 pub fn typesafe_from_env() -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for key in ["TYPESAFE_API_KEY", "TYPESAFE_URL", "TYPESAFE_MODEL"] {
-        if let Ok(value) = std::env::var(key) {
+        if let Ok(value) = crate::hub_env::var(key) {
             let value = value.trim().to_owned();
             if !value.is_empty() {
                 map.insert(key.to_owned(), value);
@@ -82,11 +82,10 @@ pub fn typesafe_from_env() -> BTreeMap<String, String> {
 }
 
 pub fn default_judge_bin() -> PathBuf {
-    let on_path = std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|dir| dir.join("typesafe-judge").is_file())
-    });
+    let on_path = std::env::split_paths(crate::child_env::child_path())
+        .any(|dir| dir.join("typesafe-judge").is_file());
     if !on_path {
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = crate::hub_env::var_os("HOME") {
             let cargo = Path::new(&home).join(".cargo/bin/typesafe-judge");
             if cargo.is_file() {
                 return cargo;
@@ -144,7 +143,6 @@ impl Judge {
         instructions: &str,
         options: &[&str],
     ) -> Result<Choice> {
-        let _ = scrub_for_external(state);
         if let Some(selected) = &self.forced {
             if options.contains(&selected.as_str()) {
                 return Ok(Choice::new(selected.clone()));
@@ -153,7 +151,7 @@ impl Judge {
                 "forced judge choice {selected} is not an option"
             )));
         }
-        match self.run_typesafe(instructions, options).await {
+        match self.run_typesafe(state, instructions, options).await {
             Ok(choice) => Ok(choice),
             Err(error) => {
                 if let Some(selected) = &self.offline_fallback {
@@ -166,11 +164,27 @@ impl Judge {
         }
     }
 
-    async fn run_typesafe(&self, instructions: &str, options: &[&str]) -> Result<Choice> {
+    async fn run_typesafe(
+        &self,
+        state: &str,
+        instructions: &str,
+        options: &[&str],
+    ) -> Result<Choice> {
         let bin = default_judge_bin();
-        let mut command = tokio::process::Command::new(&bin);
+        let mut command = crate::child_env::command(&bin);
+        // typesafe-judge refuses to decide without a state ("No state provided. Supply
+        // --state, --file, or pipe content through stdin."), and `output()` gives the child no
+        // stdin, so every call used to fail with empty stdout ("typesafe-judge declined: ").
+        let state = scrub_for_external(state);
+        let state = if state.trim().is_empty() {
+            "(no state)".to_owned()
+        } else {
+            state
+        };
         command
             .arg("choice")
+            .arg("--state")
+            .arg(state)
             .arg("-i")
             .arg(scrub_for_external(instructions))
             .arg("-q");
@@ -188,8 +202,14 @@ impl Judge {
         if output.status.success() && options.contains(&stdout.as_str()) {
             Ok(Choice::new(stdout))
         } else {
+            let stderr: String = String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .chars()
+                .take(200)
+                .collect();
             Err(HubError::message(format!(
-                "typesafe-judge declined: {stdout}"
+                "typesafe-judge declined: {stdout} ({}; {stderr})",
+                output.status
             )))
         }
     }

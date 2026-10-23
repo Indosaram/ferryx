@@ -39,33 +39,46 @@ pub struct HubConfig {
 impl HubConfig {
     /// File at `FERRYX_HUB_CONFIG`, then env overrides. Missing file is an empty config.
     pub fn load() -> Result<Self> {
-        let mut config = match std::env::var("FERRYX_HUB_CONFIG") {
+        let mut config = match crate::hub_env::var("FERRYX_HUB_CONFIG") {
             Ok(path) => Self::from_file(Path::new(&path))?,
             Err(_) => Self::default(),
         };
-        if let Ok(path) = std::env::var("FERRYX_HUB_DB") {
+        if let Ok(path) = crate::hub_env::var("FERRYX_HUB_DB") {
             config.database_path = Some(PathBuf::from(path));
         }
-        if let Ok(path) = std::env::var("FERRYX_HUB_IMPORT_FROM") {
+        if let Ok(path) = crate::hub_env::var("FERRYX_HUB_IMPORT_FROM") {
             config.import_from = Some(PathBuf::from(path));
         }
-        if std::env::var("FERRYX_HUB_IMPORT").ok().as_deref() == Some("1") {
+        if crate::hub_env::var("FERRYX_HUB_IMPORT").ok().as_deref() == Some("1") {
             config.import_invoked = true;
         }
-        if std::env::var("FERRYX_HUB_SUPERVISOR_PANE").ok().as_deref() == Some("1") {
+        if crate::hub_env::var("FERRYX_HUB_SUPERVISOR_PANE")
+            .ok()
+            .as_deref()
+            == Some("1")
+        {
             config.supervisor_pane = true;
         }
-        if let Ok(addr) = std::env::var("FERRYX_HUB_TRACKER_ADDR") {
+        if let Ok(addr) = crate::hub_env::var("FERRYX_HUB_TRACKER_ADDR") {
             config.tracker_addr = Some(addr);
         }
-        if let Ok(token) = std::env::var("FERRYX_HUB_TRACKER_TOKEN") {
+        if let Ok(token) = crate::hub_env::var("FERRYX_HUB_TRACKER_TOKEN") {
             config.tracker_owner_token = Some(token);
         }
-        if let Ok(id) = std::env::var("FERRYX_HUB_SLACK_OWNER") {
+        if let Ok(id) = crate::hub_env::var("FERRYX_HUB_SLACK_OWNER") {
             config.owner_slack_id = Some(id);
         }
-        config.apply_slack_home_override(std::env::var("SLACK_HOME_CHANNEL").ok().as_deref());
-        if let Ok(url) = std::env::var("FERRYX_HUB_OMO_URL") {
+        if config
+            .owner_slack_id
+            .as_deref()
+            .is_none_or(|id| id.trim().is_empty())
+        {
+            config.owner_slack_id = Some(slack_owner_from(
+                crate::hub_env::var("SLACK_ALLOWED_USERS").ok().as_deref(),
+            ));
+        }
+        config.apply_slack_home_override(crate::hub_env::var("SLACK_HOME_CHANNEL").ok().as_deref());
+        if let Ok(url) = crate::hub_env::var("FERRYX_HUB_OMO_URL") {
             config.supervisor_listen_url = Some(url);
         }
         Ok(config)
@@ -107,10 +120,10 @@ pub fn normalize_slack_home(raw: &str) -> Option<String> {
 /// gateway files. A `*_FILE` value wins so a secret file is not ignored in favor of an
 /// empty env var. The value itself is never logged.
 pub fn secret_from_env(name: &str) -> Option<String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::hub_env::var_os("HOME").map(PathBuf::from);
     secret_from_lookup(
         name,
-        |key| std::env::var(key).ok(),
+        |key| crate::hub_env::var(key).ok(),
         |path| std::fs::read_to_string(path).ok(),
         home.as_deref(),
     )
@@ -145,6 +158,41 @@ pub fn secret_from_lookup(
         return None;
     }
     Some(trimmed)
+}
+
+/// omo-gateway's owner: the first `SLACK_ALLOWED_USERS` entry, else its built-in owner id.
+pub const DEFAULT_SLACK_OWNER_ID: &str = "U04M1JNJM8T";
+
+pub fn slack_owner_from(allowed_users: Option<&str>) -> String {
+    slack_allowed_from(allowed_users)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| DEFAULT_SLACK_OWNER_ID.to_owned())
+}
+
+/// omo-gateway's `SLACK_ALLOWED_USERS` list (comma or whitespace separated).
+pub fn slack_allowed_from(allowed_users: Option<&str>) -> Vec<String> {
+    allowed_users
+        .unwrap_or("")
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Who may press buttons and talk to the bot: `SLACK_ALLOWED_USERS` (else omo's owner) plus
+/// the configured owner.
+pub fn slack_allowed_users(owner: &str) -> Vec<String> {
+    let mut users = slack_allowed_from(crate::hub_env::var("SLACK_ALLOWED_USERS").ok().as_deref());
+    if users.is_empty() {
+        users.push(DEFAULT_SLACK_OWNER_ID.to_owned());
+    }
+    let owner = owner.trim();
+    if !owner.is_empty() && !users.iter().any(|id| id == owner) {
+        users.push(owner.to_owned());
+    }
+    users
 }
 
 fn omon_secret_name(name: &str) -> Option<&'static str> {
@@ -187,6 +235,14 @@ mod tests {
             std::env::remove_var("FERRYX_TEST_TOKEN_FILE");
             std::env::remove_var("FERRYX_TEST_TOKEN");
         }
+    }
+
+    #[test]
+    fn the_slack_owner_defaults_like_omo_gateway() {
+        assert_eq!(slack_owner_from(None), "U04M1JNJM8T");
+        assert_eq!(slack_owner_from(Some("  ")), "U04M1JNJM8T");
+        assert_eq!(slack_owner_from(Some("UA, UB")), "UA");
+        assert_eq!(slack_allowed_from(Some("UA,UB UC")), ["UA", "UB", "UC"]);
     }
 
     #[test]

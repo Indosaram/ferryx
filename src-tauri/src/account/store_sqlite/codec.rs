@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, Transaction};
 
 use crate::account::store::{
     AccountStore, BillingStateRecord, DeviceAuthRecord, EnrollmentCodeRecord, GrantRecord,
-    LoginCodeRecord, MachineRecord, OrgInviteRecord, OrgMemberRecord, OrgRecord, PaymentEventRecord,
+    LoginCodeRecord, MachineRecord, MachineRequestRecord, OrgInviteRecord, OrgMemberRecord, OrgRecord, PaymentEventRecord,
     SessionRecord, SubscriptionRecord, UserRecord,
 };
 
@@ -76,16 +76,29 @@ pub fn load_store_from_connection(conn: &Connection) -> Result<AccountStore, Str
 
     {
         let mut stmt = conn
-            .prepare("SELECT code_hash, user_id, account_origin, expires_at FROM enrollment_codes")
+            .prepare(
+                "SELECT code_hash, user_id, account_origin, expires_at, kind, key_id, label, \
+                 created_at, consumed_at, consumed_machine_id, bound_machine_id, bound_public_key \
+                 FROM enrollment_codes",
+            )
             .map_err(|err| format!("Failed to prepare enrollment_codes query: {err}"))?;
         let rows = stmt
             .query_map([], |row| {
+                let consumed: Option<i64> = row.get(8)?;
                 Ok((
                     row.get::<_, String>(0)?,
                     EnrollmentCodeRecord {
                         user_id: row.get(1)?,
                         account_origin: row.get(2)?,
                         expires_at: row.get::<_, i64>(3)? as u64,
+                        kind: row.get(4)?,
+                        key_id: row.get(5)?,
+                        label: row.get(6)?,
+                        created_at: row.get::<_, i64>(7)? as u64,
+                        consumed_at: consumed.map(|v| v as u64),
+                        consumed_machine_id: row.get(9)?,
+                        bound_machine_id: row.get(10)?,
+                        bound_public_key: row.get(11)?,
                     },
                 ))
             })
@@ -331,6 +344,49 @@ pub fn load_store_from_connection(conn: &Connection) -> Result<AccountStore, Str
             store
                 .org_invites
                 .insert(record.token_hash.clone(), record);
+        }
+    }
+
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT request_id, device_code_hash, user_code, machine_id, public_key, \
+                 display_name, platform, app_version, email_hint, requester_ip, created_at, \
+                 expires_at, status, decided_by, decided_at, enrollment_code, last_polled_at \
+                 FROM machine_requests",
+            )
+            .map_err(|err| format!("Failed to prepare machine_requests query: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let decided_at: Option<i64> = row.get(14)?;
+                let last_polled_at: Option<i64> = row.get(16)?;
+                Ok(MachineRequestRecord {
+                    request_id: row.get(0)?,
+                    device_code_hash: row.get(1)?,
+                    user_code: row.get(2)?,
+                    machine_id: row.get(3)?,
+                    public_key: row.get(4)?,
+                    display_name: row.get(5)?,
+                    platform: row.get(6)?,
+                    app_version: row.get(7)?,
+                    email_hint: row.get(8)?,
+                    requester_ip: row.get(9)?,
+                    created_at: row.get::<_, i64>(10)? as u64,
+                    expires_at: row.get::<_, i64>(11)? as u64,
+                    status: row.get(12)?,
+                    decided_by: row.get(13)?,
+                    decided_at: decided_at.map(|v| v as u64),
+                    enrollment_code: row.get(15)?,
+                    last_polled_at: last_polled_at.map(|v| v as u64),
+                })
+            })
+            .map_err(|err| format!("Failed to query machine_requests: {err}"))?;
+        for request in rows {
+            let record =
+                request.map_err(|err| format!("Failed to read machine_request row: {err}"))?;
+            store
+                .machine_requests
+                .insert(record.request_id.clone(), record);
         }
     }
 
@@ -585,10 +641,16 @@ pub fn save_store_to_transaction(tx: &Transaction, store: &AccountStore) -> Resu
 
         let mut upsert_stmt = tx
             .prepare(
-                "INSERT INTO enrollment_codes (code_hash, user_id, account_origin, expires_at) \
-                 VALUES (?1, ?2, ?3, ?4) \
+                "INSERT INTO enrollment_codes (code_hash, user_id, account_origin, expires_at, \
+                 kind, key_id, label, created_at, consumed_at, consumed_machine_id, \
+                 bound_machine_id, bound_public_key) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
                  ON CONFLICT(code_hash) DO UPDATE SET \
-                 user_id=excluded.user_id, account_origin=excluded.account_origin, expires_at=excluded.expires_at",
+                 user_id=excluded.user_id, account_origin=excluded.account_origin, expires_at=excluded.expires_at, \
+                 kind=excluded.kind, key_id=excluded.key_id, label=excluded.label, \
+                 created_at=excluded.created_at, consumed_at=excluded.consumed_at, \
+                 consumed_machine_id=excluded.consumed_machine_id, \
+                 bound_machine_id=excluded.bound_machine_id, bound_public_key=excluded.bound_public_key",
             )
             .map_err(|e| format!("Failed to prepare enrollment_code upsert: {e}"))?;
         for (hash, code) in &store.enrollment_codes {
@@ -597,7 +659,15 @@ pub fn save_store_to_transaction(tx: &Transaction, store: &AccountStore) -> Resu
                     hash,
                     code.user_id,
                     code.account_origin,
-                    code.expires_at as i64
+                    code.expires_at as i64,
+                    code.kind,
+                    code.key_id,
+                    code.label,
+                    code.created_at as i64,
+                    code.consumed_at.map(|v| v as i64),
+                    code.consumed_machine_id,
+                    code.bound_machine_id,
+                    code.bound_public_key
                 ])
                 .map_err(|e| format!("Failed to upsert enrollment_code {hash}: {e}"))?;
         }
@@ -941,6 +1011,75 @@ pub fn save_store_to_transaction(tx: &Transaction, store: &AccountStore) -> Resu
                 ])
                 .map_err(|e| {
                     format!("Failed to upsert org_invite {}: {e}", invite.token_hash)
+                })?;
+        }
+    }
+
+    {
+        let mut existing_keys = Vec::new();
+        {
+            let mut select_stmt = tx
+                .prepare("SELECT request_id FROM machine_requests")
+                .map_err(|e| format!("Failed to prepare select machine_request ids: {e}"))?;
+            let rows = select_stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| format!("Failed to query machine_request ids: {e}"))?;
+            for k in rows {
+                existing_keys
+                    .push(k.map_err(|e| format!("Failed to read machine_request id: {e}"))?);
+            }
+        }
+        let mut del_stmt = tx
+            .prepare("DELETE FROM machine_requests WHERE request_id = ?1")
+            .map_err(|e| format!("Failed to prepare delete machine_request: {e}"))?;
+        for k in existing_keys {
+            if !store.machine_requests.contains_key(&k) {
+                del_stmt
+                    .execute(params![k])
+                    .map_err(|e| format!("Failed to delete machine_request {k}: {e}"))?;
+            }
+        }
+
+        let mut upsert_stmt = tx
+            .prepare(
+                "INSERT INTO machine_requests (request_id, device_code_hash, user_code, machine_id, \
+                 public_key, display_name, platform, app_version, email_hint, requester_ip, \
+                 created_at, expires_at, status, decided_by, decided_at, enrollment_code, last_polled_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
+                 ON CONFLICT(request_id) DO UPDATE SET \
+                 device_code_hash=excluded.device_code_hash, user_code=excluded.user_code, \
+                 machine_id=excluded.machine_id, public_key=excluded.public_key, \
+                 display_name=excluded.display_name, platform=excluded.platform, \
+                 app_version=excluded.app_version, email_hint=excluded.email_hint, \
+                 requester_ip=excluded.requester_ip, created_at=excluded.created_at, \
+                 expires_at=excluded.expires_at, status=excluded.status, \
+                 decided_by=excluded.decided_by, decided_at=excluded.decided_at, \
+                 enrollment_code=excluded.enrollment_code, last_polled_at=excluded.last_polled_at",
+            )
+            .map_err(|e| format!("Failed to prepare machine_request upsert: {e}"))?;
+        for request in store.machine_requests.values() {
+            upsert_stmt
+                .execute(params![
+                    request.request_id,
+                    request.device_code_hash,
+                    request.user_code,
+                    request.machine_id,
+                    request.public_key,
+                    request.display_name,
+                    request.platform,
+                    request.app_version,
+                    request.email_hint,
+                    request.requester_ip,
+                    request.created_at as i64,
+                    request.expires_at as i64,
+                    request.status,
+                    request.decided_by,
+                    request.decided_at.map(|v| v as i64),
+                    request.enrollment_code,
+                    request.last_polled_at.map(|v| v as i64)
+                ])
+                .map_err(|e| {
+                    format!("Failed to upsert machine_request {}: {e}", request.request_id)
                 })?;
         }
     }

@@ -77,10 +77,10 @@ pub fn button_value(action: &Value) -> Option<&str> {
 }
 
 pub fn button_actions_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("OMON_BUTTON_ACTIONS_FILE") {
+    if let Some(path) = crate::hub_env::var_os("OMON_BUTTON_ACTIONS_FILE") {
         return PathBuf::from(path);
     }
-    std::env::var_os("HOME")
+    crate::hub_env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default()
         .join(".omon")
@@ -113,7 +113,7 @@ pub async fn run_button_action(
     let Some((program, base_args)) = config.command.split_first() else {
         return Err(HubError::message("button action command is empty"));
     };
-    let mut command = tokio::process::Command::new(program);
+    let mut command = crate::child_env::command(program);
     command
         .args(base_args)
         .arg(&click.action)
@@ -125,8 +125,9 @@ pub async fn run_button_action(
     if let Some(token) = &click.token {
         command.arg(token);
     }
-    for key in ["PATH", "HOME", "TMPDIR", "LANG", "TZ"] {
-        if let Some(value) = std::env::var_os(key) {
+    command.env("PATH", crate::child_env::child_path());
+    for key in ["HOME", "TMPDIR", "LANG", "TZ"] {
+        if let Some(value) = crate::hub_env::var_os(key) {
             command.env(key, value);
         }
     }
@@ -168,7 +169,12 @@ pub async fn run_button_clicks(
         .pointer("/user/id")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if user.is_empty() || user != owner_id {
+    // omo-gateway: anyone in SLACK_ALLOWED_USERS (default: the owner) may press a button.
+    if user.is_empty()
+        || !crate::config::slack_allowed_users(owner_id)
+            .iter()
+            .any(|id| id == user)
+    {
         return Err(HubError::message(NOT_AUTHORIZED));
     }
     let channel = payload
@@ -260,6 +266,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(refused.contains("권한이 없습니다"));
+        // 2026-10-23 05:05Z: with no owner configured, omo-gateway's owner still may click.
+        let mut owner_click = payload.clone();
+        owner_click["user"]["id"] = serde_json::json!("U04M1JNJM8T");
+        assert_eq!(
+            run_button_clicks(&owner_click, "", &path).await.unwrap(),
+            vec!["okpublish\n86".to_owned()]
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

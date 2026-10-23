@@ -62,7 +62,7 @@ fn effect_may_run(effect: Effect) -> bool {
 pub async fn run_command(command: &str) -> Result<String> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        tokio::process::Command::new("sh")
+        crate::child_env::command("sh")
             .arg("-c")
             .arg(command)
             .output(),
@@ -210,11 +210,11 @@ pub(crate) fn skills_root(args: &Value) -> Option<std::path::PathBuf> {
         .and_then(Value::as_str)
         .map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HERMES_HOME")
+            crate::hub_env::var_os("HERMES_HOME")
                 .map(|root| std::path::PathBuf::from(root).join("skills"))
         })
         .or_else(|| {
-            std::env::var_os("HOME").map(|home| {
+            crate::hub_env::var_os("HOME").map(|home| {
                 std::path::PathBuf::from(home)
                     .join(".hermes")
                     .join("skills")

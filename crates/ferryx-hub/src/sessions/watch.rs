@@ -44,9 +44,9 @@ impl NotifyMode {
 
 /// `FERRYX_HUB_NOTIFY` wins, then `OMON_SESSION_NOTIFY`. An unknown value is ignored.
 pub fn notify_mode_from_env() -> Option<NotifyMode> {
-    std::env::var("FERRYX_HUB_NOTIFY")
+    crate::hub_env::var("FERRYX_HUB_NOTIFY")
         .ok()
-        .or_else(|| std::env::var("OMON_SESSION_NOTIFY").ok())
+        .or_else(|| crate::hub_env::var("OMON_SESSION_NOTIFY").ok())
         .as_deref()
         .and_then(NotifyMode::parse)
 }
@@ -109,15 +109,15 @@ impl Default for NotifyPolicy {
 impl NotifyPolicy {
     pub fn from_env() -> Self {
         let mut policy = Self::default();
-        if let Some(secs) = std::env::var("FERRYX_HUB_NOTIFY_AFTER_SECS")
+        if let Some(secs) = crate::hub_env::var("FERRYX_HUB_NOTIFY_AFTER_SECS")
             .ok()
-            .or_else(|| std::env::var("OMON_SESSION_NOTIFY_AFTER_SECS").ok())
+            .or_else(|| crate::hub_env::var("OMON_SESSION_NOTIFY_AFTER_SECS").ok())
             .and_then(|value| value.trim().parse::<u64>().ok())
         {
             policy.notify_after = Duration::from_secs(secs);
         }
-        if let Ok(value) = std::env::var("FERRYX_HUB_QUIET_HOURS")
-            .or_else(|_| std::env::var("OMON_SESSION_QUIET_HOURS"))
+        if let Ok(value) = crate::hub_env::var("FERRYX_HUB_QUIET_HOURS")
+            .or_else(|_| crate::hub_env::var("OMON_SESSION_QUIET_HOURS"))
         {
             policy.quiet_hours = parse_quiet_hours(&value);
         }

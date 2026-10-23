@@ -336,6 +336,31 @@ pub struct Directories {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DiscoveredRepository {
+    #[serde(deserialize_with = "required")]
+    pub repo_root: String,
+    pub is_linked_worktree: bool,
+    #[serde(deserialize_with = "nullable_text")]
+    pub git_common_dir: Option<String>,
+    #[serde(deserialize_with = "nullable_text")]
+    pub branch: Option<String>,
+    /// The host's own workspace id when this root is registered in its machine catalog.
+    #[serde(deserialize_with = "nullable_text")]
+    pub registered_workspace_id: Option<String>,
+}
+/// `GET /api/v1/fs/repositories` (capability `repoDiscoveryV1`). Shares the directory
+/// response bound; caps set `truncated` rather than failing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Repositories {
+    #[serde(deserialize_with = "required")]
+    pub path: String,
+    pub repos: Vec<DiscoveredRepository>,
+    pub truncated: bool,
+    pub elapsed_ms: u64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum AccessScope {
     Mirror,
     Machine,

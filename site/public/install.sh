@@ -5,11 +5,89 @@ set -eu
 # Usage:
 #   curl -fsSL https://relay.ferryx.dev/install.sh | bash
 #   curl -fsSL https://ferryx.dev/install.sh | bash
+#   curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --key <install key>
+#
+# Options:
+#   --key K        install key; handed to ferryx-cli in FERRYX_INSTALL_KEY, never as an argument
+#   --key-stdin    read the install key as exactly one line from stdin
+#   --email E      account email hint for the approval request
+#   --no-up        install the binary only; do not run "ferryx-cli up"
+#   --json         progress goes to stderr; the last stdout line is ferryx-cli up's JSON summary
 #
 # Custom options via environment variables:
 #   FERRYX_INSTALL_DIR : directory where binary is placed (default: ~/.local/bin or /usr/local/bin)
 #   FERRYX_ORIGIN      : custom relay/download origin (default: https://relay.ferryx.dev, must be https or http on loopback)
 #   FERRYX_VERSION     : specific tag version or 'latest' (default: latest, must match ^[A-Za-z0-9._-]+$)
+#   FERRYX_INSTALL_KEY : install key (same as --key)
+
+FERRYX_INSTALL_KEY="${FERRYX_INSTALL_KEY:-}"
+INSTALL_EMAIL=""
+INSTALL_NO_UP=0
+INSTALL_JSON=0
+INSTALL_KEY_STDIN=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --key)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "Error: --key needs a value." >&2
+        exit 2
+      fi
+      FERRYX_INSTALL_KEY="$2"
+      shift 2
+      ;;
+    --key=*)
+      FERRYX_INSTALL_KEY="${1#--key=}"
+      shift
+      ;;
+    --key-stdin)
+      INSTALL_KEY_STDIN=1
+      shift
+      ;;
+    --email)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "Error: --email needs a value." >&2
+        exit 2
+      fi
+      INSTALL_EMAIL="$2"
+      shift 2
+      ;;
+    --email=*)
+      INSTALL_EMAIL="${1#--email=}"
+      shift
+      ;;
+    --no-up)
+      INSTALL_NO_UP=1
+      shift
+      ;;
+    --json)
+      INSTALL_JSON=1
+      shift
+      ;;
+    *)
+      echo "Error: unknown option '$1'. Supported: --key K, --key-stdin, --email E, --no-up, --json." >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ "$INSTALL_KEY_STDIN" -eq 1 ]; then
+  FERRYX_INSTALL_KEY=""
+  # Exactly one line; a final line without a newline still counts.
+  IFS= read -r FERRYX_INSTALL_KEY || true
+  if [ -z "$FERRYX_INSTALL_KEY" ]; then
+    echo "Error: --key-stdin found no install key on stdin." >&2
+    exit 2
+  fi
+fi
+
+# With --json the last stdout line belongs to "ferryx-cli up --json": every progress line of this
+# script goes to stderr instead. fd 3 keeps the original stdout for that one call.
+if [ "$INSTALL_JSON" -eq 1 ]; then
+  exec 3>&1 1>&2
+else
+  exec 3>&1
+fi
 
 FERRYX_ORIGIN="${FERRYX_ORIGIN:-https://relay.ferryx.dev}"
 FERRYX_VERSION="${FERRYX_VERSION:-latest}"
@@ -258,11 +336,66 @@ case ":$PATH:" in
     ;;
 esac
 
-echo ""
-echo "Next steps:"
-echo "  1. Start the headless daemon:"
-echo "     ferryx-cli --daemon &"
-echo ""
-echo "  2. Link your machine with your account:"
-echo "     ferryx-cli account login --email <your-email> --origin ${FERRYX_ORIGIN}"
-echo ""
+print_next_step() {
+  echo ""
+  echo "Next step: link this machine with your account and start its daemon:"
+  echo "  ${TARGET_BIN} up --origin ${FERRYX_ORIGIN}"
+  echo "  (with an install key: FERRYX_INSTALL_KEY=<key> ${TARGET_BIN} up --key-env --origin ${FERRYX_ORIGIN})"
+  echo ""
+}
+
+# 12. Link this machine and keep its daemon running.
+if [ "$INSTALL_NO_UP" -eq 1 ]; then
+  print_next_step
+  exit 0
+fi
+
+if [ -z "$FERRYX_INSTALL_KEY" ] && [ -z "$INSTALL_EMAIL" ] && [ ! -t 2 ]; then
+  # No key, no email hint and nobody watching stderr: the approval link would go unseen.
+  # stdin is not checked because "curl ... | sh" always pipes the script into stdin.
+  echo "No install key was given and no terminal is attached; skipping 'ferryx-cli up'." >&2
+  print_next_step
+  exit 0
+fi
+
+set -- --origin "$FERRYX_ORIGIN"
+if [ -n "$FERRYX_INSTALL_KEY" ]; then
+  set -- --key-env "$@"
+fi
+if [ -n "$INSTALL_EMAIL" ]; then
+  set -- "$@" --email "$INSTALL_EMAIL"
+fi
+if [ "$INSTALL_JSON" -eq 1 ]; then
+  set -- "$@" --json
+fi
+
+echo "--> Running: ferryx-cli up $*"
+set +e
+if [ -n "$FERRYX_INSTALL_KEY" ]; then
+  # The key travels in the environment of this one call only, never in argv.
+  export FERRYX_INSTALL_KEY
+  # 3>&- keeps the saved stdout away from the detached daemon "up" may start; an inherited
+  # copy would hold an SSH session's stdout open until the session times out.
+  "$TARGET_BIN" up "$@" </dev/null 1>&3 3>&-
+  up_status=$?
+  unset FERRYX_INSTALL_KEY
+else
+  unset FERRYX_INSTALL_KEY
+  "$TARGET_BIN" up "$@" </dev/null 1>&3 3>&-
+  up_status=$?
+fi
+set -e
+
+if [ "$up_status" -ne 0 ]; then
+  case "$up_status" in
+    2) up_reason="usage error" ;;
+    3) up_reason="the install key was already used, expired, or is invalid" ;;
+    4) up_reason="the account owner denied this machine" ;;
+    5) up_reason="the approval request expired" ;;
+    6) up_reason="the account's plan limit was reached" ;;
+    *) up_reason="see the error above" ;;
+  esac
+  echo "Error: ferryx-cli up failed (exit ${up_status}): ${up_reason}." >&2
+  echo "    ferryx-cli stays installed at ${TARGET_BIN}; rerun '${TARGET_BIN} up --origin ${FERRYX_ORIGIN}' when ready." >&2
+  exit "$up_status"
+fi

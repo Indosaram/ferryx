@@ -5114,16 +5114,23 @@ impl DaemonServer {
                     let authority_transfer_id = transfer_id.clone();
                     received_authority = tokio::task::spawn_blocking(move || {
                         use crate::daemon::handover_socket::{
-                            request_authority, validate_authority, HandoverSocketError,
+                            predecessor_closed_without_authority, request_authority, validate_authority,
                         };
-                        use crate::daemon::handover_wire::HandoverWireError;
                         match request_authority(&handover_stream, &authority_transfer_id) {
                             Ok(authority) => {
                                 validate_authority(&authority, &expected)
                                     .map_err(|error| format!("Predecessor authority rejected: {error}"))?;
                                 Ok(Some(authority))
                             }
-                            Err(HandoverSocketError::Wire(HandoverWireError::Closed)) => Ok(None),
+                            // A pre-plan predecessor hangs up instead of answering; depending on
+                            // timing that is EOF on the reply or EPIPE/ECONNRESET on the request.
+                            Err(error) if predecessor_closed_without_authority(&error) => {
+                                tracing::info!(
+                                    %error,
+                                    "Predecessor sent no authority (pre-plan daemon); taking the locks after commit"
+                                );
+                                Ok(None)
+                            }
                             Err(error) => Err(format!("Predecessor authority transfer failed: {error}")),
                         }
                     })

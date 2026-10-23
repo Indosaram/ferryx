@@ -606,6 +606,191 @@ pub async fn cmd_ssh_remove_integration<R: Runtime>(
     crate::ssh::operations::remove_integration(&host, &environment).await
 }
 
+/// Wire code for every failure after the SSH install of a Ferryx node has started.
+pub(crate) const SSH_NODE_INSTALL_FAILED: &str = "SSH_NODE_INSTALL_FAILED";
+const NODE_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const NODE_INSTALL_STDERR_TAIL_BYTES: usize = 2000;
+/// Remote exit status the install command uses when install.sh could not be downloaded.
+const NODE_INSTALL_DOWNLOAD_EXIT: i64 = 97;
+/// ssh(1) exits 255 when the connection itself failed.
+const SSH_TRANSPORT_EXIT: i64 = 255;
+const NODE_INSTALL_KEY_REDACTION: &str = "[REDACTED]";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshNodeEnrollment {
+    pub account_id: String,
+    pub machine_record_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshNodeService {
+    pub supervised: bool,
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Summary install.sh prints as its last JSON line with `--json`. Unknown fields are ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshNodeInstallReport {
+    pub cli_path: String,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrolled: Option<SshNodeEnrollment>,
+    pub service: SshNodeService,
+}
+
+fn node_install_error(stage: &str, exit_code: Option<i64>, stderr_tail: String) -> IpcError {
+    IpcError::new(
+        IpcErrorCode::Custom(SSH_NODE_INSTALL_FAILED.to_string()),
+        format!("Installing Ferryx over SSH failed during {stage}"),
+    )
+    .with_details(serde_json::json!({
+        "stage": stage,
+        "exitCode": exit_code,
+        "stderrTail": stderr_tail,
+    }))
+}
+
+/// Accepts an https origin, or http only for a loopback host. Returns it without a trailing slash.
+pub(crate) fn validate_install_origin(origin: &str) -> Result<String, IpcError> {
+    let invalid = |reason: &str| {
+        IpcError::new(
+            IpcErrorCode::InvalidArgument,
+            "Account origin must be an https URL (http is allowed only for loopback)",
+        )
+        .with_details(serde_json::json!({"stage": "origin", "reason": reason}))
+    };
+    let parsed = url::Url::parse(origin.trim()).map_err(|_| invalid("unparseable"))?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(invalid("unexpectedComponent"));
+    }
+    let loopback = match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => return Err(invalid("missingHost")),
+    };
+    match parsed.scheme() {
+        "https" => {}
+        "http" if loopback => {}
+        _ => return Err(invalid("scheme")),
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+/// The ssh stdin payload: the install key followed by one newline. The key never enters argv.
+pub(crate) fn node_install_stdin(install_key: &str) -> Result<Vec<u8>, IpcError> {
+    if install_key.is_empty() || install_key.chars().any(char::is_control) {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidArgument,
+            "Install key must be a single non-empty line",
+        )
+        .with_details(serde_json::json!({"stage": "key"})));
+    }
+    let mut bytes = Vec::with_capacity(install_key.len() + 1);
+    bytes.extend_from_slice(install_key.as_bytes());
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// Remote POSIX command for a validated origin. install.sh is downloaded to a temp file (curl,
+/// else wget) rather than piped into `sh -s`: a piped script would occupy sh's stdin, and
+/// `--key-stdin` must read the key line from the ssh stdin instead.
+pub(crate) fn node_install_command(origin: &str) -> String {
+    let script_url = crate::ssh::direct::quote_posix(&format!("{origin}/install.sh"));
+    let origin = crate::ssh::direct::quote_posix(origin);
+    let download = NODE_INSTALL_DOWNLOAD_EXIT;
+    format!(
+        "tmp=$(mktemp 2>/dev/null || mktemp -t ferryx-install) || exit {download}; \
+         trap 'rm -f \"$tmp\"' EXIT; \
+         if command -v curl >/dev/null 2>&1; then curl -fsSL {script_url} -o \"$tmp\" || exit {download}; \
+         elif command -v wget >/dev/null 2>&1; then wget -qO \"$tmp\" {script_url} || exit {download}; \
+         else echo 'ferryx: curl or wget is required' >&2; exit {download}; fi; \
+         FERRYX_ORIGIN={origin} sh \"$tmp\" --key-stdin --json"
+    )
+}
+
+/// Redacts the key, then keeps the last [`NODE_INSTALL_STDERR_TAIL_BYTES`] bytes on a char boundary.
+pub(crate) fn node_install_stderr_tail(stderr: &str, install_key: &str) -> String {
+    let redacted = if install_key.is_empty() {
+        stderr.to_string()
+    } else {
+        stderr.replace(install_key, NODE_INSTALL_KEY_REDACTION)
+    };
+    let mut start = redacted.len().saturating_sub(NODE_INSTALL_STDERR_TAIL_BYTES);
+    while !redacted.is_char_boundary(start) {
+        start += 1;
+    }
+    redacted[start..].to_string()
+}
+
+/// Maps a structured `bounded_output_with_stdin` error to `SSH_NODE_INSTALL_FAILED`.
+pub(crate) fn node_install_failure(error: IpcError, install_key: &str) -> IpcError {
+    let details = error.details.as_ref();
+    let exit_code = details
+        .and_then(|details| details.get("exitCode"))
+        .and_then(serde_json::Value::as_i64);
+    let source_stage = details
+        .and_then(|details| details.get("stage"))
+        .and_then(serde_json::Value::as_str);
+    let stderr = details
+        .and_then(|details| details.get("stderr"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let stage = match (source_stage, exit_code) {
+        (Some("execution"), Some(SSH_TRANSPORT_EXIT)) => "transport",
+        (Some("execution"), Some(NODE_INSTALL_DOWNLOAD_EXIT)) => "download",
+        (Some("execution"), _) => "install",
+        _ => "transport",
+    };
+    node_install_error(stage, exit_code, node_install_stderr_tail(stderr, install_key))
+}
+
+/// Parses the last stdout line that is a JSON object into the report.
+pub(crate) fn parse_node_install_report(stdout: &[u8]) -> Result<SshNodeInstallReport, IpcError> {
+    let text = std::str::from_utf8(stdout)
+        .map_err(|_| node_install_error("parse", Some(0), String::new()))?;
+    let last = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .find_map(|line| match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(value @ serde_json::Value::Object(_)) => Some(value),
+            _ => None,
+        })
+        .ok_or_else(|| node_install_error("parse", Some(0), String::new()))?;
+    serde_json::from_value(last).map_err(|_| node_install_error("parse", Some(0), String::new()))
+}
+
+/// Installs the Ferryx CLI on a stored SSH host and enrolls it with a one-time install key.
+#[tauri::command]
+pub async fn cmd_ssh_install_ferryx_node<R: Runtime>(
+    app: AppHandle<R>,
+    host_id: String,
+    account_origin: String,
+    install_key: String,
+) -> Result<SshNodeInstallReport, IpcError> {
+    let origin = validate_install_origin(&account_origin)?;
+    let input = node_install_stdin(&install_key)?;
+    let path = get_ssh_store_path(&app)?;
+    let host =
+        run_blocking(move || crate::ssh::projects::enabled_host(&path, &host_id)).await?;
+    let plan = crate::ssh::direct::ssh_plan(&host, node_install_command(&origin), false)?;
+    let output = crate::ssh::direct::bounded_output_with_stdin(&plan, NODE_INSTALL_TIMEOUT, input)
+        .await
+        .map_err(|error| node_install_failure(error, &install_key))?;
+    parse_node_install_report(&output)
+}
+
 pub fn resolve_bundled_helper_binary(target_triple: &str) -> Result<PathBuf, IpcError> {
     let parsed_target = match target_triple {
         "x86_64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxX86_64,
@@ -1492,5 +1677,140 @@ Host dev-box
                 .and_then(|r| r.as_str()),
             Some("hostDisabled")
         );
+    }
+
+    const TEST_KEY: &str = "fxk_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn node_install_code(error: &IpcError) -> Option<&str> {
+        match &error.code {
+            IpcErrorCode::Custom(code) => Some(code.as_str()),
+            _ => None,
+        }
+    }
+
+    fn detail<'a>(error: &'a IpcError, key: &str) -> Option<&'a serde_json::Value> {
+        error.details.as_ref().and_then(|details| details.get(key))
+    }
+
+    #[test]
+    fn node_install_command_never_contains_the_key() {
+        let origin = validate_install_origin("https://ferryx.dev/").expect("https origin");
+        let command = node_install_command(&origin);
+        assert!(!command.contains(TEST_KEY));
+        assert!(!command.contains("fxk_"));
+        assert!(command.contains("--key-stdin --json"));
+        assert!(command.contains("command -v curl >/dev/null 2>&1"));
+        assert!(command.contains("wget -qO"));
+        let input = node_install_stdin(TEST_KEY).expect("key stdin");
+        assert_eq!(input, format!("{TEST_KEY}\n").into_bytes());
+    }
+
+    #[test]
+    fn node_install_command_quotes_the_origin() {
+        let origin = validate_install_origin("https://ferryx.dev").expect("https origin");
+        let command = node_install_command(&origin);
+        assert!(command.contains("FERRYX_ORIGIN='https://ferryx.dev' sh"));
+        assert!(command.contains("curl -fsSL 'https://ferryx.dev/install.sh'"));
+        let tricky = "https://ex.test/a'b";
+        let quoted = node_install_command(tricky);
+        assert!(quoted.contains("FERRYX_ORIGIN='https://ex.test/a'\\''b' sh"));
+    }
+
+    #[test]
+    fn node_install_origin_rejects_non_https() {
+        for origin in [
+            "http://ferryx.dev",
+            "ftp://ferryx.dev",
+            "ferryx.dev",
+            "https://user@ferryx.dev",
+            "https://ferryx.dev/?x=1",
+            "file:///etc/passwd",
+        ] {
+            let error = validate_install_origin(origin).expect_err(origin);
+            assert_eq!(error.code, IpcErrorCode::InvalidArgument, "{origin}");
+        }
+        assert_eq!(
+            validate_install_origin("http://127.0.0.1:8787/").unwrap(),
+            "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            validate_install_origin("http://localhost:3000").unwrap(),
+            "http://localhost:3000"
+        );
+    }
+
+    #[test]
+    fn node_install_stdin_rejects_empty_or_multiline_keys() {
+        assert!(node_install_stdin("").is_err());
+        assert!(node_install_stdin("fxk_a\nrm -rf /").is_err());
+    }
+
+    #[test]
+    fn node_install_report_uses_last_json_line_after_noise() {
+        let stdout = b"Downloading ferryx-cli...\n{\"progress\":1}\nnot json {\n\
+{\"cliPath\":\"/home/u/.local/bin/ferryx-cli\",\"version\":\"2026.1023.1\",\
+\"enrolled\":{\"accountId\":\"acc_1\",\"machineRecordId\":\"m_1\",\"extra\":true},\
+\"service\":{\"supervised\":false,\"backend\":\"detached\",\"reason\":\"no systemd\",\"pid\":42},\
+\"relayOrigin\":\"https://relay.ferryx.dev\"}\n\n";
+        let report = parse_node_install_report(stdout).expect("report");
+        assert_eq!(report.cli_path, "/home/u/.local/bin/ferryx-cli");
+        assert_eq!(report.version, "2026.1023.1");
+        assert_eq!(
+            report.enrolled,
+            Some(SshNodeEnrollment {
+                account_id: "acc_1".into(),
+                machine_record_id: "m_1".into(),
+            })
+        );
+        assert!(!report.service.supervised);
+        assert_eq!(report.service.backend, "detached");
+        assert_eq!(report.service.reason.as_deref(), Some("no systemd"));
+    }
+
+    #[test]
+    fn node_install_report_without_json_is_a_typed_parse_error() {
+        let error = parse_node_install_report(b"installed\nall good\n").expect_err("no json");
+        assert_eq!(node_install_code(&error), Some(SSH_NODE_INSTALL_FAILED));
+        assert_eq!(detail(&error, "stage").and_then(|v| v.as_str()), Some("parse"));
+        let wrong_shape = parse_node_install_report(b"{\"version\":\"1\"}\n").expect_err("shape");
+        assert_eq!(node_install_code(&wrong_shape), Some(SSH_NODE_INSTALL_FAILED));
+    }
+
+    #[test]
+    fn node_install_failure_redacts_key_and_bounds_stderr_tail() {
+        let stderr = format!("{}error: key {TEST_KEY} was rejected", "x".repeat(5000));
+        let source = IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 3)")
+            .with_details(serde_json::json!({
+                "stage": "execution",
+                "exitCode": 3,
+                "stderr": stderr,
+            }));
+        let error = node_install_failure(source, TEST_KEY);
+        assert_eq!(node_install_code(&error), Some(SSH_NODE_INSTALL_FAILED));
+        assert_eq!(detail(&error, "stage").and_then(|v| v.as_str()), Some("install"));
+        assert_eq!(detail(&error, "exitCode").and_then(|v| v.as_i64()), Some(3));
+        let tail = detail(&error, "stderrTail").and_then(|v| v.as_str()).unwrap();
+        assert!(tail.len() <= 2000);
+        assert!(!tail.contains(TEST_KEY));
+        assert!(tail.ends_with("error: key [REDACTED] was rejected"));
+        assert!(!serde_json::to_string(&error).unwrap().contains(TEST_KEY));
+    }
+
+    #[test]
+    fn node_install_failure_classifies_transport_and_download() {
+        let transport = node_install_failure(
+            crate::ssh::runtime::error(IpcErrorCode::IoError, "transport", "SSH operation timed out"),
+            TEST_KEY,
+        );
+        assert_eq!(detail(&transport, "stage").and_then(|v| v.as_str()), Some("transport"));
+        let download = node_install_failure(
+            IpcError::new(IpcErrorCode::IoError, "failed").with_details(serde_json::json!({
+                "stage": "execution",
+                "exitCode": 97,
+                "stderr": "curl: (22) 404",
+            })),
+            TEST_KEY,
+        );
+        assert_eq!(detail(&download, "stage").and_then(|v| v.as_str()), Some("download"));
     }
 }

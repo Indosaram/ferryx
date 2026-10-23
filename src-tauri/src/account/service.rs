@@ -59,6 +59,7 @@ pub struct AccountState {
     pub max_body_bytes: usize,
     http_client: reqwest::Client,
     login_attempts: Mutex<HashMap<String, Vec<Instant>>>,
+    onboarding_rates: Mutex<HashMap<String, Vec<Instant>>>,
     challenges: Mutex<HashMap<String, EnrollChallenge>>,
     signing_key: Mutex<Option<Arc<SigningKey>>>,
     liveness_probe: Mutex<Option<MachineLivenessProbe>>,
@@ -135,6 +136,7 @@ impl AccountState {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             http_client,
             login_attempts: Mutex::new(HashMap::new()),
+            onboarding_rates: Mutex::new(HashMap::new()),
             challenges: Mutex::new(HashMap::new()),
             signing_key: Mutex::new(None),
             liveness_probe: Mutex::new(None),
@@ -209,6 +211,22 @@ impl AccountState {
             return false;
         }
         window.push(Instant::now());
+        true
+    }
+
+    /// Sliding-window limiter for the onboarding endpoints (machine-request create per IP,
+    /// lookup per user). Records the attempt only when it is allowed.
+    pub(crate) fn allow_onboarding_rate(&self, key: &str, limit: usize, window: Duration) -> bool {
+        let mut rates = self.onboarding_rates.lock();
+        rates.retain(|_, hits| {
+            hits.retain(|at| at.elapsed() < window);
+            !hits.is_empty()
+        });
+        let hits = rates.entry(key.to_string()).or_default();
+        if hits.len() >= limit {
+            return false;
+        }
+        hits.push(Instant::now());
         true
     }
 
@@ -527,9 +545,21 @@ pub fn touch_enrolled_machine(state: &AccountState, machine_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn parse_json<T: for<'de> Deserialize<'de>>(body: Bytes) -> Result<T, ApiError> {
+pub(crate) async fn parse_json<T: for<'de> Deserialize<'de>>(body: Bytes) -> Result<T, ApiError> {
     serde_json::from_slice(&body)
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()))
+}
+
+/// Runs a synchronous account-store operation on a blocking thread (`crate::ipc::run_blocking`)
+/// and flattens the join failure into an internal `ApiError`.
+pub(crate) async fn run_account_blocking<T, F>(operation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ApiError> + Send + 'static,
+{
+    crate::ipc::run_blocking(move || Ok(operation()))
+        .await
+        .map_err(|error| ApiError::internal(format!("account blocking task failed: {error}")))?
 }
 
 #[derive(Debug, Deserialize)]
@@ -730,6 +760,7 @@ pub async fn device_approve_get(
                 user_id,
                 account_origin,
                 expires_at: now + 600,
+                ..Default::default()
             },
         );
 
@@ -971,6 +1002,7 @@ pub async fn create_enrollment_code(
                 user_id: user.user_id.clone(),
                 account_origin: state.origin.clone(),
                 expires_at,
+                ..Default::default()
             },
         );
         Ok(())
@@ -1029,7 +1061,7 @@ fn scope_name(scope: AccountGrantScope) -> String {
     .to_string()
 }
 
-fn plan_key_str(plan: crate::account::billing::entitlement::PlanKey) -> &'static str {
+pub(crate) fn plan_key_str(plan: crate::account::billing::entitlement::PlanKey) -> &'static str {
     match plan {
         crate::account::billing::entitlement::PlanKey::Free => "free",
         crate::account::billing::entitlement::PlanKey::ProMonthly => "pro_monthly",
@@ -1050,7 +1082,7 @@ fn entitlement_status_str(
     }
 }
 
-fn machines_used_for_user(store: &AccountStore, user_id: &str) -> u32 {
+pub(crate) fn machines_used_for_user(store: &AccountStore, user_id: &str) -> u32 {
     let org_member = store
         .org_members
         .values()
@@ -1272,6 +1304,23 @@ pub async fn enroll(
                 .ok_or_else(|| {
                     ApiError::unauthorized("ENROLL_CODE_INVALID", "unknown enrollment code")
                 })?;
+            if record.is_install_key() {
+                if record.consumed_at.is_some() {
+                    return Err(ApiError::new(
+                        StatusCode::CONFLICT,
+                        "INSTALL_KEY_USED",
+                        "this install key was already used to enroll a machine",
+                    ));
+                }
+                if record.expires_at <= now {
+                    store.enrollment_codes.remove(&code_hash);
+                    // Ok(Err(..)) commits the deletion of the expired key.
+                    return Ok(Err(ApiError::unauthorized(
+                        "INSTALL_KEY_EXPIRED",
+                        "install key has expired",
+                    )));
+                }
+            }
             if record.expires_at <= now {
                 store.enrollment_codes.remove(&code_hash);
                 return Err(ApiError::unauthorized(
@@ -1283,6 +1332,20 @@ pub async fn enroll(
                 return Err(ApiError::unauthorized(
                     "ENROLL_ORIGIN_MISMATCH",
                     "enrollment code was issued for a different account origin",
+                ));
+            }
+            let bound_machine_mismatch = record
+                .bound_machine_id
+                .as_deref()
+                .is_some_and(|bound| bound != request_clone.machine_id);
+            let bound_key_mismatch = record
+                .bound_public_key
+                .as_deref()
+                .is_some_and(|bound| bound != request_clone.public_key);
+            if bound_machine_mismatch || bound_key_mismatch {
+                return Err(ApiError::unauthorized(
+                    "ENROLL_CODE_MACHINE_MISMATCH",
+                    "this enrollment code was approved for a different machine",
                 ));
             }
             let user_id = record.user_id.clone();
@@ -1350,7 +1413,15 @@ pub async fn enroll(
                 }
             }
 
-            store.enrollment_codes.remove(&code_hash);
+            if record.is_install_key() {
+                // Install keys stay as the audit record of which machine consumed them.
+                if let Some(stored) = store.enrollment_codes.get_mut(&code_hash) {
+                    stored.consumed_at = Some(now);
+                    stored.consumed_machine_id = Some(request_clone.machine_id.clone());
+                }
+            } else {
+                store.enrollment_codes.remove(&code_hash);
+            }
             let platform = platform_name(&request_clone.platform);
             let (machine_record_id, epoch) = match existing {
                 Some(machine) => {
@@ -1711,6 +1782,35 @@ pub fn router(state: Arc<AccountState>) -> Router {
             post(create_enrollment_code),
         )
         .route("/api/account/v1/machines", get(list_machines))
+        .route(
+            "/api/account/v1/install-keys",
+            post(super::install_keys::issue_install_key).get(super::install_keys::list_install_keys),
+        )
+        .route(
+            "/api/account/v1/install-keys/{key_id}/revoke",
+            post(super::install_keys::revoke_install_key),
+        )
+        .route(
+            "/api/account/v1/machine-requests",
+            post(super::machine_requests::create_machine_request)
+                .get(super::machine_requests::list_pending_machine_requests),
+        )
+        .route(
+            "/api/account/v1/machine-requests/poll",
+            post(super::machine_requests::poll_machine_request),
+        )
+        .route(
+            "/api/account/v1/machine-requests/lookup",
+            post(super::machine_requests::lookup_machine_request),
+        )
+        .route(
+            "/api/account/v1/machine-requests/{request_id}/approve",
+            post(super::machine_requests::approve_machine_request),
+        )
+        .route(
+            "/api/account/v1/machine-requests/{request_id}/deny",
+            post(super::machine_requests::deny_machine_request),
+        )
         .route(
             "/api/account/v1/machines/enroll/challenge",
             post(enroll_challenge),
@@ -2866,6 +2966,7 @@ mod tests {
                         user_id: user_id.into(),
                         account_origin: "https://relay.test".into(),
                         expires_at: now + 3600,
+                        ..Default::default()
                     },
                 );
                 store.enrollment_codes.insert(
@@ -2874,6 +2975,7 @@ mod tests {
                         user_id: user_id.into(),
                         account_origin: "https://relay.test".into(),
                         expires_at: now + 3600,
+                        ..Default::default()
                     },
                 );
                 Ok(())
@@ -2938,6 +3040,7 @@ mod tests {
                         user_id: user_id.into(),
                         account_origin: "https://relay.test".into(),
                         expires_at: now + 3600,
+                        ..Default::default()
                     },
                 );
                 store.enrollment_codes.insert(
@@ -2946,6 +3049,7 @@ mod tests {
                         user_id: user_id.into(),
                         account_origin: "https://relay.test".into(),
                         expires_at: now + 3600,
+                        ..Default::default()
                     },
                 );
                 Ok(())
@@ -3025,6 +3129,7 @@ mod tests {
                         user_id: user_id.into(),
                         account_origin: "https://relay.test".into(),
                         expires_at: now + 3600,
+                        ..Default::default()
                     },
                 );
                 store.enrollment_codes.insert(
@@ -3033,6 +3138,7 @@ mod tests {
                         user_id: user_id.into(),
                         account_origin: "https://relay.test".into(),
                         expires_at: now + 3600,
+                        ..Default::default()
                     },
                 );
                 Ok(())
@@ -3301,6 +3407,7 @@ mod tests {
                         user_id: user_id.into(),
                         account_origin: "https://relay.test".into(),
                         expires_at: now + 3600,
+                        ..Default::default()
                     },
                 );
                 store.enrollment_codes.insert(
@@ -3309,6 +3416,7 @@ mod tests {
                         user_id: user_id.into(),
                         account_origin: "https://relay.test".into(),
                         expires_at: now + 3600,
+                        ..Default::default()
                     },
                 );
                 Ok(())
@@ -3368,6 +3476,7 @@ mod tests {
                         user_id: user_id.into(),
                         account_origin: "https://relay.test".into(),
                         expires_at: now + 3600,
+                        ..Default::default()
                     },
                 );
                 store.enrollment_codes.insert(
@@ -3376,6 +3485,7 @@ mod tests {
                         user_id: user_id.into(),
                         account_origin: "https://relay.test".into(),
                         expires_at: now + 3600,
+                        ..Default::default()
                     },
                 );
                 Ok(())
@@ -3604,6 +3714,7 @@ mod tests {
                         user_id: member_user_id.into(),
                         account_origin: "https://relay.test".into(),
                         expires_at: now + 3600,
+                        ..Default::default()
                     },
                 );
 

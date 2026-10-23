@@ -1674,6 +1674,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::ssh::cmd_ssh_remove_integration,
         ipc::ssh::cmd_ssh_install_project_helper,
         ipc::ssh::cmd_ssh_provision_helper,
+        ipc::ssh::cmd_ssh_install_ferryx_node,
         ipc::ssh::cmd_ssh_helper_update_state,
         ipc::ssh::cmd_ssh_paste_clipboard_image,
         ipc::paired_host::cmd_daemon_paste_clipboard_image,

@@ -496,7 +496,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(screen.queryByRole("radio", { name: /Pair with PIN/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /Pair Machine/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
-    expect(screen.getByRole("radio", { name: "Enrollment code" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Enrollment code (manual)" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Connect with SSH" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Import SSH Config" })).toBeInTheDocument();
   });

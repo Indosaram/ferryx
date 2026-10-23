@@ -396,7 +396,7 @@ async fn script_working_directory(pool: &sqlx::SqlitePool) -> Option<std::path::
 }
 
 async fn run_script(script: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<String> {
-    let mut command = tokio::process::Command::new("sh");
+    let mut command = crate::child_env::command("sh");
     command.arg("-c").arg(script);
     if let Some(cwd) = cwd.filter(|cwd| !cwd.as_os_str().is_empty()) {
         command.current_dir(cwd);
@@ -415,7 +415,30 @@ async fn run_script(script: &str, timeout_secs: u64, cwd: Option<&Path>) -> Resu
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Some(line) = missing_command_line(&stdout).or_else(|| missing_command_line(&stderr)) {
+        // A script that catches its own failure still exits 0 (omocat alerts printed
+        // "bun: command not found: zele" and was recorded as succeeded for hours). A missing
+        // program is an environment failure, so the run is failed and its output is not
+        // delivered.
+        return Err(HubError::message(format!(
+            "cron script reported a missing command: {line}"
+        )));
+    }
+    Ok(stdout)
+}
+
+/// First line that reports a program the shell could not find, as sh, bash, zsh and bun print it.
+pub fn missing_command_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("command not found")
+                || (lower.contains(": not found") && lower.starts_with("sh:"))
+        })
+        .map(|line| line.chars().take(300).collect())
 }
 
 pub struct StaticModel(pub String);
@@ -435,6 +458,34 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+
+    #[test]
+    fn missing_commands_are_found_in_script_output() {
+        assert!(missing_command_line("ok\n").is_none());
+        assert!(missing_command_line("found nothing to do\n").is_none());
+        assert_eq!(
+            missing_command_line(
+                "x\n⚠️ 캘린더 확인 실패: zele cal events failed: bun: command not found: zele\n"
+            )
+            .as_deref(),
+            Some("⚠️ 캘린더 확인 실패: zele cal events failed: bun: command not found: zele")
+        );
+        assert!(missing_command_line("zsh: command not found: bun").is_some());
+        assert!(missing_command_line("sh: 1: bun: not found").is_some());
+    }
+
+    #[tokio::test]
+    async fn a_script_that_hides_a_missing_command_behind_exit_zero_fails() {
+        let error = run_script(
+            "echo 'alerts: bun: command not found: zele'; exit 0",
+            10,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("missing command"), "{error}");
+        assert_eq!(run_script("printf fine", 10, None).await.unwrap(), "fine");
+    }
 
     #[test]
     fn payload_kinds_cover_script_agent_skill_and_hermes() {

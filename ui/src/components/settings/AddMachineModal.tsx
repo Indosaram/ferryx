@@ -3,15 +3,23 @@ import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AlertCircle,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Circle,
+  Copy,
+  Download,
   FileCode,
   KeyRound,
+  LoaderCircle,
+  ShieldCheck,
   Terminal,
+  XCircle,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { copyTextToClipboard } from "../../lib/clipboard";
 import type { MachineProjectTarget } from "../../lib/machineNavigation";
 import {
   DEFAULT_RELAY_ORIGIN,
@@ -23,6 +31,7 @@ import {
   extractIpcErrorMessage,
   getSshConfigPathOverride,
   importSshConfig,
+  installFerryxNode,
   readSystemSshConfig,
   setSshConfigPathOverride,
   setSshPassword,
@@ -30,9 +39,18 @@ import {
   updateSshHost,
   type SshAuthMethod,
   type SshHost,
+  type SshNodeInstallReport,
   type SshRemoteEnvironment,
   type SystemSshConfig,
 } from "../../lib/sshHosts";
+import {
+  AccountSessionError,
+  INSTALL_KEY_LIMIT,
+  PLAN_LIMIT_REACHED,
+  type AccountMachineView,
+  type IssueInstallKeyResponse,
+  type MachineRequestView,
+} from "../../remote/accountSession";
 import { safeRandomUUID } from "../../lib/uuid";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
@@ -40,6 +58,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dia
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { EnrollmentStep } from "./remote/EnrollmentStep";
+import { MachineApprovalCard, machineApprovalErrorMessage } from "./remote/MachineApprovalCard";
 
 export interface HostFormData {
   label: string;
@@ -120,14 +139,20 @@ export type VerifiedMachineResult =
       summary: { reachable: boolean; environment?: SshRemoteEnvironment | null };
     };
 
-export type AddMachineMethod = "enrollment" | "ssh" | "import";
+export type AddMachineMethod = "install" | "approve" | "enrollment" | "ssh" | "import";
 
 const METHODS: ReadonlyArray<{ value: AddMachineMethod; title: string; description: string; Icon: LucideIcon }> = [
   {
-    value: "enrollment",
-    title: "Enrollment code",
-    description: "For a headless machine signed in to your Ferryx account. Works through the relay, no open ports.",
-    Icon: KeyRound,
+    value: "install",
+    title: "Install command",
+    description: "Paste one command on the machine. It installs Ferryx and joins your account, no open ports.",
+    Icon: Download,
+  },
+  {
+    value: "approve",
+    title: "Approve a machine",
+    description: "Enter the code a machine printed after running ferryx-cli up.",
+    Icon: ShieldCheck,
   },
   {
     value: "ssh",
@@ -141,16 +166,47 @@ const METHODS: ReadonlyArray<{ value: AddMachineMethod; title: string; descripti
     description: "Pick hosts from ~/.ssh/config or paste a config block.",
     Icon: FileCode,
   },
+  {
+    value: "enrollment",
+    title: "Enrollment code (manual)",
+    description: "For a machine that already has ferryx-cli. Works through the relay, no open ports.",
+    Icon: KeyRound,
+  },
 ];
 
 const METHOD_STEP_DESCRIPTION: Record<AddMachineMethod, string> = {
+  install: "Run this command on the machine you want to add.",
+  approve: "Enter the code shown on the machine you want to add.",
   enrollment: "Run the command on the machine you want to add.",
   ssh: "Enter the connection details for the machine.",
   import: "Import hosts from an SSH configuration.",
 };
 
 function isAddMachineMethod(value: unknown): value is AddMachineMethod {
-  return value === "enrollment" || value === "ssh" || value === "import";
+  return value === "install" || value === "approve" || value === "enrollment" || value === "ssh" || value === "import";
+}
+
+/** Account refusals of install-key issuing, mapped by structured code. */
+export function installKeyErrorMessage(err: unknown): string {
+  const code = err && typeof err === "object" && "code" in err ? (err as { code: unknown }).code : undefined;
+  if (code === INSTALL_KEY_LIMIT) {
+    return "You already have 10 unused install keys. Wait for one to expire or revoke one, then try again.";
+  }
+  if (code === PLAN_LIMIT_REACHED) {
+    return "Your plan's machine limit is reached. Remove a machine or upgrade before adding another.";
+  }
+  if (code === "UNAUTHORIZED") return "Your account session expired. Sign in again.";
+  if (err && typeof err === "object" && "message" in err && typeof (err as { message: unknown }).message === "string") {
+    const message = (err as { message: string }).message.trim();
+    if (message) return message;
+  }
+  return "Failed to issue an install key.";
+}
+
+function formatExpiry(expiresAtSecs: number, nowMs: number): string {
+  const minutes = Math.max(0, Math.round((expiresAtSecs * 1000 - nowMs) / 60_000));
+  const at = new Date(expiresAtSecs * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return minutes >= 120 ? `at ${at}` : `in ${minutes} min (${at})`;
 }
 
 const FOCUSABLE =
@@ -169,6 +225,14 @@ export interface AddMachineModalProps {
   accountOrigin?: string;
   /** Issues an enrollment code for the signed-in account; absent while signed out. */
   onIssueEnrollmentCode?: () => Promise<string>;
+  /** Issues a single-use install key for the signed-in account; absent while signed out. */
+  onIssueInstallKey?: () => Promise<IssueInstallKeyResponse>;
+  /** Latest account machine list (kept fresh by the caller while the wizard is open). */
+  accountMachines?: readonly AccountMachineView[];
+  /** Looks up a pending machine request by its user code; absent while signed out. */
+  onLookupMachineRequest?: (userCode: string) => Promise<MachineRequestView>;
+  onApproveMachineRequest?: (requestId: string, userCode: string) => Promise<unknown>;
+  onDenyMachineRequest?: (requestId: string, userCode: string) => Promise<unknown>;
 }
 
 /** Add Machine wizard: step 1 chooses a method, step 2 runs it. Built on the Dialog primitive. */
@@ -269,13 +333,21 @@ function AddMachineWizard({
   initialMethod,
   accountOrigin = DEFAULT_RELAY_ORIGIN,
   onIssueEnrollmentCode,
+  onIssueInstallKey,
+  accountMachines,
+  onLookupMachineRequest,
+  onApproveMachineRequest,
+  onDenyMachineRequest,
   busy,
   setBusy,
   isActive,
 }: AddMachineWizardProps) {
   const idPrefix = useId();
   const [step, setStep] = useState<"choose" | "details">(isAddMachineMethod(initialMethod) ? "details" : "choose");
-  const [method, setMethod] = useState<AddMachineMethod>(isAddMachineMethod(initialMethod) ? initialMethod : "enrollment");
+  const [method, setMethod] = useState<AddMachineMethod>(() => {
+    if (isAddMachineMethod(initialMethod)) return initialMethod;
+    return onIssueInstallKey ? "install" : "enrollment";
+  });
 
   const [sshForm, setSshForm] = useState<HostFormData>(DEFAULT_SSH_FORM);
   const [sshPassword, setSshPasswordInput] = useState("");
@@ -594,6 +666,16 @@ function AddMachineWizard({
             <p className="text-[12px] text-muted-foreground">
               The machine has been added to your inventory and capabilities have been verified.
             </p>
+            {onIssueInstallKey && successTarget.target.kind === "ssh" ? (
+              <SshInstallOffer
+                hostId={successTarget.target.hostId}
+                accountOrigin={accountOrigin}
+                onIssueInstallKey={onIssueInstallKey}
+                accountMachines={accountMachines}
+                setBusy={setBusy}
+                alive={alive}
+              />
+            ) : null}
             <div className="flex justify-center gap-3 pt-2">
               <Button
                 type="button"
@@ -700,6 +782,25 @@ function AddMachineWizard({
           <EnrollmentStep
             accountOrigin={accountOrigin}
             onIssueEnrollmentCode={onIssueEnrollmentCode}
+            onBack={goBack}
+            onDone={onClose}
+          />
+        ) : null}
+
+        {!showingResult && step === "details" && method === "install" ? (
+          <InstallStep
+            onIssueInstallKey={onIssueInstallKey}
+            accountMachines={accountMachines}
+            onBack={goBack}
+            onDone={onClose}
+          />
+        ) : null}
+
+        {!showingResult && step === "details" && method === "approve" ? (
+          <ApproveStep
+            onLookupMachineRequest={onLookupMachineRequest}
+            onApproveMachineRequest={onApproveMachineRequest}
+            onDenyMachineRequest={onDenyMachineRequest}
             onBack={goBack}
             onDone={onClose}
           />
@@ -971,5 +1072,472 @@ function AddMachineWizard({
         ) : null}
       </div>
     </>
+  );
+}
+
+type CopyState = "idle" | "copied" | "failed";
+
+function CommandBlock({ label, command, testId }: { label: string; command: string; testId: string }) {
+  const [copyState, setCopyState] = useState<CopyState>("idle");
+  const mountedRef = useRef(true);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      clearTimeout(timerRef.current);
+    };
+  }, []);
+  const handleCopy = () => {
+    void copyTextToClipboard(command).then((copied) => {
+      if (!mountedRef.current) return;
+      setCopyState(copied ? "copied" : "failed");
+      clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setCopyState("idle"), 2000);
+    });
+  };
+  return (
+    <div className="space-y-1">
+      <p className="text-[11px] font-medium text-muted-foreground">{label}</p>
+      <div className="flex items-start gap-2 rounded-md border border-border bg-muted/60 py-1.5 pl-2.5 pr-1.5">
+        <code
+          data-testid={testId}
+          className="min-w-0 flex-1 select-all break-all pt-1 font-mono text-[11px] leading-relaxed text-foreground"
+        >
+          {command}
+        </code>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 shrink-0 px-2 text-[12px]"
+          aria-label={`Copy ${label}`}
+          onClick={handleCopy}
+        >
+          {copyState === "failed" ? (
+            <>
+              <AlertCircle className="size-3" /> Copy failed
+            </>
+          ) : copyState === "copied" ? (
+            <>
+              <Check className="size-3" /> Copied
+            </>
+          ) : (
+            <>
+              <Copy className="size-3" /> Copy
+            </>
+          )}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** Machines present in the account list but absent from the baseline taken when the key was issued. */
+function newMachinesSince(
+  baseline: ReadonlySet<string> | null,
+  machines: readonly AccountMachineView[] | undefined,
+): AccountMachineView[] {
+  if (!baseline || !machines) return [];
+  return machines.filter((m) => !baseline.has(m.machineRecordId));
+}
+
+interface InstallStepProps {
+  onIssueInstallKey?: () => Promise<IssueInstallKeyResponse>;
+  accountMachines?: readonly AccountMachineView[];
+  onBack: () => void;
+  onDone: () => void;
+}
+
+/** Add machine step 2 for the "Install command" method: one install key, sh + PowerShell one-liners. */
+function InstallStep({ onIssueInstallKey, accountMachines, onBack, onDone }: InstallStepProps) {
+  const [issued, setIssued] = useState<IssueInstallKeyResponse | null>(null);
+  const [issuing, setIssuing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [baseline, setBaseline] = useState<ReadonlySet<string> | null>(null);
+  const mountedRef = useRef(false);
+  const requestedRef = useRef(false);
+  const issuingRef = useRef(false);
+  const machinesRef = useRef(accountMachines);
+  machinesRef.current = accountMachines;
+
+  const issue = async () => {
+    if (!onIssueInstallKey || issuingRef.current) return;
+    issuingRef.current = true;
+    setIssuing(true);
+    setError(null);
+    try {
+      const next = await onIssueInstallKey();
+      if (mountedRef.current) {
+        setIssued(next);
+        setBaseline(new Set((machinesRef.current ?? []).map((m) => m.machineRecordId)));
+      }
+    } catch (err) {
+      if (mountedRef.current) setError(installKeyErrorMessage(err));
+    } finally {
+      issuingRef.current = false;
+      if (mountedRef.current) setIssuing(false);
+    }
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    // One key per visit to this step; the ref survives StrictMode's simulated remount.
+    if (!requestedRef.current) {
+      requestedRef.current = true;
+      void issue();
+    }
+    return () => {
+      mountedRef.current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!onIssueInstallKey) {
+    return (
+      <div className="space-y-4">
+        <p role="status" className="rounded-md border border-border bg-muted/40 p-3 text-[12px] text-muted-foreground">
+          Sign in to get an install command. Sign in from the account panel in Remote settings, then add the machine again.
+        </p>
+        <div className="flex items-center gap-2 border-t border-border pt-3">
+          <Button type="button" variant="ghost" size="sm" className="text-[12px]" onClick={onBack}>Back</Button>
+          <span className="flex-1" />
+          <Button type="button" size="sm" className="text-[12px]" onClick={onDone}>Done</Button>
+        </div>
+      </div>
+    );
+  }
+
+  const joined = newMachinesSince(baseline, accountMachines);
+  return (
+    <div className="space-y-4">
+      {error ? (
+        <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-[12px] text-destructive">
+          <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <span className="break-words">{error}</span>
+        </div>
+      ) : null}
+
+      {issuing && !issued ? (
+        <p role="status" className="flex items-center gap-2 text-[12px] text-muted-foreground">
+          <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+          Creating an install key…
+        </p>
+      ) : null}
+
+      {issued ? (
+        <div data-testid="install-key-card" className="space-y-3">
+          <CommandBlock label="Linux and macOS" command={issued.installCommand.sh} testId="install-command-sh" />
+          <CommandBlock label="Windows PowerShell" command={issued.installCommand.ps1} testId="install-command-ps1" />
+          <p data-testid="install-key-expiry" className="text-[11px] text-muted-foreground">
+            Single use. The key expires {formatExpiry(issued.expiresAt, Date.now())}; it is shown only here.
+          </p>
+          {joined.length > 0 ? (
+            <p role="status" data-testid="install-machine-joined" className="flex items-center gap-2 text-[12px] text-foreground">
+              <CheckCircle2 className="size-4 text-status-success" aria-hidden="true" />
+              {joined.map((m) => m.displayName || m.machineId).join(", ")} joined your account.
+            </p>
+          ) : (
+            <p role="status" data-testid="install-waiting" className="flex items-center gap-2 text-[12px] text-muted-foreground">
+              <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              Waiting for the machine to join…
+            </p>
+          )}
+        </div>
+      ) : null}
+
+      <div className="flex items-center gap-2 border-t border-border pt-3">
+        <Button type="button" variant="ghost" size="sm" className="text-[12px]" onClick={onBack}>Back</Button>
+        <span className="flex-1" />
+        <Button type="button" variant="outline" size="sm" className="text-[12px]" disabled={issuing} onClick={() => void issue()}>
+          {issuing ? "Creating…" : "New key"}
+        </Button>
+        <Button type="button" size="sm" className="text-[12px]" onClick={onDone}>Done</Button>
+      </div>
+    </div>
+  );
+}
+
+interface ApproveStepProps {
+  onLookupMachineRequest?: (userCode: string) => Promise<MachineRequestView>;
+  onApproveMachineRequest?: (requestId: string, userCode: string) => Promise<unknown>;
+  onDenyMachineRequest?: (requestId: string, userCode: string) => Promise<unknown>;
+  onBack: () => void;
+  onDone: () => void;
+}
+
+/** Add machine step 2 for the "Approve a machine" method: code entry, lookup, approval card. */
+function ApproveStep({ onLookupMachineRequest, onApproveMachineRequest, onDenyMachineRequest, onBack, onDone }: ApproveStepProps) {
+  const [code, setCode] = useState("");
+  const [looking, setLooking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [found, setFound] = useState<{ request: MachineRequestView; userCode: string } | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const signedIn = Boolean(onLookupMachineRequest && onApproveMachineRequest && onDenyMachineRequest);
+
+  const handleLookup = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!onLookupMachineRequest || looking) return;
+    const userCode = code.trim();
+    if (!userCode) return;
+    setLooking(true);
+    setError(null);
+    try {
+      const request = await onLookupMachineRequest(userCode);
+      if (mountedRef.current) setFound({ request, userCode });
+    } catch (err) {
+      if (mountedRef.current) setError(machineApprovalErrorMessage(err));
+    } finally {
+      if (mountedRef.current) setLooking(false);
+    }
+  };
+
+  if (!signedIn) {
+    return (
+      <div className="space-y-4">
+        <p role="status" className="rounded-md border border-border bg-muted/40 p-3 text-[12px] text-muted-foreground">
+          Sign in to approve a machine. Sign in from the account panel in Remote settings, then add the machine again.
+        </p>
+        <div className="flex items-center gap-2 border-t border-border pt-3">
+          <Button type="button" variant="ghost" size="sm" className="text-[12px]" onClick={onBack}>Back</Button>
+          <span className="flex-1" />
+          <Button type="button" size="sm" className="text-[12px]" onClick={onDone}>Done</Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {found ? (
+        <MachineApprovalCard
+          request={found.request}
+          onApprove={() => onApproveMachineRequest!(found.request.requestId, found.userCode)}
+          onDeny={() => onDenyMachineRequest!(found.request.requestId, found.userCode)}
+        />
+      ) : (
+        <form className="space-y-3" onSubmit={handleLookup}>
+          <div className="space-y-1">
+            <Label htmlFor="approve-user-code" className="text-[11px] font-medium">Approval code</Label>
+            <Input
+              id="approve-user-code"
+              aria-label="Approval code"
+              autoComplete="off"
+              spellCheck={false}
+              maxLength={9}
+              placeholder="XXXX-XXXX"
+              disabled={looking}
+              value={code}
+              className="font-mono uppercase tracking-wider"
+              onChange={(e) => setCode(e.target.value)}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Run <code className="font-mono">ferryx-cli up</code> on the machine; it prints this code.
+            </p>
+          </div>
+          {error ? (
+            <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-[12px] text-destructive">
+              <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+              <span className="break-words">{error}</span>
+            </div>
+          ) : null}
+          <div className="flex justify-end">
+            <Button type="submit" size="sm" className="text-[12px]" disabled={looking || !code.trim()}>
+              {looking ? "Looking up…" : "Find machine"}
+            </Button>
+          </div>
+        </form>
+      )}
+      <div className="flex items-center gap-2 border-t border-border pt-3">
+        <Button type="button" variant="ghost" size="sm" className="text-[12px]" onClick={onBack}>Back</Button>
+        <span className="flex-1" />
+        <Button type="button" size="sm" className="text-[12px]" onClick={onDone}>Done</Button>
+      </div>
+    </div>
+  );
+}
+
+/** How long the SSH install offer waits for the enrolled machine to report online. */
+export const SSH_INSTALL_ONLINE_TIMEOUT_MS = 60_000;
+
+type SshInstallStage = "idle" | "issuing" | "installing" | "waiting" | "online" | "timeout" | "failed";
+
+const SSH_INSTALL_STAGES: ReadonlyArray<{ stage: SshInstallStage; label: string }> = [
+  { stage: "issuing", label: "Create install key" },
+  { stage: "installing", label: "Install Ferryx over SSH" },
+  { stage: "waiting", label: "Wait for the machine to come online" },
+];
+
+/** Structured SSH_NODE_INSTALL_FAILED details: {stage, exitCode, stderrTail}. */
+function sshInstallFailure(err: unknown): { message: string; stage?: string; stderrTail?: string } {
+  if (err instanceof AccountSessionError) {
+    // Issuing the install key failed; the account code decides the message.
+    return { message: installKeyErrorMessage(err) };
+  }
+  if (isStructuredIpcError(err)) {
+    const details = (err.details ?? {}) as Record<string, unknown>;
+    const stage = typeof details.stage === "string" ? details.stage : undefined;
+    const stderrTail = typeof details.stderrTail === "string" && details.stderrTail.trim() ? details.stderrTail : undefined;
+    const exitCode = typeof details.exitCode === "number" ? details.exitCode : undefined;
+    if (err.code === "SSH_NODE_INSTALL_FAILED") {
+      const where = stage ? ` during ${stage}` : "";
+      const exit = exitCode !== undefined ? ` (exit ${exitCode})` : "";
+      return { message: `Installing Ferryx failed${where}${exit}.`, stage, stderrTail };
+    }
+    return { message: err.message || err.code, stage, stderrTail };
+  }
+  if (err && typeof err === "object" && "code" in err) {
+    return { message: installKeyErrorMessage(err) };
+  }
+  return { message: extractIpcErrorMessage(err, "Installing Ferryx failed.") };
+}
+
+interface SshInstallOfferProps {
+  hostId: string;
+  accountOrigin: string;
+  onIssueInstallKey: () => Promise<IssueInstallKeyResponse>;
+  accountMachines?: readonly AccountMachineView[];
+  setBusy: (busy: boolean) => void;
+  alive: () => boolean;
+}
+
+/**
+ * After an SSH machine is saved: install Ferryx on it and enroll it into the signed-in account.
+ * The key travels to the remote over ssh stdin (installFerryxNode); online state comes from the
+ * account machine list, which the caller polls while the wizard is open.
+ */
+function SshInstallOffer({ hostId, accountOrigin, onIssueInstallKey, accountMachines, setBusy, alive }: SshInstallOfferProps) {
+  const [stage, setStage] = useState<SshInstallStage>("idle");
+  const [report, setReport] = useState<SshNodeInstallReport | null>(null);
+  const [failure, setFailure] = useState<{ message: string; stderrTail?: string } | null>(null);
+  const [failedAt, setFailedAt] = useState<SshInstallStage | null>(null);
+
+  const machineRecordId = report?.enrolled?.machineRecordId ?? null;
+  const enrolledMachine = machineRecordId
+    ? accountMachines?.find((m) => m.machineRecordId === machineRecordId)
+    : undefined;
+
+  useEffect(() => {
+    if (stage === "waiting" && enrolledMachine?.online) setStage("online");
+  }, [stage, enrolledMachine?.online]);
+
+  useEffect(() => {
+    if (stage !== "waiting") return;
+    const timer = setTimeout(() => setStage((s) => (s === "waiting" ? "timeout" : s)), SSH_INSTALL_ONLINE_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [stage]);
+
+  const run = async () => {
+    if (stage !== "idle" && stage !== "failed" && stage !== "timeout") return;
+    setFailure(null);
+    setFailedAt(null);
+    setReport(null);
+    setBusy(true);
+    let current: SshInstallStage = "issuing";
+    setStage(current);
+    try {
+      const key = await onIssueInstallKey();
+      if (!alive()) return;
+      current = "installing";
+      setStage(current);
+      const result = await installFerryxNode(hostId, accountOrigin, key.key);
+      if (!alive()) return;
+      setReport(result);
+      setStage(result.enrolled ? "waiting" : "online");
+    } catch (err) {
+      if (!alive()) return;
+      setFailure(sshInstallFailure(err));
+      setFailedAt(current);
+      setStage("failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const order: SshInstallStage[] = ["issuing", "installing", "waiting"];
+  const stageState = (s: SshInstallStage): "done" | "active" | "failed" | "pending" => {
+    if (stage === "failed") {
+      const failedIndex = order.indexOf(failedAt ?? "issuing");
+      const index = order.indexOf(s);
+      return index < failedIndex ? "done" : index === failedIndex ? "failed" : "pending";
+    }
+    if (stage === "timeout") return s === "waiting" ? "failed" : "done";
+    if (stage === "online") return "done";
+    const currentIndex = order.indexOf(stage);
+    const index = order.indexOf(s);
+    if (currentIndex < 0) return "pending";
+    return index < currentIndex ? "done" : index === currentIndex ? "active" : "pending";
+  };
+
+  if (stage === "idle") {
+    return (
+      <div className="mx-auto max-w-sm space-y-2 rounded-md border border-border bg-muted/20 p-3 text-left">
+        <p className="text-[12px] text-foreground">Also run Ferryx on this machine so you can reach it from any device on your account.</p>
+        <Button type="button" size="sm" className="text-[12px]" onClick={() => void run()}>
+          Install Ferryx and add to account
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div data-testid="ssh-install-progress" className="mx-auto max-w-sm space-y-2 rounded-md border border-border bg-muted/20 p-3 text-left">
+      <ol className="space-y-1.5">
+        {SSH_INSTALL_STAGES.map(({ stage: s, label }) => {
+          const state = stageState(s);
+          return (
+            <li key={s} data-testid={`ssh-install-stage-${s}`} data-state={state} className="flex items-center gap-2 text-[12px]">
+              {state === "done" ? (
+                <CheckCircle2 className="size-3.5 text-status-success" aria-hidden="true" />
+              ) : state === "active" ? (
+                <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              ) : state === "failed" ? (
+                <XCircle className="size-3.5 text-destructive" aria-hidden="true" />
+              ) : (
+                <Circle className="size-3.5 text-muted-foreground" aria-hidden="true" />
+              )}
+              <span className={state === "pending" ? "text-muted-foreground" : "text-foreground"}>{label}</span>
+            </li>
+          );
+        })}
+      </ol>
+      {stage === "online" ? (
+        <p role="status" className="text-[12px] text-foreground">
+          {report?.enrolled
+            ? `Ferryx ${report.version} is running and the machine joined your account.`
+            : `Ferryx ${report?.version ?? ''} is installed.`}
+          {report && !report.service.supervised && report.service.reason
+            ? ` Not supervised: ${report.service.reason}.`
+            : ""}
+        </p>
+      ) : null}
+      {stage === "timeout" ? (
+        <p role="alert" className="text-[12px] text-destructive">
+          Ferryx was installed, but the machine did not come online within 60 seconds. Check the daemon on the machine, then Refresh.
+        </p>
+      ) : null}
+      {stage === "failed" && failure ? (
+        <div role="alert" className="space-y-1 text-[12px] text-destructive">
+          <p>{failure.message}</p>
+          {failure.stderrTail ? (
+            <pre data-testid="ssh-install-stderr" className="max-h-28 overflow-auto whitespace-pre-wrap break-all rounded bg-destructive/10 p-2 font-mono text-[10px]">
+              {failure.stderrTail}
+            </pre>
+          ) : null}
+        </div>
+      ) : null}
+      {stage === "failed" || stage === "timeout" ? (
+        <Button type="button" variant="outline" size="sm" className="text-[12px]" onClick={() => void run()}>
+          Try again
+        </Button>
+      ) : null}
+    </div>
   );
 }

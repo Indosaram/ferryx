@@ -21,15 +21,73 @@ pub struct SourceItem {
     pub author: Option<String>,
     pub title: Option<String>,
     pub link: Option<String>,
+    /// PirateTalk room type (`DirectChat`, `MultiChat`, `OM`, ...) that omo's prefilter reads.
+    pub room_type: Option<String>,
+    /// Gmail categories (`promotions`, `social`, `updates`) when the source reports them.
+    pub mail_categories: Vec<String>,
 }
 
 pub async fn commit_source_items(pool: &SqlitePool, items: &[SourceItem]) -> Result<u64> {
+    commit_with_rules(
+        pool,
+        items,
+        &crate::inbox_prefilter::PrefilterRules::from_home(),
+    )
+    .await
+}
+
+/// omo-gateway's commit: the prefilter drops noise before it is stored (and so before triage),
+/// and a mail follow-up in a known thread refreshes the row and reopens it for triage.
+pub async fn commit_with_rules(
+    pool: &SqlitePool,
+    items: &[SourceItem],
+    rules: &crate::inbox_prefilter::PrefilterRules,
+) -> Result<u64> {
     let mut copied = 0u64;
+    let mut drops = Vec::new();
     for item in items {
-        if item.snippet.trim().is_empty() {
+        if let Some(rule) = rules.drop_reason(item) {
+            if rule != "empty" {
+                drops.push((item.source, rule));
+            }
             continue;
         }
         let id = format!("{}:{}", item.source, item.source_ref);
+        if item.source == "mail" {
+            let existing: Option<(String, String)> =
+                sqlx::query_as("SELECT snippet, received_at FROM inbox_items WHERE id = ?")
+                    .bind(&id)
+                    .fetch_optional(pool)
+                    .await?;
+            if let Some((snippet, received_at)) = existing {
+                let newer = DateTime::parse_from_rfc3339(&received_at)
+                    .map(|at| item.received_at > at.with_timezone(&Utc))
+                    .unwrap_or(true);
+                if snippet != item.snippet || newer {
+                    sqlx::query(
+                        "UPDATE inbox_items SET author = ?, title = ?, snippet = ?, received_at = ?, link = ?, collected_at = ? WHERE id = ?",
+                    )
+                    .bind(&item.author)
+                    .bind(&item.title)
+                    .bind(&item.snippet)
+                    .bind(item.received_at.to_rfc3339())
+                    .bind(&item.link)
+                    .bind(now_rfc3339())
+                    .bind(&id)
+                    .execute(pool)
+                    .await?;
+                    sqlx::query(
+                        "DELETE FROM inbox_decisions WHERE item_id = ? AND status IN ('open', 'done', 'dismissed')",
+                    )
+                    .bind(&id)
+                    .execute(pool)
+                    .await?;
+                    tracing::info!(item = %id, "mail thread has a follow-up; re-triaging it");
+                    copied += 1;
+                }
+                continue;
+            }
+        }
         let inserted = sqlx::query(
             "INSERT OR IGNORE INTO inbox_items(id, source, source_ref, thread_ref, author, title, snippet, received_at, link, raw_hash, collected_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         )
@@ -47,6 +105,14 @@ pub async fn commit_source_items(pool: &SqlitePool, items: &[SourceItem]) -> Res
         .execute(pool)
         .await?;
         copied += inserted.rows_affected();
+    }
+    if !drops.is_empty() {
+        tracing::info!(
+            dropped = drops.len(),
+            kept = copied,
+            "inbox prefilter dropped noise like omo"
+        );
+        crate::inbox_prefilter::record_drops(pool, &drops).await;
     }
     Ok(copied)
 }
@@ -139,8 +205,9 @@ pub fn parse_kakao_messages(
             author: optional_string(message, &["senderName", "authorName", "userName"]),
             title: room_title.map(str::to_owned),
             link: None,
+            room_type: Some(room_type.to_owned()).filter(|kind| !kind.is_empty()),
+            mail_categories: Vec::new(),
         });
-        let _ = room_type;
     }
     Ok((items, page_oldest, page_newest))
 }
@@ -231,6 +298,8 @@ pub fn parse_imessage(
                 }),
                 title: optional_string(chat, &["name", "display_name"]),
                 link: None,
+                room_type: None,
+                mail_categories: Vec::new(),
             });
         }
     }
@@ -305,6 +374,8 @@ pub fn parse_mail_at(
             author: optional_string(row, &["from", "sender"]),
             title: optional_string(row, &["subject", "title"]),
             link: Some(format!("https://mail.google.com/mail/u/0/#all/{id}")),
+            room_type: None,
+            mail_categories: mail_categories(row),
         });
     }
     if !unreadable.is_empty() {
@@ -323,6 +394,30 @@ pub fn parse_mail_at(
         .map(|ts| ts.to_string())
         .unwrap_or_else(|| cursor.unwrap_or("").to_owned());
     Ok((items, next))
+}
+
+/// Gmail categories from zele's `labels`/`categories` (`CATEGORY_PROMOTIONS` → `promotions`).
+fn mail_categories(row: &Value) -> Vec<String> {
+    ["categories", "labels", "label_ids"]
+        .iter()
+        .filter_map(|key| row.get(*key).and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|label| {
+            let lower = label.trim().to_ascii_lowercase();
+            lower
+                .strip_prefix("category_")
+                .or_else(|| lower.strip_prefix("category:"))
+                .unwrap_or(&lower)
+                .to_owned()
+        })
+        .filter(|label| {
+            matches!(
+                label.as_str(),
+                "promotions" | "social" | "updates" | "forums"
+            )
+        })
+        .collect()
 }
 
 fn mail_date(row: &Value, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
@@ -604,6 +699,8 @@ fn pr_item(
         author: Some(repo.to_owned()),
         title: Some(title.to_owned()),
         link: Some(url.to_owned()),
+        room_type: None,
+        mail_categories: Vec::new(),
     }
 }
 
@@ -630,6 +727,8 @@ fn notification_item(thread: &Value, reason: &str, updated: &str) -> SourceItem 
         author: Some(repo.to_owned()),
         title: Some(title.to_owned()),
         link: Some(link),
+        room_type: None,
+        mail_categories: Vec::new(),
     }
 }
 
@@ -747,5 +846,87 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(source, "kakao");
+    }
+
+    fn source_item(source: &'static str, source_ref: &str, snippet: &str) -> SourceItem {
+        SourceItem {
+            source,
+            source_ref: source_ref.into(),
+            snippet: snippet.into(),
+            received_at: DateTime::parse_from_rfc3339("2026-10-23T05:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            thread_ref: Some("room".into()),
+            author: Some("friend".into()),
+            title: Some("t".into()),
+            link: None,
+            room_type: None,
+            mail_categories: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_commit_drops_noise_rooms_and_counts_them_like_omo() {
+        let pool = crate::storage::memory().await.unwrap();
+        let rules = crate::inbox_prefilter::PrefilterRules::default();
+        let mut noise = source_item("kakao", "1", "open chat noise");
+        noise.room_type = Some("OM".into());
+        let mut direct = source_item("kakao", "2", "점심 가능?");
+        direct.room_type = Some("DirectChat".into());
+        let kept = commit_with_rules(&pool, &[noise, direct], &rules)
+            .await
+            .unwrap();
+        assert_eq!(kept, 1);
+        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM inbox_items")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(ids, vec!["kakao:2".to_owned()]);
+        let dropped: i64 = sqlx::query_scalar(
+            "SELECT count FROM inbox_filter_stats WHERE source = 'kakao' AND rule = 'kakao_noise_room_no_keyword'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(dropped, 1);
+    }
+
+    #[tokio::test]
+    async fn a_mail_follow_up_in_a_known_thread_is_triaged_again_like_omo() {
+        let pool = crate::storage::memory().await.unwrap();
+        let rules = crate::inbox_prefilter::PrefilterRules::default();
+        let first = source_item("mail", "thread1", "first message");
+        assert_eq!(
+            commit_with_rules(&pool, std::slice::from_ref(&first), &rules)
+                .await
+                .unwrap(),
+            1
+        );
+        sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES('mail:thread1', 'fyi', 'r', 'open', '2026-10-23T05:00:01Z')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            commit_with_rules(&pool, std::slice::from_ref(&first), &rules)
+                .await
+                .unwrap(),
+            0,
+            "the same message is a duplicate"
+        );
+        let mut reply = first;
+        reply.snippet = "a reply".into();
+        reply.received_at += chrono::Duration::minutes(30);
+        assert_eq!(commit_with_rules(&pool, &[reply], &rules).await.unwrap(), 1);
+        let (snippet, decisions): (String, i64) = sqlx::query_as(
+            "SELECT snippet, (SELECT COUNT(*) FROM inbox_decisions) FROM inbox_items WHERE id = 'mail:thread1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(snippet, "a reply");
+        assert_eq!(
+            decisions, 0,
+            "the stale decision is dropped so triage runs again"
+        );
     }
 }

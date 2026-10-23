@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPairedDaemonProjectAdapter } from "../lib/pairedDaemonProject";
+import type { DiscoveredRepositories, DiscoveredRepository } from "../lib/pairedDaemonContracts";
 import type { MachineProjectTarget } from "../lib/machineNavigation";
 import type { DirectorySource } from "../lib/remoteDirectories";
 import type { RegisteredProject } from "../lib/tauri";
@@ -57,6 +58,7 @@ function PairedFolder({ host, issue, hostSelector, onClose, onBack, onRegistered
 }) {
   const adapter = useMemo(() => host && !issue ? createPairedDaemonProjectAdapter({ hostId: host.hostId, generation: host.generation! }) : null, [host?.hostId, host?.generation, issue]);
   const [ready, setReady] = useState(false);
+  const [discovery, setDiscovery] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [path, setPath] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -73,13 +75,36 @@ function PairedFolder({ host, issue, hostSelector, onClose, onBack, onRegistered
       if (!alive.current) return;
       if (!result.capabilities.includes("directoryBrowseV1") || !result.capabilities.includes("machineWorkspaceV1")) {
         setError("Upgrade the paired daemon and relay to support machine folders and project registration.");
-      } else setReady(true);
+      } else {
+        setDiscovery(result.capabilities.includes("repoDiscoveryV1"));
+        setReady(true);
+      }
     }).catch(cause => { if (alive.current) setError(`Machine access unavailable (${cause instanceof Error ? cause.message : "PAIRED_HOST_UNAVAILABLE"}). Upgrade or re-pair in Settings > Remote Access.`); });
     return () => { alive.current = false; };
   }, [adapter]);
   const source = useMemo<DirectorySource | undefined>(() => adapter ? {
     key: JSON.stringify(adapter.context), directories: (value, hidden) => adapter.directories(value ?? undefined, hidden),
   } : undefined, [adapter]);
+  // Stable per adapter so the list scans once per captured host generation.
+  const discover = useMemo(() => adapter ? () => adapter.discoverRepos() : undefined, [adapter]);
+  const openDiscovered = async (repo: DiscoveredRepository) => {
+    if (!adapter || !ready || submitting.current) return;
+    if (repo.registeredWorkspaceId !== null && repo.remoteWorkspaceId !== null) {
+      onRegistered({ workspaceId: repo.registeredWorkspaceId, repoRoot: repo.repoRoot, gitBranch: repo.branch,
+        gitCommonDir: repo.gitCommonDir, target: repo.target, remoteWorkspaceId: repo.remoteWorkspaceId });
+      onClose();
+      return;
+    }
+    submitting.current = true; setBusy(true); setError(null);
+    try {
+      const project = await adapter.registerProject({ requestId: safeRandomUUID(), repoPath: repo.repoRoot });
+      if (!alive.current) return;
+      onRegistered(project);
+      onClose();
+    } catch (cause) {
+      if (alive.current) setError(`Could not add the paired project (${cause instanceof Error ? cause.message : "PAIRED_HOST_UNAVAILABLE"}).`);
+    } finally { submitting.current = false; if (alive.current) setBusy(false); }
+  };
   return <form className="space-y-3" onSubmit={async event => {
     event.preventDefault();
     if (!adapter || !ready || !path || submitting.current) return;
@@ -96,6 +121,7 @@ function PairedFolder({ host, issue, hostSelector, onClose, onBack, onRegistered
     {hostSelector(busy)}
     {issue || error ? <p role="alert" className="text-xs text-destructive">{issue ?? error}</p> : null}
     {!issue && !ready && !error ? <p role="status" className="text-xs">Checking machine capabilities...</p> : null}
+    {ready && discovery && discover ? <DiscoveredRepositoriesList discover={discover} disabled={busy} onOpen={openDiscovered} /> : null}
     {ready && source ? <RemoteDirectoryPicker source={source} disabled={busy} onSelect={select} /> : null}
     <div className="flex justify-end gap-2 border-t border-border pt-2">
       <button type="button" disabled={busy} onClick={onBack} className="rounded border px-3 py-1 text-xs">Back</button>
@@ -104,4 +130,34 @@ function PairedFolder({ host, issue, hostSelector, onClose, onBack, onRegistered
         className="rounded bg-primary px-3 py-1 text-xs text-primary-foreground disabled:opacity-50">{busy ? "Adding..." : "Add Project"}</button>
     </div>
   </form>;
+}
+
+function DiscoveredRepositoriesList({ discover, disabled, onOpen }: {
+  discover: () => Promise<DiscoveredRepositories>; disabled: boolean; onOpen: (repo: DiscoveredRepository) => void;
+}) {
+  const [result, setResult] = useState<DiscoveredRepositories | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true;
+    void discover().then(value => { if (current) setResult(value); })
+      .catch(cause => { if (current) setFailed(cause instanceof Error ? cause.message : "PAIRED_HOST_UNAVAILABLE"); });
+    return () => { current = false; };
+  }, [discover]);
+  return <section aria-label="Discovered repositories" className="space-y-1">
+    <h3 className="text-xs font-medium">Discovered repositories</h3>
+    {failed ? <p className="text-xs text-muted-foreground">Could not scan for repositories ({failed}).</p>
+      : !result ? <p role="status" className="text-xs text-muted-foreground">Scanning for repositories...</p>
+      : result.repos.length === 0 ? <p className="text-xs text-muted-foreground">No repositories found under {result.path}.</p>
+      : <ul className="max-h-40 space-y-1 overflow-y-auto">
+        {result.repos.map(repo => <li key={repo.repoRoot} data-testid="discovered-repo" className="flex items-center gap-2 rounded border border-border px-2 py-1 text-xs">
+          <span className="min-w-0 flex-1 truncate" title={repo.repoRoot}>{repo.repoRoot}</span>
+          {repo.branch ? <span className="shrink-0 text-muted-foreground">{repo.branch}</span> : null}
+          {repo.isLinkedWorktree ? <span className="shrink-0 rounded border border-border px-1 text-[10px]">worktree</span> : null}
+          <button type="button" disabled={disabled} onClick={() => onOpen(repo)} className="shrink-0 rounded border px-2 py-0.5 disabled:opacity-50">
+            {repo.registeredWorkspaceId ? "Open" : "Add & open"}
+          </button>
+        </li>)}
+      </ul>}
+    {result?.truncated ? <p className="text-xs text-muted-foreground">Showing partial results; browse below for other folders.</p> : null}
+  </section>;
 }

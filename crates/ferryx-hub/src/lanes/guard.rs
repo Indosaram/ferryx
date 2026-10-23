@@ -49,8 +49,8 @@ impl GuardThresholds {
 }
 
 fn env_f64(primary: &str, legacy: &str, default: f64) -> f64 {
-    std::env::var(primary)
-        .or_else(|_| std::env::var(legacy))
+    crate::hub_env::var(primary)
+        .or_else(|_| crate::hub_env::var(legacy))
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)

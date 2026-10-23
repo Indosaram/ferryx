@@ -1770,3 +1770,62 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
         "a v1-only peer does not satisfy agentControlRemoteV1"
     );
 }
+
+#[test]
+fn discover_repos_route_and_desktop_id_rewrite() {
+    let op = Operation::DiscoverRepos {
+        path: Some("~/src".into()),
+        depth: Some(2),
+        include_hidden: false,
+    };
+    assert!(!op.is_mutation());
+    let route = op.route().expect("discovery route");
+    assert_eq!(route.capability, Some("repoDiscoveryV1"));
+    assert_eq!(route.segments, vec!["fs", "repositories"]);
+    assert_eq!(route.method, Method::GET);
+    assert!(route.idempotent);
+    assert!(route.request_id.is_none());
+    assert_eq!(route.response_limit, m::DIRECTORY_JSON_MAX_BYTES);
+    assert_eq!(
+        route.query,
+        vec![
+            ("path".to_owned(), "~/src".to_owned()),
+            ("depth".to_owned(), "2".to_owned()),
+            ("includeHidden".to_owned(), "false".to_owned()),
+        ]
+    );
+    for depth in [0, 5] {
+        let error = Operation::DiscoverRepos {
+            path: None,
+            depth: Some(depth),
+            include_hidden: true,
+        }
+        .route()
+        .err()
+        .expect("out-of-range depth is refused");
+        assert_eq!(error.code, "INVALID_REQUEST");
+    }
+    let wire: m::Repositories = serde_json::from_value(json!({
+        "path": "/home/a",
+        "repos": [
+            {"repoRoot": "/home/a/app", "isLinkedWorktree": false, "gitCommonDir": "/home/a/app/.git",
+             "branch": "main", "registeredWorkspaceId": "project-a"},
+            {"repoRoot": "/home/a/wt", "isLinkedWorktree": true, "gitCommonDir": "/home/a/app/.git",
+             "branch": null, "registeredWorkspaceId": null}
+        ],
+        "truncated": true,
+        "elapsedMs": 12
+    }))
+    .unwrap();
+    let mapped = discovered_repos("host-1", wire).unwrap();
+    assert!(mapped.truncated);
+    assert_eq!(
+        mapped.repos[0].registered_workspace_id,
+        Some(super::projects::id("host-1", "project-a"))
+    );
+    assert_eq!(mapped.repos[0].remote_workspace_id.as_deref(), Some("project-a"));
+    assert!(mapped.repos[1].registered_workspace_id.is_none());
+    let encoded = serde_json::to_value(&mapped.repos[1]).unwrap();
+    assert!(encoded.get("registeredWorkspaceId").is_none());
+    assert_eq!(encoded["target"], json!({"kind": "pairedDaemon", "hostId": "host-1"}));
+}

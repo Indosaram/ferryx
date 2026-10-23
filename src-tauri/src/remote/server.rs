@@ -3857,6 +3857,7 @@ async fn get_capabilities(
         "permission": device.permission,
         "capabilities": if state.machine_services.is_some() && device.access_scope == DeviceAccessScope::Machine && device.permission == DevicePermission::Control {
             let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2", crate::paired_host::file_read::PAIRED_FILE_READ_CAPABILITY];
+            capabilities.push(super::repo_discovery::REPO_DISCOVERY_CAPABILITY);
             if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok()) {
                 capabilities.push("terminalCreateV1");
                 capabilities.push("terminalStreamV1");
@@ -7364,6 +7365,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/fs/directories",
             get(super::filesystem::directories),
+        )
+        .route(
+            "/api/v1/fs/repositories",
+            get(super::repo_discovery::repositories),
         )
         .route("/api/v1/pair/exchange", post(pair_exchange))
         .route(

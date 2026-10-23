@@ -2444,6 +2444,839 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), AccountCliError
     }
 }
 
+/// Environment variable carrying an install key to `ferryx-cli up` (never argv).
+pub const INSTALL_KEY_ENV: &str = "FERRYX_INSTALL_KEY";
+
+/// `ferryx-cli up` exit codes (machine onboarding contract).
+pub const UP_EXIT_OK: i32 = 0;
+pub const UP_EXIT_OTHER: i32 = 1;
+pub const UP_EXIT_USAGE: i32 = 2;
+pub const UP_EXIT_KEY_REJECTED: i32 = 3;
+pub const UP_EXIT_DENIED: i32 = 4;
+pub const UP_EXIT_APPROVAL_EXPIRED: i32 = 5;
+pub const UP_EXIT_PLAN_LIMIT: i32 = 6;
+
+const UP_USAGE: &str = "usage: ferryx-cli up [--key-stdin | --key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]\n  The install key is read from stdin (--key-stdin) or FERRYX_INSTALL_KEY (--key-env, or implicitly when set); it is never accepted as an argument.\n  Without a key, an approval request is created and its URL and code are printed to stderr.";
+
+const SERVICE_USAGE: &str =
+    "usage: ferryx-cli service <install|status|uninstall> [--json]";
+
+/// Where `ferryx-cli up` takes its install key from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpKeySource {
+    /// No flag: use `FERRYX_INSTALL_KEY` when it is set, else the approval flow.
+    Default,
+    /// `--key-stdin`: exactly one line from stdin.
+    Stdin,
+    /// `--key-env`: `FERRYX_INSTALL_KEY`, which must be set.
+    Env,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpCliCommand {
+    pub key_source: UpKeySource,
+    pub email: Option<String>,
+    pub origin: Option<String>,
+    pub name: Option<String>,
+    pub no_service: bool,
+    pub json: bool,
+}
+
+/// A typed `up`/`service` failure: `code` is the structured account or local error code,
+/// `message` the full human text, `exit_code` one of the `UP_EXIT_*` values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpCliError {
+    pub code: String,
+    pub message: String,
+    pub exit_code: i32,
+}
+
+impl UpCliError {
+    pub fn new(code: &str, message: impl Into<String>, exit_code: i32) -> Self {
+        Self {
+            code: code.to_string(),
+            message: format!("{code}: {}", message.into()),
+            exit_code,
+        }
+    }
+
+    pub fn usage(code: &str, message: impl Into<String>) -> Self {
+        Self::new(code, message, UP_EXIT_USAGE)
+    }
+
+    pub fn other(code: &str, message: impl Into<String>) -> Self {
+        Self::new(code, message, UP_EXIT_OTHER)
+    }
+}
+
+impl std::fmt::Display for UpCliError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+/// Maps a structured account error to the `up` exit code. Branches on the code, never on text.
+pub fn up_exit_code(code: &str, status: u16) -> i32 {
+    match code {
+        "INSTALL_KEY_USED"
+        | "INSTALL_KEY_EXPIRED"
+        | "ENROLL_CODE_INVALID"
+        | "ENROLL_CODE_EXPIRED"
+        | "ENROLL_CODE_MACHINE_MISMATCH" => UP_EXIT_KEY_REJECTED,
+        "MACHINE_REQUEST_DENIED" => UP_EXIT_DENIED,
+        "MACHINE_REQUEST_EXPIRED" => UP_EXIT_APPROVAL_EXPIRED,
+        "PLAN_LIMIT_REACHED" | "REMOTE_SUSPENDED" => UP_EXIT_PLAN_LIMIT,
+        _ if status == 402 => UP_EXIT_PLAN_LIMIT,
+        _ => UP_EXIT_OTHER,
+    }
+}
+
+fn up_error_from_enroll(
+    origin: &str,
+    error: &crate::account::enroll_client::EnrollError,
+) -> UpCliError {
+    UpCliError {
+        code: error.code.clone(),
+        message: billing::from_enroll_error(origin, error).message,
+        exit_code: up_exit_code(&error.code, error.status),
+    }
+}
+
+fn take_option_value(args: &[String], index: usize, name: &str) -> Result<String, UpCliError> {
+    args.get(index + 1)
+        .filter(|value| !value.starts_with("--"))
+        .cloned()
+        .ok_or_else(|| UpCliError::usage("CLI_USAGE", format!("missing value for {name}\n{UP_USAGE}")))
+}
+
+pub fn parse_up_cli<I, T>(args: I) -> Result<UpCliCommand, UpCliError>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>();
+    if args.get(1).is_none_or(|arg| arg != "up") {
+        return Err(UpCliError::usage("CLI_USAGE", UP_USAGE));
+    }
+    let mut command = UpCliCommand {
+        key_source: UpKeySource::Default,
+        email: None,
+        origin: None,
+        name: None,
+        no_service: false,
+        json: false,
+    };
+    let mut index = 2;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--key-stdin" | "--key-env" => {
+                if command.key_source != UpKeySource::Default {
+                    return Err(UpCliError::usage(
+                        "CLI_USAGE",
+                        format!("--key-stdin and --key-env are mutually exclusive\n{UP_USAGE}"),
+                    ));
+                }
+                command.key_source = if arg == "--key-stdin" {
+                    UpKeySource::Stdin
+                } else {
+                    UpKeySource::Env
+                };
+                index += 1;
+            }
+            "--email" if command.email.is_none() => {
+                command.email = Some(take_option_value(&args, index, "--email")?);
+                index += 2;
+            }
+            "--origin" if command.origin.is_none() => {
+                command.origin = Some(take_option_value(&args, index, "--origin")?);
+                index += 2;
+            }
+            "--name" if command.name.is_none() => {
+                command.name = Some(take_option_value(&args, index, "--name")?);
+                index += 2;
+            }
+            "--no-service" => {
+                command.no_service = true;
+                index += 1;
+            }
+            "--json" => {
+                command.json = true;
+                index += 1;
+            }
+            _ if arg == "--key" || arg.starts_with("--key=") => {
+                return Err(UpCliError::usage(
+                    "INSTALL_KEY_IN_ARGV",
+                    format!(
+                        "an install key is never accepted as an argument; pass it on stdin with --key-stdin or in {INSTALL_KEY_ENV} with --key-env"
+                    ),
+                ));
+            }
+            other => {
+                return Err(UpCliError::usage(
+                    "CLI_USAGE",
+                    format!("unknown up option `{other}`\n{UP_USAGE}"),
+                ))
+            }
+        }
+    }
+    Ok(command)
+}
+
+/// Resolves the install key for `source`. `read_stdin` is called only for `--key-stdin` and
+/// must return one line; `env_key` is the value of `FERRYX_INSTALL_KEY`.
+pub fn resolve_up_key<R>(
+    source: UpKeySource,
+    read_stdin: R,
+    env_key: Option<String>,
+) -> Result<Option<String>, UpCliError>
+where
+    R: FnOnce() -> std::io::Result<String>,
+{
+    let normalized = |value: String| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    };
+    match source {
+        UpKeySource::Stdin => {
+            let line = read_stdin().map_err(|error| {
+                UpCliError::usage(
+                    "INSTALL_KEY_MISSING",
+                    format!("cannot read the install key from stdin: {error}"),
+                )
+            })?;
+            normalized(line).map(Some).ok_or_else(|| {
+                UpCliError::usage("INSTALL_KEY_MISSING", "--key-stdin read an empty line")
+            })
+        }
+        UpKeySource::Env => env_key.and_then(normalized).map(Some).ok_or_else(|| {
+            UpCliError::usage(
+                "INSTALL_KEY_MISSING",
+                format!("--key-env needs a non-empty {INSTALL_KEY_ENV}"),
+            )
+        }),
+        UpKeySource::Default => Ok(env_key.and_then(normalized)),
+    }
+}
+
+fn read_stdin_line() -> std::io::Result<String> {
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line)
+}
+
+/// The first poll interval: the server's `interval`, kept within 1..=60 s.
+pub fn approval_poll_interval(interval_secs: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(interval_secs.clamp(1, 60))
+}
+
+/// RFC 8628 `slow_down`: lengthen the interval by 5 s (capped at 60 s).
+pub fn slowed_down_interval(current: std::time::Duration) -> std::time::Duration {
+    (current + std::time::Duration::from_secs(5)).min(std::time::Duration::from_secs(60))
+}
+
+/// Whether the stored enrollment record belongs to `origin`.
+pub fn enrolled_to_origin(
+    record: &crate::account::enroll_client::AccountEnrollmentRecord,
+    origin: &str,
+) -> bool {
+    record.account_origin.trim_end_matches('/') == origin.trim_end_matches('/')
+}
+
+async fn wait_for_machine_approval(
+    origin: &str,
+    email: Option<&str>,
+    name: Option<&str>,
+) -> Result<String, UpCliError> {
+    use crate::account::enroll_client::{create_machine_request, poll_machine_request, MachineRequestPoll};
+
+    let request = create_machine_request(origin, email, name)
+        .await
+        .map_err(|error| up_error_from_enroll(origin, &error))?;
+    eprintln!("Approve this machine: {}", request.verification_uri_complete);
+    eprintln!("Code: {}", request.user_code);
+    eprintln!("Waiting for approval...");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(request.expires_in);
+    let mut interval = approval_poll_interval(request.interval);
+    loop {
+        tokio::time::sleep(interval).await;
+        match poll_machine_request(origin, &request.device_code).await {
+            Ok(MachineRequestPoll::Pending) => {}
+            Ok(MachineRequestPoll::SlowDown) => interval = slowed_down_interval(interval),
+            Ok(MachineRequestPoll::Approved { enrollment_code }) => {
+                eprintln!("Approved.");
+                return Ok(enrollment_code);
+            }
+            Ok(MachineRequestPoll::Denied) => {
+                return Err(UpCliError::new(
+                    "MACHINE_REQUEST_DENIED",
+                    "the account owner denied this machine",
+                    UP_EXIT_DENIED,
+                ))
+            }
+            // A dropped connection while waiting is retried on the next tick; the deadline bounds it.
+            Err(error) if error.code == "ACCOUNT_UNREACHABLE" => {
+                tracing::debug!(%error, "machine request poll failed; retrying");
+            }
+            Err(error) => return Err(up_error_from_enroll(origin, &error)),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(UpCliError::new(
+                "MACHINE_REQUEST_EXPIRED",
+                "the approval request expired before it was approved",
+                UP_EXIT_APPROVAL_EXPIRED,
+            ));
+        }
+    }
+}
+
+/// `enrolled` of the `up --json` summary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpEnrolled {
+    pub account_id: String,
+    pub machine_record_id: String,
+    pub relay_origin: String,
+}
+
+/// How the daemon is kept running (`service` of the `up --json` summary and `service --json`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceReport {
+    pub supervised: bool,
+    /// `systemd-user`, `launchd`, `schtasks`, `detached` or `none`.
+    pub backend: &'static str,
+    pub installed: bool,
+    pub linger: Option<bool>,
+    pub pid: Option<u32>,
+    pub reason: Option<String>,
+}
+
+/// The single JSON line `ferryx-cli up --json` prints last on stdout.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpSummary {
+    pub cli_path: String,
+    pub version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enrolled: Option<UpEnrolled>,
+    pub service: ServiceReport,
+}
+
+pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
+    let key = resolve_up_key(
+        command.key_source,
+        read_stdin_line,
+        std::env::var(INSTALL_KEY_ENV).ok(),
+    )?;
+    // Nothing started from here on (the supervised unit, the detached daemon) may inherit the key.
+    // The process is still single-threaded at this point.
+    std::env::remove_var(INSTALL_KEY_ENV);
+
+    let origin = account_cli_origin(command.origin.clone())
+        .map_err(|error| UpCliError::usage("ACCOUNT_ORIGIN_INVALID", error.message))?;
+
+    // 1. Identity first, so the approval request and the enrollment present the same machine.
+    let identity_dir = crate::remote::auth::canonical_remote_dir().ok_or_else(|| {
+        UpCliError::other("ACCOUNT_IDENTITY_DIR_UNRESOLVED", "cannot resolve the identity directory")
+    })?;
+    crate::remote::auth::load_or_generate_machine_identity(&identity_dir)
+        .map_err(|error| UpCliError::other("ACCOUNT_IDENTITY_UNAVAILABLE", error))?;
+
+    let runtime = account_cli_runtime()
+        .map_err(|error| UpCliError::other("CLI_RUNTIME_FAILED", error.message))?;
+
+    // 2. Already enrolled to this origin: keep it.
+    let existing = crate::account::enroll_client::load_enrollment_record()
+        .filter(|record| enrolled_to_origin(record, &origin));
+    let record = match existing {
+        Some(record) => {
+            eprintln!("Already enrolled with {origin}; skipping enrollment.");
+            record
+        }
+        None => runtime.block_on(async {
+            // 3. A key enrolls directly; 4. otherwise the owner approves a machine request.
+            let enrollment_code = match key {
+                Some(key) => key,
+                None => {
+                    wait_for_machine_approval(
+                        &origin,
+                        command.email.as_deref(),
+                        command.name.as_deref(),
+                    )
+                    .await?
+                }
+            };
+            crate::account::enroll_client::enroll_machine_named(
+                &origin,
+                &enrollment_code,
+                command.name.as_deref(),
+            )
+            .await
+            .map_err(|error| up_error_from_enroll(&origin, &error))
+        })?,
+    };
+
+    // 5. Keep the daemon running.
+    let service = if command.no_service {
+        let mut status = service_status(&runtime);
+        if status.reason.is_none() {
+            status.reason = Some("service install skipped (--no-service)".to_string());
+        }
+        status
+    } else {
+        install_service(&runtime)
+    };
+
+    Ok(UpSummary {
+        cli_path: std::env::current_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        version: env!("CARGO_PKG_VERSION"),
+        enrolled: Some(UpEnrolled {
+            account_id: record.account_id,
+            machine_record_id: record.machine_record_id,
+            relay_origin: record.relay_origin,
+        }),
+        service,
+    })
+}
+
+fn print_up_cli_error(json: bool, error: &UpCliError) {
+    if json {
+        eprintln!(
+            "{}",
+            serde_json::json!({ "type": "error", "code": error.code, "message": error.message })
+        );
+    } else {
+        eprintln!("{error}");
+    }
+}
+
+/// Exit code of `up` after a successful run: a daemon that could not be started is a failure
+/// even though enrollment succeeded.
+pub fn up_summary_exit_code(summary: &UpSummary, no_service: bool) -> i32 {
+    if no_service || summary.service.installed {
+        UP_EXIT_OK
+    } else {
+        UP_EXIT_OTHER
+    }
+}
+
+/// Entry for `ferryx-cli up`: parses, runs, prints, and returns the process exit code.
+pub fn up_cli_main(args: &[String]) -> i32 {
+    let json = args.iter().skip(2).any(|arg| arg == "--json");
+    let command = match parse_up_cli(args) {
+        Ok(command) => command,
+        Err(error) => {
+            print_up_cli_error(json, &error);
+            return error.exit_code;
+        }
+    };
+    let no_service = command.no_service;
+    match run_up_cli(command) {
+        Ok(summary) => {
+            if json {
+                match serde_json::to_string(&summary) {
+                    Ok(line) => println!("{line}"),
+                    Err(error) => {
+                        print_up_cli_error(json, &UpCliError::other("CLI_OUTPUT_FAILED", error.to_string()));
+                        return UP_EXIT_OTHER;
+                    }
+                }
+            } else {
+                if let Some(enrolled) = &summary.enrolled {
+                    println!(
+                        "Enrolled: account {} machine {} relay {}",
+                        enrolled.account_id, enrolled.machine_record_id, enrolled.relay_origin
+                    );
+                }
+                println!("{}", render_service_report(&summary.service));
+            }
+            let code = up_summary_exit_code(&summary, no_service);
+            if code != UP_EXIT_OK {
+                eprintln!(
+                    "SERVICE_INSTALL_FAILED: {}",
+                    summary.service.reason.as_deref().unwrap_or("the daemon is not running")
+                );
+            }
+            code
+        }
+        Err(error) => {
+            print_up_cli_error(json, &error);
+            error.exit_code
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceCliAction {
+    Install,
+    Status,
+    Uninstall,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceCliCommand {
+    pub action: ServiceCliAction,
+    pub json: bool,
+}
+
+pub fn parse_service_cli<I, T>(args: I) -> Result<ServiceCliCommand, UpCliError>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>();
+    if args.get(1).is_none_or(|arg| arg != "service") {
+        return Err(UpCliError::usage("CLI_USAGE", SERVICE_USAGE));
+    }
+    let action = match args.get(2).map(String::as_str) {
+        Some("install") => ServiceCliAction::Install,
+        Some("status") => ServiceCliAction::Status,
+        Some("uninstall") => ServiceCliAction::Uninstall,
+        _ => return Err(UpCliError::usage("CLI_USAGE", SERVICE_USAGE)),
+    };
+    let mut json = false;
+    for arg in &args[3..] {
+        match arg.as_str() {
+            "--json" => json = true,
+            other => {
+                return Err(UpCliError::usage(
+                    "CLI_USAGE",
+                    format!("unknown service option `{other}`\n{SERVICE_USAGE}"),
+                ))
+            }
+        }
+    }
+    Ok(ServiceCliCommand { action, json })
+}
+
+/// The OS service manager this target's supervisor facade drives.
+pub fn native_service_backend() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "launchd"
+    } else if cfg!(windows) {
+        "schtasks"
+    } else if cfg!(target_os = "linux") {
+        "systemd-user"
+    } else {
+        "none"
+    }
+}
+
+fn supervisor_unavailable_reason() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(reason) = crate::daemon::supervisor_linux::availability().clone() {
+            return reason;
+        }
+    }
+    "no daemon supervisor is supported in this runtime".to_string()
+}
+
+/// Pid of the daemon answering on this machine's canonical endpoint. Read-only; on targets
+/// without a handshake probe ([`crate::daemon::endpoint_owner_pid`]) it is always `None`.
+fn answering_daemon_pid(runtime: &tokio::runtime::Runtime) -> Option<u32> {
+    runtime.block_on(crate::daemon::endpoint_owner_pid())
+}
+
+#[cfg(target_os = "linux")]
+fn login_user() -> Option<String> {
+    std::env::var("USER")
+        .ok()
+        .or_else(|| std::env::var("LOGNAME").ok())
+        .filter(|user| !user.is_empty())
+}
+
+/// Linux: `loginctl enable-linger $USER` so the user manager (and a supervised daemon) outlives
+/// the SSH session. `None` on other targets.
+#[cfg(target_os = "linux")]
+fn enable_linger() -> Option<bool> {
+    let Some(user) = login_user() else {
+        return Some(false);
+    };
+    Some(
+        std::process::Command::new("loginctl")
+            .args(["enable-linger", &user])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success()),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn enable_linger() -> Option<bool> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn linger_status() -> Option<bool> {
+    let user = login_user()?;
+    let output = std::process::Command::new("loginctl")
+        .args(["show-user", &user, "-p", "Linger", "--value"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim() == "yes")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linger_status() -> Option<bool> {
+    None
+}
+
+/// `<data dir>/daemon.log` for the detached fallback daemon's stdout and stderr.
+fn detached_daemon_log_path() -> Option<std::path::PathBuf> {
+    crate::remote::auth::canonical_remote_dir()
+        .and_then(|dir| dir.parent().map(|data| data.join("daemon.log")))
+}
+
+/// Starts `<current exe> --daemon` in its own session (unix `setsid`, SIGHUP ignored; Windows
+/// detached, no console), stdio to `<data dir>/daemon.log`. Returns the child pid.
+fn spawn_detached_daemon() -> Result<u32, String> {
+    let executable =
+        std::env::current_exe().map_err(|error| format!("cannot resolve the current executable: {error}"))?;
+    let log_path = detached_daemon_log_path().ok_or("cannot resolve the Ferryx data directory")?;
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let log = options
+        .open(&log_path)
+        .map_err(|error| format!("cannot open {}: {error}", log_path.display()))?;
+    let log_err = log
+        .try_clone()
+        .map_err(|error| format!("cannot open {}: {error}", log_path.display()))?;
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("--daemon")
+        .env_remove(INSTALL_KEY_ENV)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log_err));
+    crate::util::detach_launched_child(&mut command);
+    let child = command
+        .spawn()
+        .map_err(|error| format!("cannot start the daemon: {error}"))?;
+    let pid = child.id();
+    // The daemon outlives this short-lived CLI on purpose; init reaps it after this process exits.
+    drop(child);
+    Ok(pid)
+}
+
+/// Waits (bounded) for a daemon to answer on the endpoint after a detached start.
+fn wait_for_answering_daemon(
+    runtime: &tokio::runtime::Runtime,
+    timeout: std::time::Duration,
+) -> Option<u32> {
+    if !cfg!(unix) {
+        return None;
+    }
+    runtime.block_on(async {
+        let until = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(pid) = crate::daemon::endpoint_owner_pid().await {
+                return Some(pid);
+            }
+            if std::time::Instant::now() >= until {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
+}
+
+fn detached_fallback(
+    runtime: &tokio::runtime::Runtime,
+    linger: Option<bool>,
+    reason: String,
+) -> ServiceReport {
+    // A daemon already answers: never start a second one and never touch the running one.
+    if let Some(pid) = answering_daemon_pid(runtime) {
+        return ServiceReport {
+            supervised: false,
+            backend: "detached",
+            installed: true,
+            linger,
+            pid: Some(pid),
+            reason: Some(reason),
+        };
+    }
+    match spawn_detached_daemon() {
+        Ok(child_pid) => ServiceReport {
+            supervised: false,
+            backend: "detached",
+            installed: true,
+            linger,
+            pid: wait_for_answering_daemon(runtime, std::time::Duration::from_secs(10))
+                .or(Some(child_pid)),
+            reason: Some(reason),
+        },
+        Err(error) => ServiceReport {
+            supervised: false,
+            backend: "detached",
+            installed: false,
+            linger,
+            pid: None,
+            reason: Some(format!("{reason}; detached start failed: {error}")),
+        },
+    }
+}
+
+/// `service install`: the OS supervisor when this runtime supports one (started only for an
+/// absent owner, under owner admission), else a detached `--daemon`. Never stops or replaces a
+/// running daemon.
+pub fn install_service(runtime: &tokio::runtime::Runtime) -> ServiceReport {
+    let linger = enable_linger();
+    let reason = if crate::daemon::supervisor::supported() {
+        // `ensure_if_absent` is `ensure()` behind owner admission: it starts the supervised job
+        // only when no daemon owns the endpoint and registers it for login.
+        match crate::daemon::supervisor::ensure_if_absent() {
+            Ok(_) if crate::daemon::supervisor::installed() => {
+                return ServiceReport {
+                    supervised: true,
+                    backend: native_service_backend(),
+                    installed: true,
+                    linger,
+                    pid: answering_daemon_pid(runtime),
+                    reason: None,
+                };
+            }
+            Ok(_) => "the supervisor job was not registered".to_string(),
+            Err(error) => format!("supervisor install failed: {error}"),
+        }
+    } else {
+        supervisor_unavailable_reason()
+    };
+    detached_fallback(runtime, linger, reason)
+}
+
+/// `service status`: read-only.
+pub fn service_status(runtime: &tokio::runtime::Runtime) -> ServiceReport {
+    let supported = crate::daemon::supervisor::supported();
+    let unit = supported && crate::daemon::supervisor::installed();
+    let pid = answering_daemon_pid(runtime);
+    ServiceReport {
+        supervised: unit,
+        backend: if unit {
+            native_service_backend()
+        } else if pid.is_some() {
+            "detached"
+        } else {
+            "none"
+        },
+        installed: unit || pid.is_some(),
+        linger: linger_status(),
+        pid,
+        reason: (!supported).then(supervisor_unavailable_reason),
+    }
+}
+
+/// `service uninstall`: removes the supervisor job only when no daemon answers. With a live
+/// daemon only login autostart is removed, so its terminals survive; a detached daemon is never
+/// stopped either.
+pub fn uninstall_service(runtime: &tokio::runtime::Runtime) -> Result<ServiceReport, UpCliError> {
+    if !crate::daemon::supervisor::supported() {
+        let mut report = service_status(runtime);
+        report.reason = Some(format!(
+            "{}; nothing to uninstall, and a running daemon is left running",
+            supervisor_unavailable_reason()
+        ));
+        return Ok(report);
+    }
+    if let Some(pid) = answering_daemon_pid(runtime) {
+        crate::daemon::supervisor::remove_autostart()
+            .map_err(|error| UpCliError::other("SERVICE_UNINSTALL_FAILED", error))?;
+        let mut report = service_status(runtime);
+        report.reason = Some(format!(
+            "daemon pid {pid} is running; login autostart was removed and the running daemon was left untouched"
+        ));
+        return Ok(report);
+    }
+    crate::daemon::supervisor::uninstall()
+        .map_err(|error| UpCliError::other("SERVICE_UNINSTALL_FAILED", error))?;
+    Ok(service_status(runtime))
+}
+
+pub fn render_service_report(report: &ServiceReport) -> String {
+    let mut text = format!(
+        "service backend={} supervised={} installed={}",
+        report.backend, report.supervised, report.installed
+    );
+    if let Some(linger) = report.linger {
+        text.push_str(&format!(" linger={linger}"));
+    }
+    if let Some(pid) = report.pid {
+        text.push_str(&format!(" pid={pid}"));
+    }
+    if let Some(reason) = &report.reason {
+        text.push_str(&format!(" reason=\"{reason}\""));
+    }
+    text
+}
+
+pub fn run_service_cli(command: &ServiceCliCommand) -> Result<ServiceReport, UpCliError> {
+    let runtime = account_cli_runtime()
+        .map_err(|error| UpCliError::other("CLI_RUNTIME_FAILED", error.message))?;
+    match command.action {
+        ServiceCliAction::Install => Ok(install_service(&runtime)),
+        ServiceCliAction::Status => Ok(service_status(&runtime)),
+        ServiceCliAction::Uninstall => uninstall_service(&runtime),
+    }
+}
+
+/// Entry for `ferryx-cli service`: returns the process exit code.
+pub fn service_cli_main(args: &[String]) -> i32 {
+    let json = args.iter().skip(2).any(|arg| arg == "--json");
+    let result = parse_service_cli(args).and_then(|command| {
+        run_service_cli(&command).map(|report| (command.action, report))
+    });
+    match result {
+        Ok((action, report)) => {
+            if json {
+                match serde_json::to_string(&report) {
+                    Ok(line) => println!("{line}"),
+                    Err(error) => {
+                        print_up_cli_error(json, &UpCliError::other("CLI_OUTPUT_FAILED", error.to_string()));
+                        return UP_EXIT_OTHER;
+                    }
+                }
+            } else {
+                println!("{}", render_service_report(&report));
+            }
+            if action == ServiceCliAction::Install && !report.installed {
+                UP_EXIT_OTHER
+            } else {
+                UP_EXIT_OK
+            }
+        }
+        Err(error) => {
+            print_up_cli_error(json, &error);
+            error.exit_code
+        }
+    }
+}
+
 /// Resolves the base directory Ferryx stores remote gateway state under,
 /// mirroring the resolution used by [`remote_auth_manager`].
 fn remote_state_dir() -> Option<std::path::PathBuf> {
@@ -3113,6 +3946,234 @@ pub fn run_daemon_headless(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn up_args(extra: &[&str]) -> Vec<String> {
+        ["ferryx-cli", "up"]
+            .iter()
+            .chain(extra.iter())
+            .map(|arg| arg.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn up_parses_every_flag() {
+        let command = parse_up_cli(up_args(&[
+            "--key-env",
+            "--email",
+            "me@example.com",
+            "--origin",
+            "https://relay.example",
+            "--name",
+            "box",
+            "--no-service",
+            "--json",
+        ]))
+        .expect("parse");
+        assert_eq!(
+            command,
+            UpCliCommand {
+                key_source: UpKeySource::Env,
+                email: Some("me@example.com".into()),
+                origin: Some("https://relay.example".into()),
+                name: Some("box".into()),
+                no_service: true,
+                json: true,
+            }
+        );
+        let bare = parse_up_cli(up_args(&[])).expect("bare up");
+        assert_eq!(bare.key_source, UpKeySource::Default);
+        assert!(!bare.no_service && !bare.json);
+        assert_eq!(
+            parse_up_cli(up_args(&["--key-stdin"])).expect("stdin").key_source,
+            UpKeySource::Stdin
+        );
+    }
+
+    #[test]
+    fn up_refuses_keys_in_argv_and_bad_usage_with_exit_2() {
+        for args in [
+            vec!["--key", "fxk_secret"],
+            vec!["--key=fxk_secret"],
+            vec!["--key-stdin", "--key-env"],
+            vec!["--email"],
+            vec!["--origin", "--json"],
+            vec!["--bogus"],
+        ] {
+            let error = parse_up_cli(up_args(&args)).expect_err("must refuse");
+            assert_eq!(error.exit_code, UP_EXIT_USAGE, "{args:?}");
+            assert!(!error.message.contains("fxk_secret"), "the key must never be echoed");
+        }
+        assert_eq!(
+            parse_up_cli(up_args(&["--key", "fxk_secret"])).unwrap_err().code,
+            "INSTALL_KEY_IN_ARGV"
+        );
+        assert!(parse_up_cli(["ferryx-cli", "account"]).is_err());
+    }
+
+    #[test]
+    fn up_key_resolution_reads_stdin_or_env() {
+        let no_stdin = || -> std::io::Result<String> { panic!("stdin must not be read") };
+        assert_eq!(
+            resolve_up_key(UpKeySource::Stdin, || Ok("fxk_abc\n".to_string()), None),
+            Ok(Some("fxk_abc".into()))
+        );
+        assert_eq!(
+            resolve_up_key(UpKeySource::Stdin, || Ok("\n".to_string()), None)
+                .unwrap_err()
+                .exit_code,
+            UP_EXIT_USAGE
+        );
+        assert_eq!(
+            resolve_up_key(UpKeySource::Env, no_stdin, Some(" fxk_env ".into())),
+            Ok(Some("fxk_env".into()))
+        );
+        assert_eq!(
+            resolve_up_key(UpKeySource::Env, no_stdin, None).unwrap_err().code,
+            "INSTALL_KEY_MISSING"
+        );
+        assert_eq!(
+            resolve_up_key(UpKeySource::Default, no_stdin, Some("fxk_implicit".into())),
+            Ok(Some("fxk_implicit".into()))
+        );
+        assert_eq!(resolve_up_key(UpKeySource::Default, no_stdin, Some("  ".into())), Ok(None));
+        assert_eq!(resolve_up_key(UpKeySource::Default, no_stdin, None), Ok(None));
+    }
+
+    #[test]
+    fn up_exit_codes_follow_structured_error_codes() {
+        for code in [
+            "INSTALL_KEY_USED",
+            "INSTALL_KEY_EXPIRED",
+            "ENROLL_CODE_INVALID",
+            "ENROLL_CODE_EXPIRED",
+            "ENROLL_CODE_MACHINE_MISMATCH",
+        ] {
+            assert_eq!(up_exit_code(code, 401), UP_EXIT_KEY_REJECTED, "{code}");
+        }
+        assert_eq!(up_exit_code("MACHINE_REQUEST_DENIED", 0), UP_EXIT_DENIED);
+        assert_eq!(up_exit_code("MACHINE_REQUEST_EXPIRED", 400), UP_EXIT_APPROVAL_EXPIRED);
+        assert_eq!(up_exit_code("PLAN_LIMIT_REACHED", 402), UP_EXIT_PLAN_LIMIT);
+        assert_eq!(up_exit_code("SOMETHING_NEW", 402), UP_EXIT_PLAN_LIMIT);
+        assert_eq!(up_exit_code("ACCOUNT_MACHINE_CLAIMED", 409), UP_EXIT_OTHER);
+        assert_eq!(up_exit_code("ACCOUNT_UNREACHABLE", 0), UP_EXIT_OTHER);
+
+        let used = crate::account::enroll_client::EnrollError {
+            code: "INSTALL_KEY_USED".into(),
+            message: "install key already used".into(),
+            status: 409,
+            details: None,
+        };
+        let mapped = up_error_from_enroll("https://relay.example", &used);
+        assert_eq!(mapped.exit_code, UP_EXIT_KEY_REJECTED);
+        assert_eq!(mapped.code, "INSTALL_KEY_USED");
+    }
+
+    #[test]
+    fn approval_polling_honors_interval_and_slow_down() {
+        assert_eq!(approval_poll_interval(3), std::time::Duration::from_secs(3));
+        assert_eq!(approval_poll_interval(0), std::time::Duration::from_secs(1));
+        assert_eq!(
+            slowed_down_interval(std::time::Duration::from_secs(3)),
+            std::time::Duration::from_secs(8)
+        );
+        assert_eq!(
+            slowed_down_interval(std::time::Duration::from_secs(58)),
+            std::time::Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn enrolled_origin_match_ignores_trailing_slash() {
+        let record = crate::account::enroll_client::AccountEnrollmentRecord {
+            account_id: "a".into(),
+            machine_record_id: "m".into(),
+            account_origin: "https://relay.example".into(),
+            relay_origin: "https://relay.example".into(),
+            enrollment_epoch: "1".into(),
+            enrolled_at: 1,
+        };
+        assert!(enrolled_to_origin(&record, "https://relay.example/"));
+        assert!(!enrolled_to_origin(&record, "https://other.example"));
+    }
+
+    #[test]
+    fn up_summary_json_matches_the_contract_shape() {
+        let service = ServiceReport {
+            supervised: false,
+            backend: "detached",
+            installed: true,
+            linger: None,
+            pid: Some(42),
+            reason: Some("systemd is not the init system".into()),
+        };
+        let summary = UpSummary {
+            cli_path: "/home/u/.local/bin/ferryx-cli".into(),
+            version: "1.0.0",
+            enrolled: Some(UpEnrolled {
+                account_id: "acct".into(),
+                machine_record_id: "rec".into(),
+                relay_origin: "https://relay.example".into(),
+            }),
+            service: service.clone(),
+        };
+        let value = serde_json::to_value(&summary).expect("json");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "cliPath": "/home/u/.local/bin/ferryx-cli",
+                "version": "1.0.0",
+                "enrolled": {"accountId": "acct", "machineRecordId": "rec", "relayOrigin": "https://relay.example"},
+                "service": {"supervised": false, "backend": "detached", "installed": true, "linger": null, "pid": 42, "reason": "systemd is not the init system"}
+            })
+        );
+        let unenrolled = UpSummary {
+            enrolled: None,
+            ..summary
+        };
+        let value = serde_json::to_value(&unenrolled).expect("json");
+        assert!(value.get("enrolled").is_none(), "enrolled is omitted when nothing is enrolled");
+        assert_eq!(up_summary_exit_code(&unenrolled, false), UP_EXIT_OK);
+        let not_running = UpSummary {
+            service: ServiceReport {
+                installed: false,
+                ..service
+            },
+            ..unenrolled
+        };
+        assert_eq!(up_summary_exit_code(&not_running, false), UP_EXIT_OTHER);
+        assert_eq!(up_summary_exit_code(&not_running, true), UP_EXIT_OK);
+    }
+
+    #[test]
+    fn service_parses_actions_and_json() {
+        assert_eq!(
+            parse_service_cli(["ferryx-cli", "service", "install", "--json"]).expect("install"),
+            ServiceCliCommand {
+                action: ServiceCliAction::Install,
+                json: true
+            }
+        );
+        assert_eq!(
+            parse_service_cli(["ferryx-cli", "service", "status"]).expect("status").action,
+            ServiceCliAction::Status
+        );
+        assert_eq!(
+            parse_service_cli(["ferryx-cli", "service", "uninstall"]).expect("uninstall").action,
+            ServiceCliAction::Uninstall
+        );
+        for args in [
+            vec!["ferryx-cli", "service"],
+            vec!["ferryx-cli", "service", "restart"],
+            vec!["ferryx-cli", "service", "status", "--force"],
+        ] {
+            assert_eq!(parse_service_cli(&args).unwrap_err().exit_code, UP_EXIT_USAGE, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn native_backend_names_the_contract_values() {
+        assert!(["systemd-user", "launchd", "schtasks", "none"].contains(&native_service_backend()));
+    }
 
     #[test]
     fn headless_logging_child() {

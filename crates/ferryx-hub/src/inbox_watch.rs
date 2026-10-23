@@ -9,7 +9,7 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 
 use crate::error::{HubError, Result};
-use crate::inbox::{classify_pending, digest, Class};
+use crate::inbox::classify_pending;
 use crate::inbox_sources::{
     commit_source_items, parse_imessage, parse_kakao_messages, parse_mail_at, SourceItem,
 };
@@ -178,6 +178,12 @@ async fn store_cursor(pool: &SqlitePool, source: &str, cursor: &str) -> Result<(
 
 /// Parses one source payload with that source's cursor, commits new rows, and
 /// classifies anything that still has no decision.
+/// Commits one batch (omo's prefilter runs in the commit) and triages what is new. Returns the
+/// number of rows stored or refreshed.
+///
+/// Like omo-gateway there is no per-batch digest (the daily digest cron writes one) and no
+/// generic "handle inbox item" proposal: a bot item without a concrete action goes to the action
+/// loop, which hands it to the lead.
 pub async fn ingest_parsed(
     pool: &SqlitePool,
     source: SourceKind,
@@ -185,49 +191,22 @@ pub async fn ingest_parsed(
     cursor: &str,
     judge: &Judge,
     now: DateTime<Utc>,
-) -> Result<String> {
-    commit_source_items(pool, &items).await?;
+) -> Result<u64> {
+    let fetched = items.len();
+    let kept = commit_source_items(pool, &items).await?;
     if !cursor.is_empty() {
         store_cursor(pool, source.as_str(), cursor).await?;
     }
-    classify_pending(pool, judge, now, |_id, class| async move {
-        Ok((class == Class::Bot).then(|| "handle inbox item".to_owned()))
-    })
-    .await?;
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT COALESCE(inbox_items.title, ''), inbox_decisions.class FROM inbox_items
-         JOIN inbox_decisions ON inbox_decisions.item_id = inbox_items.id
-         ORDER BY inbox_items.received_at",
-    )
-    .fetch_all(pool)
-    .await?;
-    let titled: Vec<(String, Class)> = rows
-        .into_iter()
-        .filter_map(|(title, class)| {
-            let class = match class.as_str() {
-                "owner" => Class::Owner,
-                "bot" => Class::Bot,
-                "fyi" => Class::Fyi,
-                "ignore" => Class::Ignore,
-                _ => return None,
-            };
-            Some((
-                if title.is_empty() {
-                    source.as_str().to_owned()
-                } else {
-                    title
-                },
-                class,
-            ))
-        })
-        .collect();
-    let body = digest(&titled);
-    sqlx::query("INSERT INTO inbox_digests(body, created_at) VALUES(?,?)")
-        .bind(&body)
-        .bind(now_rfc3339())
-        .execute(pool)
-        .await?;
-    Ok(body)
+    if fetched > 0 {
+        tracing::info!(
+            source = source.as_str(),
+            fetched,
+            kept,
+            "inbox items collected"
+        );
+    }
+    classify_pending(pool, judge, now, |_id, _class| async move { Ok(None) }).await?;
+    Ok(kept)
 }
 
 pub fn imessage_items(
@@ -268,13 +247,68 @@ where
     F: FnMut(SourceKind, Option<String>) -> Fut + Send,
     Fut: std::future::Future<Output = Result<Option<(Vec<SourceItem>, String)>>> + Send,
 {
-    while let Some(event) = events.recv().await {
+    serve_coalesced(pool, &mut events, judge, &mut fetch, MAIL_MIN_GAP).await
+}
+
+/// Shortest gap between two mail collections. `zele mail watch` prints a line per change, so
+/// one new message can produce several events within a minute; they collapse into one fetch.
+pub const MAIL_MIN_GAP: Duration = Duration::from_secs(30);
+
+async fn serve_coalesced<F, Fut>(
+    pool: SqlitePool,
+    events: &mut tokio::sync::mpsc::Receiver<InboxWatcherEvent>,
+    judge: Judge,
+    fetch: &mut F,
+    mail_gap: Duration,
+) -> Result<()>
+where
+    F: FnMut(SourceKind, Option<String>) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<Option<(Vec<SourceItem>, String)>>> + Send,
+{
+    let mut last_mail: Option<tokio::time::Instant> = None;
+    let mut mail_deferred = false;
+    loop {
+        let due = last_mail.map(|at| at + mail_gap);
+        let mut sources: Vec<SourceKind> = Vec::new();
+        tokio::select! {
+            event = events.recv() => match event {
+                Some(event) => sources.extend_from_slice(filter_sources(&event)),
+                None => break,
+            },
+            _ = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)), if mail_deferred => {
+                sources.push(SourceKind::Mail);
+            }
+        }
+        // Everything already queued joins this pass instead of starting its own.
+        while let Ok(event) = events.try_recv() {
+            sources.extend_from_slice(filter_sources(&event));
+        }
+        let mut unique: Vec<SourceKind> = Vec::new();
+        for source in sources {
+            if !unique.contains(&source) {
+                unique.push(source);
+            }
+        }
         let now = Utc::now();
-        for source in filter_sources(&event) {
+        for source in &unique {
+            if *source == SourceKind::Mail {
+                if last_mail.is_some_and(|at| at.elapsed() < mail_gap) {
+                    mail_deferred = true;
+                    continue;
+                }
+                mail_deferred = false;
+                last_mail = Some(tokio::time::Instant::now());
+            }
             let cursor = cursor_of(&pool, source.as_str()).await?;
             match fetch(*source, cursor).await {
                 Ok(Some((items, next))) => {
-                    let _ = ingest_parsed(&pool, *source, items, &next, &judge, now).await?;
+                    // Items are committed before triage. A judge timeout or a missing judge
+                    // leaves them pending for the next pass; it must not end the inbox loop.
+                    if let Err(error) =
+                        ingest_parsed(&pool, *source, items, &next, &judge, now).await
+                    {
+                        tracing::warn!(source = source.as_str(), %error, "inbox items stored but not triaged");
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -376,7 +410,7 @@ static GATEWAY_EVENTS: std::sync::OnceLock<tokio::sync::mpsc::Sender<InboxWatche
     std::sync::OnceLock::new();
 
 pub fn inbox_enabled() -> bool {
-    std::env::var("OMON_INBOX_ENABLED")
+    crate::hub_env::var("OMON_INBOX_ENABLED")
         .map(|value| !matches!(value.to_lowercase().as_str(), "0" | "false" | "no"))
         .unwrap_or(true)
 }
@@ -476,7 +510,7 @@ pub enum WatcherExit {
 }
 
 pub async fn run_json(program: &str, args: &[String]) -> Result<Value> {
-    let output = tokio::process::Command::new(program)
+    let output = crate::child_env::command(program)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -495,8 +529,57 @@ pub async fn run_json(program: &str, args: &[String]) -> Result<Value> {
             output.status
         )));
     }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|error| HubError::message(format!("{program} returned invalid JSON: {error}")))
+    decode_structured_output(&output.stdout, program)
+}
+
+/// Decodes a CLI's stdout the way omo did: empty output is an empty list, then one JSON
+/// document, then NDJSON (`imsg ... --json` prints one object per line), then YAML (`zele mail
+/// list` prints YAML with `items`/`next_page`/`summary`). Only the parser error is reported,
+/// never the output itself, because it holds private message content.
+pub fn decode_structured_output(bytes: &[u8], program: &str) -> Result<Value> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Value::Array(Vec::new()));
+    }
+    let json_error = match serde_json::from_slice::<Value>(bytes) {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Option<Vec<Value>> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    if let Some(items) = lines.filter(|items| !items.is_empty()) {
+        return Ok(Value::Array(items));
+    }
+    // Only a document that starts like YAML (`key:` or `- item`) counts: a prose error such
+    // as "authorization denied (code: 23)" also parses as a one-entry YAML mapping.
+    let first = text
+        .lines()
+        .map(str::trim_end)
+        .find(|line| !line.trim().is_empty());
+    let looks_like_yaml = first.is_some_and(|line| {
+        line.starts_with("- ")
+            || line == "-"
+            || line.split_once(':').is_some_and(|(key, rest)| {
+                !key.is_empty()
+                    && key
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                    && (rest.is_empty() || rest.starts_with(' '))
+            })
+    });
+    match looks_like_yaml
+        .then(|| serde_yaml::from_slice::<Value>(bytes))
+        .and_then(std::result::Result::ok)
+    {
+        Some(value @ (Value::Object(_) | Value::Array(_))) => Ok(value),
+        _ => Err(HubError::message(format!(
+            "{program} returned invalid structured output (not JSON, NDJSON or a YAML document): {json_error}"
+        ))),
+    }
 }
 
 pub async fn fetch_imessage_with(
@@ -581,12 +664,17 @@ pub async fn fetch_kind(
     match kind {
         SourceKind::Imessage => fetch_imessage_with("imsg", cursor).await.map(Some),
         SourceKind::Mail => {
-            let account = mail_account_from(std::env::var("OMON_MAIL_ACCOUNT").ok().as_deref());
+            let account =
+                mail_account_from(crate::hub_env::var("OMON_MAIL_ACCOUNT").ok().as_deref());
             fetch_mail_with("zele", cursor, &account).await.map(Some)
         }
         SourceKind::Kakao => fetch_kakao(cursor).await.map(Some),
         SourceKind::Github => {
-            if !github_enabled_from(std::env::var("OMON_GITHUB_SOURCE_ENABLED").ok().as_deref()) {
+            if !github_enabled_from(
+                crate::hub_env::var("OMON_GITHUB_SOURCE_ENABLED")
+                    .ok()
+                    .as_deref(),
+            ) {
                 return Ok(None);
             }
             fetch_github_with("gh", cursor).await.map(Some)
@@ -631,18 +719,20 @@ async fn fetch_gateway(
             author: None,
             title: None,
             link: None,
+            room_type: None,
+            mail_categories: Vec::new(),
         });
     }
     Ok(Some((items, newest)))
 }
 
 pub async fn fetch_kakao(cursor: Option<&str>) -> Result<(Vec<SourceItem>, String)> {
-    let base = std::env::var("OMON_PIRATETALK_URL")
+    let base = crate::hub_env::var("OMON_PIRATETALK_URL")
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "https://indo.taila0cef2.ts.net".to_owned());
-    let rooms = std::env::var("OMON_INBOX_KAKAO_ROOMS").ok();
+    let rooms = crate::hub_env::var("OMON_INBOX_KAKAO_ROOMS").ok();
     fetch_kakao_at(&base, rooms.as_deref(), cursor).await
 }
 
@@ -803,6 +893,25 @@ pub async fn spawn(pool: SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// How long a watcher process must stay up before its health reads `running`.
+pub const WATCHER_RUNNING_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How often a running watcher refreshes its `running` health row.
+pub const WATCHER_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn write_watcher_health(pool: &SqlitePool, source: &str, status: &str, detail: Option<&str>) {
+    let _ = sqlx::query(
+        "INSERT INTO inbox_watcher_health(source, status, detail, updated_at) VALUES(?,?,?,?)
+         ON CONFLICT(source) DO UPDATE SET status = excluded.status, detail = excluded.detail, updated_at = excluded.updated_at",
+    )
+    .bind(source)
+    .bind(status)
+    .bind(detail)
+    .bind(crate::storage::now_rfc3339())
+    .execute(pool)
+    .await;
+}
+
 async fn supervise_command<F, Fut>(
     source: &str,
     pool: &SqlitePool,
@@ -818,13 +927,26 @@ async fn supervise_command<F, Fut>(
             return;
         }
         let started = std::time::Instant::now();
-        let outcome = tokio::select! {
-            exit = run_once() => exit,
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    return;
+        let run = run_once();
+        tokio::pin!(run);
+        let running_mark = tokio::time::sleep(WATCHER_RUNNING_AFTER);
+        tokio::pin!(running_mark);
+        let outcome = loop {
+            tokio::select! {
+                exit = &mut run => break exit,
+                // A watcher that stays up past the mark started fine: replace a stale failure.
+                // The mark repeats every heartbeat so the row stays current while it runs.
+                _ = &mut running_mark => {
+                    write_watcher_health(pool, source, "running", None).await;
+                    running_mark
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + WATCHER_HEARTBEAT);
                 }
-                continue;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                }
             }
         };
         let (run, tail) = match outcome {
@@ -850,16 +972,7 @@ async fn supervise_command<F, Fut>(
         } else {
             Some(tail.as_str())
         };
-        let _ = sqlx::query(
-            "INSERT INTO inbox_watcher_health(source, status, detail, updated_at) VALUES(?,?,?,?)
-             ON CONFLICT(source) DO UPDATE SET status = excluded.status, detail = excluded.detail, updated_at = excluded.updated_at",
-        )
-        .bind(source)
-        .bind(status)
-        .bind(detail)
-        .bind(crate::storage::now_rfc3339())
-        .execute(pool)
-        .await;
+        write_watcher_health(pool, source, status, detail).await;
         if !tail.is_empty() {
             tracing::warn!(%tail, "inbox watcher exited");
         }
@@ -893,7 +1006,7 @@ async fn run_imsg_once(
 }
 
 async fn run_mail_once(sender: &tokio::sync::mpsc::Sender<InboxWatcherEvent>) -> WatcherExit {
-    let account = mail_account_from(std::env::var("OMON_MAIL_ACCOUNT").ok().as_deref());
+    let account = mail_account_from(crate::hub_env::var("OMON_MAIL_ACCOUNT").ok().as_deref());
     let args = mail_watch_command(&account);
     run_lines(
         "zele",
@@ -913,7 +1026,7 @@ async fn run_lines<F>(
 where
     F: FnMut(&str) -> Option<InboxWatcherEvent>,
 {
-    let mut child = match tokio::process::Command::new(program)
+    let mut child = match crate::child_env::command(program)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -993,6 +1106,136 @@ async fn tail_text(stderr: Option<tokio::process::ChildStderr>) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_burst_of_mail_events_collapses_into_one_fetch_plus_one_trailing() {
+        let pool = crate::storage::memory().await.unwrap();
+        let (events, mut receiver) = watcher_channel();
+        let fetched = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = fetched.clone();
+        let mut fetch = move |kind: SourceKind, _cursor: Option<String>| {
+            seen.lock()
+                .unwrap()
+                .push((kind, tokio::time::Instant::now()));
+            async move { Ok(None) }
+        };
+        let sender = events.clone();
+        let feeder = tokio::spawn(async move {
+            for _ in 0..6 {
+                sender.send(InboxWatcherEvent::Mail).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            sender
+                .send(InboxWatcherEvent::IMessage { rowid: Some(1) })
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        });
+        let serve_task = tokio::spawn(async move {
+            serve_coalesced(
+                pool,
+                &mut receiver,
+                Judge::forced("bot_can_handle"),
+                &mut fetch,
+                Duration::from_millis(250),
+            )
+            .await
+        });
+        feeder.await.unwrap();
+        drop(events);
+        serve_task.await.unwrap().unwrap();
+        let fetched = fetched.lock().unwrap().clone();
+        let mail: Vec<_> = fetched
+            .iter()
+            .filter(|(kind, _)| *kind == SourceKind::Mail)
+            .collect();
+        assert_eq!(mail.len(), 2, "{fetched:?}");
+        assert!(mail[1].1 - mail[0].1 >= Duration::from_millis(240));
+        assert_eq!(
+            fetched
+                .iter()
+                .filter(|(kind, _)| *kind == SourceKind::Imessage)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_judge_leaves_items_pending_and_the_loop_keeps_serving() {
+        let pool = crate::storage::memory().await.unwrap();
+        let (events, receiver) = watcher_channel();
+        events.try_send(InboxWatcherEvent::Mail).unwrap();
+        events
+            .try_send(InboxWatcherEvent::IMessage { rowid: Some(1) })
+            .unwrap();
+        drop(events);
+        let fetched = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = fetched.clone();
+        serve(
+            pool.clone(),
+            receiver,
+            Judge::forced("not-an-option"),
+            move |kind, _cursor| {
+                seen.lock().unwrap().push(kind);
+                let source = match kind {
+                    SourceKind::Mail => "mail",
+                    _ => "imessage",
+                };
+                async move {
+                    Ok(Some((
+                        vec![SourceItem {
+                            source,
+                            source_ref: format!("{source}-1"),
+                            snippet: "hello".into(),
+                            received_at: Utc::now(),
+                            thread_ref: None,
+                            author: None,
+                            title: None,
+                            link: None,
+                            room_type: None,
+                            mail_categories: Vec::new(),
+                        }],
+                        String::new(),
+                    )))
+                }
+            },
+        )
+        .await
+        .expect("a judge failure must not end serve");
+        assert_eq!(
+            *fetched.lock().unwrap(),
+            [SourceKind::Mail, SourceKind::Imessage]
+        );
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbox_items")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 2);
+    }
+
+    #[test]
+    fn structured_output_accepts_json_ndjson_yaml_and_empty() {
+        use serde_json::json;
+        assert_eq!(decode_structured_output(b"", "x").unwrap(), json!([]));
+        assert_eq!(decode_structured_output(b" \n", "x").unwrap(), json!([]));
+        assert_eq!(
+            decode_structured_output(br#"[{"id":1}]"#, "x").unwrap(),
+            json!([{"id": 1}])
+        );
+        assert_eq!(
+            decode_structured_output(b"{\"id\":1}\n{\"id\":2}\n", "imsg").unwrap(),
+            json!([{"id": 1}, {"id": 2}])
+        );
+        let yaml =
+            b"summary: 1 thread\nnext_page: null\nitems:\n  - thread_id: t1\n    subject: Hi\n";
+        let value = decode_structured_output(yaml, "zele").unwrap();
+        assert_eq!(value["items"][0]["thread_id"], json!("t1"));
+        let error = decode_structured_output(b"authorization denied (code: 23)\n", "imsg")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid structured output"), "{error}");
+        assert!(!error.contains("authorization"), "{error}");
+    }
+
     #[test]
     fn events_select_the_gateway_source_and_the_clis_match() {
         assert_eq!(
@@ -1033,7 +1276,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_imessage_event_commits_triages_and_writes_a_digest() {
+    async fn an_imessage_event_commits_and_triages_without_a_digest_or_a_generic_proposal() {
         let pool = crate::storage::memory().await.unwrap();
         let now = DateTime::parse_from_rfc3339("2026-10-22T03:00:00Z")
             .unwrap()
@@ -1044,16 +1287,29 @@ mod tests {
             imessage_items(&chats, &[("7".into(), history.clone())], None).unwrap();
         assert_eq!(items.len(), 1);
         let judge = Judge::forced("bot_can_handle");
-        let digest = ingest_parsed(&pool, SourceKind::Imessage, items, &cursor, &judge, now)
+        let kept = ingest_parsed(&pool, SourceKind::Imessage, items, &cursor, &judge, now)
             .await
             .unwrap();
-        assert!(digest.contains("bot"));
+        assert_eq!(kept, 1);
+        let class: String = sqlx::query_scalar("SELECT class FROM inbox_decisions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(class, "bot");
         let proposals: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM action_proposals WHERE origin = 'inbox'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(proposals, 1);
+        assert_eq!(
+            proposals, 0,
+            "omo proposes only a concrete action, never a generic one"
+        );
+        let digests: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbox_digests")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(digests, 0, "no digest per ingest");
         let stored: String =
             sqlx::query_scalar("SELECT cursor FROM inbox_cursors WHERE source = 'imessage'")
                 .fetch_one(&pool)
@@ -1072,7 +1328,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(again.contains("bot"));
+        assert_eq!(again, 0);
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbox_items")
             .fetch_one(&pool)
             .await

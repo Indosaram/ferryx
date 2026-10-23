@@ -115,6 +115,16 @@ pub async fn enroll_machine(
     account_origin: &str,
     enrollment_code: &str,
 ) -> Result<AccountEnrollmentRecord, EnrollError> {
+    enroll_machine_named(account_origin, enrollment_code, None).await
+}
+
+/// [`enroll_machine`] with an optional display name that replaces the identity's own name in the
+/// account record (`ferryx-cli up --name`). The name is not part of the signed payload.
+pub async fn enroll_machine_named(
+    account_origin: &str,
+    enrollment_code: &str,
+    display_name: Option<&str>,
+) -> Result<AccountEnrollmentRecord, EnrollError> {
     let origin = account_origin.trim_end_matches('/');
     let dir = canonical_remote_dir()
         .ok_or_else(|| EnrollError::local("ACCOUNT_IDENTITY_DIR_UNRESOLVED", "cannot resolve identity dir"))?;
@@ -165,7 +175,8 @@ pub async fn enroll_machine(
         api_version: 1,
         enrollment_code: enrollment_code.to_string(),
         machine_id: identity.machine_id.clone(),
-        display_name: identity.display_name.clone(),
+        display_name: requested_display_name(display_name)
+            .unwrap_or_else(|| identity.display_name.clone()),
         public_key: identity.public_key.clone(),
         attach_public_key: attach.public_key.clone(),
         platform: current_platform(),
@@ -342,6 +353,142 @@ pub async fn poll_device_auth(
     }
 }
 
+fn requested_display_name(display_name: Option<&str>) -> Option<String> {
+    display_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+#[allow(clippy::result_large_err)]
+fn account_http_client() -> Result<reqwest::Client, EnrollError> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|error| EnrollError::local("ACCOUNT_CLIENT_FAILED", error.to_string()))
+}
+
+/// Error code the account service answers a machine-request poll with when the client polls
+/// faster than the advertised interval (RFC 8628 `slow_down`).
+pub const MACHINE_REQUEST_SLOW_DOWN: &str = "slow_down";
+
+/// `POST /api/account/v1/machine-requests` response: an RFC 8628 shaped approval request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineRequestClientResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+/// One answer of `POST /api/account/v1/machine-requests/poll`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MachineRequestPoll {
+    Pending,
+    /// The poll came faster than the interval; the caller must lengthen it.
+    SlowDown,
+    Approved { enrollment_code: String },
+    Denied,
+}
+
+/// Asks the account service to let its owner approve this machine. Posts the machine identity
+/// (created on first use) and the optional `email` hint; nothing secret leaves the machine.
+pub async fn create_machine_request(
+    account_origin: &str,
+    email: Option<&str>,
+    display_name: Option<&str>,
+) -> Result<MachineRequestClientResponse, EnrollError> {
+    let origin = account_origin.trim_end_matches('/');
+    let dir = canonical_remote_dir()
+        .ok_or_else(|| EnrollError::local("ACCOUNT_IDENTITY_DIR_UNRESOLVED", "cannot resolve identity dir"))?;
+    let identity = load_or_generate_machine_identity(&dir)
+        .map_err(|error| EnrollError::local("ACCOUNT_IDENTITY_UNAVAILABLE", error))?;
+    let mut body = serde_json::json!({
+        "machineId": identity.machine_id,
+        "publicKey": identity.public_key,
+        "displayName": requested_display_name(display_name).unwrap_or(identity.display_name),
+        "platform": platform_name(current_platform()),
+        "appVersion": env!("CARGO_PKG_VERSION"),
+    });
+    if let Some(email) = email.map(str::trim).filter(|email| !email.is_empty()) {
+        body["email"] = serde_json::Value::String(email.to_string());
+    }
+    let response = account_http_client()?
+        .post(format!("{origin}/api/account/v1/machine-requests"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| EnrollError::local("ACCOUNT_UNREACHABLE", error.to_string()))?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| EnrollError::local("ACCOUNT_UNREACHABLE", error.to_string()))?;
+    if !(200..300).contains(&status) {
+        return Err(EnrollError::remote(status, &body));
+    }
+    serde_json::from_str(&body)
+        .map_err(|error| EnrollError::local("ACCOUNT_BAD_RESPONSE", error.to_string()))
+}
+
+/// Polls one machine request. `slow_down` is an answer, not an error; an expired request is
+/// the structured `MACHINE_REQUEST_EXPIRED` error.
+pub async fn poll_machine_request(
+    account_origin: &str,
+    device_code: &str,
+) -> Result<MachineRequestPoll, EnrollError> {
+    let origin = account_origin.trim_end_matches('/');
+    let response = account_http_client()?
+        .post(format!("{origin}/api/account/v1/machine-requests/poll"))
+        .json(&serde_json::json!({ "deviceCode": device_code }))
+        .send()
+        .await
+        .map_err(|error| EnrollError::local("ACCOUNT_UNREACHABLE", error.to_string()))?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| EnrollError::local("ACCOUNT_UNREACHABLE", error.to_string()))?;
+    parse_machine_request_poll(status, &body)
+}
+
+/// Classifies one poll response by its HTTP status and structured body.
+#[allow(clippy::result_large_err)]
+pub fn parse_machine_request_poll(status: u16, body: &str) -> Result<MachineRequestPoll, EnrollError> {
+    if !(200..300).contains(&status) {
+        let error = EnrollError::remote(status, body);
+        let rfc_error = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| value.get("error").and_then(|error| error.as_str()).map(str::to_string));
+        if error.code == MACHINE_REQUEST_SLOW_DOWN
+            || rfc_error.as_deref() == Some(MACHINE_REQUEST_SLOW_DOWN)
+        {
+            return Ok(MachineRequestPoll::SlowDown);
+        }
+        return Err(error);
+    }
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| EnrollError::local("ACCOUNT_BAD_RESPONSE", error.to_string()))?;
+    match value["status"].as_str() {
+        Some("pending") => Ok(MachineRequestPoll::Pending),
+        Some("denied") => Ok(MachineRequestPoll::Denied),
+        Some("approved") => value["enrollmentCode"]
+            .as_str()
+            .filter(|code| !code.is_empty())
+            .map(|code| MachineRequestPoll::Approved {
+                enrollment_code: code.to_string(),
+            })
+            .ok_or_else(|| EnrollError::local("ACCOUNT_BAD_RESPONSE", "approved poll had no enrollmentCode")),
+        other => Err(EnrollError::local(
+            "ACCOUNT_BAD_RESPONSE",
+            format!("unknown machine request status {other:?}"),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,5 +617,63 @@ mod tests {
         assert_eq!(offline.code, "ACCOUNT_UNREACHABLE");
         assert_eq!(offline.status, 0, "locally detected failures carry no HTTP status");
         assert_eq!(offline.details, None);
+    }
+
+    #[test]
+    fn machine_request_poll_classifies_every_answer() {
+        assert_eq!(
+            parse_machine_request_poll(200, r#"{"status":"pending"}"#),
+            Ok(MachineRequestPoll::Pending)
+        );
+        assert_eq!(
+            parse_machine_request_poll(200, r#"{"status":"denied"}"#),
+            Ok(MachineRequestPoll::Denied)
+        );
+        assert_eq!(
+            parse_machine_request_poll(200, r#"{"status":"approved","enrollmentCode":"abc"}"#),
+            Ok(MachineRequestPoll::Approved {
+                enrollment_code: "abc".into()
+            })
+        );
+        assert_eq!(
+            parse_machine_request_poll(400, r#"{"code":"slow_down","message":"poll slower"}"#),
+            Ok(MachineRequestPoll::SlowDown)
+        );
+        assert_eq!(
+            parse_machine_request_poll(400, r#"{"error":"slow_down"}"#),
+            Ok(MachineRequestPoll::SlowDown)
+        );
+    }
+
+    #[test]
+    fn machine_request_poll_keeps_structured_failures() {
+        let expired = parse_machine_request_poll(
+            400,
+            r#"{"code":"MACHINE_REQUEST_EXPIRED","message":"request expired"}"#,
+        )
+        .expect_err("expired is an error");
+        assert_eq!(expired.code, "MACHINE_REQUEST_EXPIRED");
+        assert_eq!(expired.status, 400);
+
+        let missing_code = parse_machine_request_poll(200, r#"{"status":"approved"}"#)
+            .expect_err("approved without a code is malformed");
+        assert_eq!(missing_code.code, "ACCOUNT_BAD_RESPONSE");
+
+        let unknown = parse_machine_request_poll(200, r#"{"status":"weird"}"#)
+            .expect_err("unknown status");
+        assert_eq!(unknown.code, "ACCOUNT_BAD_RESPONSE");
+    }
+
+    #[test]
+    fn machine_request_response_decodes_the_wire_shape() {
+        let decoded: MachineRequestClientResponse = serde_json::from_str(
+            r#"{"deviceCode":"d","userCode":"ABCD-EFGH","verificationUri":"https://a/approve","verificationUriComplete":"https://a/approve?code=ABCD-EFGH","expiresIn":900,"interval":3}"#,
+        )
+        .expect("decode");
+        assert_eq!(decoded.user_code, "ABCD-EFGH");
+        assert_eq!(decoded.verification_uri_complete, "https://a/approve?code=ABCD-EFGH");
+        assert_eq!(decoded.interval, 3);
+        assert_eq!(requested_display_name(Some("  ")), None);
+        assert_eq!(requested_display_name(Some(" box ")), Some("box".into()));
     }
 }

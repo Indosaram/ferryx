@@ -2371,6 +2371,7 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("POST", ["sessions"])
             | ("GET" | "DELETE", ["sessions", _])
             | ("GET", ["fs", "directories"])
+            | ("GET", ["fs", "repositories"])
             | ("GET" | "POST", ["workspace", "projects"])
             | ("DELETE", ["workspace", "projects", _])
             | ("GET" | "POST" | "DELETE", ["workspace", "worktrees"])
@@ -2476,6 +2477,7 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
     ];
     let allowed: &[&str] = match path.split('/').collect::<Vec<_>>().as_slice() {
         ["fs", "directories"] => &["path", "includeHidden"],
+        ["fs", "repositories"] => &["path", "depth", "includeHidden"],
         ["browser", "sessions"] | ["browser", "identify"] => &["workspaceId", "worktreeSlug"],
         ["workspace", "worktrees"] => &["workspaceId"],
         ["workspace", "worktrees", "status"] => &["workspaceId", "wsId", "slug"],
@@ -2505,6 +2507,7 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
             || !seen.insert(key.clone())
             || value.chars().any(char::is_control)
             || (key == "includeHidden" && !matches!(value.as_str(), "true" | "false"))
+            || (key == "depth" && !matches!(value.as_str(), "1" | "2" | "3" | "4"))
         {
             return Err(StatusCode::BAD_REQUEST);
         }

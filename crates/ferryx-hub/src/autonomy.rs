@@ -36,15 +36,15 @@ pub fn flag_on(raw: Option<&str>) -> bool {
 }
 
 pub fn action_loop_enabled() -> bool {
-    flag_on(std::env::var(ENABLED_ENV).ok().as_deref())
+    flag_on(crate::hub_env::var(ENABLED_ENV).ok().as_deref())
 }
 
 pub fn approval_ledger_enabled() -> bool {
-    flag_on(std::env::var(LEDGER_ENV).ok().as_deref())
+    flag_on(crate::hub_env::var(LEDGER_ENV).ok().as_deref())
 }
 
 pub fn daily_cap_from_env() -> i64 {
-    std::env::var(DAILY_CAP_ENV)
+    crate::hub_env::var(DAILY_CAP_ENV)
         .ok()
         .and_then(|value| value.trim().parse().ok())
         .filter(|value| *value > 0)
@@ -293,6 +293,14 @@ impl ActionLoop {
 
     /// Coalesces for `coalesce_window`, then flushes and executes until the task is aborted.
     pub async fn serve(self) -> Result<()> {
+        match retire_unfiltered_kakao_backlog(&self.pool).await {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(
+                items = count,
+                "KakaoTalk items triaged before the omo prefilter were retired from the action loop"
+            ),
+            Err(error) => tracing::warn!(%error, "unfiltered KakaoTalk backlog was not retired"),
+        }
         let mut deadline: Option<tokio::time::Instant> = None;
         let mut sweep = tokio::time::interval(Duration::from_secs(30));
         sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -394,42 +402,113 @@ async fn foreign_lead_items(pool: &SqlitePool, lead: &str) -> Result<Vec<String>
     Ok(rows)
 }
 
-#[derive(sqlx::FromRow)]
-struct UnseenInbox {
-    id: String,
-    source: String,
-    line: String,
-    link: Option<String>,
-    class: Option<String>,
+const KAKAO_BACKLOG_MARK: &str = "migration:2026.1022.8.1:kakao-unfiltered";
+
+/// 1022.8 stored and triaged KakaoTalk without omo's prefilter (open-chat noise rooms were never
+/// dropped), so its unseen KakaoTalk items are not omo candidates. They are marked seen once,
+/// so the action loop does not hand the lead hundreds of noise lines.
+pub async fn retire_unfiltered_kakao_backlog(pool: &SqlitePool) -> Result<u64> {
+    let done: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM action_loop_seen WHERE item_key = ?")
+        .bind(KAKAO_BACKLOG_MARK)
+        .fetch_one(pool)
+        .await?;
+    if done > 0 {
+        return Ok(0);
+    }
+    let stamp = now_rfc3339();
+    let retired = sqlx::query(
+        "INSERT OR IGNORE INTO action_loop_seen(item_key, seen_at)
+         SELECT 'inbox:' || d.item_id, ? FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
+         WHERE i.source = 'kakao' AND d.class IN ('bot', 'owner')",
+    )
+    .bind(&stamp)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    sqlx::query("INSERT OR IGNORE INTO action_loop_seen(item_key, seen_at) VALUES(?, ?)")
+        .bind(KAKAO_BACKLOG_MARK)
+        .bind(&stamp)
+        .execute(pool)
+        .await?;
+    Ok(retired)
 }
 
+/// omo-gateway's `scan_unseen_candidates`: triaged `bot`/`owner` items (never FYI, ignored or
+/// untriaged noise) and GitHub items that triage did not take, each once.
 async fn unseen_inbox(pool: &SqlitePool) -> Result<Vec<LoopItem>> {
-    let rows: Vec<UnseenInbox> = sqlx::query_as(
-        "SELECT i.id AS id, i.source AS source, COALESCE(NULLIF(i.title, ''), i.snippet) AS line, i.link AS link, d.class AS class
-         FROM inbox_items i
-         LEFT JOIN inbox_decisions d ON d.item_id = i.id
-         WHERE NOT EXISTS (
-             SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'inbox:' || i.id
-         )
-         ORDER BY i.received_at",
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(String, String, String, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT d.item_id, d.class, COALESCE(d.reason, ''), i.source, COALESCE(i.author, ''), COALESCE(i.title, ''), i.link
+         FROM inbox_decisions d
+         JOIN inbox_items i ON i.id = d.item_id
+         WHERE d.class IN ('bot', 'owner')
+           AND NOT EXISTS (SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'inbox:' || d.item_id)
+           AND NOT EXISTS (SELECT 1 FROM action_loop_outcomes o WHERE o.item_key = 'inbox:' || d.item_id)
+           AND NOT EXISTS (SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'github:' || d.item_id)
+         ORDER BY d.decided_at ASC",
     )
     .fetch_all(pool)
     .await?;
-    Ok(rows
+    let mut out: Vec<LoopItem> = rows
         .into_iter()
-        .map(|row| LoopItem {
-            item_key: format!("inbox:{}", row.id),
-            kind: if row.class.as_deref() == Some("owner") {
-                "inbox_owner".into()
+        .map(|(id, class, reason, source, author, title, link)| {
+            let author = if author.trim().is_empty() {
+                "unknown".to_owned()
             } else {
-                "inbox".into()
-            },
-            source: row.source,
-            line: row.line,
-            link: row.link,
-            attempts: 1,
+                author.trim().to_owned()
+            };
+            LoopItem {
+                item_key: format!("inbox:{id}"),
+                kind: format!("inbox_{class}"),
+                source,
+                line: format!(
+                    "content from {author}: {} ({})",
+                    one_line(&title, 120),
+                    one_line(&reason, 80)
+                ),
+                link,
+                attempts: 1,
+            }
         })
-        .collect())
+        .collect();
+    let github: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT i.id, COALESCE(i.author, ''), COALESCE(i.title, ''), i.link FROM inbox_items i
+         WHERE i.source = 'github'
+           AND NOT EXISTS (SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'github:' || i.id)
+           AND NOT EXISTS (SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'inbox:' || i.id)
+           AND NOT EXISTS (SELECT 1 FROM inbox_decisions d WHERE d.item_id = i.id AND d.class IN ('bot', 'owner'))
+         ORDER BY i.received_at ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    out.extend(
+        github
+            .into_iter()
+            .map(|(id, author, title, link)| LoopItem {
+                item_key: format!("github:{id}"),
+                kind: "github".into(),
+                source: "github".into(),
+                line: if author.trim().is_empty() {
+                    one_line(&title, 160)
+                } else {
+                    format!("content from {}: {}", author.trim(), one_line(&title, 140))
+                },
+                link,
+                attempts: 1,
+            }),
+    );
+    Ok(out)
+}
+
+fn one_line(text: &str, max: usize) -> String {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        flat
+    } else {
+        let mut cut: String = flat.chars().take(max.saturating_sub(1)).collect();
+        cut.push('…');
+        cut
+    }
 }
 
 async fn requeue_stale(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopItem>> {
@@ -484,7 +563,7 @@ pub struct Readback {
 impl Readback {
     pub fn from_env() -> Self {
         Self {
-            program: std::env::var(CALENDAR_CMD_ENV)
+            program: crate::hub_env::var(CALENDAR_CMD_ENV)
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
@@ -540,7 +619,7 @@ pub async fn record_outcome(
     }
     let proof = if status == "verified" {
         let id = external_id.ok_or_else(|| HubError::message("verified needs an external id"))?;
-        let output = tokio::process::Command::new(&readback.program)
+        let output = crate::child_env::command(&readback.program)
             .args(["cal", "get", id])
             .output()
             .await
@@ -612,8 +691,41 @@ mod tests {
         .await
         .unwrap();
         let loop_ = ActionLoop::new(pool.clone(), "lead").with_cap(24);
+        assert!(
+            loop_.flush(now).await.unwrap().is_none(),
+            "like omo, an untriaged item is not an action-loop candidate"
+        );
+        sqlx::query("INSERT INTO inbox_items(id, source, source_ref, snippet, title, received_at, raw_hash, collected_at) VALUES('i2','kakao','k2','noise','Room',?,'h2',?)")
+            .bind(now.to_rfc3339())
+            .bind(now.to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES('i2','fyi','fyi','open',?)")
+            .bind(now.to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            loop_.flush(now).await.unwrap().is_none(),
+            "FYI items stay out"
+        );
+        sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES('i1','bot','bot can reply','open',?)")
+            .bind(now.to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
         let event = loop_.flush(now).await.unwrap();
         assert!(event.is_some());
+        let body: String =
+            sqlx::query_scalar("SELECT body FROM lane_events WHERE kind = 'action_loop'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            body.starts_with("[inbox_bot:mail] content from unknown: Ping (bot can reply)"),
+            "{body}"
+        );
         assert!(loop_.flush(now).await.unwrap().is_none());
         let status: String = sqlx::query_scalar(
             "SELECT status FROM action_loop_outcomes WHERE item_key = 'inbox:i1'",
@@ -814,5 +926,28 @@ mod tests {
             self.daily_cap = cap;
             self
         }
+    }
+
+    #[tokio::test]
+    async fn the_unfiltered_kakao_backlog_is_retired_once() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = Utc::now().to_rfc3339();
+        for (id, source) in [("k1", "kakao"), ("m1", "mail")] {
+            sqlx::query("INSERT INTO inbox_items(id, source, source_ref, snippet, received_at, raw_hash, collected_at) VALUES(?,?,?,'x',?,'h',?)")
+                .bind(id).bind(source).bind(id).bind(&now).bind(&now)
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES(?, 'owner', 'r', 'open', ?)")
+                .bind(id).bind(&now)
+                .execute(&pool).await.unwrap();
+        }
+        assert_eq!(retire_unfiltered_kakao_backlog(&pool).await.unwrap(), 1);
+        assert_eq!(retire_unfiltered_kakao_backlog(&pool).await.unwrap(), 0);
+        let keys: Vec<String> = unseen_inbox(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|item| item.item_key)
+            .collect();
+        assert_eq!(keys, vec!["inbox:m1".to_owned()]);
     }
 }

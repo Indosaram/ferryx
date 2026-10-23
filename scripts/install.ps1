@@ -3,6 +3,14 @@
 # Usage:
 #   irm https://relay.ferryx.dev/install.ps1 | iex
 #   irm https://ferryx.dev/install.ps1 | iex
+#   & ([scriptblock]::Create((irm https://relay.ferryx.dev/install.ps1))) -Key <install key>
+#
+# Parameters:
+#   -Key K       install key; handed to ferryx-cli in FERRYX_INSTALL_KEY, never as an argument
+#   -KeyStdin    read the install key as exactly one line from stdin
+#   -Email E     account email hint for the approval request
+#   -NoUp        install the binary only; do not run "ferryx-cli up"
+#   -Json        pass --json to "ferryx-cli up"; its JSON summary is the last stdout line
 #
 # Custom options via environment variables:
 #   FERRYX_INSTALL_DIR : directory where ferryx-cli.exe is placed
@@ -11,8 +19,35 @@
 #                        must be https or http on loopback)
 #   FERRYX_VERSION     : specific tag version or 'latest'
 #                        (default: latest, must match ^[A-Za-z0-9._-]+$)
+#   FERRYX_INSTALL_KEY : install key (same as -Key)
 #
 # Windows PowerShell 5.1 compatible; ASCII only.
+
+param(
+    [string]$Key = "",
+    [switch]$KeyStdin,
+    [string]$Email = "",
+    [switch]$NoUp,
+    [switch]$Json
+)
+
+$FerryxInstallKey = $Key
+if ([string]::IsNullOrEmpty($FerryxInstallKey)) {
+    $FerryxInstallKey = $env:FERRYX_INSTALL_KEY
+}
+if ($KeyStdin) {
+    $FerryxInstallKey = [Console]::In.ReadLine()
+    if ([string]::IsNullOrWhiteSpace($FerryxInstallKey)) {
+        [Console]::Error.WriteLine("Error: -KeyStdin found no install key on stdin.")
+        exit 2
+    }
+}
+if ($null -eq $FerryxInstallKey) {
+    $FerryxInstallKey = ""
+}
+$FerryxInstallKey = $FerryxInstallKey.Trim()
+# Nothing launched below may inherit a key it was not explicitly handed.
+Remove-Item Env:\FERRYX_INSTALL_KEY -ErrorAction SilentlyContinue
 
 # Windows PowerShell 5.1 still negotiates TLS 1.0 on older builds; the relay and GitHub
 # only accept TLS 1.2 or newer.
@@ -394,14 +429,65 @@ try {
         }
     }
 
-    Write-Host ""
-    Write-Host "Next steps:"
-    Write-Host "  1. Start the headless daemon (from a new terminal):"
-    Write-Host "     Start-Process ferryx-cli -ArgumentList '--daemon'"
-    Write-Host ""
-    Write-Host "  2. Link your machine with your account:"
-    Write-Host ("     ferryx-cli account login --email <your-email> --origin " + $FerryxOrigin)
-    Write-Host ""
+    $nextStep = @(
+        "",
+        "Next step: link this machine with your account and start its daemon:",
+        ("  & '" + $targetExe + "' up --origin " + $FerryxOrigin),
+        ("  (with an install key: set FERRYX_INSTALL_KEY, then & '" + $targetExe + "' up --key-env --origin " + $FerryxOrigin + ")"),
+        ""
+    )
+
+    # 12. Link this machine and keep its daemon running. Progress uses Write-Host, so with -Json
+    #     the only stdout output is the JSON summary line of "ferryx-cli up --json".
+    if ($NoUp) {
+        foreach ($line in $nextStep) { Write-Host $line }
+        exit 0
+    }
+    if ([string]::IsNullOrEmpty($FerryxInstallKey) -and [string]::IsNullOrEmpty($Email) -and [Console]::IsInputRedirected) {
+        # No key, no email hint and nobody at a terminal: an approval prompt would go unseen.
+        Write-Host "No install key was given and stdin is not a terminal; skipping 'ferryx-cli up'."
+        foreach ($line in $nextStep) { Write-Host $line }
+        exit 0
+    }
+
+    $upArgs = @("up")
+    if (-not [string]::IsNullOrEmpty($FerryxInstallKey)) {
+        $upArgs += "--key-env"
+    }
+    $upArgs += @("--origin", $FerryxOrigin)
+    if (-not [string]::IsNullOrEmpty($Email)) {
+        $upArgs += @("--email", $Email)
+    }
+    if ($Json) {
+        $upArgs += "--json"
+    }
+
+    Write-Host ("--> Running: ferryx-cli " + ($upArgs -join " "))
+    $upStatus = 1
+    try {
+        if (-not [string]::IsNullOrEmpty($FerryxInstallKey)) {
+            # The key travels in the environment of this one call only, never in argv.
+            $env:FERRYX_INSTALL_KEY = $FerryxInstallKey
+        }
+        & $targetExe @upArgs
+        $upStatus = $LASTEXITCODE
+    } finally {
+        Remove-Item Env:\FERRYX_INSTALL_KEY -ErrorAction SilentlyContinue
+    }
+
+    if ($upStatus -ne 0) {
+        switch ($upStatus) {
+            2 { $upReason = "usage error" }
+            3 { $upReason = "the install key was already used, expired, or is invalid" }
+            4 { $upReason = "the account owner denied this machine" }
+            5 { $upReason = "the approval request expired" }
+            6 { $upReason = "the account's plan limit was reached" }
+            default { $upReason = "see the error above" }
+        }
+        Write-FerryxError ("ferryx-cli up failed (exit " + $upStatus + "): " + $upReason + ".")
+        Write-FerryxError ("    ferryx-cli stays installed at " + $targetExe + "; rerun it with 'up --origin " + $FerryxOrigin + "' when ready.")
+        exit $upStatus
+    }
 } finally {
     if ((-not [string]::IsNullOrEmpty($tempDir)) -and (Test-Path -LiteralPath $tempDir)) {
         Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue

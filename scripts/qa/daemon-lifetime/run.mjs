@@ -391,6 +391,8 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
   await step('leftovers', async () => {
     summary.teardown.leftovers = [
       ...(await jobs.listQaJobs()).map((j) => ({ kind: 'job', name: j })),
+      // Windows: a task-definition record of this run left in the real supervisor dir.
+      ...(jobs.listQaTaskXml ? await jobs.listQaTaskXml() : []).map((file) => ({ kind: 'task-xml', file })),
       ...(await agent.call('table')).filter((r) => r.executable && qaRoots.some((root) => r.executable.toLowerCase().startsWith(root.toLowerCase()))).map((r) => ({ kind: 'process', pid: r.pid, executable: r.executable })),
     ];
   });

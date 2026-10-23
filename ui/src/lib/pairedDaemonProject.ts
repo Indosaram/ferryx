@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { remoteHostStore, type RemoteHostStore } from "../state/remoteHostStore";
-import { decodeMachineJson, decodePairedProject, decodeU64 } from "./pairedDaemonContracts";
+import { decodeMachineJson, decodePairedProject, decodeU64, type DiscoveredRepositories } from "./pairedDaemonContracts";
 
 export interface PairedHostContext { readonly hostId: string; readonly generation: string }
 export interface WorktreeIdentity { wsId: string; slug: string }
@@ -16,6 +16,7 @@ export interface CreateSessionRequest {
 export interface CloseSessionRequest { requestId: string; daemonEpoch: string }
 export type PairedHostOperation =
   | { kind: "capabilities" } | { kind: "directories"; path?: string; includeHidden: boolean }
+  | { kind: "discoverRepos"; path?: string; depth?: number; includeHidden: boolean }
   | { kind: "projects" } | { kind: "registerProject"; request: RegisterProjectRequest }
   | { kind: "unregisterProject"; workspaceId: string; request: UnregisterProjectRequest }
   | { kind: "worktrees"; workspaceId: string }
@@ -49,6 +50,15 @@ function desktopId(value: unknown): string {
 function json(kind: string, value: unknown) { return decodeMachineJson(kind, JSON.stringify(value)); }
 function capabilities(value: unknown) { const v = json("capabilities", value); if (!("apiVersion" in v) || v.apiVersion === undefined) return invalid(); return v; }
 function directories(value: unknown) { const v = json("directories", value); if (!("homePath" in v) || v.homePath === undefined) return invalid(); return v; }
+function discoveredRepos(value: unknown, hostId: string): DiscoveredRepositories {
+  const v = json("repositories", value);
+  if (!("repos" in v) || v.repos === undefined) return invalid();
+  for (const row of v.repos) {
+    if (row.target.hostId !== hostId) return invalid("CROSS_HOST_RESULT");
+    if (row.remoteWorkspaceId !== null) remoteId(row.remoteWorkspaceId);
+  }
+  return v;
+}
 function projectMetadata(value: unknown) { const v = json("project", value); if (!("availability" in v) || v.availability === undefined) return invalid(); return v; }
 function projectList(value: unknown) { const v = json("projects", value); if (!("projects" in v) || v.projects === undefined) return invalid(); return v; }
 function worktrees(value: unknown) { const v = json("worktrees", value); if (!("worktrees" in v) || v.worktrees === undefined) return invalid(); return v; }
@@ -72,7 +82,7 @@ function mappedProjects(value: unknown, hostId: string) {
     unavailableWorkspaceIds: list.unavailableWorkspaceIds.map(desktopId) };
 }
 const requiredCapability = {
-  directories: "directoryBrowseV1", projects: "machineWorkspaceV1", registerProject: "machineWorkspaceV1",
+  directories: "directoryBrowseV1", discoverRepos: "repoDiscoveryV1", projects: "machineWorkspaceV1", registerProject: "machineWorkspaceV1",
   unregisterProject: "machineWorkspaceV1", worktrees: "managedWorktreesV1", worktreeStatus: "managedWorktreesV1",
   createWorktree: "managedWorktreesV1", deleteWorktree: "managedWorktreesV1", sessions: "terminalCreateV1",
   session: "terminalCreateV1", createSession: "terminalCreateV1", closeSession: "terminalCreateV1", operation: "machineWorkspaceV1",
@@ -159,6 +169,10 @@ export function createPairedDaemonProjectAdapter(
       return result;
     }),
     directories: (path?: string, includeHidden = false) => execute({ kind: "directories", path, includeHidden }, directories),
+    discoverRepos: (path?: string, options: { depth?: number; includeHidden?: boolean } = {}) => {
+      if (options.depth !== undefined && (!Number.isInteger(options.depth) || options.depth < 1 || options.depth > 4)) return Promise.reject(new PairedOperationError("INVALID_REQUEST"));
+      return execute({ kind: "discoverRepos", path, depth: options.depth, includeHidden: options.includeHidden ?? false }, value => discoveredRepos(value, hostId));
+    },
     projects: () => execute({ kind: "projects" }, value => mappedProjects(value, hostId)),
     registerProject: (request: RegisterProjectRequest) => execute({ kind: "registerProject", request }, value => pairedProject(value, hostId)),
     unregisterProject: (workspaceId: string, request: UnregisterProjectRequest) => execute({ kind: "unregisterProject", workspaceId, request }, noContent),

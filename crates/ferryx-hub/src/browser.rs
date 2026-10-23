@@ -15,9 +15,9 @@ use crate::error::{HubError, Result};
 const DEFAULT_PORT: u16 = 9333;
 
 pub fn cdp_port() -> u16 {
-    std::env::var("FERRYX_HUB_CDP_PORT")
+    crate::hub_env::var("FERRYX_HUB_CDP_PORT")
         .ok()
-        .or_else(|| std::env::var("OMON_BROWSER_CDP_PORT").ok())
+        .or_else(|| crate::hub_env::var("OMON_BROWSER_CDP_PORT").ok())
         .and_then(|value| value.trim().parse().ok())
         .unwrap_or(DEFAULT_PORT)
 }
