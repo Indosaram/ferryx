@@ -251,10 +251,16 @@ fn omo_plist_path() -> std::path::PathBuf {
 
 /// Imports omo's launchd `EnvironmentVariables` into the hub env file so the hub does not
 /// depend on the daemon's launchd environment. Prints key names only, never values.
+///
+/// `DISCORD_*` keys are skipped (their names go to stderr): Discord stays off unless
+/// `FERRYX_HUB_DISCORD=1` is set by hand.
 fn import_omo_env(plist: &std::path::Path) -> Result<Vec<String>, String> {
     let dest = ferryx_hub::hub_env::env_file_path().ok_or("HOME is not set")?;
-    let incoming =
+    let mut incoming =
         ferryx_hub::hub_env::plist_environment(plist).map_err(|error| error.to_string())?;
+    for key in ferryx_hub::hub_env::drop_discord_keys(&mut incoming) {
+        eprintln!("skipped {key} (Discord is enabled only by FERRYX_HUB_DISCORD=1)");
+    }
     ferryx_hub::hub_env::write_merged(&dest, &incoming).map_err(|error| error.to_string())?;
     Ok(incoming.keys().cloned().collect())
 }
@@ -516,7 +522,7 @@ fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
         #[cfg(not(feature = "hub-slack"))]
         slack: None,
         #[cfg(feature = "hub-discord")]
-        discord_configured: ferryx_hub::chat::discord::bot_token().is_some(),
+        discord_configured: ferryx_hub::chat::discord::active_bot_token().is_some(),
         #[cfg(not(feature = "hub-discord"))]
         discord_configured: false,
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -584,15 +590,76 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             tracing::warn!(%error, "hub http stopped");
         }
     }));
-    if let Some(url) = (!launch.config.supervisor_pane).then(|| launch.config.supervisor_listen_url.clone()).flatten() {
-        let command = launch.config.supervisor_command.clone();
+    // The omo app-server answers Slack messages (one turn per Slack thread), as it did under
+    // omo-gateway. It is supervised unless the supervisor pane preset is used instead, or
+    // FERRYX_HUB_SLACK_TURNS=0 turns the path off.
+    let slack_turns = !launch.config.supervisor_pane
+        && !matches!(
+            ferryx_hub::hub_env::var("FERRYX_HUB_SLACK_TURNS").ok().as_deref().map(str::trim),
+            Some("0" | "off" | "false" | "no")
+        );
+    let omo_url = launch.config.supervisor_listen_url.clone().or_else(|| {
+        slack_turns.then(|| ferryx_hub::cron_exec::OMO_APP_SERVER.to_owned())
+    });
+    if let Some(url) = (!launch.config.supervisor_pane).then_some(omo_url).flatten() {
         let state_dir = ferryx_hub::meta::supervisor::state_dir_from_home().unwrap_or_else(|| std::path::PathBuf::from(".ferryx/hub"));
+        let probe = ferryx_hub::meta::supervisor::DaemonSupervisor::new(url.clone(), Vec::new(), state_dir.clone());
+        let token_path = match probe.ensure_token_file() {
+            Ok(path) => Some(path),
+            Err(error) => {
+                tracing::warn!(%error, "omo app-server token file was not written");
+                None
+            }
+        };
+        let command = if !launch.config.supervisor_command.is_empty() {
+            launch.config.supervisor_command.clone()
+        } else if let Some(path) = &token_path {
+            ferryx_hub::meta::supervisor::app_server_command(&ferryx_hub::meta::supervisor::omo_bin(), &url, path)
+        } else {
+            Vec::new()
+        };
+        #[cfg(feature = "hub-slack")]
+        if slack_turns {
+            let owner = launch.config.owner_slack_id.clone();
+            let config = ferryx_hub::chat::slack_turn::SlackTurnConfig::from_env(&url, token_path.clone(), owner.as_deref());
+            tracing::info!(
+                url = %url,
+                workspace = config.omo.workspace.is_some(),
+                idle_secs = config.omo.idle_timeout.as_secs(),
+                total_secs = config.omo.total_timeout.as_secs(),
+                "slack turn path is armed (omo app-server)"
+            );
+            ferryx_hub::chat::slack_turn::install(config);
+        }
         tasks.push(tokio::spawn(async move {
             let supervisor = ferryx_hub::meta::supervisor::DaemonSupervisor::new(url, command, state_dir);
-            if let Err(error) = supervisor.ensure().await {
-                tracing::warn!(%error, "omo app-server was not started");
-            } else {
-                tracing::info!("omo app-server backend is armed");
+            let mut announced = false;
+            let mut backoff = std::time::Duration::from_secs(5);
+            loop {
+                match supervisor.ensure().await {
+                    Ok(pid) => {
+                        if supervisor.wait_responsive(std::time::Duration::from_secs(60)).await {
+                            if !announced {
+                                tracing::info!(pid = ?pid, "omo app-server is ready");
+                                announced = true;
+                            }
+                            backoff = std::time::Duration::from_secs(5);
+                        } else {
+                            tracing::warn!(pid = ?pid, "omo app-server did not start listening");
+                            announced = false;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "omo app-server was not started");
+                        announced = false;
+                    }
+                }
+                tokio::time::sleep(backoff).await;
+                if !supervisor.responsive().await {
+                    backoff = (backoff * 2).min(std::time::Duration::from_secs(300));
+                } else {
+                    backoff = std::time::Duration::from_secs(15);
+                }
             }
         }));
     }
@@ -665,7 +732,11 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         }));
     }
     #[cfg(feature = "hub-discord")]
-    if ferryx_hub::chat::discord::bot_token().is_some() {
+    if ferryx_hub::chat::discord::bot_token().is_some() && !ferryx_hub::chat::discord::enabled() {
+        tracing::info!("discord is off (set FERRYX_HUB_DISCORD=1 to enable it)");
+    }
+    #[cfg(feature = "hub-discord")]
+    if ferryx_hub::chat::discord::active_bot_token().is_some() {
         let discord_bridge = launch.bridge.clone();
         let discord_profiles = launch.profiles.clone();
         let discord_meta = launch.meta_session_id.clone();
