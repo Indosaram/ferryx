@@ -31,7 +31,7 @@ pub fn gateway_intents(voice_receive: bool) -> u64 {
 
 pub fn voice_receive_from_env() -> bool {
     matches!(
-        std::env::var("DISCORD_VOICE_RECEIVE")
+        crate::hub_env::var("DISCORD_VOICE_RECEIVE")
             .ok()
             .map(|value| value.trim().to_ascii_lowercase())
             .as_deref(),

@@ -382,7 +382,7 @@ static GATEWAY_EVENTS: std::sync::OnceLock<tokio::sync::mpsc::Sender<InboxWatche
     std::sync::OnceLock::new();
 
 pub fn inbox_enabled() -> bool {
-    std::env::var("OMON_INBOX_ENABLED")
+    crate::hub_env::var("OMON_INBOX_ENABLED")
         .map(|value| !matches!(value.to_lowercase().as_str(), "0" | "false" | "no"))
         .unwrap_or(true)
 }
@@ -587,12 +587,17 @@ pub async fn fetch_kind(
     match kind {
         SourceKind::Imessage => fetch_imessage_with("imsg", cursor).await.map(Some),
         SourceKind::Mail => {
-            let account = mail_account_from(std::env::var("OMON_MAIL_ACCOUNT").ok().as_deref());
+            let account =
+                mail_account_from(crate::hub_env::var("OMON_MAIL_ACCOUNT").ok().as_deref());
             fetch_mail_with("zele", cursor, &account).await.map(Some)
         }
         SourceKind::Kakao => fetch_kakao(cursor).await.map(Some),
         SourceKind::Github => {
-            if !github_enabled_from(std::env::var("OMON_GITHUB_SOURCE_ENABLED").ok().as_deref()) {
+            if !github_enabled_from(
+                crate::hub_env::var("OMON_GITHUB_SOURCE_ENABLED")
+                    .ok()
+                    .as_deref(),
+            ) {
                 return Ok(None);
             }
             fetch_github_with("gh", cursor).await.map(Some)
@@ -643,12 +648,12 @@ async fn fetch_gateway(
 }
 
 pub async fn fetch_kakao(cursor: Option<&str>) -> Result<(Vec<SourceItem>, String)> {
-    let base = std::env::var("OMON_PIRATETALK_URL")
+    let base = crate::hub_env::var("OMON_PIRATETALK_URL")
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "https://indo.taila0cef2.ts.net".to_owned());
-    let rooms = std::env::var("OMON_INBOX_KAKAO_ROOMS").ok();
+    let rooms = crate::hub_env::var("OMON_INBOX_KAKAO_ROOMS").ok();
     fetch_kakao_at(&base, rooms.as_deref(), cursor).await
 }
 
@@ -812,6 +817,9 @@ pub async fn spawn(pool: SqlitePool) -> Result<()> {
 /// How long a watcher process must stay up before its health reads `running`.
 pub const WATCHER_RUNNING_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// How often a running watcher refreshes its `running` health row.
+pub const WATCHER_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(60);
+
 async fn write_watcher_health(pool: &SqlitePool, source: &str, status: &str, detail: Option<&str>) {
     let _ = sqlx::query(
         "INSERT INTO inbox_watcher_health(source, status, detail, updated_at) VALUES(?,?,?,?)
@@ -844,14 +852,16 @@ async fn supervise_command<F, Fut>(
         tokio::pin!(run);
         let running_mark = tokio::time::sleep(WATCHER_RUNNING_AFTER);
         tokio::pin!(running_mark);
-        let mut marked_running = false;
         let outcome = loop {
             tokio::select! {
                 exit = &mut run => break exit,
                 // A watcher that stays up past the mark started fine: replace a stale failure.
-                _ = &mut running_mark, if !marked_running => {
-                    marked_running = true;
+                // The mark repeats every heartbeat so the row stays current while it runs.
+                _ = &mut running_mark => {
                     write_watcher_health(pool, source, "running", None).await;
+                    running_mark
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + WATCHER_HEARTBEAT);
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
@@ -917,7 +927,7 @@ async fn run_imsg_once(
 }
 
 async fn run_mail_once(sender: &tokio::sync::mpsc::Sender<InboxWatcherEvent>) -> WatcherExit {
-    let account = mail_account_from(std::env::var("OMON_MAIL_ACCOUNT").ok().as_deref());
+    let account = mail_account_from(crate::hub_env::var("OMON_MAIL_ACCOUNT").ok().as_deref());
     let args = mail_watch_command(&account);
     run_lines(
         "zele",

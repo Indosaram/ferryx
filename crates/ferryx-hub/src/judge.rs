@@ -46,7 +46,7 @@ impl Choice {
 /// Replaces a home directory and obvious token shapes before text leaves the machine.
 pub fn scrub_for_external(input: &str) -> String {
     let mut scrubbed = input.to_owned();
-    if let Ok(home) = std::env::var("HOME") {
+    if let Ok(home) = crate::hub_env::var("HOME") {
         if !home.is_empty() {
             scrubbed = scrubbed.replace(&home, "~");
         }
@@ -71,7 +71,7 @@ pub fn typesafe_env(config: &BTreeMap<String, String>) -> Vec<(String, String)> 
 pub fn typesafe_from_env() -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for key in ["TYPESAFE_API_KEY", "TYPESAFE_URL", "TYPESAFE_MODEL"] {
-        if let Ok(value) = std::env::var(key) {
+        if let Ok(value) = crate::hub_env::var(key) {
             let value = value.trim().to_owned();
             if !value.is_empty() {
                 map.insert(key.to_owned(), value);
@@ -85,7 +85,7 @@ pub fn default_judge_bin() -> PathBuf {
     let on_path = std::env::split_paths(crate::child_env::child_path())
         .any(|dir| dir.join("typesafe-judge").is_file());
     if !on_path {
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = crate::hub_env::var_os("HOME") {
             let cargo = Path::new(&home).join(".cargo/bin/typesafe-judge");
             if cargo.is_file() {
                 return cargo;

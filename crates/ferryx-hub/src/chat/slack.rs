@@ -25,7 +25,7 @@ pub fn api_base() -> String {
     if let Some((base, _)) = slack_test_api() {
         return base;
     }
-    std::env::var("FERRYX_HUB_SLACK_API")
+    crate::hub_env::var("FERRYX_HUB_SLACK_API")
         .ok()
         .and_then(|value| is_loopback_api(&value).then(|| value.trim_end_matches('/').to_owned()))
         .unwrap_or_else(|| "https://slack.com/api".into())
@@ -232,7 +232,7 @@ pub async fn apply_frame_with(
         }
     }
     if let (SlackFrame::Command(invocation), Some(pool)) = (&frame, pool) {
-        let url = std::env::var("FERRYX_HUB_OMO_URL")
+        let url = crate::hub_env::var("FERRYX_HUB_OMO_URL")
             .ok()
             .filter(|value| !value.trim().is_empty());
         let model = url.as_deref().map(crate::meta::backend::UrlModel::new);
@@ -246,7 +246,7 @@ pub async fn apply_frame_with(
             control,
             meta_session_id,
             huddle_enabled: matches!(
-                std::env::var("OMON_SLACK_HUDDLE_ENABLED")
+                crate::hub_env::var("OMON_SLACK_HUDDLE_ENABLED")
                     .ok()
                     .as_deref()
                     .map(str::trim)
@@ -798,7 +798,8 @@ async fn attach_voice_reply(
 ) -> Result<bool> {
     #[cfg(all(feature = "hub-slack", feature = "hub-voice"))]
     {
-        let settings = crate::voice::VoiceSettings::from_lookup(&|name| std::env::var(name).ok());
+        let settings =
+            crate::voice::VoiceSettings::from_lookup(&|name| crate::hub_env::var(name).ok());
         if !settings.slack_voice_reply() {
             return Ok(false);
         }

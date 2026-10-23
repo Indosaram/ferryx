@@ -700,8 +700,14 @@ pub struct ClaimedJob {
     pub id: String,
     /// `next_run_at` captured before the claim clears it. That instant is `last_occurrence`.
     pub occurrence: Option<String>,
+    /// The `cron_runs` row this claim opened. The run is finished by this id only.
+    pub run_id: String,
 }
 
+/// Claims every due job for `owner_pid`. A job is claimed by one conditional UPDATE that
+/// clears `next_run_at` only while it still holds the occurrence this scheduler read, so two
+/// schedulers on one database (a draining predecessor next to its successor) never both run
+/// the same occurrence: the loser's UPDATE changes no row and it opens no run.
 pub async fn claim_due(
     pool: &SqlitePool,
     now: DateTime<Utc>,
@@ -717,6 +723,25 @@ pub async fn claim_due(
     .await?;
     let mut claimed = Vec::new();
     for (id, occurrence) in rows {
+        let Some(observed) = occurrence.clone() else {
+            continue;
+        };
+        let mut tx = pool.begin().await?;
+        let won = sqlx::query(
+            "UPDATE scheduled_jobs SET next_run_at = NULL, updated_at = ? WHERE id = ? AND enabled = 1 AND next_run_at = ?",
+        )
+        .bind(&now_text)
+        .bind(&id)
+        .bind(&observed)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        if !won {
+            tx.rollback().await?;
+            tracing::debug!(job_id = %id, "cron occurrence was claimed by another scheduler");
+            continue;
+        }
         let run_id = uuid::Uuid::new_v4().to_string();
         sqlx::query("INSERT INTO cron_runs(id, job_id, status, owner_pid, lease_until, started_at) VALUES(?,?, 'running', ?, ?, ?)")
             .bind(&run_id)
@@ -724,14 +749,14 @@ pub async fn claim_due(
             .bind(owner_pid)
             .bind(&lease)
             .bind(&now_text)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE scheduled_jobs SET next_run_at = NULL, updated_at = ? WHERE id = ?")
-            .bind(&now_text)
-            .bind(&id)
-            .execute(pool)
-            .await?;
-        claimed.push(ClaimedJob { id, occurrence });
+        tx.commit().await?;
+        claimed.push(ClaimedJob {
+            id,
+            occurrence,
+            run_id,
+        });
     }
     Ok(claimed)
 }
@@ -797,6 +822,7 @@ fn increment_repeat_completed(payload: &mut Value) -> (Option<u64>, u64) {
 pub async fn finish_run(
     pool: &SqlitePool,
     job_id: &str,
+    run_id: &str,
     ok: bool,
     error: Option<&str>,
     output: &str,
@@ -805,12 +831,13 @@ pub async fn finish_run(
     let now = Utc::now();
     let status = if ok { "succeeded" } else { "failed" };
     sqlx::query(
-        "UPDATE cron_runs SET status = ?, finished_at = ?, error = ?, output = ? WHERE job_id = ? AND status = 'running'",
+        "UPDATE cron_runs SET status = ?, finished_at = ?, error = ?, output = ? WHERE id = ? AND job_id = ?",
     )
     .bind(status)
     .bind(now.to_rfc3339())
     .bind(error)
     .bind(output)
+    .bind(run_id)
     .bind(job_id)
     .execute(pool)
     .await?;
@@ -1001,7 +1028,7 @@ pub async fn drive_due_now(pool: &SqlitePool) -> Result<Vec<DueDelivery>> {
 }
 
 fn cron_model() -> crate::meta::backend::UrlModel {
-    let url = std::env::var("FERRYX_HUB_OMO_URL")
+    let url = crate::hub_env::var("FERRYX_HUB_OMO_URL")
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
@@ -1010,10 +1037,10 @@ fn cron_model() -> crate::meta::backend::UrlModel {
 }
 
 fn skills_root_from_env() -> Option<std::path::PathBuf> {
-    if let Some(root) = std::env::var_os("HERMES_HOME") {
+    if let Some(root) = crate::hub_env::var_os("HERMES_HOME") {
         return Some(std::path::PathBuf::from(root).join("skills"));
     }
-    std::env::var_os("HOME").map(|home| {
+    crate::hub_env::var_os("HOME").map(|home| {
         std::path::PathBuf::from(home)
             .join(".hermes")
             .join("skills")
@@ -1045,6 +1072,7 @@ pub async fn drive_due_with(
     for ClaimedJob {
         id: job_id,
         occurrence,
+        run_id,
     } in claimed
     {
         let payload_json: Option<String> =
@@ -1052,13 +1080,7 @@ pub async fn drive_due_with(
                 .bind(&job_id)
                 .fetch_optional(pool)
                 .await?;
-        let run_id: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM cron_runs WHERE job_id = ? AND status = 'running' ORDER BY started_at DESC LIMIT 1",
-        )
-        .bind(&job_id)
-        .fetch_optional(pool)
-        .await?;
-        let (Some(payload_json), Some(run_id)) = (payload_json, run_id) else {
+        let Some(payload_json) = payload_json else {
             continue;
         };
         let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
@@ -1082,6 +1104,7 @@ pub async fn drive_due_with(
         finish_run(
             pool,
             &job_id,
+            &run_id,
             ok,
             error.as_deref(),
             &output,
@@ -1263,7 +1286,7 @@ async fn record_problem(
     .bind(&now)
     .execute(pool)
     .await?;
-    let lead = std::env::var("OMON_LANE_DEFAULT_LEAD")
+    let lead = crate::hub_env::var("OMON_LANE_DEFAULT_LEAD")
         .ok()
         .filter(|lead| !lead.trim().is_empty())
         .unwrap_or_else(|| "meta".into());
@@ -1652,6 +1675,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_schedulers_on_one_database_claim_an_occurrence_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferryx-claim-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hub.sqlite");
+        let first = crate::storage::connect(&path).await.unwrap();
+        let second = crate::storage::connect(&path).await.unwrap();
+        for round in 0..20 {
+            let due = (Utc::now() - TimeDelta::minutes(1)).to_rfc3339();
+            sqlx::query("INSERT OR REPLACE INTO scheduled_jobs(id, expression, payload_json, enabled, next_run_at, delivery_json) VALUES('job','every 5m','{}',1,?, '[]')")
+                .bind(&due)
+                .execute(&first)
+                .await
+                .unwrap();
+            let now = Utc::now();
+            let (a, b) = tokio::join!(claim_due(&first, now, 111), claim_due(&second, now, 222));
+            let total = a.unwrap().len() + b.unwrap().len();
+            assert_eq!(
+                total, 1,
+                "round {round}: one scheduler claims the occurrence"
+            );
+        }
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cron_runs WHERE job_id = 'job'")
+            .fetch_one(&first)
+            .await
+            .unwrap();
+        assert_eq!(runs, 20);
+        first.close().await;
+        second.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn finishing_a_run_updates_only_that_run() {
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled, next_run_at, delivery_json) VALUES('job','every 5m','{}',1,NULL, '[]')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (id, pid) in [("mine", 1_i64), ("theirs", 2)] {
+            sqlx::query("INSERT INTO cron_runs(id, job_id, status, owner_pid, started_at) VALUES(?, 'job', 'running', ?, ?)")
+                .bind(id)
+                .bind(pid)
+                .bind(Utc::now().to_rfc3339())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        finish_run(&pool, "job", "mine", true, None, "done", None)
+            .await
+            .unwrap();
+        let rows: Vec<(String, String, Option<String>)> =
+            sqlx::query_as("SELECT id, status, output FROM cron_runs ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows[0],
+            ("mine".into(), "succeeded".into(), Some("done".into()))
+        );
+        assert_eq!(rows[1].0, "theirs");
+        assert_eq!(rows[1].1, "running");
+    }
+
+    #[tokio::test]
     async fn a_due_job_is_claimed_once_and_a_failure_opens_an_incident() {
         let pool = crate::storage::memory().await.unwrap();
         let due = (Utc::now() - TimeDelta::minutes(1)).to_rfc3339();
@@ -1671,9 +1762,17 @@ mod tests {
         let occurrence = claimed[0].occurrence.clone();
         assert_eq!(occurrence.as_deref(), Some(due.as_str()));
         assert!(claim_due(&pool, Utc::now(), 9).await.unwrap().is_empty());
-        finish_run(&pool, "job", false, Some("boom"), "", occurrence.as_deref())
-            .await
-            .unwrap();
+        finish_run(
+            &pool,
+            "job",
+            &claimed[0].run_id,
+            false,
+            Some("boom"),
+            "",
+            occurrence.as_deref(),
+        )
+        .await
+        .unwrap();
         let incidents: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM cron_incidents WHERE job_id = 'job'")
                 .fetch_one(&pool)

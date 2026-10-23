@@ -12,7 +12,7 @@ pub fn receive_watchdog_threshold_from(raw: Option<&str>) -> u64 {
 
 pub fn receive_watchdog_threshold() -> u64 {
     receive_watchdog_threshold_from(
-        std::env::var("OMON_DISCORD_RECEIVE_WATCHDOG_SECS")
+        crate::hub_env::var("OMON_DISCORD_RECEIVE_WATCHDOG_SECS")
             .ok()
             .as_deref(),
     )

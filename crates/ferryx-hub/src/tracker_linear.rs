@@ -810,7 +810,7 @@ async fn open_delegated_lane(
             .map(|duration| duration.subsec_nanos() & 0xffff)
             .unwrap_or(1)
     ));
-    let brief_dir = std::env::var("OMON_TRACKER_BRIEF_DIR")
+    let brief_dir = crate::hub_env::var("OMON_TRACKER_BRIEF_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir().join("ferryx-tracker-briefs"));
     tokio::fs::create_dir_all(&brief_dir)

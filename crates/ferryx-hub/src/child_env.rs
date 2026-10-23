@@ -26,18 +26,18 @@ static CHILD_PATH: OnceLock<OsString> = OnceLock::new();
 /// Later calls return the first result.
 pub fn init() -> &'static OsString {
     CHILD_PATH.get_or_init(|| {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let shell = std::env::var_os("SHELL")
+        let home = crate::hub_env::var_os("HOME").map(PathBuf::from);
+        let shell = crate::hub_env::var_os("SHELL")
             .filter(|shell| !shell.is_empty())
             .unwrap_or_else(|| OsString::from(default_shell()));
         let login = login_shell_path(Path::new(&shell), LOGIN_SHELL_TIMEOUT);
         if login.is_none() {
             tracing::warn!(shell = %Path::new(&shell).display(), "login shell PATH was not read; using the current PATH plus the well-known tool directories");
         }
-        let extra = std::env::var_os("FERRYX_HUB_EXTRA_PATH")
-            .or_else(|| std::env::var_os("OMON_EXTRA_PATH"))
-            .or_else(|| std::env::var_os("EXTRA_PATH"));
-        let current = std::env::var_os("PATH");
+        let extra = crate::hub_env::var_os("FERRYX_HUB_EXTRA_PATH")
+            .or_else(|| crate::hub_env::var_os("OMON_EXTRA_PATH"))
+            .or_else(|| crate::hub_env::var_os("EXTRA_PATH"));
+        let current = crate::hub_env::var_os("PATH");
         let path = build_child_path(
             extra.as_deref(),
             login.as_deref(),
@@ -54,10 +54,12 @@ pub fn child_path() -> &'static OsStr {
     init().as_os_str()
 }
 
-/// `tokio::process::Command` for `program` with the hub child PATH. A bare program name is
+/// `tokio::process::Command` for `program` with the hub child PATH and the hub env file
+/// entries the daemon does not set ([`crate::hub_env::child_env`]). A bare program name is
 /// looked up in that PATH (std searches the PATH set on the command, not the daemon's).
 pub fn command(program: impl AsRef<OsStr>) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(program);
+    command.envs(crate::hub_env::child_env());
     command.env("PATH", child_path());
     command
 }
@@ -65,6 +67,7 @@ pub fn command(program: impl AsRef<OsStr>) -> tokio::process::Command {
 /// Blocking variant of [`command`].
 pub fn std_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
+    command.envs(crate::hub_env::child_env());
     command.env("PATH", child_path());
     command
 }

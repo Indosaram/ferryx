@@ -121,7 +121,7 @@ pub fn observe(frame: &Value) {
 }
 
 pub async fn answer(data: &Value) -> Result<String, String> {
-    let settings = VoiceSettings::from_lookup(&|name| std::env::var(name).ok());
+    let settings = VoiceSettings::from_lookup(&|name| crate::hub_env::var(name).ok());
     match voice_subcommand(data).unwrap_or("") {
         "leave" => leave(&settings, interaction_guild(data)).await,
         "join" => join(&settings, data).await,

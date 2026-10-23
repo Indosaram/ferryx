@@ -72,8 +72,8 @@ pub fn turn_start_request(thread_id: &str, user_prompt: &str, model: Option<&str
     if let Some(model) = model {
         params["model"] = json!(model);
     }
-    let effort = std::env::var("OMON_DEFAULT_EFFORT")
-        .or_else(|_| std::env::var("DEFAULT_EFFORT"))
+    let effort = crate::hub_env::var("OMON_DEFAULT_EFFORT")
+        .or_else(|_| crate::hub_env::var("DEFAULT_EFFORT"))
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())

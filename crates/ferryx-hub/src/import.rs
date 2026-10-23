@@ -320,7 +320,7 @@ pub async fn migrate_from_omo(
         .bind(source.to_string_lossy().as_ref())
         .execute(pool)
         .await?;
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::hub_env::var_os("HOME").map(PathBuf::from);
     remember_working_directory(pool, &omo_working_directory(source, home.as_deref())).await?;
     from.close().await;
     Ok(ImportReport {

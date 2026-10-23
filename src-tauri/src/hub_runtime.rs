@@ -113,7 +113,7 @@ impl AgentControl for DaemonBridge {
 #[async_trait]
 impl TaskLauncher for DaemonBridge {
     async fn launch_pane(&self, cwd: &str, command: &[String]) -> Result<String, HubError> {
-        let workspace = std::env::var("FERRYX_HUB_WORKSPACE").map_err(|_| {
+        let workspace = ferryx_hub::hub_env::var("FERRYX_HUB_WORKSPACE").map_err(|_| {
             HubError::config("FERRYX_HUB_WORKSPACE is required before the hub can launch a pane")
         })?;
         let shell = if command.is_empty() { None } else { Some(command.join(" ")) };
@@ -137,10 +137,14 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
     match rest.next().map(String::as_str) {
         Some("stop") => return hub_control(ferryx_hub::control::ControlOp::Stop),
         Some("start") => return hub_control(ferryx_hub::control::ControlOp::Start),
+        Some("env") => return hub_env_cli(&args[3.min(args.len())..]),
         Some("migrate") => {}
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
             eprintln!("       ferryx hub stop | start");
+            eprintln!(
+                "       ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
+            );
             return 2;
         }
     }
@@ -214,6 +218,13 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
                 for (name, count) in &report.tables {
                     println!("table {name} {count}");
                 }
+                let plist = omo_plist_path();
+                if !dry && plist.exists() {
+                    match import_omo_env(&plist) {
+                        Ok(keys) => println!("env_keys_imported {}", keys.len()),
+                        Err(error) => eprintln!("omo env was not imported: {error}"),
+                    }
+                }
                 0
             }
             Err(error) => {
@@ -222,6 +233,86 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             }
         }
     })
+}
+
+fn omo_plist_path() -> std::path::PathBuf {
+    home_dir().join("Library/LaunchAgents/ai.omon.gateway.plist")
+}
+
+/// Imports omo's launchd `EnvironmentVariables` into the hub env file so the hub does not
+/// depend on the daemon's launchd environment. Prints key names only, never values.
+fn import_omo_env(plist: &std::path::Path) -> Result<Vec<String>, String> {
+    let dest = ferryx_hub::hub_env::env_file_path().ok_or("HOME is not set")?;
+    let incoming =
+        ferryx_hub::hub_env::plist_environment(plist).map_err(|error| error.to_string())?;
+    ferryx_hub::hub_env::write_merged(&dest, &incoming).map_err(|error| error.to_string())?;
+    Ok(incoming.keys().cloned().collect())
+}
+
+fn hub_env_cli(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("import") => {
+            let mut plist = omo_plist_path();
+            let mut rest = args.iter().skip(1);
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--from-plist" => match rest.next() {
+                        Some(path) => plist = std::path::PathBuf::from(path),
+                        None => {
+                            eprintln!("--from-plist needs a path");
+                            return 2;
+                        }
+                    },
+                    other => {
+                        eprintln!("unknown argument {other}");
+                        return 2;
+                    }
+                }
+            }
+            match import_omo_env(&plist) {
+                Ok(keys) => {
+                    if let Some(dest) = ferryx_hub::hub_env::env_file_path() {
+                        println!("env_file {}", dest.display());
+                    }
+                    println!("imported_keys {}", keys.len());
+                    for key in keys {
+                        println!("key {key}");
+                    }
+                    println!("the running hub reads the file at its next start (handover or hub restart)");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("hub env import: {error}");
+                    1
+                }
+            }
+        }
+        Some("keys") => {
+            let Some(path) = ferryx_hub::hub_env::env_file_path() else {
+                eprintln!("HOME is not set");
+                return 1;
+            };
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    println!("env_file {}", path.display());
+                    for key in ferryx_hub::hub_env::parse_env_file(&text).keys() {
+                        println!("key {key}");
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("{}: {error}", path.display());
+                    1
+                }
+            }
+        }
+        _ => {
+            eprintln!(
+                "usage: ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
+            );
+            2
+        }
+    }
 }
 
 fn hub_control(op: ferryx_hub::control::ControlOp) -> i32 {
@@ -257,6 +348,21 @@ fn hub_control(op: ferryx_hub::control::ControlOp) -> i32 {
         let _ = (op, path);
         eprintln!("hub control uses a unix socket");
         1
+    }
+}
+
+/// Every hub task in this daemon: the generation (Slack, cron, HTTP, watchers) and the control
+/// listener. A handover commit retires it from a synchronous callback.
+static HUB_TASKS: ferryx_hub::lifecycle::TaskRegistry = ferryx_hub::lifecycle::TaskRegistry::new();
+
+/// Handover commit: this daemon keeps serving retained sessions but no longer owns the hub.
+/// Slack, the cron scheduler and sockets, `:9119`, the watchers and the control listener end
+/// here, before the successor's hub starts, so there is never a second Socket Mode connection
+/// or a second scheduler. `hub_stopped` is left as it is: the successor reads it to decide
+/// whether to open the hub.
+pub fn retire_for_handover() {
+    if let Some(aborted) = HUB_TASKS.retire() {
+        tracing::info!(aborted, "hub stopped at handover commit; the successor owns Slack, cron, :9119 and control.sock");
     }
 }
 
@@ -298,7 +404,22 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     }
     // Fail closed: a fresh or unreadable hub database does not open Slack next to omo.
     let forced_on = std::env::var("FERRYX_HUB").ok().as_deref() == Some("on");
-    let stopped = !forced_on && ferryx_hub::control::is_stopped(&hub.pool).await.unwrap_or(true);
+    let persisted_stop = ferryx_hub::control::is_stopped(&hub.pool).await.unwrap_or(true);
+    let stopped = !forced_on && persisted_stop;
+    // This daemon owns the hub from here; a later handover commit ends it again.
+    server.handover_manager.on_commit(retire_for_handover);
+    // A predecessor from before 2026.1022.7 keeps its hub through the drain. Stop it over
+    // control.sock; its stop persists hub_stopped=1, so the value read above is put back.
+    #[cfg(unix)]
+    if ferryx_hub::lifecycle::preempt_foreign_hub(&ferryx_hub::control::control_socket(&home_dir()))
+        .await
+        .is_some()
+        && !persisted_stop
+    {
+        if let Err(error) = ferryx_hub::control::clear_stopped(&hub.pool).await {
+            tracing::warn!(%error, "hub_stopped was not restored after stopping the previous hub");
+        }
+    }
     let launch = HubLaunch {
         server,
         config,
@@ -389,14 +510,11 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     let addr = launch.config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
     let router = ferryx_hub::http::router(launch.hub.pool.clone(), ferryx_hub::http::web_root());
     tasks.push(tokio::spawn(async move {
-        match tokio::net::TcpListener::bind(&addr).await {
-            Ok(listener) => {
-                tracing::info!(%addr, "hub http listening");
-                if let Err(error) = axum::serve(listener, router).await {
-                    tracing::warn!(%error, "hub http stopped");
-                }
-            }
-            Err(error) => tracing::warn!(%error, %addr, "hub http did not bind"),
+        // A draining predecessor may still hold the port; keep trying until it lets go.
+        let listener = ferryx_hub::lifecycle::bind_tcp_with_retry(&addr, Default::default()).await;
+        tracing::info!(%addr, "hub http listening");
+        if let Err(error) = axum::serve(listener, router).await {
+            tracing::warn!(%error, "hub http stopped");
         }
     }));
     if let Some(url) = (!launch.config.supervisor_pane).then(|| launch.config.supervisor_listen_url.clone()).flatten() {
@@ -416,12 +534,11 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         let home = home_dir();
         for path in ferryx_hub::schedule::native_socket_paths(&home) {
             let pool = launch.hub.pool.clone();
-            let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-            tasks.push(tokio::spawn(async move {
-                if let Err(error) = ferryx_hub::schedule::serve_native_socket(path, pool, stop_rx).await {
-                    tracing::warn!(%error, "cron socket was not bound");
-                }
-            }));
+            tasks.push(tokio::spawn(ferryx_hub::lifecycle::serve_native_socket_with_retry(
+                path,
+                pool,
+                Default::default(),
+            )));
         }
     }
     let cron_pool = launch.hub.pool.clone();
@@ -469,7 +586,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                 let owner = owner_for_frames.clone();
                 let pool = slack_pool.clone();
                 async move {
-                    if let Err(error) = ferryx_hub::chat::slack::apply_frame_with(&text, &owner, &meta, &profiles, bridge.as_ref(), Some(&pool), std::env::var("SLACK_BOT_USER_ID").ok().as_deref()).await {
+                    if let Err(error) = ferryx_hub::chat::slack::apply_frame_with(&text, &owner, &meta, &profiles, bridge.as_ref(), Some(&pool), ferryx_hub::hub_env::var("SLACK_BOT_USER_ID").ok().as_deref()).await {
                         tracing::warn!(%error, "slack frame was not applied");
                     }
                 }
@@ -531,6 +648,9 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                 tracing::warn!(%error, "action loop stopped");
             }
         }));
+    }
+    for task in &tasks {
+        HUB_TASKS.track(task);
     }
     Generation { tasks }
 }
@@ -598,12 +718,15 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
     #[cfg(unix)]
     {
         let path = ferryx_hub::control::control_socket(&home_dir());
-        tokio::spawn(async move {
-            let listener = match ferryx_hub::schedule::bind_native_socket(&path).await {
-                Ok(listener) => listener,
-                Err(error) => {
-                    tracing::warn!(%error, "hub control socket was not bound");
-                    return;
+        let control = tokio::spawn(async move {
+            let mut backoff = ferryx_hub::lifecycle::BindBackoff::default();
+            let listener = loop {
+                match ferryx_hub::lifecycle::bind_control_socket(&path).await {
+                    Ok(listener) => break listener,
+                    Err(error) => {
+                        tracing::warn!(%error, "hub control socket was not bound; retrying");
+                        tokio::time::sleep(backoff.step()).await;
+                    }
                 }
             };
             tracing::info!(path = %path.display(), "hub control socket listening");
@@ -640,6 +763,9 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                                 }
                             }
                         }
+                        Ok(ferryx_hub::control::ControlOp::Start) if HUB_TASKS.is_retired() => {
+                            "{\"status\":\"failed\",\"error\":\"this daemon handed the hub over to its successor\"}\n"
+                        }
                         Ok(ferryx_hub::control::ControlOp::Start) => {
                             match ferryx_hub::control::clear_stopped(&launch.hub.pool).await {
                                 Ok(()) => {
@@ -662,6 +788,7 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                 });
             }
         });
+        HUB_TASKS.track(&control);
     }
     #[cfg(not(unix))]
     {
