@@ -38,6 +38,10 @@ impl LaneRunner {
         let Some((status, cwd, title, done_signals, pane, brief_path)) = row else {
             return Err(HubError::message(format!("lane {key} not found")));
         };
+        // omo's runner skips a paused lane: no launch, no nudge, no claim reading.
+        if super::pause::is_paused(&self.pool, key).await? {
+            return Err(HubError::message(format!("lane {key} is paused")));
+        }
         let mut session_id = pane.unwrap_or_default();
         if status == "queued" {
             if !self.load.admit(&self.thresholds) {
@@ -190,6 +194,13 @@ mod tests {
                 lanes_max: 4,
             },
         };
+        // A paused lane is not driven: no launch, no read.
+        crate::lanes::pause::pause(&pool, "lane-g4", "session:lead")
+            .await
+            .unwrap();
+        assert!(runner.drive("lane-g4").await.is_err());
+        assert!(control.ops().is_empty());
+        crate::lanes::pause::resume(&pool, "lane-g4").await.unwrap();
         let report = runner.drive("lane-g4").await.unwrap();
         assert_eq!(report.session_id, "pane-g4");
         assert_eq!(report.status, LaneStatus::VerifiedDone);

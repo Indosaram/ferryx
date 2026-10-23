@@ -129,8 +129,7 @@ async fn sync_inner(pool: &SqlitePool) -> Result<()> {
     .fetch_optional(pool)
     .await?;
 
-    // ferryx lanes have no pause rows; the Paused state stays for imported boards.
-    let paused_lane_keys = std::collections::HashSet::<String>::new();
+    let paused_lane_keys = crate::lanes::pause::paused_keys(pool).await?;
 
     let me_user_id: Option<String> =
         sqlx::query_scalar("SELECT id FROM tracker_users WHERE is_me = 1 LIMIT 1")
@@ -545,5 +544,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn a_paused_lane_shows_paused_and_returns_to_its_status_on_resume() {
+        let pool = seeded().await;
+        sqlx::query("INSERT INTO tracker_states(id, team_id, name, type, color, position, lane_paused) VALUES('s-paused', 'agt', 'Paused', 'started', '#9b8afb', 2.5, 1)")
+            .execute(&pool).await.unwrap();
+        lane(&pool, "fix-p", "working").await;
+        sync(&pool).await.unwrap();
+        crate::lanes::pause::pause(&pool, "fix-p", "session:lead")
+            .await
+            .unwrap();
+        sync(&pool).await.unwrap();
+        assert_eq!(issue(&pool, "fix-p").await.1, "s-paused");
+        crate::lanes::pause::resume(&pool, "fix-p").await.unwrap();
+        sync(&pool).await.unwrap();
+        assert_eq!(issue(&pool, "fix-p").await.1, "s-working");
     }
 }

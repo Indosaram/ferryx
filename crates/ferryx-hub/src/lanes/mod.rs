@@ -2,6 +2,7 @@ pub mod dispatch;
 pub mod guard;
 pub mod kibitzer;
 pub mod lead;
+pub mod pause;
 pub mod posts;
 pub mod runner;
 pub mod settle;

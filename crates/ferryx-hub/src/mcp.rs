@@ -155,6 +155,16 @@ pub(crate) fn tool_list() -> Vec<Value> {
             ),
         ),
         (
+            "lane.pause",
+            "Pause a live lane: it keeps its status and is not driven until resumed.",
+            schema(json!({"key": {"type": "string"}}), &["key"]),
+        ),
+        (
+            "lane.resume",
+            "Resume a paused lane.",
+            schema(json!({"key": {"type": "string"}}), &["key"]),
+        ),
+        (
             "lane.drive",
             "Drive a lane one step: launch or nudge its pane.",
             schema(json!({"key": {"type": "string"}}), &["key"]),
@@ -329,10 +339,33 @@ async fn call_tool(
                     .fetch_all(&context.pool)
                     .await
                     .map_err(|error| error.to_string())?;
+            let paused = crate::lanes::pause::paused_keys(&context.pool)
+                .await
+                .map_err(|error| error.to_string())?;
             Ok(json!(rows
                 .into_iter()
-                .map(|(key, status, pane)| json!({"key": key, "status": status, "pane": pane}))
+                .map(|(key, status, pane)| {
+                    let is_paused = paused.contains(&key);
+                    json!({"key": key, "status": status, "pane": pane, "paused": is_paused})
+                })
                 .collect::<Vec<_>>()))
+        }
+        "lane.pause" => {
+            let key = required(args, "key")?;
+            let changed = crate::lanes::pause::pause(&context.pool, &key, "session:lead")
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(json!({"key": key, "paused": true, "changed": changed}))
+        }
+        "lane.resume" => {
+            let key = required(args, "key")?;
+            if !crate::lanes::pause::resume(&context.pool, &key)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Err(format!("NOT_PAUSED: lane {key} is not paused"));
+            }
+            Ok(json!({"key": key, "paused": false}))
         }
         "lane.transition" => {
             let key = required(args, "key")?;
