@@ -169,7 +169,12 @@ pub async fn run_button_clicks(
         .pointer("/user/id")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if user.is_empty() || user != owner_id {
+    // omo-gateway: anyone in SLACK_ALLOWED_USERS (default: the owner) may press a button.
+    if user.is_empty()
+        || !crate::config::slack_allowed_users(owner_id)
+            .iter()
+            .any(|id| id == user)
+    {
         return Err(HubError::message(NOT_AUTHORIZED));
     }
     let channel = payload
@@ -261,6 +266,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(refused.contains("권한이 없습니다"));
+        // 2026-10-23 05:05Z: with no owner configured, omo-gateway's owner still may click.
+        let mut owner_click = payload.clone();
+        owner_click["user"]["id"] = serde_json::json!("U04M1JNJM8T");
+        assert_eq!(
+            run_button_clicks(&owner_click, "", &path).await.unwrap(),
+            vec!["okpublish\n86".to_owned()]
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

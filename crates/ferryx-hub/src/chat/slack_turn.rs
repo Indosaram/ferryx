@@ -19,7 +19,6 @@ use crate::meta::omo_client::{self, OmoClientConfig, TurnRequest};
 
 pub const DEFAULT_OWNER_ID: &str = "U04M1JNJM8T";
 const PLATFORM: &str = "slack";
-const SLACK_CHUNK: usize = 3800;
 
 #[derive(Debug, Clone)]
 pub struct SlackTurnConfig {
@@ -211,10 +210,29 @@ pub async fn known_thread(pool: &SqlitePool, payload: &Value) -> bool {
     let Some(event) = payload.get("event") else {
         return false;
     };
-    let (Some(channel), Some(thread)) = (str_field(event, "channel"), reply_thread_ts(event))
-    else {
+    let Some(channel) = str_field(event, "channel") else {
         return false;
     };
+    let Some(thread) = reply_thread_ts(event) else {
+        // omo-gateway: a top-level message is known when the channel has a channel session.
+        if is_dm(event, channel) {
+            return false;
+        }
+        return sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sessions WHERE platform = 'slack' AND channel_id = ? \
+             AND (thread_id IS NULL OR thread_id = '')",
+        )
+        .bind(channel)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0)
+            > 0;
+    };
+    // omo-gateway: a thread rooted by the bot (a cron or lane report card) has no thread
+    // session yet, but a reply under it is addressed to the bot.
+    if rooted_by_bot(payload, event) {
+        return true;
+    }
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM sessions WHERE platform = 'slack' AND channel_id = ? AND thread_id = ?",
     )
@@ -224,6 +242,13 @@ pub async fn known_thread(pool: &SqlitePool, payload: &Value) -> bool {
     .await
     .unwrap_or(0)
         > 0
+}
+
+fn rooted_by_bot(payload: &Value, event: &Value) -> bool {
+    let Some(bot) = bot_user_id(payload) else {
+        return false;
+    };
+    reply_thread_ts(event).is_some() && str_field(event, "parent_user_id") == Some(bot)
 }
 
 fn seen_events() -> &'static Mutex<(HashSet<String>, VecDeque<String>)> {
@@ -289,12 +314,19 @@ async fn inherited_system_prompt(pool: &SqlitePool, key: &SessionKey) -> Option<
     .flatten()
 }
 
+/// omo-gateway writes `updated_at` as RFC 3339 with microseconds (`...+00:00`). SQLite's
+/// `CURRENT_TIMESTAMP` (`2026-10-23 05:58:20`) sorts before every omo row, so recency
+/// queries over the shared table went wrong.
+pub fn omo_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+}
+
 async fn save_state(pool: &SqlitePool, key: &SessionKey, state: &SessionState) -> Result<()> {
     let state_json = serde_json::to_string(state).unwrap_or_else(|_| "{}".into());
     sqlx::query(
-        "INSERT INTO sessions (session_key, platform, guild_id, channel_id, thread_id, user_id, state_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(session_key) DO UPDATE SET state_json = excluded.state_json, updated_at = CURRENT_TIMESTAMP",
+        "INSERT INTO sessions (session_key, platform, guild_id, channel_id, thread_id, user_id, state_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_key) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at",
     )
     .bind(key.storage_key())
     .bind(&key.platform)
@@ -303,48 +335,31 @@ async fn save_state(pool: &SqlitePool, key: &SessionKey, state: &SessionState) -
     .bind(&key.thread_id)
     .bind(&key.user_id)
     .bind(state_json)
+    .bind(omo_timestamp())
     .execute(pool)
     .await?;
     Ok(())
 }
 
-/// Splits a reply into Slack-sized pieces on line boundaries.
-pub fn chunks(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    for line in text.split_inclusive('\n') {
-        if current.len() + line.len() > SLACK_CHUNK && !current.is_empty() {
-            out.push(std::mem::take(&mut current));
-        }
-        if line.len() > SLACK_CHUNK {
-            let mut rest = line;
-            while rest.len() > SLACK_CHUNK {
-                let mut cut = SLACK_CHUNK;
-                while !rest.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                out.push(rest[..cut].to_owned());
-                rest = &rest[cut..];
-            }
-            current.push_str(rest);
-        } else {
-            current.push_str(line);
-        }
-    }
-    if !current.trim().is_empty() {
-        out.push(current);
-    }
-    out
+/// omo-gateway's egress filters before rendering: report-claim markers, then reasoning tags.
+pub fn outgoing_text(text: &str) -> String {
+    let stripped = if super::claims::report_claims_enabled() {
+        super::claims::strip_and_extract_claims(text).0
+    } else {
+        text.to_owned()
+    };
+    omo_client::filter_reasoning(&stripped)
 }
 
 async fn post(channel: &str, thread: Option<&str>, text: &str) {
-    let rendered = super::mrkdwn::to_mrkdwn(text);
-    for piece in chunks(&rendered) {
-        match super::slack::deliver(channel, thread, &piece).await {
-            Ok(true) => {}
-            Ok(false) => tracing::warn!("slack reply was not posted: no bot token"),
-            Err(error) => tracing::warn!(%error, "slack reply was not posted"),
-        }
+    let text = outgoing_text(text);
+    if text.is_empty() || omo_client::is_explicit_silence(&text) {
+        return;
+    }
+    match super::slack::deliver_omo(channel, thread, &text).await {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!("slack reply was not posted: no bot token"),
+        Err(error) => tracing::warn!(%error, "slack reply was not posted"),
     }
 }
 
@@ -369,13 +384,67 @@ pub async fn handle(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admit
     if !first_delivery(&admitted.channel, &admitted.message_ts) {
         return;
     }
-    let storage_key = admitted.key.storage_key();
-    let lock = session_lock(&storage_key);
+    let lock = session_lock(&admitted.key.storage_key());
     let _turn = lock.lock().await;
-    react(&admitted.channel, &admitted.message_ts, "eyes", true).await;
-    let mut state = load_state(pool, &admitted.key).await.unwrap_or_default();
+    run_turn(
+        config,
+        pool,
+        &admitted.key,
+        &admitted.channel,
+        admitted.reply_thread.as_deref(),
+        &admitted.text,
+        Some(&admitted.message_ts),
+    )
+    .await;
+}
+
+/// omo's system admission (`EventOrigin::System`): a lane event becomes a turn in `key`'s
+/// session and the reply is posted where that session lives (the owner DM or the home channel,
+/// top level). Returns false without running when the session already has a turn.
+pub async fn system_turn(
+    config: &'static SlackTurnConfig,
+    pool: SqlitePool,
+    key: SessionKey,
+    text: String,
+) -> bool {
+    let lock = session_lock(&key.storage_key());
+    let Ok(guard) = lock.clone().try_lock_owned() else {
+        return false;
+    };
+    tokio::spawn(async move {
+        let _turn = guard;
+        let channel = key.channel_id.clone();
+        let thread = key.thread_id.clone().filter(|thread| !thread.is_empty());
+        run_turn(
+            config,
+            &pool,
+            &key,
+            &channel,
+            thread.as_deref(),
+            &text,
+            None,
+        )
+        .await;
+    });
+    true
+}
+
+async fn run_turn(
+    config: &SlackTurnConfig,
+    pool: &SqlitePool,
+    key: &SessionKey,
+    channel_id: &str,
+    reply_thread: Option<&str>,
+    text: &str,
+    message_ts: Option<&str>,
+) {
+    let storage_key = key.storage_key();
+    if let Some(ts) = message_ts {
+        react(channel_id, ts, "eyes", true).await;
+    }
+    let mut state = load_state(pool, key).await.unwrap_or_default();
     if state.system_prompt.is_none() {
-        state.system_prompt = inherited_system_prompt(pool, &admitted.key).await;
+        state.system_prompt = inherited_system_prompt(pool, key).await;
     }
     let mut omo = config.omo.clone();
     if let Some(path) = &config.token_path {
@@ -393,43 +462,53 @@ pub async fn handle(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admit
             .clone()
             .or_else(|| config.default_model.clone()),
         toolsets: state.enabled_toolsets.clone(),
-        text: admitted.text.clone(),
+        text: text.to_owned(),
     };
     let (progress, mut interim) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let channel = admitted.channel.clone();
-    let thread = admitted.reply_thread.clone();
+    let channel = channel_id.to_owned();
+    let thread = reply_thread.map(str::to_owned);
     let relay = super::slack::spawn_carrying_test_api(async move {
         while let Some(text) = interim.recv().await {
             post(&channel, thread.as_deref(), &text).await;
         }
     });
-    tracing::info!(session = %storage_key, resume = request.thread_id.is_some(), "slack turn started on omo app-server");
+    tracing::info!(session = %storage_key, resume = request.thread_id.is_some(), system = message_ts.is_none(), "slack turn started on omo app-server");
     let started = std::time::Instant::now();
     let result = omo_client::run_turn(&omo, &request, Some(progress)).await;
     let _ = relay.await;
-    react(&admitted.channel, &admitted.message_ts, "eyes", false).await;
+    if let Some(ts) = message_ts {
+        react(channel_id, ts, "eyes", false).await;
+    }
+    let failed = |error: String| async move {
+        tracing::warn!(session = %storage_key, %error, "slack turn failed");
+        post(
+            channel_id,
+            reply_thread,
+            &format!("⚠️ omo turn failed: {error}"),
+        )
+        .await;
+        if let Some(ts) = message_ts {
+            react(channel_id, ts, "x", true).await;
+        }
+    };
     match result {
         Ok(outcome) => {
             state
                 .metadata
                 .insert("omo_thread_id".into(), json!(outcome.thread_id));
-            if let Err(error) = save_state(pool, &admitted.key, &state).await {
+            if let Err(error) = save_state(pool, key, &state).await {
                 tracing::warn!(%error, "slack session state was not saved");
             }
             match omo_client::final_reply(&outcome) {
                 Ok(reply) => {
                     if let Some(text) = &reply {
-                        post(&admitted.channel, admitted.reply_thread.as_deref(), text).await;
+                        post(channel_id, reply_thread, text).await;
                     }
-                    react(
-                        &admitted.channel,
-                        &admitted.message_ts,
-                        "white_check_mark",
-                        true,
-                    )
-                    .await;
+                    if let Some(ts) = message_ts {
+                        react(channel_id, ts, "white_check_mark", true).await;
+                    }
                     tracing::info!(
-                        session = %storage_key,
+                        session = %key.storage_key(),
                         resumed = outcome.resumed,
                         elapsed_ms = started.elapsed().as_millis() as u64,
                         interim = outcome.messages_delivered,
@@ -440,29 +519,71 @@ pub async fn handle(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admit
                         "slack turn replied"
                     );
                 }
-                Err(error) => {
-                    tracing::warn!(session = %storage_key, %error, "slack turn failed");
-                    post(
-                        &admitted.channel,
-                        admitted.reply_thread.as_deref(),
-                        &format!("⚠️ omo turn failed: {error}"),
-                    )
-                    .await;
-                    react(&admitted.channel, &admitted.message_ts, "x", true).await;
-                }
+                Err(error) => failed(error.to_string()).await,
             }
         }
-        Err(error) => {
-            tracing::warn!(session = %storage_key, %error, "slack turn failed");
-            post(
-                &admitted.channel,
-                admitted.reply_thread.as_deref(),
-                &format!("⚠️ omo turn failed: {error}"),
-            )
-            .await;
-            react(&admitted.channel, &admitted.message_ts, "x", true).await;
+        Err(error) => failed(error.to_string()).await,
+    }
+}
+
+/// omo-gateway's lane-event dispatcher on the Slack turn path: every 5s queued lane events
+/// become a system turn in the owner DM (urgent) or the home channel (routine), and owner alerts
+/// queued in `chat_outbox` are posted to their session's channel.
+pub async fn serve_lane_events(config: &'static SlackTurnConfig, pool: SqlitePool, lead: String) {
+    let judge = crate::judge::Judge::from_config(crate::judge::typesafe_from_env());
+    let mut ticks = tokio::time::interval(std::time::Duration::from_secs(5));
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticks.tick().await;
+        let turn_pool = pool.clone();
+        if let Err(error) =
+            crate::lanes::dispatch::dispatch_tick(&pool, &judge, chrono::Utc::now(), |key, text| {
+                system_turn(config, turn_pool.clone(), key, text)
+            })
+            .await
+        {
+            tracing::warn!(%error, "lane event dispatch tick failed; events remain queued");
+        }
+        if let Err(error) = drain_outbox(&pool, &lead).await {
+            tracing::warn!(%error, "slack outbox was not drained");
         }
     }
+}
+
+/// Posts queued Slack outbox rows from the last day. A row addressed to a name that is not a
+/// session key (1022.8 queued owner alerts under `meta`) goes to the lead.
+pub async fn drain_outbox(pool: &SqlitePool, lead: &str) -> Result<usize> {
+    let since = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, session_key, text FROM chat_outbox
+         WHERE delivered_at IS NULL AND platform = 'slack' AND created_at >= ? ORDER BY id",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    let mut sent = 0;
+    for (id, session_key, text) in rows {
+        let Some(key) = SessionKey::from_storage_key(&session_key)
+            .ok()
+            .or_else(|| SessionKey::from_storage_key(lead).ok())
+            .filter(|key| key.platform == PLATFORM)
+        else {
+            continue;
+        };
+        let thread = key.thread_id.as_deref().filter(|thread| !thread.is_empty());
+        match super::slack::deliver_omo(&key.channel_id, thread, &outgoing_text(&text)).await {
+            Ok(true) => {
+                super::reply::mark_delivered(pool, id).await?;
+                sent += 1;
+            }
+            Ok(false) => return Ok(sent),
+            Err(error) => {
+                tracing::warn!(%error, outbox_id = id, "slack outbox row was not posted");
+                return Ok(sent);
+            }
+        }
+    }
+    Ok(sent)
 }
 
 /// Entry from the Socket Mode frame handler. Returns false when this frame is not an event the
@@ -555,12 +676,21 @@ mod tests {
     }
 
     #[test]
-    fn long_replies_are_split_on_lines() {
+    fn replies_render_like_omo_gateway() {
         let text = format!("{}\n{}", "a".repeat(3000), "b".repeat(3000));
-        let parts = chunks(&text);
+        let parts = super::super::mrkdwn::render(&text);
         assert_eq!(parts.len(), 2);
-        assert!(parts.iter().all(|p| p.len() <= SLACK_CHUNK));
-        assert_eq!(chunks("short"), vec!["short".to_owned()]);
+        assert!(parts
+            .iter()
+            .all(|p| p.len() <= super::super::mrkdwn::MESSAGE_LIMIT));
+        assert_eq!(
+            super::super::mrkdwn::render("**done** see [docs](https://x.y)"),
+            ["*done* see <https://x.y|docs>"]
+        );
+        assert_eq!(
+            outgoing_text("<think>plan</think>Ok. [[measure [\"uptime\"] expect~\"up\"]]"),
+            "Ok."
+        );
     }
 
     #[test]

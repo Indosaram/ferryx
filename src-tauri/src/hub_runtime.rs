@@ -774,17 +774,36 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             }
         }));
     }
+    // omo-gateway's lead is the owner's Slack DM session, not a lane name: action-loop items,
+    // owner alerts and cron problems queued for "meta" were never delivered.
+    let lead_fallback = launch
+        .config
+        .meta_session_id
+        .clone()
+        .unwrap_or_else(|| "meta".into());
+    let lead_owner = launch
+        .config
+        .owner_slack_id
+        .clone()
+        .filter(|owner| !owner.trim().is_empty())
+        .unwrap_or_else(|| ferryx_hub::config::DEFAULT_SLACK_OWNER_ID.to_owned());
     if ferryx_hub::autonomy::action_loop_enabled() {
         let action_pool = launch.hub.pool.clone();
-        let lead = launch
-            .config
-            .meta_session_id
-            .clone()
-            .unwrap_or_else(|| "meta".into());
+        let (owner, fallback) = (lead_owner.clone(), lead_fallback.clone());
         tasks.push(tokio::spawn(async move {
+            let lead = ferryx_hub::lanes::lead::resolve(&action_pool, &owner, &fallback).await;
             if let Err(error) = ferryx_hub::autonomy::serve(action_pool, lead).await {
                 tracing::warn!(%error, "action loop stopped");
             }
+        }));
+    }
+    #[cfg(feature = "hub-slack")]
+    if let Some(config) = ferryx_hub::chat::slack_turn::installed() {
+        let pool = launch.hub.pool.clone();
+        let (owner, fallback) = (lead_owner, lead_fallback);
+        tasks.push(tokio::spawn(async move {
+            let lead = ferryx_hub::lanes::lead::resolve(&pool, &owner, &fallback).await;
+            ferryx_hub::chat::slack_turn::serve_lane_events(config, pool, lead).await;
         }));
     }
     for task in &tasks {

@@ -830,6 +830,22 @@ fn upload_host_allowed(url: &str) -> bool {
         || url.starts_with("https://files.slack.com/")
 }
 
+/// omo's `owner_dm_key` inputs: the owner's IM channel (`conversations.open`) and the bot user
+/// (`auth.test`).
+#[cfg(feature = "hub-slack")]
+pub async fn open_owner_dm(owner: &str) -> Option<(String, String)> {
+    let auth = slack_form("auth.test", &[]).await.ok()?;
+    let bot = auth.get("user_id").and_then(Value::as_str)?.to_owned();
+    let opened = slack_form("conversations.open", &[("users", owner)])
+        .await
+        .ok()?;
+    let channel = opened
+        .pointer("/channel/id")
+        .and_then(Value::as_str)?
+        .to_owned();
+    Some((channel, bot))
+}
+
 #[cfg(feature = "hub-slack")]
 async fn slack_form(method: &str, fields: &[(&str, &str)]) -> Result<Value> {
     let Some(token) = bot_token() else {
@@ -936,6 +952,36 @@ async fn slack_method(method: &str, body: Value) -> Result<bool> {
         return Err(HubError::message(format!("slack {method} failed: {value}")));
     }
     Ok(true)
+}
+
+/// omo-gateway's Slack send (`egress::send`): tables become images first, then each
+/// `mrkdwn::render` chunk is posted as is, and the table images follow in the thread.
+#[cfg(feature = "hub-slack")]
+pub async fn deliver_omo(channel: &str, thread: Option<&str>, text: &str) -> Result<bool> {
+    if bot_token().is_none() {
+        return Ok(false);
+    }
+    let session = super::session::SessionKey::new(
+        "slack",
+        None::<String>,
+        channel,
+        thread.map(str::to_owned),
+        "cron",
+    );
+    let (text, tables) = crate::table_image::transform_markdown_tables(text);
+    let mut posted = false;
+    for chunk in super::mrkdwn::render(&text) {
+        let mut body = json!({ "channel": channel, "text": chunk });
+        if let Some(thread) = thread {
+            body["thread_ts"] = json!(thread);
+        }
+        posted |= slack_method("chat.postMessage", body).await?;
+    }
+    if posted {
+        let _ = attach_voice_reply(channel, thread, thread, &text).await;
+        upload_tables(&session, &tables).await?;
+    }
+    Ok(posted)
 }
 
 /// Posts one cron or lane delivery into a Slack channel or thread.
@@ -1757,6 +1803,9 @@ mod tests {
             resume_error: None,
             approval: true,
             thread_id: "thr-e2e".into(),
+            queued_ticks: 0,
+            tick: std::time::Duration::ZERO,
+            no_ack: false,
         })
         .await;
         let dir = std::env::temp_dir().join(format!("ferryx-e2e-turn-{}", std::process::id()));

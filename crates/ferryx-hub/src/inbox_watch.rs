@@ -9,7 +9,7 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 
 use crate::error::{HubError, Result};
-use crate::inbox::{classify_pending, digest, Class};
+use crate::inbox::classify_pending;
 use crate::inbox_sources::{
     commit_source_items, parse_imessage, parse_kakao_messages, parse_mail_at, SourceItem,
 };
@@ -178,6 +178,12 @@ async fn store_cursor(pool: &SqlitePool, source: &str, cursor: &str) -> Result<(
 
 /// Parses one source payload with that source's cursor, commits new rows, and
 /// classifies anything that still has no decision.
+/// Commits one batch (omo's prefilter runs in the commit) and triages what is new. Returns the
+/// number of rows stored or refreshed.
+///
+/// Like omo-gateway there is no per-batch digest (the daily digest cron writes one) and no
+/// generic "handle inbox item" proposal: a bot item without a concrete action goes to the action
+/// loop, which hands it to the lead.
 pub async fn ingest_parsed(
     pool: &SqlitePool,
     source: SourceKind,
@@ -185,49 +191,22 @@ pub async fn ingest_parsed(
     cursor: &str,
     judge: &Judge,
     now: DateTime<Utc>,
-) -> Result<String> {
-    commit_source_items(pool, &items).await?;
+) -> Result<u64> {
+    let fetched = items.len();
+    let kept = commit_source_items(pool, &items).await?;
     if !cursor.is_empty() {
         store_cursor(pool, source.as_str(), cursor).await?;
     }
-    classify_pending(pool, judge, now, |_id, class| async move {
-        Ok((class == Class::Bot).then(|| "handle inbox item".to_owned()))
-    })
-    .await?;
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT COALESCE(inbox_items.title, ''), inbox_decisions.class FROM inbox_items
-         JOIN inbox_decisions ON inbox_decisions.item_id = inbox_items.id
-         ORDER BY inbox_items.received_at",
-    )
-    .fetch_all(pool)
-    .await?;
-    let titled: Vec<(String, Class)> = rows
-        .into_iter()
-        .filter_map(|(title, class)| {
-            let class = match class.as_str() {
-                "owner" => Class::Owner,
-                "bot" => Class::Bot,
-                "fyi" => Class::Fyi,
-                "ignore" => Class::Ignore,
-                _ => return None,
-            };
-            Some((
-                if title.is_empty() {
-                    source.as_str().to_owned()
-                } else {
-                    title
-                },
-                class,
-            ))
-        })
-        .collect();
-    let body = digest(&titled);
-    sqlx::query("INSERT INTO inbox_digests(body, created_at) VALUES(?,?)")
-        .bind(&body)
-        .bind(now_rfc3339())
-        .execute(pool)
-        .await?;
-    Ok(body)
+    if fetched > 0 {
+        tracing::info!(
+            source = source.as_str(),
+            fetched,
+            kept,
+            "inbox items collected"
+        );
+    }
+    classify_pending(pool, judge, now, |_id, _class| async move { Ok(None) }).await?;
+    Ok(kept)
 }
 
 pub fn imessage_items(
@@ -740,6 +719,8 @@ async fn fetch_gateway(
             author: None,
             title: None,
             link: None,
+            room_type: None,
+            mail_categories: Vec::new(),
         });
     }
     Ok(Some((items, newest)))
@@ -1210,6 +1191,8 @@ mod tests {
                             author: None,
                             title: None,
                             link: None,
+                            room_type: None,
+                            mail_categories: Vec::new(),
                         }],
                         String::new(),
                     )))
@@ -1293,7 +1276,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_imessage_event_commits_triages_and_writes_a_digest() {
+    async fn an_imessage_event_commits_and_triages_without_a_digest_or_a_generic_proposal() {
         let pool = crate::storage::memory().await.unwrap();
         let now = DateTime::parse_from_rfc3339("2026-10-22T03:00:00Z")
             .unwrap()
@@ -1304,16 +1287,29 @@ mod tests {
             imessage_items(&chats, &[("7".into(), history.clone())], None).unwrap();
         assert_eq!(items.len(), 1);
         let judge = Judge::forced("bot_can_handle");
-        let digest = ingest_parsed(&pool, SourceKind::Imessage, items, &cursor, &judge, now)
+        let kept = ingest_parsed(&pool, SourceKind::Imessage, items, &cursor, &judge, now)
             .await
             .unwrap();
-        assert!(digest.contains("bot"));
+        assert_eq!(kept, 1);
+        let class: String = sqlx::query_scalar("SELECT class FROM inbox_decisions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(class, "bot");
         let proposals: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM action_proposals WHERE origin = 'inbox'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(proposals, 1);
+        assert_eq!(
+            proposals, 0,
+            "omo proposes only a concrete action, never a generic one"
+        );
+        let digests: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbox_digests")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(digests, 0, "no digest per ingest");
         let stored: String =
             sqlx::query_scalar("SELECT cursor FROM inbox_cursors WHERE source = 'imessage'")
                 .fetch_one(&pool)
@@ -1332,7 +1328,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(again.contains("bot"));
+        assert_eq!(again, 0);
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbox_items")
             .fetch_one(&pool)
             .await
