@@ -89,6 +89,51 @@ pub async fn flush_pending(pool: &SqlitePool) -> Result<u64> {
     Ok(delivered)
 }
 
+/// Publishes one stored outbox row now and marks it delivered when the transport took it.
+/// A key that is not a chat session (a lane name) cannot be delivered and reports false.
+pub async fn deliver_stored(pool: &SqlitePool, id: i64, key: &str, text: &str) -> Result<bool> {
+    let Ok(session) = SessionKey::from_storage_key(key) else {
+        return Ok(false);
+    };
+    if publish(&session, text).await? {
+        mark_delivered(pool, id).await?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// The periodic retry of the outbox. Only rows older than `settle` are tried, so a reply
+/// whose first post is still in flight is not posted twice, and only rows younger than
+/// `max_age`, so a channel that is gone does not retry forever. One failure does not stop
+/// the pass.
+pub async fn flush_stale(
+    pool: &SqlitePool,
+    settle: chrono::Duration,
+    max_age: chrono::Duration,
+) -> Result<u64> {
+    let now = chrono::Utc::now();
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, session_key, text FROM chat_outbox
+          WHERE delivered_at IS NULL
+            AND julianday(created_at) <= julianday(?)
+            AND julianday(created_at) >= julianday(?)
+          ORDER BY id",
+    )
+    .bind((now - settle).to_rfc3339())
+    .bind((now - max_age).to_rfc3339())
+    .fetch_all(pool)
+    .await?;
+    let mut delivered = 0u64;
+    for (id, key, text) in rows {
+        match deliver_stored(pool, id, &key, &text).await {
+            Ok(true) => delivered += 1,
+            Ok(false) => {}
+            Err(error) => tracing::warn!(id, %error, "stored chat reply was not delivered"),
+        }
+    }
+    Ok(delivered)
+}
+
 pub async fn pending(pool: &SqlitePool) -> Result<Vec<(i64, String, String)>> {
     let rows: Vec<(i64, String, String)> = sqlx::query_as(
         "SELECT id, session_key, text FROM chat_outbox WHERE delivered_at IS NULL ORDER BY id",

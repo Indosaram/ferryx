@@ -205,7 +205,15 @@ pub async fn ingest_parsed(
             "inbox items collected"
         );
     }
-    classify_pending(pool, judge, now, |_id, _class| async move { Ok(None) }).await?;
+    let lead = crate::lanes::lead::default_lead_or("meta");
+    classify_pending(
+        pool,
+        judge,
+        now,
+        &lead,
+        |_id, _class| async move { Ok(None) },
+    )
+    .await?;
     Ok(kept)
 }
 

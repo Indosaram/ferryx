@@ -87,6 +87,8 @@ struct ReadyProposal {
 pub struct ActionLoop {
     pub pool: SqlitePool,
     pub lead_session_key: String,
+    /// Where owner alerts go (the Slack home channel or the owner DM). Falls back to the lead.
+    pub owner_session_key: Option<String>,
     pub daily_cap: i64,
     pub coalesce_window: Duration,
 }
@@ -96,6 +98,7 @@ impl ActionLoop {
         Self {
             pool,
             lead_session_key: lead_session_key.into(),
+            owner_session_key: None,
             daily_cap: daily_cap_from_env(),
             coalesce_window: COALESCE_WINDOW,
         }
@@ -104,7 +107,11 @@ impl ActionLoop {
     /// Unseen inbox rows become one lane event and `enqueued` outcomes.
     /// A full daily cap leaves them unseen so the next flush can still emit them.
     pub async fn flush(&self, now: DateTime<Utc>) -> Result<Option<i64>> {
-        let _ = crate::owner_alert::sweep(&self.pool, &self.lead_session_key, now).await?;
+        let owner = self
+            .owner_session_key
+            .as_deref()
+            .unwrap_or(&self.lead_session_key);
+        let _ = crate::owner_alert::sweep(&self.pool, owner, now).await?;
         let mut items = unseen_inbox(&self.pool).await?;
         items.extend(requeue_stale(&self.pool, now).await?);
         let foreign = foreign_lead_items(&self.pool, &self.lead_session_key).await?;
@@ -336,6 +343,18 @@ impl ActionLoop {
 
 pub async fn serve(pool: SqlitePool, lead: String) -> Result<()> {
     ActionLoop::new(pool, lead).serve().await
+}
+
+/// The action loop with owner alerts addressed to a real chat session (a storage key),
+/// not the lead lane name, which no transport can deliver to.
+pub async fn serve_with_owner(
+    pool: SqlitePool,
+    lead: String,
+    owner_session_key: String,
+) -> Result<()> {
+    let mut action_loop = ActionLoop::new(pool, lead);
+    action_loop.owner_session_key = Some(owner_session_key);
+    action_loop.serve().await
 }
 
 fn may_execute(

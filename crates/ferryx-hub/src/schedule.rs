@@ -303,6 +303,41 @@ pub fn incident_kind(
     }
 }
 
+/// omo-gateway's `needs_owner`: a cron problem becomes an open owner item (`cron:<incident>`),
+/// so the owner alert sweep posts it to the owner's Slack DM and the digest lists it.
+async fn escalate_incident(
+    pool: &SqlitePool,
+    incident: &str,
+    job_id: &str,
+    kind: &str,
+    detail: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let item = format!("cron:{incident}");
+    let at = now.to_rfc3339();
+    let action = crate::judge::scrub_for_external(detail);
+    let mut tx = pool.begin().await?;
+    sqlx::query("INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'cron', ?, ?, ?, ?, ?, 'cron', ?) ON CONFLICT DO NOTHING")
+        .bind(&item)
+        .bind(incident)
+        .bind(job_id)
+        .bind(format!("{job_id}: needs you - {kind}: {action}"))
+        .bind(&action)
+        .bind(&at)
+        .bind(&at)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, proposed_action, status, decided_at) VALUES(?, 'owner', ?, ?, 'open', ?) ON CONFLICT(item_id) DO NOTHING")
+        .bind(&item)
+        .bind(kind)
+        .bind(&action)
+        .bind(&at)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub fn remediation_due(consecutive_failures: u32, open_incident: bool) -> bool {
     consecutive_failures >= 3 && !open_incident
 }
@@ -561,6 +596,14 @@ pub async fn approve_problem(
             &format!("problem {problem_id} not found"),
         ));
     };
+    // A problem the remediator escalated carries only its token's hash. The remediator spends
+    // the token, grants one more verified rerun, and settles the problem.
+    if crate::cron_remediate::installed().is_some() && stored.is_none() {
+        return match crate::cron_remediate::approve_rerun(problem_id, token).await {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => Ok(failed_receipt(&job_id, &error.to_string())),
+        };
+    }
     if stored.as_deref() != Some(token) {
         return Ok(failed_receipt(&job_id, "owner token does not match"));
     }
@@ -923,14 +966,16 @@ pub async fn finish_run(
         .await?;
     if let Some((kind, detail)) = incident_kind(status, error, false) {
         if remediation_due(consecutive as u32, false) || !ok {
+            let incident = uuid::Uuid::new_v4().to_string();
             sqlx::query("INSERT INTO cron_incidents(id, job_id, kind, detail, status, created_at) VALUES(?,?,?,?, 'open', ?)")
-                .bind(uuid::Uuid::new_v4().to_string())
+                .bind(&incident)
                 .bind(job_id)
                 .bind(kind)
-                .bind(detail)
+                .bind(&detail)
                 .bind(now.to_rfc3339())
                 .execute(pool)
                 .await?;
+            escalate_incident(pool, &incident, job_id, kind, &detail, now).await?;
         }
     }
     Ok(())
@@ -1035,7 +1080,7 @@ fn cron_model() -> crate::meta::backend::UrlModel {
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| crate::cron_exec::OMO_APP_SERVER.to_owned());
-    crate::meta::backend::UrlModel::new(url)
+    crate::meta::backend::UrlModel::for_cron(url)
 }
 
 fn skills_root_from_env() -> Option<std::path::PathBuf> {
@@ -1157,7 +1202,7 @@ pub async fn run_ack(command: &str) -> Result<()> {
     run_shell(command).await.map(|_| ())
 }
 
-async fn note_run_health(
+pub(crate) async fn note_run_health(
     pool: &SqlitePool,
     job_id: &str,
     run_id: &str,
@@ -1178,35 +1223,28 @@ async fn note_run_health(
     };
     let Some((kind, detail)) = problem else {
         sqlx::query(
-            "UPDATE cron_problems SET status = 'fixed', updated_at = ? WHERE job_id = ? AND status IN ('open', 'remediating')",
+            "UPDATE cron_problems SET status = 'fixed', updated_at = ? WHERE job_id = ? AND status IN ('open', 'remediating', 'needs_owner')",
         )
         .bind(now_rfc3339())
         .bind(job_id)
         .execute(pool)
         .await?;
+        sqlx::query("UPDATE inbox_decisions SET status = 'done' WHERE status = 'open' AND item_id IN (SELECT 'cron:' || CAST(id AS INTEGER) FROM cron_problems WHERE job_id = ? AND status = 'fixed')")
+            .bind(job_id)
+            .execute(pool)
+            .await?;
+        crate::cron_remediate::reconcile_fixed(pool, job_id).await?;
         return Ok(());
     };
     let signature = problem_signature(kind, &detail);
     if let Some(problem_id) =
         record_problem(pool, job_id, run_id, kind, &signature, &detail).await?
     {
-        let failures: i64 =
-            sqlx::query_scalar("SELECT consecutive_failures FROM scheduled_jobs WHERE id = ?")
-                .bind(job_id)
-                .fetch_one(pool)
-                .await?;
-        let open_lane: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM cron_problems WHERE job_id = ? AND lane_key IS NOT NULL AND status = 'remediating'",
-        )
-        .bind(job_id)
-        .fetch_one(pool)
-        .await?;
-        let mut remediation_opened = false;
-        if remediation_due(failures as u32, open_lane > 0) {
-            open_remediation(pool, job_id, problem_id, &detail).await?;
-            remediation_opened = true;
-        }
-        announce_cron_failure(pool, job_id, &detail, remediation_opened).await;
+        // omo-gateway triages every new problem (cron_remediate via the queued event), so
+        // the announcement says remediation is under way when a remediator is running.
+        let _ = problem_id;
+        let remediating = crate::cron_remediate::installed().is_some();
+        announce_cron_failure(pool, job_id, &detail, remediating).await;
     }
     Ok(())
 }
@@ -1219,7 +1257,7 @@ async fn announce_cron_failure(
 ) {
     let mut text = format!("cron {job_id} failed: {detail}");
     if remediation_opened {
-        text.push_str("\nremediation lane opened");
+        text.push_str("\nremediation started (root-cause triage)");
     }
     if let Err(error) = crate::http::record_log(pool, "error", &text).await {
         tracing::warn!(%error, %job_id, "cron failure was not written to the activity log");
@@ -1258,16 +1296,51 @@ async fn record_problem(
     signature: &str,
     detail: &str,
 ) -> Result<Option<i64>> {
-    let existing: Option<i64> = sqlx::query_scalar(
-        "SELECT CAST(id AS INTEGER) FROM cron_problems WHERE job_id = ? AND kind = ? AND signature = ?",
+    type ProblemRow = (i64, String, Option<String>, Option<String>, Option<String>);
+    let existing: Option<ProblemRow> = sqlx::query_as(
+        "SELECT CAST(id AS INTEGER), status, run_id, updated_at, lane_key FROM cron_problems WHERE job_id = ? AND kind = ? AND signature = ?",
     )
     .bind(job_id)
     .bind(kind)
     .bind(signature)
     .fetch_optional(pool)
     .await?;
-    if existing.is_some() {
-        return Ok(None);
+    if let Some((id, status, last_run, updated, lane)) = existing {
+        // omo reopens a fixed or ignored problem, or one stranded in remediating with no
+        // live lane, when a different run fails the same way. Anything else is a duplicate.
+        let stale = status == "remediating"
+            && updated
+                .as_deref()
+                .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+                .is_some_and(|at| {
+                    Utc::now() - at.with_timezone(&Utc)
+                        > chrono::TimeDelta::seconds(crate::cron_remediate::STALE_REMEDIATING_SECS)
+                });
+        let live_lane = match &lane {
+            Some(key) => sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM lanes WHERE key = ? AND status NOT IN ('verified_done','closed')",
+            )
+            .bind(key)
+            .fetch_one(pool)
+            .await? > 0,
+            None => false,
+        };
+        let reopen = matches!(status.as_str(), "fixed" | "ignored") || (stale && !live_lane);
+        if !reopen || last_run.as_deref() == Some(run_id) {
+            return Ok(None);
+        }
+        let now = now_rfc3339();
+        sqlx::query("UPDATE cron_problems SET status = 'open', run_id = ?, detail = ?, summary = ?, lane_key = NULL, created_at = ?, updated_at = ? WHERE CAST(id AS INTEGER) = ?")
+            .bind(run_id)
+            .bind(detail)
+            .bind(detail)
+            .bind(&now)
+            .bind(&now)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        enqueue_problem(pool, id, job_id, kind, run_id, detail).await?;
+        return Ok(Some(id));
     }
     let id: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(CAST(id AS INTEGER)), 0) + 1 FROM cron_problems")
@@ -1288,62 +1361,29 @@ async fn record_problem(
     .bind(&now)
     .execute(pool)
     .await?;
+    enqueue_problem(pool, id, job_id, kind, run_id, detail).await?;
+    Ok(Some(id))
+}
+
+async fn enqueue_problem(
+    pool: &SqlitePool,
+    id: i64,
+    job_id: &str,
+    kind: &str,
+    run_id: &str,
+    detail: &str,
+) -> Result<()> {
     let lead = crate::lanes::lead::default_lead_or("meta");
     crate::lanes::dispatch::enqueue(
         pool,
         job_id,
         &lead,
         "cron_problem",
-        &serde_json::json!({"problem_id": id, "job_id": job_id, "kind": kind, "detail": detail})
+        &serde_json::json!({"problem_id": id, "job_id": job_id, "kind": kind, "run_id": run_id, "detail": detail})
             .to_string(),
     )
     .await?;
-    Ok(Some(id))
-}
-
-async fn open_remediation(
-    pool: &SqlitePool,
-    job_id: &str,
-    problem_id: i64,
-    detail: &str,
-) -> Result<()> {
-    let key = remediation_lane_key(job_id);
-    let existing: Option<String> = sqlx::query_scalar("SELECT status FROM lanes WHERE key = ?")
-        .bind(&key)
-        .fetch_optional(pool)
-        .await?;
-    if existing.is_none() {
-        let _ = crate::lanes::state::insert_lane(pool, &key, job_id, "meta", ".", "[]").await;
-    }
-    let token = uuid::Uuid::new_v4().to_string().replace('-', "");
-    sqlx::query(
-        "UPDATE cron_problems SET status = 'remediating', lane_key = ?, owner_token = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(&key)
-    .bind(&token)
-    .bind(now_rfc3339())
-    .bind(problem_id.to_string())
-    .execute(pool)
-    .await?;
-    let _ = detail;
     Ok(())
-}
-
-fn remediation_lane_key(job_id: &str) -> String {
-    let key: String = job_id
-        .chars()
-        .map(|character| match character {
-            'a'..='z' | '0'..='9' | '-' => character,
-            'A'..='Z' => character.to_ascii_lowercase(),
-            _ => '-',
-        })
-        .collect();
-    let key: String = key.trim_matches('-').chars().take(48).collect();
-    if key.is_empty() {
-        "cron-job".into()
-    } else {
-        key
-    }
 }
 
 fn deliver_wants_home(payload: &Value) -> bool {
@@ -1418,7 +1458,28 @@ async fn deliver_run_output(
             None => None,
         };
     }
-    let error = post_targets(&targets, text).await;
+    let (error, delivered) = post_targets(&targets, text).await;
+    // omo's attach_to_session (default on): what the job posted joins that conversation.
+    if payload
+        .get("attach_to_session")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        for target in delivered {
+            if let Err(mirror) = crate::mirror::mirror_cron_delivery(
+                pool,
+                job_id,
+                &target.platform,
+                &target.chat_id,
+                target.thread_id.as_deref(),
+                text,
+            )
+            .await
+            {
+                tracing::warn!(job_id, error = %mirror, "cron delivery was not mirrored into its session");
+            }
+        }
+    }
     if let Err(record) = remember_delivery(pool, job_id, error.as_deref()).await {
         return Some(record.to_string());
     }
@@ -1432,8 +1493,12 @@ async fn deliver_run_output(
     error
 }
 
-async fn post_targets(targets: &[Delivery], text: &str) -> Option<String> {
+async fn post_targets<'a>(
+    targets: &'a [Delivery],
+    text: &str,
+) -> (Option<String>, Vec<&'a Delivery>) {
     let mut errors = Vec::new();
+    let mut delivered = Vec::new();
     for target in targets {
         let posted = match target.platform.as_str() {
             "slack" => post_slack_target(&target.chat_id, target.thread_id.as_deref(), text).await,
@@ -1443,7 +1508,7 @@ async fn post_targets(targets: &[Delivery], text: &str) -> Option<String> {
             ))),
         };
         match posted {
-            Ok(true) => {}
+            Ok(true) => delivered.push(target),
             Ok(false) => errors.push(format!(
                 "unconfigured delivery transport: {}",
                 target.platform
@@ -1451,11 +1516,8 @@ async fn post_targets(targets: &[Delivery], text: &str) -> Option<String> {
             Err(error) => errors.push(error.to_string()),
         }
     }
-    if errors.is_empty() {
-        None
-    } else {
-        Some(errors.join("; "))
-    }
+    let error = (!errors.is_empty()).then(|| errors.join("; "));
+    (error, delivered)
 }
 
 async fn post_slack_target(channel: &str, thread: Option<&str>, text: &str) -> Result<bool> {
@@ -1778,6 +1840,16 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(incidents, 1);
+        // As omo's needs_owner: the failure becomes an owner item the alert sweep posts.
+        let alerts = crate::owner_alert::pending_alerts(&pool, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert!(alerts[0].item_id.starts_with("cron:"));
+        assert_eq!(
+            crate::owner_alert::alert_line(&alerts[0]),
+            "📬 [크론] job — job: needs you - failed: boom"
+        );
         let failures: i64 =
             sqlx::query_scalar("SELECT consecutive_failures FROM scheduled_jobs WHERE id = 'job'")
                 .fetch_one(&pool)
@@ -1994,12 +2066,14 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(kind, "failed");
-        let lane: String =
-            sqlx::query_scalar("SELECT lane_key FROM cron_problems WHERE job_id = 'broken'")
+        // The remediator (cron_remediate) triages the queued problem; the scheduler opens
+        // no lane on its own any more.
+        let (state, lane): (String, Option<String>) =
+            sqlx::query_as("SELECT status, lane_key FROM cron_problems WHERE job_id = 'broken'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(lane, "broken");
+        assert_eq!((state.as_str(), lane), ("open", None));
         let event: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM lane_events WHERE kind = 'cron_problem'")
                 .fetch_one(&pool)
@@ -2162,7 +2236,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert!(message.contains("remediation lane opened"), "{message}");
+        assert_eq!(message, "cron broken failed: disk full");
         let outbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox")
             .fetch_one(&pool)
             .await
