@@ -94,6 +94,24 @@ export function decodePairedProject(value: unknown) {
   if (!/^daemon:[a-f0-9]{64}$/.test(workspaceId)) return invalid();
   return { workspaceId, repoRoot: text(v.repoRoot), target, remoteWorkspaceId: text(v.remoteWorkspaceId) };
 }
+function optional<T>(v: unknown, parse: (v: unknown) => T): T | null { return v === undefined || v === null ? null : parse(v); }
+function discoveredRepo(value: unknown) {
+  const v = object(value), target = decodeRunTarget(v.target);
+  if (target.kind !== "pairedDaemon") return invalid();
+  const registeredWorkspaceId = optional(v.registeredWorkspaceId, id => { const s = text(id); return /^daemon:[a-f0-9]{64}$/.test(s) ? s : invalid(); });
+  const remoteWorkspaceId = optional(v.remoteWorkspaceId, text);
+  // A registration is the desktop id and the host's own id together, or neither.
+  if ((registeredWorkspaceId === null) !== (remoteWorkspaceId === null)) return invalid();
+  return { repoRoot: text(v.repoRoot), isLinkedWorktree: bool(v.isLinkedWorktree), gitCommonDir: optional(v.gitCommonDir, text),
+    branch: optional(v.branch, text), registeredWorkspaceId, remoteWorkspaceId, target };
+}
+/** Desktop projection of `GET /api/v1/fs/repositories` (`repoDiscoveryV1`). */
+export function decodeDiscoveredRepositories(value: unknown) {
+  const v = object(value);
+  const repos = array(v.repos, discoveredRepo);
+  if (repos.length > 200) return invalid();
+  return { path: text(v.path), repos, truncated: bool(v.truncated), elapsedMs: uint(v.elapsedMs) };
+}
 export const MACHINE_JSON_MAX_BYTES = 64 * 1024;
 export const DIRECTORY_JSON_MAX_BYTES = 256 * 1024;
 export const CONTROL_JSON_MAX_BYTES = 16 * 1024;
@@ -109,7 +127,7 @@ export function decodeProxyDescriptor(value: unknown) {
     transportStatus: choice(v.transportStatus, ["disconnected", "reconnecting", "revoked"]) };
 }
 export function decodeMachineJson(kind: string, json: string) {
-  const limit = kind === "directories" ? DIRECTORY_JSON_MAX_BYTES : kind === "attached" || kind === "control" ? CONTROL_JSON_MAX_BYTES : MACHINE_JSON_MAX_BYTES;
+  const limit = kind === "directories" || kind === "repositories" ? DIRECTORY_JSON_MAX_BYTES : kind === "attached" || kind === "control" ? CONTROL_JSON_MAX_BYTES : MACHINE_JSON_MAX_BYTES;
   if (new TextEncoder().encode(json).length > limit) throw new MachineDecodeError("PAYLOAD_TOO_LARGE");
   let value: unknown;
   try { value = JSON.parse(json); } catch (error) { if (error instanceof SyntaxError) return invalid(); throw error; }
@@ -128,6 +146,7 @@ export function decodeMachineJson(kind: string, json: string) {
     }
     case "directories": return { path: text(v.path), parentPath: nullable(v.parentPath, text), homePath: text(v.homePath),
       entries: array(v.entries, entry => { const e = object(entry); return { name: text(e.name), path: text(e.path), hidden: bool(e.hidden) }; }), truncated: bool(v.truncated) };
+    case "repositories": return decodeDiscoveredRepositories(v);
     case "project": return project(v);
     case "projects": return { revision: decodeU64(v.revision), completeness: choice(v.completeness, ["complete", "partial"]),
       projects: array(v.projects, project), unavailableWorkspaceIds: array(v.unavailableWorkspaceIds, text) };
@@ -198,3 +217,5 @@ export type RemoteTerminalTarget = ReturnType<typeof decodeRemoteTarget>;
 export type MachineProject = ReturnType<typeof project>;
 export type MachineSession = ReturnType<typeof session>;
 export type MachineWorktree = ReturnType<typeof worktree>;
+export type DiscoveredRepositories = ReturnType<typeof decodeDiscoveredRepositories>;
+export type DiscoveredRepository = DiscoveredRepositories["repos"][number];

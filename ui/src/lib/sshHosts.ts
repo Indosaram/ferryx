@@ -273,6 +273,26 @@ export async function removeSshIntegration(hostId: string): Promise<RemoteRemova
   return invoke<RemoteRemovalReport>("cmd_ssh_remove_integration", { hostId });
 }
 
+export interface SshNodeInstallReport {
+  cliPath: string;
+  version: string;
+  enrolled?: { accountId: string; machineRecordId: string };
+  service: { supervised: boolean; backend: string; reason?: string };
+}
+
+/** Installs the Ferryx CLI on a stored SSH host; the key travels over ssh stdin, never argv. */
+export async function installFerryxNode(
+  hostId: string,
+  accountOrigin: string,
+  installKey: string,
+): Promise<SshNodeInstallReport> {
+  return invoke<SshNodeInstallReport>("cmd_ssh_install_ferryx_node", {
+    hostId,
+    accountOrigin,
+    installKey,
+  });
+}
+
 export interface UseSshHostsResult {
   hosts: SshHost[];
   loading: boolean;

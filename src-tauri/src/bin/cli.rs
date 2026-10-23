@@ -36,6 +36,12 @@ fn main() {
             }
         }
     }
+    if args.get(1).is_some_and(|arg| arg == "up") {
+        std::process::exit(ferryx_lib::cli::up_cli_main(&args));
+    }
+    if args.get(1).is_some_and(|arg| arg == "service") {
+        std::process::exit(ferryx_lib::cli::service_cli_main(&args));
+    }
     if args.get(1).is_some_and(|arg| arg == "account") {
         let outcome = parse_account_cli(&args)
             .map_err(AccountCliError::usage)
@@ -107,7 +113,7 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
-            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <agents|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|--daemon>");
+            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|--daemon>");
             std::process::exit(1);
         }
         LaunchMode::DaemonSupervisor => std::process::exit(run_daemon_supervisor(&args)),

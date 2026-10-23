@@ -4,7 +4,10 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use rusqlite::Connection;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
+/// Schema version written by the original table set, before the onboarding migration.
+const BASE_SCHEMA_VERSION: u32 = 1;
 
 /// Dedicated lock file that serializes database initialization inside an account dir.
 pub const INIT_LOCK_FILENAME: &str = "account-store.init.lock";
@@ -229,14 +232,70 @@ pub fn init_schema(conn: &mut Connection) -> Result<(), String> {
         )
         .map_err(|error| format!("Failed to create schema tables: {error}"))?;
 
-        tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
-            .map_err(|error| format!("Failed to set user_version to {CURRENT_SCHEMA_VERSION}: {error}"))?;
+        tx.pragma_update(None, "user_version", BASE_SCHEMA_VERSION)
+            .map_err(|error| format!("Failed to set user_version to {BASE_SCHEMA_VERSION}: {error}"))?;
 
         tx.commit()
             .map_err(|error| format!("Failed to commit schema initialization: {error}"))?;
     }
 
+    let user_version: u32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|error| format!("Failed to query PRAGMA user_version: {error}"))?;
+    if user_version < 2 {
+        migrate_to_v2(conn)?;
+    }
+
     Ok(())
+}
+
+/// Additive onboarding migration: install-key and machine-binding columns on
+/// `enrollment_codes` (existing rows become `kind = 'code'`) plus the `machine_requests` table.
+fn migrate_to_v2(conn: &mut Connection) -> Result<(), String> {
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("Failed to begin v2 migration transaction: {error}"))?;
+    tx.execute_batch(
+        r#"
+        ALTER TABLE enrollment_codes ADD COLUMN kind TEXT NOT NULL DEFAULT 'code';
+        ALTER TABLE enrollment_codes ADD COLUMN key_id TEXT;
+        ALTER TABLE enrollment_codes ADD COLUMN label TEXT;
+        ALTER TABLE enrollment_codes ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE enrollment_codes ADD COLUMN consumed_at INTEGER;
+        ALTER TABLE enrollment_codes ADD COLUMN consumed_machine_id TEXT;
+        ALTER TABLE enrollment_codes ADD COLUMN bound_machine_id TEXT;
+        ALTER TABLE enrollment_codes ADD COLUMN bound_public_key TEXT;
+        CREATE INDEX IF NOT EXISTS enrollment_codes_user_kind ON enrollment_codes(user_id, kind);
+
+        CREATE TABLE IF NOT EXISTS machine_requests (
+            request_id TEXT PRIMARY KEY,
+            device_code_hash TEXT NOT NULL,
+            user_code TEXT NOT NULL,
+            machine_id TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            app_version TEXT NOT NULL,
+            email_hint TEXT,
+            requester_ip TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            decided_by TEXT,
+            decided_at INTEGER,
+            enrollment_code TEXT,
+            last_polled_at INTEGER
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS machine_requests_device_code ON machine_requests(device_code_hash);
+        CREATE INDEX IF NOT EXISTS machine_requests_user_code ON machine_requests(user_code);
+        CREATE INDEX IF NOT EXISTS machine_requests_expires_at ON machine_requests(expires_at);
+        "#,
+    )
+    .map_err(|error| format!("Failed to apply v2 onboarding migration: {error}"))?;
+    tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
+        .map_err(|error| format!("Failed to set user_version to {CURRENT_SCHEMA_VERSION}: {error}"))?;
+    tx.commit()
+        .map_err(|error| format!("Failed to commit v2 onboarding migration: {error}"))
 }
 
 #[cfg(test)]
@@ -348,6 +407,52 @@ mod tests {
             released.contains("acquired"),
             "a contending process could not take the init lock after the guard was dropped:\n{released}"
         );
+    }
+
+    /// A database created by the v1 schema (enrollment code rows without the onboarding columns)
+    /// must upgrade in place: old rows read back as `kind = 'code'` and the new table exists.
+    #[test]
+    fn v1_database_upgrades_additively_to_v2() {
+        let dir = tempfile::tempdir().expect("temp");
+        {
+            let conn = Connection::open(dir.path().join(super::super::STORE_SQLITE_FILENAME))
+                .expect("open raw v1 db");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE schema_migrations (migration_key TEXT PRIMARY KEY, applied_at INTEGER NOT NULL);
+                CREATE TABLE users (user_id TEXT PRIMARY KEY, email TEXT NOT NULL, created_at INTEGER NOT NULL);
+                CREATE TABLE enrollment_codes (
+                    code_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    account_origin TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL
+                );
+                INSERT INTO users (user_id, email, created_at) VALUES ('u1', 'u1@test.local', 1);
+                INSERT INTO enrollment_codes (code_hash, user_id, account_origin, expires_at)
+                    VALUES ('legacy-hash', 'u1', 'https://relay.test', 4000000000);
+                PRAGMA user_version = 1;
+                "#,
+            )
+            .expect("seed v1 schema");
+        }
+        let conn = crate::account::store::store_sqlite::open_sqlite_connection(dir.path())
+            .expect("open upgrades the schema");
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        let kind: String = conn
+            .query_row(
+                "SELECT kind FROM enrollment_codes WHERE code_hash = 'legacy-hash'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy row keeps its data and gains kind");
+        assert_eq!(kind, "code");
+        let requests: i64 = conn
+            .query_row("SELECT count(*) FROM machine_requests", [], |row| row.get(0))
+            .expect("machine_requests table exists");
+        assert_eq!(requests, 0);
     }
 
     /// Same-process regression: the production initialization lock must keep a contender out of

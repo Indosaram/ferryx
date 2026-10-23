@@ -96,6 +96,7 @@ import {
 } from "./remoteClient";
 
 import { AccountLoginPage } from "./AccountLoginPage";
+import { ApprovePage, isApproveRoute } from "./ApprovePage";
 import {
   useAccountWorktrees,
   type AccountWorktreeOption,
@@ -1043,6 +1044,12 @@ export const RemoteApp: React.FC = () => {
   // remount instead of being discarded with the component that held it. Nothing is persisted and
   // no store is involved - the owner is simply the first component that does not remount.
   const [viewMode, setViewMode] = useState<"chat" | "terminal" | "browser">("chat");
+  // Hooks stay above every early return. The /approve route is fixed for the page's lifetime.
+  const [approveRoute] = useState(() => isApproveRoute(window.location.pathname));
+  if (approveRoute) {
+    // The approval link points at the account origin itself, not at a saved host.
+    return <ApprovePage relayUrl={window.location.origin} />;
+  }
   const bypassSavedHost = magicLinkOverridden;
   const host = bypassSavedHost ? null : selectActiveHost(state);
   const hostId = (bypassSavedHost ? null : state.activeHostId) ?? `local:${window.location.origin}`;

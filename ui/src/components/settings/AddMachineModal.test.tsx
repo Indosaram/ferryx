@@ -37,10 +37,12 @@ describe("AddMachineModal - P05 structured per-status error UX", () => {
     );
     // An unknown method falls back to step 1, "Choose a method".
     expect(screen.getByRole("radiogroup", { name: "Connection methods" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Enrollment code" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Install command" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Approve a machine" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Enrollment code (manual)" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Connect with SSH" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Import SSH Config" })).toBeInTheDocument();
-    expect(screen.getAllByRole("radio")).toHaveLength(3);
+    expect(screen.getAllByRole("radio")).toHaveLength(5);
     expect(screen.queryByRole("radio", { name: /Pair with PIN/i })).toBeNull();
     expect(screen.queryByRole("tab", { name: /Pair with PIN/i })).toBeNull();
     expect(screen.queryByLabelText(/Machine PIN/i)).toBeNull();
@@ -160,7 +162,8 @@ describe("AddMachineModal - SSH connection and import", () => {
         onSuccess={() => {}}
       />,
     );
-    expect(screen.getByRole("radio", { name: "Enrollment code" })).toHaveAttribute("aria-checked", "true");
+    // Signed out (no install-key issuer): the manual enrollment method stays the default.
+    expect(screen.getByRole("radio", { name: "Enrollment code (manual)" })).toHaveAttribute("aria-checked", "true");
     chooseMethod("Connect with SSH");
     expect(screen.getByLabelText(/Label/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/Hostname/i)).toBeInTheDocument();
@@ -189,7 +192,7 @@ describe("AddMachineModal - enrollment code step", () => {
         onIssueEnrollmentCode={issue}
       />,
     );
-    chooseMethod("Enrollment code");
+    chooseMethod("Enrollment code (manual)");
 
     expect(await screen.findByTestId("issued-enrollment-card")).toBeInTheDocument();
     expect(screen.getByTestId("enrollment-command").textContent).toBe(
@@ -203,7 +206,7 @@ describe("AddMachineModal - enrollment code step", () => {
 
   it("signed out: choosing Enrollment code shows the sign-in reason and issues nothing", () => {
     render(<AddMachineModal isOpen={true} onClose={() => {}} onSuccess={() => {}} accountOrigin="https://relay.example" />);
-    chooseMethod("Enrollment code");
+    chooseMethod("Enrollment code (manual)");
 
     expect(screen.getByText(/Sign in to issue an enrollment code/i)).toBeInTheDocument();
     expect(screen.queryByTestId("issued-enrollment-card")).toBeNull();

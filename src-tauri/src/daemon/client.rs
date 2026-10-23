@@ -2220,6 +2220,7 @@ impl DaemonClient {
             Operation::PasteUploadChunk { request } => Some(request.request_id.clone()),
             Operation::Capabilities
             | Operation::Directories { .. }
+            | Operation::DiscoverRepos { .. }
             | Operation::Projects
             | Operation::Worktrees { .. }
             | Operation::WorktreeStatus { .. }

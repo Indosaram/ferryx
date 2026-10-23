@@ -1086,6 +1086,264 @@ export async function issueEnrollmentCode(
   return data as unknown as IssueEnrollmentCodeResponse;
 }
 
+/**
+ * Throws the structured account error carried by a non-2xx response. The server's
+ * {code,message,details} wins; UNAUTHORIZED is honoured only with HTTP 401 so a gateway
+ * cannot sign the user out with a stray code.
+ */
+async function throwAccountResponseError(res: Response, fallbackCode: string, fallbackMessage: string): Promise<never> {
+  let code = fallbackCode;
+  let message = `${fallbackMessage} (${res.status})`;
+  let details: unknown;
+  try {
+    const data = await res.json();
+    if (typeof data?.code === "string" && data.code.trim().length > 0) {
+      code = data.code.trim();
+    }
+    if (typeof data?.message === "string" && data.message.trim().length > 0) {
+      message = data.message.trim();
+    }
+    details = errorDetails(data);
+  } catch {}
+  if (code === "UNAUTHORIZED" && res.status !== 401) {
+    code = fallbackCode;
+  }
+  if (res.status === 401 && code === "UNAUTHORIZED") {
+    message = "Account session expired or unauthorized.";
+  }
+  throw new AccountSessionError(code, message, res.status, details);
+}
+
+function bearerJson(sessionToken: string): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${sessionToken}`,
+  };
+}
+
+function requireNumbers(data: Record<string, unknown>, fields: readonly string[], what: string, status?: number): void {
+  for (const field of fields) {
+    if (typeof data[field] !== "number" || !Number.isFinite(data[field] as number)) {
+      throw new AccountSessionError("INVALID_RESPONSE", `${what} response missing ${field}`, status);
+    }
+  }
+}
+
+/** Typed refusals of the install-key and machine-request endpoints (see the onboarding plan). */
+export const INSTALL_KEY_LIMIT = "INSTALL_KEY_LIMIT";
+export const MACHINE_REQUEST_FOREIGN_ACCOUNT = "MACHINE_REQUEST_FOREIGN_ACCOUNT";
+export const MACHINE_REQUEST_DECIDED = "MACHINE_REQUEST_DECIDED";
+export const MACHINE_REQUEST_EXPIRED = "MACHINE_REQUEST_EXPIRED";
+export const ACCOUNT_MACHINE_CLAIMED = "ACCOUNT_MACHINE_CLAIMED";
+
+export interface InstallKeyCommands {
+  sh: string;
+  ps1: string;
+}
+
+export interface IssueInstallKeyResponse {
+  keyId: string;
+  /** fxk_ secret; shown exactly once and never stored by the client. */
+  key: string;
+  /** Unix seconds. */
+  expiresAt: number;
+  installCommand: InstallKeyCommands;
+}
+
+export interface InstallKeyView {
+  keyId: string;
+  label: string | null;
+  createdAt: number;
+  expiresAt: number;
+  consumedAt?: number | null;
+  consumedMachineId?: string | null;
+}
+
+export interface MachineRequestView {
+  requestId: string;
+  machineId: string;
+  displayName: string;
+  platform: string;
+  appVersion: string;
+  requesterIp: string;
+  /** Unix seconds. */
+  createdAt: number;
+  /** Unix seconds. */
+  expiresAt: number;
+}
+
+/** A pending request listed for the signed-in owner; the user code is what approve/deny bind to. */
+export interface PendingMachineRequest extends MachineRequestView {
+  userCode: string;
+}
+
+export interface ApproveMachineRequestResponse {
+  machineId: string;
+}
+
+function validateMachineRequest(item: unknown, what: string, status: number): MachineRequestView {
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    throw new AccountSessionError("INVALID_RESPONSE", `${what} entry is not an object`, status);
+  }
+  const data = item as Record<string, unknown>;
+  requireStrings(data, ["requestId", "machineId"], what, status);
+  requireNumbers(data, ["expiresAt"], what, status);
+  return {
+    requestId: data.requestId as string,
+    machineId: data.machineId as string,
+    displayName: typeof data.displayName === "string" ? data.displayName : "",
+    platform: typeof data.platform === "string" ? data.platform : "",
+    appVersion: typeof data.appVersion === "string" ? data.appVersion : "",
+    requesterIp: typeof data.requesterIp === "string" ? data.requesterIp : "unknown",
+    createdAt: typeof data.createdAt === "number" ? data.createdAt : 0,
+    expiresAt: data.expiresAt as number,
+  };
+}
+
+/** Normalizes a user-typed approval code to the server's XXXX-XXXX form. */
+export function normalizeUserCode(value: string): string {
+  const compact = value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return compact.length === 8 ? `${compact.slice(0, 4)}-${compact.slice(4)}` : compact;
+}
+
+export async function issueInstallKey(
+  origin: string,
+  sessionToken: string,
+  options: { label?: string; ttlSecs?: number } = {},
+): Promise<IssueInstallKeyResponse> {
+  const url = `${cleanOrigin(origin)}/api/account/v1/install-keys`;
+  const body: Record<string, unknown> = {};
+  if (options.label !== undefined) body.label = options.label;
+  if (options.ttlSecs !== undefined) body.ttlSecs = options.ttlSecs;
+  const res = await fetchWithTimeout(url, {
+    method: "POST",
+    headers: bearerJson(sessionToken),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await throwAccountResponseError(res, "INSTALL_KEY_FAILED", "Failed to issue install key");
+
+  const data = await readJsonObject(res, "Install key");
+  requireStrings(data, ["keyId", "key"], "Install key", res.status);
+  requireNumbers(data, ["expiresAt"], "Install key", res.status);
+  const command = data.installCommand;
+  if (!command || typeof command !== "object" || Array.isArray(command)) {
+    throw new AccountSessionError("INVALID_RESPONSE", "Install key response missing installCommand", res.status);
+  }
+  requireStrings(command as Record<string, unknown>, ["sh", "ps1"], "Install key command", res.status);
+  return data as unknown as IssueInstallKeyResponse;
+}
+
+export async function listInstallKeys(origin: string, sessionToken: string): Promise<InstallKeyView[]> {
+  const url = `${cleanOrigin(origin)}/api/account/v1/install-keys`;
+  const res = await fetchWithTimeout(url, {
+    headers: { Authorization: `Bearer ${sessionToken}` },
+  });
+  if (!res.ok) await throwAccountResponseError(res, "LIST_INSTALL_KEYS_FAILED", "Failed to list install keys");
+
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    throw new AccountSessionError("INVALID_RESPONSE", "Install key list response is not valid JSON", res.status);
+  }
+  if (!Array.isArray(data)) {
+    throw new AccountSessionError("INVALID_RESPONSE", "Expected install key list array", res.status);
+  }
+  for (const item of data) {
+    if (!item || typeof item !== "object") {
+      throw new AccountSessionError("INVALID_RESPONSE", "Install key list entry is not an object", res.status);
+    }
+    requireStrings(item as Record<string, unknown>, ["keyId"], "Install key list", res.status);
+  }
+  return data as InstallKeyView[];
+}
+
+export async function revokeInstallKey(origin: string, sessionToken: string, keyId: string): Promise<void> {
+  const url = `${cleanOrigin(origin)}/api/account/v1/install-keys/${encodeURIComponent(keyId)}/revoke`;
+  const res = await fetchWithTimeout(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${sessionToken}` },
+  });
+  if (!res.ok) await throwAccountResponseError(res, "REVOKE_INSTALL_KEY_FAILED", "Failed to revoke install key");
+}
+
+export async function listPendingMachineRequests(
+  origin: string,
+  sessionToken: string,
+): Promise<PendingMachineRequest[]> {
+  const url = `${cleanOrigin(origin)}/api/account/v1/machine-requests`;
+  const res = await fetchWithTimeout(url, {
+    headers: { Authorization: `Bearer ${sessionToken}` },
+  });
+  if (!res.ok) await throwAccountResponseError(res, "LIST_MACHINE_REQUESTS_FAILED", "Failed to list machine requests");
+
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    throw new AccountSessionError("INVALID_RESPONSE", "Machine request list response is not valid JSON", res.status);
+  }
+  if (!Array.isArray(data)) {
+    throw new AccountSessionError("INVALID_RESPONSE", "Expected machine request list array", res.status);
+  }
+  return data.map((item) => {
+    const view = validateMachineRequest(item, "Machine request list", res.status);
+    requireStrings(item as Record<string, unknown>, ["userCode"], "Machine request list", res.status);
+    return { ...view, userCode: (item as { userCode: string }).userCode };
+  });
+}
+
+export async function lookupMachineRequest(
+  origin: string,
+  sessionToken: string,
+  userCode: string,
+): Promise<MachineRequestView> {
+  const url = `${cleanOrigin(origin)}/api/account/v1/machine-requests/lookup`;
+  const res = await fetchWithTimeout(url, {
+    method: "POST",
+    headers: bearerJson(sessionToken),
+    body: JSON.stringify({ userCode: normalizeUserCode(userCode) }),
+  });
+  if (!res.ok) await throwAccountResponseError(res, "MACHINE_REQUEST_LOOKUP_FAILED", "Failed to look up machine request");
+
+  const data = await readJsonObject(res, "Machine request");
+  return validateMachineRequest(data, "Machine request", res.status);
+}
+
+export async function approveMachineRequest(
+  origin: string,
+  sessionToken: string,
+  requestId: string,
+  userCode: string,
+): Promise<ApproveMachineRequestResponse> {
+  const url = `${cleanOrigin(origin)}/api/account/v1/machine-requests/${encodeURIComponent(requestId)}/approve`;
+  const res = await fetchWithTimeout(url, {
+    method: "POST",
+    headers: bearerJson(sessionToken),
+    body: JSON.stringify({ userCode: normalizeUserCode(userCode) }),
+  });
+  if (!res.ok) await throwAccountResponseError(res, "MACHINE_REQUEST_APPROVE_FAILED", "Failed to approve machine request");
+
+  const data = await readJsonObject(res, "Machine request approval");
+  requireStrings(data, ["machineId"], "Machine request approval", res.status);
+  return { machineId: data.machineId as string };
+}
+
+export async function denyMachineRequest(
+  origin: string,
+  sessionToken: string,
+  requestId: string,
+  userCode: string,
+): Promise<void> {
+  const url = `${cleanOrigin(origin)}/api/account/v1/machine-requests/${encodeURIComponent(requestId)}/deny`;
+  const res = await fetchWithTimeout(url, {
+    method: "POST",
+    headers: bearerJson(sessionToken),
+    body: JSON.stringify({ userCode: normalizeUserCode(userCode) }),
+  });
+  if (!res.ok) await throwAccountResponseError(res, "MACHINE_REQUEST_DENY_FAILED", "Failed to deny machine request");
+}
+
 export interface OpenAccountWebSocketParams {
   relayUrl: string;
   accountSessionToken: string;

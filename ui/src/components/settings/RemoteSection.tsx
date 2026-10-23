@@ -15,12 +15,18 @@ import {
   getConfiguredAccountOrigin,
   getStoredAccountSessionToken,
   storeAccountOrigin,
+  approveMachineRequest,
+  denyMachineRequest,
   issueEnrollmentCode,
+  issueInstallKey,
   listMachines,
+  listPendingMachineRequests,
+  lookupMachineRequest,
   openTunnel,
   redeemInTunnel,
   requestGrant,
   type AccountMachineView,
+  type PendingMachineRequest,
 } from "../../remote/accountSession";
 import { getOrCreateAttachKey } from "../../remote/accountAttach";
 import { getAgentIntegration, toIpcError } from "../../lib/tauri";
@@ -31,6 +37,7 @@ import { AdvancedSection } from "./remote/AdvancedSection";
 import { DiscoveredList } from "./remote/DiscoveredList";
 import { MachineDrawer, RemoveSshIntegrationDialog, type MachineDrawerContent } from "./remote/MachineDrawer";
 import { MachineList } from "./remote/MachineList";
+import { MachineApprovalCard } from "./remote/MachineApprovalCard";
 import { PairedMachineRow, SshMachineRow, sshRowStatus } from "./remote/MachineRow";
 import { ThisMachineSection } from "./remote/ThisMachineSection";
 import {
@@ -43,6 +50,9 @@ import {
   type MixedItem,
 } from "./remote/remoteModel";
 import { useSshActions } from "./remote/useSshActions";
+
+/** Account polling cadence while the Add Machine wizard is open or a machine awaits approval. */
+export const ACCOUNT_ONBOARDING_POLL_MS = 5_000;
 
 export interface RemoteSectionProps {
   initialContext?: RemoteContext;
@@ -165,6 +175,29 @@ export function RemoteSection({
     }
   };
 
+  // Pending approval requests addressed to this account (by email hint). An older account
+  // server without the endpoint, or any transient failure, leaves the list as it was: the
+  // cards are an addition to the machine list, never a reason to show an error.
+  const [pendingRequests, setPendingRequests] = useState<PendingMachineRequest[]>([]);
+  const pendingRequestRef = useRef(0);
+  const refreshPendingRequests = async (token: string, origin: string) => {
+    const requestId = ++pendingRequestRef.current;
+    try {
+      const pending = await listPendingMachineRequests(origin, token);
+      if (requestId === pendingRequestRef.current) setPendingRequests(pending);
+    } catch {
+      // Optional surface; see above.
+    }
+  };
+
+  useEffect(() => {
+    pendingRequestRef.current += 1;
+    setPendingRequests([]);
+    if (!accountToken) return;
+    void refreshPendingRequests(accountToken, accountOrigin);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountToken, accountOrigin]);
+
   const handleSignOut = () => {
     if (accountToken) {
       const issuerOrigin = getStoredAccountTokenOrigin() || accountOrigin;
@@ -173,6 +206,7 @@ export function RemoteSection({
     clearStoredAccountSessionToken();
     setAccountToken(null);
     setAccountMachines([]);
+    setPendingRequests([]);
   };
   const handleUseAccountOrigin = () => {
     let next: URL;
@@ -207,6 +241,48 @@ export function RemoteSection({
   const openAddMachine = (method?: AddMachineMethod) => {
     setAddMachineMethod(method);
     setIsAddModalOpen(true);
+  };
+
+  // Bounded polling: only while the wizard is open (an install or SSH enrollment is landing) or a
+  // request is waiting for approval, and only while signed in. Closing the wizard, deciding the
+  // last request, signing out or unmounting clears the interval.
+  const pollingActive = Boolean(accountToken) && (isAddModalOpen || pendingRequests.length > 0);
+  useEffect(() => {
+    if (!pollingActive || !accountToken) return;
+    const token = accountToken;
+    const origin = accountOrigin;
+    const interval = setInterval(() => {
+      const requestId = ++machinesRequestRef.current;
+      listMachines(origin, token)
+        .then((machines) => {
+          if (requestId === machinesRequestRef.current) setAccountMachines(machines);
+        })
+        .catch(() => {
+          // A failed background poll keeps the last list; Refresh reports errors explicitly.
+        });
+      void refreshPendingRequests(token, origin);
+    }, ACCOUNT_ONBOARDING_POLL_MS);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pollingActive, accountToken, accountOrigin]);
+
+  const handleIssueInstallKey = async () => {
+    if (!accountToken) throw new Error("Sign in to issue an install key");
+    return issueInstallKey(accountOrigin, accountToken);
+  };
+  const handleLookupMachineRequest = async (userCode: string) => {
+    if (!accountToken) throw new Error("Sign in to approve a machine");
+    return lookupMachineRequest(accountOrigin, accountToken, userCode);
+  };
+  const handleApproveMachineRequest = async (requestId: string, userCode: string) => {
+    if (!accountToken) throw new Error("Sign in to approve a machine");
+    const result = await approveMachineRequest(accountOrigin, accountToken, requestId, userCode);
+    void refreshAccountMachines(accountToken, accountOrigin);
+    return result;
+  };
+  const handleDenyMachineRequest = async (requestId: string, userCode: string) => {
+    if (!accountToken) throw new Error("Sign in to deny a machine");
+    await denyMachineRequest(accountOrigin, accountToken, requestId, userCode);
   };
 
   // Namespaced selected machine key (e.g. "paired:xyz" or "ssh:xyz")
@@ -544,6 +620,24 @@ export function RemoteSection({
         />
       )}
 
+      {accountToken && pendingRequests.length > 0 ? (
+        <section aria-label="Machines waiting for approval" className="space-y-2">
+          <h2 className="text-[13px] font-medium text-foreground">Waiting for approval</h2>
+          {pendingRequests.map((request) => (
+            <MachineApprovalCard
+              key={request.requestId}
+              request={request}
+              autoFocus={false}
+              onApprove={() => handleApproveMachineRequest(request.requestId, request.userCode)}
+              onDeny={() => handleDenyMachineRequest(request.requestId, request.userCode)}
+              onDecided={() => {
+                if (accountToken) void refreshPendingRequests(accountToken, accountOrigin);
+              }}
+            />
+          ))}
+        </section>
+      ) : null}
+
       <MachineList
         total={mixedItems.length}
         shown={filteredItems.length}
@@ -642,6 +736,11 @@ export function RemoteSection({
         initialMethod={addMachineMethod}
         accountOrigin={accountOrigin}
         onIssueEnrollmentCode={accountToken ? handleIssueEnrollmentCode : undefined}
+        onIssueInstallKey={accountToken ? handleIssueInstallKey : undefined}
+        accountMachines={accountMachines}
+        onLookupMachineRequest={accountToken ? handleLookupMachineRequest : undefined}
+        onApproveMachineRequest={accountToken ? handleApproveMachineRequest : undefined}
+        onDenyMachineRequest={accountToken ? handleDenyMachineRequest : undefined}
         onSuccess={result => {
           if (result.kind === "pairedDaemon") {
             // Propagate verified generation-bound state

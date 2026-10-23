@@ -13,6 +13,12 @@ pub mod store_sqlite;
 pub const LOGIN_CODE_TTL: Duration = Duration::from_secs(600);
 pub const SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 pub const ENROLLMENT_CODE_TTL: Duration = Duration::from_secs(600);
+/// Expired or consumed install keys and decided machine requests stay this long past their
+/// expiry so the refusal stays typed (INSTALL_KEY_USED / INSTALL_KEY_EXPIRED /
+/// MACHINE_REQUEST_EXPIRED) and the consumed row stays visible for audit.
+pub const ONBOARDING_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+pub const ENROLLMENT_KIND_CODE: &str = "code";
+pub const ENROLLMENT_KIND_INSTALL_KEY: &str = "install_key";
 pub const DEFAULT_LOGIN_REQUESTS_PER_HOUR: u32 = 5;
 pub const DEFAULT_MAX_BODY_BYTES: usize = 4096;
 
@@ -72,6 +78,90 @@ pub struct EnrollmentCodeRecord {
     pub user_id: String,
     pub account_origin: String,
     pub expires_at: u64,
+    /// `code` (one-shot enrollment code, removed on use) or `install_key` (kept with
+    /// `consumed_at` for audit). Rows written before this column existed are `code`.
+    #[serde(default = "default_enrollment_kind")]
+    pub kind: String,
+    /// Public identifier of an install key (list/revoke); never the key itself.
+    #[serde(default)]
+    pub key_id: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub consumed_at: Option<u64>,
+    #[serde(default)]
+    pub consumed_machine_id: Option<String>,
+    /// Set on codes minted by a machine-request approval: enroll must present exactly this
+    /// machine id and public key.
+    #[serde(default)]
+    pub bound_machine_id: Option<String>,
+    #[serde(default)]
+    pub bound_public_key: Option<String>,
+}
+
+fn default_enrollment_kind() -> String {
+    ENROLLMENT_KIND_CODE.to_string()
+}
+
+impl Default for EnrollmentCodeRecord {
+    fn default() -> Self {
+        Self {
+            user_id: String::new(),
+            account_origin: String::new(),
+            expires_at: 0,
+            kind: default_enrollment_kind(),
+            key_id: None,
+            label: None,
+            created_at: 0,
+            consumed_at: None,
+            consumed_machine_id: None,
+            bound_machine_id: None,
+            bound_public_key: None,
+        }
+    }
+}
+
+impl EnrollmentCodeRecord {
+    pub fn is_install_key(&self) -> bool {
+        self.kind == ENROLLMENT_KIND_INSTALL_KEY
+    }
+}
+
+pub const MACHINE_REQUEST_PENDING: &str = "pending";
+pub const MACHINE_REQUEST_APPROVED: &str = "approved";
+pub const MACHINE_REQUEST_DENIED: &str = "denied";
+pub const MACHINE_REQUEST_DELIVERED: &str = "delivered";
+
+/// An unauthenticated machine asking an account owner for approval (RFC 8628 shape).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineRequestRecord {
+    pub request_id: String,
+    pub device_code_hash: String,
+    pub user_code: String,
+    pub machine_id: String,
+    pub public_key: String,
+    pub display_name: String,
+    pub platform: String,
+    pub app_version: String,
+    #[serde(default)]
+    pub email_hint: Option<String>,
+    pub requester_ip: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    /// `pending`, `approved`, `denied` or `delivered` (approved and the code was polled).
+    pub status: String,
+    #[serde(default)]
+    pub decided_by: Option<String>,
+    #[serde(default)]
+    pub decided_at: Option<u64>,
+    /// Plaintext approved enrollment code, held only until the first poll delivers it.
+    #[serde(default)]
+    pub enrollment_code: Option<String>,
+    #[serde(default)]
+    pub last_polled_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -234,6 +324,8 @@ pub struct AccountStore {
     pub org_members: BTreeMap<String, OrgMemberRecord>,
     #[serde(default)]
     pub org_invites: BTreeMap<String, OrgInviteRecord>,
+    #[serde(default)]
+    pub machine_requests: BTreeMap<String, MachineRequestRecord>,
 }
 
 impl AccountStore {
@@ -254,8 +346,16 @@ impl AccountStore {
     }
 
     pub fn purge_expired(&mut self, now: u64) {
-        self.enrollment_codes
-            .retain(|_, code| code.expires_at > now);
+        self.enrollment_codes.retain(|_, code| {
+            if code.is_install_key() {
+                code.expires_at.saturating_add(ONBOARDING_RETENTION_SECS) > now
+            } else {
+                code.expires_at > now
+            }
+        });
+        self.machine_requests.retain(|_, request| {
+            request.expires_at.saturating_add(ONBOARDING_RETENTION_SECS) > now
+        });
         self.sessions.retain(|_, session| session.expires_at > now);
         self.grants.retain(|_, grant| grant.expires_at > now);
         self.device_auths.retain(|_, auth| auth.expires_at > now);
@@ -370,6 +470,7 @@ mod tests {
                 user_id: "u1".into(),
                 account_origin: "https://account.example".into(),
                 expires_at: now_secs() - 1,
+                ..Default::default()
             },
         );
         store.purge_expired(now_secs());

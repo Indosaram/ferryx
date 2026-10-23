@@ -30,6 +30,12 @@ pub enum Operation {
         path: Option<String>,
         include_hidden: bool,
     },
+    /// Bounded Git repository discovery below a host directory (`repoDiscoveryV1`).
+    DiscoverRepos {
+        path: Option<String>,
+        depth: Option<u8>,
+        include_hidden: bool,
+    },
     Projects,
     RegisterProject {
         request: m::RegisterRequest,
@@ -97,6 +103,7 @@ pub struct OperationResponse {
 pub enum OperationResult {
     Capabilities(m::Capabilities),
     Directories(m::Directories),
+    DiscoverRepos(DiscoveredRepos),
     Projects(projects::Projects),
     RegisterProject(projects::Project),
     UnregisterProject(()),
@@ -112,6 +119,62 @@ pub enum OperationResult {
     PasteUploadChunk(m::PasteUploadChunkResult),
     FileRead(m::FileReadResult),
     AgentControl(serde_json::Value),
+}
+/// Desktop projection of [m::Repositories]: a registered row carries the desktop
+/// workspace id (`daemon:<sha256>`) next to the host's own id, so the caller can open
+/// the existing project without a second inventory read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredRepos {
+    pub path: String,
+    pub repos: Vec<DiscoveredRepo>,
+    pub truncated: bool,
+    pub elapsed_ms: u64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredRepo {
+    pub repo_root: String,
+    pub is_linked_worktree: bool,
+    pub git_common_dir: Option<String>,
+    pub branch: Option<String>,
+    /// Desktop workspace id of the registered project, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered_workspace_id: Option<String>,
+    /// The host's own workspace id for the same registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_workspace_id: Option<String>,
+    pub target: crate::scoped_contracts::RunTarget,
+}
+/// Rewrites host workspace ids into desktop ids. Rows are bounded by the host's caps.
+#[allow(clippy::result_large_err)]
+pub(crate) fn discovered_repos(host: &str, rows: m::Repositories) -> Result<DiscoveredRepos> {
+    if rows.repos.len() > 200 {
+        return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
+    }
+    Ok(DiscoveredRepos {
+        path: rows.path,
+        truncated: rows.truncated,
+        elapsed_ms: rows.elapsed_ms,
+        repos: rows
+            .repos
+            .into_iter()
+            .map(|repo| DiscoveredRepo {
+                registered_workspace_id: repo
+                    .registered_workspace_id
+                    .as_deref()
+                    .map(|remote| projects::id(host, remote)),
+                remote_workspace_id: repo.registered_workspace_id,
+                repo_root: repo.repo_root,
+                is_linked_worktree: repo.is_linked_worktree,
+                git_common_dir: repo.git_common_dir,
+                branch: repo.branch,
+                target: crate::scoped_contracts::RunTarget::PairedDaemon {
+                    host_id: host.into(),
+                },
+            })
+            .collect(),
+    })
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -329,6 +392,26 @@ impl Operation {
                 r.capability = Some("directoryBrowseV1");
                 if let Some(p) = p {
                     r.query.push(("path".into(), p.clone()));
+                }
+                r.query
+                    .push(("includeHidden".into(), include_hidden.to_string()));
+            }
+            Self::DiscoverRepos {
+                path: p,
+                depth,
+                include_hidden,
+            } => {
+                path = "fs/repositories";
+                r.capability = Some(crate::remote::repo_discovery::REPO_DISCOVERY_CAPABILITY);
+                r.response_limit = m::DIRECTORY_JSON_MAX_BYTES;
+                if let Some(p) = p {
+                    r.query.push(("path".into(), p.clone()));
+                }
+                if let Some(depth) = depth {
+                    if !(1..=crate::remote::repo_discovery::MAX_DEPTH).contains(depth) {
+                        return Err(ClientError::local("INVALID_REQUEST"));
+                    }
+                    r.query.push(("depth".into(), depth.to_string()));
                 }
                 r.query
                     .push(("includeHidden".into(), include_hidden.to_string()));
@@ -1387,6 +1470,9 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
     Ok(match operation {
         Operation::Capabilities => OperationResult::Capabilities(decode(bytes)?),
         Operation::Directories { .. } => OperationResult::Directories(decode(bytes)?),
+        Operation::DiscoverRepos { .. } => {
+            OperationResult::DiscoverRepos(discovered_repos(&host.host_id, decode(bytes)?)?)
+        }
         Operation::Projects => {
             OperationResult::Projects(projects::projects(&host.host_id, decode(bytes)?))
         }
