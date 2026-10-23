@@ -4693,12 +4693,9 @@ impl NativeTerminalSurfaceHostState {
                                         // A later process sighting is what lifts the suppression:
                                         // a new agent is running, so its screen is live evidence
                                         // again until it reports for itself.
-                                        sess.agent_reports_own_state = match origin {
-                                            crate::daemon::protocol::AgentStateOrigin::Agent
-                                            | crate::daemon::protocol::AgentStateOrigin::ProcessReleased => true,
-                                            crate::daemon::protocol::AgentStateOrigin::ProcessObserved
-                                            | crate::daemon::protocol::AgentStateOrigin::ManualReset => false,
-                                        };
+                                        // A discovered provider session names the conversation
+                                        // only, so it does not suppress inference either.
+                                        sess.agent_reports_own_state = origin.claims_activity();
                                         // `/new` gives the pane a new conversation while the
                                         // activity state stays put, so a rotated provider session
                                         // is a change in its own right.

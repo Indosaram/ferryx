@@ -58,6 +58,41 @@ impl AgentStateHub {
         });
     }
 
+    /// Publishes a provider session the daemon discovered from the pane's agent process, unless
+    /// the session already carries a live one. The check and the insert share the publishers'
+    /// lock, so an identity the agent reported for itself is never replaced by a discovered one.
+    ///
+    /// `baseline` is the provider session the hub retained when this agent process was first
+    /// seen. A release keeps the exited agent's identity, so that leftover (and only that one) may
+    /// be replaced by the identity the next agent in the pane is discovered to hold.
+    ///
+    /// Discovery names the session only. The retained state word and detail are kept, and a
+    /// session whose agent reports its own state keeps that origin, so a discovered id never lifts
+    /// the screen-inference suppression a self-report installed.
+    pub(crate) fn publish_discovered(
+        &self,
+        mut state: AgentState,
+        baseline: Option<&AgentProviderSession>,
+    ) -> bool {
+        let mut retained = self.retained.lock();
+        if let Some(previous) = retained.get(&state.session_id) {
+            if holds_live_provider(Some(previous), baseline) {
+                return false;
+            }
+            state.state = previous.state.clone();
+            state.detail = previous.detail.clone();
+            if previous.origin == AgentStateOrigin::Agent {
+                state.origin = AgentStateOrigin::Agent;
+            }
+        }
+        retained.insert(state.session_id.clone(), state.clone());
+        let _ = self.tx.send(AgentStateUpdate {
+            state,
+            is_snapshot: false,
+        });
+        true
+    }
+
     pub(crate) fn release_manual(&self, session_id: &str) {
         let mut retained = self.retained.lock();
         let previous = retained.get(session_id).cloned();
@@ -167,6 +202,20 @@ impl AgentStateHub {
     }
 }
 
+/// Whether `current` carries a provider identity discovery must leave alone: one the agent
+/// reported itself, or any identity published since `baseline` (the one retained when the
+/// current agent process was first seen) was taken.
+pub(crate) fn holds_live_provider(
+    current: Option<&AgentState>,
+    baseline: Option<&AgentProviderSession>,
+) -> bool {
+    current.is_some_and(|state| {
+        state.provider_session.as_ref().is_some_and(|provider| {
+            state.origin == AgentStateOrigin::Agent || Some(provider) != baseline
+        })
+    })
+}
+
 impl AgentStateSubscription {
     pub fn resynchronize(&mut self, session_id: &str) -> Option<AgentState> {
         let fresh = self.hub.subscribe(session_id);
@@ -190,6 +239,88 @@ mod tests {
             origin: AgentStateOrigin::Agent,
         }
     }
+
+    fn provider(id: &str) -> AgentProviderSession {
+        AgentProviderSession {
+            key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+            id: id.to_string(),
+            transcript_path: None,
+        }
+    }
+
+    fn discovered(session_id: &str, agent: &str, id: &str) -> AgentState {
+        AgentState {
+            session_id: session_id.to_string(),
+            state: "idle".to_string(),
+            agent: Some(agent.to_string()),
+            provider_session: Some(provider(id)),
+            detail: None,
+            origin: AgentStateOrigin::ProcessDiscovered,
+        }
+    }
+
+    // Re-explore-4 G2: a discovered identity fills a gap and never overwrites what an agent
+    // reported for itself.
+    #[test]
+    fn a_discovered_identity_never_replaces_one_the_agent_reported() {
+        let hub = AgentStateHub::new(8);
+        hub.publish_canonical(AgentState {
+            provider_session: Some(provider("self-reported")),
+            ..state("s1", "working")
+        });
+        assert!(!hub.publish_discovered(discovered("s1", "omo", "discovered"), None));
+        let current = hub.current("s1").unwrap();
+        assert_eq!(current.provider_session, Some(provider("self-reported")));
+        assert_eq!(current.origin, AgentStateOrigin::Agent);
+        // Even when it equals the baseline: the agent's own report is authoritative.
+        let own = provider("self-reported");
+        assert!(!hub.publish_discovered(discovered("s1", "omo", "x"), Some(&own)));
+    }
+
+    #[test]
+    fn a_discovered_identity_fills_a_pane_without_one_and_keeps_its_state() {
+        let hub = AgentStateHub::new(8);
+        for agent in ["kimi", "copilot", "gjc"] {
+            let session = format!("pane-{agent}");
+            assert!(hub.publish_discovered(discovered(&session, agent, "id-1"), None));
+            let current = hub.current(&session).unwrap();
+            assert_eq!(current.provider_session, Some(provider("id-1")));
+            assert_eq!(current.origin, AgentStateOrigin::ProcessDiscovered);
+            // A second discovery does not overwrite the first.
+            assert!(!hub.publish_discovered(discovered(&session, agent, "id-2"), None));
+            assert_eq!(hub.current(&session).unwrap().provider_session, Some(provider("id-1")));
+        }
+        // A retained activity word and detail survive the discovery.
+        hub.publish_canonical(AgentState {
+            detail: Some("approve?".into()),
+            agent: Some("kimi".into()),
+            ..state("s2", "blocked")
+        });
+        assert!(hub.publish_discovered(discovered("s2", "kimi", "id-3"), None));
+        let current = hub.current("s2").unwrap();
+        assert_eq!(current.state, "blocked");
+        assert_eq!(current.detail.as_deref(), Some("approve?"));
+        // The self-reported origin is kept, so inference stays suppressed for that pane.
+        assert_eq!(current.origin, AgentStateOrigin::Agent);
+    }
+
+    #[test]
+    fn a_released_agents_leftover_identity_yields_to_the_next_agents_discovery() {
+        let hub = AgentStateHub::new(8);
+        hub.publish_discovered(discovered("s3", "kimi", "old"), None);
+        hub.release_foreground("s3");
+        let leftover = hub.current("s3").unwrap().provider_session;
+        assert_eq!(leftover, Some(provider("old")));
+        // A new agent process starts with the leftover as its baseline: that one may be replaced.
+        assert!(!holds_live_provider(hub.current("s3").as_ref(), leftover.as_ref()));
+        assert!(hub.publish_discovered(discovered("s3", "gjc", "new"), leftover.as_ref()));
+        assert_eq!(hub.current("s3").unwrap().provider_session, Some(provider("new")));
+        // Anything published since the baseline is live.
+        assert!(holds_live_provider(hub.current("s3").as_ref(), leftover.as_ref()));
+        assert!(!hub.publish_discovered(discovered("s3", "gjc", "newer"), leftover.as_ref()));
+        assert!(!holds_live_provider(None, None));
+    }
+
 
     #[tokio::test]
     async fn manual_reset_clears_state_and_recovers_on_next_transition() {
@@ -231,7 +362,7 @@ mod tests {
         let mut subscription = hub.subscribe("s1");
         let mut transition = ProcessTransition::default();
         assert_eq!(
-            transition.observe(Some(Foreground::Agent(42))),
+            transition.observe(Some(Foreground::Agent { pid: 42, agent: "omo" })),
             Some(AgentProcessEdge::Observed)
         );
         if transition.observe(Some(Foreground::Shell)) == Some(AgentProcessEdge::Released) {
@@ -320,9 +451,9 @@ mod tests {
         let mut subscription = hub.subscribe("s1");
         let mut transition = ProcessTransition::default();
         for observation in [
-            Some(Foreground::Agent(42)),
+            Some(Foreground::Agent { pid: 42, agent: "omo" }),
             None,
-            Some(Foreground::Agent(42)),
+            Some(Foreground::Agent { pid: 42, agent: "omo" }),
         ] {
             if transition.observe(observation) == Some(AgentProcessEdge::Released) {
                 hub.release_foreground("s1");

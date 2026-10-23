@@ -3,7 +3,10 @@ use super::PtySession;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Foreground {
-    Agent(u32),
+    /// An agent process owns the PTY. `agent` is the canonical agent name the process was
+    /// recognized by (see [`agent_identity`]), so a consumer can pick that agent's discovery
+    /// adapter without re-reading the process table.
+    Agent { pid: u32, agent: &'static str },
     Shell,
     Other,
 }
@@ -28,11 +31,11 @@ impl ProcessTransition {
         // Unknown ownership is not evidence in either direction.
         let current = current?;
         match current {
-            Foreground::Agent(_) if !self.agent_observed => {
+            Foreground::Agent { .. } if !self.agent_observed => {
                 self.agent_observed = true;
                 Some(AgentProcessEdge::Observed)
             }
-            Foreground::Agent(_) => None,
+            Foreground::Agent { .. } => None,
             // An agent rarely hands the terminal straight back to the prompt: it exits, the shell
             // runs whatever came next in the command line, and only then prompts. Releasing only
             // on an immediate agent -> shell edge therefore misses real exits and pins the pane
@@ -200,11 +203,26 @@ const AGENT_NAMES: [&str; 18] = [
     "droid",
 ];
 
+/// The agent name a launcher binary is recognized by, mapped to the agent id the rest of Ferryx
+/// uses (discovery, resume, machine admission). cursor's binary is `agent` or `cursor-agent`,
+/// and antigravity's is `agy`.
+fn canonical_agent_name(matched: &'static str) -> &'static str {
+    match matched {
+        "agent" => "cursor-agent",
+        "agy" => "antigravity",
+        other => other,
+    }
+}
+
+#[cfg(test)]
 fn is_agent(command: &str) -> bool {
+    agent_identity(command).is_some()
+}
+
+/// Which agent `command` launches, by its executable or interpreter entry point.
+pub(crate) fn agent_identity(command: &str) -> Option<&'static str> {
     let tokens = command_tokens(command);
-    let Some(program) = tokens.first().copied() else {
-        return false;
-    };
+    let program = tokens.first().copied()?;
     let candidate = if is_interpreter(executable_name(program)) {
         // Interpreter entry points, not arbitrary arguments such as `echo omo`. The script is
         // the first argument after the interpreter's own flags (`node --no-warnings=X agent`);
@@ -213,7 +231,7 @@ fn is_agent(command: &str) -> bool {
         let mut arguments = tokens.iter().skip(1).copied();
         let script = loop {
             match arguments.next() {
-                Some(flag) if is_named(flag, &INLINE_CODE_FLAGS) => return false,
+                Some(flag) if is_named(flag, &INLINE_CODE_FLAGS) => return None,
                 Some(flag) if flag.starts_with('-') => continue,
                 other => break other,
             }
@@ -221,13 +239,18 @@ fn is_agent(command: &str) -> bool {
         let script = script.or_else(|| last_segment(command)).unwrap_or("");
         if is_named(agent_name(script), &GENERIC_ENTRY_POINTS) {
             // A bundled CLI (`senpi/dist/bundle/cli.js`) is named by its package, not its file.
-            return package_agent(&tokens).is_some();
+            return package_agent(&tokens);
         }
         script
     } else {
         program
     };
-    is_named(agent_name(candidate), &AGENT_NAMES)
+    let name = agent_name(candidate);
+    AGENT_NAMES
+        .iter()
+        .copied()
+        .find(|known| name.eq_ignore_ascii_case(known))
+        .map(canonical_agent_name)
 }
 
 fn is_shell(command: &str) -> bool {
@@ -357,9 +380,11 @@ mod platform {
                 (process.pid, process.parent, process.pgid, process.command.as_str());
             group_listed |= pgid == Some(group);
             // A suspended/background agent is still alive: do not call shell ownership exit.
-            if (pgid == Some(group) || parent == Some(shell)) && is_agent(command) {
-                agent = Some(pid);
-                break;
+            if pgid == Some(group) || parent == Some(shell) {
+                if let Some(name) = agent_identity(command) {
+                    agent = Some((pid, name));
+                    break;
+                }
             }
             if pid == Some(shell) && pgid == Some(group) && is_shell(command) {
                 shell_foreground = true;
@@ -370,8 +395,8 @@ mod platform {
         if session.foreground_process_group()? != Some(group) {
             return Ok(None);
         }
-        if let Some(pid) = agent {
-            return Ok(pid.map(Foreground::Agent));
+        if let Some((pid, name)) = agent {
+            return Ok(pid.map(|pid| Foreground::Agent { pid, agent: name }));
         }
         if !group_listed {
             return Ok(None);
@@ -441,11 +466,16 @@ mod platform {
             }
         }
         for p in &snapshot.processes {
-            if p.pid != shell
-                && descendants.contains(&p.pid)
-                && (is_agent(&p.name) || p.command.as_deref().is_some_and(is_agent))
+            if p.pid == shell || !descendants.contains(&p.pid) {
+                continue;
+            }
+            if let Some(name) =
+                agent_identity(&p.name).or_else(|| p.command.as_deref().and_then(agent_identity))
             {
-                return Ok(Some(Foreground::Agent(p.pid)));
+                return Ok(Some(Foreground::Agent {
+                    pid: p.pid,
+                    agent: name,
+                }));
             }
         }
         Ok(Some(if descendants.len() == 1 {
@@ -536,7 +566,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(
-                matches!(observed, Some(Foreground::Agent(_))),
+                matches!(observed, Some(Foreground::Agent { .. })),
                 "{observed:?}"
             );
             assert_ne!(
@@ -739,6 +769,36 @@ mod tests {
     }
 
     #[test]
+    fn foreground_agent_carries_the_name_discovery_uses() {
+        // Re-explore-4 G2: the observer picks the discovery adapter by this name, so each
+        // published family must come back under the id discovery and resume use.
+        for (command, agent) in [
+            // kimi: uv's python runs ~/.local/bin/kimi (local-2.md:212,216).
+            ("/Users/indo/.local/share/uv/tools/kimi-cli/bin/python /Users/indo/.local/bin/kimi", "kimi"),
+            ("/Users/indo/.local/share/uv/tools/kimi-cli/bin/python /Users/indo/.local/bin/kimi -S eca66b4f-a89b-4979-9f13-cbe3f35b5991", "kimi"),
+            // copilot: the Mach-O binary itself (local-3.md:17, local.md:124).
+            ("copilot", "copilot"),
+            ("copilot --resume 5793c06c-5bee-4b34-883b-589051286cfd", "copilot"),
+            (r"C:\Users\dev\AppData\Local\Programs\Copilot.Exe", "copilot"),
+            // gjc: bun runs the bin symlink (remote-gjc.md:18).
+            ("bun /home/indo/.local/share/mise/installs/node/26.8.1/bin/gjc --model fakelocal/fake-model", "gjc"),
+            ("claude --resume id", "claude"),
+            ("/home/indo/.grok/bin/grok", "grok"),
+            ("bun /home/indo/.bun/bin/omp", "omp"),
+            ("/Users/indo/.local/bin/agent --resume id", "cursor-agent"),
+            ("/Users/x/.local/bin/agy", "antigravity"),
+        ] {
+            assert_eq!(agent_identity(command), Some(agent), "{command}");
+        }
+        assert_eq!(
+            agent_identity("bun /g/node_modules/@code-yeongyu/senpi/dist/bundle/cli.js --extension /g/node_modules/omo-ai/plugin"),
+            Some("omo")
+        );
+        assert_eq!(agent_identity("/bin/zsh"), None);
+        assert_eq!(agent_identity("sh -c kimi"), None);
+    }
+
+    #[test]
     fn generic_entry_points_resolve_to_their_package_agent() {
         let senpi = "/g/node_modules/@code-yeongyu/senpi/dist/bundle/cli.js";
         assert_eq!(
@@ -769,7 +829,7 @@ mod tests {
         let mut observer = ProcessTransition::default();
         assert_eq!(observer.observe(Some(Foreground::Shell)), None);
         assert_eq!(
-            observer.observe(Some(Foreground::Agent(42))),
+            observer.observe(Some(Foreground::Agent { pid: 42, agent: "omo" })),
             Some(AgentProcessEdge::Observed)
         );
         assert_eq!(observer.observe(None), None);
@@ -788,7 +848,7 @@ mod tests {
         // silently drops the exit and the pane stays "working" with no agent alive.
         let mut observer = ProcessTransition::default();
         assert_eq!(
-            observer.observe(Some(Foreground::Agent(42))),
+            observer.observe(Some(Foreground::Agent { pid: 42, agent: "omo" })),
             Some(AgentProcessEdge::Observed)
         );
         assert_eq!(observer.observe(Some(Foreground::Other)), None);
@@ -809,11 +869,11 @@ mod tests {
         // is what re-arms it, so the edge has to be observable.
         let mut observer = ProcessTransition::default();
         assert_eq!(
-            observer.observe(Some(Foreground::Agent(7))),
+            observer.observe(Some(Foreground::Agent { pid: 7, agent: "omo" })),
             Some(AgentProcessEdge::Observed)
         );
         assert_eq!(
-            observer.observe(Some(Foreground::Agent(7))),
+            observer.observe(Some(Foreground::Agent { pid: 7, agent: "omo" })),
             None,
             "a still-running agent is not a new edge"
         );
@@ -822,7 +882,7 @@ mod tests {
             Some(AgentProcessEdge::Released)
         );
         assert_eq!(
-            observer.observe(Some(Foreground::Agent(9))),
+            observer.observe(Some(Foreground::Agent { pid: 9, agent: "omo" })),
             Some(AgentProcessEdge::Observed)
         );
     }
@@ -872,12 +932,12 @@ mod tests {
             inspect_with_snapshot(session, &snapshot).unwrap()
         };
         assert!(
-            matches!(classify(&agent), Some(Foreground::Agent(_))),
+            matches!(classify(&agent), Some(Foreground::Agent { .. })),
             "the tick's listing must still see the agent in front of its own pane"
         );
         assert_eq!(classify(&shell), Some(Foreground::Shell));
         // The same listing keeps serving the rest of the tick's sessions.
-        assert!(matches!(classify(&agent), Some(Foreground::Agent(_))));
+        assert!(matches!(classify(&agent), Some(Foreground::Agent { .. })));
         assert_eq!(classify(&shell), Some(Foreground::Shell));
         // Teardown exists only so no child outlives the test. Both sessions stay in the
         // manager's registry, so their output channels are not required to close: shut the

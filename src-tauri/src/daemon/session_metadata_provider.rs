@@ -98,6 +98,14 @@ impl DaemonSessionService {
             {
                 return Err("AGENT_CWD_MISMATCH".into());
             }
+        } else if crate::terminal::resume_cwd::machine_spawn_admits_agent(agent) {
+            // Every other family whose store records a cwd gets the same proof, read through the
+            // resume-cwd lookup a remote spawn uses: the store record for this id must name the
+            // pane's own directory. copilot is the exception: its store writes no cwd
+            // (`MACHINE_RESUME_NO_CWD_PROOF`), so there is nothing to compare; it is published on
+            // the process-discovery proof alone and a remote spawn of it stays refused.
+            crate::terminal::resume_cwd::verify_machine_resume_cwd(agent, provider, &cwd)
+                .map_err(|code| code.to_string())?;
         }
         let claim =
             ProviderSessionClaimKey::from_startup(Some(&startup)).ok_or("AGENT_RESUME_INVALID")?;

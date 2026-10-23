@@ -85,7 +85,7 @@ pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Opti
     let agent_pid = entries
         .as_deref()
         .and_then(|entries| descendant_agent_pid(entries, root_pid, normalized));
-    // A resumed grok, droid, cline or crush names its session in its own argv, which binds the id
+    // A resumed grok, droid, cline, crush, kimi, copilot or gjc names its session in its own argv, which binds the id
     // to this pane's process. The open-file walk stays first because it follows a conversation the
     // agent switched to after launch, which the launch argv cannot.
     let resumed_id = |pid: u32| {
@@ -104,7 +104,7 @@ pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Opti
         None if normalized == "opencode" => opencode_session_id(None, root_pid),
         Some(pid) if normalized == "pi" => pi_session_id(Some(pid), root_pid),
         None if normalized == "pi" => pi_session_id(None, root_pid),
-        Some(pid) if matches!(normalized, "grok" | "droid" | "cline") => {
+        Some(pid) if matches!(normalized, "grok" | "droid" | "cline" | "kimi" | "copilot" | "gjc") => {
             lsof_session_id(pid, normalized).or_else(|| resumed_id(pid))
         }
         // crush keeps every session of a project in one `.crush/crush.db`, so no open file names
@@ -237,11 +237,32 @@ fn args_match_agent(agent_type: &str, args: &str) -> bool {
         .next()
         .unwrap_or(command)
         .to_ascii_lowercase();
+    // kimi is a uv console script (`…/kimi-cli/bin/python ~/.local/bin/kimi`, local-2.md:212) and
+    // gjc a bun-shebang symlink (`bun …/bin/gjc`, remote-gjc.md:18): argv[0] is the interpreter
+    // and the agent is the entry script that follows it.
+    let interpreted_entry = || {
+        let interpreter = basename.trim_end_matches(".exe");
+        let is_interpreter = matches!(interpreter, "bun" | "node" | "python" | "python3")
+            || (interpreter.starts_with("python3.")
+                && interpreter[8..].bytes().all(|byte| byte.is_ascii_digit()));
+        is_interpreter
+            && args.split_whitespace().nth(1).is_some_and(|entry| {
+                entry
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(normalized_agent))
+            })
+    };
     match normalized_agent {
         "cursor" => matches!(basename.as_str(), "cursor-agent" | "cursor"),
-        "claude" | "codex" | "copilot" | "kimi" => basename == normalized_agent,
+        "claude" | "codex" | "copilot" => basename == normalized_agent,
+        "kimi" => basename == "kimi" || interpreted_entry(),
         "antigravity" => basename == "agy",
-        "gjc" => basename == "gjc" || args.to_ascii_lowercase().contains("/gjc.js"),
+        "gjc" => {
+            basename == "gjc"
+                || args.to_ascii_lowercase().contains("/gjc.js")
+                || interpreted_entry()
+        }
         "opencode" => basename == "opencode",
         "pi" => {
             basename == "pi"
@@ -281,6 +302,11 @@ fn resume_id_from_args(agent_type: &str, args: &str) -> Option<String> {
         "droid" => &["--resume", "-r", "resume"],
         "cline" => &["--id"],
         "crush" => &["--session", "-s"],
+        // Measured flags: `kimi --help` (--session/-S), `copilot --help` (--resume [sessionId]),
+        // and the resume argv Ferryx itself spawns (terminal/shell.rs resolve_agent_resume_plan).
+        "kimi" => &["--session", "-S"],
+        "copilot" => &["--resume"],
+        "gjc" => &["--resume"],
         _ => return None,
     };
     let value = tokens
@@ -296,6 +322,8 @@ fn resume_id_from_args(agent_type: &str, args: &str) -> Option<String> {
     let valid = match agent_type {
         "cline" => is_cline_session_id(value),
         "crush" => is_valid_uuid(value) || is_crush_session_hash(value),
+        // gjc ids are the 16-hex suffix of its store file (gjc_session_id_from_path).
+        "gjc" => is_crush_session_hash(value),
         _ => is_valid_uuid(value),
     };
     valid.then(|| value.to_string())
@@ -509,7 +537,7 @@ fn proc_fd_session_id(fd_dir: &std::path::Path, agent_type: &str) -> Option<Stri
         .find_map(|target| extract_session_id_from_path(agent_type, &target.to_string_lossy()))
 }
 
-fn extract_session_id_from_path(agent_type: &str, path: &str) -> Option<String> {
+pub(crate) fn extract_session_id_from_path(agent_type: &str, path: &str) -> Option<String> {
     let agent_type = if agent_type == "cursor-agent" {
         "cursor"
     } else {
@@ -522,6 +550,7 @@ fn extract_session_id_from_path(agent_type: &str, path: &str) -> Option<String> 
     match agent_type {
         "grok" => return grok_session_id_from_path(&normalized),
         "droid" => return droid_session_id_from_path(&normalized),
+        "codex" => return codex_session_id_from_path(&normalized),
         "cline" => return cline_session_id_from_path(&normalized),
         // omp writes `<agentDir>/sessions/<cwd-slug>/<ts>_<UUIDv7>.jsonl`, agentDir defaulting to
         // `~/.omp/agent`; a named profile uses `~/.omp/profiles/<name>/agent`.
@@ -631,6 +660,18 @@ fn uuid_from_session_path(path: &str) -> Option<String> {
 fn components_after_marker<'a>(path: &'a str, marker: &str) -> Option<Vec<&'a str>> {
     let start = path.find(marker)? + marker.len();
     Some(path[start..].split('/').filter(|part| !part.is_empty()).collect())
+}
+
+// codex writes `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<yyyy>-<mm>-<dd>T<hh>-<mm>-<ss>-<id>.jsonl`
+// (measured: cli/fixtures/agent_hook/codex-*.json). The timestamp is glued to the id with `-`, so
+// the generic UUID scan reads one 45-character run and finds nothing; the id is the file stem's
+// last 36 characters.
+fn codex_session_id_from_path(path: &str) -> Option<String> {
+    let parts = components_after_marker(path, "/.codex/sessions/")?;
+    let stem = parts.last()?.strip_suffix(".jsonl")?.strip_prefix("rollout-")?;
+    let id = stem.get(stem.len().checked_sub(36)?..)?;
+    let separated = stem.len() == 36 || stem.as_bytes().get(stem.len() - 37) == Some(&b'-');
+    (separated && is_valid_uuid(id)).then(|| id.to_string())
 }
 
 // grok keeps one directory per session: `~/.grok/sessions/<url-encoded cwd>/<id>/<file>`, where
@@ -1359,6 +1400,25 @@ mod tests {
     // remote-droid.md, local-3.md, remote-gjc.md).
     #[test]
     fn session_discovery_extracts_measured_omp_grok_droid_cline_store_paths() {
+        // codex: the measured rollout name glues the timestamp to the id.
+        assert_eq!(
+            extract_session_id_from_path(
+                "codex",
+                "/Users/indo/.codex/sessions/2026/10/22/rollout-2026-10-22T16-07-46-01a1626f-f0db-75d0-b73c-2372a21d4cae.jsonl",
+            ),
+            Some("01a1626f-f0db-75d0-b73c-2372a21d4cae".to_string())
+        );
+        assert_eq!(
+            extract_session_id_from_path("codex", "/Users/indo/.codex/sessions/2026/10/22/notes.jsonl"),
+            None
+        );
+        assert_eq!(
+            extract_session_id_from_path(
+                "codex",
+                "/Users/indo/.claude/projects/x/rollout-2026-10-22T16-07-46-01a1626f-f0db-75d0-b73c-2372a21d4cae.jsonl",
+            ),
+            None
+        );
         assert_eq!(
             extract_session_id_from_path(
                 "omp",
@@ -1509,6 +1569,29 @@ mod tests {
             Some("1792653340197_ys4yu")
         );
         assert_eq!(resume_id_from_args("cline", "cline --hooks-dir /tmp/h"), None);
+        // kimi/copilot UUIDs are measured store ids (~/.kimi/sessions/<md5>/<uuid>,
+        // ~/.copilot/session-state/<uuid>.jsonl); gjc ids are its 16-hex store suffix.
+        assert_eq!(
+            resume_id_from_args("kimi", "/usr/bin/python3 /x/kimi --session cb340356-2adc-4cbf-acd3-35e6fb6a5a32")
+                .as_deref(),
+            Some("cb340356-2adc-4cbf-acd3-35e6fb6a5a32")
+        );
+        assert_eq!(
+            resume_id_from_args("kimi", "kimi -S cb340356-2adc-4cbf-acd3-35e6fb6a5a32").as_deref(),
+            Some("cb340356-2adc-4cbf-acd3-35e6fb6a5a32")
+        );
+        assert_eq!(
+            resume_id_from_args("copilot", "copilot --resume 0538fdd2-a63e-42b6-8405-4588bd776c6c")
+                .as_deref(),
+            Some("0538fdd2-a63e-42b6-8405-4588bd776c6c")
+        );
+        // `copilot --resume` alone opens a picker; no id is claimed.
+        assert_eq!(resume_id_from_args("copilot", "copilot --resume"), None);
+        assert_eq!(
+            resume_id_from_args("gjc", "bun /x/gjc --resume 1f9d2a6b9c0d1234").as_deref(),
+            Some("1f9d2a6b9c0d1234")
+        );
+        assert_eq!(resume_id_from_args("gjc", "gjc --resume abcd"), None);
         // remote-crush.md section 1: the npm wrapper and its Go child both carry the resume flag.
         assert_eq!(
             resume_id_from_args(
@@ -1664,6 +1747,23 @@ mod tests {
             "node /Users/x/.npm-global/bin/gjc.js"
         ));
         assert!(!args_match_agent("gjc", "/usr/local/bin/gjc-helper"));
+        // Re-explore-4 G2: machine-pane discovery must find the interpreter-launched kimi and gjc
+        // processes measured live, or their panes never get an id.
+        assert!(args_match_agent(
+            "kimi",
+            "/Users/indo/.local/share/uv/tools/kimi-cli/bin/python /Users/indo/.local/bin/kimi"
+        ));
+        assert!(args_match_agent(
+            "kimi",
+            "/usr/bin/python3.12 /home/x/.local/bin/kimi -S eca66b4f-a89b-4979-9f13-cbe3f35b5991"
+        ));
+        assert!(!args_match_agent("kimi", "/usr/bin/python3 /x/manage.py kimi"));
+        assert!(args_match_agent(
+            "gjc",
+            "bun /home/indo/.local/share/mise/installs/node/26.8.1/bin/gjc --model fakelocal/fake-model"
+        ));
+        assert!(!args_match_agent("gjc", "bun /x/server.ts gjc"));
+        assert!(!args_match_agent("copilot", "node /x/copilot-helper.js"));
         assert!(args_match_agent(
             "cursor",
             "/Applications/Cursor.app/Contents/Resources/app/bin/cursor-agent --resume id"

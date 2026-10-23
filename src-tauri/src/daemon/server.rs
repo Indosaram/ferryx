@@ -7,7 +7,6 @@ mod control_server;
 use super::handover::HandoverManager;
 use super::session_service::*;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
-#[cfg(test)]
 use crate::daemon::protocol::AgentProviderSessionKey;
 use crate::daemon::protocol::{
     AgentProviderSession, AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest,
@@ -1656,10 +1655,12 @@ pub(crate) enum IngressOutcome {
 
 /// The admission decision for one report's provider claim.
 ///
-/// Only an OMO claim can lose its pinned path, and only when the id is the one discovery read from
-/// the pane's own process AND the claimed path is the store that id resolves to on this host. OMO is
-/// the family the daemon resolves from an id alone; every other family keeps its claim exactly as it
-/// arrived, so the existing pinned-path rule still decides it.
+/// A claim from a family the machine publishes (`resume_cwd::MACHINE_RESUME_AGENTS`) can lose its
+/// pinned path, and only when the id is the one discovery read from the pane's own process AND the
+/// claimed path is that agent's own store file for that id on this host. Every family in that list
+/// resumes from the id alone (`terminal/shell.rs` `resolve_agent_resume_plan`; omp falls back to the
+/// id when no path is given), so a verified path carries nothing the machine needs. A family outside
+/// that list keeps its claim exactly as it arrived, so the existing pinned-path rule still decides it.
 fn ingress_admission_identity(
     agent: &str,
     id: &str,
@@ -1667,7 +1668,7 @@ fn ingress_admission_identity(
     discovered: Option<&str>,
     path_is_own_store: bool,
 ) -> IngressAdmissionIdentity {
-    if !has_path || !agent.eq_ignore_ascii_case("omo") {
+    if !has_path || !crate::terminal::resume_cwd::machine_admits_agent(agent) {
         return IngressAdmissionIdentity::AsReported;
     }
     if discovered.is_some_and(|found| found == id.trim()) && path_is_own_store {
@@ -1676,6 +1677,39 @@ fn ingress_admission_identity(
     // The claim names a path this session cannot prove is its own store: admit no identity rather
     // than a path nothing verified.
     IngressAdmissionIdentity::Refused
+}
+
+/// Is `claimed` the store file `agent` itself keeps for session `id`?
+///
+/// The claim must be a regular file inside that agent's own history root (`roots`, from
+/// `ipc::agent_history::provider_history_roots`), compared after canonicalization so a symlink
+/// cannot pass by spelling, and the agent's own path reader (the one discovery uses) must read
+/// exactly `id` from it. crush keeps every session in one shared database, so no file proves one
+/// session and its claim is never accepted here; crush reports carry no path anyway.
+fn ingress_path_is_agent_store(
+    agent: &str,
+    id: &str,
+    claimed: &Path,
+    roots: &[(crate::scoped_contracts::CanonicalProvider, PathBuf)],
+) -> bool {
+    let wire = if agent == "cursor-agent" { "cursor" } else { agent };
+    let Some(provider) = crate::agent_history::history::provider_from_wire(wire) else {
+        return false;
+    };
+    let Ok(claimed) = std::fs::canonicalize(claimed) else {
+        return false;
+    };
+    if !claimed.is_file() {
+        return false;
+    }
+    let in_own_root = roots
+        .iter()
+        .filter(|(candidate, _)| *candidate == provider)
+        .filter_map(|(_, root)| std::fs::canonicalize(root).ok())
+        .any(|root| claimed.starts_with(&root));
+    in_own_root
+        && crate::ipc::agents::extract_session_id_from_path(wire, &claimed.to_string_lossy())
+            .is_some_and(|found| found == id.trim())
 }
 
 /// The identity the hub may publish for one report.
@@ -1691,6 +1725,68 @@ fn ingress_publish_identity(
         // A refused identity is never published, so a stale or foreign claim cannot linger.
         IngressOutcome::Refused => None,
     }
+}
+
+/// First wait between process-discovery probes of one machine-pane agent (re-explore-4 G2). It
+/// matches the UI's `PROVIDER_SESSION_PROBE_INTERVAL_MS` floor for local panes.
+const MACHINE_IDENTITY_PROBE_FLOOR: Duration = Duration::from_secs(2);
+/// Longest wait between probes. kimi and gjc create their session file only after the first
+/// persisted message, so a pane can sit at a fresh prompt for a while before discovery can work.
+const MACHINE_IDENTITY_PROBE_CEILING: Duration = Duration::from_secs(60);
+/// Probes per agent process before the observer gives up on it; a new agent process re-arms it.
+const MACHINE_IDENTITY_PROBE_ATTEMPTS: u32 = 40;
+
+/// Should the foreground observer try process discovery for this pane's agent? Only a family the
+/// machine publishes (`MACHINE_RESUME_AGENTS`), only on a machine-owned pane (a local pane's UI
+/// probes for itself), and never while the pane already holds an identity discovery must not
+/// replace (`agent_state::holds_live_provider`).
+fn machine_identity_probe_wanted(agent: &str, machine_only: bool, holds_provider: bool) -> bool {
+    crate::terminal::resume_cwd::machine_admits_agent(agent) && machine_only && !holds_provider
+}
+
+/// Wait before probe number `attempts` (0-based), or `None` once the budget is spent. Doubles
+/// from the floor up to the ceiling.
+fn machine_identity_probe_delay(attempts: u32) -> Option<Duration> {
+    if attempts >= MACHINE_IDENTITY_PROBE_ATTEMPTS {
+        return None;
+    }
+    let doubled = MACHINE_IDENTITY_PROBE_FLOOR.saturating_mul(1u32 << attempts.min(16));
+    Some(doubled.min(MACHINE_IDENTITY_PROBE_CEILING))
+}
+
+/// The report the observer feeds through admission for a discovered provider session. The state
+/// word is the retained one, since discovery observes no activity (`idle` when nothing is
+/// retained), and the claim carries no path: every `MACHINE_RESUME_AGENTS` member resumes from
+/// the id alone, and `admit_agent_report` refuses a pinned path.
+fn discovered_machine_report(
+    session_id: &str,
+    agent: &str,
+    provider_id: &str,
+    retained: Option<&AgentState>,
+) -> AgentStateIngressReport {
+    (
+        session_id.to_string(),
+        retained.map_or_else(|| "idle".to_string(), |state| state.state.clone()),
+        Some(agent.to_string()),
+        Some(AgentProviderSession {
+            key: AgentProviderSessionKey::SessionId,
+            id: provider_id.to_string(),
+            transcript_path: None,
+        }),
+        retained.and_then(|state| state.detail.clone()),
+    )
+}
+
+/// The observer's probe bookkeeping for one pane's current agent process.
+struct MachineIdentityProbe {
+    agent_pid: u32,
+    agent: &'static str,
+    /// Provider session retained when this agent process was first seen.
+    baseline: Option<AgentProviderSession>,
+    attempts: u32,
+    next_at: tokio::time::Instant,
+    in_flight: bool,
+    finished: bool,
 }
 
 /// Name of the rendezvous record the non-unix ingress publishes beside its socket: the loopback
@@ -3814,7 +3910,7 @@ impl DaemonServer {
             .and_then(|pty| pty.pid())
     }
 
-    /// Is `claimed` the store `provider_id` resolves to under this host's HOME?
+    /// Is `claimed` the OMO store `provider_id` resolves to under this host's HOME?
     ///
     /// Both sides are canonicalized and the claim must be a regular file, so a symlink or a
     /// directory cannot pass by spelling alone.
@@ -3853,7 +3949,9 @@ impl DaemonServer {
         let Some(agent) = agent else {
             return Some(provider.clone());
         };
-        if provider.transcript_path.is_none() || !agent.eq_ignore_ascii_case("omo") {
+        if provider.transcript_path.is_none()
+            || !crate::terminal::resume_cwd::machine_admits_agent(agent)
+        {
             return Some(provider.clone());
         }
         let server = Arc::clone(self);
@@ -3865,9 +3963,21 @@ impl DaemonServer {
             let discovered = server
                 .ingress_pty_pid(&session_id)
                 .and_then(|pid| crate::ipc::agents::discover_agent_session_id(pid, &agent));
-            let path_is_own_store = discovered
-                .as_deref()
-                .is_some_and(|found| Self::ingress_path_is_own_store(found, &claimed));
+            let path_is_own_store = discovered.as_deref().is_some_and(|found| {
+                if agent == "omo" {
+                    // omo keeps its own resolver, which also searches the legacy flat store.
+                    Self::ingress_path_is_own_store(found, &claimed)
+                } else {
+                    crate::ipc::file_link::home_dir().is_some_and(|home| {
+                        ingress_path_is_agent_store(
+                            &agent,
+                            found,
+                            Path::new(&claimed),
+                            &crate::ipc::agent_history::provider_history_roots(&home),
+                        )
+                    })
+                }
+            });
             Ok(ingress_admission_identity(
                 &agent,
                 &id,
@@ -3899,6 +4009,29 @@ impl DaemonServer {
         epoch: crate::scoped_contracts::Epoch,
         report: AgentStateIngressReport,
     ) {
+        if let Some((_, state)) = self
+            .resolve_agent_state_report(
+                sessions,
+                epoch,
+                report,
+                crate::daemon::protocol::AgentStateOrigin::Agent,
+            )
+            .await
+        {
+            states.publish_canonical(state);
+        }
+    }
+
+    /// Runs one report through ingress identity, machine-owner validation and
+    /// `admit_agent_report`, and returns the outcome with the state the hub may publish. `None`
+    /// means nothing may be published (the session exited, expired, or its owner is unreachable).
+    async fn resolve_agent_state_report(
+        self: &Arc<Self>,
+        sessions: &Arc<DaemonSessionService>,
+        epoch: crate::scoped_contracts::Epoch,
+        report: AgentStateIngressReport,
+        origin: crate::daemon::protocol::AgentStateOrigin,
+    ) -> Option<(IngressOutcome, AgentState)> {
         let (session_id, state, agent, reported, detail) = report;
         let admitted = self
             .ingress_identity_for_admission(&session_id, agent.as_deref(), reported.as_ref())
@@ -3923,20 +4056,179 @@ impl DaemonServer {
                 }
             }
             // An exited or expired session, or an unreachable owner, publishes nothing.
-            Ok(_) => return,
+            Ok(_) => return None,
             Err(error) if error == "SESSION_NOT_FOUND" => IngressOutcome::Local,
             Err(error) => {
                 tracing::debug!(%error, "Machine agent owner unavailable");
-                return;
+                return None;
             }
         };
-        states.publish_canonical(AgentState {
-            session_id,
-            state,
-            agent,
-            provider_session: ingress_publish_identity(outcome, reported, admitted),
-            detail,
-            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+        Some((
+            outcome,
+            AgentState {
+                session_id,
+                state,
+                agent,
+                provider_session: ingress_publish_identity(outcome, reported, admitted),
+                detail,
+                origin,
+            },
+        ))
+    }
+
+    /// Re-explore-4 G2: gives a machine-owned pane the provider session its agent holds when the
+    /// agent reports nothing itself (kimi, copilot and gjc have no reporter; any other
+    /// `MACHINE_RESUME_AGENTS` member whose reporter is absent is covered the same way).
+    ///
+    /// `pty_pid` is the pane's own PTY process, the root `admit_agent_report` re-runs discovery
+    /// from, so both reads agree on which process they mean. The synthesized report goes through
+    /// the same `resolve_agent_state_report` path as an agent's own report, so machine-owner
+    /// validation and `admit_agent_report` (discovered id, resume plan, store cwd) still decide
+    /// it. `baseline` is the provider session retained when this agent process was first seen.
+    ///
+    /// Returns true when probing this agent process can stop: the id was admitted and published,
+    /// or an identity is already present that discovery must not replace.
+    async fn admit_discovered_machine_agent(
+        self: &Arc<Self>,
+        session_id: &str,
+        agent: &'static str,
+        pty_pid: u32,
+        baseline: Option<AgentProviderSession>,
+    ) -> bool {
+        let discovered = crate::ipc::run_blocking(move || {
+            Ok(crate::ipc::agents::discover_agent_session_id(pty_pid, agent))
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(id) = discovered else {
+            return false;
+        };
+        let retained = self.agent_states.current(session_id);
+        let already_published = retained
+            .as_ref()
+            .and_then(|state| state.provider_session.as_ref())
+            .is_some_and(|provider| provider.id == id);
+        if already_published
+            || crate::daemon::agent_state::holds_live_provider(retained.as_ref(), baseline.as_ref())
+        {
+            return true;
+        }
+        let report = discovered_machine_report(session_id, agent, &id, retained.as_ref());
+        let sessions = self.session_service.clone();
+        let resolved = self
+            .resolve_agent_state_report(
+                &sessions,
+                crate::scoped_contracts::Epoch(self.epoch),
+                report,
+                crate::daemon::protocol::AgentStateOrigin::ProcessDiscovered,
+            )
+            .await;
+        match resolved {
+            // Only an admitted identity is published; a refusal or a local pane publishes nothing,
+            // so a discovered guess can never reach the hub unverified.
+            Some((IngressOutcome::Admitted, state)) if state.provider_session.is_some() => {
+                self.agent_states.publish_discovered(state, baseline.as_ref());
+                true
+            }
+            Some((outcome, _)) => {
+                tracing::debug!(session_id, agent, ?outcome, "discovered machine identity not admitted");
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// One observer tick's G2 bookkeeping for a pane whose foreground is `agent` (process
+    /// `agent_pid`): starts a probe when one is due, rate-limited by
+    /// `machine_identity_probe_delay` and bounded by `MACHINE_IDENTITY_PROBE_ATTEMPTS`. A new
+    /// agent process in the pane re-arms the budget. The probe itself, including the
+    /// machine-ownership read, runs off the tick and reports back through `done`.
+    fn schedule_machine_identity_probe(
+        self: &Arc<Self>,
+        probes: &mut HashMap<String, MachineIdentityProbe>,
+        done: &tokio::sync::mpsc::UnboundedSender<(String, u32, bool)>,
+        session_id: &str,
+        agent_pid: u32,
+        agent: &'static str,
+    ) {
+        if !crate::terminal::resume_cwd::machine_admits_agent(agent) {
+            probes.remove(session_id);
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let same_process = probes
+            .get(session_id)
+            .is_some_and(|probe| probe.agent_pid == agent_pid && probe.agent == agent);
+        if !same_process {
+            let baseline = self
+                .agent_states
+                .current(session_id)
+                .and_then(|state| state.provider_session);
+            probes.insert(
+                session_id.to_string(),
+                MachineIdentityProbe {
+                    agent_pid,
+                    agent,
+                    baseline,
+                    attempts: 0,
+                    next_at: now,
+                    in_flight: false,
+                    finished: false,
+                },
+            );
+        }
+        let Some(probe) = probes.get_mut(session_id) else {
+            return;
+        };
+        if probe.finished || probe.in_flight || now < probe.next_at {
+            return;
+        }
+        if crate::daemon::agent_state::holds_live_provider(
+            self.agent_states.current(session_id).as_ref(),
+            probe.baseline.as_ref(),
+        ) {
+            probe.finished = true;
+            return;
+        }
+        let Some(delay) = machine_identity_probe_delay(probe.attempts) else {
+            probe.finished = true;
+            return;
+        };
+        let Some(pty_pid) = self
+            .terminal_service
+            .get_session(session_id)
+            .and_then(|session| session.pid())
+        else {
+            probe.finished = true;
+            return;
+        };
+        probe.attempts += 1;
+        probe.next_at = now + delay;
+        probe.in_flight = true;
+        let baseline = probe.baseline.clone();
+        let server = Arc::clone(self);
+        let done = done.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            let machine_only = server
+                .session_service
+                .machine_only_async(&session_id)
+                .await
+                .unwrap_or(false);
+            let holds = crate::daemon::agent_state::holds_live_provider(
+                server.agent_states.current(&session_id).as_ref(),
+                baseline.as_ref(),
+            );
+            let finished = if machine_identity_probe_wanted(agent, machine_only, holds) {
+                server
+                    .admit_discovered_machine_agent(&session_id, agent, pty_pid, baseline)
+                    .await
+            } else {
+                // A local pane's UI probes for itself, and an identity already present stays.
+                true
+            };
+            let _ = done.send((session_id, agent_pid, finished));
         });
     }
 
@@ -4166,6 +4458,11 @@ impl DaemonServer {
         tokio::spawn(async move {
             let mut transitions =
                 HashMap::<String, crate::terminal::foreground::ProcessTransition>::new();
+            // Re-explore-4 G2: per-pane discovery of the provider session an agent that reports
+            // nothing holds. Probes run off the tick and post back whether to stop.
+            let mut probes = HashMap::<String, MachineIdentityProbe>::new();
+            let (probe_done_tx, mut probe_done) =
+                tokio::sync::mpsc::unbounded_channel::<(String, u32, bool)>();
             // Inspect even without output. This cadence only collects positive process
             // evidence; neither elapsed time nor silence can release activity.
             let mut sample = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -4187,6 +4484,13 @@ impl DaemonServer {
                     })
                     .collect();
                 transitions.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
+                probes.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
+                while let Ok((id, agent_pid, finished)) = probe_done.try_recv() {
+                    if let Some(probe) = probes.get_mut(&id).filter(|p| p.agent_pid == agent_pid) {
+                        probe.in_flight = false;
+                        probe.finished |= finished;
+                    }
+                }
                 // No live session means nothing to classify: skip the process listing.
                 if sessions.is_empty() {
                     continue;
@@ -4227,6 +4531,25 @@ impl DaemonServer {
                                         .entry(id.clone())
                                         .or_default()
                                         .observe(observation);
+                                    match observation {
+                                        Some(crate::terminal::foreground::Foreground::Agent {
+                                            pid,
+                                            agent,
+                                        }) => {
+                                            server.schedule_machine_identity_probe(
+                                                &mut probes,
+                                                &probe_done_tx,
+                                                &id,
+                                                pid,
+                                                agent,
+                                            );
+                                        }
+                                        // The agent left the foreground: stop probing for it.
+                                        Some(_) => {
+                                            probes.remove(&id);
+                                        }
+                                        None => {}
+                                    }
                                     if server.terminal_service.get_session(&id).is_some() {
                                         match edge {
                                         Some(crate::terminal::foreground::AgentProcessEdge::Released) => {
@@ -10381,6 +10704,92 @@ mod tests {
         );
     }
 
+    // Re-explore-4 G2. Each row names a family; dropping an agent from MACHINE_RESUME_AGENTS or
+    // from the observer's decision breaks its row.
+    #[test]
+    fn machine_identity_probe_runs_for_every_published_family_on_machine_panes_only() {
+        for agent in crate::terminal::resume_cwd::MACHINE_RESUME_AGENTS {
+            assert!(machine_identity_probe_wanted(agent, true, false), "{agent}");
+            // A local pane's UI probes for itself.
+            assert!(!machine_identity_probe_wanted(agent, false, false), "{agent}");
+            // An identity already present is never replaced.
+            assert!(!machine_identity_probe_wanted(agent, true, true), "{agent}");
+        }
+        for agent in ["kimi", "copilot", "gjc"] {
+            assert!(machine_identity_probe_wanted(agent, true, false), "{agent}");
+        }
+        // Families whose discovery is a cwd guess stay out (C25).
+        for agent in ["pi", "antigravity", "opencode", "aider", "unknown"] {
+            assert!(!machine_identity_probe_wanted(agent, true, false), "{agent}");
+        }
+    }
+
+    #[test]
+    fn machine_identity_probe_backs_off_and_stops_after_its_budget() {
+        assert_eq!(machine_identity_probe_delay(0), Some(MACHINE_IDENTITY_PROBE_FLOOR));
+        assert_eq!(
+            machine_identity_probe_delay(1),
+            Some(MACHINE_IDENTITY_PROBE_FLOOR * 2)
+        );
+        let mut previous = Duration::ZERO;
+        for attempt in 0..MACHINE_IDENTITY_PROBE_ATTEMPTS {
+            let delay = machine_identity_probe_delay(attempt).expect("within budget");
+            assert!(delay >= previous && delay <= MACHINE_IDENTITY_PROBE_CEILING);
+            previous = delay;
+        }
+        assert_eq!(previous, MACHINE_IDENTITY_PROBE_CEILING);
+        assert_eq!(machine_identity_probe_delay(MACHINE_IDENTITY_PROBE_ATTEMPTS), None);
+        assert_eq!(machine_identity_probe_delay(u32::MAX), None);
+    }
+
+    #[test]
+    fn discovered_report_for_kimi_copilot_gjc_is_a_resumable_pathless_claim() {
+        // Ids in each family's measured shape (local-2.md:256, local-3.md:17, remote-gjc.md).
+        for (agent, id) in [
+            ("kimi", "eca66b4f-a89b-4979-9f13-cbe3f35b5991"),
+            ("copilot", "5793c06c-5bee-4b34-883b-589051286cfd"),
+            ("gjc", "01a16274-abd4-7581-8f9c-22214661ef6a"),
+        ] {
+            let (session_id, state, reported_agent, provider, detail) =
+                discovered_machine_report("pane-1", agent, id, None);
+            assert_eq!(session_id, "pane-1");
+            assert_eq!(state, "idle", "{agent}: nothing retained reads as idle");
+            assert_eq!(reported_agent.as_deref(), Some(agent));
+            assert_eq!(detail, None);
+            let provider = provider.expect("claim");
+            assert_eq!(provider.key, AgentProviderSessionKey::SessionId);
+            assert_eq!(provider.id, id);
+            // admit_agent_report refuses a pinned path, so a discovered claim carries none.
+            assert_eq!(provider.transcript_path, None);
+            crate::terminal::shell::resolve_agent_resume_plan(agent, &provider)
+                .unwrap_or_else(|error| panic!("{agent} must resume from the id: {error}"));
+            // The ingress filter keeps it: the same path an agent's own report takes.
+            let admitted = DaemonServer::admit_agent_state_report(AgentStateReport {
+                session_id: session_id.clone(),
+                state: "idle".into(),
+                agent: reported_agent.clone(),
+                provider_session: Some(provider.clone()),
+                detail: None,
+            })
+            .expect("valid state");
+            assert_eq!(admitted.3, Some(provider), "{agent}");
+
+            // The retained state word and detail are carried, never invented.
+            let retained = AgentState {
+                session_id: "pane-1".into(),
+                state: "blocked".into(),
+                agent: Some(agent.into()),
+                provider_session: None,
+                detail: Some("approve?".into()),
+                origin: crate::daemon::protocol::AgentStateOrigin::ProcessObserved,
+            };
+            let (_, state, _, _, detail) =
+                discovered_machine_report("pane-1", agent, id, Some(&retained));
+            assert_eq!(state, "blocked");
+            assert_eq!(detail.as_deref(), Some("approve?"));
+        }
+    }
+
     /// A provider claim shaped the way the extension reports it.
     fn reported_claim(id: &str, path: Option<&str>) -> AgentProviderSession {
         AgentProviderSession {
@@ -10391,7 +10800,7 @@ mod tests {
     }
 
     #[test]
-    fn ingress_drops_a_path_only_for_a_verified_omo_claim() {
+    fn ingress_drops_a_verified_path_for_every_machine_published_family() {
         let id = "01a112e9-02b1-7857-b11d-967060362583";
         // The canonical machine OMO report: the id is the one discovery read from the pane's own
         // process, and the path is the store that id resolves to on this host.
@@ -10420,9 +10829,34 @@ mod tests {
             ingress_admission_identity("omo", id, true, None, true),
             IngressAdmissionIdentity::Refused
         );
-        // Only OMO may lose its path: another family's claim keeps it exactly as reported, so the
+        // Every family the machine publishes can lose a verified path, and loses it only when
+        // both proofs hold. Removing a family from the admission breaks its row here.
+        for agent in ["omo", "claude", "codex", "grok", "omp"] {
+            assert_eq!(
+                ingress_admission_identity(agent, id, true, Some(id), true),
+                IngressAdmissionIdentity::WithoutPath,
+                "{agent} must be admitted without its verified path"
+            );
+            assert_eq!(
+                ingress_admission_identity(agent, id, true, Some(id), false),
+                IngressAdmissionIdentity::Refused,
+                "{agent} with a foreign path must be refused"
+            );
+            assert_eq!(
+                ingress_admission_identity(
+                    agent,
+                    id,
+                    true,
+                    Some("01a00000-0000-0000-0000-000000000000"),
+                    true
+                ),
+                IngressAdmissionIdentity::Refused,
+                "{agent} with an id the process does not report must be refused"
+            );
+        }
+        // A family the machine never publishes keeps its claim exactly as reported, so the
         // daemon's existing pinned-path rule still decides it.
-        for agent in ["pi", "omp", "claude", "codex"] {
+        for agent in ["pi", "antigravity", "opencode"] {
             assert_eq!(
                 ingress_admission_identity(agent, id, true, Some(id), true),
                 IngressAdmissionIdentity::AsReported,
@@ -10434,6 +10868,113 @@ mod tests {
             ingress_admission_identity("omo", id, false, Some(id), false),
             IngressAdmissionIdentity::AsReported
         );
+    }
+
+    /// Writes one store file at `relative` under `home` and returns its path.
+    fn store_file(home: &Path, relative: &str) -> PathBuf {
+        let path = home.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{}\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn ingress_proves_each_path_reporting_family_against_its_own_store() {
+        use crate::scoped_contracts::CanonicalProvider;
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let roots = crate::ipc::agent_history::provider_history_roots_with_env(home, |_| None);
+        // The store layouts these agents report as their transcript path (measured fixtures in
+        // cli/fixtures/agent_hook and ferryx-agent-state.ts).
+        let cases = [
+            (
+                "claude",
+                "d49fdc31-682a-40b4-811a-eea8a17f6cf9",
+                ".claude/projects/-tmp-proj/d49fdc31-682a-40b4-811a-eea8a17f6cf9.jsonl",
+            ),
+            (
+                "codex",
+                "01a1626f-f0db-75d0-b73c-2372a21d4cae",
+                ".codex/sessions/2026/10/22/rollout-2026-10-22T16-07-46-01a1626f-f0db-75d0-b73c-2372a21d4cae.jsonl",
+            ),
+            (
+                "grok",
+                "01a16274-a688-7e73-b6fc-434bc7781be4",
+                ".grok/sessions/%2Ftmp%2Fproj/01a16274-a688-7e73-b6fc-434bc7781be4/updates.jsonl",
+            ),
+            (
+                "omp",
+                "01a16270-e358-7635-88e4-1b2f84460057",
+                ".omp/agent/sessions/-tmp-proj/2026-10-22T07-08-47-832Z_01a16270-e358-7635-88e4-1b2f84460057.jsonl",
+            ),
+        ];
+        for (agent, id, relative) in cases {
+            let path = store_file(home, relative);
+            assert!(
+                ingress_path_is_agent_store(agent, id, &path, &roots),
+                "{agent} must prove its own store file"
+            );
+            // The same file never proves a different id.
+            assert!(
+                !ingress_path_is_agent_store(agent, "01a00000-0000-0000-0000-000000000000", &path, &roots),
+                "{agent} must refuse a store file of another session"
+            );
+            // A file of the same name outside the agent's own root is foreign.
+            let foreign = store_file(home, &format!("elsewhere/{relative}"));
+            assert!(
+                !ingress_path_is_agent_store(agent, id, &foreign, &roots),
+                "{agent} must refuse a path outside its own store root"
+            );
+            // Another family's root never proves this agent's claim.
+            let other_roots: Vec<_> = roots
+                .iter()
+                .filter(|(provider, _)| {
+                    crate::agent_history::history::provider_wire(*provider) != agent
+                })
+                .cloned()
+                .collect();
+            assert!(
+                !ingress_path_is_agent_store(agent, id, &path, &other_roots),
+                "{agent} must be proven against its own root only"
+            );
+        }
+        // A claimed path that does not exist, or a directory, proves nothing.
+        assert!(!ingress_path_is_agent_store(
+            "claude",
+            "d49fdc31-682a-40b4-811a-eea8a17f6cf9",
+            &home.join(".claude/projects/-tmp-proj/missing.jsonl"),
+            &roots
+        ));
+        assert!(!ingress_path_is_agent_store(
+            "grok",
+            "01a16274-a688-7e73-b6fc-434bc7781be4",
+            &home.join(".grok/sessions/%2Ftmp%2Fproj/01a16274-a688-7e73-b6fc-434bc7781be4"),
+            &roots
+        ));
+        // crush keeps every session in one database: no file proves one session.
+        let crush_db = store_file(home, ".local/share/crush/crush.db");
+        assert!(!ingress_path_is_agent_store(
+            "crush",
+            "7f7fbfa62dd136ec",
+            &crush_db,
+            &[(CanonicalProvider::Crush, home.join(".local/share/crush"))]
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ingress_refuses_a_symlink_into_another_agents_store() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let roots = crate::ipc::agent_history::provider_history_roots_with_env(home, |_| None);
+        let id = "d49fdc31-682a-40b4-811a-eea8a17f6cf9";
+        // A link spelled like a claude store file, pointing at a codex file: canonicalization
+        // resolves it into the codex root, which is not claude's.
+        let target = store_file(home, &format!(".codex/sessions/2026/10/22/{id}.jsonl"));
+        let link = home.join(format!(".claude/projects/-tmp-proj/{id}.jsonl"));
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(!ingress_path_is_agent_store("claude", id, &link, &roots));
     }
 
     #[test]

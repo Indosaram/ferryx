@@ -1324,6 +1324,10 @@ pub enum AgentStateOrigin {
     ProcessReleased,
     /// The daemon observed an agent process running in this PTY again. Carries no new activity.
     ProcessObserved,
+    /// The daemon read this pane's provider session id from the agent process itself (its open
+    /// session file or resume argv) because the agent reports nothing of its own. It names the
+    /// session only; the activity is still the screen's to infer, so it never suppresses inference.
+    ProcessDiscovered,
     /// The user reset this session's activity by hand.
     ManualReset,
 }
@@ -1333,6 +1337,19 @@ impl AgentStateOrigin {
     /// absence decodes back to it. See the type docs for why absence is ambiguous in practice.
     pub fn is_self_reported(&self) -> bool {
         matches!(self, AgentStateOrigin::Agent)
+    }
+
+    /// Whether a frame of this origin claims the session's activity, which suppresses screen
+    /// inference on the consumer: the agent's own report (for as long as it lives) and a process
+    /// release (the exited agent's screen must not resurrect its activity). A process sighting, a
+    /// discovered provider session and a manual reset carry no activity of their own.
+    pub fn claims_activity(&self) -> bool {
+        match self {
+            AgentStateOrigin::Agent | AgentStateOrigin::ProcessReleased => true,
+            AgentStateOrigin::ProcessObserved
+            | AgentStateOrigin::ProcessDiscovered
+            | AgentStateOrigin::ManualReset => false,
+        }
     }
 }
 
@@ -1435,6 +1452,38 @@ impl LiveSessionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Re-explore-4 G2: a discovered provider session names the conversation only. If it claimed
+    // the activity, a kimi/copilot/gjc machine pane would lose screen inference the moment its id
+    // was found, and those agents report no state of their own.
+    #[test]
+    fn a_process_discovered_frame_does_not_claim_the_activity() {
+        assert!(!AgentStateOrigin::ProcessDiscovered.claims_activity());
+        assert!(!AgentStateOrigin::ProcessDiscovered.is_self_reported());
+        assert!(AgentStateOrigin::Agent.claims_activity());
+        assert!(AgentStateOrigin::ProcessReleased.claims_activity());
+        assert!(!AgentStateOrigin::ProcessObserved.claims_activity());
+        assert!(!AgentStateOrigin::ManualReset.claims_activity());
+        // It travels on the wire, unlike the self-reported default.
+        let frame = DaemonStreamMessage::AgentState {
+            session_id: "s".into(),
+            state: "idle".into(),
+            agent: Some("kimi".into()),
+            provider_session: None,
+            detail: None,
+            is_snapshot: false,
+            origin: AgentStateOrigin::ProcessDiscovered,
+        };
+        let line = serde_json::to_string(&frame).unwrap();
+        assert!(line.contains("\"origin\":\"processDiscovered\""), "{line}");
+        match serde_json::from_str::<DaemonStreamMessage>(&line).unwrap() {
+            DaemonStreamMessage::AgentState { origin, .. } => {
+                assert_eq!(origin, AgentStateOrigin::ProcessDiscovered)
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
 
     #[test]
     fn describe_live_sessions_request_is_additive_and_roundtrips() {
