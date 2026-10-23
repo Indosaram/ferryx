@@ -371,6 +371,29 @@ fn full_access() -> bool {
     })
 }
 
+/// omo-gateway is retired: the ferryx hub replaced it, and a second gateway means a second
+/// Slack Socket Mode consumer, double replies and a second lane dispatcher. Engine turns have
+/// restarted it on their own (`launchctl enable/bootstrap ai.omon.gateway`), so any tool
+/// request that would start it is declined outright, without an owner card and regardless of
+/// full access. Reading its state (`launchctl print/list`, logs) stays allowed.
+pub const RETIRED_GATEWAY_REASON: &str = "omo-gateway is intentionally retired and replaced by the ferryx hub; it must never be started, enabled, kickstarted or loaded again. Do not retry; report instead.";
+
+pub fn starts_retired_gateway(frame: &Value) -> bool {
+    static PATTERNS: std::sync::OnceLock<[regex::Regex; 3]> = std::sync::OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            regex::Regex::new(
+                r"(?i)launchctl.{0,40}?\b(bootstrap|enable|kickstart|load|start|submit)\b.{0,160}?ai\.omon\.gateway",
+            )
+            .expect("valid regex"),
+            regex::Regex::new(r"omo-gateway-launch").expect("valid regex"),
+            regex::Regex::new(r#"omo-gateway[\\"',\s\]]{1,8}run\b"#).expect("valid regex"),
+        ]
+    });
+    let text = frame.to_string();
+    patterns.iter().any(|pattern| pattern.is_match(&text))
+}
+
 /// Approval verdict for one engine approval frame: `None` approves, `Some(reason)` declines.
 pub fn approval_verdict(frame: &Value, cwd: Option<&str>) -> Option<String> {
     let full_access = full_access();
@@ -540,6 +563,16 @@ async fn answer_server_request(
         return Ok(true);
     }
     if protocol::is_approval_request(method) {
+        if starts_retired_gateway(frame) {
+            tracing::warn!(%method, "declined a tool request that would start the retired omo-gateway");
+            *denied += 1;
+            send(
+                ws,
+                protocol::approval_denial_with_reason(id, RETIRED_GATEWAY_REASON),
+            )
+            .await?;
+            return Ok(true);
+        }
         let mut verdict = approval_verdict(frame, cwd);
         if let Some(reason) = verdict.clone() {
             if let Ok(approver) = APPROVER.try_with(std::sync::Arc::clone) {
@@ -1367,6 +1400,65 @@ mod tests {
             .find(|f| f.get("id") == Some(&json!(77)))
             .unwrap();
         assert_eq!(answer["result"]["decision"], "accept");
+    }
+
+    #[test]
+    fn only_requests_that_would_start_the_retired_gateway_are_recognized() {
+        let frame = |command: &str| {
+            json!({"method":"item/commandExecution/requestApproval","params":{"command":command}})
+        };
+        for blocked in [
+            "launchctl enable gui/501/ai.omon.gateway",
+            "launchctl bootstrap gui/$(id -u) /Users/x/Library/LaunchAgents/ai.omon.gateway.plist 2>&1 | head -5",
+            "/bin/launchctl kickstart -k gui/501/ai.omon.gateway",
+            "launchctl load -w ~/Library/LaunchAgents/ai.omon.gateway-watchdog.plist",
+            "nohup /Users/x/.omon/bin/omo-gateway run &",
+            "/Users/x/.omon/bin/omo-gateway-launch",
+        ] {
+            assert!(starts_retired_gateway(&frame(blocked)), "{blocked}");
+        }
+        // A tool call whose arguments carry the command in another shape.
+        assert!(starts_retired_gateway(&json!({"method":"item/tool/requestApproval","params":{"arguments":{"code":"subprocess.run([\"/Users/x/.omon/bin/omo-gateway\",\"run\"])"}}})));
+        for allowed in [
+            "launchctl print gui/501/ai.omon.gateway",
+            "launchctl list | grep ai.omon",
+            "launchctl bootout gui/501/ai.omon.gateway",
+            "launchctl disable gui/501/ai.omon.gateway",
+            "tail -n 50 ~/.omon/gateway.log",
+            "/Users/x/.omon/bin/omo-gateway autonomy outcome k --status failed",
+            "launchctl kickstart -k gui/501/ai.omon.tracker-proxy",
+        ] {
+            assert!(!starts_retired_gateway(&frame(allowed)), "{allowed}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_to_start_the_retired_gateway_is_declined_even_with_full_access() {
+        let (url, log) = serve(Script {
+            approval: true,
+            approval_command: Some("launchctl enable gui/501/ai.omon.gateway".into()),
+            ..script(&["done"])
+        })
+        .await;
+        let outcome = run_turn(
+            &OmoClientConfig::new(url),
+            &TurnRequest {
+                text: "hello".into(),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.approvals_allowed, 0);
+        assert_eq!(outcome.approvals_denied, 1);
+        let frames = log.frames.lock().unwrap().clone();
+        let answer = frames
+            .iter()
+            .find(|f| f.get("id") == Some(&json!(77)))
+            .unwrap();
+        assert_ne!(answer["result"]["decision"], "accept");
+        assert!(answer.to_string().contains("intentionally retired"));
     }
 
     #[tokio::test]
