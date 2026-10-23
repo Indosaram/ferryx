@@ -1057,6 +1057,91 @@ describe("session title activity", () => {
 
     expect(services.closeTerminal).toHaveBeenCalledWith(backendId);
   });
+
+  function soleTabState(session: TerminalSession): WorkspaceState {
+    const tab: TerminalTab = { id: "tab-sole", label: "sole", sessionId: session.id };
+    return {
+      worktrees: [worktree],
+      activeWorktreePath: worktree.path,
+      sessions: { [session.id]: session },
+      layout: {
+        tabs: [tab],
+        activeTabId: tab.id,
+        layoutsByTabId: {
+          [tab.id]: {
+            root: { type: "leaf", leafId: "leaf-sole" },
+            activeLeafId: "leaf-sole",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-sole": session.id },
+          },
+        },
+      },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+    };
+  }
+
+  it("removes the sole tab of a lost session even when its backend close never settles", async () => {
+    const { services } = createServices();
+    services.closeTerminal = vi.fn(() => new Promise<void>(() => {}));
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    const lost: TerminalSession = {
+      ...restoredSession("session-lost", "backend-lost"),
+      lifecycle: "exited",
+      remoteConnectionState: "reconnecting",
+    };
+    act(() => result.current.restoreWorkspace(soleTabState(lost)));
+
+    await act(async () => {
+      void result.current.closeTab("tab-sole");
+    });
+
+    await waitFor(() => expect(result.current.state.layout.tabs).toHaveLength(0));
+    expect(services.closeTerminal).toHaveBeenCalledWith("backend-lost");
+    expect(services.waitForTerminalExit).not.toHaveBeenCalled();
+  });
+
+  it("removes the sole tab when its backend close rejects", async () => {
+    const { services } = createServices();
+    const failure = { code: "REMOTE_CLOSE_FAILED", message: "transport down", details: {} };
+    services.closeTerminal = vi.fn(async () => { throw failure; });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    act(() => result.current.restoreWorkspace(soleTabState(restoredSession("session-sole", "backend-sole"))));
+
+    await act(async () => {
+      await result.current.closeTab("tab-sole");
+    });
+
+    expect(result.current.state.layout.tabs).toHaveLength(0);
+    expect(result.current.state.sessions["session-sole"]).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith("Failed to close terminal session:", "backend-sole", failure);
+  });
+
+  it("bounds the healthy sole-tab exit wait when the backend close never settles", async () => {
+    const { services } = createServices();
+    services.closeTerminal = vi.fn(() => new Promise<void>(() => {}));
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    act(() => result.current.restoreWorkspace(soleTabState(restoredSession("session-sole", "backend-sole"))));
+
+    vi.useFakeTimers();
+    try {
+      const closing = result.current.closeTab("tab-sole");
+      expect(services.waitForTerminalExit).toHaveBeenCalledWith("backend-sole", 5_000);
+      expect(result.current.state.layout.tabs).toHaveLength(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(result.current.state.layout.tabs).toHaveLength(0);
+      await act(async () => {
+        await closing;
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("worktree tab and session isolation", () => {

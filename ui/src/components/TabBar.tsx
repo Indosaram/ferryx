@@ -64,6 +64,8 @@ type TabBarProps = {
   leadingSpacer?: number;
   unreadTabIds?: Record<string, boolean>;
   activityByTabId?: Record<string, ActivitySummary | undefined>;
+  /** Tabs the supervisor typed into moments ago; they carry the eye. */
+  supervisorActingTabIds?: Record<string, boolean>;
   /** Resolved live text/tooltip per terminal tab; falls back to `tab.label` when absent. */
   tabDisplayById?: Record<string, TerminalTabDisplay | undefined>;
 };
@@ -109,6 +111,7 @@ export function TabBar({
   leadingSpacer = 0,
   unreadTabIds,
   activityByTabId,
+  supervisorActingTabIds,
   tabDisplayById,
 }: TabBarProps) {
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
@@ -492,6 +495,7 @@ export function TabBar({
                 unread={Boolean(unreadTabIds?.[tab.id] && !active)}
                 sleeping={sleeping}
                 activity={activityByTabId?.[tab.id]}
+                supervisorActing={Boolean(supervisorActingTabIds?.[tab.id])}
                 displayText={tabDisplayById?.[tab.id]?.text}
                 displayTooltip={tabDisplayById?.[tab.id]?.tooltip}
                 fileTitle={fileTitle}

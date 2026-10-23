@@ -4349,6 +4349,7 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                             let exit = serde_json::to_string(&DaemonStreamMessage::Exit {
                                 session_id: std::borrow::Cow::Borrowed(&legacy_session_for_exit),
                                 exit_code: Some(0),
+                                incarnation: None,
                             })
                             .unwrap()
                                 + "\n";

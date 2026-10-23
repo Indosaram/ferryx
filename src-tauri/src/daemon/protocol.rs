@@ -701,6 +701,14 @@ pub enum DaemonRequest {
     SetAgentIntegration {
         enabled: bool,
     },
+    /// What the supervisor drives and watches, and the input it recently typed.
+    SupervisorSnapshot,
+    /// A person pauses or resumes one supervised lane; the supervisor stops typing into it.
+    #[serde(rename_all = "camelCase")]
+    SupervisorSetPaused {
+        lane_key: String,
+        paused: bool,
+    },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
     PairedHostList,
@@ -1139,6 +1147,14 @@ pub enum DaemonResponse {
         enabled: bool,
     },
     #[serde(rename_all = "camelCase")]
+    SupervisorSnapshotOk {
+        snapshot: serde_json::Value,
+    },
+    #[serde(rename_all = "camelCase")]
+    SupervisorSetPausedOk {
+        paused: bool,
+    },
+    #[serde(rename_all = "camelCase")]
     AttachOk {
         epoch: u64,
         session_id: String,
@@ -1294,6 +1310,10 @@ pub enum DaemonStreamMessage<'a> {
     Exit {
         session_id: Cow<'a, str>,
         exit_code: Option<i32>,
+        /// Incarnation of the PTY whose stream ended. The frontend only accepts an exit for the
+        /// incarnation it is bound to, so an exit without it cannot settle the pane.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        incarnation: Option<Cow<'a, str>>,
     },
     #[serde(rename_all = "camelCase")]
     DagRunUpdated {

@@ -688,7 +688,14 @@ export async function signalTerminal(request: { sessionId: string; signal: Termi
 export async function closeTerminal(sessionId: string) {
   if (!isTauri()) return;
   const attachTuple = getDurableNativeBinding(sessionId);
-  if (attachTuple) await invokeCommand<void>("cmd_native_terminal_close", { sessionId, attachTuple });
+  if (attachTuple) {
+    try {
+      await invokeCommand<void>("cmd_native_terminal_close", { sessionId, attachTuple });
+    } catch (error) {
+      // A lost or never-attached surface has nothing left to release; the PTY still must close.
+      if (toIpcError(error).code !== "SESSION_NOT_FOUND") throw error;
+    }
+  }
   await invokeCommand<void>("cmd_terminal_close", { sessionId });
 }
 

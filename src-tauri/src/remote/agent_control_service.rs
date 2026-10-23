@@ -247,17 +247,34 @@ pub(crate) async fn handle_as(
     authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
 ) -> Result<serde_json::Value, ScopeError> {
     let result = dispatch(state, op.clone(), authorize).await;
-    state.agent_control_audit.record(AuditRecord {
-        device_id: actor.to_string(),
-        op: policy::audit_op_name(&op).to_string(),
-        session_id: policy::audit_session(&op),
-        request_id: policy::audit_request(&op),
-        code: match &result {
-            Ok(_) => "OK".to_string(),
-            Err(error) => reference_chat_wire_code(error.code).to_string(),
-        },
-    });
+    record_audit(
+        state,
+        AuditRecord::for_op(
+            actor,
+            &op,
+            match &result {
+                Ok(_) => "OK".to_string(),
+                Err(error) => reference_chat_wire_code(error.code).to_string(),
+            },
+        ),
+    );
     result
+}
+
+/// Desktop event the Supervisor view refetches on: a supervisor typed, or was refused.
+pub(crate) const SUPERVISOR_CHANGED_EVENT: &str = "supervisor_changed";
+
+/// Append one audit line; an input line also tells the desktop to refresh what it shows.
+fn record_audit(state: &Arc<RemoteGatewayState>, record: AuditRecord) {
+    let input = record.is_input();
+    let session_id = record.session_id.clone();
+    state.agent_control_audit.record(record);
+    if input {
+        state.emit_desktop_event(
+            SUPERVISOR_CHANGED_EVENT,
+            serde_json::json!({ "sessionId": session_id }),
+        );
+    }
 }
 
 async fn dispatch(
@@ -477,24 +494,12 @@ pub(crate) async fn forward_daemon(
 ) -> crate::daemon::protocol::DaemonResponse {
     let failure = match forward_once(hosts, &host_id, op.clone()).await {
         Ok(result) => {
-            state.agent_control_audit.record(AuditRecord {
-                device_id: "owner".into(),
-                op: policy::audit_op_name(&op).to_string(),
-                session_id: policy::audit_session(&op),
-                request_id: policy::audit_request(&op),
-                code: "OK".into(),
-            });
+            record_audit(state, AuditRecord::for_op("owner", &op, "OK"));
             return crate::daemon::protocol::DaemonResponse::AgentControlOk { result };
         }
         Err(failure) => failure,
     };
-    state.agent_control_audit.record(AuditRecord {
-        device_id: "owner".into(),
-        op: policy::audit_op_name(&op).to_string(),
-        session_id: policy::audit_session(&op),
-        request_id: policy::audit_request(&op),
-        code: failure.code.clone(),
-    });
+    record_audit(state, AuditRecord::for_op("owner", &op, failure.code.clone()));
     crate::daemon::protocol::DaemonResponse::Error {
         message: failure.message,
         code: Some(failure.code),

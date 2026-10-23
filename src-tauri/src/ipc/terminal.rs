@@ -359,7 +359,7 @@ pub fn start_managed_pump_token<R: Runtime>(
                             Ok(DaemonStreamMessage::AgentState { .. })
                             | Ok(DaemonStreamMessage::DagRunUpdated { .. })
                             | Ok(DaemonStreamMessage::DagInventory { .. }) => {}
-                            Ok(DaemonStreamMessage::Exit { exit_code, .. }) => {
+                            Ok(DaemonStreamMessage::Exit { exit_code, incarnation, .. }) => {
                                 flush_terminal_output(
                                     &app,
                                     &session_id_clone,
@@ -371,7 +371,7 @@ pub fn start_managed_pump_token<R: Runtime>(
                                     &app,
                                     &session_id_clone,
                                     exit_code,
-                                    None,
+                                    incarnation.map(|value| value.into_owned()),
                                     Some(epoch.to_string()),
                                 );
                                 return;
@@ -451,7 +451,7 @@ pub fn start_managed_pump_token<R: Runtime>(
                 Some(DaemonStreamMessage::AgentState { .. })
                 | Some(DaemonStreamMessage::DagRunUpdated { .. })
                 | Some(DaemonStreamMessage::DagInventory { .. }) => {}
-                Some(DaemonStreamMessage::Exit { exit_code, .. }) => {
+                Some(DaemonStreamMessage::Exit { exit_code, incarnation, .. }) => {
                     flush_terminal_output(
                         &app,
                         &session_id_clone,
@@ -463,7 +463,7 @@ pub fn start_managed_pump_token<R: Runtime>(
                         &app,
                         &session_id_clone,
                         exit_code,
-                        None,
+                        incarnation.map(|value| value.into_owned()),
                         Some(epoch.to_string()),
                     );
                     break;
@@ -5964,6 +5964,7 @@ mod tests {
             .send(DaemonStreamMessage::Exit {
                 session_id: std::borrow::Cow::Owned(session.clone()),
                 exit_code: Some(0),
+                incarnation: None,
             })
             .await
             .unwrap();
@@ -5984,6 +5985,62 @@ mod tests {
                 .is_some_and(|map| map.contains_key(&session)),
             "ACTIVE_PUMPS must not retain session on exit"
         );
+    }
+
+    #[tokio::test]
+    async fn managed_pump_exit_event_carries_the_daemon_incarnation() {
+        use tauri::Listener;
+
+        let session = format!("pump-exit-incarnation-{}", uuid::Uuid::new_v4());
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let (lifecycle_tx, mut lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
+        let watched = session.clone();
+        app.listen(TERMINAL_LIFECYCLE_EVENT, move |event: tauri::Event| {
+            let payload: TerminalLifecyclePayload = serde_json::from_str(event.payload()).unwrap();
+            if payload.session_id == watched {
+                let _ = lifecycle_tx.send(payload);
+            }
+        });
+        let (sender, messages) = tokio::sync::mpsc::channel(1);
+        let token = reserve_managed_pump(&session);
+        start_managed_pump_token(
+            session.clone(),
+            app.handle().clone(),
+            DaemonAttachment {
+                session_id: session.clone(),
+                epoch: 7,
+                start_sequence: None,
+                end_sequence: None,
+                gap: None,
+                history: bytes::Bytes::new(),
+                history_segments: Vec::new(),
+                pty_cols: None,
+                pty_rows: None,
+                remote_generation: None,
+                messages,
+                stream_task: tokio::spawn(std::future::pending::<()>()),
+            },
+            token,
+        );
+
+        sender
+            .send(DaemonStreamMessage::Exit {
+                session_id: std::borrow::Cow::Owned(session.clone()),
+                exit_code: Some(0),
+                incarnation: Some(std::borrow::Cow::Borrowed("incarnation-under-test")),
+            })
+            .await
+            .unwrap();
+
+        let exited = tokio::time::timeout(Duration::from_secs(1), lifecycle_rx.recv())
+            .await
+            .expect("exit lifecycle event")
+            .expect("lifecycle channel open");
+        assert_eq!(exited.state, TerminalLifecycleState::Exited);
+        assert_eq!(exited.incarnation.as_deref(), Some("incarnation-under-test"));
+        assert_eq!(exited.daemon_epoch.as_deref(), Some("7"));
     }
 
     #[tokio::test(start_paused = true)]

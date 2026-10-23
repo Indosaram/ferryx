@@ -55,15 +55,23 @@ const AGENT_DETECT_TRAILING_IDLE: std::time::Duration = std::time::Duration::fro
 const REPLAY_ABSORB_IDLE: std::time::Duration = std::time::Duration::from_millis(120);
 /// Upper bound on absorbing, so a session that keeps producing output cannot stay unpainted.
 const REPLAY_ABSORB_MAX: std::time::Duration = std::time::Duration::from_secs(3);
+/// A PTY resize sends SIGWINCH, and full-screen TUIs that render inline (Claude Code, ink, ...)
+/// answer it by clearing the screen and reprinting their whole transcript. Painting that reprint
+/// chunk by chunk shows the pane scrolling from the top again on every window or pane resize, so
+/// output arriving shortly after a resize is absorbed like an attach replay burst.
+const RESIZE_REDRAW_ARM_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+/// Upper bound on absorbing a post-resize redraw; shorter than an attach replay because the
+/// pane already shows content and a live stream must not look frozen after a resize.
+const RESIZE_REDRAW_ABSORB_MAX: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Whether the post-attach replay burst is still being absorbed. The window closes on the first
-/// gap longer than [`REPLAY_ABSORB_IDLE`], or at [`REPLAY_ABSORB_MAX`] for a stream that never
-/// goes idle.
+/// Whether an output burst is still being absorbed. The window closes on the first gap longer
+/// than [`REPLAY_ABSORB_IDLE`], or at `max` for a stream that never goes idle.
 fn replay_absorb_continues(
-    since_attach: std::time::Duration,
+    since_start: std::time::Duration,
     since_last_output: std::time::Duration,
+    max: std::time::Duration,
 ) -> bool {
-    since_attach < REPLAY_ABSORB_MAX && since_last_output < REPLAY_ABSORB_IDLE
+    since_start < max && since_last_output < REPLAY_ABSORB_IDLE
 }
 pub const NATIVE_TERMINAL_SCROLLBAR_EVENT: &str = "native_terminal_scrollbar";
 pub const NATIVE_TERMINAL_FOCUS_EVENT: &str = "native_terminal_focus";
@@ -577,6 +585,9 @@ pub struct NativeTerminalSession {
     pub surface_attached: bool,
     pub output_stream_ended: bool,
     pub snapshot_slot: Arc<SnapshotSlot>,
+    /// When the grid was last resized for a PTY resize; the pump absorbs the redraw burst that
+    /// the resulting SIGWINCH provokes instead of painting it frame by frame.
+    pub pty_resized_at: Option<std::time::Instant>,
 }
 
 impl NativeTerminalSession {
@@ -3097,6 +3108,7 @@ mod pane_liveness_native_binding_tests {
         output.send(crate::daemon::DaemonStreamMessage::Exit {
             session_id: session_id.into(),
             exit_code: Some(0),
+            incarnation: None,
         }).await.unwrap();
 
         let mut pump_task = state.sessions.lock().get_mut(session_id)
@@ -3555,6 +3567,7 @@ impl NativeTerminalSurfaceHostState {
                         output_stream_ended: false,
                         bracketed_paste_seen: false,
                         snapshot_slot: Arc::new(SnapshotSlot::new()),
+                        pty_resized_at: None,
                     },
                 );
                 (
@@ -3621,6 +3634,9 @@ impl NativeTerminalSurfaceHostState {
         session.layout = Some(layout);
         session.logical_bounds = Some(request.bounds);
         session.cell_metrics = Some(cell_metrics);
+        if resized && !initialized {
+            session.pty_resized_at = Some(std::time::Instant::now());
+        }
         session.snapshot_slot.set_attached(true);
         session.publish_frame();
         drop(sessions);
@@ -3836,6 +3852,7 @@ impl NativeTerminalSurfaceHostState {
                         metrics.width_px,
                         metrics.height_px,
                     )?;
+                    session.pty_resized_at = Some(std::time::Instant::now());
 
                     if let Some(ratio) = prior_scroll_ratio {
                         if let Ok(new_sb) = session.terminal.scrollbar() {
@@ -4224,6 +4241,7 @@ impl NativeTerminalSurfaceHostState {
                         bracketed_paste_seen,
                         output_stream_ended: false,
                         snapshot_slot: Arc::new(SnapshotSlot::new()),
+                        pty_resized_at: None,
                     },
                 );
                 (update_sender, render_coordinator)
@@ -4284,7 +4302,7 @@ impl NativeTerminalSurfaceHostState {
             };
             let mut replay_absorb = absorbs_replay_burst.then(|| {
                 let now = std::time::Instant::now();
-                (now, now)
+                (now, now, REPLAY_ABSORB_MAX, true)
             });
             // Only this task feeds the terminal or defers agent detection once it runs, so idle
             // ticks skip the global sessions lock unless a handled message may have changed either.
@@ -4384,14 +4402,19 @@ impl NativeTerminalSurfaceHostState {
                         if detected {
                             update_sender.send_replace(());
                         }
-                        if let Some((started_at, last_output_at)) = replay_absorb {
+                        if let Some((started_at, last_output_at, max, locks_bottom)) = replay_absorb {
                             let now = std::time::Instant::now();
                             if !replay_absorb_continues(
                                 now.duration_since(started_at),
                                 now.duration_since(last_output_at),
+                                max,
                             ) {
                                 replay_absorb = None;
-                                lock_to_bottom();
+                                // A post-resize redraw keeps the viewport where the VT left it;
+                                // only the attach replay must land on the bottom.
+                                if locks_bottom {
+                                    lock_to_bottom();
+                                }
                                 schedule_render();
                             }
                         }
@@ -4400,6 +4423,7 @@ impl NativeTerminalSurfaceHostState {
                 };
                 match msg {
                     DaemonStreamMessage::Output { sequence, data, .. } => {
+                        let mut resized_at = None;
                         let (session_exists, events) = {
                             let mut sessions_guard = sessions.lock();
                             if let Some(sess) = sessions_guard
@@ -4412,6 +4436,7 @@ impl NativeTerminalSurfaceHostState {
                                     sess.last_sequence.is_none_or(|applied| sequence > applied)
                                 })
                             {
+                                resized_at = sess.pty_resized_at.take();
                                 if let Err(err) = sess.terminal.feed(&data) {
                                     tracing::warn!(
                                         session_id = %session_id_owned,
@@ -4456,19 +4481,30 @@ impl NativeTerminalSurfaceHostState {
 
                         if session_exists {
                             let now = std::time::Instant::now();
+                            // First output after a PTY resize is the SIGWINCH redraw; absorb it.
+                            if replay_absorb.is_none()
+                                && resized_at.is_some_and(|at| {
+                                    now.duration_since(at) < RESIZE_REDRAW_ARM_WINDOW
+                                })
+                            {
+                                replay_absorb = Some((now, now, RESIZE_REDRAW_ABSORB_MAX, false));
+                            }
                             let absorbing = match replay_absorb {
-                                Some((started_at, last_output_at))
+                                Some((started_at, last_output_at, max, locks_bottom))
                                     if replay_absorb_continues(
                                         now.duration_since(started_at),
                                         now.duration_since(last_output_at),
+                                        max,
                                     ) =>
                                 {
-                                    replay_absorb = Some((started_at, now));
+                                    replay_absorb = Some((started_at, now, max, locks_bottom));
                                     true
                                 }
-                                Some(_) => {
+                                Some((_, _, _, locks_bottom)) => {
                                     replay_absorb = None;
-                                    lock_to_bottom();
+                                    if locks_bottom {
+                                        lock_to_bottom();
+                                    }
                                     false
                                 }
                                 None => false,
@@ -5413,6 +5449,7 @@ impl NativeTerminalSurfaceHostState {
             surface_attached: true,
             output_stream_ended: false,
             snapshot_slot: Arc::new(SnapshotSlot::new()),
+            pty_resized_at: None,
         };
         self.sessions.lock().insert(session_id.to_string(), session);
         Ok(render_coordinator)
@@ -5655,6 +5692,7 @@ impl NativeTerminalSurfaceHostState {
                         bracketed_paste_seen: false,
                         output_stream_ended: false,
                         snapshot_slot: Arc::new(SnapshotSlot::new()),
+                        pty_resized_at: None,
                     },
                 );
                 sessions
@@ -6814,17 +6852,20 @@ mod tests {
         // Frames still arriving inside both bounds: the pane must not paint the scroll-through.
         assert!(replay_absorb_continues(
             std::time::Duration::from_millis(500),
-            std::time::Duration::from_millis(10)
+            std::time::Duration::from_millis(10),
+            REPLAY_ABSORB_MAX,
         ));
         // The burst drained, so the next wakeup paints once at the bottom.
         assert!(!replay_absorb_continues(
             std::time::Duration::from_millis(500),
-            REPLAY_ABSORB_IDLE
+            REPLAY_ABSORB_IDLE,
+            REPLAY_ABSORB_MAX,
         ));
         // A session that never goes idle still paints at the cap instead of staying blank.
         assert!(!replay_absorb_continues(
             REPLAY_ABSORB_MAX,
-            std::time::Duration::from_millis(10)
+            std::time::Duration::from_millis(10),
+            REPLAY_ABSORB_MAX,
         ));
     }
 
@@ -10526,6 +10567,71 @@ mod tests {
         assert_bottom_locked("height shrink");
 
         state.teardown();
+    }
+
+    #[tokio::test]
+    async fn resize_absorbs_sigwinch_redraw_instead_of_painting_it_frame_by_frame() {
+        // A resized PTY gets SIGWINCH, and an inline TUI answers by clearing the screen and
+        // reprinting its whole transcript. Painting each chunk of that reprint is the pane
+        // visibly scrolling from the top again after every window or pane resize.
+        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
+        let session_id = harness.request.session_id.clone();
+        while harness.dispatched.try_recv().is_ok() {}
+        let mut resized = harness.request.clone();
+        resized.bounds.width += 200.0;
+        harness
+            .state
+            .prepare_session_layout(resized, font_manager::derived_cell_metrics())
+            .expect("resize an attached grid");
+
+        let mut reprint = String::from("\x1b[2J\x1b[3J\x1b[H");
+        for line in 0..200 {
+            reprint.push_str(&format!("transcript line {line}\r\n"));
+        }
+        for (sequence, data) in [(2, reprint.into_bytes()), (3, b"> prompt".to_vec())] {
+            harness
+                ._output
+                .send(DaemonStreamMessage::Output {
+                    session_id: session_id.clone().into(),
+                    sequence,
+                    data: data.into(),
+                    metrics_read_unix_micros: None,
+                })
+                .await
+                .expect("send redraw chunk");
+        }
+        // `tokio::test` runs the pump on this thread, and the pump applies a chunk and makes its
+        // paint decision in one poll with no await between, so once the last chunk is applied
+        // its scheduling decision has been made too.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while harness.state.sessions.lock().get(&session_id).and_then(|s| s.last_sequence)
+                != Some(3)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pump must apply the redraw burst");
+
+        assert!(
+            harness.dispatched.try_recv().is_err(),
+            "no frame may be painted while the post-resize redraw is still streaming"
+        );
+        assert!(
+            !harness.state.is_session_render_pending(&session_id),
+            "the redraw burst must not schedule a paint per chunk"
+        );
+
+        // Once the burst goes idle the finished redraw is painted exactly once.
+        tokio::time::timeout(std::time::Duration::from_secs(5), harness.dispatched.recv())
+            .await
+            .expect("the drained redraw must be painted")
+            .expect("dispatch channel open");
     }
 
     #[tokio::test]

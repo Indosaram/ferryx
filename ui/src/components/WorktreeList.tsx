@@ -1,5 +1,5 @@
 import { useSortable } from "@dnd-kit/sortable";
-import { LockKeyhole, Plus, Trash2 } from "lucide-react";
+import { Eye, LockKeyhole, Plus, Trash2 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -9,6 +9,7 @@ import { cn } from "../lib/cn";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
 import { getHostPlatform } from "../lib/platform";
 import { revealPath } from "../lib/tauri";
+import { actingSessionIds, useSupervisor, type SupervisorSnapshot } from "../lib/supervisor";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { SidebarStateSlot, type SidebarSlotState } from "./sidebar/SidebarStateSlot";
@@ -87,6 +88,13 @@ export function isPrimaryWorktree(worktree: Worktree, repoRoot?: string | null):
   return worktreeIdentity(worktree) === null;
 }
 
+/** True when a supervised lane rooted at this worktree was typed into within the acting window. */
+export function supervisorTypingIn(snapshot: SupervisorSnapshot, now: number, worktreePath: string): boolean {
+  const acting = actingSessionIds(snapshot, now);
+  if (acting.size === 0) return false;
+  return snapshot.lanes.some((lane) => lane.sessionId !== null && acting.has(lane.sessionId) && isSameWorktreePath(lane.cwd, worktreePath));
+}
+
 /** Maps a row's activity to its slot state; idle and failed rows show nothing (ui/DESIGN.md section 4 rule 7). */
 function slotStateFor(indicator: StatusDotState | null): SidebarSlotState {
   if (indicator === "working" || indicator === "starting") return "working";
@@ -135,6 +143,9 @@ export const WorktreeRow = memo(function WorktreeRow({
   const indicator: StatusDotState | null =
     aggregateIndicator ?? (activitySummary === undefined && agent ? agent.state : null);
   const slotState = slotStateFor(indicator);
+  // Needs input outranks the supervisor; the supervisor typing outranks running and unread.
+  const { snapshot: supervisor, now: supervisorNow } = useSupervisor();
+  const supervisorTyping = slotState !== "waiting" && !isRemote && supervisorTypingIn(supervisor, supervisorNow, worktree.path);
   const hostName = isRemote ? (worktree.hostLabel ?? worktree.hostSummary ?? "Remote") : undefined;
 
   const handleContextMenu = (event: React.MouseEvent) => {
@@ -251,13 +262,20 @@ export const WorktreeRow = memo(function WorktreeRow({
           >
             {displayName}
           </span>
-          <SidebarStateSlot
-            state={slotState}
-            host={hostName}
-            title={isRemote && slotState === null ? (worktree.hostSummary ? `${worktree.hostLabel ?? "Remote"} (${worktree.hostSummary})` : hostName) : undefined}
-            className="ml-auto min-w-0 truncate"
-            data-testid={slotState ? "worktree-status-dot" : "remote-machine-badge"}
-          />
+          {supervisorTyping ? (
+            <span data-testid="worktree-supervisor-slot" className="ml-auto inline-flex min-w-0 shrink-0 items-center gap-1 truncate text-[10px] leading-none text-foreground">
+              <Eye aria-hidden="true" className="size-2.5 shrink-0" />
+              <span className="truncate">supervisor typing</span>
+            </span>
+          ) : (
+            <SidebarStateSlot
+              state={slotState}
+              host={hostName}
+              title={isRemote && slotState === null ? (worktree.hostSummary ? `${worktree.hostLabel ?? "Remote"} (${worktree.hostSummary})` : hostName) : undefined}
+              className="ml-auto min-w-0 truncate"
+              data-testid={slotState ? "worktree-status-dot" : "remote-machine-badge"}
+            />
+          )}
         </button>
 
         <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/worktree-row:opacity-100">

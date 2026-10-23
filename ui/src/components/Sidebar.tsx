@@ -24,6 +24,7 @@ import {
   PanelLeftClose,
   Plus,
   Settings2,
+  Eye,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
@@ -75,6 +76,7 @@ import { IconButton } from "./ui/IconButton";
 import { Input } from "./ui/input";
 import { SectionHeader } from "./ui/SectionHeader";
 import { SegmentedControl } from "./ui/SegmentedControl";
+import { SupervisorPanel, useSupervisorTyping } from "./supervisor/SupervisorPanel";
 import { SidebarStateSlot, type SidebarSlotState } from "./sidebar/SidebarStateSlot";
 import type { SectionId } from "./settings/types";
 import { EmptyWorktreesHint, fileManagerActionLabel, WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
@@ -173,6 +175,10 @@ export function Sidebar({
 }: SidebarProps) {
   const selectWorktree = onSelectWorktree;
   const inboxOpen = attention?.inboxOpen ?? false;
+  const [supervisorOpenState, setSupervisorOpen] = useState(false);
+  const supervisorOpen = supervisorOpenState && !inboxOpen;
+  const supervisorTyping = useSupervisorTyping();
+  const sidebarView = supervisorOpen ? "supervisor" : inboxOpen ? "inbox" : "worktrees";
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [resizing, setResizing] = useState(false);
   const [width, setWidth] = useState(loadSidebarWidth);
@@ -487,8 +493,9 @@ export function Sidebar({
           <div className="shrink-0 px-2 pb-1">
             <SegmentedControl
               label="Sidebar view"
-              value={inboxOpen ? "inbox" : "worktrees"}
+              value={sidebarView}
               onChange={(view) => {
+                setSupervisorOpen(view === "supervisor");
                 if ((view === "inbox") !== inboxOpen) attention.onInboxOpenChange(view === "inbox");
               }}
               options={[
@@ -501,10 +508,19 @@ export function Sidebar({
                   countTestId: "sidebar-attention-badge",
                   "data-shortcut": "notifications.toggle",
                 },
+                {
+                  value: "supervisor",
+                  label: "Supervisor",
+                  ariaLabel: supervisorTyping ? "Supervisor (typing)" : "Supervisor",
+                  count: supervisorTyping ? <Eye aria-hidden="true" className="size-3 text-foreground" /> : undefined,
+                  countTestId: "sidebar-supervisor-typing",
+                },
               ]}
             />
           </div>
         ) : null}
+
+        {attention && supervisorOpen ? <SupervisorPanel /> : null}
 
         {attention && inboxOpen ? (
           <AttentionInbox
@@ -516,8 +532,8 @@ export function Sidebar({
 
         <div
           data-testid="worktree-region"
-          hidden={inboxOpen || undefined}
-          className={cn("min-h-0 flex-1 flex-col", inboxOpen ? "hidden" : "flex")}
+          hidden={inboxOpen || supervisorOpen || undefined}
+          className={cn("min-h-0 flex-1 flex-col", inboxOpen || supervisorOpen ? "hidden" : "flex")}
         >
           <div className="shrink-0 px-2 pt-1">
             <Input

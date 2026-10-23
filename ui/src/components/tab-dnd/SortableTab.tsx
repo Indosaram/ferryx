@@ -1,6 +1,7 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
+  Eye,
   File,
   FileAudio,
   FileCode,
@@ -44,6 +45,7 @@ type SortableTabProps = {
   unread: boolean;
   sleeping?: boolean;
   activity?: ActivitySummary;
+  supervisorActing?: boolean;
   displayText?: string;
   displayTooltip?: string;
   fileTitle?: string;
@@ -65,6 +67,7 @@ export const SortableTab = memo(function SortableTab({
   unread,
   sleeping = false,
   activity,
+  supervisorActing = false,
   displayText,
   displayTooltip,
   fileTitle,
@@ -178,6 +181,9 @@ export const SortableTab = memo(function SortableTab({
             >
               💤
             </span>
+          ) : null}
+          {supervisorActing ? (
+            <Eye data-testid="tab-supervisor-indicator" aria-label="Supervisor typing" className="size-3 shrink-0 text-foreground" />
           ) : null}
           {activityIndicator ? (
             <span
