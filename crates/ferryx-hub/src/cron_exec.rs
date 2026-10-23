@@ -785,7 +785,9 @@ mod tests {
         assert!(first.deliver);
         assert!(first.output.contains("Owner tasks"));
         assert!(first.output.contains("Sign"));
-        assert!(first.output.contains("어제: jev 0회(폴백 0, 상한 도달 false)"));
+        assert!(first
+            .output
+            .contains("어제: jev 0회(폴백 0, 상한 도달 false)"));
         sqlx::query(
             "INSERT INTO cron_runs(id, job_id, status, started_at, finished_at, output) VALUES('d1','omon:inbox-digest','succeeded',?,?,?)",
         )

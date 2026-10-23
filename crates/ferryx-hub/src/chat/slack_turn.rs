@@ -814,7 +814,6 @@ pub async fn handle(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admit
     true
 }
 
-
 /// omo's system admission (`EventOrigin::System`): a lane event becomes a turn in `key`'s
 /// session and the reply is posted where that session lives (the owner DM or the home channel,
 /// top level). Returns false without running when the session already has a turn.

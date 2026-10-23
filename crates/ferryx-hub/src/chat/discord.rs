@@ -262,7 +262,7 @@ pub async fn consume_pairing(
         return Ok(None);
     }
     let expires = chrono::DateTime::parse_from_rfc3339(&expires_at).ok();
-    if !expires.is_some_and(|at| at > now) {
+    if expires.is_none_or(|at| at <= now) {
         return Ok(None);
     }
     sqlx::query("UPDATE pairing_codes SET consumed_at = ? WHERE code = ?")

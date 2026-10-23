@@ -38,6 +38,9 @@ fn script(messages: &[&str], approval: bool) -> Script {
         approval,
         approval_command: approval.then(|| PUSH.to_owned()),
         thread_id: "thr-parity".into(),
+        queued_ticks: 0,
+        tick: std::time::Duration::ZERO,
+        no_ack: false,
     }
 }
 
