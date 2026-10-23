@@ -1653,6 +1653,17 @@ pub(crate) enum IngressOutcome {
     Refused,
 }
 
+/// Agents whose CLI leaves no process-bound record of a fresh session. Measured on claude
+/// 2.1.308 (re-explore-5): the transcript is never held open (0/40 lsof samples while working, none
+/// at idle) and a fresh launch carries no id in argv. Only a resumed claude names its session
+/// (`--resume <uuid>`, read by `ipc::agents::resume_id_from_args`). For these agents the agent's
+/// own store file plus the store-recorded cwd stand in for the missing process proof.
+const AGENTS_WITHOUT_PROCESS_BOUND_SESSION: [&str; 1] = ["claude"];
+
+pub(crate) fn agent_has_no_process_bound_session(agent: &str) -> bool {
+    AGENTS_WITHOUT_PROCESS_BOUND_SESSION.contains(&agent)
+}
+
 /// The admission decision for one report's provider claim.
 ///
 /// A claim from a family the machine publishes (`resume_cwd::MACHINE_RESUME_AGENTS`) can lose its
@@ -1671,7 +1682,14 @@ fn ingress_admission_identity(
     if !has_path || !crate::terminal::resume_cwd::machine_admits_agent(agent) {
         return IngressAdmissionIdentity::AsReported;
     }
-    if discovered.is_some_and(|found| found == id.trim()) && path_is_own_store {
+    // An agent whose CLI keeps no process-bound record of its session (no open store file, no
+    // argv on a fresh launch) can never be discovered; its own store file for the reported id is
+    // then the proof, and admit_agent_report still requires that store's cwd to be this pane's.
+    // A discovered id that differs is still refused.
+    let discovery_unavailable = discovered.is_none() && agent_has_no_process_bound_session(agent);
+    if (discovered.is_some_and(|found| found == id.trim()) || discovery_unavailable)
+        && path_is_own_store
+    {
         return IngressAdmissionIdentity::WithoutPath;
     }
     // The claim names a path this session cannot prove is its own store: admit no identity rather
@@ -3963,7 +3981,12 @@ impl DaemonServer {
             let discovered = server
                 .ingress_pty_pid(&session_id)
                 .and_then(|pid| crate::ipc::agents::discover_agent_session_id(pid, &agent));
-            let path_is_own_store = discovered.as_deref().is_some_and(|found| {
+            // With no discovered id, an agent that keeps no process-bound session record is
+            // checked against the id it reported; every other agent proves nothing without one.
+            let store_id = discovered.clone().or_else(|| {
+                agent_has_no_process_bound_session(&agent).then(|| id.trim().to_string())
+            });
+            let path_is_own_store = store_id.as_deref().is_some_and(|found| {
                 if agent == "omo" {
                     // omo keeps its own resolver, which also searches the legacy flat store.
                     Self::ingress_path_is_own_store(found, &claimed)
@@ -10796,6 +10819,42 @@ mod tests {
             key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
             id: id.to_string(),
             transcript_path: path.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn ingress_admits_a_fresh_claude_on_its_own_store_alone() {
+        // claude keeps no process-bound record of a fresh session (re-explore-5, measured), so
+        // with nothing discovered its own store file for the reported id is the proof.
+        let id = "0f3c9a52-6b1e-4d7a-9c2e-8a4b5d6e7f80";
+        assert!(agent_has_no_process_bound_session("claude"));
+        assert_eq!(
+            ingress_admission_identity("claude", id, true, None, true),
+            IngressAdmissionIdentity::WithoutPath
+        );
+        // A foreign path, or a discovered id that differs, is still refused.
+        assert_eq!(
+            ingress_admission_identity("claude", id, true, None, false),
+            IngressAdmissionIdentity::Refused
+        );
+        assert_eq!(
+            ingress_admission_identity(
+                "claude",
+                id,
+                true,
+                Some("01a00000-0000-0000-0000-000000000000"),
+                true
+            ),
+            IngressAdmissionIdentity::Refused
+        );
+        // Every agent that does leave a process-bound record still needs discovery.
+        for agent in ["omo", "codex", "grok", "omp", "kimi", "copilot", "gjc", "cursor"] {
+            assert!(!agent_has_no_process_bound_session(agent), "{agent}");
+            assert_eq!(
+                ingress_admission_identity(agent, id, true, None, true),
+                IngressAdmissionIdentity::Refused,
+                "{agent} with nothing discovered must be refused"
+            );
         }
     }
 

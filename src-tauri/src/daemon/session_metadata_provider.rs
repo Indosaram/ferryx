@@ -76,10 +76,16 @@ impl DaemonSessionService {
             .get_session(&target.session_id)
             .ok_or("SESSION_EXPIRED")?;
         let pid = pty.pid().ok_or("SESSION_EXPIRED")?;
-        let discovered = crate::ipc::agents::discover_agent_session_id(pid, agent)
-            .ok_or("AGENT_PROVIDER_UNVERIFIED")?;
-        if provider.id != discovered {
-            return Err("AGENT_PROVIDER_MISMATCH".into());
+        match crate::ipc::agents::discover_agent_session_id(pid, agent) {
+            Some(discovered) if provider.id != discovered => {
+                return Err("AGENT_PROVIDER_MISMATCH".into());
+            }
+            Some(_) => {}
+            // claude keeps no process-bound record of a fresh session (no open transcript, no id
+            // in argv). Its proof is then the store-cwd check below, which it always gets because
+            // it is not in MACHINE_RESUME_NO_CWD_PROOF.
+            None if crate::daemon::server::agent_has_no_process_bound_session(agent) => {}
+            None => return Err("AGENT_PROVIDER_UNVERIFIED".into()),
         }
         crate::terminal::shell::resolve_agent_resume_plan(agent, provider)
             .map_err(|_| "AGENT_RESUME_INVALID")?;

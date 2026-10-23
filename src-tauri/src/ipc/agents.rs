@@ -104,7 +104,12 @@ pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Opti
         None if normalized == "opencode" => opencode_session_id(None, root_pid),
         Some(pid) if normalized == "pi" => pi_session_id(Some(pid), root_pid),
         None if normalized == "pi" => pi_session_id(None, root_pid),
-        Some(pid) if matches!(normalized, "grok" | "droid" | "cline" | "kimi" | "copilot" | "gjc") => {
+        Some(pid)
+            if matches!(
+                normalized,
+                "claude" | "grok" | "droid" | "cline" | "kimi" | "copilot" | "gjc"
+            ) =>
+        {
             lsof_session_id(pid, normalized).or_else(|| resumed_id(pid))
         }
         // crush keeps every session of a project in one `.crush/crush.db`, so no open file names
@@ -302,6 +307,10 @@ fn resume_id_from_args(agent_type: &str, args: &str) -> Option<String> {
         "droid" => &["--resume", "-r", "resume"],
         "cline" => &["--id"],
         "crush" => &["--session", "-s"],
+        // `claude --help`: `-r, --resume [value]` and `--session-id <uuid>`; Ferryx resumes claude
+        // with `--resume <uuid>` (terminal/shell.rs). claude keeps no transcript open, so argv is
+        // its only process-bound proof (re-explore-5 G1, measured on claude 2.1.308).
+        "claude" => &["--resume", "-r", "--session-id"],
         // Measured flags: `kimi --help` (--session/-S), `copilot --help` (--resume [sessionId]),
         // and the resume argv Ferryx itself spawns (terminal/shell.rs resolve_agent_resume_plan).
         "kimi" => &["--session", "-S"],
@@ -1608,7 +1617,27 @@ mod tests {
         );
         assert_eq!(resume_id_from_args("crush", "crush --session 7f7f"), None);
         assert_eq!(resume_id_from_args("crush", "crush --continue"), None);
+        // A bare or non-UUID resume value (the picker, or a search term) names no session.
         assert_eq!(resume_id_from_args("claude", "claude --resume id"), None);
+        assert_eq!(resume_id_from_args("claude", "claude --resume"), None);
+        assert_eq!(
+            resume_id_from_args("claude", "claude --resume 0f3c9a52-6b1e-4d7a-9c2e-8a4b5d6e7f80")
+                .as_deref(),
+            Some("0f3c9a52-6b1e-4d7a-9c2e-8a4b5d6e7f80")
+        );
+        assert_eq!(
+            resume_id_from_args("claude", "node /x/claude -r 0f3c9a52-6b1e-4d7a-9c2e-8a4b5d6e7f80")
+                .as_deref(),
+            Some("0f3c9a52-6b1e-4d7a-9c2e-8a4b5d6e7f80")
+        );
+        assert_eq!(
+            resume_id_from_args(
+                "claude",
+                "claude --session-id 0f3c9a52-6b1e-4d7a-9c2e-8a4b5d6e7f80"
+            )
+            .as_deref(),
+            Some("0f3c9a52-6b1e-4d7a-9c2e-8a4b5d6e7f80")
+        );
     }
 
     #[test]
