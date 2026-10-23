@@ -485,3 +485,142 @@ async fn network_error_keeps_lease_until_expiry() {
     assert!(host_lease.get_valid_lease(now_secs + 3600).is_none());
     assert!(host_lease.get_valid_lease(now_secs + 3601).is_none());
 }
+
+
+/// Serves `GET /api/account/v1/public-key` with `key`, counting requests.
+async fn public_key_stub(
+    key: String,
+) -> (String, Arc<std::sync::atomic::AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind public key stub");
+    let addr = listener.local_addr().expect("stub address");
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    let app = axum::Router::new().route(
+        "/api/account/v1/public-key",
+        axum::routing::get(move || {
+            let key = key.clone();
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                axum::Json(serde_json::json!({ "publicKey": key }))
+            }
+        }),
+    );
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), hits, handle)
+}
+
+fn env_key_unset() -> bool {
+    crate::remote::direct_lease::env_account_public_key().is_none()
+}
+
+#[tokio::test]
+async fn enrolled_machine_pins_account_key_and_lease_context_resolves_without_env() {
+    if !env_key_unset() {
+        return;
+    }
+    let fx = fixture(true);
+    let account = test_account_key();
+    let (origin, hits, stub) = public_key_stub(account_public_key_b64(&account)).await;
+    write_enrollment(&fx, &origin);
+    let dir = fx._dir.path();
+    assert!(
+        HostLeaseWiring::resolve(Some(dir)).context.is_none(),
+        "before pinning, an enrolled host has no verifiable lease context"
+    );
+
+    let key = crate::remote::direct_lease::ensure_account_public_key(Some(dir), &lease_http())
+        .await
+        .expect("pin account key");
+    assert_eq!(key, account_public_key_b64(&account));
+    assert_eq!(
+        crate::remote::direct_lease::pinned_account_public_key_in(Some(dir)).as_deref(),
+        Some(key.as_str())
+    );
+    let wiring = HostLeaseWiring::resolve(Some(dir));
+    assert!(wiring.required);
+    assert_eq!(
+        wiring.context.and_then(|context| context.account_public_key).as_deref(),
+        Some(key.as_str()),
+        "the lease context uses the pinned key"
+    );
+
+    crate::remote::direct_lease::ensure_account_public_key(Some(dir), &lease_http())
+        .await
+        .expect("pin reused");
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1, "a pin is fetched once");
+    stub.abort();
+}
+
+#[tokio::test]
+async fn pinned_account_key_is_not_replaced_by_a_different_key() {
+    if !env_key_unset() {
+        return;
+    }
+    let fx = fixture(true);
+    let first = test_account_key();
+    let (origin, _hits, stub) = public_key_stub(account_public_key_b64(&first)).await;
+    write_enrollment(&fx, &origin);
+    let dir = fx._dir.path();
+    crate::remote::direct_lease::ensure_account_public_key(Some(dir), &lease_http())
+        .await
+        .expect("first pin");
+    stub.abort();
+
+    // Same origin now serves another key: the existing pin must win.
+    let rewritten = std::fs::read_to_string(dir.join(crate::remote::direct_lease::ACCOUNT_KEY_PIN_FILE))
+        .expect("pin file");
+    let key = crate::remote::direct_lease::ensure_account_public_key(Some(dir), &lease_http())
+        .await
+        .expect("existing pin");
+    assert_eq!(key, account_public_key_b64(&first));
+    assert_ne!(key, account_public_key_b64(&test_wrong_key()));
+    assert_eq!(
+        std::fs::read_to_string(dir.join(crate::remote::direct_lease::ACCOUNT_KEY_PIN_FILE))
+            .expect("pin file"),
+        rewritten,
+        "pin file untouched"
+    );
+}
+
+#[tokio::test]
+async fn pin_for_another_origin_is_ignored_and_bad_keys_are_refused() {
+    if !env_key_unset() {
+        return;
+    }
+    let fx = fixture(true);
+    let dir = fx._dir.path();
+    let (origin, _hits, stub) = public_key_stub(account_public_key_b64(&test_account_key())).await;
+    write_enrollment(&fx, &origin);
+    crate::remote::direct_lease::ensure_account_public_key(Some(dir), &lease_http())
+        .await
+        .expect("pin");
+    stub.abort();
+
+    // Re-enrolled elsewhere: the old origin's pin no longer applies.
+    let (other, _other_hits, other_stub) = public_key_stub("not-a-key".to_string()).await;
+    write_enrollment(&fx, &other);
+    assert_eq!(crate::remote::direct_lease::pinned_account_public_key_in(Some(dir)), None);
+    assert_eq!(
+        crate::remote::direct_lease::ensure_account_public_key(Some(dir), &lease_http()).await,
+        Err(crate::remote::direct_lease::AccountKeyPinError::BadKey)
+    );
+    assert_eq!(crate::remote::direct_lease::pinned_account_public_key_in(Some(dir)), None);
+    other_stub.abort();
+}
+
+#[tokio::test]
+async fn unenrolled_machine_fetches_nothing() {
+    if !env_key_unset() {
+        return;
+    }
+    let fx = fixture(true);
+    assert_eq!(
+        crate::remote::direct_lease::ensure_account_public_key(Some(fx._dir.path()), &lease_http()).await,
+        Err(crate::remote::direct_lease::AccountKeyPinError::NotEnrolled)
+    );
+}

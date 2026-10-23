@@ -126,6 +126,9 @@ test('ProcessRegistry kills only a recorded pid whose identity still matches', a
   await assert.rejects(reg.record(99, { role: 'gone', executable: '/qa/ferryx' }), /PID_GONE/);
   await assert.rejects(reg.kill(11), /KILL_REFUSED/);
   table.set(10, { executable: '/qa/ferryx', startTime: 'T2' }); // pid reused
+  assert.equal(await reg.check(10), 'reused');
+  assert.equal(await reg.kill(10), false, 'a reused pid is never signalled');
+  table.set(10, { executable: '/usr/bin/other', startTime: 'T1' }); // same start, other image: no exit proof
   assert.equal(await reg.check(10), 'mismatch');
   await assert.rejects(reg.kill(10), /KILL_REFUSED/);
   table.set(10, { executable: '/qa/ferryx', startTime: 'T1' });
@@ -133,6 +136,25 @@ test('ProcessRegistry kills only a recorded pid whose identity still matches', a
   table.delete(10);
   assert.equal(await reg.kill(10), false);
   assert.deepEqual(sent, [[10, 'SIGKILL']]);
+});
+
+test('windows teardown: a recorded GUI whose pid was reused by another process is gone, not refused, and never signalled (all3 g9 pid 7716)', async () => {
+  const gui = 'C:\\run\\artifacts\\A\\ferryx.exe';
+  const table = new Map([[7716, { executable: gui, startTime: '134371448369187860' }]]);
+  const sent = [];
+  const reg = new ProcessRegistry({ probe: async (pid) => table.get(pid) ?? null, signal: async (pid, sig) => sent.push([pid, sig]), platform: 'windows' });
+  await reg.record(7716, { role: 'gui-g9', executable: gui });
+  // g9 exited; nine minutes later g28's powershell launcher got pid 7716.
+  table.set(7716, { executable: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', startTime: '134371453993520000' });
+  assert.equal(await reg.check(7716), 'reused');
+  assert.equal(await reg.kill(7716), false);
+  // A recorded start that is unknown proves nothing: the image difference is still refused.
+  const noStart = new ProcessRegistry({ probe: async (pid) => table.get(pid) ?? null, signal: async (pid, sig) => sent.push([pid, sig]), platform: 'windows' });
+  table.set(7717, { executable: gui, startTime: null });
+  await noStart.record(7717, { role: 'gui-g10', executable: gui });
+  table.set(7717, { executable: 'C:\\Windows\\System32\\cmd.exe', startTime: '1' });
+  await assert.rejects(noStart.kill(7717), /KILL_REFUSED/);
+  assert.deepEqual(sent, []);
 });
 
 test('windows probe keeps the FILETIME start exact through script, JSON and parse (> 2^53)', async () => {

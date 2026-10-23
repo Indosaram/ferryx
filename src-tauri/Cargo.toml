@@ -51,7 +51,7 @@ required-features = ["native-terminal"]
 tauri-build = { version = "2", features = [] }
 
 [features]
-default = ["native-terminal"]
+default = ["native-terminal", "hub-slack", "hub-discord", "hub-voice"]
 # Task 3 private QA barrier channel for the pane-liveness diagnostic
 # classifier headless harness. Compile-time gated; never enabled in release
 # builds. No code outside #[cfg(feature = "local-split-qa")] is reachable.
@@ -67,8 +67,15 @@ native-terminal = [
     "dep:bytemuck",
     "dep:pollster",
 ]
+# Hub connectors. Cargo cannot scope default features to macOS, so every OS build
+# includes them. They stay idle until a token or speech key is present.
+hub-slack = ["ferryx-hub/hub-slack"]
+hub-discord = ["ferryx-hub/hub-discord"]
+hub-voice = ["ferryx-hub/hub-voice"]
 
 [dependencies]
+ferryx-hub = { path = "../crates/ferryx-hub" }
+async-trait = "0.1"
 tauri = { version = "2", features = ["macos-private-api", "test", "unstable", "image-png", "devtools"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
@@ -136,6 +143,10 @@ quinn = { version = "=0.11.11", default-features = false, features = ["runtime-t
 rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "=1.15.1"
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "ring"] }
+# Direct TLS termination for ferryx-relay (src/remote/relay_tls.rs). Both stay on ring; never
+# enable their aws-lc defaults.
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-acme = { version = "=0.15.4", default-features = false, features = ["ring", "webpki-roots"] }
 
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
@@ -245,4 +256,18 @@ tokio = { version = "1.53", features = ["test-util"] }
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# `strip = "symbols"` is also applied to proc-macro dylibs. On macOS that
+# corrupts libsqlx_macros ("mis-aligned LINKEDIT") and the notarized app
+# build fails. Build scripts and proc-macros stay unstripped.
+[profile.release.build-override]
+strip = "none"
+
+# Xcode 27.1 applies the same strip to proc-macro dylibs in dev and test
+# builds (`mis-aligned LINKEDIT` on libsqlx_macros). Keep those unstripped too.
+[profile.dev.build-override]
+strip = "none"
+
+[profile.test.build-override]
+strip = "none"
 

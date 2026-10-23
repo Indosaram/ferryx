@@ -316,8 +316,41 @@ fn corrupt_unknown_newer_and_external_replacement_never_overwrite() {
     root.close().unwrap();
 }
 
+/// `Inventory::open` and `normalize_origin` read the process-global opt-in. These tests
+/// assert the closed default, so a leaked `FERRYX_ALLOW_INSECURE_RELAY` must not reach them.
+/// The lock keeps one test's restore from turning the opt-in back on under another.
+struct ClearedInsecureOptIn {
+    env: Option<String>,
+    flag: bool,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+impl Drop for ClearedInsecureOptIn {
+    fn drop(&mut self) {
+        match self.env.take() {
+            Some(value) => unsafe { std::env::set_var("FERRYX_ALLOW_INSECURE_RELAY", value) },
+            None => unsafe { std::env::remove_var("FERRYX_ALLOW_INSECURE_RELAY") },
+        }
+        crate::remote::relay_client::ALLOW_INSECURE_RELAY
+            .store(self.flag, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+fn clear_insecure_relay_opt_in() -> ClearedInsecureOptIn {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let env = std::env::var("FERRYX_ALLOW_INSECURE_RELAY").ok();
+    let flag = crate::remote::relay_client::ALLOW_INSECURE_RELAY
+        .swap(false, std::sync::atomic::Ordering::Relaxed);
+    unsafe { std::env::remove_var("FERRYX_ALLOW_INSECURE_RELAY") };
+    ClearedInsecureOptIn {
+        env,
+        flag,
+        _lock: lock,
+    }
+}
+
 #[test]
 fn test_loopback_is_explicit_and_not_a_production_origin() {
+    let _guard = clear_insecure_relay_opt_in();
     for origin in [
         "http://localhost:8080",
         "http://127.0.0.1:8080",
@@ -343,6 +376,7 @@ fn test_loopback_is_explicit_and_not_a_production_origin() {
 
 #[test]
 fn fixture_loopback_store_roundtrips_but_production_fails_closed() {
+    let _guard = clear_insecure_relay_opt_in();
     let root = fixture();
     let mut input = pairing("loopback");
     input.relay_origin = "http://127.0.0.1:43123".into();
@@ -352,11 +386,95 @@ fn fixture_loopback_store_roundtrips_but_production_fails_closed() {
     drop(store);
     assert_eq!(
         Inventory::open_test_loopback(root.path()).unwrap().list(),
-        vec![row]
+        vec![row.clone()]
     );
     let bytes = fs::read(path(root.path())).unwrap();
-    assert!(Inventory::open(root.path()).is_err());
+    let mut closed = Inventory::open(root.path()).expect("one insecure row must not fail the file");
+    let listed = closed.list();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].host_id, row.host_id);
+    assert_eq!(listed[0].auth_status, AuthStatus::Unknown);
+    assert!(!listed[0].online);
+    assert_eq!(
+        listed[0].unavailable_reason.as_deref(),
+        Some(INSECURE_LOOPBACK_RELAY)
+    );
+    assert_eq!(
+        closed.capture(&row.host_id, row.generation).unwrap_err(),
+        InventoryError::InsecureRelay
+    );
     assert_eq!(fs::read(path(root.path())).unwrap(), bytes);
+    root.close().unwrap();
+}
+
+#[test]
+fn an_insecure_saved_relay_does_not_hide_the_other_hosts() {
+    let _guard = clear_insecure_relay_opt_in();
+    let root = fixture();
+    let mut store = Inventory::open_test_loopback(root.path()).unwrap();
+    let secure = store.pair(&pairing("secure")).unwrap();
+    let mut loopback = pairing("loop");
+    loopback.relay_origin = "http://127.0.0.1:43123".into();
+    let insecure = store.pair(&loopback).unwrap();
+    drop(store);
+    let bytes = fs::read(path(root.path())).unwrap();
+
+    let mut closed = Inventory::open(root.path()).unwrap();
+    let listed = closed.list();
+    let secure_view = listed
+        .iter()
+        .find(|host| host.host_id == secure.host_id)
+        .expect("https host");
+    assert_eq!(secure_view.auth_status, AuthStatus::Paired);
+    assert!(secure_view.unavailable_reason.is_none());
+    let blocked = listed
+        .iter()
+        .find(|host| host.host_id == insecure.host_id)
+        .expect("loopback host");
+    assert_eq!(blocked.auth_status, AuthStatus::Unknown);
+    assert!(!blocked.online);
+    assert_eq!(
+        blocked.unavailable_reason.as_deref(),
+        Some(INSECURE_LOOPBACK_RELAY)
+    );
+    assert!(closed
+        .capture(&secure.host_id, secure.generation)
+        .unwrap()
+        .token()
+        .is_ok());
+    assert_eq!(
+        closed
+            .capture(&insecure.host_id, insecure.generation)
+            .unwrap_err(),
+        InventoryError::InsecureRelay
+    );
+    let read = closed
+        .read_verified(&secure.host_id, secure.generation)
+        .expect("the https host stays readable");
+    assert!(read.unavailable_reason.is_none());
+    closed
+        .set_ssh_host_id(
+            &secure.host_id,
+            secure.generation,
+            Some("saved-ssh".into()),
+        )
+        .expect("editing a healthy host must not fence the inventory");
+    let text = fs::read_to_string(path(root.path())).unwrap();
+    assert!(text.contains("127.0.0.1"), "the insecure row stays on disk");
+    assert_ne!(fs::read(path(root.path())).unwrap(), bytes);
+
+    let again = Inventory::open(root.path()).unwrap();
+    assert!(again.list().iter().any(|host| {
+        host.host_id == secure.host_id && host.unavailable_reason.is_none() && host.ssh_host_id.is_some()
+    }));
+    assert!(again.list().iter().any(|host| {
+        host.host_id == insecure.host_id
+            && host.unavailable_reason.as_deref() == Some(INSECURE_LOOPBACK_RELAY)
+    }));
+    let opted = Inventory::open_test_loopback(root.path()).unwrap();
+    assert!(opted.list().iter().all(|host| {
+        host.unavailable_reason.is_none() && host.auth_status == AuthStatus::Paired
+    }));
     root.close().unwrap();
 }
 
@@ -398,6 +516,7 @@ fn legacy_host_view_decodes_without_device_id_and_omits_none_in_wire_format() {
     assert_eq!(view.online, true);
     assert_eq!(view.ssh_host_id, None);
     assert_eq!(view.device_id, None);
+    assert_eq!(view.unavailable_reason, None);
 
     let serialized = serde_json::to_string(&view).expect("HostView serializes");
     assert!(!serialized.contains("deviceId"));

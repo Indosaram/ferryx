@@ -364,6 +364,9 @@ pub struct DaemonSessionService {
     pub(super) provider_session_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
     pub(super) desktop_geometries: Arc<Mutex<HashMap<String, (u16, u16)>>>,
     pub(super) agent_states: Arc<AgentStateHub>,
+    /// Installed once the gateway's observer exists. Sessions spawned before that are caught by
+    /// `watch_live` at install time.
+    pub(super) agent_watch: Mutex<Option<Arc<crate::daemon::agent_observer::AgentObserverHub>>>,
     #[cfg(test)]
     pub(super) test_shell_command: parking_lot::Mutex<Option<portable_pty::CommandBuilder>>,
 }
@@ -372,6 +375,37 @@ impl DaemonSessionService {
     #[cfg(test)]
     pub(crate) fn set_test_shell_command(&self, cmd: portable_pty::CommandBuilder) {
         *self.test_shell_command.lock() = Some(cmd);
+    }
+
+    pub(crate) fn agent_state_hub(&self) -> Arc<AgentStateHub> {
+        Arc::clone(&self.agent_states)
+    }
+
+    pub(crate) fn install_agent_watch(
+        &self,
+        hub: Arc<crate::daemon::agent_observer::AgentObserverHub>,
+    ) {
+        let metadata = Arc::clone(&self.session_metadata);
+        hub.set_workspace_lookup(Arc::new(move |session_id: &str| {
+            metadata
+                .read()
+                .get(session_id)
+                .map(|meta| meta.workspace_id.clone())
+        }));
+        *self.agent_watch.lock() = Some(Arc::clone(&hub));
+        hub.watch_live();
+    }
+
+    pub(crate) fn watch_agent_session(&self, session_id: &str) {
+        if let Some(hub) = self.agent_watch.lock().clone() {
+            hub.watch(session_id);
+        }
+    }
+
+    pub(crate) fn unwatch_agent_session(&self, session_id: &str) {
+        if let Some(hub) = self.agent_watch.lock().clone() {
+            hub.unwatch(session_id);
+        }
     }
 
     pub(crate) fn admission_time_unix_ms(&self) -> u64 {
@@ -1563,6 +1597,7 @@ impl DaemonSessionService {
                 continue;
             }
             self.watch_remote_session(&id)?;
+            self.watch_agent_session(&id);
         }
         Ok(())
     }
@@ -1893,7 +1928,10 @@ impl DaemonSessionService {
             .persist_remote_sessions_at(self.remote_sessions_path.clone())
             .await
         {
-            Ok(()) => self.watch_remote_session(&id),
+            Ok(()) => {
+                self.watch_agent_session(&id);
+                self.watch_remote_session(&id)
+            }
             Err(error) => Err(format!("Failed to persist remote session: {error}")),
         };
         self.abandon_uncommitted_remote_session(&id, committed).await?;
@@ -2247,6 +2285,8 @@ impl DaemonSessionService {
         let session_metadata = Arc::clone(&self.session_metadata);
         let provider_session_claims = Arc::clone(&self.provider_session_claims);
         let agent_states = Arc::clone(&self.agent_states);
+        let agent_watch = self.agent_watch.lock().clone();
+        let cleanup_watch = agent_watch.clone();
         let desktop_geometries = Arc::clone(&self.desktop_geometries);
         let handover_manager = self.handover_manager.clone();
         let machine_lifecycles = self.machine_lifecycles.clone();
@@ -2591,6 +2631,7 @@ impl DaemonSessionService {
                 let cleanup_claims = Arc::clone(&provider_session_claims);
                 let cleanup_desktop_geometries = Arc::clone(&desktop_geometries);
                 let cleanup_agent_states = Arc::clone(&agent_states);
+                let cleanup_watch = cleanup_watch.clone();
                 let handover_manager = handover_manager.clone();
                 let terminal_service = Arc::clone(&terminal_service);
                 let exited_pty = terminal_service.get_session(&session_id);
@@ -2719,6 +2760,9 @@ impl DaemonSessionService {
                         }
                     }
                     cleanup_router.remove_workspace(&cleanup_session_id);
+                    if let Some(hub) = &cleanup_watch {
+                        hub.unwatch(&cleanup_session_id);
+                    }
                     cleanup_agent_states.remove(&cleanup_session_id);
                     cleanup_cache
                         .lock()
@@ -2775,6 +2819,11 @@ impl DaemonSessionService {
                     }
                 });
 
+                if persisted.is_ok() {
+                    if let Some(hub) = &agent_watch {
+                        hub.watch(&session_id);
+                    }
+                }
                 if let Err(error) = persisted {
                     // The caller never learns this session's id, so it is handed back for
                     // teardown instead of being left running with nobody able to reach it.
@@ -2826,6 +2875,7 @@ impl DaemonSessionService {
             return closed;
         }
         self.release_session_ownership(session_id);
+        self.unwatch_agent_session(session_id);
         self.agent_states.remove(session_id);
         if remote {
             self.persist_remote_sessions_at(self.remote_sessions_path.clone())
@@ -2841,6 +2891,7 @@ impl DaemonSessionService {
     ) -> Result<(), crate::terminal::PtyError> {
         self.terminal_service.hibernate_session(session_id).await?;
         self.release_session_ownership(session_id);
+        self.unwatch_agent_session(session_id);
         self.agent_states.remove(session_id);
         Ok(())
     }

@@ -243,6 +243,7 @@ fn probe_loop_skips_hosts_without_a_machine_grant() {
         online: false,
         ssh_host_id: None,
         device_id: None,
+        unavailable_reason: None,
     };
     assert!(is_probe_target(&host(AuthStatus::Paired, GrantScope::Machine)));
     assert!(
@@ -279,6 +280,10 @@ async fn fake_daemon(
                         Ok(DaemonRequest::PairedHostReachabilityList) => json!({
                             "type": "pairedHostReachabilityListOk",
                             "entries": [{"hostId":"https://relay.example/host/a","generation":"2","state":"offline","checkedAtMs":5,"lastError":null}]
+                        }),
+                        Ok(DaemonRequest::PairedHostRouteList) => json!({
+                            "type": "pairedHostRouteListOk",
+                            "entries": [{"hostId":"https://relay.example/host/a","state":"direct"}]
                         }),
                         _ => json!({"type": "error", "message": "unknown request"}),
                     };
@@ -331,6 +336,41 @@ async fn g_daemon_with_the_capability_returns_entries_in_the_ui_shape() {
     task.abort();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn g_daemon_without_the_route_capability_reports_unsupported() {
+    let (_root, client, task) = fake_daemon(vec![
+        "pairedHostInventoryV1",
+        super::super::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY,
+    ])
+    .await;
+    let view = tokio::time::timeout(Duration::from_secs(10), crate::ipc::paired_host::route_list_view(&client))
+        .await
+        .expect("bounded")
+        .unwrap();
+    assert_eq!(serde_json::to_value(&view).unwrap(), json!({"supported": false, "entries": []}));
+    task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn g_daemon_with_the_route_capability_returns_routes_in_the_ui_shape() {
+    let (_root, client, task) = fake_daemon(vec![
+        "pairedHostInventoryV1",
+        super::super::route_view::PAIRED_HOST_ROUTE_CAPABILITY,
+    ])
+    .await;
+    let view = tokio::time::timeout(Duration::from_secs(10), crate::ipc::paired_host::route_list_view(&client))
+        .await
+        .expect("bounded")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&view).unwrap(),
+        json!({"supported": true, "entries": [{"hostId":"https://relay.example/host/a","state":"direct"}]})
+    );
+    task.abort();
+}
+
 /// HostView exactly as defined at origin/main c7c3b549, before this change.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -372,6 +412,7 @@ fn compat_old_and_new_host_view_wire_shapes_parse_both_ways() {
         online: false,
         ssh_host_id: None,
         device_id: Some("d".into()),
+        unavailable_reason: None,
     };
     let wire = serde_json::to_string(&new_view).unwrap();
     let legacy: LegacyHostView = serde_json::from_str(&wire).expect("old GUI parses new HostView");

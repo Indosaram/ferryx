@@ -325,6 +325,37 @@ pub struct RelayClient {
     register_rx: Arc<Mutex<mpsc::Receiver<RegisterPairingPinRequest>>>,
     attach_tx: mpsc::Sender<AttachSessionRequest>,
     attach_rx: Arc<Mutex<mpsc::Receiver<AttachSessionRequest>>>,
+    /// True only while a control session has passed authentication and has not dropped.
+    /// Shared across clones so status reads the client the gateway published, not a copy.
+    control_accepted: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Holds `control_accepted` for one live control session and clears it on every exit.
+pub(crate) struct ControlChannelAdmission {
+    accepted: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ControlChannelAdmission {
+    fn admit(accepted: &Arc<std::sync::atomic::AtomicBool>) -> Self {
+        accepted.store(true, std::sync::atomic::Ordering::Release);
+        Self {
+            accepted: Arc::clone(accepted),
+        }
+    }
+}
+
+impl Drop for ControlChannelAdmission {
+    fn drop(&mut self) {
+        self.accepted
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Both status bits follow the accepted control session. A saved relay URL or a published
+/// pairing coordinator is not a connection.
+pub(crate) fn relay_connection_flags(client: Option<&RelayClient>) -> (Option<bool>, Option<bool>) {
+    let accepted = client.is_some_and(RelayClient::control_channel_accepted);
+    (Some(accepted), Some(accepted))
 }
 
 impl RelayClient {
@@ -355,6 +386,7 @@ impl RelayClient {
             register_rx: Arc::new(Mutex::new(rx)),
             attach_tx,
             attach_rx: Arc::new(Mutex::new(attach_rx)),
+            control_accepted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -392,6 +424,7 @@ impl RelayClient {
             register_rx: Arc::new(Mutex::new(rx)),
             attach_tx,
             attach_rx: Arc::new(Mutex::new(attach_rx)),
+            control_accepted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -409,6 +442,18 @@ impl RelayClient {
 
     pub fn pairing_coordinator(&self) -> PairingCoordinator {
         self.pairing.clone()
+    }
+
+    /// The relay has accepted this daemon's control session and the socket is still up.
+    /// Pairing configuration alone is not acceptance: a rejected handshake stays false.
+    pub fn control_channel_accepted(&self) -> bool {
+        self.control_accepted
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_admit_control_channel(&self) -> ControlChannelAdmission {
+        ControlChannelAdmission::admit(&self.control_accepted)
     }
 
     pub async fn connect_control(&self) -> anyhow::Result<ControlSocket> {
@@ -537,6 +582,8 @@ impl RelayClient {
 
     async fn run_control_session(&self) -> anyhow::Result<()> {
         let socket = self.connect_control().await?;
+        // Set only after authentication succeeds. Drop clears every exit, including a later reject.
+        let _admitted = ControlChannelAdmission::admit(&self.control_accepted);
         let mut registrations = self.register_rx.lock().await;
         let mut attachments = self.attach_rx.lock().await;
         let mut pending: Option<RegisterPairingPinRequest> = None;
@@ -1099,7 +1146,78 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(error.to_string().contains("denied"));
+        assert!(
+            !client.control_channel_accepted(),
+            "a rejected handshake must not count as connected"
+        );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_control_session_never_reports_connected() {
+        let (client, server) = auth_fixture(false).await;
+        let error = tokio::time::timeout(Duration::from_secs(5), client.run_control_session())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("denied") || error.to_string().contains("rejected"));
+        assert_eq!(relay_connection_flags(Some(&client)), (Some(false), Some(false)));
+        assert_eq!(relay_connection_flags(None), (Some(false), Some(false)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_channel_is_accepted_only_while_the_session_is_up() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let _ = release_rx.await;
+            let _ = socket.close(None).await;
+        });
+        let client = RelayClient::new(format!("http://{addr}"), "machine");
+        assert_eq!(
+            relay_connection_flags(Some(&client)),
+            (Some(false), Some(false))
+        );
+        let running = client.clone();
+        let task = tokio::spawn(async move { running.run_control_session().await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if client.control_channel_accepted() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("control channel was never accepted");
+        assert_eq!(relay_connection_flags(Some(&client)), (Some(true), Some(true)));
+        release_tx.send(()).ok();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !client.control_channel_accepted() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("accepted flag stayed set after the session dropped");
+        let _ = task.await;
+        server.abort();
+    }
+
+    #[test]
+    fn admitting_the_control_channel_is_what_status_reads() {
+        let client = RelayClient::new("https://relay.example", "token");
+        assert!(!client.control_channel_accepted());
+        let admission = client.test_admit_control_channel();
+        assert_eq!(relay_connection_flags(Some(&client)), (Some(true), Some(true)));
+        drop(admission);
+        assert_eq!(relay_connection_flags(Some(&client)), (Some(false), Some(false)));
     }
 
     #[tokio::test]

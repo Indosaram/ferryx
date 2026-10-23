@@ -53,10 +53,15 @@ pub const FORWARDED_ENV: [&str; 4] = [
 ];
 
 /// QA barrier channel of a `local-split-qa` build (todo 12), forwarded beside [`FORWARDED_ENV`]
-/// only into a QA-named task.
+/// only into a QA-named task. FERRYX_QA_DISABLE_CONTROL reaches the task's daemon only this way:
+/// the GUI never starts the daemon itself (only3 Q09 part 3 got a daemon with control bound).
 #[cfg(feature = "local-split-qa")]
-pub const QA_FORWARDED_ENV: [&str; 3] =
-    ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID", crate::ssh::direct::QA_SSH_KNOWN_HOSTS_ENV];
+pub const QA_FORWARDED_ENV: [&str; 4] = [
+    "FERRYX_QA_BARRIER_DIR",
+    "FERRYX_QA_RUN_ID",
+    crate::ssh::direct::QA_SSH_KNOWN_HOSTS_ENV,
+    "FERRYX_QA_DISABLE_CONTROL",
+];
 #[cfg(not(feature = "local-split-qa"))]
 pub const QA_FORWARDED_ENV: [&str; 0] = [];
 
@@ -1335,6 +1340,11 @@ mod tests {
         if cfg!(feature = "local-split-qa") {
             assert_eq!(keys, [SUPERVISOR_NAME_ENV, "FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"]);
             assert!(matches!(parse_supervisor_args(&[SUPERVISOR_ARG, ENV_ARG, "FERRYX_QA_RUN_ID=r1"]), Some(Ok(_))));
+            // Q09 part 3: the no-control switch reaches the task's daemon only through the task.
+            let off = env_of(&[(SUPERVISOR_NAME_ENV, "DaemonQa"), ("FERRYX_QA_DISABLE_CONTROL", "1")]);
+            assert_eq!(forwarded_env(&off), [(SUPERVISOR_NAME_ENV.to_string(), "DaemonQa".to_string()), ("FERRYX_QA_DISABLE_CONTROL".to_string(), "1".to_string())]);
+            assert!(forwarded_env(&env_of(&[("FERRYX_QA_DISABLE_CONTROL", "1")])).is_empty(), "never into a user task");
+            assert!(matches!(parse_supervisor_args(&[SUPERVISOR_ARG, ENV_ARG, "FERRYX_QA_DISABLE_CONTROL=1"]), Some(Ok(_))));
         } else {
             assert_eq!(keys, [SUPERVISOR_NAME_ENV]);
             assert!(matches!(parse_supervisor_args(&[SUPERVISOR_ARG, ENV_ARG, "FERRYX_QA_RUN_ID=r1"]), Some(Err(_))));

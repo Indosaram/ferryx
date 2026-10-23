@@ -706,6 +706,8 @@ pub enum DaemonRequest {
     PairedHostList,
     /// Gated by `pairedHostReachabilityV1`; an older daemon never receives it.
     PairedHostReachabilityList,
+    /// Gated by `pairedHostRouteV1`; an older daemon never receives it.
+    PairedHostRouteList,
     PairedTerminalReattach {
         descriptor: crate::terminal::paired_daemon::Descriptor,
     },
@@ -867,10 +869,15 @@ pub enum DaemonRequest {
         project_path: String,
     },
     Shutdown,
-    /// Agent-neutral control of one or every live session (capability `agentControlV1`).
+    /// Agent-neutral control of one or every live session.
+    ///
+    /// `host_id` absent runs the operation on this daemon (`agentControlV1`). `host_id` set
+    /// forwards it to that paired host (`agentControlRemoteV1`). Older peers omit the field.
     #[serde(rename_all = "camelCase")]
     AgentControl {
         request: crate::agent_control::AgentControlOp,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_id: Option<String>,
     },
 }
 
@@ -915,6 +922,9 @@ pub enum DaemonResponse {
     },
     PairedHostReachabilityListOk {
         entries: Vec<crate::paired_host::reachability::HostReachability>,
+    },
+    PairedHostRouteListOk {
+        entries: Vec<crate::paired_host::route_view::HostRoute>,
     },
     PairedHostPairOk {
         host: crate::paired_host::inventory::HostView,

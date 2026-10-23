@@ -25,7 +25,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -44,6 +44,11 @@ pub struct DirectHostConfig {
     pub max_sessions: usize,
     /// Replay-window clock; injectable for tests.
     pub now_ms: fn() -> u64,
+    /// Operator-pinned account public key used to verify account peer records on a trust miss.
+    /// `None` disables account auto-trust (no key pinned, or `FERRYX_DIRECT_AUTO_TRUST=0`).
+    pub auto_trust_account_key: Option<String>,
+    /// How long a failed account attestation for one source machine is remembered.
+    pub auto_trust_negative_ttl: Duration,
 }
 
 impl Default for DirectHostConfig {
@@ -54,9 +59,16 @@ impl Default for DirectHostConfig {
             connect_deadline: Duration::from_secs(3),
             max_sessions: 8,
             now_ms: unix_now_ms,
+            auto_trust_account_key: crate::paired_host::direct_trust::auto_trust_enabled()
+                .then(crate::remote::direct_lease::pinned_account_public_key)
+                .flatten(),
+            auto_trust_negative_ttl: Duration::from_secs(60),
         }
     }
 }
+
+/// Upper bound on remembered attestation misses; expired entries are pruned first.
+const MAX_AUTO_TRUST_MISSES: usize = 1024;
 
 /// Owns every host direct task. Dropping it aborts the JoinSet, which drops each
 /// task's UDP socket, QUIC endpoint and bridge.
@@ -66,6 +78,9 @@ pub struct DirectHostManager {
     tasks: parking_lot::Mutex<JoinSet<()>>,
     udp_binds: AtomicUsize,
     cancellation_tx: tokio::sync::broadcast::Sender<()>,
+    /// Source machine id -> time of the last failed (or in-flight) account attestation.
+    auto_trust_misses: parking_lot::Mutex<std::collections::HashMap<String, Instant>>,
+    auto_trust_fetches: AtomicUsize,
 }
 
 impl DirectHostManager {
@@ -77,6 +92,8 @@ impl DirectHostManager {
             tasks: parking_lot::Mutex::new(JoinSet::new()),
             udp_binds: AtomicUsize::new(0),
             cancellation_tx,
+            auto_trust_misses: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            auto_trust_fetches: AtomicUsize::new(0),
         }
     }
 
@@ -99,6 +116,33 @@ impl DirectHostManager {
         let mut tasks = self.tasks.lock();
         while tasks.try_join_next().is_some() {}
         tasks.len()
+    }
+
+    /// Account peer-record fetches ever started; proves the negative cache bounds them.
+    pub fn auto_trust_fetches(&self) -> usize {
+        self.auto_trust_fetches.load(Ordering::Acquire)
+    }
+
+    /// Claims the right to attest `source` now. `false` while a recent miss (or an in-flight
+    /// attempt) for the same source is remembered, so a flood of offers cannot hammer the account.
+    fn claim_auto_trust(&self, source: &str, now: Instant) -> bool {
+        let ttl = self.config.auto_trust_negative_ttl;
+        let mut misses = self.auto_trust_misses.lock();
+        if misses.get(source).is_some_and(|at| now.duration_since(*at) < ttl) {
+            return false;
+        }
+        if misses.len() >= MAX_AUTO_TRUST_MISSES {
+            misses.retain(|_, at| now.duration_since(*at) < ttl);
+            if misses.len() >= MAX_AUTO_TRUST_MISSES {
+                return false;
+            }
+        }
+        misses.insert(source.to_owned(), now);
+        true
+    }
+
+    fn clear_auto_trust_miss(&self, source: &str) {
+        self.auto_trust_misses.lock().remove(source);
     }
 }
 
@@ -236,9 +280,12 @@ async fn negotiate(
         }
     }
 
-    let key = trusted_key(DirectTrustStore::at(&store_dir), source)
-        .await
-        .ok_or_else(|| forbidden("DIRECT_UNTRUSTED"))?;
+    let key = match trusted_key(DirectTrustStore::at(&store_dir), source.clone()).await {
+        Some(key) => key,
+        None => account_auto_trust(&state, manager, &store_dir, &identity, &source)
+            .await
+            .ok_or_else(|| forbidden("DIRECT_UNTRUSTED"))?,
+    };
     envelope.offer.verify(&key).map_err(|_| forbidden("DIRECT_BAD_SIGNATURE"))?;
 
     let gateway = local_gateway_addr(&state).ok_or_else(unavailable)?;
@@ -303,6 +350,79 @@ async fn negotiate(
         job.run().await;
     });
     Ok(DirectAnswerEnvelope { version: 1, answer })
+}
+
+/// Host-side account auto-trust for a client with no local pin.
+///
+/// Only an account-gated host holding a valid lease attempts it, and only a record whose
+/// `ownerKey` equals that lease's owner is pinned: a machine of another owner never becomes
+/// trusted. A manual pin is never consulted here (the caller only gets here on a miss) and
+/// `provision_from_account` refuses to override one or a revoked id. Bounded by the attestation
+/// timeout, rate-limited per source by the manager's negative cache; every failure is `None`.
+async fn account_auto_trust(
+    state: &Arc<RemoteGatewayState>,
+    manager: &DirectHostManager,
+    store_dir: &std::path::Path,
+    identity: &crate::remote::auth::MachineIdentity,
+    source: &str,
+) -> Option<ed25519_dalek::VerifyingKey> {
+    if !crate::paired_host::direct_trust::auto_trust_enabled() || !state.host_lease_required() {
+        return None;
+    }
+    let account_public_key = match manager.config.auto_trust_account_key.clone() {
+        Some(key) => key,
+        None => {
+            let dir = store_dir.to_path_buf();
+            crate::ipc::run_blocking(move || {
+                Ok(crate::remote::direct_lease::pinned_account_public_key_in(Some(&dir)))
+            })
+            .await
+            .ok()
+            .flatten()?
+        }
+    };
+    let account_public_key = account_public_key.as_str();
+    let lease = state
+        .host_lease
+        .get_valid_lease((manager.config.now_ms)() / 1000)?;
+    if !manager.claim_auto_trust(source, Instant::now()) {
+        tracing::debug!(source, "account direct trust recently failed; not retrying yet");
+        return None;
+    }
+    let enrollment_dir = store_dir.to_path_buf();
+    let enrollment = crate::ipc::run_blocking(move || {
+        Ok(crate::remote::direct_lease::load_host_enrollment(Some(&enrollment_dir)))
+    })
+    .await
+    .ok()
+    .flatten()?;
+    manager.auto_trust_fetches.fetch_add(1, Ordering::AcqRel);
+    let http = crate::paired_host::direct_autotrust::account_http();
+    let attestor = crate::paired_host::direct_autotrust::Attestor {
+        http: &http,
+        account_origin: &enrollment.account_origin,
+        own: identity,
+        account_public_key,
+    };
+    match crate::paired_host::direct_autotrust::attest_and_pin(
+        DirectTrustStore::at(store_dir),
+        &attestor,
+        source,
+        Some(&lease.owner_key),
+        crate::remote::direct_lease::unix_now_secs(),
+    )
+    .await
+    {
+        Ok(key) => {
+            manager.clear_auto_trust_miss(source);
+            tracing::info!(source, "direct trust pinned from account record");
+            Some(key)
+        }
+        Err(error) => {
+            tracing::info!(source, %error, "account direct trust refused; staying on relay");
+            None
+        }
+    }
 }
 
 #[cfg(test)]

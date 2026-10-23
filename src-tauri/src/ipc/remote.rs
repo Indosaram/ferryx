@@ -213,11 +213,9 @@ pub async fn cmd_remote_status(
                 .ok()
                 .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok());
             let machine_id = identity.map(|id| id.machine_id);
-            let relay_pairing = state.relay_pairing.read();
-            let (relay_connected, control_channel_connected) = if relay_pairing.is_some() {
-                (Some(true), Some(true))
-            } else {
-                (Some(false), Some(false))
+            let (relay_connected, control_channel_connected) = {
+                let relay_client = state.relay_client.read();
+                crate::remote::relay_client::relay_connection_flags(relay_client.as_ref())
             };
             Ok(RemoteGatewayStatusResponse {
                 enabled: is_running,

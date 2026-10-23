@@ -5408,22 +5408,10 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        if let Some(path) = macos_proc::get_proc_cwd(pid) {
-            return Some(path);
-        }
-        let output = std::process::Command::new("/usr/sbin/lsof")
-            .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let stdout = String::from_utf8(output.stdout).ok()?;
-        return stdout
-            .lines()
-            .find_map(|line| line.strip_prefix('n'))
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from);
+        // No lsof fallback: when proc_pidinfo cannot resolve the cwd (the directory was deleted),
+        // lsof only reports `cwd|rtd info error: ...`, which used to be served as a path, and
+        // spawning it per session made every describeSession take 0.5-2.7 s.
+        macos_proc::get_proc_cwd(pid)
     }
 
     #[cfg(target_os = "windows")]

@@ -203,3 +203,6 @@ async fn router_mounts_offer_with_bearer_and_body_limit() {
 
 #[path = "direct_lease_tests.rs"]
 mod direct_lease_tests;
+
+#[path = "direct_autotrust_tests.rs"]
+mod direct_autotrust_tests;

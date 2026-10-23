@@ -93,6 +93,9 @@ DOM terminal grid and steer agents from anywhere.
 Pair headless Linux servers, VPSs, and cloud instances as project-owning machines.
 Ferryx uses an outbound-only relay tunnel, so machines behind NAT, firewalls, or without
 public IPs / open SSH ports connect seamlessly.
+When both machines can reach each other over UDP, a paired session also moves onto a direct,
+end-to-end encrypted QUIC path without dropping the terminal, and falls back to the relay if
+that path breaks. The relay stays the baseline; the direct path is opportunistic.
 To operate your own relay instead of the default service, follow the
 [self-hosted relay guide](https://ferryx.dev/docs/self-hosted-relay/) for TLS, mail delivery,
 machine enrollment, and the separate desktop account and gateway settings.

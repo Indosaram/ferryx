@@ -613,6 +613,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::ResourceUsage => "resourceUsage",
         DaemonRequest::PairedHostList => "pairedHostList",
         DaemonRequest::PairedHostReachabilityList => "pairedHostReachabilityList",
+        DaemonRequest::PairedHostRouteList => "pairedHostRouteList",
         DaemonRequest::PairedTerminalReattach { .. } => "pairedTerminalReattach",
         DaemonRequest::PairedTerminalDetach { .. } => "pairedTerminalDetach",
         DaemonRequest::RetryPairedSession { .. } => "retryPairedSession",
@@ -1974,12 +1975,31 @@ impl DaemonClient {
     pub fn outer_deadline_for_request(request: &DaemonRequest) -> Duration {
         match request {
             DaemonRequest::PairedHostOperation { request: op } => {
-                if op.operation.is_mutation() {
+                if let crate::paired_host::client::Operation::AgentControl {
+                    op: crate::agent_control::AgentControlOp::Wait { timeout_ms, .. },
+                } = &op.operation
+                {
+                    std::time::Duration::from_millis(
+                        (*timeout_ms)
+                            .min(crate::agent_control::policy::AGENT_CONTROL_TIMEOUT_MAX_MS)
+                            .saturating_add(15_000),
+                    )
+                } else if op.operation.is_mutation() {
                     Self::PAIRED_MUTATION_OUTER_TIMEOUT
                 } else {
                     Self::PAIRED_QUERY_OUTER_TIMEOUT
                 }
             }
+            DaemonRequest::AgentControl { request, .. } => match request {
+                crate::agent_control::AgentControlOp::Wait { timeout_ms, .. } => {
+                    std::time::Duration::from_millis(
+                        (*timeout_ms)
+                            .min(crate::agent_control::policy::AGENT_CONTROL_TIMEOUT_MAX_MS)
+                            .saturating_add(15_000),
+                    )
+                }
+                _ => Self::PAIRED_DEFAULT_OUTER_TIMEOUT,
+            },
             DaemonRequest::PairedTerminalReattach { .. } => Self::PAIRED_REATTACH_OUTER_TIMEOUT,
             DaemonRequest::RemoteWrite { .. } | DaemonRequest::RemoteResize { .. } => {
                 Self::REMOTE_CONTROL_OUTER_TIMEOUT
@@ -2162,6 +2182,26 @@ impl DaemonClient {
             _ => Err(crate::paired_host::service::ServiceError::unavailable()),
         }
     }
+    /// `Ok(None)` when the running daemon predates `pairedHostRouteV1`: the request is then
+    /// never sent, so an old daemon never sees an unknown request type.
+    pub async fn paired_host_route_list(
+        &self,
+    ) -> crate::paired_host::service::Result<Option<Vec<crate::paired_host::route_view::HostRoute>>> {
+        let capabilities = self.paired_daemon_capabilities().await?;
+        if !capabilities
+            .iter()
+            .any(|c| c == crate::paired_host::route_view::PAIRED_HOST_ROUTE_CAPABILITY)
+        {
+            return Ok(None);
+        }
+        match self
+            .paired_host_request(DaemonRequest::PairedHostRouteList)
+            .await?
+        {
+            DaemonResponse::PairedHostRouteListOk { entries } => Ok(Some(entries)),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
     pub async fn paired_host_operation(
         &self,
         request: crate::paired_host::client::OperationRequest,
@@ -2188,6 +2228,7 @@ impl DaemonClient {
             | Operation::DagStream { .. }
             | Operation::FileRead { .. }
             | Operation::Operation { .. } => None,
+            Operation::AgentControl { op } => op.mutation_request_id(),
         };
         let transport_error = |error: crate::paired_host::service::ServiceError| ClientError {
             code: error.code,

@@ -361,24 +361,33 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
   await step('record-ssh-helper', async () => {
     await agent.call('recordSshHelper', { hostId: sshHostId(summary.runId) });
   });
-  await step('kill-recorded', async () => {
-    const t = await agent.call('teardownRecorded');
-    summary.teardown.killed = t.killed.map((e) => ({ pid: e.pid, role: e.role }));
-    summary.teardown.refused = t.refused;
-  });
-  if (locked.length) await step('copy-locked-logs', async () => { for (const name of locked) await copyLog(name); });
-  await step('remove-ssh-helper-roots', async () => {
-    const r = await agent.call('removeSshHelperRoots');
-    summary.teardown.dirsRemoved.push(...(r?.removed ?? []).map((h) => h.root));
-    summary.teardown.leftovers.push(...(r?.kept ?? []).map((h) => ({ kind: 'ssh-helper-root', ...h })));
-  });
-  await step('remove-jobs', async () => {
+  const removeJobs = async () => {
     for (const name of await jobs.listQaJobs()) {
       await jobs.remove(name);
       summary.teardown.jobsRemoved.push(name);
     }
     if (host.platform === 'linux') await agent.call('exec', { command: 'systemctl', args: ['--user', 'daemon-reload'] });
+  };
+  // Windows: end and delete the QA tasks first. A task's watchdog respawns a killed daemon, and
+  // that child was never recorded (only-q11 leftover pid 27232).
+  if (host.platform === 'windows') await step('remove-jobs', removeJobs);
+  await step('kill-recorded', async () => {
+    const t = await agent.call('teardownRecorded');
+    summary.teardown.killed = t.killed.map((e) => ({ pid: e.pid, role: e.role }));
+    summary.teardown.refused = t.refused;
+    summary.teardown.gone = (t.gone ?? []).map((e) => ({ pid: e.pid, role: e.role }));
   });
+  if (locked.length) await step('copy-locked-logs', async () => { for (const name of locked) await copyLog(name); });
+  // Windows: a GUI still alive during the first pass re-registers its missing generation task
+  // before the kill (only4: task file rewritten at 09:05:49, after remove-jobs, kept as a
+  // leftover). Sweep again once every recorded pid is gone; the leftover check below still runs.
+  if (host.platform === 'windows') await step('remove-jobs-after-kill', removeJobs);
+  await step('remove-ssh-helper-roots', async () => {
+    const r = await agent.call('removeSshHelperRoots');
+    summary.teardown.dirsRemoved.push(...(r?.removed ?? []).map((h) => h.root));
+    summary.teardown.leftovers.push(...(r?.kept ?? []).map((h) => ({ kind: 'ssh-helper-root', ...h })));
+  });
+  if (host.platform !== 'windows') await step('remove-jobs', removeJobs);
   await step('leftovers', async () => {
     summary.teardown.leftovers = [
       ...(await jobs.listQaJobs()).map((j) => ({ kind: 'job', name: j })),

@@ -3578,6 +3578,7 @@ impl DaemonServer {
             handover_manager: Arc::downgrade(&handover_manager),
             remote_event_tx: remote_event_tx.clone(),
             agent_states: Arc::new(AgentStateHub::default()),
+            agent_watch: parking_lot::Mutex::new(None),
             spawn_idempotency_cache: Arc::new(Mutex::new(HashMap::new())),
             spawn_lock: Arc::new(tokio::sync::Mutex::new(())),
             split_admission: Mutex::new(HashMap::new()),
@@ -3637,6 +3638,11 @@ impl DaemonServer {
                 .unwrap_or_else(|_| unreachable!("gateway not published yet"))
                 .with_machine_services(Arc::clone(&session_service)),
         );
+        remote_state.agent_observers.attach(
+            session_service.agent_state_hub(),
+            Arc::clone(&session_service.workspace_service.machine_events),
+        );
+        session_service.install_agent_watch(Arc::clone(&remote_state.agent_observers));
 
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
         remote_state
@@ -4493,6 +4499,31 @@ impl DaemonServer {
                 super::handover::HandoverStatus::Draining | super::handover::HandoverStatus::Retired
             )
         })
+    }
+
+    /// Forwards direct/relay route transitions to the GUI under `paired_host_route_changed`.
+    /// The subscription is taken here, synchronously, before the accept loop can serve a
+    /// `PairedHostRouteList`, so a transition never falls between a list and its events.
+    fn spawn_paired_host_route_forwarder(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let routes = crate::paired_host::direct_route::GLOBAL_DIRECT_ROUTES.clone();
+        let events = routes.subscribe();
+        let server = Arc::downgrade(self);
+        let service = self.paired_hosts.clone();
+        tokio::spawn(crate::paired_host::route_view::forward_route_events(
+            routes,
+            events,
+            self.remote_event_tx.clone(),
+            move || {
+                let service = service.clone();
+                async move {
+                    service
+                        .list()
+                        .await
+                        .map(|hosts| hosts.into_iter().map(|host| host.host_id).collect::<Vec<_>>())
+                }
+            },
+            move || server.strong_count() > 0,
+        ))
     }
 
     fn spawn_foreground_observer(self: &Arc<Self>) {
@@ -5448,6 +5479,7 @@ impl DaemonServer {
         let agent_state_ingress = self.spawn_agent_state_listener();
         self.spawn_foreground_observer();
         self.spawn_paired_host_probe(crate::paired_host::client::PROBE_INTERVAL);
+        self.spawn_paired_host_route_forwarder();
         crate::daemon::agent_extension::install_agent_state_extension_if_enabled(
             &self.agent_integration,
         );
@@ -6155,7 +6187,10 @@ impl DaemonServer {
                 Ok(DaemonRequest::Write { session_id, data }) if self.serves_paired_here(&session_id) => {
                     match self.terminal_service.write_input_operation(&session_id, 0, data) {
                         Ok(pending) => match pending.await {
-                            Ok(()) => DaemonResponse::WriteOk,
+                            Ok(()) => {
+                                crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
+                                DaemonResponse::WriteOk
+                            }
                             Err(e) => daemon_error(e.to_string()),
                         },
                         Err(e) => daemon_error(e.to_string()),
@@ -6178,6 +6213,7 @@ impl DaemonServer {
                             Ok(()) => {
                                 #[cfg(feature = "local-split-qa")]
                                 super::qa_producers::record_daemon_mutation_delivery(&session_id, "write", &tok);
+                                crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
                                 DaemonResponse::WriteOk
                             }
                             Err(e) => daemon_error(e.to_string(),),
@@ -6187,6 +6223,7 @@ impl DaemonServer {
                             Ok(()) => {
                                 #[cfg(feature = "local-split-qa")]
                                 super::qa_producers::record_daemon_mutation_delivery(&session_id, "write", &tok);
+                                crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
                                 DaemonResponse::WriteOk
                             }
                             Err(message) => daemon_error(message),
@@ -6435,11 +6472,9 @@ impl DaemonServer {
                         .ok()
                         .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok());
                     let machine_id = identity.map(|id| id.machine_id);
-                    let relay_pairing = self.remote_state.relay_pairing.read();
-                    let (relay_connected, control_channel_connected) = if relay_pairing.is_some() {
-                        (Some(true), Some(true))
-                    } else {
-                        (Some(false), Some(false))
+                    let (relay_connected, control_channel_connected) = {
+                        let relay_client = self.remote_state.relay_client.read();
+                        crate::remote::relay_client::relay_connection_flags(relay_client.as_ref())
                     };
                     let (gate_status, gate_reason) = {
                         let handle_guard = self.remote_server_handle.lock();
@@ -6702,6 +6737,18 @@ impl DaemonServer {
                     Ok(entries) => DaemonResponse::PairedHostReachabilityListOk { entries },
                     Err(error) => DaemonResponse::PairedHostError { error },
                 },
+                Ok(DaemonRequest::PairedHostRouteList) => match self.paired_hosts.list().await {
+                    Ok(hosts) => DaemonResponse::PairedHostRouteListOk {
+                        entries: hosts
+                            .into_iter()
+                            .map(|host| crate::paired_host::route_view::HostRoute::current(
+                                &crate::paired_host::direct_route::GLOBAL_DIRECT_ROUTES,
+                                host.host_id,
+                            ))
+                            .collect(),
+                    },
+                    Err(error) => DaemonResponse::PairedHostError { error },
+                },
                 Ok(DaemonRequest::PairedHostPair { request }) => match self.paired_hosts.pair(request).await {
                     Ok(host) => DaemonResponse::PairedHostPairOk { host },
                     Err(error) => DaemonResponse::PairedHostError { error },
@@ -6723,11 +6770,13 @@ impl DaemonServer {
                     if self.paired_hosts.available().await {
                         capabilities.push("pairedHostInventoryV1".into());
                         capabilities.push(crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY.into());
+                        capabilities.push(crate::paired_host::route_view::PAIRED_HOST_ROUTE_CAPABILITY.into());
                     }
                     capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY.into());
                     #[cfg(unix)]
                     capabilities.push("sessionOwnershipTransferV1".into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
+                    capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
@@ -7254,10 +7303,23 @@ impl DaemonServer {
                         Err(message) => daemon_error(message),
                     }
                 }
-                Ok(DaemonRequest::AgentControl { request }) => {
-                    match crate::remote::server::agent_control_service::handle(&self.remote_state, request).await {
-                        Ok(result) => DaemonResponse::AgentControlOk { result },
-                        Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                Ok(DaemonRequest::AgentControl { request, host_id }) => {
+                    match host_id {
+                        None => match crate::remote::server::agent_control_service::handle(&self.remote_state, request).await {
+                            Ok(result) => DaemonResponse::AgentControlOk { result },
+                            Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                        },
+                        // One execute, on the caller's request id. A lost answer stays outcome-unknown
+                        // and is not issued again.
+                        Some(host_id) => {
+                            crate::remote::server::agent_control_service::forward_daemon(
+                                &self.remote_state,
+                                &self.paired_hosts,
+                                host_id,
+                                request,
+                            )
+                            .await
+                        }
                     }
                 }
                 Err(e) => daemon_error(format!("Malformed request: {e}"),),
@@ -8873,6 +8935,40 @@ mod tests {
         assert!(
             server.paired_hosts.has_reachability_sink(),
             "daemon-owned PairedHostService must publish reachability changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_forwards_global_route_transitions_as_remote_events() {
+        use crate::paired_host::direct_route::{DirectGuard, GLOBAL_DIRECT_ROUTES};
+        let server = Arc::new(DaemonServer::new_with_paths(None, None));
+        let mut remote_events = server.remote_event_tx.subscribe();
+        let forwarder = server.spawn_paired_host_route_forwarder();
+        // GLOBAL_DIRECT_ROUTES is process-wide; a unique host keeps parallel tests apart.
+        let host = format!("route-forwarder-test-{}", std::process::id());
+        let epoch = GLOBAL_DIRECT_ROUTES.begin_attempt(&host, std::time::Instant::now()).unwrap();
+        assert!(GLOBAL_DIRECT_ROUTES.publish(&host, epoch, "http://127.0.0.1:9".into(), DirectGuard::default()));
+        let mut states = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while states.len() < 2 {
+                let event = remote_events.recv().await.expect("remote event");
+                if event.event == crate::paired_host::route_view::PAIRED_HOST_ROUTE_CHANGED_EVENT
+                    && event.payload["hostId"] == host.as_str()
+                {
+                    states.push(event.payload);
+                }
+            }
+        })
+        .await
+        .expect("route events forwarded within bound");
+        GLOBAL_DIRECT_ROUTES.reset(&host);
+        forwarder.abort();
+        assert_eq!(
+            states,
+            vec![
+                serde_json::json!({"hostId": host, "state": "attempting"}),
+                serde_json::json!({"hostId": host, "state": "direct"}),
+            ]
         );
     }
 
@@ -11277,6 +11373,57 @@ mod tests {
             }
             other => panic!("Expected RemoteStatusOk, got {other:?}"),
         }
+
+        drop(write_half);
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn remote_get_status_follows_the_accepted_control_channel_not_pairing() {
+        use super::*;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let server = Arc::new(DaemonServer::new());
+        let client = crate::remote::relay_client::RelayClient::new("https://relay.example", "token");
+        *server.remote_state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+            coordinator: client.pairing_coordinator(),
+            epoch: 1,
+        });
+        *server.remote_state.relay_client.write() = Some(client.clone());
+
+        let (client_stream, server_stream) = UnixStream::pair().expect("unix pair");
+        let server_clone = Arc::clone(&server);
+        let server_task = tokio::spawn(async move {
+            server_clone.handle_client(server_stream).await;
+        });
+        let (read_half, mut write_half) = client_stream.into_split();
+        let mut reader = BufReader::new(read_half);
+
+        async fn status(write_half: &mut tokio::net::unix::OwnedWriteHalf, reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> DaemonRemoteStatus {
+            let mut line = String::new();
+            let mut json = serde_json::to_string(&DaemonRequest::RemoteGetStatus).unwrap();
+            json.push('\n');
+            write_half.write_all(json.as_bytes()).await.unwrap();
+            reader.read_line(&mut line).await.unwrap();
+            match serde_json::from_str::<DaemonResponse>(line.trim()).unwrap() {
+                DaemonResponse::RemoteStatusOk { status } => status,
+                other => panic!("Expected RemoteStatusOk, got {other:?}"),
+            }
+        }
+
+        let before = status(&mut write_half, &mut reader).await;
+        assert_eq!(before.relay_connected, Some(false));
+        assert_eq!(before.control_channel_connected, Some(false));
+
+        let admission = client.test_admit_control_channel();
+        let during = status(&mut write_half, &mut reader).await;
+        assert_eq!(during.relay_connected, Some(true));
+        assert_eq!(during.control_channel_connected, Some(true));
+
+        drop(admission);
+        let after = status(&mut write_half, &mut reader).await;
+        assert_eq!(after.relay_connected, Some(false));
+        assert_eq!(after.control_channel_connected, Some(false));
 
         drop(write_half);
         let _ = server_task.await;

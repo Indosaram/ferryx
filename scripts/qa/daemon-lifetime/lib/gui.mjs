@@ -163,6 +163,17 @@ export function isExplorerDialogForeground(record) {
   return Boolean(record) && record.processName === 'explorer.exe' && record.rootClass === '#32770' && record.foreground === true;
 }
 
+/** True when an observer events file holds exactly one record, "armed", and every line parses. */
+export function onlyArmedRecord(text) {
+  const lines = String(text ?? '').split(/\r?\n/).filter((l) => l.trim());
+  try {
+    const records = lines.map((l) => JSON.parse(l));
+    return records.length === 1 && records[0].kind === 'armed';
+  } catch {
+    return false;
+  }
+}
+
 /** Stages after Win+R whose leftovers (Run box, error box) are dismissed with Escape. */
 export const DISMISS_STAGES = Object.freeze(['run-dialog-not-identified', 'observer-not-latched', 'typed-text-not-confirmed']);
 /** Stages retried once, only when nothing executed and the dismissal was confirmed. */
@@ -365,18 +376,30 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     return Promise.allSettled(typed.map((t) => (t.ok ? t.value.finish() : Promise.reject(t.error))));
   }
 
-  /** One bounded retry of the keyboard section, only when it executed nothing and the desktop is clear. */
+  /**
+   * One bounded retry of the keyboard section, only when it executed nothing and either the desktop
+   * is clear or Win+R provably never arrived: the armed observer saw no focus or foreground change
+   * at all, which no key on that desktop can produce. Then the MahoRD session is replaced first
+   * (only3 Q13 g15/g16: the host session had ended, input went nowhere).
+   */
   async function typeWindowsWithRetry(spec) {
     try {
       return await typeWindows({ ...spec, attempt: 1, prior: [] });
     } catch (error) {
       const r = error?.receipt;
-      if (!(error instanceof WindowsLaunchError) || !RETRY_STAGES.includes(error.stage) || r?.dismissal?.clear !== true) throw error;
+      if (!(error instanceof WindowsLaunchError) || !RETRY_STAGES.includes(error.stage)) throw error;
       const f = windowsLaunchFiles(layout, spec.tag);
+      const undelivered = error.stage === 'run-dialog-not-identified' && r?.dismissal?.onlyArmed === true;
+      if (r?.dismissal?.clear !== true && !undelivered) throw error;
       if (await agent.call('exists', { file: f.cmdStarted })) throw error;
+      let reconnected = null;
+      if (undelivered) {
+        if (typeof mahord.reconnect !== 'function') throw error;
+        reconnected = await mahord.reconnect();
+      }
       // A fresh observer reports from seq 1 again; its files must not carry the first attempt's records.
       for (const file of [f.observerReady, f.observerEvents, f.observerArm, f.observerStop, f.observerError]) await agent.call('remove', { target: file });
-      return typeWindows({ ...spec, attempt: 2, prior: [{ failedStage: r.failedStage, stages: r.stages, dismissal: r.dismissal, screenshot: r.screenshot ?? null }] });
+      return typeWindows({ ...spec, attempt: 2, prior: [{ failedStage: r.failedStage, stages: r.stages, dismissal: r.dismissal, screenshot: r.screenshot ?? null, undelivered, mahordReconnect: reconnected }] });
     }
   }
 
@@ -413,10 +436,16 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     // Escape only while the observer's newest record is a foreground explorer #32770, and only as
     // far as the observer confirms a following record each time; never a blind key.
     const dismiss = async () => {
-      const d = { escapes: [], clear: false, last: null };
+      const d = { escapes: [], clear: false, last: null, onlyArmed: false };
       for (let i = 0; i < 3; i += 1) {
-        const last = d.last = lastObserverRecord(await agent.call('readFile', { file: f.observerEvents }));
-        if (!last) return d;
+        const text = await agent.call('readFile', { file: f.observerEvents });
+        const last = d.last = lastObserverRecord(text);
+        if (!last) {
+          // Positive evidence that Win+R reached nothing: every line parses and the armed record is
+          // the only one. An unreadable file is not that evidence.
+          if (i === 0 && armedObserver) d.onlyArmed = onlyArmedRecord(text);
+          return d;
+        }
         if (!isExplorerDialogForeground(last)) { d.clear = true; return d; }
         await mahord.key('Escape');
         const next = await agent.call('waitLog', { file: f.observerEvents, pattern: `,"seq":${last.seq + 1}\\}\\r?$`, flags: 'm', deadlineMs: 3_000 });

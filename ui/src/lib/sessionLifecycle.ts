@@ -184,7 +184,10 @@ function reconcileDaemonSuspension(session: TerminalSession): void {
         entry.session.incarnation !== session.incarnation || entry.session.daemonEpoch !== session.daemonEpoch ||
         inFlightResumes.has(session.id)) return;
       suspensionDetails.set(session.id, details);
-      const stopped = details.suspended === true || details.kernelStopped === true || details.readerPaused === true;
+      // Only a stopped process is asleep. A paused reader is the daemon holding output during a
+      // handover export, and its process keeps running; treating it as a stop marked live
+      // sessions as sleeping and that state was then persisted and restored after a restart.
+      const stopped = details.suspended === true || details.kernelStopped === true;
       entry.session = { ...entry.session, processState: stopped ? "suspended" : "running" };
       setSessionSleeping(session.id, stopped);
       if (stopped && (details.suspensionSource === "ferryx-owned" || details.registrySuspended === true)) {
