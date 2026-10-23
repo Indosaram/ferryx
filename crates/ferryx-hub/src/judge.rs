@@ -54,6 +54,11 @@ impl Purpose {
             Self::DoneDiff => "diff_gate_failed",
         }
     }
+
+    /// omo `Purpose::conservative_noul`: a missing score wakes the lead rather than dropping the event.
+    pub fn conservative_noul(self) -> f64 {
+        1.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,6 +303,8 @@ pub struct Judge {
     /// Skips the binary. Tests use this so a machine with typesafe-judge installed
     /// still returns the scripted choice.
     forced: Option<String>,
+    /// Skips the binary for `noul`. The dispatcher wakes on a score of 0.5 or more.
+    forced_noul: Option<f64>,
     /// `judge_calls` rows (omo usage); also the source of the daily counts.
     pool: Option<SqlitePool>,
     /// omo `Fallback`: one bounded small-model omo turn answering as a JSON classifier.
@@ -314,6 +321,7 @@ impl Judge {
             typesafe,
             offline_fallback: None,
             forced: None,
+            forced_noul: None,
             pool: ALERTS.get().map(|(pool, _)| pool.clone()),
             fallback: default_fallback(),
             bin: None,
@@ -330,11 +338,20 @@ impl Judge {
         }
     }
 
+    /// A scripted `noul` score, so the dispatcher can be tested without typesafe-judge.
+    pub fn forced_noul(score: f64) -> Self {
+        Self {
+            forced_noul: Some(score),
+            ..Self::bare()
+        }
+    }
+
     fn bare() -> Self {
         Self {
             typesafe: BTreeMap::new(),
             offline_fallback: None,
             forced: None,
+            forced_noul: None,
             pool: None,
             fallback: None,
             bin: None,
@@ -460,6 +477,110 @@ impl Judge {
         }
     }
 
+    /// omo `Judge::noul`: a score in `0.0..=1.0`. The lane dispatcher skips a non-critical event
+    /// below 0.5. A missing binary, an open breaker, or a used-up cap answers
+    /// [`Purpose::conservative_noul`] (1.0), so the event is woken instead of stuck.
+    pub async fn noul(&self, purpose: Purpose, state: &str, instructions: &str) -> Result<f64> {
+        if let Some(score) = self.forced_noul {
+            return Ok(score.clamp(0.0, 1.0));
+        }
+        if let Some(selected) = &self.forced {
+            let score = match selected.as_str() {
+                "no" | "skip" => 0.0,
+                other => other.parse::<f64>().unwrap_or(1.0),
+            };
+            return Ok(score.clamp(0.0, 1.0));
+        }
+        let start = Instant::now();
+        let open = breaker()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .open_until(Instant::now());
+        if !self.jev_enabled || open.is_some() {
+            let score = purpose.conservative_noul();
+            self.record_kind(
+                purpose,
+                "noul",
+                elapsed_ms(start),
+                &format!("{score:.3}"),
+                true,
+            )
+            .await;
+            return Ok(score);
+        }
+        let (jev_today, _) = self.counts_today().await;
+        if jev_today >= self.jev_cap {
+            let score = purpose.conservative_noul();
+            self.record_kind(purpose, "noul", 0, &format!("capped:{score:.3}"), false)
+                .await;
+            return Ok(score);
+        }
+        match self.run_noul(state, instructions).await {
+            Ok(score) => {
+                self.record_kind(
+                    purpose,
+                    "noul",
+                    elapsed_ms(start),
+                    &format!("{score:.3}"),
+                    false,
+                )
+                .await;
+                Ok(score)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "noul fell back to the conservative score");
+                self.record_kind(purpose, "noul", elapsed_ms(start), "failed", false)
+                    .await;
+                let score = purpose.conservative_noul();
+                self.record_kind(
+                    purpose,
+                    "noul",
+                    elapsed_ms(start),
+                    &format!("{score:.3}"),
+                    true,
+                )
+                .await;
+                Ok(score)
+            }
+        }
+    }
+
+    async fn run_noul(&self, state: &str, instructions: &str) -> Result<f64> {
+        let bin = self.bin.clone().unwrap_or_else(default_judge_bin);
+        let mut command = crate::child_env::command(&bin);
+        let state = scrub_for_external(state);
+        let state = if state.trim().is_empty() {
+            "(no state)".to_owned()
+        } else {
+            state
+        };
+        command
+            .arg("noul")
+            .arg("--state")
+            .arg(state)
+            .arg("-i")
+            .arg(scrub_for_external(instructions))
+            .arg("-q");
+        for (key, value) in typesafe_env(&self.typesafe) {
+            command.env(key, value);
+        }
+        let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+            .await
+            .map_err(|_| HubError::message("typesafe-judge noul timed out"))?
+            .map_err(|error| HubError::message(error.to_string()))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if output.status.success() || output.status.code() == Some(1) {
+            if let Ok(score) = stdout.parse::<f64>() {
+                if score.is_finite() && (0.0..=1.0).contains(&score) {
+                    return Ok(score);
+                }
+            }
+        }
+        Err(HubError::message(format!(
+            "typesafe-judge noul declined: {stdout}"
+        )))
+    }
+
     async fn fallback_choice(
         &self,
         purpose: Purpose,
@@ -545,15 +666,28 @@ impl Judge {
     }
 
     async fn record_call(&self, purpose: Purpose, ms: u64, outcome: &str, used_fallback: bool) {
+        self.record_kind(purpose, "choice", ms, outcome, used_fallback)
+            .await;
+    }
+
+    async fn record_kind(
+        &self,
+        purpose: Purpose,
+        kind: &str,
+        ms: u64,
+        outcome: &str,
+        used_fallback: bool,
+    ) {
         let Some(pool) = &self.pool else {
             return;
         };
         let inserted = sqlx::query(
             "INSERT INTO judge_calls(id, purpose, kind, ms, outcome, used_fallback, created_at)
-             VALUES(?, ?, 'choice', ?, ?, ?, ?)",
+             VALUES(?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(purpose.as_str())
+        .bind(kind)
         .bind(ms as i64)
         .bind(outcome)
         .bind(used_fallback)
