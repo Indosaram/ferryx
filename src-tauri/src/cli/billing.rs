@@ -363,6 +363,13 @@ fn explained_error(
                  (see docs/billing-operations.md).",
             );
         }
+        "INSTALL_KEY_USED" | "INSTALL_KEY_EXPIRED" | "ENROLL_CODE_INVALID"
+        | "ENROLL_CODE_EXPIRED" | "ENROLL_CODE_MACHINE_MISMATCH" => {
+            text.push_str(
+                "\n  Install keys are single-use and short-lived; create a new one in the Ferryx app \
+                 (Settings > Remote > Add machine) or run `ferryx-cli up` without a key to request approval.",
+            );
+        }
         _ => {
             if status == 404 {
                 text.push_str(&format!(
@@ -752,6 +759,17 @@ mod tests {
         let mapped = from_enroll_error("https://account.example", &rejected);
         assert_eq!(mapped.exit_code, 1);
         assert!(mapped.message.contains("ACCOUNT_ENROLLMENT_INVALID"), "{}", mapped.message);
+        assert!(!mapped.message.contains("Install keys"), "{}", mapped.message);
+
+        let used = EnrollError {
+            code: "INSTALL_KEY_USED".to_string(),
+            message: "this install key was already used".to_string(),
+            status: 409,
+            details: None,
+        };
+        let mapped = from_enroll_error("https://account.example", &used);
+        assert!(mapped.message.starts_with("INSTALL_KEY_USED:"), "{}", mapped.message);
+        assert!(mapped.message.contains("Install keys are single-use"), "{}", mapped.message);
     }
 
     #[test]

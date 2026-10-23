@@ -374,12 +374,14 @@ set +e
 if [ -n "$FERRYX_INSTALL_KEY" ]; then
   # The key travels in the environment of this one call only, never in argv.
   export FERRYX_INSTALL_KEY
-  "$TARGET_BIN" up "$@" </dev/null 1>&3
+  # 3>&- keeps the saved stdout away from the detached daemon "up" may start; an inherited
+  # copy would hold an SSH session's stdout open until the session times out.
+  "$TARGET_BIN" up "$@" </dev/null 1>&3 3>&-
   up_status=$?
   unset FERRYX_INSTALL_KEY
 else
   unset FERRYX_INSTALL_KEY
-  "$TARGET_BIN" up "$@" </dev/null 1>&3
+  "$TARGET_BIN" up "$@" </dev/null 1>&3 3>&-
   up_status=$?
 fi
 set -e
