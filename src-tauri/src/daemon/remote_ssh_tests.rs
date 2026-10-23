@@ -24,6 +24,8 @@ mod qa;
 
 const PERSISTENCE_CHILD: &str = "FERRYX_REMOTE_PERSISTENCE_CHILD";
 const PERSISTENCE_PARTIAL: &str = "FERRYX_REMOTE_PERSISTENCE_PARTIAL";
+/// Whole-child watchdog for the real-SSH scenario; each phase keeps its own tight bound.
+const CHILD_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Child half of [`remote_persistence_migrates_out_of_volatile_runtime_dir`].
 ///
@@ -302,7 +304,9 @@ async fn direct_ssh_real_transport_registration_and_pty() {
         .spawn()
         .expect("spawn child test process");
     let child_pid = child.id();
-    let wait_res = tokio::time::timeout(Duration::from_secs(45), child.wait()).await;
+    // Hang watchdog, not a latency budget: on a loaded host the real SSH phases
+    // (helper install alone measured 17-25s) consume a 45s bound before teardown.
+    let wait_res = tokio::time::timeout(CHILD_TIMEOUT, child.wait()).await;
     let status = match wait_res {
         Ok(Ok(status)) => status,
         Ok(Err(e)) => panic!("failed waiting for child test {child_pid:?}: {e}"),
@@ -313,7 +317,7 @@ async fn direct_ssh_real_transport_registration_and_pty() {
             let child_stderr = std::fs::read_to_string(dir.path().join("child_stderr.log")).unwrap();
             let log = std::fs::read_to_string(&log_path).unwrap();
             panic!(
-                "bounded child test timeout (45s) for PID {child_pid:?}\nchild stdout:\n{child_stdout}\nchild stderr:\n{child_stderr}\nsshd:\n{log}"
+                "bounded child test timeout ({CHILD_TIMEOUT:?}) for PID {child_pid:?}\nchild stdout:\n{child_stdout}\nchild stderr:\n{child_stderr}\nsshd:\n{log}"
             );
         }
     };
