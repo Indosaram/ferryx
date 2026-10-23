@@ -3097,6 +3097,7 @@ mod pane_liveness_native_binding_tests {
         output.send(crate::daemon::DaemonStreamMessage::Exit {
             session_id: session_id.into(),
             exit_code: Some(0),
+            incarnation: None,
         }).await.unwrap();
 
         let mut pump_task = state.sessions.lock().get_mut(session_id)

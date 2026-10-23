@@ -8051,6 +8051,7 @@ impl DaemonServer {
             writer,
             None,
             None::<tokio::io::Empty>,
+            None,
         )
         .await
     }
@@ -8067,6 +8068,12 @@ impl DaemonServer {
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send,
     {
+        // Captured before streaming: the PTY leaves the registry as soon as it exits, which is
+        // exactly when the exit frame that must carry this incarnation is written.
+        let incarnation = self
+            .terminal_service
+            .get_session(&session_id)
+            .and_then(|session| session.incarnation().map(str::to_owned));
         let paired = self.terminal_service.paired();
         if let Some(mut updates) = paired.subscribe_recovery_outcome(&session_id) {
             let Some(descriptor) = paired.descriptor(&session_id) else { return; };
@@ -8074,7 +8081,7 @@ impl DaemonServer {
             if descriptor.target.daemon_epoch.0.to_string() != initial.daemon_epoch { return; }
             let (input, output) = tokio::io::duplex(64 * 1024);
             let pump = Self::pump_sequenced_stream_with_agent_state(
-                session_id.clone(), rx, hub, output, agent_rx, client_reader,
+                session_id.clone(), rx, hub, output, agent_rx, client_reader, incarnation,
             );
             tokio::pin!(pump);
             let mut lines = BufReader::new(input).lines();
@@ -8146,6 +8153,7 @@ impl DaemonServer {
                 writer,
                 agent_rx,
                 client_reader,
+                incarnation,
             )
             .await;
             return;
@@ -8158,6 +8166,7 @@ impl DaemonServer {
             output,
             agent_rx,
             client_reader,
+            incarnation,
         );
         tokio::pin!(pump);
         let mut lines = BufReader::new(input).lines();
@@ -8202,6 +8211,7 @@ impl DaemonServer {
         writer: W,
         mut agent_state_rx: Option<AgentStateSubscription>,
         mut client_reader: Option<R>,
+        incarnation: Option<String>,
     ) where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send,
@@ -8476,6 +8486,7 @@ impl DaemonServer {
                     let msg = DaemonStreamMessage::Exit {
                         session_id: Cow::Borrowed(&session_id),
                         exit_code: None,
+                        incarnation: incarnation.as_deref().map(Cow::Borrowed),
                     };
                     frame_buf.clear();
                     if serde_json::to_writer(&mut frame_buf, &msg).is_ok() {
@@ -9035,6 +9046,35 @@ mod tests {
         client_reader.read_line(&mut line).await.unwrap();
         assert!(line.contains(r#""type":"exit""#));
         assert!(line.contains(r#""sessionId":"test-session-123""#));
+
+        let _ = pump_handle.await;
+    }
+
+    #[tokio::test]
+    async fn exit_frame_carries_the_pty_incarnation() {
+        let (client, server_side) = tokio::io::duplex(4096);
+        let mut client_reader = BufReader::new(client);
+        let (tx, rx) = broadcast::channel(16);
+        let hub = Arc::new(TerminalOutputHub::default());
+
+        let pump_handle = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
+            "exiting-session".to_string(),
+            rx,
+            hub,
+            server_side,
+            None,
+            None::<tokio::io::Empty>,
+            Some("incarnation-under-test".to_string()),
+        ));
+
+        drop(tx);
+        let mut line = String::new();
+        client_reader.read_line(&mut line).await.unwrap();
+        let frame: DaemonStreamMessage<'_> = serde_json::from_str(line.trim()).unwrap();
+        let DaemonStreamMessage::Exit { incarnation, .. } = frame else {
+            panic!("expected an exit frame, got {line}");
+        };
+        assert_eq!(incarnation.as_deref(), Some("incarnation-under-test"));
 
         let _ = pump_handle.await;
     }
@@ -10567,6 +10607,7 @@ mod tests {
             client,
             Some(agent_rx),
             None::<tokio::io::Empty>,
+            None,
         ));
 
         // Send the foreign report FIRST, then this session's own report. The pump processes the
@@ -11460,6 +11501,7 @@ mod tests {
             server_write_side,
             None,
             Some(server_read_side),
+            None,
         ));
 
         // Terminal is completely idle: no output sent.

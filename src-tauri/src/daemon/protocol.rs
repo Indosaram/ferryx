@@ -1294,6 +1294,10 @@ pub enum DaemonStreamMessage<'a> {
     Exit {
         session_id: Cow<'a, str>,
         exit_code: Option<i32>,
+        /// Incarnation of the PTY whose stream ended. The frontend only accepts an exit for the
+        /// incarnation it is bound to, so an exit without it cannot settle the pane.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        incarnation: Option<Cow<'a, str>>,
     },
     #[serde(rename_all = "camelCase")]
     DagRunUpdated {
