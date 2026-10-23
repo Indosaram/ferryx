@@ -124,6 +124,8 @@ pollster = { version = "1", optional = true }
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"
+# 2.5 requires tauri ^2.12; stay on 2.4.x until tauri itself is bumped.
+tauri-plugin-window-state = "~2.4"
 rodio = { version = "0.22", default-features = false, features = [
     "playback",
     "wav",
