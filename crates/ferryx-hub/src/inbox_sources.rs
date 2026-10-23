@@ -82,6 +82,9 @@ pub async fn commit_with_rules(
                     .bind(&id)
                     .execute(pool)
                     .await?;
+                    // A known notification is filed again here, so the judge is not called on the
+                    // follow-up. Escalated mail (review, failure) stays pending for triage.
+                    file_direct_mail(pool, &id, item, rules).await?;
                     tracing::info!(item = %id, "mail thread has a follow-up; re-triaging it");
                     copied += 1;
                 }
@@ -104,7 +107,10 @@ pub async fn commit_with_rules(
         .bind(now_rfc3339())
         .execute(pool)
         .await?;
-        copied += inserted.rows_affected();
+        if inserted.rows_affected() > 0 {
+            file_direct_mail(pool, &id, item, rules).await?;
+            copied += 1;
+        }
     }
     if !drops.is_empty() {
         tracing::info!(
@@ -115,6 +121,29 @@ pub async fn commit_with_rules(
         crate::inbox_prefilter::record_drops(pool, &drops).await;
     }
     Ok(copied)
+}
+
+/// omo `direct_class`, applied at commit: ordinary notification mail is `fyi` with no judge
+/// call. Review requests, failures, and anything else stay undecided for triage.
+async fn file_direct_mail(
+    pool: &SqlitePool,
+    id: &str,
+    item: &SourceItem,
+    rules: &crate::inbox_prefilter::PrefilterRules,
+) -> Result<()> {
+    let Some(class) = rules.direct_class(item) else {
+        return Ok(());
+    };
+    sqlx::query(
+        "INSERT OR IGNORE INTO inbox_decisions(item_id, class, reason, status, decided_at, model)
+         VALUES(?, ?, 'direct notification mail', 'open', ?, 'direct')",
+    )
+    .bind(id)
+    .bind(class)
+    .bind(now_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 fn optional_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -928,5 +957,41 @@ mod tests {
             decisions, 0,
             "the stale decision is dropped so triage runs again"
         );
+    }
+
+    #[tokio::test]
+    async fn known_notification_mail_is_fyi_and_a_review_request_stays_for_triage() {
+        let pool = crate::storage::memory().await.unwrap();
+        let rules = crate::inbox_prefilter::PrefilterRules::default();
+        let mut note = source_item("mail", "n1", "your repository had activity");
+        note.author = Some("notifications@github.com".into());
+        note.title = Some("activity on ferryx".into());
+        assert_eq!(commit_with_rules(&pool, &[note], &rules).await.unwrap(), 1);
+        let class: String =
+            sqlx::query_scalar("SELECT class FROM inbox_decisions WHERE item_id = 'mail:n1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(class, "fyi");
+        let model: String =
+            sqlx::query_scalar("SELECT model FROM inbox_decisions WHERE item_id = 'mail:n1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(model, "direct");
+
+        let mut review = source_item("mail", "n2", "on your pull request");
+        review.author = Some("notifications@github.com".into());
+        review.title = Some("Review requested".into());
+        assert_eq!(
+            commit_with_rules(&pool, &[review], &rules).await.unwrap(),
+            1
+        );
+        let waiting: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM inbox_decisions WHERE item_id = 'mail:n2'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(waiting, 0, "escalated mail stays pending for the judge");
     }
 }
