@@ -292,6 +292,9 @@ pub async fn build_scheduled_digest(
         render(&bot)
     );
     message.push_str(&format!("\n\nUsage: {runs} cron runs in the last day"));
+    // omo digest: yesterday's judge and inbox prefilter counts.
+    let usage = crate::usage::yesterday(pool, now).await?;
+    message.push_str(&format!("\n{}", usage.digest_line()));
     let remediation = crate::cron_remediate::digest_section(pool, now).await?;
     if failed > 0 || remediation.is_some() {
         message.push_str("\n\n## Cron");

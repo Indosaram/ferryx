@@ -64,6 +64,7 @@ pub fn router(pool: SqlitePool, web_root: PathBuf) -> Router {
                 .delete(api::delete_bot),
         )
         .route("/api/memory", get(api::memory))
+        .route("/api/usage", get(usage))
         .route("/api/tools", get(tools))
         .route("/api/skills", get(skills))
         .route("/api/config", get(config))
@@ -81,6 +82,29 @@ pub fn web_root() -> PathBuf {
         crate::hub_env::var_os("DASHBOARD_WEB_ROOT"),
         crate::hub_env::var_os("HOME"),
     )
+}
+
+#[derive(serde::Deserialize)]
+struct UsageQuery {
+    since: Option<String>,
+    json: Option<String>,
+}
+
+/// omo's `omon usage --since Nm|Nh|Nd [--json]` (default 24h).
+async fn usage(
+    State(state): State<HttpState>,
+    axum::extract::Query(query): axum::extract::Query<UsageQuery>,
+) -> Response {
+    let since = query.since.as_deref().unwrap_or("24h");
+    let json = query
+        .json
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "0" | "false"));
+    match crate::usage::render(&state.pool, since, json, chrono::Utc::now()).await {
+        Ok(body) if json => ([(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Ok(body) => body.into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    }
 }
 
 async fn ready() -> Json<Value> {

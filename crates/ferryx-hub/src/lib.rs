@@ -52,6 +52,7 @@ pub mod tracker_lanes;
 pub mod tracker_linear;
 pub mod tracker_requests;
 pub mod tracker_sessions;
+pub mod usage;
 pub mod voice;
 pub mod voice_pcm;
 pub mod voice_session;
