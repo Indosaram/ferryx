@@ -54,6 +54,24 @@ pub async fn cmd_agent_state_reset<R: tauri::Runtime>(
 }
 
 pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Option<String> {
+    discover_agent_session(root_pid, agent_type).map(|(id, _)| id)
+}
+
+/// Where a discovered provider id came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiscoverySource {
+    /// A file the process holds open, or (omo) its environment: it follows the live conversation.
+    Live,
+    /// The launch argv only. It cannot follow a conversation the agent switched to after launch
+    /// (`/clear`, `/new`, an in-TUI `/resume`), so it must not veto a different reported id.
+    LaunchArgv,
+}
+
+/// [`discover_agent_session_id`] plus where the id came from.
+pub(crate) fn discover_agent_session(
+    root_pid: u32,
+    agent_type: &str,
+) -> Option<(String, DiscoverySource)> {
     let requested = agent_type.trim().to_ascii_lowercase();
     let normalized = if requested == "cursor-agent" {
         "cursor"
@@ -93,31 +111,34 @@ pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Opti
             .as_deref()?
             .iter()
             .find(|(entry_pid, _, _)| *entry_pid == pid)?;
-        resume_id_from_args(normalized, args)
+        resume_id_from_args(normalized, args).map(|id| (id, DiscoverySource::LaunchArgv))
     };
+    let live = |id: Option<String>| id.map(|id| (id, DiscoverySource::Live));
     match agent_pid {
-        Some(pid) if normalized == "omo" => omo_session_id_from_environment(pid, normalized)
-            .or_else(|| lsof_session_id(pid, normalized)),
-        Some(pid) if normalized == "antigravity" => antigravity_session_id(Some(pid), root_pid),
-        None if normalized == "antigravity" => antigravity_session_id(None, root_pid),
-        Some(pid) if normalized == "opencode" => opencode_session_id(Some(pid), root_pid),
-        None if normalized == "opencode" => opencode_session_id(None, root_pid),
-        Some(pid) if normalized == "pi" => pi_session_id(Some(pid), root_pid),
-        None if normalized == "pi" => pi_session_id(None, root_pid),
+        Some(pid) if normalized == "omo" => live(
+            omo_session_id_from_environment(pid, normalized)
+                .or_else(|| lsof_session_id(pid, normalized)),
+        ),
+        Some(pid) if normalized == "antigravity" => live(antigravity_session_id(Some(pid), root_pid)),
+        None if normalized == "antigravity" => live(antigravity_session_id(None, root_pid)),
+        Some(pid) if normalized == "opencode" => live(opencode_session_id(Some(pid), root_pid)),
+        None if normalized == "opencode" => live(opencode_session_id(None, root_pid)),
+        Some(pid) if normalized == "pi" => live(pi_session_id(Some(pid), root_pid)),
+        None if normalized == "pi" => live(pi_session_id(None, root_pid)),
         Some(pid)
             if matches!(
                 normalized,
-                "claude" | "grok" | "droid" | "cline" | "kimi" | "copilot" | "gjc"
+                "claude" | "omp" | "grok" | "droid" | "cline" | "kimi" | "copilot" | "gjc"
             ) =>
         {
-            lsof_session_id(pid, normalized).or_else(|| resumed_id(pid))
+            live(lsof_session_id(pid, normalized)).or_else(|| resumed_id(pid))
         }
         // crush keeps every session of a project in one `.crush/crush.db`, so no open file names
         // the session; only the resume argv does.
         Some(pid) if normalized == "crush" => resumed_id(pid),
         None if normalized == "crush" => None,
-        Some(pid) => lsof_session_id(pid, normalized),
-        None => lsof_session_id(root_pid, normalized),
+        Some(pid) => live(lsof_session_id(pid, normalized)),
+        None => live(lsof_session_id(root_pid, normalized)),
     }
 }
 
@@ -311,6 +332,9 @@ fn resume_id_from_args(agent_type: &str, args: &str) -> Option<String> {
         // with `--resume <uuid>` (terminal/shell.rs). claude keeps no transcript open, so argv is
         // its only process-bound proof (re-explore-5 G1, measured on claude 2.1.308).
         "claude" => &["--resume", "-r", "--session-id"],
+        // Ferryx resumes omp with `--resume <transcript-path>` or `--resume <id>`
+        // (terminal/shell.rs); a path value is read through omp's own store-path reader.
+        "omp" => &["--resume"],
         // Measured flags: `kimi --help` (--session/-S), `copilot --help` (--resume [sessionId]),
         // and the resume argv Ferryx itself spawns (terminal/shell.rs resolve_agent_resume_plan).
         "kimi" => &["--session", "-S"],
@@ -329,6 +353,13 @@ fn resume_id_from_args(agent_type: &str, args: &str) -> Option<String> {
             })
         })?;
     let valid = match agent_type {
+        "omp" => {
+            return if is_valid_uuid(value) {
+                Some(value.to_string())
+            } else {
+                extract_session_id_from_path("omp", value)
+            };
+        }
         "cline" => is_cline_session_id(value),
         "crush" => is_valid_uuid(value) || is_crush_session_hash(value),
         // gjc ids are the 16-hex suffix of its store file (gjc_session_id_from_path).
@@ -1620,6 +1651,21 @@ mod tests {
         // A bare or non-UUID resume value (the picker, or a search term) names no session.
         assert_eq!(resume_id_from_args("claude", "claude --resume id"), None);
         assert_eq!(resume_id_from_args("claude", "claude --resume"), None);
+        // omp, measured on omarchy (bun-launched); Ferryx resumes it by path or by id.
+        assert_eq!(
+            resume_id_from_args(
+                "omp",
+                "bun /home/indo/.bun/bin/omp --resume /home/indo/.omp/agent/sessions/-tmp-x/2026-10-23T00-58-57-948Z_01a16644-a81c-76a4-879e-e9857adb0145.jsonl"
+            )
+            .as_deref(),
+            Some("01a16644-a81c-76a4-879e-e9857adb0145")
+        );
+        assert_eq!(
+            resume_id_from_args("omp", "bun /home/indo/.bun/bin/omp --resume 01a16644-a81c-76a4-879e-e9857adb0145")
+                .as_deref(),
+            Some("01a16644-a81c-76a4-879e-e9857adb0145")
+        );
+        assert_eq!(resume_id_from_args("omp", "omp --resume /tmp/elsewhere.jsonl"), None);
         assert_eq!(
             resume_id_from_args("claude", "claude --resume 0f3c9a52-6b1e-4d7a-9c2e-8a4b5d6e7f80")
                 .as_deref(),

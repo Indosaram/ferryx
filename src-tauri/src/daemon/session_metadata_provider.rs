@@ -76,7 +76,9 @@ impl DaemonSessionService {
             .get_session(&target.session_id)
             .ok_or("SESSION_EXPIRED")?;
         let pid = pty.pid().ok_or("SESSION_EXPIRED")?;
-        match crate::ipc::agents::discover_agent_session_id(pid, agent) {
+        match crate::ipc::agents::discover_agent_session(pid, agent)
+            .and_then(|(found, source)| crate::daemon::server::binding_discovery(agent, found, source))
+        {
             Some(discovered) if provider.id != discovered => {
                 return Err("AGENT_PROVIDER_MISMATCH".into());
             }

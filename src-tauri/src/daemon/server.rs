@@ -1658,10 +1658,28 @@ pub(crate) enum IngressOutcome {
 /// at idle) and a fresh launch carries no id in argv. Only a resumed claude names its session
 /// (`--resume <uuid>`, read by `ipc::agents::resume_id_from_args`). For these agents the agent's
 /// own store file plus the store-recorded cwd stand in for the missing process proof.
-const AGENTS_WITHOUT_PROCESS_BOUND_SESSION: [&str; 1] = ["claude"];
+/// omp, measured on omarchy 2026-10-23 (`.omo-parity/facts/omp-session-fd-2026-10-23.md`,
+/// re-explore-6 §2): it keeps one persistent append handle on its session jsonl only after its first
+/// write in that process. A fresh pane before its first turn, or a resumed/reconnected pane while
+/// idle, holds no session file open (0/35 /proc fd samples), and `/new` switches the session
+/// under an unchanged argv.
+const AGENTS_WITHOUT_PROCESS_BOUND_SESSION: [&str; 2] = ["claude", "omp"];
 
 pub(crate) fn agent_has_no_process_bound_session(agent: &str) -> bool {
     AGENTS_WITHOUT_PROCESS_BOUND_SESSION.contains(&agent)
+}
+
+/// The discovered id that may bind (and veto) a report. For an agent with no process-bound
+/// session, an id read only from the launch argv is dropped: after `/clear`, `/new` or an in-TUI
+/// `/resume` the agent writes a new session while its argv still names the old one (measured on
+/// claude 2.1.309, re-explore-6 §4). The report is then proven by its own store file instead.
+pub(crate) fn binding_discovery(
+    agent: &str,
+    found: String,
+    source: crate::ipc::agents::DiscoverySource,
+) -> Option<String> {
+    let launch_only = source == crate::ipc::agents::DiscoverySource::LaunchArgv;
+    (!(launch_only && agent_has_no_process_bound_session(agent))).then_some(found)
 }
 
 /// The admission decision for one report's provider claim.
@@ -3980,7 +3998,8 @@ impl DaemonServer {
         let decision = crate::ipc::run_blocking(move || {
             let discovered = server
                 .ingress_pty_pid(&session_id)
-                .and_then(|pid| crate::ipc::agents::discover_agent_session_id(pid, &agent));
+                .and_then(|pid| crate::ipc::agents::discover_agent_session(pid, &agent))
+                .and_then(|(found, source)| binding_discovery(&agent, found, source));
             // With no discovered id, an agent that keeps no process-bound session record is
             // checked against the id it reported; every other agent proves nothing without one.
             let store_id = discovered.clone().or_else(|| {
@@ -10823,6 +10842,40 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_argv_id_never_vetoes_a_switched_claude_or_omp_conversation() {
+        use crate::ipc::agents::DiscoverySource;
+        let stale = "96b3d95c-0000-4000-8000-000000000000";
+        let switched = "2cc12210-0000-4000-8000-000000000000";
+        // Measured: after `claude --resume A` then `/clear`, claude writes session B while its
+        // argv still names A. For claude and omp the argv id is dropped, so B is admitted on its
+        // own store file instead of being refused as a mismatch.
+        for agent in ["claude", "omp"] {
+            let found = binding_discovery(agent, stale.into(), DiscoverySource::LaunchArgv);
+            assert_eq!(found, None, "{agent}");
+            assert_eq!(
+                ingress_admission_identity(agent, switched, true, found.as_deref(), true),
+                IngressAdmissionIdentity::WithoutPath,
+                "{agent}"
+            );
+            // A live (open-file) discovery still binds and still vetoes a different id.
+            let live = binding_discovery(agent, stale.into(), DiscoverySource::Live);
+            assert_eq!(live.as_deref(), Some(stale));
+            assert_eq!(
+                ingress_admission_identity(agent, switched, true, live.as_deref(), true),
+                IngressAdmissionIdentity::Refused
+            );
+        }
+        // Every other agent keeps its argv binding.
+        for agent in ["grok", "droid", "cline", "kimi", "copilot", "gjc", "crush"] {
+            assert_eq!(
+                binding_discovery(agent, stale.into(), DiscoverySource::LaunchArgv).as_deref(),
+                Some(stale),
+                "{agent}"
+            );
+        }
+    }
+
+    #[test]
     fn ingress_admits_a_fresh_claude_on_its_own_store_alone() {
         // claude keeps no process-bound record of a fresh session (re-explore-5, measured), so
         // with nothing discovered its own store file for the reported id is the proof.
@@ -10848,7 +10901,8 @@ mod tests {
             IngressAdmissionIdentity::Refused
         );
         // Every agent that does leave a process-bound record still needs discovery.
-        for agent in ["omo", "codex", "grok", "omp", "kimi", "copilot", "gjc", "cursor"] {
+        assert!(agent_has_no_process_bound_session("omp"));
+        for agent in ["omo", "codex", "grok", "kimi", "copilot", "gjc", "cursor"] {
             assert!(!agent_has_no_process_bound_session(agent), "{agent}");
             assert_eq!(
                 ingress_admission_identity(agent, id, true, None, true),
