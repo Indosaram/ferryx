@@ -900,6 +900,10 @@ pub async fn run_turn(
                 if fresh && !matches!(item_type, "agentMessage" | "userMessage" | "reasoning" | "")
                 {
                     tool_calls += 1;
+                    #[cfg(feature = "hub-slack")]
+                    if let Some(key) = crate::chat::turns::current_key() {
+                        crate::chat::turn_status::record_tool_activity(&key, item_type);
+                    }
                     let now = tokio::time::Instant::now();
                     if !content.trim().is_empty()
                         && !should_relay_interim(delivered, last_relay_at, now)

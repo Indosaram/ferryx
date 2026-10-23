@@ -24,4 +24,6 @@ pub mod slash;
 pub mod transcript;
 #[cfg(feature = "hub-slack")]
 pub mod turn_approval;
+#[cfg(feature = "hub-slack")]
+pub mod turn_status;
 pub mod turns;

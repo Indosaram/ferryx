@@ -509,7 +509,7 @@ pub async fn run_session_turn(
     if let Some(path) = &config.token_path {
         omo.token = omo_client::token_from_file(path);
     }
-    let request = TurnRequest {
+    let mut request = TurnRequest {
         thread_id: state
             .metadata
             .get("omo_thread_id")
@@ -523,6 +523,17 @@ pub async fn run_session_turn(
         toolsets: state.enabled_toolsets.clone(),
         text: turn.text.clone(),
     };
+    // omo: cron deliveries mirrored into this session ride on the next turn as context,
+    // consumed only when that turn succeeds.
+    let briefings = crate::mirror::peek_pending_cron_briefings(pool, &storage_key)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "cron briefings were not loaded");
+            None
+        });
+    if let Some(briefings) = &briefings {
+        request.text = format!("{}\n{}", briefings.text, request.text);
+    }
     let (progress, mut interim) = tokio::sync::mpsc::unbounded_channel::<String>();
     let relay_pool = pool.clone();
     let relay_turn = turn.clone();
@@ -533,6 +544,43 @@ pub async fn run_session_turn(
     });
     tracing::info!(session = %storage_key, resume = request.thread_id.is_some(), "session turn started on omo app-server");
     let started = std::time::Instant::now();
+    // omo's status message for the owner's long turns.
+    let status_message = match &turn.reply_channel {
+        Some(channel)
+            if super::turn_status::enabled()
+                && config
+                    .allowed_users
+                    .first()
+                    .is_some_and(|owner| super::turn_status::is_owner_lead(&turn.key, owner)) =>
+        {
+            Some(std::sync::Arc::new(tokio::sync::Mutex::new(Some(
+                super::turn_status::StatusMessage::new(
+                    &storage_key,
+                    channel,
+                    turn.reply_thread.as_deref(),
+                    &turn.text,
+                    chrono::Utc::now(),
+                    super::turn_status::interval(),
+                ),
+            ))))
+        }
+        _ => None,
+    };
+    let status_ticker = status_message.clone().map(|driver| {
+        super::slack::spawn_carrying_test_api(async move {
+            loop {
+                let due = match driver.lock().await.as_ref() {
+                    Some(message) => message.next_due(),
+                    None => return,
+                };
+                let wait = (due - chrono::Utc::now()).to_std().unwrap_or_default();
+                tokio::time::sleep(wait).await;
+                if let Some(message) = driver.lock().await.as_mut() {
+                    message.tick(chrono::Utc::now()).await;
+                }
+            }
+        })
+    });
     let channel = turn.reply_channel.clone().unwrap_or_default();
     let registration = super::turns::begin(&storage_key, &channel);
     // Boxed: the app-server turn plus the approval wrapper is a large future, and an unboxed
@@ -557,6 +605,24 @@ pub async fn run_session_turn(
     };
     drop(registration);
     let _ = relay.await;
+    if let Some(ticker) = status_ticker {
+        ticker.abort();
+        let _ = ticker.await;
+    }
+    if let Some(driver) = status_message {
+        if let Some(message) = driver.lock().await.take() {
+            let outcome = match &result {
+                Ok(outcome) => omo_client::final_reply(outcome)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                Err(error) if error.to_string().contains(omo_client::STOPPED) => {
+                    Err("stopped by the owner".to_owned())
+                }
+                Err(error) => Err(error.to_string()),
+            };
+            message.finish(chrono::Utc::now(), outcome).await;
+        }
+    }
     status(&turn, "eyes", false).await;
     if matches!(&result, Err(error) if error.to_string().contains(omo_client::STOPPED)) {
         tracing::info!(session = %storage_key, "session turn stopped by the owner");
@@ -564,6 +630,13 @@ pub async fn run_session_turn(
     }
     let failure = match result {
         Ok(outcome) => {
+            if let Some(briefings) = &briefings {
+                if let Err(error) =
+                    crate::mirror::mark_cron_briefings_injected(pool, &briefings.message_ids).await
+                {
+                    tracing::warn!(%error, "cron briefings were not marked injected");
+                }
+            }
             state
                 .metadata
                 .insert("omo_thread_id".into(), json!(outcome.thread_id));

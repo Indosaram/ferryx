@@ -557,3 +557,135 @@ async fn e2e_messages_missed_while_down_are_answered_once_after_restart() {
     assert_eq!(again, 0);
     assert!(calls_of(&calls, "chat.postMessage").is_empty());
 }
+
+#[tokio::test]
+async fn e2e_a_cron_delivery_rides_on_the_next_turn_of_its_thread_once() {
+    let pool = crate::storage::memory().await.unwrap();
+    let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
+    let turn_text = |log: &MockLog| {
+        log.frames
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|f| f["method"] == "turn/start")
+            .map(|f| {
+                f["params"]["input"][0]["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .unwrap()
+    };
+
+    // The thread's session exists after one turn.
+    let (omo_url, _) = serve(script(&["hello"], false)).await;
+    let first = config(omo_url);
+    with_test_api(base.clone(), "xoxb-test".into(), async {
+        run_session_turn(&first, &pool, slack_turn("hi")).await
+    })
+    .await;
+
+    // A cron job posts into that thread.
+    sqlx::query(
+        "INSERT INTO scheduled_jobs(id, expression, payload_json) VALUES('wx', 'every 1h', ?)",
+    )
+    .bind(json!({"command": "printf 'Weather: sunny'", "deliver": "slack:CHOME:100.1"}).to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    with_test_api(base.clone(), "xoxb-test".into(), async {
+        crate::schedule::run_native_job(&pool, "wx", false, true)
+            .await
+            .unwrap()
+    })
+    .await;
+    assert!(calls_of(&calls, "chat.postMessage")
+        .iter()
+        .any(|post| post["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Weather: sunny")));
+
+    // The next turn in the thread carries it as context; the one after does not.
+    let (omo_url, log) = serve(script(&["it said sunny"], false)).await;
+    let second = config(omo_url);
+    with_test_api(base.clone(), "xoxb-test".into(), async {
+        run_session_turn(&second, &pool, slack_turn("what did the cron say?")).await
+    })
+    .await;
+    let text = turn_text(&log);
+    assert!(
+        text.starts_with("[Context: messages you already posted"),
+        "{text}"
+    );
+    assert!(text.contains("(wx)\nWeather: sunny"), "{text}");
+    assert!(text.ends_with("what did the cron say?"), "{text}");
+
+    let (omo_url, log) = serve(script(&["ok"], false)).await;
+    let third = config(omo_url);
+    with_test_api(base, "xoxb-test".into(), async {
+        run_session_turn(&third, &pool, slack_turn("thanks")).await
+    })
+    .await;
+    assert_eq!(turn_text(&log), "thanks");
+}
+
+#[tokio::test]
+async fn e2e_a_long_owner_turn_gets_a_status_message_that_ends_done() {
+    let (omo_url, _log) = serve(script(&["pushed"], true)).await;
+    let config = config(omo_url);
+    let pool = crate::storage::memory().await.unwrap();
+    let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
+    let response_url = format!("{base}/response_url");
+    let owners = config.allowed_users.clone();
+    let dm = SessionTurn {
+        key: SessionKey::new("slack", None::<String>, "D1", None::<String>, "UOWNER"),
+        reply_channel: Some("D1".into()),
+        reply_thread: None,
+        status_ts: None,
+        text: "[2026-10-23 15:00 KST] push   it".into(),
+    };
+    let reply = with_test_api(base, "xoxb-test".into(), async {
+        super::turn_status::INTERVAL_OVERRIDE
+            .scope(std::time::Duration::from_millis(150), async {
+                FULL_ACCESS_TEST
+                    .scope(false, async {
+                        let clicker = async {
+                            let (ts, allow) = wait_card(&calls, "once").await;
+                            // The owner answers after a few status intervals.
+                            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                            super::turn_approval::handle_click(
+                                &click("UOWNER", &ts, &allow, &response_url),
+                                &owners,
+                            )
+                            .await;
+                        };
+                        tokio::join!(run_session_turn(&config, &pool, dm), clicker).0
+                    })
+                    .await
+            })
+            .await
+    })
+    .await;
+    assert_eq!(reply.as_deref(), Some("pushed"));
+    let status: Vec<Value> = calls_of(&calls, "chat.postMessage")
+        .into_iter()
+        .filter(|post| post["text"].as_str().unwrap_or("").starts_with("작업 중:"))
+        .collect();
+    assert_eq!(status.len(), 1, "one status post: {status:?}");
+    assert_eq!(status[0]["text"], "작업 중: push it · 0분");
+    assert_eq!(status[0]["channel"], "D1");
+    let updates = calls_of(&calls, "chat.update");
+    let status_updates: Vec<&Value> = updates
+        .iter()
+        .filter(|u| {
+            let text = u["text"].as_str().unwrap_or("");
+            text.starts_with("작업 중:") || text.starts_with("완료")
+        })
+        .collect();
+    assert!(
+        status_updates.len() >= 2,
+        "edited while running, then finished: {updates:?}"
+    );
+    assert_eq!(status_updates.last().unwrap()["text"], "완료 · 0분");
+}

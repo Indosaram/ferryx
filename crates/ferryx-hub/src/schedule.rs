@@ -1458,7 +1458,28 @@ async fn deliver_run_output(
             None => None,
         };
     }
-    let error = post_targets(&targets, text).await;
+    let (error, delivered) = post_targets(&targets, text).await;
+    // omo's attach_to_session (default on): what the job posted joins that conversation.
+    if payload
+        .get("attach_to_session")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        for target in delivered {
+            if let Err(mirror) = crate::mirror::mirror_cron_delivery(
+                pool,
+                job_id,
+                &target.platform,
+                &target.chat_id,
+                target.thread_id.as_deref(),
+                text,
+            )
+            .await
+            {
+                tracing::warn!(job_id, error = %mirror, "cron delivery was not mirrored into its session");
+            }
+        }
+    }
     if let Err(record) = remember_delivery(pool, job_id, error.as_deref()).await {
         return Some(record.to_string());
     }
@@ -1472,8 +1493,12 @@ async fn deliver_run_output(
     error
 }
 
-async fn post_targets(targets: &[Delivery], text: &str) -> Option<String> {
+async fn post_targets<'a>(
+    targets: &'a [Delivery],
+    text: &str,
+) -> (Option<String>, Vec<&'a Delivery>) {
     let mut errors = Vec::new();
+    let mut delivered = Vec::new();
     for target in targets {
         let posted = match target.platform.as_str() {
             "slack" => post_slack_target(&target.chat_id, target.thread_id.as_deref(), text).await,
@@ -1483,7 +1508,7 @@ async fn post_targets(targets: &[Delivery], text: &str) -> Option<String> {
             ))),
         };
         match posted {
-            Ok(true) => {}
+            Ok(true) => delivered.push(target),
             Ok(false) => errors.push(format!(
                 "unconfigured delivery transport: {}",
                 target.platform
@@ -1491,11 +1516,8 @@ async fn post_targets(targets: &[Delivery], text: &str) -> Option<String> {
             Err(error) => errors.push(error.to_string()),
         }
     }
-    if errors.is_empty() {
-        None
-    } else {
-        Some(errors.join("; "))
-    }
+    let error = (!errors.is_empty()).then(|| errors.join("; "));
+    (error, delivered)
 }
 
 async fn post_slack_target(channel: &str, thread: Option<&str>, text: &str) -> Result<bool> {
