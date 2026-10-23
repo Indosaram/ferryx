@@ -16,6 +16,7 @@ import * as tauriIpc from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { isAbsoluteTerminalCwd } from "../lib/terminalCwd";
 import { switchDebug } from "../lib/switchDebug";
+import { withTimeout } from "../lib/withTimeout";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, resolvePairedStartup } from "../lib/remoteProject";
 import { findGroupForWorkspace, groupProjects } from "../lib/projectGrouping";
 import { hasValidProjectTarget } from "../lib/projectIdentity";
@@ -1980,10 +1981,22 @@ export function useWorkspaceStore({
 
       const disposableSessions = getDisposableSessionsForTab(snapshot, tabId);
       if (snapshot.layout.tabs.length === 1 && !disposableSessions.some((session) => localSplitIntent(session))) {
-        await Promise.all(
-          disposableSessions.map((session) => closeBackendSessionAndWait(session, services)),
-        );
+        // Only a healthy local PTY holds a writer the next tab must wait for. A connecting,
+        // reconnecting, lost or exited session has none, and its close may reject or never
+        // settle, so it must not hold the tab open; even the healthy wait is bounded.
+        const healthy = disposableSessions.filter(isHealthyLocalPty);
+        const results = await Promise.allSettled(healthy.map((session) => withTimeout(
+          closeBackendSessionAndWait(session, services),
+          LAST_TAB_EXIT_TIMEOUT_MS,
+          "closeTab.lastTabExit",
+        )));
+        warnRejectedCloses(results, healthy);
         dispatch({ type: "CLOSE_TAB", tabId });
+        const rest = disposableSessions.filter((session) => !healthy.includes(session));
+        warnRejectedCloses(
+          await Promise.allSettled(rest.map((session) => closeBackendSession(session, services))),
+          rest,
+        );
       } else {
         dispatch({ type: "CLOSE_TAB", tabId });
         await Promise.allSettled(disposableSessions.map((session) => closeBackendSession(session, services)));
@@ -4710,6 +4723,21 @@ async function closeOrphanBackend(backendSessionId: string, services: WorkspaceS
   } finally {
     terminalEventBus.clearSession(backendSessionId);
   }
+}
+
+function isHealthyLocalPty(session: TerminalSession): boolean {
+  if (!session.backendSessionId) return false;
+  if (session.lifecycle !== "working" && session.lifecycle !== "waiting" && session.lifecycle !== "running") return false;
+  if (session.remoteConnectionState != null && session.remoteConnectionState !== "connected") return false;
+  return session.reconnectLifecycle == null || session.reconnectLifecycle === "idle";
+}
+
+function warnRejectedCloses(results: PromiseSettledResult<unknown>[], sessions: TerminalSession[]) {
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      console.warn("Failed to close terminal session:", sessions[index]?.backendSessionId ?? sessions[index]?.id, result.reason);
+    }
+  });
 }
 
 async function closeBackendSessionAndWait(session: TerminalSession | undefined, services: WorkspaceServices) {

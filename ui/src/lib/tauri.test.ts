@@ -58,11 +58,40 @@ import {
   writeTerminalRemote,
   resizeTerminalRemote,
   onTerminalRemoteStatus,
+  closeTerminal,
   describeRejection,
   getAccountEnrollmentStatus,
   enrollThisMachine,
   type AccountEnrollmentStatus,
 } from "./tauri";
+import { registerDurableNativeBinding, resetNativeTerminalLifecycleForTest } from "./nativeTerminalLifecycle";
+
+describe("closeTerminal", () => {
+  const tuple = {
+    backendSessionId: "backend-lost", daemonEpoch: "7", frontendSessionId: "front",
+    paneIdentity: "front", bindingKey: "binding", attemptGeneration: 1,
+  };
+  beforeEach(() => {
+    core.invoke.mockReset();
+    core.isTauri.mockReturnValue(true);
+    resetNativeTerminalLifecycleForTest();
+    registerDurableNativeBinding(tuple);
+  });
+
+  it("still closes the PTY when the native surface is already detached", async () => {
+    core.invoke
+      .mockRejectedValueOnce({ code: "SESSION_NOT_FOUND", message: "Session detached", details: {} })
+      .mockResolvedValueOnce(undefined);
+    await closeTerminal("backend-lost");
+    expect(core.invoke.mock.calls.map(([command]) => command)).toEqual(["cmd_native_terminal_close", "cmd_terminal_close"]);
+  });
+
+  it("propagates other native close failures without closing the PTY", async () => {
+    core.invoke.mockRejectedValueOnce({ code: "INTERNAL_ERROR", message: "boom", details: {} });
+    await expect(closeTerminal("backend-lost")).rejects.toMatchObject({ code: "INTERNAL_ERROR" });
+    expect(core.invoke.mock.calls.map(([command]) => command)).toEqual(["cmd_native_terminal_close"]);
+  });
+});
 
 describe("describeRejection", () => {
   it("serializes structured rejection objects as JSON", () => {
