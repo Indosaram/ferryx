@@ -503,6 +503,28 @@ pub fn request_authority(
     recv_authority(stream)
 }
 
+/// Whether a `request_authority` failure means the predecessor hung up without answering.
+///
+/// A pre-plan predecessor (one that predates the authority transfer, e.g. 2026.1018.x) never
+/// reads KIND_AUTHORITY_REQUEST: it closes its end of the handover stream once the sessions are
+/// sent. Depending on timing the candidate then sees EOF on the reply (`Closed`) or fails the
+/// request write itself (`EPIPE`, `ECONNRESET`). Every one of these means the same thing: no
+/// authority is coming, so the candidate falls back to taking the locks after commit.
+pub fn predecessor_closed_without_authority(error: &HandoverSocketError) -> bool {
+    let io_error = match error {
+        HandoverSocketError::Wire(HandoverWireError::Closed) => return true,
+        HandoverSocketError::Wire(HandoverWireError::Io(error)) | HandoverSocketError::Io(error) => error,
+        _ => return false,
+    };
+    matches!(
+        io_error.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::UnexpectedEof
+    )
+}
+
 /// Predecessor side: reads the candidate's KIND_AUTHORITY_REQUEST and answers it with the
 /// duplicated authority descriptors.
 pub fn serve_authority_request(
@@ -767,6 +789,61 @@ mod tests {
         let authority = request_authority(&candidate, &transfer_id).expect("authority received");
         serving.join().unwrap().expect("authority served");
         authority
+    }
+
+    /// A pre-plan predecessor closes the handover stream before the candidate writes its
+    /// authority request: the write fails with EPIPE, which must read as "no authority" (the
+    /// legacy fallback), not as a failed transfer that aborts the handover.
+    #[test]
+    fn request_authority_to_a_predecessor_that_already_hung_up_falls_back() {
+        let (candidate, predecessor) = UnixStream::pair().expect("socketpair");
+        drop(predecessor);
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        let Err(error) = request_authority(&candidate, &transfer_id) else {
+            panic!("a closed peer sent authority");
+        };
+        assert!(
+            matches!(&error, HandoverSocketError::Wire(HandoverWireError::Io(err)) if err.kind() == io::ErrorKind::BrokenPipe),
+            "expected EPIPE on the request write, got {error}"
+        );
+        assert!(predecessor_closed_without_authority(&error), "{error}");
+    }
+
+    /// The other timing: the predecessor reads the request, then closes without answering.
+    #[test]
+    fn request_authority_to_a_predecessor_that_closes_after_reading_falls_back() {
+        let (candidate, predecessor) = UnixStream::pair().expect("socketpair");
+        let peer = std::thread::spawn(move || {
+            let _ = recv_frame(predecessor.as_raw_fd());
+            drop(predecessor);
+        });
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        let Err(error) = request_authority(&candidate, &transfer_id) else {
+            panic!("a closed peer sent authority");
+        };
+        peer.join().unwrap();
+        assert!(predecessor_closed_without_authority(&error), "{error}");
+    }
+
+    #[test]
+    fn hang_up_kinds_fall_back_and_protocol_errors_do_not() {
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(predecessor_closed_without_authority(&HandoverSocketError::Wire(HandoverWireError::Io(
+                io::Error::from(kind)
+            ))));
+            assert!(predecessor_closed_without_authority(&HandoverSocketError::Io(io::Error::from(kind))));
+        }
+        assert!(predecessor_closed_without_authority(&HandoverSocketError::Wire(HandoverWireError::Closed)));
+        assert!(!predecessor_closed_without_authority(&HandoverSocketError::Wire(HandoverWireError::BadMagic)));
+        assert!(!predecessor_closed_without_authority(&HandoverSocketError::Wire(HandoverWireError::Io(
+            io::Error::from(io::ErrorKind::PermissionDenied)
+        ))));
+        assert!(!predecessor_closed_without_authority(&HandoverSocketError::UnexpectedMessageKind(0x99)));
     }
 
     #[test]
