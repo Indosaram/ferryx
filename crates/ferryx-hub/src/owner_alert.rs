@@ -27,6 +27,7 @@ pub fn alert_line(alert: &PendingAlert) -> String {
         "slack" => "슬랙",
         "discord" => "디스코드",
         "github" => "GitHub",
+        "cron" => "크론",
         other => other,
     };
     let who = one_line(alert.author.as_deref().unwrap_or("알 수 없음"), 60);
@@ -65,7 +66,7 @@ pub async fn pending_alerts(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec
            JOIN inbox_items i ON i.id = d.item_id
           WHERE d.class = 'owner'
             AND d.status = 'open'
-            AND i.source IN ('mail','imessage','slack','discord','github')
+            AND i.source IN ('mail','imessage','slack','discord','github','cron')
             AND julianday(d.decided_at) >= julianday(?)
             AND NOT EXISTS (
                 SELECT 1 FROM delivery_obligations o
@@ -100,10 +101,12 @@ pub async fn sweep(pool: &SqlitePool, owner_session: &str, now: DateTime<Utc>) -
         )
     };
     let stamp = now.to_rfc3339();
+    // `pending` until a transport takes the line; `delivered` only after it did, so the
+    // action loop never records `executed` for an owner item the owner was not told about.
     for alert in &alerts {
         sqlx::query(
-            "INSERT INTO delivery_obligations(id, state, body, updated_at) VALUES(?, 'delivered', ?, ?)
-             ON CONFLICT(id) DO UPDATE SET state = 'delivered', body = excluded.body, updated_at = excluded.updated_at",
+            "INSERT INTO delivery_obligations(id, state, body, updated_at) VALUES(?, 'pending', ?, ?)
+             ON CONFLICT(id) DO UPDATE SET state = 'pending', body = excluded.body, updated_at = excluded.updated_at",
         )
         .bind(format!("{OBLIGATION_PREFIX}{}", alert.item_id))
         .bind(&content)
@@ -111,7 +114,7 @@ pub async fn sweep(pool: &SqlitePool, owner_session: &str, now: DateTime<Utc>) -
         .execute(pool)
         .await?;
     }
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO chat_outbox(session_key, platform, text, created_at) VALUES(?, 'slack', ?, ?)",
     )
     .bind(owner_session)
@@ -119,7 +122,107 @@ pub async fn sweep(pool: &SqlitePool, owner_session: &str, now: DateTime<Utc>) -
     .bind(&stamp)
     .execute(pool)
     .await?;
+    match crate::chat::reply::deliver_stored(
+        pool,
+        inserted.last_insert_rowid(),
+        owner_session,
+        &content,
+    )
+    .await
+    {
+        Ok(true) => {
+            reconcile(pool).await?;
+        }
+        Ok(false) => tracing::warn!("owner alert is queued; no transport took it yet"),
+        Err(error) => {
+            tracing::warn!(%error, "owner alert post failed; the outbox retry will send it")
+        }
+    }
     Ok(alerts.len())
+}
+
+/// Marks owner-alert obligations delivered once their outbox line went out.
+pub async fn reconcile(pool: &SqlitePool) -> Result<u64> {
+    let updated = sqlx::query(
+        "UPDATE delivery_obligations SET state = 'delivered', updated_at = ?
+          WHERE id LIKE ? || '%'
+            AND state = 'pending'
+            AND EXISTS (SELECT 1 FROM chat_outbox o WHERE o.text = delivery_obligations.body AND o.delivered_at IS NOT NULL)",
+    )
+    .bind(crate::storage::now_rfc3339())
+    .bind(OBLIGATION_PREFIX)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected())
+}
+
+/// Earlier builds queued owner alerts under the lead lane name ("meta"), which no transport
+/// delivers, and marked them delivered anyway. Recent such lines are re-addressed to the
+/// owner session and their obligations reopened, so the outbox retry sends them.
+pub async fn repair_misrouted(
+    pool: &SqlitePool,
+    owner_session: &str,
+    now: DateTime<Utc>,
+) -> Result<u64> {
+    let since = (now - Duration::hours(MAX_ALERT_AGE_HOURS)).to_rfc3339();
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, session_key, text FROM chat_outbox
+          WHERE delivered_at IS NULL AND julianday(created_at) >= julianday(?)
+            AND text IN (SELECT body FROM delivery_obligations WHERE id LIKE ? || '%')",
+    )
+    .bind(&since)
+    .bind(OBLIGATION_PREFIX)
+    .fetch_all(pool)
+    .await?;
+    let mut repaired = 0u64;
+    for (id, key, text) in rows {
+        if crate::chat::session::SessionKey::from_storage_key(&key).is_ok() {
+            continue;
+        }
+        sqlx::query("UPDATE chat_outbox SET session_key = ? WHERE id = ?")
+            .bind(owner_session)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "UPDATE delivery_obligations SET state = 'pending', updated_at = ? WHERE id LIKE ? || '%' AND body = ? AND state = 'delivered'",
+        )
+        .bind(now.to_rfc3339())
+        .bind(OBLIGATION_PREFIX)
+        .bind(&text)
+        .execute(pool)
+        .await?;
+        repaired += 1;
+    }
+    Ok(repaired)
+}
+
+/// Keeps the outbox moving for the life of the hub: re-addresses misrouted owner alerts once,
+/// then every minute retries stored replies a transport has not taken yet (a Slack outage, a
+/// token that arrived late) and marks owner alerts delivered once their line went out.
+pub async fn serve_delivery(pool: SqlitePool, owner_session: String) {
+    match repair_misrouted(&pool, &owner_session, Utc::now()).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(count, "owner alerts re-addressed to the owner session"),
+        Err(error) => tracing::warn!(%error, "owner alert repair failed"),
+    }
+    loop {
+        match crate::chat::reply::flush_stale(
+            &pool,
+            Duration::minutes(2),
+            Duration::hours(MAX_ALERT_AGE_HOURS),
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(count, "stored chat replies delivered"),
+            Err(error) => tracing::warn!(%error, "chat outbox retry failed"),
+        }
+        if let Err(error) = reconcile(&pool).await {
+            tracing::warn!(%error, "owner alert reconcile failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    }
 }
 
 pub async fn delivered(pool: &SqlitePool, item_id: &str) -> Result<bool> {
@@ -157,13 +260,112 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(sweep(&pool, "owner-dm", now).await.unwrap(), 1);
-        assert!(delivered(&pool, "mail-1").await.unwrap());
+        assert!(
+            !delivered(&pool, "mail-1").await.unwrap(),
+            "no transport took it, so it is not delivered"
+        );
         assert_eq!(sweep(&pool, "owner-dm", now).await.unwrap(), 0);
+        sqlx::query("UPDATE chat_outbox SET delivered_at = 'x'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(reconcile(&pool).await.unwrap(), 1);
+        assert!(delivered(&pool, "mail-1").await.unwrap());
         let text: String = sqlx::query_scalar("SELECT text FROM chat_outbox")
             .fetch_one(&pool)
             .await
             .unwrap();
         assert!(text.contains("메일"));
         assert!(text.contains("Quote"));
+    }
+
+    async fn owner_item(pool: &SqlitePool, id: &str, now: DateTime<Utc>) {
+        sqlx::query(
+            "INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, link, raw_hash, collected_at)
+             VALUES(?,'imessage','ref','Bob','','call me',?,NULL,'h',?)",
+        )
+        .bind(id)
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES(?,'owner','needs you','open',?)",
+        )
+        .bind(id)
+        .bind(now.to_rfc3339())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// e2e with a mock Slack API: the alert is posted to the owner's home channel at once
+    /// and only then counts as delivered.
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn e2e_an_owner_alert_is_posted_to_slack_and_then_delivered() {
+        let (base, calls) = crate::chat::slack_web::mock::serve("B1").await;
+        let pool = crate::storage::memory().await.unwrap();
+        let now = Utc::now();
+        owner_item(&pool, "im-1", now).await;
+        let owner = crate::chat::session::SessionKey::new(
+            "slack",
+            None::<String>,
+            "CHOME",
+            None::<String>,
+            "UOWNER",
+        );
+        crate::chat::slack::with_test_api(base, "xoxb-test".into(), async {
+            assert_eq!(sweep(&pool, &owner.storage_key(), now).await.unwrap(), 1);
+        })
+        .await;
+        let posted = calls.lock().unwrap().clone();
+        assert_eq!(posted.len(), 1, "{posted:?}");
+        assert_eq!(posted[0].0, "chat.postMessage");
+        assert_eq!(posted[0].1["channel"], "CHOME");
+        assert!(posted[0].1["text"]
+            .as_str()
+            .unwrap()
+            .contains("[문자] Bob — call me"));
+        assert!(delivered(&pool, "im-1").await.unwrap());
+        assert!(crate::chat::reply::pending(&pool).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn alerts_queued_under_the_lead_lane_are_readdressed_and_reopened() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = Utc::now();
+        owner_item(&pool, "im-2", now).await;
+        // What the old build did: queue under "meta" and call it delivered.
+        assert_eq!(sweep(&pool, "meta", now).await.unwrap(), 1);
+        sqlx::query("UPDATE delivery_obligations SET state = 'delivered'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let owner = crate::chat::session::SessionKey::new(
+            "slack",
+            None::<String>,
+            "CHOME",
+            None::<String>,
+            "UOWNER",
+        );
+        assert_eq!(
+            repair_misrouted(&pool, &owner.storage_key(), now)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(!delivered(&pool, "im-2").await.unwrap());
+        let queued = crate::chat::reply::pending(&pool).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].1, owner.storage_key());
+        // A second repair finds nothing left to move.
+        assert_eq!(
+            repair_misrouted(&pool, &owner.storage_key(), now)
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

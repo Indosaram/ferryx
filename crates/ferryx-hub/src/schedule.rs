@@ -303,6 +303,41 @@ pub fn incident_kind(
     }
 }
 
+/// omo-gateway's `needs_owner`: a cron problem becomes an open owner item (`cron:<incident>`),
+/// so the owner alert sweep posts it to the owner's Slack DM and the digest lists it.
+async fn escalate_incident(
+    pool: &SqlitePool,
+    incident: &str,
+    job_id: &str,
+    kind: &str,
+    detail: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let item = format!("cron:{incident}");
+    let at = now.to_rfc3339();
+    let action = crate::judge::scrub_for_external(detail);
+    let mut tx = pool.begin().await?;
+    sqlx::query("INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'cron', ?, ?, ?, ?, ?, 'cron', ?) ON CONFLICT DO NOTHING")
+        .bind(&item)
+        .bind(incident)
+        .bind(job_id)
+        .bind(format!("{job_id}: needs you - {kind}: {action}"))
+        .bind(&action)
+        .bind(&at)
+        .bind(&at)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, proposed_action, status, decided_at) VALUES(?, 'owner', ?, ?, 'open', ?) ON CONFLICT(item_id) DO NOTHING")
+        .bind(&item)
+        .bind(kind)
+        .bind(&action)
+        .bind(&at)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub fn remediation_due(consecutive_failures: u32, open_incident: bool) -> bool {
     consecutive_failures >= 3 && !open_incident
 }
@@ -923,14 +958,16 @@ pub async fn finish_run(
         .await?;
     if let Some((kind, detail)) = incident_kind(status, error, false) {
         if remediation_due(consecutive as u32, false) || !ok {
+            let incident = uuid::Uuid::new_v4().to_string();
             sqlx::query("INSERT INTO cron_incidents(id, job_id, kind, detail, status, created_at) VALUES(?,?,?,?, 'open', ?)")
-                .bind(uuid::Uuid::new_v4().to_string())
+                .bind(&incident)
                 .bind(job_id)
                 .bind(kind)
-                .bind(detail)
+                .bind(&detail)
                 .bind(now.to_rfc3339())
                 .execute(pool)
                 .await?;
+            escalate_incident(pool, &incident, job_id, kind, &detail, now).await?;
         }
     }
     Ok(())
@@ -1778,6 +1815,16 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(incidents, 1);
+        // As omo's needs_owner: the failure becomes an owner item the alert sweep posts.
+        let alerts = crate::owner_alert::pending_alerts(&pool, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert!(alerts[0].item_id.starts_with("cron:"));
+        assert_eq!(
+            crate::owner_alert::alert_line(&alerts[0]),
+            "📬 [크론] job — job: needs you - failed: boom"
+        );
         let failures: i64 =
             sqlx::query_scalar("SELECT consecutive_failures FROM scheduled_jobs WHERE id = 'job'")
                 .fetch_one(&pool)
