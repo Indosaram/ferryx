@@ -429,17 +429,34 @@ pub fn notify_gateway() {
     }
 }
 
-pub async fn note_gateway(pool: &SqlitePool, inbound: &crate::chat::router::Inbound) -> Result<()> {
+/// Records one chat message for the inbox. The owner's own messages are skipped: they are
+/// requests to the bot, not contacts for the owner (omo's Slack source drops `author_id = owner`
+/// for the same reason), and recording them sent the owner his own words back as
+/// "📬 [슬랙] 알 수 없음 — …" alerts. Author and channel are kept so an alert can name who wrote.
+pub async fn note_gateway(
+    pool: &SqlitePool,
+    inbound: &crate::chat::router::Inbound,
+    owner_id: &str,
+) -> Result<()> {
+    if inbound.user_id.is_empty() || inbound.user_id == owner_id {
+        return Ok(());
+    }
     let id = inbound
         .event_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let metadata = serde_json::json!({
+        "author": inbound.user_id,
+        "channel": inbound.channel_id,
+        "thread": inbound.thread_id,
+    });
     sqlx::query(
-        "INSERT OR IGNORE INTO messages(id, session_key, role, content, created_at) VALUES(?,?, 'user', ?, ?)",
+        "INSERT OR IGNORE INTO messages(id, session_key, role, content, metadata_json, created_at) VALUES(?,?, 'user', ?, ?, ?)",
     )
     .bind(&id)
     .bind(format!("{}:gateway", inbound.platform))
     .bind(&inbound.text)
+    .bind(metadata.to_string())
     .bind(now_rfc3339())
     .execute(pool)
     .await?;
@@ -696,8 +713,8 @@ async fn fetch_gateway(
     kind: SourceKind,
     cursor: Option<&str>,
 ) -> Result<Option<(Vec<SourceItem>, String)>> {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT id, content, created_at FROM messages
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, content, metadata_json, created_at FROM messages
          WHERE session_key = ? AND (? IS NULL OR created_at > ?)
          ORDER BY created_at",
     )
@@ -711,20 +728,28 @@ async fn fetch_gateway(
     }
     let mut newest = cursor.unwrap_or("").to_owned();
     let mut items = Vec::new();
-    for (id, content, created_at) in rows {
+    for (id, content, metadata, created_at) in rows {
         let received = DateTime::parse_from_rfc3339(&created_at)
             .map(|value| value.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now());
         if created_at > newest {
             newest = created_at;
         }
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap_or_default();
+        let field = |key: &str| {
+            metadata
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
         items.push(SourceItem {
             source: kind.as_str(),
             source_ref: id,
             snippet: content,
             received_at: received,
-            thread_ref: None,
-            author: None,
+            thread_ref: field("thread"),
+            author: field("author"),
             title: None,
             link: None,
             room_type: None,
@@ -1402,6 +1427,23 @@ mod tests {
                 parent_chat_id: None,
                 event_id: Some("evt-1".into()),
             },
+            "U0OWNER",
+        )
+        .await
+        .unwrap();
+        note_gateway(
+            &pool,
+            &crate::chat::router::Inbound {
+                platform: "slack".into(),
+                guild_id: None,
+                channel_id: "D1".into(),
+                thread_id: None,
+                user_id: "U0OWNER".into(),
+                text: "the owner asking the bot".into(),
+                parent_chat_id: None,
+                event_id: Some("evt-2".into()),
+            },
+            "U0OWNER",
         )
         .await
         .unwrap();
@@ -1409,7 +1451,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(
+            stored.0.len(),
+            1,
+            "the owner's own message is not an inbox item"
+        );
         assert_eq!(stored.0[0].snippet, "from slack");
+        assert_eq!(stored.0[0].author.as_deref(), Some("U1"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

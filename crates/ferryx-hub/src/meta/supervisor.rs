@@ -173,6 +173,21 @@ impl DaemonSupervisor {
             .args(&self.command[1..])
             .stdin(std::process::Stdio::null())
             .kill_on_drop(false);
+        // Engine tool calls inherit the app-server's PATH, so a bare `launchctl` resolves to
+        // the guard first (macOS only; launchd does not exist elsewhere).
+        if cfg!(target_os = "macos") {
+            match install_launchctl_guard(&self.state_dir) {
+                Ok(dir) => {
+                    let mut path = std::ffi::OsString::from(dir.as_os_str());
+                    path.push(":");
+                    path.push(crate::child_env::child_path());
+                    command.env("PATH", path);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "launchctl guard for the omo app-server was not installed")
+                }
+            }
+        }
         match self.open_log() {
             Some((out, err)) => {
                 command.stdout(out).stderr(err);
@@ -244,9 +259,94 @@ pub fn state_dir_from_home() -> Option<PathBuf> {
     Some(Path::new(&home).join(".ferryx").join("hub"))
 }
 
+/// `launchctl` wrapper put first on the app-server PATH. It refuses to start, enable, or load
+/// the retired omo-gateway (`ai.omon.gateway*`) and passes every other call to the real
+/// launchctl. The approval guard in `omo_client` covers absolute paths and other spellings.
+const LAUNCHCTL_GUARD: &str = r#"#!/bin/sh
+# Installed by the ferryx hub. omo-gateway is retired; the ferryx hub replaced it.
+real="${FERRYX_REAL_LAUNCHCTL:-/bin/launchctl}"
+case "$1" in
+  bootstrap|enable|kickstart|load|start|submit)
+    for arg in "$@"; do
+      case "$arg" in
+        *ai.omon.gateway*)
+          echo "launchctl: refused: omo-gateway is intentionally retired and replaced by the ferryx hub; do not start it again" >&2
+          exit 1
+          ;;
+      esac
+    done
+    ;;
+esac
+exec "$real" "$@"
+"#;
+
+/// Writes the guard to `<state_dir>/guard-bin/launchctl` and returns that directory.
+pub fn install_launchctl_guard(state_dir: &Path) -> Result<PathBuf> {
+    let dir = state_dir.join("guard-bin");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("launchctl");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(LAUNCHCTL_GUARD) {
+        std::fs::write(&path, LAUNCHCTL_GUARD)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_launchctl_guard_refuses_only_starting_the_retired_gateway() {
+        let dir = std::env::temp_dir().join(format!("ferryx-hub-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bin = install_launchctl_guard(&dir).unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new(bin.join("launchctl"))
+                .args(args)
+                .env("FERRYX_REAL_LAUNCHCTL", "/bin/echo")
+                .output()
+                .unwrap()
+        };
+        for blocked in [
+            &[
+                "bootstrap",
+                "gui/501",
+                "/Users/x/Library/LaunchAgents/ai.omon.gateway.plist",
+            ][..],
+            &["enable", "gui/501/ai.omon.gateway"],
+            &["kickstart", "-k", "gui/501/ai.omon.gateway"],
+            &[
+                "load",
+                "-w",
+                "/Users/x/Library/LaunchAgents/ai.omon.gateway-watchdog.plist",
+            ],
+        ] {
+            let output = run(blocked);
+            assert!(!output.status.success(), "{blocked:?}");
+            assert!(output.stdout.is_empty(), "{blocked:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("retired"));
+        }
+        for allowed in [
+            &["print", "gui/501/ai.omon.gateway"][..],
+            &["bootout", "gui/501/ai.omon.gateway"],
+            &["disable", "gui/501/ai.omon.gateway"],
+            &["kickstart", "-k", "gui/501/ai.omon.tracker-proxy"],
+        ] {
+            let output = run(allowed);
+            assert!(output.status.success(), "{allowed:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                allowed.join(" ")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_token_survives_and_the_command_matches_omo_gateway() {

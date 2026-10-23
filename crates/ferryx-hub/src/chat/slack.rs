@@ -282,7 +282,7 @@ pub(crate) async fn apply_frame_routed(
     let (_ack, frame) = handle_frame(text, owner_id)?;
     if let SlackFrame::Inbound(inbound) = &frame {
         if let Some(pool) = pool {
-            if let Err(error) = crate::inbox_watch::note_gateway(pool, inbound).await {
+            if let Err(error) = crate::inbox_watch::note_gateway(pool, inbound, owner_id).await {
                 tracing::warn!(%error, "slack message was not recorded for the inbox");
             }
             // omo: the owner's reply in a finished lane's thread reopens that lane.
