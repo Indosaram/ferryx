@@ -193,7 +193,8 @@ where
                 TRIAGE_OPTIONS,
             )
             .await?;
-        if choice.is_fallback {
+        // omo triage: a capped or conservative answer is not a jev classification.
+        if choice.is_fallback || choice.is_capped {
             return Err(HubError::message(
                 "inbox jev unavailable; items remain pending",
             ));
