@@ -294,14 +294,86 @@ pub fn final_reply(outcome: &TurnOutcome) -> Result<Option<String>> {
     Ok(Some(outcome.text.clone()))
 }
 
-/// Approval verdict for one engine approval frame: `None` approves, `Some(reason)` declines.
-pub fn approval_verdict(frame: &Value, cwd: Option<&str>) -> Option<String> {
-    let full_access = crate::hub_env::var("OMON_FULL_ACCESS").map_or(true, |value| {
+/// omo-gateway's fallback model (`OMON_OMO_FALLBACK_MODEL`).
+pub const DEFAULT_FALLBACK_MODEL: &str = "inferhub/cb/deepseek-v4.1-flash";
+
+pub fn fallback_model() -> String {
+    crate::hub_env::var("OMON_OMO_FALLBACK_MODEL")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_FALLBACK_MODEL.to_owned())
+}
+
+/// omo-gateway's `fallback_eligible`: a turn that failed before any side effect, by producing
+/// nothing at all or by a quota/overload/model rejection, runs once more on the fallback model.
+pub fn fallback_eligible(result: &Result<TurnOutcome>) -> bool {
+    match result {
+        Ok(outcome) => {
+            outcome.text.is_empty() && outcome.tool_calls == 0 && outcome.messages_delivered == 0
+        }
+        Err(error) => {
+            let lower = error.to_string().to_lowercase();
+            lower.contains("model update rejected")
+                || lower.contains("model not found")
+                || lower.contains("unknown model")
+                || lower.contains("invalid model")
+                || lower.contains("unsupported model")
+        }
+    }
+}
+
+/// omo-gateway's owner-facing Korean line for a failed turn; the raw error stays in the logs.
+pub fn owner_failure_text(error: &str) -> String {
+    format!(
+        "⚠️ 응답을 만들지 못했어요 ({}). 같은 메시지를 다시 보내 주시면 이어서 할게요.",
+        owner_failure_reason(error)
+    )
+}
+
+fn owner_failure_reason(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if [
+        "no output within",
+        "turn interrupted",
+        "timeout waiting for turn/start",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        "모델이 응답하지 않았어요"
+    } else if ["quota", "429", "rate limit"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        "모델 사용량 한도에 걸렸어요"
+    } else {
+        "처리 중 오류가 났어요"
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Lets a test run a turn with full access off without touching the process environment.
+    pub static FULL_ACCESS_TEST: bool;
+}
+
+fn full_access() -> bool {
+    #[cfg(test)]
+    if let Ok(value) = FULL_ACCESS_TEST.try_with(|value| *value) {
+        return value;
+    }
+    crate::hub_env::var("OMON_FULL_ACCESS").map_or(true, |value| {
         !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "0" | "false" | "no" | "off"
         )
-    });
+    })
+}
+
+/// Approval verdict for one engine approval frame: `None` approves, `Some(reason)` declines.
+pub fn approval_verdict(frame: &Value, cwd: Option<&str>) -> Option<String> {
+    let full_access = full_access();
     if full_access {
         return None;
     }
@@ -320,6 +392,37 @@ pub fn approval_verdict(frame: &Value, cwd: Option<&str>) -> Option<String> {
         )),
     }
 }
+
+/// The owner's answer to an approval card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerAnswer {
+    Approve,
+    Deny,
+    /// No answer before the card expired (or the turn ended).
+    Unanswered,
+}
+
+/// Asks the owner about a tool request policy would decline (omo-gateway's approval card).
+#[async_trait::async_trait]
+pub trait Approver: Send + Sync {
+    async fn ask(&self, frame: &Value, cwd: Option<&str>, reason: &str) -> OwnerAnswer;
+}
+
+tokio::task_local! {
+    static APPROVER: std::sync::Arc<dyn Approver>;
+}
+
+/// Runs `future` (a turn) with `approver` answering requests full access would not allow.
+pub async fn with_approver<F: std::future::Future>(
+    approver: std::sync::Arc<dyn Approver>,
+    future: F,
+) -> F::Output {
+    APPROVER.scope(approver, future).await
+}
+
+/// omo's reply when the owner did not answer in time.
+pub const UNANSWERED_REASON: &str =
+    "owner has not answered yet; continue with other work and mention the pending approval in your report";
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -437,13 +540,25 @@ async fn answer_server_request(
         return Ok(true);
     }
     if protocol::is_approval_request(method) {
-        match approval_verdict(frame, cwd) {
+        let mut verdict = approval_verdict(frame, cwd);
+        if let Some(reason) = verdict.clone() {
+            if let Ok(approver) = APPROVER.try_with(std::sync::Arc::clone) {
+                verdict = match approver.ask(frame, cwd, &reason).await {
+                    OwnerAnswer::Approve => None,
+                    OwnerAnswer::Deny => Some("denied by the owner".into()),
+                    OwnerAnswer::Unanswered => Some(UNANSWERED_REASON.into()),
+                };
+            }
+        }
+        match verdict {
             None => {
                 *allowed += 1;
                 send(ws, protocol::approval_allow_response(id)).await?;
             }
             Some(reason) => {
-                *denied += 1;
+                if reason != UNANSWERED_REASON {
+                    *denied += 1;
+                }
                 send(ws, protocol::approval_denial_with_reason(id, &reason)).await?;
             }
         }
@@ -490,6 +605,67 @@ fn is_thread_busy_error(error: &str) -> bool {
 
 /// Runs one turn. Every completed agent message except the last is sent on `progress` as it
 /// lands, so a long turn shows its interim replies. The last one is the outcome text.
+/// The error a turn ends with when `/omo-stop` interrupted it.
+pub const STOPPED: &str = "omo turn stopped by /omo-stop";
+
+/// Injects guidance into a running turn (`turn/steer`, omo-gateway's instant steer) over a
+/// short-lived connection. False when the engine refused it (the turn ended or moved on).
+pub async fn steer(
+    config: &OmoClientConfig,
+    thread_id: &str,
+    turn_id: &str,
+    guidance: &str,
+) -> Result<bool> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut ws = connect(config, deadline).await?;
+    let (mut allowed, mut denied) = (0u32, 0u32);
+    send(&mut ws, protocol::initialize_request()).await?;
+    let reply = await_reply(
+        &mut ws,
+        1,
+        deadline,
+        "the initialize reply",
+        None,
+        (&mut allowed, &mut denied),
+    )
+    .await?;
+    if let Some(error) = rpc_error(&reply) {
+        return Err(HubError::message(format!("omo initialize failed: {error}")));
+    }
+    let request = json!({
+        "jsonrpc": "2.0", "id": 9_500, "method": "turn/steer",
+        "params": {
+            "threadId": thread_id,
+            "expectedTurnId": turn_id,
+            "input": [{"type": "text", "text": guidance}]
+        }
+    });
+    send(&mut ws, request.to_string()).await?;
+    let reply = await_reply(
+        &mut ws,
+        9_500,
+        deadline,
+        "the turn/steer reply",
+        None,
+        (&mut allowed, &mut denied),
+    )
+    .await;
+    let _ = ws.close(None).await;
+    match reply {
+        Ok(reply) => match rpc_error(&reply) {
+            None => Ok(true),
+            Some(error) => {
+                tracing::warn!(%error, "turn/steer rejected by the omo app-server");
+                Ok(false)
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "turn/steer got no answer");
+            Ok(false)
+        }
+    }
+}
+
 pub async fn run_turn(
     config: &OmoClientConfig,
     request: &TurnRequest,
@@ -591,6 +767,34 @@ pub async fn run_turn(
         }
     };
 
+    // omo-gateway awaits the custom-provider-aware settings RPC on every turn: a fresh thread
+    // otherwise runs on the engine default and a custom-provider model returns nothing.
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty())
+    {
+        send(
+            &mut ws,
+            protocol::thread_settings_update_request(&thread_id, model),
+        )
+        .await?;
+        let reply = await_reply(
+            &mut ws,
+            4,
+            handshake_until,
+            "the thread/settings/update reply",
+            cwd,
+            (&mut allowed, &mut denied),
+        )
+        .await?;
+        if let Some(error) = rpc_error(&reply) {
+            return Err(HubError::message(format!(
+                "omo model update rejected: {error}"
+            )));
+        }
+    }
+
     // turn/start as omo-gateway submits it (`omo_backend.rs`): the app-server acknowledges only
     // once our prompt is dequeued, so the wait is a 30s window that this thread's activity
     // keeps extending. Until then the thread runs something else; its finished messages are
@@ -691,11 +895,26 @@ pub async fn run_turn(
     let mut started_items: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut turn_id = turn_id;
     let mut last_activity = tokio::time::Instant::now();
+    // `/omo-stop` and `/omo-steer` find this turn by its session (chat::turns).
+    let registry_key = crate::chat::turns::current_key();
+    if let Some(key) = &registry_key {
+        crate::chat::turns::started(key, &thread_id, &turn_id);
+    }
+    let mut cancel = registry_key
+        .as_deref()
+        .and_then(crate::chat::turns::cancelled);
     loop {
         let frame = {
             {
                 let until = (last_activity + config.idle_timeout).min(deadline);
-                match next_frame(&mut ws, until, "the turn to finish").await {
+                let next = match cancel.as_mut() {
+                    Some(cancel) => tokio::select! {
+                        frame = next_frame(&mut ws, until, "the turn to finish") => frame,
+                        Ok(_) = cancel.wait_for(|stop| *stop) => Err(HubError::message(STOPPED)),
+                    },
+                    None => next_frame(&mut ws, until, "the turn to finish").await,
+                };
+                match next {
                     Ok(frame) => frame,
                     Err(error) => {
                         let interrupt = json!({
@@ -767,6 +986,10 @@ pub async fn run_turn(
                 if fresh && !matches!(item_type, "agentMessage" | "userMessage" | "reasoning" | "")
                 {
                     tool_calls += 1;
+                    #[cfg(feature = "hub-slack")]
+                    if let Some(key) = crate::chat::turns::current_key() {
+                        crate::chat::turn_status::record_tool_activity(&key, item_type);
+                    }
                     let now = tokio::time::Instant::now();
                     if !content.trim().is_empty()
                         && !should_relay_interim(delivered, last_relay_at, now)
@@ -889,6 +1112,8 @@ pub mod mock {
         pub messages: Vec<String>,
         pub resume_error: Option<String>,
         pub approval: bool,
+        /// Command the approval request names (default `ls`).
+        pub approval_command: Option<String>,
         pub thread_id: String,
         /// Before acknowledging turn/start, run another turn on the thread for this many
         /// ticks (one frame each), relaying one finished message.
@@ -952,6 +1177,11 @@ pub mod mock {
                                 };
                                 ws.send(out(reply)).await.unwrap();
                             }
+                            Some("thread/settings/update") => {
+                                ws.send(out(json!({"jsonrpc":"2.0","id":id,"result":{}})))
+                                    .await
+                                    .unwrap();
+                            }
                             Some("thread/start") => {
                                 // A notification before the reply: the client must keep waiting for id 2.
                                 ws.send(out(json!({"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":script.thread_id}}}))).await.unwrap();
@@ -980,7 +1210,7 @@ pub mod mock {
                                 }
                                 ws.send(out(json!({"jsonrpc":"2.0","id":id,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}))).await.unwrap();
                                 if script.approval {
-                                    ws.send(out(json!({"jsonrpc":"2.0","id":77,"method":"item/commandExecution/requestApproval","params":{"threadId":thread,"command":"ls"}}))).await.unwrap();
+                                    ws.send(out(json!({"jsonrpc":"2.0","id":77,"method":"item/commandExecution/requestApproval","params":{"threadId":thread,"command":script.approval_command.clone().unwrap_or_else(|| "ls".into())}}))).await.unwrap();
                                     // Wait for the answer before continuing.
                                     if let Some(Ok(Message::Text(text))) = ws.next().await {
                                         log.frames
@@ -1020,6 +1250,7 @@ mod tests {
             messages: messages.iter().map(|m| (*m).to_owned()).collect(),
             resume_error: None,
             approval: false,
+            approval_command: None,
             thread_id: "thr-new".into(),
             queued_ticks: 0,
             tick: Duration::ZERO,
@@ -1094,6 +1325,7 @@ mod tests {
     async fn a_turn_waits_for_each_reply_and_returns_the_last_message() {
         let (url, log) = serve(Script {
             approval: true,
+            approval_command: None,
             ..script(&["first", "final answer"])
         })
         .await;
@@ -1135,6 +1367,74 @@ mod tests {
             .find(|f| f.get("id") == Some(&json!(77)))
             .unwrap();
         assert_eq!(answer["result"]["decision"], "accept");
+    }
+
+    #[tokio::test]
+    async fn a_fresh_thread_gets_the_model_through_settings_update_like_omo() {
+        let (url, log) = serve(script(&["hi"])).await;
+        let outcome = run_turn(
+            &OmoClientConfig::new(url),
+            &TurnRequest {
+                text: "hello".into(),
+                model: Some("mahoquot/claude-opus-5-5".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.text, "hi");
+        let frames = log.frames.lock().unwrap().clone();
+        let methods: Vec<_> = frames
+            .iter()
+            .filter_map(|f| f.get("method").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "thread/start",
+                "thread/settings/update",
+                "turn/start"
+            ]
+        );
+        let update = &frames[2]["params"];
+        assert_eq!(update["threadId"], "thr-new");
+        assert_eq!(update["model"], "mahoquot/claude-opus-5-5");
+        assert!(update["effort"]
+            .as_str()
+            .is_some_and(|effort| !effort.is_empty()));
+    }
+
+    #[test]
+    fn an_empty_turn_falls_back_and_the_owner_sees_omos_korean_line() {
+        let empty = TurnOutcome {
+            thread_id: "t".into(),
+            resumed: false,
+            turn_id: "u".into(),
+            text: String::new(),
+            approvals_allowed: 0,
+            approvals_denied: 0,
+            messages_delivered: 0,
+            tool_calls: 0,
+        };
+        assert!(fallback_eligible(&Ok(empty.clone())));
+        let worked = TurnOutcome {
+            tool_calls: 1,
+            ..empty
+        };
+        assert!(!fallback_eligible(&Ok(worked)));
+        assert!(fallback_eligible(&Err(HubError::message(
+            "omo model update rejected: unknown model"
+        ))));
+        assert!(!fallback_eligible(&Err(HubError::message(
+            "omo turn failed: boom"
+        ))));
+        assert_eq!(
+            owner_failure_text("omo turn ended with no content (likely upstream LLM failure)"),
+            "⚠️ 응답을 만들지 못했어요 (처리 중 오류가 났어요). 같은 메시지를 다시 보내 주시면 이어서 할게요."
+        );
+        assert!(owner_failure_text("HTTP 429").contains("모델 사용량 한도에 걸렸어요"));
     }
 
     #[tokio::test]

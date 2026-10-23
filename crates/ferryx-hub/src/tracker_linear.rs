@@ -107,7 +107,24 @@ async fn bootstrap(State(pool): State<SqlitePool>) -> (StatusCode, Json<Value>) 
     }
 }
 
+/// omo's `api::prepare`: inbox requests are mirrored before the tracker is read.
+async fn prepare(pool: &SqlitePool) {
+    if let Err(error) = crate::tracker_lanes::sync(pool).await {
+        tracing::warn!(%error, "tracker lane sync failed");
+    }
+    if let Err(error) = crate::tracker_requests::sync(pool).await {
+        tracing::warn!(%error, "tracker request sync failed");
+    }
+    crate::tracker_sessions::sync_issues(pool).await;
+}
+
+#[cfg(test)]
+pub(crate) async fn issue_values_for_test(pool: &SqlitePool) -> Vec<Value> {
+    list_issue_values(pool, None, false).await.unwrap()
+}
+
 async fn bootstrap_value(pool: &SqlitePool) -> Result<Value> {
+    prepare(pool).await;
     let users = sqlx::query(
         "SELECT id, name, display_name, email, avatar_color, kind, model, is_me, created_at FROM tracker_users ORDER BY created_at",
     )
@@ -272,6 +289,7 @@ async fn list_issue_values(
     team_id: Option<&str>,
     include_archived: bool,
 ) -> Result<Vec<Value>> {
+    prepare(pool).await;
     let rows: Vec<String> = if let Some(team) = team_id {
         sqlx::query_scalar(
             "SELECT id FROM tracker_issues WHERE team_id = ? ORDER BY sort_order, number",
@@ -341,7 +359,24 @@ async fn load_issue(pool: &SqlitePool, id: &str) -> Result<Value> {
     object.insert("sub_issue_completed".into(), json!(sub_done));
     object.insert("comment_count".into(), json!(comments));
     object.insert("lane".into(), Value::Null);
-    object.insert("session".into(), Value::Null);
+    let session = match object.get("session_ref").and_then(Value::as_str) {
+        Some(reference) => {
+            let state: Option<Option<String>> =
+                sqlx::query_scalar("SELECT session_state FROM tracker_states WHERE id = ?")
+                    .bind(
+                        object
+                            .get("state_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    )
+                    .fetch_optional(pool)
+                    .await?;
+            crate::tracker_sessions::session_summary(reference, state.flatten().as_deref())
+                .unwrap_or(Value::Null)
+        }
+        None => Value::Null,
+    };
+    object.insert("session".into(), session);
     Ok(Value::Object(object))
 }
 
@@ -450,11 +485,115 @@ async fn issue_detail(
     }
 }
 
+/// omo's `timestamps_for`: the started/completed/canceled stamps an issue gets in a state.
+fn timestamps_for(
+    state_type: &str,
+    started_at: Option<String>,
+    now: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    match state_type {
+        "started" => (
+            Some(started_at.unwrap_or_else(|| now.to_owned())),
+            None,
+            None,
+        ),
+        "completed" => (
+            Some(started_at.unwrap_or_else(|| now.to_owned())),
+            Some(now.to_owned()),
+            None,
+        ),
+        "canceled" => (started_at, None, Some(now.to_owned())),
+        _ => (None, None, None),
+    }
+}
+
+/// omo's `lanes::handle_lane_state_transition`: moving a lane-linked issue drives its lane.
+async fn lane_state_transition(
+    pool: &SqlitePool,
+    lane_key: &str,
+    state_type: &str,
+    force_note: Option<&str>,
+) -> std::result::Result<(), String> {
+    use crate::lanes::state::LaneStatus;
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM lanes WHERE key = ?")
+        .bind(lane_key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(status) = status else {
+        return Err(format!("IllegalTransition: lane {lane_key} not found"));
+    };
+    let (target, reason) = match state_type {
+        "completed" if status == "verified_done" => (LaneStatus::Closed, None),
+        "completed" => match force_note.map(str::trim).filter(|note| !note.is_empty()) {
+            Some(note) => (LaneStatus::Closed, Some(format!("forced: {note}"))),
+            None => return Err("lane must be verified before closing; use force close".into()),
+        },
+        "canceled" if matches!(status.as_str(), "working" | "blocked" | "verified_done") => (
+            LaneStatus::Closed,
+            Some("forced: canceled from tracker".to_owned()),
+        ),
+        "canceled" => {
+            return Err(format!(
+                "IllegalTransition: lane cannot be canceled from status {status}"
+            ))
+        }
+        "started" | "unstarted" | "backlog" if matches!(status.as_str(), "closed" | "failed") => {
+            (LaneStatus::Working, Some("note: reopened".to_owned()))
+        }
+        "started" | "unstarted" | "backlog" => {
+            return Err(format!(
+                "IllegalTransition: lane is already in active status {status}"
+            ))
+        }
+        other => {
+            return Err(format!(
+                "IllegalTransition: unsupported target state type {other}"
+            ))
+        }
+    };
+    if target == LaneStatus::Closed {
+        // omo closes through the close intent: worktree removed, unmerged branch reported.
+        crate::lanes::worktree::close(pool, lane_key, reason.as_deref())
+            .await
+            .map_err(|error| error.to_string())?;
+    } else {
+        crate::lanes::state::transition(pool, lane_key, target, reason.as_deref())
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    crate::tracker_lanes::sync(pool)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// state_id, started_at, lane_key, session_ref of the issue being patched.
+type PatchRow = (String, Option<String>, Option<String>, Option<String>);
+
 async fn patch_issue(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    let current: Option<PatchRow> = match sqlx::query_as(
+        "SELECT state_id, started_at, lane_key, session_ref FROM tracker_issues WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => return fail(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    let Some((current_state, started_at, lane_key, session_ref)) = current else {
+        return fail(StatusCode::NOT_FOUND, "issue not found");
+    };
+    if session_ref.is_some() && (body.get("title").is_some() || body.get("description").is_some()) {
+        return fail(
+            StatusCode::CONFLICT,
+            "session issues mirror the live session title and description",
+        );
+    }
     if let Some(title) = body.get("title").and_then(Value::as_str) {
         if let Err(error) =
             sqlx::query("UPDATE tracker_issues SET title = ?, updated_at = ? WHERE id = ?")
@@ -477,14 +616,69 @@ async fn patch_issue(
                 .execute(&pool)
                 .await;
     }
-    if let Some(state_id) = body.get("state_id").and_then(Value::as_str) {
-        let _ = sqlx::query("UPDATE tracker_issues SET state_id = ?, updated_at = ? WHERE id = ?")
+    if let Some(state_id) = body
+        .get("state_id")
+        .and_then(Value::as_str)
+        .filter(|state| *state != current_state)
+    {
+        let state: Option<(String, i64)> =
+            match sqlx::query_as("SELECT type, lane_paused FROM tracker_states WHERE id = ?")
+                .bind(state_id)
+                .fetch_optional(&pool)
+                .await
+            {
+                Ok(state) => state,
+                Err(error) => return fail(StatusCode::BAD_REQUEST, error.to_string()),
+            };
+        let Some((state_type, lane_paused)) = state else {
+            return fail(StatusCode::BAD_REQUEST, "unknown state_id");
+        };
+        if let Some(reference) = session_ref.as_deref() {
+            // Sync owns SES states; the one allowed move (Ended on a streaming session)
+            // interrupts it and the re-sync records whatever state the session lands in.
+            if let Err(error) =
+                crate::tracker_sessions::manual_state_move(&pool, reference, state_id).await
+            {
+                return fail(StatusCode::CONFLICT, error.to_string());
+            }
+        } else {
+            if let Some(key) = lane_key.as_deref() {
+                if lane_paused == 1 {
+                    return fail(StatusCode::CONFLICT, "Paused is set by lane pause");
+                }
+                let force_note = body.get("force_note").and_then(Value::as_str);
+                if let Err(error) = lane_state_transition(&pool, key, &state_type, force_note).await
+                {
+                    return fail(StatusCode::CONFLICT, error);
+                }
+            }
+            let now = now_rfc3339();
+            let (started, completed, canceled) =
+                timestamps_for(&state_type, started_at.clone(), &now);
+            if let Err(error) = sqlx::query(
+                "UPDATE tracker_issues SET state_id = ?, started_at = ?, completed_at = ?, canceled_at = ?, updated_at = ? WHERE id = ?",
+            )
             .bind(state_id)
-            .bind(now_rfc3339())
+            .bind(&started)
+            .bind(&completed)
+            .bind(&canceled)
+            .bind(&now)
             .bind(&id)
             .execute(&pool)
+            .await
+            {
+                return fail(StatusCode::BAD_REQUEST, error.to_string());
+            }
+            let _ = record_activity(
+                &pool,
+                &id,
+                None,
+                "state",
+                Some(current_state.as_str()),
+                Some(state_id),
+            )
             .await;
-        let _ = record_activity(&pool, &id, None, "state", None, Some(state_id)).await;
+        }
     }
     match load_issue(&pool, &id).await {
         Ok(issue) => ok(issue),
@@ -493,6 +687,19 @@ async fn patch_issue(
 }
 
 async fn delete_issue(State(pool): State<SqlitePool>, Path(id): Path<String>) -> StatusCode {
+    let reference: Option<Option<String>> =
+        sqlx::query_scalar("SELECT session_ref FROM tracker_issues WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap_or_default();
+    if let Some(reference) = reference.flatten() {
+        // Session sync re-creates issues for live sessions; the tombstone keeps this one gone.
+        if let Err(error) = crate::tracker_sessions::tombstone(&pool, &reference).await {
+            tracing::warn!(%error, "session tombstone failed");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
     let _ = sqlx::query("DELETE FROM tracker_issues WHERE id = ?")
         .bind(id)
         .execute(&pool)
@@ -1366,15 +1573,15 @@ async fn search(
     }
 }
 
+/// omo's sessions board: every live agent pane on this machine and paired hosts.
 async fn list_sessions(State(pool): State<SqlitePool>) -> (StatusCode, Json<Value>) {
-    match rows_json(
-        &pool,
-        "SELECT session_key, platform, guild_id, channel_id, thread_id, user_id, created_at, updated_at FROM sessions ORDER BY updated_at DESC",
-    )
-    .await
-    {
-        Ok(items) => ok(json!({"items": items})),
-        Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    ok(crate::tracker_sessions::board(&pool).await)
+}
+
+fn session_result(result: Result<Value>) -> (StatusCode, Json<Value>) {
+    match result {
+        Ok(result) => ok(json!({"ok": true, "result": result})),
+        Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
 
@@ -1383,21 +1590,15 @@ async fn session_send(
     Path((machine, session_id)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    session_op(
-        &pool,
-        &machine,
-        &session_id,
-        "send",
-        body.get("text").and_then(Value::as_str).unwrap_or(""),
-    )
-    .await
+    let text = body.get("text").and_then(Value::as_str).unwrap_or("");
+    session_result(crate::tracker_sessions::send(&pool, &machine, &session_id, text).await)
 }
 
 async fn session_interrupt(
     State(pool): State<SqlitePool>,
     Path((machine, session_id)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
-    session_op(&pool, &machine, &session_id, "interrupt", "").await
+    session_result(crate::tracker_sessions::interrupt(&pool, &machine, &session_id).await)
 }
 
 async fn session_answer(
@@ -1405,30 +1606,10 @@ async fn session_answer(
     Path((machine, session_id)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    session_op(
-        &pool,
-        &machine,
-        &session_id,
-        "answer",
-        body.get("text").and_then(Value::as_str).unwrap_or(""),
-    )
-    .await
-}
-
-async fn session_op(
-    pool: &SqlitePool,
-    machine: &str,
-    session_id: &str,
-    op: &str,
-    text: &str,
-) -> (StatusCode, Json<Value>) {
-    let message = format!("{op} {machine}:{session_id} {text}");
-    if let Err(error) = crate::http::record_log(pool, "info", &message).await {
-        return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
-    }
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({"ok": true, "op": op, "machine": machine, "session_id": session_id})),
+    let text = body.get("text").and_then(Value::as_str).unwrap_or("");
+    let request = body.get("request_id").and_then(Value::as_str);
+    session_result(
+        crate::tracker_sessions::answer(&pool, &machine, &session_id, text, request).await,
     )
 }
 
@@ -1544,5 +1725,132 @@ mod tests {
         assert!(kinds.contains(&"comment".to_string()));
         assert!(kinds.contains(&"delegate".to_string()));
         assert!(kinds.contains(&"lane_action".to_string()));
+    }
+
+    async fn call(app: &Router, method: &str, uri: &str, body: &str) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn session_issues_are_sync_owned_and_deleting_one_tombstones_it() {
+        let pool = crate::storage::memory().await.unwrap();
+        seed(&pool).await;
+        let live = vec![(
+            "local".to_owned(),
+            Ok(vec![crate::tracker_sessions::LiveSession::from_entry(
+                &json!({"sessionId": "abc", "agent": "claude", "state": "idle"}),
+            )
+            .unwrap()]),
+        )];
+        crate::tracker_sessions::sync_from_snapshots(&pool, &live, chrono::Utc::now())
+            .await
+            .unwrap();
+        let (id, ended): (String, String) = sqlx::query_as(
+            "SELECT i.id, s.id FROM tracker_issues i JOIN tracker_states s ON s.team_id = i.team_id AND s.session_state = 'ended' WHERE i.session_ref = 'local:abc'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let app = router().with_state(pool.clone());
+        let (status, issue) = call(&app, "GET", &format!("/issues/{id}"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(issue["session"]["session_id"], "abc");
+        assert_eq!(issue["session"]["state"], "idle");
+        let (status, _) = call(&app, "PATCH", &format!("/issues/{id}"), r#"{"title":"x"}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        // Ended is only reachable by interrupting a streaming session; an idle one is refused.
+        let (status, _) = call(
+            &app,
+            "PATCH",
+            &format!("/issues/{id}"),
+            &json!({"state_id": ended}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) = call(&app, "DELETE", &format!("/issues/{id}"), "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        crate::tracker_sessions::sync_from_snapshots(&pool, &live, chrono::Utc::now())
+            .await
+            .unwrap();
+        let recreated: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tracker_issues WHERE session_ref = 'local:abc'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(recreated, 0);
+    }
+
+    #[tokio::test]
+    async fn moving_a_lane_issue_drives_its_lane_and_stamps_the_issue() {
+        let pool = crate::storage::memory().await.unwrap();
+        seed(&pool).await;
+        for (id, kind, paused) in [("s-done", "completed", 0), ("s-paused", "started", 1)] {
+            sqlx::query("INSERT INTO tracker_states(id, team_id, name, type, color, lane_paused) VALUES(?, 't1', ?, ?, '#fff', ?)")
+                .bind(id).bind(id).bind(kind).bind(paused)
+                .execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO lanes(key, title, lead_session_key, cwd, session_key, status, done_signals, last_activity_at)
+             VALUES('ledger', 'Ledger', 'lead', '/tmp', 'lane', 'working', '[]', '2020-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tracker_issues(id, team_id, number, identifier, title, state_id, priority, sort_order, lane_key, creator_id, created_at, updated_at)
+             VALUES('i1', 't1', 1, 'AGT-1', 'Ledger', 's1', 0, 0, 'ledger', 'u1', '2020', '2020')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let app = router().with_state(pool.clone());
+        let lane_status = || async {
+            sqlx::query_scalar::<_, String>("SELECT status FROM lanes WHERE key = 'ledger'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let (status, _) = call(&app, "PATCH", "/issues/i1", r#"{"state_id":"s-paused"}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, body) = call(&app, "PATCH", "/issues/i1", r#"{"state_id":"s-done"}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body["error"].as_str().unwrap().contains("verified"));
+        assert_eq!(lane_status().await, "working");
+        let (status, issue) = call(
+            &app,
+            "PATCH",
+            "/issues/i1",
+            r#"{"state_id":"s-done","force_note":"shipped by hand"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(issue["state_id"], "s-done");
+        assert!(issue["completed_at"].is_string());
+        assert!(issue["started_at"].is_string());
+        assert_eq!(lane_status().await, "closed");
+        let (status, issue) = call(&app, "PATCH", "/issues/i1", r#"{"state_id":"s1"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(issue["completed_at"].is_null());
+        assert_eq!(lane_status().await, "working");
     }
 }

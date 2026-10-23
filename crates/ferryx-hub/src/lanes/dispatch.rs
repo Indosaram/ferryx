@@ -107,6 +107,21 @@ where
     let mut misrouted = Vec::new();
     let mut groups = std::collections::BTreeMap::<String, Vec<QueuedEvent>>::new();
     for (id, lane_key, lead, kind, body, created_at) in rows {
+        if kind == "cron_problem" {
+            // One bad cron problem must not block every other lead's events.
+            let taken = crate::cron_remediate::handle_event(&body, &lead).await;
+            if let Err(error) = &taken {
+                tracing::warn!(event_id = id, %error, "cron problem handling failed; event remains queued");
+            }
+            match cron_disposition(taken) {
+                CronDisposition::Receipt => {
+                    receipt(pool, &[id], &stamp, "cron_remediation").await?;
+                    continue;
+                }
+                CronDisposition::Keep => continue,
+                CronDisposition::Continue => {}
+            }
+        }
         let Ok(lead_key) = SessionKey::from_storage_key(&lead) else {
             misrouted.push(id);
             continue;
@@ -137,7 +152,7 @@ where
             events = misrouted.len(),
             "lane events addressed to a lead that is not a session key were retired"
         );
-        receipt(pool, &misrouted, &stamp).await?;
+        receipt(pool, &misrouted, &stamp, "misrouted").await?;
     }
     let mut admitted = 0;
     for (target, events) in groups {
@@ -155,7 +170,7 @@ where
             continue;
         }
         let last: Option<String> = sqlx::query_scalar(
-            "SELECT MAX(delivered_at) FROM lane_events WHERE lead_session_key = ? AND delivered_at IS NOT NULL",
+            "SELECT MAX(delivered_at) FROM lane_events WHERE lead_session_key = ? AND delivered_at IS NOT NULL AND (delivery_reason IS NULL OR delivery_reason <> 'jev_skip')",
         )
         .bind(&target)
         .fetch_one(pool)
@@ -190,16 +205,15 @@ where
                     event.body
                 );
                 match judge
-                    .choice(
+                    .noul(
                         crate::judge::Purpose::EventWake,
                         &state,
                         "Does this event need the lead agent's judgment now?",
-                        &["yes", "no"],
                     )
                     .await
                 {
-                    Ok(choice) if choice.selected == "no" => {
-                        receipt(pool, &ids, &stamp).await?;
+                    Ok(score) if score < 0.5 => {
+                        receipt(pool, &ids, &stamp, "jev_skip").await?;
                         continue;
                     }
                     Ok(_) => {}
@@ -241,23 +255,40 @@ where
             continue;
         }
         tracing::info!(lead_session_key = %target, events = ids.len(), "lane event admitted to lead turn");
-        receipt(pool, &ids, &stamp).await?;
+        receipt(pool, &ids, &stamp, "lead_turn").await?;
         admitted += 1;
     }
     Ok(admitted)
 }
 
-async fn receipt(pool: &SqlitePool, ids: &[i64], stamp: &str) -> Result<()> {
+async fn receipt(pool: &SqlitePool, ids: &[i64], stamp: &str, reason: &str) -> Result<()> {
     for id in ids {
         sqlx::query(
-            "UPDATE lane_events SET delivered_at = ? WHERE id = ? AND delivered_at IS NULL",
+            "UPDATE lane_events SET delivered_at = ?, delivery_reason = ? WHERE id = ? AND delivered_at IS NULL",
         )
         .bind(stamp)
+        .bind(reason)
         .bind(id)
         .execute(pool)
         .await?;
     }
     Ok(())
+}
+
+/// What a `cron_problem` event does inside one tick. `Ok(true)` from the remediator is a
+/// receipt; `Ok(false)` (no remediator) joins the ordinary groups; an error stays queued.
+fn cron_disposition(result: Result<bool>) -> CronDisposition {
+    match result {
+        Ok(true) => CronDisposition::Receipt,
+        Ok(false) => CronDisposition::Continue,
+        Err(_) => CronDisposition::Keep,
+    }
+}
+
+enum CronDisposition {
+    Receipt,
+    Continue,
+    Keep,
 }
 
 /// omo: only urgent events wake a turn in the owner DM ("DM으로는 급한 용무만").
@@ -380,5 +411,125 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(open, 1);
+    }
+
+    #[test]
+    fn a_handled_cron_problem_is_receipted_and_a_failure_stays_queued() {
+        assert!(matches!(
+            cron_disposition(Ok(true)),
+            CronDisposition::Receipt
+        ));
+        assert!(matches!(
+            cron_disposition(Ok(false)),
+            CronDisposition::Continue
+        ));
+        assert!(matches!(
+            cron_disposition(Err(crate::error::HubError::message("down"))),
+            CronDisposition::Keep
+        ));
+    }
+
+    #[tokio::test]
+    async fn events_wait_thirty_seconds_then_one_turn_and_a_low_score_is_skipped() {
+        let pool = crate::storage::memory().await.unwrap();
+        let dm = SessionKey::new("slack", None::<String>, "D0DM", None::<String>, "U0OWNER")
+            .with_bot_id("U0BOT")
+            .storage_key();
+        let now = chrono::Utc::now();
+        let recent = (now - chrono::Duration::seconds(10)).to_rfc3339();
+        sqlx::query("INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES('lane-a', ?, 'question', 'old', ?)")
+            .bind(&dm)
+            .bind(&recent)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES('lane-a', ?, 'question', 'latest', ?)")
+            .bind(&dm)
+            .bind(&recent)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let judge = crate::judge::Judge::forced_noul(0.9);
+        let admitted = dispatch_tick(&pool, &judge, now, |_, _| async { true })
+            .await
+            .unwrap();
+        assert_eq!(admitted, 0, "younger than 30s, so the group waits");
+        let later = now + chrono::Duration::seconds(31);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let record = seen.clone();
+        let admitted = dispatch_tick(&pool, &judge, later, move |_, text| {
+            *record.lock().unwrap() = text;
+            async { true }
+        })
+        .await
+        .unwrap();
+        assert_eq!(admitted, 1);
+        let text = seen.lock().unwrap().clone();
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.contains("latest"));
+        assert!(!text.contains("old"));
+        let reason: String = sqlx::query_scalar(
+            "SELECT delivery_reason FROM lane_events WHERE kind = 'question' ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(reason, "lead_turn");
+
+        let quiet = (later - chrono::Duration::seconds(40)).to_rfc3339();
+        sqlx::query("INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES('lane-b', ?, 'question', 'routine', ?)")
+            .bind(&dm)
+            .bind(&quiet)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let low = crate::judge::Judge::forced_noul(0.49);
+        let admitted = dispatch_tick(
+            &pool,
+            &low,
+            later + chrono::Duration::seconds(31),
+            |_, _| async { true },
+        )
+        .await
+        .unwrap();
+        assert_eq!(admitted, 0);
+        let skip: String =
+            sqlx::query_scalar("SELECT delivery_reason FROM lane_events WHERE lane_key = 'lane-b'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(skip, "jev_skip");
+    }
+
+    #[tokio::test]
+    async fn a_cron_problem_without_a_remediator_still_reaches_the_lead() {
+        let pool = crate::storage::memory().await.unwrap();
+        let dm = SessionKey::new("slack", None::<String>, "D0DM", None::<String>, "U0OWNER")
+            .with_bot_id("U0BOT")
+            .storage_key();
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        sqlx::query("INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES('job', ?, 'cron_problem', ?, ?)")
+            .bind(&dm)
+            .bind(r#"{"problem_id":1,"kind":"needs_owner"}"#)
+            .bind(&old)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let judge = crate::judge::Judge::forced_noul(0.0);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let record = seen.clone();
+        let admitted = dispatch_tick(&pool, &judge, chrono::Utc::now(), move |_, text| {
+            *record.lock().unwrap() = text;
+            async { true }
+        })
+        .await
+        .unwrap();
+        assert_eq!(admitted, 1);
+        assert!(seen.lock().unwrap().contains("needs_owner"));
+        let reason: String = sqlx::query_scalar("SELECT delivery_reason FROM lane_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(reason, "lead_turn");
     }
 }

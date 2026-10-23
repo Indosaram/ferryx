@@ -161,6 +161,8 @@ pub async fn transition(
     if updated.rows_affected() == 0 {
         return illegal(pool, key, to, reason).await;
     }
+    let reopened =
+        to == LaneStatus::Working && matches!(previous.as_deref(), Some("closed" | "failed"));
     sqlx::query(
         "INSERT INTO lane_history(lane_key, at, from_status, to_status, reason) VALUES(?,?,?,?,?)",
     )
@@ -172,6 +174,11 @@ pub async fn transition(
     .execute(pool)
     .await
     .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
+    if reopened {
+        super::pause::clear_on_reopen(pool, key)
+            .await
+            .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
+    }
     Ok(())
 }
 

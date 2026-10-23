@@ -1,6 +1,6 @@
 //! Event-armed inbox. A message older than 24 hours is filed as fyi without a model call.
 //! The production path has no model fallback: a missing classification is an error.
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, NaiveDate, TimeDelta, TimeZone, Utc};
 use serde_json::Value;
 use sqlx::SqlitePool;
 
@@ -160,29 +160,39 @@ pub const TRIAGE_INSTRUCTIONS: &str = "owner_must_act = a specific person is wai
 /// Classifies inbox rows that have no decision yet.
 /// A message older than 24 hours is fyi, except a GitHub `[CI failed]` snippet.
 /// A fallback judge choice leaves every row in the batch pending.
+///
+/// `lead` is the session that receives an `inbox_urgent` event when an owner item is due
+/// within 24 hours (omo triage). Pass the owner DM; tests pass an explicit key so they do
+/// not depend on the process-wide default lead.
 pub async fn classify_pending<F, Fut>(
     pool: &SqlitePool,
     judge: &crate::judge::Judge,
     now: DateTime<Utc>,
+    lead: &str,
     mut action_for: F,
 ) -> Result<usize>
 where
     F: FnMut(&str, Class) -> Fut,
     Fut: std::future::Future<Output = Result<Option<String>>>,
 {
-    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-        "SELECT id, source, snippet, received_at FROM inbox_items WHERE id NOT IN (SELECT item_id FROM inbox_decisions)",
+    let rows: Vec<(String, String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT id, source, snippet, title, received_at FROM inbox_items WHERE id NOT IN (SELECT item_id FROM inbox_decisions)",
     )
     .fetch_all(pool)
     .await?;
     let mut ready = Vec::new();
-    for (id, source, snippet, received_at) in rows {
+    for (id, source, snippet, title, received_at) in rows {
         let received = DateTime::parse_from_rfc3339(&received_at)
             .map(|value| value.with_timezone(&Utc))
             .unwrap_or(now);
+        let due = parse_due_at(
+            &format!("{} {}", title.unwrap_or_default(), snippet),
+            received,
+        )
+        .filter(|due| *due >= now);
         let ci_failure = source == "github" && snippet.starts_with("[CI failed]");
         if !ci_failure && is_stale(received, now) {
-            ready.push((id, Class::Fyi, "stale".to_owned(), None));
+            ready.push((id, Class::Fyi, "stale".to_owned(), None, due));
             continue;
         }
         let choice = judge
@@ -193,7 +203,8 @@ where
                 TRIAGE_OPTIONS,
             )
             .await?;
-        if choice.is_fallback {
+        // omo triage: a capped or conservative answer is not a jev classification.
+        if choice.is_fallback || choice.is_capped {
             return Err(HubError::message(
                 "inbox jev unavailable; items remain pending",
             ));
@@ -203,13 +214,76 @@ where
             Class::Owner | Class::Bot => action_for(&id, class).await?,
             Class::Fyi | Class::Ignore => None,
         };
-        ready.push((id, class, choice.as_str().to_owned(), action));
+        ready.push((id, class, choice.as_str().to_owned(), action, due));
     }
     let stored = ready.len();
-    for (id, class, reason, action) in ready {
+    for (id, class, reason, action, due) in ready {
         decide(pool, &id, class, &reason, action.as_deref()).await?;
+        if let Some(due) = due {
+            sqlx::query("UPDATE inbox_decisions SET due_at = ? WHERE item_id = ?")
+                .bind(due.to_rfc3339())
+                .bind(&id)
+                .execute(pool)
+                .await?;
+            // omo: an owner item due within a day wakes the lead. Anything later stays on the row.
+            if class == Class::Owner && due <= now + TimeDelta::hours(24) {
+                sqlx::query(
+                    "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at)
+                     VALUES(NULL, ?, 'inbox_urgent', ?, ?)",
+                )
+                .bind(lead)
+                .bind(format!("inbox:{id} due {}", due.to_rfc3339()))
+                .bind(now.to_rfc3339())
+                .execute(pool)
+                .await?;
+            }
+        }
+    }
+    if let Some(action) = crate::inbox_cards::trusted_action() {
+        crate::inbox_cards::present_ready(pool, &action, lead).await?;
     }
     Ok(stored)
+}
+
+/// ISO dates/timestamps and explicit today/tomorrow deadlines, in owner KST.
+/// Relative words resolve against `sent_at`, the moment the message was received.
+/// No inference of dates from a model response. omo `parse_due_at`.
+pub fn parse_due_at(text: &str, sent_at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let re =
+        regex::Regex::new(r"\b\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2}))?\b")
+            .ok()?;
+    if let Some(found) = re.find(text) {
+        if let Ok(date) = DateTime::parse_from_rfc3339(found.as_str()) {
+            return Some(date.with_timezone(&Utc));
+        }
+        let date = NaiveDate::parse_from_str(found.as_str(), "%Y-%m-%d").ok()?;
+        return chrono_tz::Asia::Seoul
+            .from_local_datetime(&date.and_hms_opt(23, 59, 59)?)
+            .single()
+            .map(|d| d.with_timezone(&Utc));
+    }
+    let lower = text.to_lowercase();
+    let offset = if lower.contains("tomorrow") || text.contains("내일") {
+        1
+    } else if lower.contains("today") || text.contains("오늘") {
+        0
+    } else {
+        return None;
+    };
+    let date =
+        sent_at.with_timezone(&chrono_tz::Asia::Seoul).date_naive() + TimeDelta::days(offset);
+    let clock = regex::Regex::new(r"\b([0-2]\d):([0-5]\d)\b").ok()?;
+    let (hour, minute) = match clock.captures(text) {
+        Some(found) => (
+            found.get(1)?.as_str().parse().ok()?,
+            found.get(2)?.as_str().parse().ok()?,
+        ),
+        None => (23, 59),
+    };
+    chrono_tz::Asia::Seoul
+        .from_local_datetime(&date.and_hms_opt(hour, minute, 0)?)
+        .single()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 pub const DIGEST_JOB_ID: &str = "omon:inbox-digest";
@@ -291,8 +365,21 @@ pub async fn build_scheduled_digest(
         render(&bot)
     );
     message.push_str(&format!("\n\nUsage: {runs} cron runs in the last day"));
-    if failed > 0 {
-        message.push_str(&format!("\n\n## Cron\n- {failed} failed"));
+    // omo digest: yesterday's judge and inbox prefilter counts.
+    let usage = crate::usage::yesterday(pool, now).await?;
+    message.push_str(&format!("\n{}", usage.digest_line()));
+    let remediation = crate::cron_remediate::digest_section(pool, now).await?;
+    if failed > 0 || remediation.is_some() {
+        message.push_str("\n\n## Cron");
+        if failed > 0 {
+            message.push_str(&format!("\n- {failed} failed"));
+        }
+        if let Some(section) = remediation {
+            for line in section.lines().skip(1) {
+                message.push('\n');
+                message.push_str(line);
+            }
+        }
     }
     if !errors.is_empty() {
         message.push_str("\n\n## Source authentication\n");
@@ -426,7 +513,7 @@ mod tests {
         .await
         .unwrap();
         let judge = crate::judge::Judge::forced("bot_can_handle");
-        let stored = classify_pending(&pool, &judge, now, |_id, class| async move {
+        let stored = classify_pending(&pool, &judge, now, "meta", |_id, class| async move {
             assert_eq!(class, Class::Bot);
             Ok(Some("investigate failure".into()))
         })
@@ -451,5 +538,78 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(proposals, 2);
+    }
+
+    #[test]
+    fn a_due_date_is_the_stamp_in_the_text() {
+        let sent = DateTime::parse_from_rfc3339("2026-10-22T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let iso = parse_due_at("need this by 2026-10-23T03:00:00Z", sent).unwrap();
+        assert_eq!(iso.to_rfc3339(), "2026-10-23T03:00:00+00:00");
+        let today = parse_due_at("오늘 18:30", sent).unwrap();
+        assert_eq!(
+            today
+                .with_timezone(&chrono_tz::Asia::Seoul)
+                .format("%H:%M")
+                .to_string(),
+            "18:30"
+        );
+        assert!(parse_due_at("no deadline here", sent).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_owner_item_due_within_a_day_enqueues_inbox_urgent_once() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-10-22T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let soon = (now + TimeDelta::hours(2)).to_rfc3339();
+        let later = (now + TimeDelta::hours(48)).to_rfc3339();
+        ingest(
+            &pool,
+            "soon",
+            "mail",
+            "s",
+            &format!("reply {soon}"),
+            &now.to_rfc3339(),
+        )
+        .await
+        .unwrap();
+        ingest(
+            &pool,
+            "later",
+            "mail",
+            "l",
+            &format!("reply {later}"),
+            &now.to_rfc3339(),
+        )
+        .await
+        .unwrap();
+        let lead = "slack:dm:D0OWNER";
+        let judge = crate::judge::Judge::forced("owner_must_act");
+        let stored = classify_pending(&pool, &judge, now, lead, |_id, class| async move {
+            assert_eq!(class, Class::Owner);
+            Ok(None)
+        })
+        .await
+        .unwrap();
+        assert_eq!(stored, 2);
+        let events: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT kind, lead_session_key, body FROM lane_events ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "inbox_urgent");
+        assert_eq!(events[0].1, lead);
+        assert!(events[0].2.starts_with("inbox:soon due "));
+        assert!(events[0].2.contains(&soon));
+        let due: String =
+            sqlx::query_scalar("SELECT due_at FROM inbox_decisions WHERE item_id = 'later'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(due.contains("2026-10-24"));
     }
 }

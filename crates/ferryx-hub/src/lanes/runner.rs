@@ -29,27 +29,44 @@ pub struct LaneRunner {
 
 impl LaneRunner {
     pub async fn drive(&self, key: &str) -> Result<DriveReport> {
-        let row: Option<(String, String, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT status, cwd, title, done_signals, omo_thread_id FROM lanes WHERE key = ?",
+        let row: Option<(String, String, String, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT status, cwd, title, done_signals, omo_thread_id, brief_path FROM lanes WHERE key = ?",
         )
         .bind(key)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((status, cwd, title, done_signals, pane)) = row else {
+        let Some((status, cwd, title, done_signals, pane, brief_path)) = row else {
             return Err(HubError::message(format!("lane {key} not found")));
         };
+        // omo's runner skips a paused lane: no launch, no nudge, no claim reading.
+        if super::pause::is_paused(&self.pool, key).await? {
+            return Err(HubError::message(format!("lane {key} is paused")));
+        }
         let mut session_id = pane.unwrap_or_default();
+        let mut cwd = cwd;
         if status == "queued" {
             if !self.load.admit(&self.thresholds) {
                 return Err(HubError::message(format!(
                     "guard refused to launch lane {key}"
                 )));
             }
+            // omo's auto worktree: a lane at a repository root gets its own checkout.
+            if let Some(tree) = super::worktree::create(&self.pool, key, &cwd).await? {
+                cwd = tree;
+            }
             session_id = self.launcher.launch_pane(&cwd, &[]).await?;
             set_pane(&self.pool, key, &session_id).await?;
             transition(&self.pool, key, LaneStatus::Working, Some("launched")).await?;
+            // A lane with a brief file (cron remediation) sends the brief with the title.
+            let brief = match brief_path.trim() {
+                "" => String::new(),
+                path => tokio::fs::read_to_string(path)
+                    .await
+                    .map(|brief| format!("\n\n{brief}"))
+                    .unwrap_or_default(),
+            };
             let text = format!(
-                "{title}\n\nDone = {done_signals}\n\nClaim completion with a standalone line: [CLAIM_DONE] {key} | <checkable evidence>. A [REPORT] done line is not a claim."
+                "{title}{brief}\n\nDone = {done_signals}\n\nClaim completion with a standalone line: [CLAIM_DONE] {key} | <checkable evidence>. A [REPORT] done line is not a claim."
             );
             self.control
                 .execute(
@@ -61,6 +78,9 @@ impl LaneRunner {
                     },
                 )
                 .await?;
+        } else {
+            // A reopened lane gets its removed worktree back before the pane is read.
+            super::worktree::restore(&self.pool, key).await?;
         }
         let reading = self
             .control
@@ -182,6 +202,13 @@ mod tests {
                 lanes_max: 4,
             },
         };
+        // A paused lane is not driven: no launch, no read.
+        crate::lanes::pause::pause(&pool, "lane-g4", "session:lead")
+            .await
+            .unwrap();
+        assert!(runner.drive("lane-g4").await.is_err());
+        assert!(control.ops().is_empty());
+        crate::lanes::pause::resume(&pool, "lane-g4").await.unwrap();
         let report = runner.drive("lane-g4").await.unwrap();
         assert_eq!(report.session_id, "pane-g4");
         assert_eq!(report.status, LaneStatus::VerifiedDone);

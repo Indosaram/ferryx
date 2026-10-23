@@ -28,6 +28,44 @@ pub struct SlackTurnConfig {
     pub allowed_users: Vec<String>,
     pub free_channels: Vec<String>,
     pub default_model: Option<String>,
+    /// omo's channel scoping: a non-empty allowlist restricts channels (not DMs); ignored
+    /// channels always reject.
+    pub allowed_channels: Vec<String>,
+    pub ignored_channels: Vec<String>,
+    /// `SLACK_THREAD_REQUIRE_MENTION`: a reply in a known thread needs a mention.
+    pub thread_require_mention: bool,
+    /// `SLACK_AUTO_THREAD` (default on): a top-level channel message roots its own thread.
+    pub auto_thread: bool,
+    /// `SLACK_ALLOW_BOTS`: none (default), mentions, all.
+    pub allow_bots: AllowBots,
+    /// `SLACK_ALLOW_ALL_USERS`.
+    pub allow_all_users: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AllowBots {
+    #[default]
+    None,
+    Mentions,
+    All,
+}
+
+impl AllowBots {
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("all") => Self::All,
+            Some("mentions" | "mention") => Self::Mentions,
+            _ => Self::None,
+        }
+    }
+}
+
+fn parse_flag(raw: Option<String>, default: bool) -> bool {
+    match raw.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("1" | "true" | "yes" | "on") => true,
+        Some("0" | "false" | "no" | "off") => false,
+        _ => default,
+    }
 }
 
 fn split_list(raw: Option<String>) -> Vec<String> {
@@ -72,6 +110,12 @@ impl SlackTurnConfig {
                 .or_else(|| var("DEFAULT_MODEL"))
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
+            allowed_channels: split_list(var("SLACK_ALLOWED_CHANNELS")),
+            ignored_channels: split_list(var("SLACK_IGNORED_CHANNELS")),
+            thread_require_mention: parse_flag(var("SLACK_THREAD_REQUIRE_MENTION"), false),
+            auto_thread: parse_flag(var("SLACK_AUTO_THREAD"), true),
+            allow_bots: AllowBots::parse(var("SLACK_ALLOW_BOTS").as_deref()),
+            allow_all_users: parse_flag(var("SLACK_ALLOW_ALL_USERS"), false),
         }
     }
 }
@@ -96,6 +140,12 @@ pub struct Admitted {
     pub message_ts: String,
     pub user: String,
     pub text: String,
+    /// Files of the message and of what it forwards.
+    pub files: Vec<super::slack_ingress::SlackFile>,
+    /// The raw Slack event (for reply and channel context); `Null` for synthetic turns.
+    pub event: Value,
+    pub dm: bool,
+    pub bot_user: String,
 }
 
 fn str_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
@@ -135,7 +185,7 @@ pub fn admit(
         "message" => {
             if !matches!(
                 str_field(event, "subtype"),
-                None | Some("file_share" | "thread_broadcast")
+                None | Some("file_share" | "thread_broadcast" | "bot_message")
             ) {
                 return None;
             }
@@ -143,19 +193,33 @@ pub fn admit(
         "app_mention" => {}
         _ => return None,
     }
-    if event.get("bot_id").is_some() {
-        return None;
+    let text = str_field(event, "text").unwrap_or_default();
+    let mention = format!("<@{bot_user}>");
+    let mentioned = !bot_user.is_empty() && text.contains(&mention);
+    let bot_id = str_field(event, "bot_id");
+    if bot_id.is_some() || str_field(event, "subtype") == Some("bot_message") {
+        match config.allow_bots {
+            AllowBots::None => return None,
+            AllowBots::Mentions if !mentioned => return None,
+            AllowBots::Mentions | AllowBots::All => {}
+        }
     }
-    let user = str_field(event, "user")?;
-    if user == bot_user || !config.allowed_users.iter().any(|id| id == user) {
+    let user = str_field(event, "user").or(bot_id)?;
+    if user == bot_user
+        || !(config.allow_all_users || config.allowed_users.iter().any(|id| id == user))
+    {
         return None;
     }
     let channel = str_field(event, "channel")?;
     let ts = str_field(event, "ts")?;
-    let text = str_field(event, "text").unwrap_or_default();
-    let mention = format!("<@{bot_user}>");
-    let mentioned = !bot_user.is_empty() && text.contains(&mention);
     let dm = is_dm(event, channel);
+    if config.ignored_channels.iter().any(|id| id == channel)
+        || !(dm
+            || config.allowed_channels.is_empty()
+            || config.allowed_channels.iter().any(|id| id == channel))
+    {
+        return None;
+    }
     let reply_thread = reply_thread_ts(event);
     let team = str_field(payload, "team_id")
         .or_else(|| str_field(event, "team"))
@@ -172,14 +236,18 @@ pub fn admit(
                 return None;
             }
             let free = config.free_channels.iter().any(|id| id == channel);
-            if !free && !known_thread {
+            let implicit_thread = known_thread && !config.thread_require_mention;
+            if !free && !implicit_thread {
                 return None;
             }
         }
-        let thread = reply_thread.unwrap_or(ts).to_owned();
+        let thread = reply_thread
+            .or_else(|| config.auto_thread.then_some(ts))
+            .map(str::to_owned);
         (
-            SessionKey::new(PLATFORM, Some(team), channel, Some(thread.clone()), ""),
-            Some(thread),
+            SessionKey::new(PLATFORM, Some(team), channel, thread.clone(), ""),
+            // Without auto-threading omo still answered a top-level message in a thread.
+            Some(thread.unwrap_or_else(|| ts.to_owned())),
         )
     };
     let key = if bot_user.is_empty() {
@@ -187,12 +255,13 @@ pub fn admit(
     } else {
         key.with_bot_id(bot_user)
     };
-    let content = if bot_user.is_empty() {
+    let stripped = if bot_user.is_empty() {
         text.trim().to_owned()
     } else {
         text.replace(&mention, "").trim().to_owned()
     };
-    if content.is_empty() {
+    let (content, files) = super::slack_ingress::content_and_files(event, &stripped);
+    if content.is_empty() && files.is_empty() {
         return None;
     }
     Some(Admitted {
@@ -202,6 +271,10 @@ pub fn admit(
         message_ts: ts.to_owned(),
         user: user.to_owned(),
         text: content,
+        files,
+        event: event.clone(),
+        dm,
+        bot_user: bot_user.to_owned(),
     })
 }
 
@@ -272,6 +345,36 @@ fn first_delivery(channel: &str, ts: &str) -> bool {
         }
     }
     true
+}
+
+/// Persisted twin of [`first_delivery`]: the in-process set is empty after a restart, so a
+/// redelivered or re-swept event `ts` that was already answered must not start a second turn.
+async fn first_delivery_persisted(pool: &SqlitePool, channel: &str, ts: &str) -> bool {
+    let id = format!("{channel}/{ts}");
+    let now = chrono::Utc::now();
+    let recorded = async {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS slack_inbound_seen (id TEXT PRIMARY KEY NOT NULL, seen_at TEXT NOT NULL)",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("DELETE FROM slack_inbound_seen WHERE seen_at < ?")
+            .bind((now - chrono::Duration::days(7)).to_rfc3339())
+            .execute(pool)
+            .await?;
+        let inserted =
+            sqlx::query("INSERT OR IGNORE INTO slack_inbound_seen(id, seen_at) VALUES(?, ?)")
+                .bind(&id)
+                .bind(now.to_rfc3339())
+                .execute(pool)
+                .await?;
+        Ok::<_, sqlx::Error>(inserted.rows_affected() == 1)
+    }
+    .await;
+    recorded.unwrap_or_else(|error| {
+        tracing::warn!(%error, "slack inbound dedupe was not recorded; answering anyway");
+        true
+    })
 }
 
 fn session_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -379,23 +482,392 @@ async fn react(channel: &str, ts: &str, name: &str, add: bool) {
     }
 }
 
-/// Runs one admitted message through omo and posts the reply in its thread.
-pub async fn handle(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admitted) {
-    if !first_delivery(&admitted.channel, &admitted.message_ts) {
-        return;
+/// One omo turn for a session, from Slack or the dashboard.
+#[derive(Debug, Clone)]
+pub struct SessionTurn {
+    pub key: SessionKey,
+    /// Slack channel the replies go to; `None` for a dashboard-only (web) session.
+    pub reply_channel: Option<String>,
+    pub reply_thread: Option<String>,
+    /// Slack message that gets the 👀/✅/❌ status reactions.
+    pub status_ts: Option<String>,
+    pub text: String,
+}
+
+/// Where a session's assistant output goes: its Slack thread, or (for a web session) only the
+/// transcript the dashboard streams.
+async fn emit(pool: &SqlitePool, turn: &SessionTurn, text: &str) {
+    match &turn.reply_channel {
+        Some(channel) => post(channel, turn.reply_thread.as_deref(), text).await,
+        None => {
+            if let Err(error) =
+                super::transcript::record(pool, &turn.key.storage_key(), "assistant", text).await
+            {
+                tracing::warn!(%error, "dashboard reply was not stored");
+            }
+        }
     }
-    let lock = session_lock(&admitted.key.storage_key());
+}
+
+async fn status(turn: &SessionTurn, name: &str, add: bool) {
+    if let (Some(channel), Some(ts)) = (&turn.reply_channel, &turn.status_ts) {
+        react(channel, ts, name, add).await;
+    }
+}
+
+/// Runs one message through the session's omo thread, as omo-gateway's multiplexer did: the
+/// user message and the final reply land in the session transcript, the reply goes to the
+/// session's Slack thread (or the dashboard), and the engine thread id is kept for resume.
+/// Returns the final reply.
+pub async fn run_session_turn(
+    config: &SlackTurnConfig,
+    pool: &SqlitePool,
+    turn: SessionTurn,
+) -> Option<String> {
+    let storage_key = turn.key.storage_key();
+    let lock = session_lock(&storage_key);
     let _turn = lock.lock().await;
-    run_turn(
-        config,
-        pool,
-        &admitted.key,
-        &admitted.channel,
-        admitted.reply_thread.as_deref(),
-        &admitted.text,
-        Some(&admitted.message_ts),
+    if let Err(error) = super::transcript::record(pool, &storage_key, "user", &turn.text).await {
+        tracing::warn!(%error, "session message was not stored");
+    }
+    status(&turn, "eyes", true).await;
+    let mut state = load_state(pool, &turn.key).await.unwrap_or_default();
+    if state.system_prompt.is_none() {
+        state.system_prompt = inherited_system_prompt(pool, &turn.key).await;
+    }
+    let mut omo = config.omo.clone();
+    if let Some(path) = &config.token_path {
+        omo.token = omo_client::token_from_file(path);
+    }
+    let mut request = TurnRequest {
+        thread_id: state
+            .metadata
+            .get("omo_thread_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        system_prompt: state.system_prompt.clone(),
+        model: state
+            .active_model
+            .clone()
+            .or_else(|| config.default_model.clone()),
+        toolsets: state.enabled_toolsets.clone(),
+        text: turn.text.clone(),
+    };
+    // omo: cron deliveries mirrored into this session ride on the next turn as context,
+    // consumed only when that turn succeeds.
+    let briefings = crate::mirror::peek_pending_cron_briefings(pool, &storage_key)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "cron briefings were not loaded");
+            None
+        });
+    if let Some(briefings) = &briefings {
+        request.text = format!("{}\n{}", briefings.text, request.text);
+    }
+    let (progress, mut interim) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let relay_pool = pool.clone();
+    let relay_turn = turn.clone();
+    // omo's report claims: `[[measure ...]]` markers never reach the user; a Slack reply's
+    // claims are re-measured and corrected in its thread.
+    let claim_target = turn
+        .reply_channel
+        .clone()
+        .map(|channel| super::report_claims::Target {
+            session_key: storage_key.clone(),
+            channel,
+            thread: turn.reply_thread.clone(),
+            cwd: state
+                .metadata
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(std::path::PathBuf::from)
+                .or_else(|| crate::hub_env::var_os("HOME").map(std::path::PathBuf::from))
+                .unwrap_or_default(),
+        });
+    let claim_delay = super::report_claims::delay();
+    let relay_target = claim_target.clone();
+    let relay = super::slack::spawn_carrying_test_api(async move {
+        while let Some(text) = interim.recv().await {
+            let (text, claims) = if super::report_claims::enabled() {
+                super::report_claims::strip_interim(&text)
+            } else {
+                (text, Vec::new())
+            };
+            if !text.trim().is_empty() {
+                emit(&relay_pool, &relay_turn, &text).await;
+            }
+            if let Some(target) = &relay_target {
+                super::report_claims::record_and_schedule(&relay_pool, target, claims, claim_delay)
+                    .await;
+            }
+        }
+    });
+    tracing::info!(session = %storage_key, resume = request.thread_id.is_some(), "session turn started on omo app-server");
+    let started = std::time::Instant::now();
+    // omo's status message for the owner's long turns.
+    let status_message = match &turn.reply_channel {
+        Some(channel)
+            if super::turn_status::enabled()
+                && config
+                    .allowed_users
+                    .first()
+                    .is_some_and(|owner| super::turn_status::is_owner_lead(&turn.key, owner)) =>
+        {
+            Some(std::sync::Arc::new(tokio::sync::Mutex::new(Some(
+                super::turn_status::StatusMessage::new(
+                    &storage_key,
+                    channel,
+                    turn.reply_thread.as_deref(),
+                    &turn.text,
+                    chrono::Utc::now(),
+                    super::turn_status::interval(),
+                ),
+            ))))
+        }
+        _ => None,
+    };
+    let status_ticker = status_message.clone().map(|driver| {
+        super::slack::spawn_carrying_test_api(async move {
+            loop {
+                let due = match driver.lock().await.as_ref() {
+                    Some(message) => message.next_due(),
+                    None => return,
+                };
+                let wait = (due - chrono::Utc::now()).to_std().unwrap_or_default();
+                tokio::time::sleep(wait).await;
+                if let Some(message) = driver.lock().await.as_mut() {
+                    message.tick(chrono::Utc::now()).await;
+                }
+            }
+        })
+    });
+    let channel = turn.reply_channel.clone().unwrap_or_default();
+    let registration = super::turns::begin(&storage_key, &channel);
+    // Boxed: the app-server turn plus the approval wrapper is a large future, and an unboxed
+    // copy on each await level overflowed a 2 MiB worker stack in debug builds.
+    let run = Box::pin(async {
+        let first = omo_client::run_turn(&omo, &request, Some(progress.clone())).await;
+        // omo-gateway retries a side-effect-free failure once on the fallback model.
+        let fallback = omo_client::fallback_model();
+        if !omo_client::fallback_eligible(&first)
+            || request
+                .model
+                .as_deref()
+                .is_none_or(|model| model == fallback)
+        {
+            return first;
+        }
+        tracing::warn!(session = %storage_key, model = %fallback, error = ?first.as_ref().err().map(ToString::to_string), "retrying turn failure with fallback model");
+        let retry = omo_client::TurnRequest {
+            thread_id: match &first {
+                Ok(outcome) => Some(outcome.thread_id.clone()),
+                Err(_) => request.thread_id.clone(),
+            },
+            model: Some(fallback),
+            ..request.clone()
+        };
+        omo_client::run_turn(&omo, &retry, Some(progress)).await
+    });
+    let result = match &turn.reply_channel {
+        // omo's approval cards: a request full access would not allow is asked in the thread.
+        Some(channel) => {
+            let approver = std::sync::Arc::new(super::turn_approval::SlackApprover::new(
+                pool.clone(),
+                storage_key.clone(),
+                channel.clone(),
+                turn.reply_thread.clone(),
+            ));
+            super::turns::scope(
+                storage_key.clone(),
+                omo_client::with_approver(approver, run),
+            )
+            .await
+        }
+        None => super::turns::scope(storage_key.clone(), run).await,
+    };
+    drop(registration);
+    let _ = relay.await;
+    if let Some(ticker) = status_ticker {
+        ticker.abort();
+        let _ = ticker.await;
+    }
+    if let Some(driver) = status_message {
+        if let Some(message) = driver.lock().await.take() {
+            let outcome = match &result {
+                Ok(outcome) => omo_client::final_reply(outcome)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                Err(error) if error.to_string().contains(omo_client::STOPPED) => {
+                    Err("stopped by the owner".to_owned())
+                }
+                Err(error) => Err(error.to_string()),
+            };
+            message.finish(chrono::Utc::now(), outcome).await;
+        }
+    }
+    status(&turn, "eyes", false).await;
+    if matches!(&result, Err(error) if error.to_string().contains(omo_client::STOPPED)) {
+        tracing::info!(session = %storage_key, "session turn stopped by the owner");
+        return None;
+    }
+    let failure = match result {
+        Ok(outcome) => {
+            if let Some(briefings) = &briefings {
+                if let Err(error) =
+                    crate::mirror::mark_cron_briefings_injected(pool, &briefings.message_ids).await
+                {
+                    tracing::warn!(%error, "cron briefings were not marked injected");
+                }
+            }
+            state
+                .metadata
+                .insert("omo_thread_id".into(), json!(outcome.thread_id));
+            if let Err(error) = save_state(pool, &turn.key, &state).await {
+                tracing::warn!(%error, "session state was not saved");
+            }
+            match omo_client::final_reply(&outcome) {
+                Ok(reply) => {
+                    let (reply, claims) = match reply {
+                        Some(text) => {
+                            let (clean, claims) = super::report_claims::strip_reply(&text);
+                            (Some(clean).filter(|clean| !clean.trim().is_empty()), claims)
+                        }
+                        None => (None, Vec::new()),
+                    };
+                    if let Some(text) = &reply {
+                        emit(pool, &turn, text).await;
+                        if turn.reply_channel.is_some() {
+                            if let Err(error) =
+                                super::transcript::record(pool, &storage_key, "assistant", text)
+                                    .await
+                            {
+                                tracing::warn!(%error, "session reply was not stored");
+                            }
+                        }
+                    }
+                    if let Some(target) = &claim_target {
+                        super::report_claims::record_and_schedule(
+                            pool,
+                            target,
+                            claims,
+                            claim_delay,
+                        )
+                        .await;
+                    }
+                    status(&turn, "white_check_mark", true).await;
+                    tracing::info!(
+                        session = %storage_key,
+                        resumed = outcome.resumed,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        interim = outcome.messages_delivered,
+                        tool_calls = outcome.tool_calls,
+                        approvals_allowed = outcome.approvals_allowed,
+                        approvals_denied = outcome.approvals_denied,
+                        silent = reply.is_none(),
+                        "session turn replied"
+                    );
+                    return reply;
+                }
+                Err(error) => error.to_string(),
+            }
+        }
+        Err(error) => error.to_string(),
+    };
+    tracing::warn!(session = %storage_key, error = %failure, "session turn failed");
+    emit(pool, &turn, &omo_client::owner_failure_text(&failure)).await;
+    status(&turn, "x", true).await;
+    None
+}
+
+/// omo's ingress enrichment and prompt rendering for a real Slack message (synthetic turns,
+/// with a `Null` event, go through as typed).
+pub async fn prepare_prompt(pool: &SqlitePool, admitted: &Admitted) -> String {
+    prepare_prompt_in(pool, admitted, &super::slack_ingress::attachment_dir()).await
+}
+
+/// [`prepare_prompt`] with attachments saved under `dir`.
+pub async fn prepare_prompt_in(
+    pool: &SqlitePool,
+    admitted: &Admitted,
+    dir: &std::path::Path,
+) -> String {
+    if admitted.event.is_null() {
+        return admitted.text.clone();
+    }
+    let mut content = admitted.text.clone();
+    let mut files = admitted.files.clone();
+    let root_known = load_state(pool, &admitted.key).await.is_some();
+    super::slack_ingress::enrich(
+        &super::slack_ingress::Enrich {
+            event: &admitted.event,
+            channel: &admitted.channel,
+            ts: &admitted.message_ts,
+            dm: admitted.dm,
+            bot_user: &admitted.bot_user,
+            root_known,
+        },
+        &mut content,
+        &mut files,
     )
     .await;
+    super::slack_ingress::hydrate(
+        dir,
+        &admitted.channel,
+        &admitted.message_ts,
+        &mut content,
+        &mut files,
+    )
+    .await;
+    super::slack_ingress::render_prompt(
+        &content,
+        &files,
+        super::slack_ingress::ts_to_datetime(&admitted.message_ts),
+    )
+}
+
+/// Runs one admitted message through omo and posts the reply in its thread. Returns false when
+/// the message was already delivered (live and backfill both see it). Afterwards the Slack
+/// cursor moves past it, as omo's `advance_cursor` did, so a restart's backfill skips it.
+pub async fn handle(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admitted) -> bool {
+    if !first_delivery(&admitted.channel, &admitted.message_ts) {
+        return false;
+    }
+    if !first_delivery_persisted(pool, &admitted.channel, &admitted.message_ts).await {
+        tracing::info!(channel = %admitted.channel, ts = %admitted.message_ts, "slack message already answered before a restart; not replayed");
+        return false;
+    }
+    let text = Box::pin(prepare_prompt(pool, &admitted)).await;
+    let cursor = (
+        admitted.bot_user.clone(),
+        admitted.channel.clone(),
+        admitted.key.thread_id.clone().unwrap_or_default(),
+        admitted.message_ts.clone(),
+    );
+    Box::pin(run_session_turn(
+        config,
+        pool,
+        SessionTurn {
+            key: admitted.key,
+            reply_channel: Some(admitted.channel),
+            reply_thread: admitted.reply_thread,
+            status_ts: Some(admitted.message_ts),
+            text,
+        },
+    ))
+    .await;
+    let (bot, channel, thread, ts) = cursor;
+    if !bot.is_empty() {
+        // A top-level message that roots its own thread is read back from channel history.
+        let roots_own = !thread.is_empty() && thread == ts;
+        for thread in std::iter::once(thread.as_str()).chain(roots_own.then_some("")) {
+            if let Err(error) =
+                super::slack_backfill::write_cursor(pool, &bot, &channel, thread, &ts).await
+            {
+                tracing::debug!(%error, channel, "failed to advance Slack cursor");
+            }
+        }
+    }
+    true
 }
 
 /// omo's system admission (`EventOrigin::System`): a lane event becomes a turn in `key`'s
@@ -412,118 +884,25 @@ pub async fn system_turn(
         return false;
     };
     tokio::spawn(async move {
-        let _turn = guard;
+        // The admission lock is held until this task starts, then released before
+        // `run_session_turn` takes the same lock for the whole turn.
+        drop(guard);
         let channel = key.channel_id.clone();
         let thread = key.thread_id.clone().filter(|thread| !thread.is_empty());
-        run_turn(
+        let _ = run_session_turn(
             config,
             &pool,
-            &key,
-            &channel,
-            thread.as_deref(),
-            &text,
-            None,
+            SessionTurn {
+                reply_channel: Some(channel),
+                reply_thread: thread,
+                status_ts: None,
+                key,
+                text,
+            },
         )
         .await;
     });
     true
-}
-
-async fn run_turn(
-    config: &SlackTurnConfig,
-    pool: &SqlitePool,
-    key: &SessionKey,
-    channel_id: &str,
-    reply_thread: Option<&str>,
-    text: &str,
-    message_ts: Option<&str>,
-) {
-    let storage_key = key.storage_key();
-    if let Some(ts) = message_ts {
-        react(channel_id, ts, "eyes", true).await;
-    }
-    let mut state = load_state(pool, key).await.unwrap_or_default();
-    if state.system_prompt.is_none() {
-        state.system_prompt = inherited_system_prompt(pool, key).await;
-    }
-    let mut omo = config.omo.clone();
-    if let Some(path) = &config.token_path {
-        omo.token = omo_client::token_from_file(path);
-    }
-    let request = TurnRequest {
-        thread_id: state
-            .metadata
-            .get("omo_thread_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        system_prompt: state.system_prompt.clone(),
-        model: state
-            .active_model
-            .clone()
-            .or_else(|| config.default_model.clone()),
-        toolsets: state.enabled_toolsets.clone(),
-        text: text.to_owned(),
-    };
-    let (progress, mut interim) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let channel = channel_id.to_owned();
-    let thread = reply_thread.map(str::to_owned);
-    let relay = super::slack::spawn_carrying_test_api(async move {
-        while let Some(text) = interim.recv().await {
-            post(&channel, thread.as_deref(), &text).await;
-        }
-    });
-    tracing::info!(session = %storage_key, resume = request.thread_id.is_some(), system = message_ts.is_none(), "slack turn started on omo app-server");
-    let started = std::time::Instant::now();
-    let result = omo_client::run_turn(&omo, &request, Some(progress)).await;
-    let _ = relay.await;
-    if let Some(ts) = message_ts {
-        react(channel_id, ts, "eyes", false).await;
-    }
-    let failed = |error: String| async move {
-        tracing::warn!(session = %storage_key, %error, "slack turn failed");
-        post(
-            channel_id,
-            reply_thread,
-            &format!("⚠️ omo turn failed: {error}"),
-        )
-        .await;
-        if let Some(ts) = message_ts {
-            react(channel_id, ts, "x", true).await;
-        }
-    };
-    match result {
-        Ok(outcome) => {
-            state
-                .metadata
-                .insert("omo_thread_id".into(), json!(outcome.thread_id));
-            if let Err(error) = save_state(pool, key, &state).await {
-                tracing::warn!(%error, "slack session state was not saved");
-            }
-            match omo_client::final_reply(&outcome) {
-                Ok(reply) => {
-                    if let Some(text) = &reply {
-                        post(channel_id, reply_thread, text).await;
-                    }
-                    if let Some(ts) = message_ts {
-                        react(channel_id, ts, "white_check_mark", true).await;
-                    }
-                    tracing::info!(
-                        session = %key.storage_key(),
-                        resumed = outcome.resumed,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        interim = outcome.messages_delivered,
-                        tool_calls = outcome.tool_calls,
-                        approvals_allowed = outcome.approvals_allowed,
-                        approvals_denied = outcome.approvals_denied,
-                        silent = reply.is_none(),
-                        "slack turn replied"
-                    );
-                }
-                Err(error) => failed(error.to_string()).await,
-            }
-        }
-        Err(error) => failed(error.to_string()).await,
-    }
 }
 
 /// omo-gateway's lane-event dispatcher on the Slack turn path: every 5s queued lane events
@@ -548,6 +927,37 @@ pub async fn serve_lane_events(config: &'static SlackTurnConfig, pool: SqlitePoo
             tracing::warn!(%error, "slack outbox was not drained");
         }
     }
+}
+
+/// The dashboard's direct chat (omo `POST /api/sessions/{id}/chat` and the websocket
+/// `message`): the owner's message runs as a turn of that session. A Slack session answers in
+/// its Slack thread; a web session answers into the transcript the dashboard streams.
+pub fn submit_dashboard_message(pool: &SqlitePool, key: SessionKey, text: String) -> bool {
+    let Some(config) = installed() else {
+        return false;
+    };
+    let pool = pool.clone();
+    super::slack::spawn_carrying_test_api(async move {
+        run_dashboard_turn(config, &pool, key, text).await;
+    });
+    true
+}
+
+pub async fn run_dashboard_turn(
+    config: &SlackTurnConfig,
+    pool: &SqlitePool,
+    key: SessionKey,
+    text: String,
+) -> Option<String> {
+    let slack = key.platform == PLATFORM;
+    let turn = SessionTurn {
+        reply_channel: slack.then(|| key.channel_id.clone()),
+        reply_thread: if slack { key.thread_id.clone() } else { None },
+        status_ts: None,
+        key,
+        text,
+    };
+    Box::pin(run_session_turn(config, pool, turn)).await
 }
 
 /// Posts queued Slack outbox rows from the last day. A row addressed to a name that is not a
@@ -604,7 +1014,9 @@ pub async fn intercept(config: &'static SlackTurnConfig, pool: &SqlitePool, fram
         return false;
     };
     let pool = pool.clone();
-    super::slack::spawn_carrying_test_api(async move { handle(config, &pool, admitted).await });
+    super::slack::spawn_carrying_test_api(async move {
+        handle(config, &pool, admitted).await;
+    });
     true
 }
 
@@ -619,6 +1031,12 @@ mod tests {
             allowed_users: vec!["UOWNER".into()],
             free_channels: vec!["CHOME".into()],
             default_model: None,
+            allowed_channels: Vec::new(),
+            ignored_channels: Vec::new(),
+            thread_require_mention: false,
+            auto_thread: true,
+            allow_bots: AllowBots::None,
+            allow_all_users: false,
         }
     }
 
@@ -697,5 +1115,14 @@ mod tests {
     fn redelivered_events_run_once() {
         assert!(first_delivery("C9", "9.9"));
         assert!(!first_delivery("C9", "9.9"));
+    }
+
+    #[tokio::test]
+    async fn a_message_answered_before_a_restart_is_not_replayed() {
+        let pool = crate::storage::memory().await.unwrap();
+        assert!(first_delivery_persisted(&pool, "C1", "1.000001").await);
+        assert!(!first_delivery_persisted(&pool, "C1", "1.000001").await);
+        assert!(first_delivery_persisted(&pool, "C1", "1.000002").await);
+        assert!(first_delivery_persisted(&pool, "C2", "1.000001").await);
     }
 }

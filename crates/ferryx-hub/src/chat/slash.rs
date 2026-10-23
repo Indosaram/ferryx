@@ -142,21 +142,7 @@ pub async fn execute(env: &SlashEnv<'_>, invocation: &SlashInvocation) -> Result
                 "Session context and memory cleared.".to_owned(),
             ))
         }
-        SlackCommand::Stop => {
-            env.control
-                .execute(
-                    None,
-                    AgentOp::Stop {
-                        session_id: env.meta_session_id.to_owned(),
-                        request_id: format!("omo-stop-{}", invocation.user_id),
-                    },
-                )
-                .await?;
-            remember(env.pool, &format!("suspended:{}", key.storage_key()), "1").await?;
-            Ok(SlashReply::private(
-                "🛑 Stopped active turn and marked session suspended.",
-            ))
-        }
+        SlackCommand::Stop => stop(env, invocation, &key).await,
         SlackCommand::Status => status(env).await,
         SlackCommand::Tools => Ok(SlashReply::public(format!(
             "Tools: {}",
@@ -165,33 +151,14 @@ pub async fn execute(env: &SlashEnv<'_>, invocation: &SlashInvocation) -> Result
         SlackCommand::Skill { action, arg } => skill(env, &action, arg.as_deref()).await,
         SlackCommand::Memory { action, arg } => memory(env, &key, &action, arg.as_deref()).await,
         SlackCommand::Cron { action } => cron(env, &action).await,
-        SlackCommand::Steer(text) => {
-            let prompt = format!("[steer] {text}");
-            env.control
-                .execute(
-                    None,
-                    AgentOp::Send {
-                        session_id: env.meta_session_id.to_owned(),
-                        text: prompt,
-                        request_id: format!("omo-steer-{}", invocation.user_id),
-                    },
-                )
-                .await?;
-            Ok(SlashReply::private(format!(
-                "🎯 Steering guidance applied to the running turn: `{text}`"
-            )))
-        }
+        SlackCommand::Steer(text) => steer(env, invocation, &key, &text).await,
         SlackCommand::Undo => undo(env, &key).await,
         SlackCommand::Retry => retry(env, &key).await,
         SlackCommand::Compress => compress(env, &key).await,
-        SlackCommand::Title(text) => {
-            remember(env.pool, &format!("title:{}", key.storage_key()), &text).await?;
-            Ok(SlashReply::public(format!("Thread title set to `{text}`.")))
+        SlackCommand::Title(text) => title(env, invocation, &text).await,
+        SlackCommand::Thread { name, message } => {
+            thread(env, invocation, &key, &name, message).await
         }
-        SlackCommand::Thread { name, message } => Ok(SlashReply::public(match message {
-            Some(message) => format!("Thread `{name}`: {message}"),
-            None => format!("Thread `{name}`."),
-        })),
         SlackCommand::Deny(reason) => deny(env, &key, reason.as_deref()).await,
         SlackCommand::Yolo(mode) => yolo(env, &key, mode.as_deref()).await,
         SlackCommand::Pair(code) => pair(env, invocation, &code).await,
@@ -215,6 +182,338 @@ pub async fn execute(env: &SlashEnv<'_>, invocation: &SlashInvocation) -> Result
                 ))),
             }
         }
+    }
+}
+
+#[cfg_attr(not(feature = "hub-slack"), allow(dead_code))]
+const THREAD_ONLY: &str =
+    "이 명령은 대화 스레드 안에서 실행해 주세요. 채널 최상위에서는 새 채널 세션을 만들지 않습니다.";
+
+/// Which session a stop or steer means. Inside a thread or DM it is that session. At a
+/// channel's top level Slack sends no thread, so it is the one thread with a live turn there.
+fn live_turn_target(
+    invocation: &SlashInvocation,
+    key: &SessionKey,
+) -> std::result::Result<Option<String>, &'static str> {
+    let storage = key.storage_key();
+    if super::turns::is_active(&storage) {
+        return Ok(Some(storage));
+    }
+    if invocation.is_dm() || invocation.thread_ts.is_some() {
+        return Ok(None);
+    }
+    let mut candidates = super::turns::active_in_channel(&invocation.channel_id);
+    match candidates.len() {
+        0 => Err("이 채널에 진행 중인 대화가 없습니다."),
+        1 => Ok(candidates.pop()),
+        _ => Err(
+            "진행 중인 대화가 여러 개입니다. 멈추거나 거절할 대화의 스레드 안에서 실행해 주세요.",
+        ),
+    }
+}
+
+/// `/omo-stop`: interrupts the session's running omo turn (`turn/interrupt`) and marks the
+/// session suspended. Without the omo app-server path, the meta pane is stopped instead.
+async fn stop(
+    env: &SlashEnv<'_>,
+    invocation: &SlashInvocation,
+    key: &SessionKey,
+) -> Result<SlashReply> {
+    let target = match live_turn_target(invocation, key) {
+        Ok(target) => target,
+        Err(message) if omo_turns_enabled() => return Ok(SlashReply::private(message)),
+        Err(_) => None,
+    };
+    let session = target.clone().unwrap_or_else(|| key.storage_key());
+    let interrupted = target.as_deref().is_some_and(super::turns::stop);
+    remember(env.pool, &format!("suspended:{session}"), "1").await?;
+    if interrupted {
+        return Ok(SlashReply::private(
+            "🛑 Stopped active turn and marked session suspended.",
+        ));
+    }
+    if omo_turns_enabled() {
+        return Ok(SlashReply::private(
+            "🛑 No active turn running; session marked suspended.",
+        ));
+    }
+    env.control
+        .execute(
+            None,
+            AgentOp::Stop {
+                session_id: env.meta_session_id.to_owned(),
+                request_id: format!("omo-stop-{}", invocation.user_id),
+            },
+        )
+        .await?;
+    Ok(SlashReply::private(
+        "🛑 Stopped active turn and marked session suspended.",
+    ))
+}
+
+fn omo_turns_enabled() -> bool {
+    #[cfg(feature = "hub-slack")]
+    {
+        super::slack_turn::installed().is_some()
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        false
+    }
+}
+
+/// `/omo-steer`: guidance goes into the running turn (`turn/steer`); with no turn running, or
+/// one the engine will not steer, it starts the session's next turn instead (omo-gateway).
+async fn steer(
+    env: &SlashEnv<'_>,
+    invocation: &SlashInvocation,
+    key: &SessionKey,
+    text: &str,
+) -> Result<SlashReply> {
+    let prompt = format!("[Steering] {}", text.trim());
+    #[cfg(feature = "hub-slack")]
+    if let Some(config) = super::slack_turn::installed() {
+        let target = match live_turn_target(invocation, key) {
+            Ok(Some(target)) => target,
+            Ok(None) if invocation.is_dm() || invocation.thread_ts.is_some() => key.storage_key(),
+            _ => return Ok(SlashReply::private(THREAD_ONLY)),
+        };
+        if let Some((thread_id, turn_id)) = super::turns::ids(&target) {
+            let mut omo = config.omo.clone();
+            if let Some(path) = &config.token_path {
+                omo.token = crate::meta::omo_client::token_from_file(path);
+            }
+            match crate::meta::omo_client::steer(&omo, &thread_id, &turn_id, &prompt).await {
+                Ok(true) => {
+                    return Ok(SlashReply::private(format!(
+                        "🎯 Steering guidance applied to the running turn: `{text}`"
+                    )))
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "turn/steer failed; queuing a new turn"),
+            }
+        }
+        let session = SessionKey::from_storage_key(&target)
+            .map_err(|error| crate::error::HubError::message(error.to_string()))?;
+        let admitted = super::slack_turn::Admitted {
+            channel: session.channel_id.clone(),
+            reply_thread: session.thread_id.clone(),
+            message_ts: format!("steer-{}", uuid::Uuid::new_v4()),
+            user: invocation.user_id.clone(),
+            text: prompt,
+            key: session,
+            files: Vec::new(),
+            event: serde_json::Value::Null,
+            dm: false,
+            bot_user: String::new(),
+        };
+        let pool = env.pool.clone();
+        super::slack::spawn_carrying_test_api(async move {
+            super::slack_turn::handle(config, &pool, admitted).await;
+        });
+        return Ok(SlashReply::private(format!(
+            "🎯 Steering guidance queued: `{text}`"
+        )));
+    }
+    let _ = key;
+    env.control
+        .execute(
+            None,
+            AgentOp::Send {
+                session_id: env.meta_session_id.to_owned(),
+                text: prompt,
+                request_id: format!("omo-steer-{}", invocation.user_id),
+            },
+        )
+        .await?;
+    Ok(SlashReply::private(format!(
+        "🎯 Steering guidance applied to the running turn: `{text}`"
+    )))
+}
+
+const THREAD_ROOT_PREFIX: &str = "🧵 *";
+/// Slack slash payloads carry no `thread_ts`, so `/omo-title` must be told its thread explicitly.
+const TITLE_NO_THREAD: &str = "❌ `/omo-title` cannot tell which thread you mean: Slack sends no `thread_ts` with a slash command, even inside a thread. Run `/omo-title <thread link or timestamp> <title>`.";
+
+#[cfg_attr(not(feature = "hub-slack"), allow(dead_code))]
+fn thread_root_text(name: &str) -> String {
+    format!("{THREAD_ROOT_PREFIX}{name}*")
+}
+
+#[cfg_attr(not(feature = "hub-slack"), allow(dead_code))]
+fn escape_mrkdwn(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Reads the leading `<thread link or timestamp>` of `/omo-title` text: a bare Slack ts
+/// (`1700000000.000100`) or a permalink to the same channel
+/// (`https://<workspace>.slack.com/archives/<channel>/p1700000000000100`).
+fn explicit_thread(text: &str, channel: &str) -> Option<(String, String)> {
+    let (target, title) = text.trim().split_once(char::is_whitespace)?;
+    let target = target.trim_start_matches('<').trim_end_matches('>');
+    let target = target.split('|').next()?;
+    let timestamp = if target.starts_with("https://") {
+        let (_, path) = target.split_once("://")?.1.split_once('/')?;
+        let path = path.split(['?', '#']).next()?;
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() != 3 || parts[0] != "archives" || parts[1] != channel {
+            return None;
+        }
+        let digits = parts[2].strip_prefix('p')?;
+        if digits.len() <= 6 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let (seconds, micros) = digits.split_at(digits.len() - 6);
+        format!("{seconds}.{micros}")
+    } else {
+        let (seconds, fraction) = target.split_once('.')?;
+        if seconds.is_empty()
+            || fraction.is_empty()
+            || !seconds
+                .bytes()
+                .chain(fraction.bytes())
+                .all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        target.to_owned()
+    };
+    Some((timestamp, title.trim().to_owned()))
+}
+
+/// A stored thread session makes ingress treat unmentioned replies in it as the bot's.
+#[cfg_attr(not(feature = "hub-slack"), allow(dead_code))]
+async fn ensure_session(pool: &SqlitePool, key: &SessionKey) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO sessions (session_key, platform, guild_id, channel_id, thread_id, user_id, state_json)
+         VALUES (?, ?, ?, ?, ?, ?, '{}') ON CONFLICT(session_key) DO NOTHING",
+    )
+    .bind(key.storage_key())
+    .bind(&key.platform)
+    .bind(&key.guild_id)
+    .bind(&key.channel_id)
+    .bind(&key.thread_id)
+    .bind(&key.user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// `/omo-thread <name> [message]`: Slack has no thread objects, so the thread is a root
+/// message whose `ts` keys the session. A starter message runs as the thread's first turn.
+async fn thread(
+    env: &SlashEnv<'_>,
+    invocation: &SlashInvocation,
+    key: &SessionKey,
+    name: &str,
+    message: Option<String>,
+) -> Result<SlashReply> {
+    if invocation.is_dm() {
+        return Ok(SlashReply::private(
+            "❌ Threads can only be created in channels, not in DMs.",
+        ));
+    }
+    if invocation.thread_ts.is_some() {
+        return Ok(SlashReply::private(
+            "❌ Cannot create a thread inside an existing thread.",
+        ));
+    }
+    #[cfg(feature = "hub-slack")]
+    {
+        let root_ts =
+            super::slack_web::post_message(&invocation.channel_id, &thread_root_text(name)).await?;
+        let thread_key = SessionKey {
+            thread_id: Some(root_ts.clone()),
+            ..key.clone()
+        };
+        ensure_session(env.pool, &thread_key).await?;
+        let link = match super::slack_web::permalink(&invocation.channel_id, &root_ts).await {
+            Ok(url) => format!("<{url}|{}>", escape_mrkdwn(name)),
+            Err(error) => {
+                tracing::warn!(%error, channel = %invocation.channel_id, "slack thread permalink lookup failed");
+                format!("*{name}*")
+            }
+        };
+        if let Some(starter) = message.filter(|text| !text.trim().is_empty()) {
+            let Some(config) = super::slack_turn::installed() else {
+                return Ok(SlashReply::public(format!(
+                    "❌ Created thread {link} but could not start a session: the omo app-server is not configured"
+                )));
+            };
+            let admitted = super::slack_turn::Admitted {
+                key: thread_key,
+                channel: invocation.channel_id.clone(),
+                reply_thread: Some(root_ts.clone()),
+                message_ts: root_ts,
+                user: invocation.user_id.clone(),
+                text: starter,
+                files: Vec::new(),
+                event: serde_json::Value::Null,
+                dm: false,
+                bot_user: String::new(),
+            };
+            let pool = env.pool.clone();
+            super::slack::spawn_carrying_test_api(async move {
+                super::slack_turn::handle(config, &pool, admitted).await;
+            });
+        }
+        Ok(SlashReply::public(format!("🧵 Created thread {link}.")))
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (env, key, message);
+        Ok(SlashReply::private(format!(
+            "❌ Cannot create `{name}`: this hub was built without Slack."
+        )))
+    }
+}
+
+/// `/omo-title`: renames a thread made by `/omo-thread` by editing its bot-authored root.
+/// Slack slash payloads carry no `thread_ts` (even when typed inside a thread), so the
+/// thread may be named explicitly: `/omo-title <thread link or ts> <text>`.
+async fn title(env: &SlashEnv<'_>, invocation: &SlashInvocation, text: &str) -> Result<SlashReply> {
+    let explicit =
+        explicit_thread(text, &invocation.channel_id).filter(|(_, title)| !title.trim().is_empty());
+    let (thread_ts, text): (String, &str) = match (&invocation.thread_ts, &explicit) {
+        (Some(thread_ts), _) => (thread_ts.clone(), text),
+        (None, Some((thread_ts, title))) => (thread_ts.clone(), title.as_str()),
+        (None, None) => return Ok(SlashReply::private(TITLE_NO_THREAD)),
+    };
+    #[cfg(feature = "hub-slack")]
+    {
+        let root = super::slack_web::thread_root(&invocation.channel_id, &thread_ts).await?;
+        let created_by_thread = root.as_ref().is_some_and(|message| {
+            message["ts"].as_str() == Some(thread_ts.as_str())
+                && message["user"].as_str() == Some(env.bot_user_id)
+                && message["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with(THREAD_ROOT_PREFIX))
+        });
+        if !created_by_thread {
+            return Ok(SlashReply::private(
+                "❌ Only threads created by `/omo-thread` can be renamed.",
+            ));
+        }
+        let title = text.trim();
+        super::slack_web::update_message(
+            &invocation.channel_id,
+            &thread_ts,
+            &thread_root_text(title),
+        )
+        .await?;
+        Ok(SlashReply::public(format!(
+            "🏷️ Thread renamed to `{title}`."
+        )))
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (env, thread_ts);
+        Ok(SlashReply::private(format!(
+            "❌ Cannot rename to `{}`: this hub was built without Slack.",
+            text.trim()
+        )))
     }
 }
 
@@ -800,5 +1099,171 @@ mod tests {
         assert!(refused.text.contains("not authorized"));
         let line = huddle_line(&HuddleAction::Join("https://slack.example/huddle".into()));
         assert!(line.contains("\"op\":\"join\""));
+    }
+
+    #[test]
+    fn explicit_thread_accepts_ts_and_permalinks() {
+        assert_eq!(
+            explicit_thread("1700000000.000100 Renamed", "C1"),
+            Some(("1700000000.000100".into(), "Renamed".into()))
+        );
+        assert_eq!(
+            explicit_thread(
+                "<https://acme.slack.com/archives/C1/p1700000000000100> Renamed",
+                "C1"
+            ),
+            Some(("1700000000.000100".into(), "Renamed".into()))
+        );
+        assert_eq!(
+            explicit_thread(
+                "https://acme.slack.com/archives/C1/p1700000000000100?thread_ts=1 Renamed",
+                "C1"
+            ),
+            Some(("1700000000.000100".into(), "Renamed".into()))
+        );
+        assert_eq!(explicit_thread("Renamed", "C1"), None);
+        assert_eq!(
+            explicit_thread(
+                "https://acme.slack.com/archives/C2/p1700000000000100 X",
+                "C1"
+            ),
+            None
+        );
+        assert_eq!(explicit_thread("1700.1 ", "C1"), None);
+    }
+
+    #[tokio::test]
+    async fn thread_and_title_refuse_dms_nested_threads_and_unnamed_threads() {
+        let pool = crate::storage::memory().await.unwrap();
+        let control = RecordingControl::default();
+        let env = SlashEnv {
+            pool: &pool,
+            owner_id: "UOWNER",
+            bot_user_id: "B1",
+            control: &control,
+            meta_session_id: "meta",
+            huddle_enabled: false,
+            model: None,
+        };
+        let dm = SlashInvocation {
+            channel_id: "D1".into(),
+            ..invocation("/omo-thread", "plan")
+        };
+        assert!(execute(&env, &dm)
+            .await
+            .unwrap()
+            .text
+            .contains("not in DMs"));
+        let nested = SlashInvocation {
+            thread_ts: Some("1.1".into()),
+            ..invocation("/omo-thread", "plan")
+        };
+        assert!(execute(&env, &nested)
+            .await
+            .unwrap()
+            .text
+            .contains("inside an existing thread"));
+        let unnamed = execute(&env, &invocation("/omo-title", "New"))
+            .await
+            .unwrap();
+        assert!(unnamed.ephemeral);
+        assert_eq!(unnamed.text, TITLE_NO_THREAD);
+    }
+
+    /// e2e against a mock Slack Web API: `/omo-thread` posts the root, stores the thread
+    /// session and links it; `/omo-title` renames only a root the bot made with `/omo-thread`.
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn e2e_omo_thread_creates_a_thread_and_omo_title_renames_it() {
+        let (base, calls) = crate::chat::slack_web::mock::serve("B1").await;
+        let pool = crate::storage::memory().await.unwrap();
+        let control = RecordingControl::default();
+        let env = SlashEnv {
+            pool: &pool,
+            owner_id: "UOWNER",
+            bot_user_id: "B1",
+            control: &control,
+            meta_session_id: "meta",
+            huddle_enabled: false,
+            model: None,
+        };
+        crate::chat::slack::with_test_api(base, "xoxb-test".into(), async {
+            let created = execute(&env, &invocation("/omo-thread", "Launch <plan>"))
+                .await
+                .unwrap();
+            assert!(!created.ephemeral);
+            assert!(created.text.starts_with("🧵 Created thread <https://acme.slack.com/archives/C1/p"), "{}", created.text);
+            assert!(created.text.contains("|Launch &lt;plan&gt;>"), "{}", created.text);
+            let (method, body) = calls.lock().unwrap()[0].clone();
+            assert_eq!(method, "chat.postMessage");
+            assert_eq!(body["channel"], "C1");
+            assert_eq!(body["text"], "🧵 *Launch <plan>*");
+            let root_ts = "1700000000.000001";
+            let stored: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sessions WHERE platform = 'slack' AND channel_id = 'C1' AND thread_id = ?",
+            )
+            .bind(root_ts)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(stored, 1, "replies in the new thread reach the bot without a mention");
+
+            let renamed = execute(&env, &invocation("/omo-title", &format!("{root_ts} Shipped")))
+                .await
+                .unwrap();
+            assert_eq!(renamed.text, "🏷️ Thread renamed to `Shipped`.");
+            let update = calls
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(method, _)| method == "chat.update")
+                .cloned()
+                .expect("chat.update");
+            assert_eq!(update.1["ts"], root_ts);
+            assert_eq!(update.1["text"], "🧵 *Shipped*");
+
+            let foreign = execute(&env, &invocation("/omo-title", "1699999999.000001 Nope"))
+                .await
+                .unwrap();
+            assert!(foreign.text.contains("Only threads created by `/omo-thread`"));
+        })
+        .await;
+    }
+
+    #[test]
+    fn a_top_level_stop_picks_the_one_live_thread_in_the_channel() {
+        let top = SlashInvocation {
+            channel_id: "C-live".into(),
+            ..invocation("/omo-stop", "")
+        };
+        let key = session_key(&top, "B1");
+        assert_eq!(
+            live_turn_target(&top, &key),
+            Err("이 채널에 진행 중인 대화가 없습니다.")
+        );
+        let thread_key = SessionKey {
+            thread_id: Some("1.1".into()),
+            ..key.clone()
+        };
+        let guard = super::super::turns::begin(&thread_key.storage_key(), "C-live");
+        assert_eq!(
+            live_turn_target(&top, &key),
+            Ok(Some(thread_key.storage_key()))
+        );
+        let other = super::super::turns::begin("other-live-thread", "C-live");
+        assert!(
+            live_turn_target(&top, &key).is_err(),
+            "two live threads are ambiguous"
+        );
+        drop((guard, other));
+        let in_thread = SlashInvocation {
+            channel_id: "C-live".into(),
+            thread_ts: Some("1.1".into()),
+            ..invocation("/omo-stop", "")
+        };
+        assert_eq!(
+            live_turn_target(&in_thread, &session_key(&in_thread, "B1")),
+            Ok(None)
+        );
     }
 }

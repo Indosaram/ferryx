@@ -71,6 +71,16 @@ fn slack_test_api() -> Option<(String, String)> {
     SLACK_API_TEST.try_with(|pair| pair.clone()).ok()
 }
 
+/// Runs `future` with the Slack Web API pointed at a test stand-in (base URL, token).
+#[cfg(all(test, feature = "hub-slack"))]
+pub(crate) async fn with_test_api<F: std::future::Future>(
+    base: String,
+    token: String,
+    future: F,
+) -> F::Output {
+    SLACK_API_TEST.scope((base, token), future).await
+}
+
 /// Spawns `future`, keeping a test's Slack API stand-in visible inside the new task.
 #[cfg(feature = "hub-slack")]
 pub(crate) fn spawn_carrying_test_api<F>(future: F) -> tokio::task::JoinHandle<()>
@@ -261,6 +271,12 @@ pub(crate) async fn apply_frame_routed(
     let frame_value: Value = serde_json::from_str(text)
         .map_err(|error| HubError::message(format!("slack frame: {error}")))?;
     if frame_value.get("type").and_then(Value::as_str) == Some("interactive") {
+        #[cfg(feature = "hub-slack")]
+        if let (Some(turns), Some(payload)) = (turns, frame_value.get("payload")) {
+            if super::turn_approval::handle_click(payload, &turns.allowed_users).await {
+                return Ok(SlackFrame::Ignore);
+            }
+        }
         return apply_interactive(&frame_value, owner_id, control).await;
     }
     let (_ack, frame) = handle_frame(text, owner_id)?;
@@ -268,6 +284,24 @@ pub(crate) async fn apply_frame_routed(
         if let Some(pool) = pool {
             if let Err(error) = crate::inbox_watch::note_gateway(pool, inbound).await {
                 tracing::warn!(%error, "slack message was not recorded for the inbox");
+            }
+            // omo: the owner's reply in a finished lane's thread reopens that lane.
+            if let (Some(thread_ts), Some(message_id)) =
+                (inbound.thread_id.as_deref(), inbound.event_id.as_deref())
+            {
+                let reply = crate::lanes::owner_replies::OwnerReply {
+                    channel: &inbound.channel_id,
+                    thread_ts,
+                    author: &inbound.user_id,
+                    owner: owner_id,
+                    message_id,
+                    text: &inbound.text,
+                };
+                match crate::lanes::owner_replies::intercept(pool, control, &reply).await {
+                    Ok(true) => return Ok(SlackFrame::Ignore),
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(%error, "lane owner reply was not applied"),
+                }
             }
         }
     }
@@ -1663,6 +1697,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_owner_reply_in_a_closed_lane_thread_reopens_the_lane_instead_of_routing() {
+        use crate::lanes::state::{insert_lane, set_pane, transition, LaneStatus};
+        let pool = crate::storage::memory().await.unwrap();
+        insert_lane(&pool, "ledger", "Ledger", "lead", "/tmp", "file marker")
+            .await
+            .unwrap();
+        set_pane(&pool, "ledger", "lane-pane").await.unwrap();
+        transition(&pool, "ledger", LaneStatus::Working, Some("launched"))
+            .await
+            .unwrap();
+        transition(&pool, "ledger", LaneStatus::Closed, Some("forced: done"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE lanes SET thread_channel_id = 'slack:C1:50.1' WHERE key = 'ledger'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let frame = r#"{"envelope_id":"e9","type":"events_api","payload":{"event":{"type":"message","channel":"C1","user":"UOWNER","text":"one more thing","ts":"60.1","thread_ts":"50.1"}}}"#;
+        let control = RecordingControl::default();
+        let routed = apply_frame_routed(
+            frame,
+            "UOWNER",
+            "meta-pane",
+            &crate::chat::router::ProfileRouter::new(vec![]),
+            &control,
+            Some(&pool),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(routed, SlackFrame::Ignore));
+        let sends: Vec<String> = control
+            .ops()
+            .into_iter()
+            .filter_map(|(_, op)| match op {
+                AgentOp::Send { session_id, .. } => Some(session_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sends, vec!["lane-pane".to_owned()]);
+        let status: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key = 'ledger'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "working");
+    }
+
+    #[tokio::test]
     async fn an_inbound_frame_is_fenced_and_sent_to_the_meta_pane() {
         let frame = r#"{"envelope_id":"e3","type":"events_api","payload":{"event":{"type":"message","channel":"C1","user":"U1","text":"status?","ts":"1.2"}}}"#;
         let control = RecordingControl::default();
@@ -1802,6 +1885,7 @@ mod tests {
             messages: vec!["looking now".into(), "**All good**: 3 items".into()],
             resume_error: None,
             approval: true,
+            approval_command: None,
             thread_id: "thr-e2e".into(),
             queued_ticks: 0,
             tick: std::time::Duration::ZERO,
@@ -1819,6 +1903,12 @@ mod tests {
             allowed_users: vec!["UOWNER".into()],
             free_channels: vec!["CHOME".into()],
             default_model: Some("model-x".into()),
+            allowed_channels: Vec::new(),
+            ignored_channels: Vec::new(),
+            thread_require_mention: false,
+            auto_thread: true,
+            allow_bots: crate::chat::slack_turn::AllowBots::None,
+            allow_all_users: false,
         }));
         let pool = crate::storage::memory().await.unwrap();
         let control = crate::agent_control::RecordingControl::default();
@@ -1979,9 +2069,11 @@ mod tests {
             [
                 "initialize",
                 "thread/start",
+                "thread/settings/update",
                 "turn/start",
                 "initialize",
                 "thread/resume",
+                "thread/settings/update",
                 "turn/start"
             ]
         );
@@ -1992,7 +2084,11 @@ mod tests {
         assert_eq!(resume["params"]["threadId"], "thr-e2e");
         let turn = frames.iter().find(|f| f["method"] == "turn/start").unwrap();
         assert_eq!(turn["params"]["model"], "model-x");
-        assert_eq!(turn["params"]["input"][0]["text"], "how are things?");
+        // omo prefixes each Slack prompt with the message's own time (slack_ingress).
+        assert_eq!(
+            turn["params"]["input"][0]["text"],
+            "[Thu 1970-01-01 00:01:40 UTC] how are things?"
+        );
         let approval = frames
             .iter()
             .find(|f| f.get("id") == Some(&json!(77)))

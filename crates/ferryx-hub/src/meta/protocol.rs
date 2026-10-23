@@ -64,6 +64,27 @@ pub fn thread_resume_request(thread_id: &str) -> String {
     .to_string()
 }
 
+/// omo-gateway's `thread/settings/update` (id 4), sent before every turn because
+/// `thread/start` misses custom providers and `turn/start` may ignore the model.
+pub fn thread_settings_update_request(thread_id: &str, model: &str) -> String {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "thread/settings/update",
+        "params": { "threadId": thread_id, "model": model, "effort": default_effort() }
+    })
+    .to_string()
+}
+
+fn default_effort() -> String {
+    crate::hub_env::var("OMON_DEFAULT_EFFORT")
+        .or_else(|_| crate::hub_env::var("DEFAULT_EFFORT"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "high".to_owned())
+}
+
 pub fn turn_start_request(thread_id: &str, user_prompt: &str, model: Option<&str>) -> String {
     let mut params = json!({
         "threadId": thread_id,
@@ -72,13 +93,7 @@ pub fn turn_start_request(thread_id: &str, user_prompt: &str, model: Option<&str
     if let Some(model) = model {
         params["model"] = json!(model);
     }
-    let effort = crate::hub_env::var("OMON_DEFAULT_EFFORT")
-        .or_else(|_| crate::hub_env::var("DEFAULT_EFFORT"))
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "high".to_owned());
-    params["effort"] = json!(effort);
+    params["effort"] = json!(default_effort());
     json!({
         "jsonrpc": "2.0",
         "id": 3,

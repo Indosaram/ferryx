@@ -630,6 +630,22 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                 "slack turn path is armed (omo app-server)"
             );
             ferryx_hub::chat::slack_turn::install(config);
+            // omo's startup sweep: claims a restart left pending are never re-run.
+            match ferryx_hub::chat::report_claims::recover_stale(&launch.hub.pool).await {
+                Ok(0) => {}
+                Ok(swept) => tracing::info!(swept, "stale report claims marked unmeasurable"),
+                Err(error) => tracing::warn!(%error, "stale report claims were not swept"),
+            }
+            // omo's missed-message backfill: answer what arrived while the hub was down, then
+            // reconcile every few minutes. It reads with the bot token; Socket Mode is untouched.
+            if let Some(config) = ferryx_hub::chat::slack_turn::installed() {
+                if ferryx_hub::chat::slack::app_token().is_some() {
+                    tasks.push(tokio::spawn(ferryx_hub::chat::slack_backfill::run_forever(
+                        config,
+                        launch.hub.pool.clone(),
+                    )));
+                }
+            }
         }
         tasks.push(tokio::spawn(async move {
             let supervisor = ferryx_hub::meta::supervisor::DaemonSupervisor::new(url, command, state_dir);
@@ -806,6 +822,54 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             ferryx_hub::chat::slack_turn::serve_lane_events(config, pool, lead).await;
         }));
     }
+    tasks.push(tokio::spawn(ferryx_hub::owner_alert::serve_delivery(
+        launch.hub.pool.clone(),
+        launch.hub.owner_session().storage_key(),
+    )));
+    tasks.push(tokio::spawn(ferryx_hub::retention::serve(launch.hub.pool.clone())));
+    // The tracker's Sessions board and SES issues read and drive panes through the hub's control.
+    ferryx_hub::tracker_sessions::install(launch.bridge.clone());
+    // omo's judge breaker alert reaches the owner through the owner alert sweep.
+    ferryx_hub::judge::install_alerts(
+        launch.hub.pool.clone(),
+        launch.hub.owner_session().storage_key(),
+    );
+    // omo's Full Disk Access owner DM, once per hub binary.
+    {
+        let pool = launch.hub.pool.clone();
+        let owner = launch.hub.owner_session().storage_key();
+        tasks.push(tokio::spawn(async move {
+            let denied = crate::permissions::check_full_disk_access()
+                == crate::permissions::PermissionStatus::Denied;
+            let identity = std::env::current_exe()
+                .and_then(std::fs::metadata)
+                .map(|meta| {
+                    let modified = meta
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |since| since.as_secs());
+                    format!("{}:{modified}", meta.len())
+                })
+                .unwrap_or_default();
+            let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+                return;
+            };
+            let marker = home.join(".ferryx").join("hub").join("fda-dm-marker");
+            if let Err(error) = ferryx_hub::owner_alert::alert_missing_full_disk_access(
+                &pool, &owner, denied, &marker, &identity,
+            )
+            .await
+            {
+                tracing::warn!(%error, "full disk access alert failed");
+            }
+        }));
+    }
+    // omo's cron triage and auto-fix: queued cron problems go to the remediator.
+    tasks.push(tokio::spawn(ferryx_hub::cron_remediate::serve(
+        launch.hub.pool.clone(),
+        Some(launch.hub.owner_session().storage_key()),
+    )));
     for task in &tasks {
         HUB_TASKS.track(task);
     }

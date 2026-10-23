@@ -20,9 +20,15 @@ pub async fn settle(
     claim_evidence: &str,
     judge: &Judge,
 ) -> Result<Settlement> {
-    let signals =
-        parse_signals(done_signals).map_err(|error| HubError::message(error.to_string()))?;
-    let checks = check_signals(&signals, std::path::Path::new(cwd)).await;
+    // A cron remediation lane settles on the hub's own verified rerun (omo `settle_lane`).
+    let checks = match Box::pin(crate::cron_remediate::settle_lane(pool, key)).await? {
+        Some(checks) => checks,
+        None => {
+            let signals = parse_signals(done_signals)
+                .map_err(|error| HubError::message(error.to_string()))?;
+            check_signals(&signals, std::path::Path::new(cwd)).await
+        }
+    };
     if checks.iter().any(|check| !check.passed) {
         transition(pool, key, LaneStatus::NotDone, Some("signals failed")).await?;
         return Ok(Settlement {
