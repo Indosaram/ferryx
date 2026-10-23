@@ -294,6 +294,64 @@ pub fn final_reply(outcome: &TurnOutcome) -> Result<Option<String>> {
     Ok(Some(outcome.text.clone()))
 }
 
+/// omo-gateway's fallback model (`OMON_OMO_FALLBACK_MODEL`).
+pub const DEFAULT_FALLBACK_MODEL: &str = "inferhub/cb/deepseek-v4.1-flash";
+
+pub fn fallback_model() -> String {
+    crate::hub_env::var("OMON_OMO_FALLBACK_MODEL")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_FALLBACK_MODEL.to_owned())
+}
+
+/// omo-gateway's `fallback_eligible`: a turn that failed before any side effect, by producing
+/// nothing at all or by a quota/overload/model rejection, runs once more on the fallback model.
+pub fn fallback_eligible(result: &Result<TurnOutcome>) -> bool {
+    match result {
+        Ok(outcome) => {
+            outcome.text.is_empty() && outcome.tool_calls == 0 && outcome.messages_delivered == 0
+        }
+        Err(error) => {
+            let lower = error.to_string().to_lowercase();
+            lower.contains("model update rejected")
+                || lower.contains("model not found")
+                || lower.contains("unknown model")
+                || lower.contains("invalid model")
+                || lower.contains("unsupported model")
+        }
+    }
+}
+
+/// omo-gateway's owner-facing Korean line for a failed turn; the raw error stays in the logs.
+pub fn owner_failure_text(error: &str) -> String {
+    format!(
+        "⚠️ 응답을 만들지 못했어요 ({}). 같은 메시지를 다시 보내 주시면 이어서 할게요.",
+        owner_failure_reason(error)
+    )
+}
+
+fn owner_failure_reason(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if [
+        "no output within",
+        "turn interrupted",
+        "timeout waiting for turn/start",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        "모델이 응답하지 않았어요"
+    } else if ["quota", "429", "rate limit"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        "모델 사용량 한도에 걸렸어요"
+    } else {
+        "처리 중 오류가 났어요"
+    }
+}
+
 #[cfg(test)]
 tokio::task_local! {
     /// Lets a test run a turn with full access off without touching the process environment.
@@ -709,6 +767,34 @@ pub async fn run_turn(
         }
     };
 
+    // omo-gateway awaits the custom-provider-aware settings RPC on every turn: a fresh thread
+    // otherwise runs on the engine default and a custom-provider model returns nothing.
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty())
+    {
+        send(
+            &mut ws,
+            protocol::thread_settings_update_request(&thread_id, model),
+        )
+        .await?;
+        let reply = await_reply(
+            &mut ws,
+            4,
+            handshake_until,
+            "the thread/settings/update reply",
+            cwd,
+            (&mut allowed, &mut denied),
+        )
+        .await?;
+        if let Some(error) = rpc_error(&reply) {
+            return Err(HubError::message(format!(
+                "omo model update rejected: {error}"
+            )));
+        }
+    }
+
     // turn/start as omo-gateway submits it (`omo_backend.rs`): the app-server acknowledges only
     // once our prompt is dequeued, so the wait is a 30s window that this thread's activity
     // keeps extending. Until then the thread runs something else; its finished messages are
@@ -1091,6 +1177,11 @@ pub mod mock {
                                 };
                                 ws.send(out(reply)).await.unwrap();
                             }
+                            Some("thread/settings/update") => {
+                                ws.send(out(json!({"jsonrpc":"2.0","id":id,"result":{}})))
+                                    .await
+                                    .unwrap();
+                            }
                             Some("thread/start") => {
                                 // A notification before the reply: the client must keep waiting for id 2.
                                 ws.send(out(json!({"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":script.thread_id}}}))).await.unwrap();
@@ -1276,6 +1367,74 @@ mod tests {
             .find(|f| f.get("id") == Some(&json!(77)))
             .unwrap();
         assert_eq!(answer["result"]["decision"], "accept");
+    }
+
+    #[tokio::test]
+    async fn a_fresh_thread_gets_the_model_through_settings_update_like_omo() {
+        let (url, log) = serve(script(&["hi"])).await;
+        let outcome = run_turn(
+            &OmoClientConfig::new(url),
+            &TurnRequest {
+                text: "hello".into(),
+                model: Some("mahoquot/claude-opus-5-5".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.text, "hi");
+        let frames = log.frames.lock().unwrap().clone();
+        let methods: Vec<_> = frames
+            .iter()
+            .filter_map(|f| f.get("method").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "thread/start",
+                "thread/settings/update",
+                "turn/start"
+            ]
+        );
+        let update = &frames[2]["params"];
+        assert_eq!(update["threadId"], "thr-new");
+        assert_eq!(update["model"], "mahoquot/claude-opus-5-5");
+        assert!(update["effort"]
+            .as_str()
+            .is_some_and(|effort| !effort.is_empty()));
+    }
+
+    #[test]
+    fn an_empty_turn_falls_back_and_the_owner_sees_omos_korean_line() {
+        let empty = TurnOutcome {
+            thread_id: "t".into(),
+            resumed: false,
+            turn_id: "u".into(),
+            text: String::new(),
+            approvals_allowed: 0,
+            approvals_denied: 0,
+            messages_delivered: 0,
+            tool_calls: 0,
+        };
+        assert!(fallback_eligible(&Ok(empty.clone())));
+        let worked = TurnOutcome {
+            tool_calls: 1,
+            ..empty
+        };
+        assert!(!fallback_eligible(&Ok(worked)));
+        assert!(fallback_eligible(&Err(HubError::message(
+            "omo model update rejected: unknown model"
+        ))));
+        assert!(!fallback_eligible(&Err(HubError::message(
+            "omo turn failed: boom"
+        ))));
+        assert_eq!(
+            owner_failure_text("omo turn ended with no content (likely upstream LLM failure)"),
+            "⚠️ 응답을 만들지 못했어요 (처리 중 오류가 났어요). 같은 메시지를 다시 보내 주시면 이어서 할게요."
+        );
+        assert!(owner_failure_text("HTTP 429").contains("모델 사용량 한도에 걸렸어요"));
     }
 
     #[tokio::test]

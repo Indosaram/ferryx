@@ -2069,9 +2069,11 @@ mod tests {
             [
                 "initialize",
                 "thread/start",
+                "thread/settings/update",
                 "turn/start",
                 "initialize",
                 "thread/resume",
+                "thread/settings/update",
                 "turn/start"
             ]
         );

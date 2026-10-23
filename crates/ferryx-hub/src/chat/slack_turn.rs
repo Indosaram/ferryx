@@ -347,6 +347,36 @@ fn first_delivery(channel: &str, ts: &str) -> bool {
     true
 }
 
+/// Persisted twin of [`first_delivery`]: the in-process set is empty after a restart, so a
+/// redelivered or re-swept event `ts` that was already answered must not start a second turn.
+async fn first_delivery_persisted(pool: &SqlitePool, channel: &str, ts: &str) -> bool {
+    let id = format!("{channel}/{ts}");
+    let now = chrono::Utc::now();
+    let recorded = async {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS slack_inbound_seen (id TEXT PRIMARY KEY NOT NULL, seen_at TEXT NOT NULL)",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("DELETE FROM slack_inbound_seen WHERE seen_at < ?")
+            .bind((now - chrono::Duration::days(7)).to_rfc3339())
+            .execute(pool)
+            .await?;
+        let inserted =
+            sqlx::query("INSERT OR IGNORE INTO slack_inbound_seen(id, seen_at) VALUES(?, ?)")
+                .bind(&id)
+                .bind(now.to_rfc3339())
+                .execute(pool)
+                .await?;
+        Ok::<_, sqlx::Error>(inserted.rows_affected() == 1)
+    }
+    .await;
+    recorded.unwrap_or_else(|error| {
+        tracing::warn!(%error, "slack inbound dedupe was not recorded; answering anyway");
+        true
+    })
+}
+
 fn session_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
     let mut locks = LOCKS
@@ -615,7 +645,29 @@ pub async fn run_session_turn(
     let registration = super::turns::begin(&storage_key, &channel);
     // Boxed: the app-server turn plus the approval wrapper is a large future, and an unboxed
     // copy on each await level overflowed a 2 MiB worker stack in debug builds.
-    let run = Box::pin(omo_client::run_turn(&omo, &request, Some(progress)));
+    let run = Box::pin(async {
+        let first = omo_client::run_turn(&omo, &request, Some(progress.clone())).await;
+        // omo-gateway retries a side-effect-free failure once on the fallback model.
+        let fallback = omo_client::fallback_model();
+        if !omo_client::fallback_eligible(&first)
+            || request
+                .model
+                .as_deref()
+                .is_none_or(|model| model == fallback)
+        {
+            return first;
+        }
+        tracing::warn!(session = %storage_key, model = %fallback, error = ?first.as_ref().err().map(ToString::to_string), "retrying turn failure with fallback model");
+        let retry = omo_client::TurnRequest {
+            thread_id: match &first {
+                Ok(outcome) => Some(outcome.thread_id.clone()),
+                Err(_) => request.thread_id.clone(),
+            },
+            model: Some(fallback),
+            ..request.clone()
+        };
+        omo_client::run_turn(&omo, &retry, Some(progress)).await
+    });
     let result = match &turn.reply_channel {
         // omo's approval cards: a request full access would not allow is asked in the thread.
         Some(channel) => {
@@ -722,7 +774,7 @@ pub async fn run_session_turn(
         Err(error) => error.to_string(),
     };
     tracing::warn!(session = %storage_key, error = %failure, "session turn failed");
-    emit(pool, &turn, &format!("⚠️ omo turn failed: {failure}")).await;
+    emit(pool, &turn, &omo_client::owner_failure_text(&failure)).await;
     status(&turn, "x", true).await;
     None
 }
@@ -778,6 +830,10 @@ pub async fn prepare_prompt_in(
 /// cursor moves past it, as omo's `advance_cursor` did, so a restart's backfill skips it.
 pub async fn handle(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admitted) -> bool {
     if !first_delivery(&admitted.channel, &admitted.message_ts) {
+        return false;
+    }
+    if !first_delivery_persisted(pool, &admitted.channel, &admitted.message_ts).await {
+        tracing::info!(channel = %admitted.channel, ts = %admitted.message_ts, "slack message already answered before a restart; not replayed");
         return false;
     }
     let text = Box::pin(prepare_prompt(pool, &admitted)).await;
@@ -1059,5 +1115,14 @@ mod tests {
     fn redelivered_events_run_once() {
         assert!(first_delivery("C9", "9.9"));
         assert!(!first_delivery("C9", "9.9"));
+    }
+
+    #[tokio::test]
+    async fn a_message_answered_before_a_restart_is_not_replayed() {
+        let pool = crate::storage::memory().await.unwrap();
+        assert!(first_delivery_persisted(&pool, "C1", "1.000001").await);
+        assert!(!first_delivery_persisted(&pool, "C1", "1.000001").await);
+        assert!(first_delivery_persisted(&pool, "C1", "1.000002").await);
+        assert!(first_delivery_persisted(&pool, "C2", "1.000001").await);
     }
 }
