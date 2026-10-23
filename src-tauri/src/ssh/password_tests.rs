@@ -159,22 +159,7 @@ fn askpass_cli_process_serves_password_when_credentials_match() {
     use std::io::{BufReader, Read, Write};
     use std::process::{Command, Stdio};
 
-    let cli_path = [
-        std::env::var_os("CARGO_BIN_EXE_ferryx-cli").map(std::path::PathBuf::from),
-        std::env::var_os("CARGO_TARGET_DIR").map(|t| {
-            std::path::PathBuf::from(t)
-                .join(format!("debug/ferryx-cli{}", std::env::consts::EXE_SUFFIX))
-        }),
-        Some(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("target/debug/ferryx-cli{}", std::env::consts::EXE_SUFFIX)),
-        ),
-        Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/ferryx-cli")),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|p| p.is_file())
-    .expect("existing built ferryx-cli binary in target/debug");
+    let cli_path = crate::test_support::ferryx_cli_binary().to_path_buf();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
     let port = listener.local_addr().unwrap().port();

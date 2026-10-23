@@ -1,6 +1,7 @@
 //! In-crate owner CLI surface fixture. Wire under daemon::server with cfg(test, unix).
 //! The outer test launches a dedicated test-binary process with private roots.
-//! Build ferryx-cli before running; no canonical daemon discovery is permitted.
+//! The CLI under test is built from this checkout on first use; no canonical daemon
+//! discovery is permitted.
 use super::*;
 use anyhow::{ensure, Context};
 use serde::Deserialize;
@@ -242,6 +243,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             if server.paired_hosts.available().await {
                 capabilities.push("pairedHostInventoryV1");
                 capabilities.push(crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY);
+                capabilities.push(crate::paired_host::route_view::PAIRED_HOST_ROUTE_CAPABILITY);
             }
             capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY);
             // Mirrors the daemon's GetCapabilities surface: handover advertises ownership transfer.
@@ -297,6 +299,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         let machine_terminal_ready = server.remote_state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok());
         let expected_capabilities = if machine {
             let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2", "pairedFileReadV1"];
+            capabilities.push(crate::remote::repo_discovery::REPO_DISCOVERY_CAPABILITY);
             if machine_terminal_ready { capabilities.push("terminalCreateV1"); capabilities.push("terminalStreamV1"); }
             // DAG streaming is advertised whenever the catalog that resolves remote
             // roots is readable, independent of terminal readiness.
@@ -394,15 +397,7 @@ fn a03_private_owner_cli_surface() -> anyhow::Result<()> {
             std::fs::create_dir(private_root.join(directory))?;
         }
         let exe = std::env::current_exe()?;
-        let binary = exe
-            .parent()
-            .and_then(Path::parent)
-            .context("target debug directory")?
-            .join("ferryx-cli");
-        ensure!(
-            binary.is_file(),
-            "build ferryx-cli before the owner fixture"
-        );
+        let binary = crate::test_support::ferryx_cli_binary();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;

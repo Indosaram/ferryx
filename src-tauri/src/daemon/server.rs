@@ -2873,6 +2873,33 @@ mod live_inventory_paired_tests {
         sessions.into_iter().find(|s| s.backend_id == id).expect("paired session missing from inventory")
     }
 
+    /// Reattach answers as soon as the proxy actor is installed (with a placeholder generation);
+    /// the actor attaches to the host in the background. Wait for that attach so the live
+    /// identity the tests assert on (remote pid, connected, controller generation) is the
+    /// host's and not the pre-attach state.
+    async fn reattach_attached(
+        daemon: &DaemonServer,
+        client: &crate::daemon::client::DaemonClient,
+        descriptor: crate::terminal::paired_daemon::Descriptor,
+    ) -> (String, crate::scoped_contracts::Epoch) {
+        let (id, _placeholder) = client.paired_terminal_reattach(descriptor).await.unwrap();
+        let mut outcome = daemon
+            .terminal_service
+            .paired()
+            .subscribe_recovery_outcome(&id)
+            .expect("reattach installs a proxy actor");
+        let attached = tokio::time::timeout(
+            Duration::from_secs(10),
+            outcome.wait_for(|outcome| outcome.state == "proxy_attached"),
+        )
+        .await
+        .expect("paired proxy did not attach to the host")
+        .expect("paired proxy actor ended before attaching")
+        .clone();
+        let generation = attached.generation.expect("an attached proxy holds a controller generation");
+        (id, crate::scoped_contracts::Epoch(generation))
+    }
+
     async fn teardown(mut host: MockHost, accept: tokio::task::JoinHandle<()>, daemon: Arc<DaemonServer>, id: &str) {
         let _ = daemon.terminal_service.paired().detach(id).await;
         accept.abort();
@@ -2891,7 +2918,7 @@ mod live_inventory_paired_tests {
 
         // First client attaches, observes the session, then disconnects (GUI quit).
         let first = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
-        let (id, _generation) = first.paired_terminal_reattach(descriptor).await.unwrap();
+        let (id, _generation) = reattach_attached(&daemon, &first, descriptor).await;
         let before = live_entry(&socket, &id).await;
         drop(first);
 
@@ -2937,7 +2964,7 @@ mod live_inventory_paired_tests {
         let host = mock_host().await;
         let (daemon, socket, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
         let client = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
-        let (id, generation) = client.paired_terminal_reattach(descriptor).await.unwrap();
+        let (id, generation) = reattach_attached(&daemon, &client, descriptor).await;
         let before = live_entry(&socket, &id).await;
 
         let durable = root.path().join("remote_sessions.json");
@@ -3009,7 +3036,7 @@ mod live_inventory_paired_tests {
         let host = mock_host().await;
         let (daemon, socket, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
         let client = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
-        let (id, _generation) = client.paired_terminal_reattach(descriptor).await.unwrap();
+        let (id, _generation) = reattach_attached(&daemon, &client, descriptor).await;
         daemon.handover_manager.note_transferred_local("local-moved");
         let legacy = commit_predecessor_keeping_retained(&daemon, root.path()).await;
 
@@ -3036,7 +3063,7 @@ mod live_inventory_paired_tests {
         let host = mock_host().await;
         let (daemon, socket, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
         let client = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
-        let (id, _generation) = client.paired_terminal_reattach(descriptor).await.unwrap();
+        let (id, _generation) = reattach_attached(&daemon, &client, descriptor).await;
         let probe = daemon.spawn_paired_host_probe(Duration::from_millis(20));
         // The loop exits only once its predicate reads false, so while it reads true the
         // loop is still running and the bounded wait below measures the commit alone.
@@ -3063,7 +3090,7 @@ mod live_inventory_paired_tests {
         let host = mock_host().await;
         let (a, socket_a, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
         let client = crate::daemon::client::DaemonClient::new_with_socket(socket_a.clone());
-        let (id, generation) = client.paired_terminal_reattach(descriptor).await.unwrap();
+        let (id, generation) = reattach_attached(&a, &client, descriptor).await;
         let remote_pid = live_entry(&socket_a, &id).await.remote_pid;
         let (a_retired_tx, mut a_retired) = tokio::sync::watch::channel(false);
         let legacy_a = root.path().join("legacy-a.sock");
@@ -3142,7 +3169,7 @@ mod live_inventory_paired_tests {
         let host = mock_host().await;
         let (daemon, socket, descriptor, accept) = daemon_with_paired_host(root.path(), &host).await;
         let attach = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
-        let (id, generation) = attach.paired_terminal_reattach(descriptor).await.unwrap();
+        let (id, generation) = reattach_attached(&daemon, &attach, descriptor).await;
         drop(attach);
         let before = live_entry(&socket, &id).await;
         let mut received = host.received.clone();

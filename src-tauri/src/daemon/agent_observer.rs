@@ -117,7 +117,10 @@ impl AgentObserverHub {
         drop(slots);
 
         let session_id = session_id.to_string();
-        let terminals = Arc::clone(&self.terminals);
+        // Weak: the observer reads the pane through the service's own output hub, so a strong
+        // handle would keep that hub's sender (and with it the whole service and its runtimes)
+        // alive for as long as the observer waits on it.
+        let terminals = Arc::downgrade(&self.terminals);
         let bus = Arc::clone(&self.bus);
         let sources = self.sources.lock().clone();
         let workspace_of = self.workspace_of.lock().clone();
@@ -232,17 +235,21 @@ fn rebuild(engine: &mut NativeTerminal, history: &[u8]) -> bool {
 
 async fn observe_session(
     session_id: String,
-    terminals: Arc<TerminalService>,
+    terminals: std::sync::Weak<TerminalService>,
     bus: Arc<AgentEventBus>,
     sources: Option<Arc<AgentStateHub>>,
     workspace_of: Option<WorkspaceLookup>,
     timing: ObserverTiming,
     mut stop: watch::Receiver<bool>,
 ) {
-    let Some((history, mut output)) = terminals.output_hub().subscribe(&session_id) else {
+    let Some(service) = terminals.upgrade() else {
         return;
     };
-    let (cols, rows) = pane_size(&terminals, &session_id);
+    let Some((history, mut output)) = service.output_hub().subscribe(&session_id) else {
+        return;
+    };
+    let (cols, rows) = pane_size(&service, &session_id);
+    drop(service);
     let mut engine = match NativeTerminal::new(cols, rows) {
         Ok(engine) => engine,
         Err(error) => {
@@ -292,7 +299,10 @@ async fn observe_session(
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let Some((history, fresh)) = terminals.output_hub().subscribe(&session_id) else {
+                        let Some((history, fresh)) = terminals
+                            .upgrade()
+                            .and_then(|service| service.output_hub().subscribe(&session_id))
+                        else {
                             break;
                         };
                         output = fresh;
@@ -327,13 +337,17 @@ async fn observe_session(
                 }
             }
             _ = tokio::time::sleep_until(debounce_at), if dirty => {
-                sync_size(&terminals, &session_id, &mut engine);
+                let Some(service) = terminals.upgrade() else { break };
+                sync_size(&service, &session_id, &mut engine);
+                drop(service);
                 let provider = sources.as_ref().and_then(|states| provider_report(states, &session_id));
                 publish_if_changed(&bus, &session_id, workspace_of.as_ref(), provider.as_ref(), &engine, false);
                 dirty = false;
             }
             _ = tokio::time::sleep_until(quiet_at), if !dirty && !quiet_done => {
-                sync_size(&terminals, &session_id, &mut engine);
+                let Some(service) = terminals.upgrade() else { break };
+                sync_size(&service, &session_id, &mut engine);
+                drop(service);
                 let provider = sources.as_ref().and_then(|states| provider_report(states, &session_id));
                 publish_if_changed(&bus, &session_id, workspace_of.as_ref(), provider.as_ref(), &engine, true);
                 quiet_done = true;
