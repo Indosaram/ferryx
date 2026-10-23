@@ -490,6 +490,67 @@ fn is_thread_busy_error(error: &str) -> bool {
 
 /// Runs one turn. Every completed agent message except the last is sent on `progress` as it
 /// lands, so a long turn shows its interim replies. The last one is the outcome text.
+/// The error a turn ends with when `/omo-stop` interrupted it.
+pub const STOPPED: &str = "omo turn stopped by /omo-stop";
+
+/// Injects guidance into a running turn (`turn/steer`, omo-gateway's instant steer) over a
+/// short-lived connection. False when the engine refused it (the turn ended or moved on).
+pub async fn steer(
+    config: &OmoClientConfig,
+    thread_id: &str,
+    turn_id: &str,
+    guidance: &str,
+) -> Result<bool> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut ws = connect(config, deadline).await?;
+    let (mut allowed, mut denied) = (0u32, 0u32);
+    send(&mut ws, protocol::initialize_request()).await?;
+    let reply = await_reply(
+        &mut ws,
+        1,
+        deadline,
+        "the initialize reply",
+        None,
+        (&mut allowed, &mut denied),
+    )
+    .await?;
+    if let Some(error) = rpc_error(&reply) {
+        return Err(HubError::message(format!("omo initialize failed: {error}")));
+    }
+    let request = json!({
+        "jsonrpc": "2.0", "id": 9_500, "method": "turn/steer",
+        "params": {
+            "threadId": thread_id,
+            "expectedTurnId": turn_id,
+            "input": [{"type": "text", "text": guidance}]
+        }
+    });
+    send(&mut ws, request.to_string()).await?;
+    let reply = await_reply(
+        &mut ws,
+        9_500,
+        deadline,
+        "the turn/steer reply",
+        None,
+        (&mut allowed, &mut denied),
+    )
+    .await;
+    let _ = ws.close(None).await;
+    match reply {
+        Ok(reply) => match rpc_error(&reply) {
+            None => Ok(true),
+            Some(error) => {
+                tracing::warn!(%error, "turn/steer rejected by the omo app-server");
+                Ok(false)
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "turn/steer got no answer");
+            Ok(false)
+        }
+    }
+}
+
 pub async fn run_turn(
     config: &OmoClientConfig,
     request: &TurnRequest,
@@ -691,11 +752,26 @@ pub async fn run_turn(
     let mut started_items: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut turn_id = turn_id;
     let mut last_activity = tokio::time::Instant::now();
+    // `/omo-stop` and `/omo-steer` find this turn by its session (chat::turns).
+    let registry_key = crate::chat::turns::current_key();
+    if let Some(key) = &registry_key {
+        crate::chat::turns::started(key, &thread_id, &turn_id);
+    }
+    let mut cancel = registry_key
+        .as_deref()
+        .and_then(crate::chat::turns::cancelled);
     loop {
         let frame = {
             {
                 let until = (last_activity + config.idle_timeout).min(deadline);
-                match next_frame(&mut ws, until, "the turn to finish").await {
+                let next = match cancel.as_mut() {
+                    Some(cancel) => tokio::select! {
+                        frame = next_frame(&mut ws, until, "the turn to finish") => frame,
+                        Ok(_) = cancel.wait_for(|stop| *stop) => Err(HubError::message(STOPPED)),
+                    },
+                    None => next_frame(&mut ws, until, "the turn to finish").await,
+                };
+                match next {
                     Ok(frame) => frame,
                     Err(error) => {
                         let interrupt = json!({

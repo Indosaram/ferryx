@@ -12,4 +12,7 @@ pub mod session;
 pub mod slack;
 #[cfg(feature = "hub-slack")]
 pub mod slack_turn;
+#[cfg(feature = "hub-slack")]
+pub mod slack_web;
 pub mod slash;
+pub mod turns;

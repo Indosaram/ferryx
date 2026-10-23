@@ -30,15 +30,23 @@ pub fn router(pool: SqlitePool, web_root: PathBuf) -> Router {
         .route("/api/readiness", get(ready))
         .route("/api/status", get(api::status))
         .route("/api/sessions", get(api::list_sessions))
-        .route("/api/sessions/{id}", get(api::get_session).delete(api::delete_session))
+        .route(
+            "/api/sessions/{id}",
+            get(api::get_session).delete(api::delete_session),
+        )
         .route("/api/sessions/{id}/messages", get(api::list_messages))
         .route("/api/sessions/{id}/chat", post(api::post_chat))
         .route("/api/sessions/{id}/stop", post(api::stop_session))
         .route("/api/sessions/{id}/ws", get(api::session_ws))
-        .route("/api/cron/jobs", get(api::list_cron_jobs).post(api::create_cron_job))
+        .route(
+            "/api/cron/jobs",
+            get(api::list_cron_jobs).post(api::create_cron_job),
+        )
         .route(
             "/api/cron/jobs/{id}",
-            get(api::get_cron_job).put(api::update_cron_job).delete(api::delete_cron_job),
+            get(api::get_cron_job)
+                .put(api::update_cron_job)
+                .delete(api::delete_cron_job),
         )
         .route("/api/cron/jobs/{id}/trigger", post(trigger_cron))
         .route("/api/cron/jobs/{id}/pause", post(api::pause_cron_job))
@@ -49,7 +57,12 @@ pub fn router(pool: SqlitePool, web_root: PathBuf) -> Router {
         .route("/api/approvals/allowlist", get(api::allowlist))
         .route("/api/autonomy/precedents", get(api::precedents))
         .route("/api/bots", get(api::list_bots).post(api::create_bot))
-        .route("/api/bots/{id}", get(api::get_bot).put(api::update_bot).delete(api::delete_bot))
+        .route(
+            "/api/bots/{id}",
+            get(api::get_bot)
+                .put(api::update_bot)
+                .delete(api::delete_bot),
+        )
         .route("/api/memory", get(api::memory))
         .route("/api/tools", get(tools))
         .route("/api/skills", get(skills))
@@ -441,7 +454,12 @@ mod tests {
         assert!(bots_body.contains("dark"));
         let page = app
             .clone()
-            .oneshot(Request::builder().uri("http://127.0.0.1/").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("http://127.0.0.1/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(page.status(), StatusCode::OK);

@@ -101,7 +101,10 @@ pub async fn validate_host_and_origin(
             return (StatusCode::FORBIDDEN, "missing Origin on WebSocket upgrade").into_response();
         };
         if !is_same_origin(&origin, &host_str) {
-            return (StatusCode::FORBIDDEN, "cross-origin WebSocket upgrade rejected")
+            return (
+                StatusCode::FORBIDDEN,
+                "cross-origin WebSocket upgrade rejected",
+            )
                 .into_response();
         }
     } else if !request.method().is_safe() {
@@ -381,10 +384,11 @@ pub async fn delete_session(
     State(state): State<HttpState>,
     UrlPath(id): UrlPath<String>,
 ) -> ApiResult<Response> {
-    let bound: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scheduled_jobs WHERE session_key = ?")
-        .bind(&id)
-        .fetch_one(&state.pool)
-        .await?;
+    let bound: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM scheduled_jobs WHERE session_key = ?")
+            .bind(&id)
+            .fetch_one(&state.pool)
+            .await?;
     if bound > 0 {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -416,8 +420,20 @@ pub async fn post_chat(UrlPath(_id): UrlPath<String>) -> ApiError {
     ApiError::new(StatusCode::SERVICE_UNAVAILABLE, CHAT_UNAVAILABLE)
 }
 
-pub async fn stop_session(UrlPath(_id): UrlPath<String>) -> ApiError {
-    ApiError::bad_request(CHAT_UNAVAILABLE)
+/// Interrupts the session's running omo turn, as `/omo-stop` does.
+pub async fn stop_session(
+    State(state): State<HttpState>,
+    UrlPath(id): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    let known: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE session_key = ?")
+        .bind(&id)
+        .fetch_one(&state.pool)
+        .await?;
+    if known == 0 && !crate::chat::turns::is_active(&id) {
+        return Err(ApiError::not_found("session"));
+    }
+    let stopped = crate::chat::turns::stop(&id);
+    Ok(Json(json!({"stopped": stopped, "session_id": id})))
 }
 
 pub async fn session_ws(
@@ -429,17 +445,23 @@ pub async fn session_ws(
 }
 
 /// Sends `ready`, then each message stored for the session after the socket opened as an
-/// `event`, and answers `ping`. Chat and stop report the missing chat runtime, as omo did.
+/// `event`, and answers `ping`. Chat and stop report the missing chat runtime, as omo did;
+/// `stop` interrupts the session's live omo turn.
 async fn handle_session_socket(mut socket: WebSocket, pool: SqlitePool, id: String) {
     let ready = json!({"type": "ready", "session_id": id, "chat_available": false});
-    if socket.send(Message::Text(ready.to_string().into())).await.is_err() {
+    if socket
+        .send(Message::Text(ready.to_string().into()))
+        .await
+        .is_err()
+    {
         return;
     }
-    let mut last: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(rowid), 0) FROM messages WHERE session_key = ?")
-        .bind(&id)
-        .fetch_one(&pool)
-        .await
-        .unwrap_or(0);
+    let mut last: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(rowid), 0) FROM messages WHERE session_key = ?")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0);
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -472,7 +494,8 @@ async fn handle_session_socket(mut socket: WebSocket, pool: SqlitePool, id: Stri
                             .unwrap_or_else(|_| json!({"type": "message"}));
                         match parsed.get("type").and_then(Value::as_str).unwrap_or("message") {
                             "ping" => json!({"type": "pong"}),
-                            "message" | "chat" | "stop" => json!({"type": "error", "message": CHAT_UNAVAILABLE}),
+                            "stop" => json!({"type": "stopped", "stopped": crate::chat::turns::stop(&id)}),
+                            "message" | "chat" => json!({"type": "error", "message": CHAT_UNAVAILABLE}),
                             other => json!({"type": "error", "message": format!("unsupported websocket message type {other}")}),
                         }
                     }
@@ -761,7 +784,11 @@ pub async fn delete_cron_job(
 /// Pause clears the next run; resume schedules the next occurrence from now. ferryx used to
 /// flip `enabled` only, so a resumed job fired at a stale `next_run_at` (or never, when it
 /// had none) and pausing an unknown id answered 200.
-pub async fn set_cron_enabled(pool: &SqlitePool, id: &str, enabled: bool) -> ApiResult<Json<Value>> {
+pub async fn set_cron_enabled(
+    pool: &SqlitePool,
+    id: &str,
+    enabled: bool,
+) -> ApiResult<Json<Value>> {
     let (_, _, expression, payload_json, _, _, _, _) = fetch_job(pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found("cron job"))?;
@@ -771,13 +798,15 @@ pub async fn set_cron_enabled(pool: &SqlitePool, id: &str, enabled: bool) -> Api
     } else {
         None
     };
-    sqlx::query("UPDATE scheduled_jobs SET enabled = ?, next_run_at = ?, updated_at = ? WHERE id = ?")
-        .bind(i64::from(enabled))
-        .bind(&next)
-        .bind(now_rfc3339())
-        .bind(id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE scheduled_jobs SET enabled = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(i64::from(enabled))
+    .bind(&next)
+    .bind(now_rfc3339())
+    .bind(id)
+    .execute(pool)
+    .await?;
     crate::schedule::poke_scheduler();
     let row = fetch_job(pool, id)
         .await?
@@ -813,7 +842,7 @@ pub async fn list_cron_runs(
     Query(query): Query<CronRunsQuery>,
 ) -> ApiResult<Json<Value>> {
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let rows: Vec<(String, String, Option<String>, String, Option<String>, String, Option<String>, Option<i64>)> =
+    let rows: Vec<CronRunRow> =
         sqlx::query_as(
             "SELECT id, job_id, lease_until, started_at, finished_at, status, error, owner_pid FROM cron_runs
              WHERE (?1 IS NULL OR job_id = ?1) AND (?2 IS NULL OR status = ?2)
@@ -1010,11 +1039,12 @@ pub async fn update_bot(
     };
     let settings = match payload.custom_settings {
         Some(mut settings) => {
-            let stored: Option<String> =
-                sqlx::query_scalar("SELECT custom_settings_json FROM bot_profiles WHERE bot_id = ?")
-                    .bind(&bot_id)
-                    .fetch_optional(&state.pool)
-                    .await?;
+            let stored: Option<String> = sqlx::query_scalar(
+                "SELECT custom_settings_json FROM bot_profiles WHERE bot_id = ?",
+            )
+            .bind(&bot_id)
+            .fetch_optional(&state.pool)
+            .await?;
             if let (Some(stored), Some(object)) = (stored, settings.as_object_mut()) {
                 let stored: Value = serde_json::from_str(&stored).unwrap_or_else(|_| json!({}));
                 let public = crate::http::public_settings(&stored.to_string());
@@ -1169,8 +1199,44 @@ pub async fn memory(
     })))
 }
 
+type CronRunRow = (
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<i64>,
+);
+type ApprovalRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+);
+type PrecedentRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    String,
+    Option<String>,
+    String,
+    String,
+);
+
 pub async fn pending_approvals(State(state): State<HttpState>) -> ApiResult<Json<Value>> {
-    let rows: Vec<(i64, String, String, String, String, String, String, i64, String)> = sqlx::query_as(
+    let rows: Vec<ApprovalRow> = sqlx::query_as(
         "SELECT id, origin, session_key, signature, effect, target, summary, tainted, created_at
          FROM action_proposals WHERE state = 'pending' ORDER BY id",
     )
@@ -1178,13 +1244,15 @@ pub async fn pending_approvals(State(state): State<HttpState>) -> ApiResult<Json
     .await?;
     let items: Vec<Value> = rows
         .into_iter()
-        .map(|(id, origin, session, signature, effect, target, summary, tainted, created)| {
-            json!({
-                "id": id, "origin": origin, "session_key": session, "signature": signature,
-                "effect": effect, "target": target, "summary": summary, "command": summary,
-                "tainted": tainted == 1, "created_at": created,
-            })
-        })
+        .map(
+            |(id, origin, session, signature, effect, target, summary, tainted, created)| {
+                json!({
+                    "id": id, "origin": origin, "session_key": session, "signature": signature,
+                    "effect": effect, "target": target, "summary": summary, "command": summary,
+                    "tainted": tainted == 1, "created_at": created,
+                })
+            },
+        )
         .collect();
     Ok(Json(json!({
         "items": items, "pending_count": items.len(), "approvals": items,
@@ -1208,7 +1276,7 @@ pub async fn allowlist(State(state): State<HttpState>) -> ApiResult<Json<Value>>
 }
 
 pub async fn precedents(State(state): State<HttpState>) -> ApiResult<Json<Value>> {
-    let rows: Vec<(i64, String, String, String, String, String, i64, i64, String, Option<String>, String, String)> =
+    let rows: Vec<PrecedentRow> =
         sqlx::query_as(
             "SELECT id, signature, effect, target_scope, decision, scope, approvals, declines, origin, owner_words, created_at, updated_at
              FROM action_precedents WHERE revoked_at IS NULL ORDER BY updated_at DESC, id DESC",
@@ -1254,7 +1322,10 @@ mod tests {
 
     async fn app() -> (axum::Router, SqlitePool) {
         let pool = crate::storage::memory().await.unwrap();
-        (crate::http::router(pool.clone(), std::env::temp_dir()), pool)
+        (
+            crate::http::router(pool.clone(), std::env::temp_dir()),
+            pool,
+        )
     }
 
     async fn call(
@@ -1317,7 +1388,14 @@ mod tests {
         let (status, _) = call(&app, "GET", "/api/status", None, &[]).await;
         assert_eq!(status, StatusCode::OK);
         // A GET from another origin is allowed (no state change); a POST is not.
-        let (status, _) = call(&app, "GET", "/api/status", None, &[("origin", "https://evil.example")]).await;
+        let (status, _) = call(
+            &app,
+            "GET",
+            "/api/status",
+            None,
+            &[("origin", "https://evil.example")],
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let (status, _) = call(
             &app,
@@ -1350,6 +1428,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_interrupts_the_sessions_live_turn() {
+        let (app, pool) = app().await;
+        sqlx::query("INSERT INTO sessions(session_key, platform, channel_id, user_id, state_json) VALUES('slack:CSTOP:9.0','slack','CSTOP','U1','{}')")
+            .execute(&pool).await.unwrap();
+        let path = "/api/sessions/slack:CSTOP:9.0/stop";
+        let (status, body) = call(&app, "POST", path, None, &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({"stopped": false, "session_id": "slack:CSTOP:9.0"})
+        );
+        let guard = crate::chat::turns::begin("slack:CSTOP:9.0", "CSTOP");
+        let cancelled = crate::chat::turns::cancelled("slack:CSTOP:9.0").unwrap();
+        let (_, body) = call(&app, "POST", path, None, &[]).await;
+        assert_eq!(body["stopped"], true);
+        assert!(*cancelled.borrow());
+        drop(guard);
+        let (status, _) = call(&app, "POST", "/api/sessions/nope/stop", None, &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn session_detail_messages_and_delete_follow_omo() {
         let (app, pool) = app().await;
         sqlx::query("INSERT INTO sessions(session_key, platform, channel_id, user_id, state_json) VALUES('slack:C1:1.0','slack','C1','U1','{\"title\":\"t\"}'), ('slack:C2','slack','C2','U2','{}')")
@@ -1370,7 +1470,14 @@ mod tests {
         assert_eq!(detail["message_count"], 2);
         assert_eq!(detail["state"]["title"], "t");
 
-        let (_, messages) = call(&app, "GET", "/api/sessions/slack:C1:1.0/messages?page=1&per_page=10", None, &[]).await;
+        let (_, messages) = call(
+            &app,
+            "GET",
+            "/api/sessions/slack:C1:1.0/messages?page=1&per_page=10",
+            None,
+            &[],
+        )
+        .await;
         assert_eq!(messages["total"], 2);
         assert_eq!(messages["items"][0]["content"], "one");
         assert_eq!(messages["items"][1]["content"], "two");
@@ -1381,10 +1488,20 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         let (status, _) = call(&app, "DELETE", "/api/sessions/slack:C1:1.0", None, &[]).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages").fetch_one(&pool).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(left, 0);
 
-        let (status, body) = call(&app, "POST", "/api/sessions/slack:C2/chat", Some(json!({"message": "hi"})), &[]).await;
+        let (status, body) = call(
+            &app,
+            "POST",
+            "/api/sessions/slack:C2/chat",
+            Some(json!({"message": "hi"})),
+            &[],
+        )
+        .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"], CHAT_UNAVAILABLE);
     }
@@ -1401,10 +1518,27 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        assert!(created["next_run_at"].is_string(), "a created job is scheduled: {created}");
-        let (status, _) = call(&app, "POST", "/api/cron/jobs", Some(json!({"id": "daily", "expression": "every 5m", "payload": {}})), &[]).await;
+        assert!(
+            created["next_run_at"].is_string(),
+            "a created job is scheduled: {created}"
+        );
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/cron/jobs",
+            Some(json!({"id": "daily", "expression": "every 5m", "payload": {}})),
+            &[],
+        )
+        .await;
         assert_eq!(status, StatusCode::CONFLICT);
-        let (status, _) = call(&app, "POST", "/api/cron/jobs", Some(json!({"id": "bad", "expression": "nonsense", "payload": {}})), &[]).await;
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/cron/jobs",
+            Some(json!({"id": "bad", "expression": "nonsense", "payload": {}})),
+            &[],
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
         sqlx::query("UPDATE scheduled_jobs SET payload_json = json_set(payload_json, '$.last_status', 'succeeded') WHERE id = 'daily'")
@@ -1420,8 +1554,15 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{updated}");
         assert_eq!(updated["expression"], "every 30m");
         assert_eq!(updated["payload"]["command"], "echo hi");
-        assert_eq!(updated["payload"]["last_status"], "succeeded", "scheduler state survives an edit");
-        let delivery: String = sqlx::query_scalar("SELECT delivery_json FROM scheduled_jobs WHERE id = 'daily'").fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            updated["payload"]["last_status"], "succeeded",
+            "scheduler state survives an edit"
+        );
+        let delivery: String =
+            sqlx::query_scalar("SELECT delivery_json FROM scheduled_jobs WHERE id = 'daily'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(delivery, "[]", "delivery follows the new payload");
 
         let (_, paused) = call(&app, "POST", "/api/cron/jobs/daily/pause", None, &[]).await;
@@ -1463,9 +1604,20 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let model: Option<String> = sqlx::query_scalar("SELECT model FROM bot_profiles WHERE bot_id = 'B1'").fetch_one(&pool).await.unwrap();
+        let model: Option<String> =
+            sqlx::query_scalar("SELECT model FROM bot_profiles WHERE bot_id = 'B1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(model, None, "a blank model is stored as NULL");
-        let (status, _) = call(&app, "POST", "/api/bots", Some(json!({"bot_id": "B1", "name": "dup"})), &[]).await;
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/bots",
+            Some(json!({"bot_id": "B1", "name": "dup"})),
+            &[],
+        )
+        .await;
         assert_eq!(status, StatusCode::CONFLICT);
 
         let (_, bot) = call(&app, "GET", "/api/bots/B1", None, &[]).await;
@@ -1483,10 +1635,21 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(updated["name"], "omo2");
-        assert_eq!(updated["enabled_toolsets"], json!(["web", "shell"]), "omitted fields are kept");
-        let stored: String = sqlx::query_scalar("SELECT custom_settings_json FROM bot_profiles WHERE bot_id = 'B1'").fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            updated["enabled_toolsets"],
+            json!(["web", "shell"]),
+            "omitted fields are kept"
+        );
+        let stored: String =
+            sqlx::query_scalar("SELECT custom_settings_json FROM bot_profiles WHERE bot_id = 'B1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         let stored: Value = serde_json::from_str(&stored).unwrap();
-        assert_eq!(stored["token"], "xoxb-1", "a hidden secret survives a form save");
+        assert_eq!(
+            stored["token"], "xoxb-1",
+            "a hidden secret survives a form save"
+        );
         assert_eq!(stored["theme"], "light");
 
         let (_, list) = call(&app, "GET", "/api/bots", None, &[]).await;
@@ -1501,7 +1664,9 @@ mod tests {
     #[tokio::test]
     async fn list_routes_carry_omo_keys() {
         let (app, pool) = app().await;
-        crate::ledger::propose(&pool, "loop", "s", "rm", "delete", true).await.unwrap();
+        crate::ledger::propose(&pool, "loop", "s", "rm", "delete", true)
+            .await
+            .unwrap();
         let (_, pending) = call(&app, "GET", "/api/approvals/pending", None, &[]).await;
         assert_eq!(pending["pending_count"], 1);
         assert_eq!(pending["items"][0]["id"], pending["approvals"][0]["id"]);
@@ -1511,7 +1676,10 @@ mod tests {
         let (_, memory) = call(&app, "GET", "/api/memory", None, &[]).await;
         assert_eq!(memory["total"], 0);
         let (_, health) = call(&app, "GET", "/api/health", None, &[]).await;
-        assert_eq!((health["ok"].clone(), health["status"].clone()), (json!(true), json!("ok")));
+        assert_eq!(
+            (health["ok"].clone(), health["status"].clone()),
+            (json!(true), json!("ok"))
+        );
     }
 
     #[test]
@@ -1523,7 +1691,11 @@ mod tests {
             std::path::PathBuf::from("/srv/web")
         );
         assert_eq!(
-            web_root_from(Some(OsString::from("/x")), Some(OsString::from("/srv/web")), home.clone()),
+            web_root_from(
+                Some(OsString::from("/x")),
+                Some(OsString::from("/srv/web")),
+                home.clone()
+            ),
             std::path::PathBuf::from("/x")
         );
         assert_eq!(

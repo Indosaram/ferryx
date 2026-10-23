@@ -474,10 +474,20 @@ async fn run_turn(
     });
     tracing::info!(session = %storage_key, resume = request.thread_id.is_some(), system = message_ts.is_none(), "slack turn started on omo app-server");
     let started = std::time::Instant::now();
-    let result = omo_client::run_turn(&omo, &request, Some(progress)).await;
+    let registration = super::turns::begin(&storage_key, channel_id);
+    let result = super::turns::scope(
+        storage_key.clone(),
+        omo_client::run_turn(&omo, &request, Some(progress)),
+    )
+    .await;
+    drop(registration);
     let _ = relay.await;
     if let Some(ts) = message_ts {
         react(channel_id, ts, "eyes", false).await;
+    }
+    if matches!(&result, Err(error) if error.to_string().contains(omo_client::STOPPED)) {
+        tracing::info!(session = %storage_key, "slack turn stopped by the owner");
+        return;
     }
     let failed = |error: String| async move {
         tracing::warn!(session = %storage_key, %error, "slack turn failed");

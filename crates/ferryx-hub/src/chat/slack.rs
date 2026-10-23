@@ -71,6 +71,16 @@ fn slack_test_api() -> Option<(String, String)> {
     SLACK_API_TEST.try_with(|pair| pair.clone()).ok()
 }
 
+/// Runs `future` with the Slack Web API pointed at a test stand-in (base URL, token).
+#[cfg(all(test, feature = "hub-slack"))]
+pub(crate) async fn with_test_api<F: std::future::Future>(
+    base: String,
+    token: String,
+    future: F,
+) -> F::Output {
+    SLACK_API_TEST.scope((base, token), future).await
+}
+
 /// Spawns `future`, keeping a test's Slack API stand-in visible inside the new task.
 #[cfg(feature = "hub-slack")]
 pub(crate) fn spawn_carrying_test_api<F>(future: F) -> tokio::task::JoinHandle<()>
