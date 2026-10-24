@@ -11,7 +11,7 @@ This page compares the two on what can be verified: source availability, licensi
 
 Both codebases are readable, under licenses that permit very different things.
 
-Warp's client is open source. The [`warpdotdev/warp`](https://github.com/warpdotdev/Warp) repository carries the client crates, and the README states that the `warpui_core` and `warpui` crates are MIT licensed while the rest of the repository is under AGPL v3. The server portion is not in that repository. So Warp is an open-source client talking to a closed, commercial backend, with community contributions accepted through a labelled issue-to-PR flow.
+Warp's client is open source. The [`warpdotdev/warp`](https://github.com/warpdotdev/Warp) repository carries the client crates, and the README states that the `warpui_core` and `warpui` crates are MIT licensed while the rest of the repository is under AGPL v3. The server portion is not in that repository. So Warp is an open-source client talking to a closed, commercial backend, with community contributions accepted through a labelled issue-to-PR flow. Ferryx, by contrast, is source-available.
 
 Ferryx's source is public on GitHub under the Ferryx License, which is free for individuals, education, open-source work, non-profits, and companies under 50 people and USD 5M revenue; larger companies need a Team subscription for work use. The Ferryx License is not an OSI open-source license, and AGPL-3.0 is. If reciprocal-copyleft open source is what you need, Warp's client qualifies on that axis and Ferryx doesn't; say so plainly rather than around it.
 
@@ -23,7 +23,7 @@ Warp's answer spans products. The Warp Terminal recognises third-party CLI agent
 
 Remote Control is worth calling out because Ferryx has a counterpart. In Warp you click the `/remote-control` chip in the agent utility bar and the session publishes to Warp's cloud with a shareable link, viewable from any browser with nothing installed and steerable if you grant edit access ([docs.warp.dev/agents/cli-agents/remote-control](https://docs.warp.dev/agents/cli-agents/remote-control/), checked 2026-10-24).
 
-Ferryx approaches the same problem locally and without a cloud. The daemon owns the pseudoterminals independent of the GUI, so agents survive the window closing and replay the gap on reconnect. Parallel agent streams get git worktree isolation: each managed worktree lives in `.orca-worktrees/<workspace-id>/<slug>` on a branch named `orca/<workspace-id>/<slug>`, so concurrent work doesn't share a checkout. Its remote client is self-hosted rather than published: an authenticated gateway, 6-digit PIN pairing, a custom DOM grid instead of xterm.js, and an outbound relay you can run yourself for machines behind NAT.
+Ferryx approaches the same problem locally and without a cloud. The daemon owns the pseudoterminals independent of the GUI, so agents survive the window closing and replay the gap on reconnect. Parallel agent streams get git worktree isolation: each managed worktree lives in `.orca-worktrees/<workspace-id>/<slug>` on a branch named `orca/<workspace-id>/<slug>`, so concurrent work doesn't share a checkout. Its remote client is self-hosted rather than published: an authenticated gateway, account sign-in pairing, a custom DOM grid instead of xterm.js, and an outbound relay you can run yourself for machines behind NAT.
 
 ## A plain-language rundown
 
@@ -33,7 +33,7 @@ Ferryx approaches the same problem locally and without a cloud. The daemon owns 
 - **Where work runs.** Ferryx runs entirely locally. Warp runs locally too, and Warp Factories runs fleets of agents in cloud infrastructure.
 - **Process survival.** Closing or reloading the Ferryx GUI doesn't kill running agent processes, and reconnecting replays missed output from a ring buffer with monotonic sequence numbers.
 - **Remote viewing.** Warp publishes a session to its cloud and hands you a link. Ferryx pairs a device directly with your daemon over your own gateway or relay.
-- **Agent breadth.** Warp documents enhanced support for sixteen named CLI agents ([docs](https://docs.warp.dev/agents/cli-agents/overview/), checked 2026-10-24). Ferryx runs any command in a pane and ships status detection for eleven agents.
+- **Agent breadth.** Warp documents enhanced support for sixteen named CLI agents ([docs](https://docs.warp.dev/agents/cli-agents/overview/), checked 2026-10-24). Ferryx runs any command in a pane and ships status detection for <!-- agents:count -->16<!-- /agents:count --> agents.
 - **Worktree isolation.** Ferryx manages worktrees at `.orca-worktrees/<workspace-id>/<slug>` on `orca/<workspace-id>/<slug>` branches; Warp leaves worktrees to you or to the agent.
 - **Enterprise surface.** Warp markets named solutions for financial services, insurance, and telecommunications and holds SOC 2 certification. Ferryx has no enterprise program; it's an early local desktop app.
 

@@ -57,6 +57,13 @@ impl RemoteGatewayManager {
         }
     }
 
+    pub(crate) fn daemon_client(&self) -> Option<&Arc<DaemonClient>> {
+        match &self.inner {
+            RemoteGatewayManagerInner::Daemon(client) => Some(client),
+            RemoteGatewayManagerInner::State { .. } => None,
+        }
+    }
+
     pub fn set_browser_backend(
         &self,
         backend: Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>,

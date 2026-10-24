@@ -24,15 +24,15 @@ Ferryx connects your terminals, agents, and Git worktrees across local and remot
 Our commercial hosted relay network allows connecting remote machines, accessing terminals from web browsers, and coordinating agent workflows without manual port forwarding or VPN configuration.
 
 :::note[Paid Plans Coming Soon]
-**Only the Free plan is available today.** Pro and Team are coming soon: the machine limits below are final, but their prices are planned and checkout is not open yet. Business and Enterprise are not priced yet; see [Business and Enterprise](#4-business-and-enterprise) below.
+**Only the Free plan is available today, covering up to {pricingData.plans.free.machine_limit} registered machines.** Paid checkout is not open yet: Pro and Team are coming soon, the machine limits below are final, but their prices are planned. Business and Enterprise are not priced yet; see [Business and Enterprise](#4-business-and-enterprise) below.
 :::
 
 :::caution[Company Use]
-Ferryx is free for individuals, education, open-source work, non-profits, and companies with fewer than 50 employees and contractors and less than USD 5M in annual revenue. Larger companies need the Team plan or higher to use Ferryx for work, starting 90 days after the Team plan opens; until then, work use stays free. See the [license](https://github.com/Indosaram/ferryx/blob/main/LICENSE).
+Ferryx is free for individuals, education, open-source work, non-profits, and companies with fewer than 50 employees and contractors and less than USD 5M in annual revenue. Larger companies need the Team plan or higher to use Ferryx for work, starting 90 days after the Team plan opens; until then, work use stays free. See the [license](https://github.com/Indosaram/ferryx/blob/main/LICENSE) and the [license FAQ](/docs/license/) for common cases.
 :::
 
 :::tip[Local and Self-Hosted are Perpetually Free]
-**Local terminal multiplexing and self-hosted relays are completely free and open.** Running Ferryx locally on your machine or hosting your own relay instance (`FERRYX_DEPLOYMENT_MODE=selfhost`) requires no account, no subscription, and enforces no machine limits.
+**Local terminal multiplexing and self-hosted relays are free under the Ferryx License, a source-available license.** Running Ferryx locally on your machine or hosting your own relay instance (`FERRYX_DEPLOYMENT_MODE=selfhost`) requires no account, no subscription, and enforces no machine limits.
 :::
 
 ---
@@ -44,7 +44,7 @@ Ferryx is free for individuals, education, open-source work, non-profits, and co
 | **Availability** | **{availabilityLabel(pricingData.plans.free)}** | **{availabilityLabel(pricingData.plans.pro)}** | **{availabilityLabel(pricingData.plans.team)}** |
 | **Monthly Price** | **{planPrice(pricingData.plans.free, pricingData.plans.free.monthly, ' / mo')}** | {planPrice(pricingData.plans.pro, pricingData.plans.pro.monthly, ' / mo')} | {planPrice(pricingData.plans.team, pricingData.plans.team.monthly, ' / seat / mo')} |
 | **Annual Price** | **{planPrice(pricingData.plans.free, pricingData.plans.free.annual, ' / yr')}** | {planPrice(pricingData.plans.pro, pricingData.plans.pro.annual, ' / yr')} | {planPrice(pricingData.plans.team, pricingData.plans.team.annual, ' / seat / yr')} |
-| **Connected Machines** | {pricingData.plans.free.machine_limit} machine | Up to {pricingData.plans.pro.machine_limit} machines | {pricingData.plans.team.machine_limit} |
+| **Connected Machines** | {pricingData.plans.free.machine_limit} registered machines | Up to {pricingData.plans.pro.machine_limit} machines | {pricingData.plans.team.machine_limit} |
 | **Extra Machine Expansion** | — | {planPrice(pricingData.plans.pro, pricingData.plans.pro.extra_host_pack.monthly, ' / mo')} or {formatPrice(pricingData.plans.pro.extra_host_pack.annual, ' / yr')} per {pricingData.plans.pro.extra_host_pack.hosts} hosts | {planPrice(pricingData.plans.team, pricingData.plans.team.extra_host_pack.annual, ' / yr')} per {pricingData.plans.team.extra_host_pack.hosts} hosts (Annual) |
 | **Seat Requirements** | 1 user | 1 user | Minimum {pricingData.plans.team.min_seats} seats |
 | **Team List Price** | — | — | {planPrice(teamPlan, teamPlan.list_monthly, ' / seat / mo')} after the launch period |
@@ -59,8 +59,8 @@ Ferryx is free for individuals, education, open-source work, non-profits, and co
 
 ### 1. Free Plan
 - **Price:** {formatPrice(pricingData.plans.free.monthly)}
-- **Connected Machines:** {pricingData.plans.free.machine_limit} active registered machine at a time via official managed relay.
-- **Audience:** Individual developers getting started with remote terminal access on a single workstation or server.
+- **Connected Machines:** Up to {pricingData.plans.free.machine_limit} registered machines at a time via official managed relay.
+- **Audience:** Individual developers getting started with remote terminal access across a few workstations or servers.
 - **Local Multiplexing:** Unlimited local workspaces, worktrees, tabs, and agents on your primary machine.
 
 ### 2. Pro Plan (Coming Soon)

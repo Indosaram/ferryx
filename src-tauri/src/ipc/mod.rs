@@ -1,5 +1,6 @@
 pub mod account;
 pub mod agent_history;
+pub mod agent_control_settings;
 pub mod agent_integration;
 pub mod agents;
 pub mod browser;
@@ -41,6 +42,7 @@ pub mod ssh;
 pub mod supervisor;
 pub mod system_resources;
 pub mod terminal;
+pub mod terminal_grid;
 #[cfg(test)]
 pub mod pane_liveness_contract;
 pub mod updater;
@@ -88,5 +90,6 @@ pub use remote::*;
 pub use remote_auto_trust::*;
 pub use session::*;
 pub use terminal::*;
+pub use terminal_grid::*;
 pub use worktree::*;
 pub use worktree_disk::*;

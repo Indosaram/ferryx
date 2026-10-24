@@ -2,7 +2,51 @@ import { getVersion } from "@tauri-apps/api/app";
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 
+import { UPDATE_CHANNEL_STORAGE_KEY } from "./storageKeys";
+
 export type UpdateFailure = "cancelled" | "stalled";
+
+/** Release channel the in-app updater follows. Stable is the default. */
+export type UpdateChannel = "stable" | "beta";
+
+/**
+ * Update manifests per channel. They mirror `STABLE_UPDATE_ENDPOINT` and `BETA_UPDATE_ENDPOINT` in
+ * src-tauri/src/ipc/updater.rs, which picks the endpoint from the channel this module sends; the UI
+ * never sends a URL. Beta falls back to the stable manifest when no beta manifest is published.
+ */
+export const UPDATE_ENDPOINTS: Record<UpdateChannel, readonly string[]> = {
+  stable: ["https://github.com/Indosaram/ferryx/releases/latest/download/latest.json"],
+  beta: [
+    "https://github.com/Indosaram/ferryx/releases/latest/download/latest-beta.json",
+    "https://github.com/Indosaram/ferryx/releases/latest/download/latest.json",
+  ],
+};
+
+function channelStorage(): Storage | null {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function getUpdateChannel(): UpdateChannel {
+  try {
+    return channelStorage()?.getItem(UPDATE_CHANNEL_STORAGE_KEY) === "beta" ? "beta" : "stable";
+  } catch {
+    return "stable";
+  }
+}
+
+/** Persists the channel and re-checks so the offer reflects it, unless a download is underway. */
+export async function setUpdateChannel(channel: UpdateChannel): Promise<void> {
+  try {
+    channelStorage()?.setItem(UPDATE_CHANNEL_STORAGE_KEY, channel);
+  } catch (error) {
+    console.warn("Failed to persist the update channel", error);
+  }
+  await checkForUpdate();
+}
 
 /** Offer returned by `cmd_updater_check` (`UpdaterOffer` in ipc/updater.rs). */
 type UpdateOffer = {
@@ -121,7 +165,9 @@ export async function checkForUpdate(): Promise<void> {
   try {
     // The Rust command builds the same updater as the download, so a debug endpoint override
     // applies to the offer too.
-    const update = await invoke<UpdateOffer | null>("cmd_updater_check");
+    const update = await invoke<UpdateOffer | null>("cmd_updater_check", {
+      updateChannel: getUpdateChannel(),
+    });
     if (!update) {
       pendingUpdate = null;
       setStatus({ state: "idle" });
@@ -241,7 +287,11 @@ export async function downloadAndInstallUpdate(): Promise<void> {
   setStatus({ state: "downloading", version, releaseNotes, downloadProgress: 0 });
   let result: DownloadOutcome;
   try {
-    await invoke("cmd_updater_download", { expectedVersion: version, onEvent });
+    await invoke("cmd_updater_download", {
+      expectedVersion: version,
+      onEvent,
+      updateChannel: getUpdateChannel(),
+    });
     result = await outcome;
   } catch (error) {
     download.settled = true;

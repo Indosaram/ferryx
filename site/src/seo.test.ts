@@ -262,7 +262,7 @@ describe("SEO — structured data", () => {
     const html = readFileSync(path.join(DIST, "index.html"), "utf8");
     const app = nodesOfType(html, "SoftwareApplication")[0]!;
     // The offer says free; without an explicit license a crawler cannot tell whether
-    // that means open source, and the Ferryx License is emphatically not OSI open source.
+    // that means open source, and the Ferryx License is source-available, emphatically not OSI open source.
     expect(String(app.license)).toBe("https://github.com/Indosaram/ferryx/blob/main/LICENSE");
     expect(app.isAccessibleForFree).toBe(true);
     expect(String(app.downloadUrl)).toMatch(/^https:\/\/github\.com\/Indosaram\/ferryx\/releases/);

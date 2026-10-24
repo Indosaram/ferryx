@@ -10,9 +10,9 @@
       "annual": "$0",
       "monthly_num": 0,
       "annual_num": 0,
-      "machine_limit": 1,
+      "machine_limit": 3,
       "extra_host_pack": null,
-      "description": "Every local feature, plus remote access to 1 connected computer through the managed relay. Local terminal multiplexing and self-hosted relays remain completely free and open."
+      "description": "Every local feature, plus remote access to up to 3 registered machines through the managed relay. Local terminal multiplexing and self-hosted relays stay free under the Ferryx License, a source-available license."
     },
     "pro": {
       "name": "Pro",

@@ -113,7 +113,7 @@
     <text x="24" y="16" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.2">FERRYX SECURITY</text>
 
     <!-- Main Title & Subtitle -->
-    <text x="0" y="54" fill="#f8fafc" font-size="24" font-weight="700" letter-spacing="-0.5">QR Pairing Security: Pairing Trust &amp; Capability Grant</text>
+    <text x="0" y="54" fill="#f8fafc" font-size="24" font-weight="700" letter-spacing="-0.5">Pairing Security: Pairing Trust &amp; Capability Grant</text>
     <text x="0" y="76" fill="#64748b" font-size="13" font-weight="400">Cryptographic trust exchange, scoped capability tokens, and host revocation control</text>
 
     <!-- Top Right Telemetry Badges -->
@@ -143,34 +143,19 @@
     <text x="46" y="29" fill="#e2e8f0" font-size="14" font-weight="700" letter-spacing="0.2">REMOTE CLIENT (INITIATOR)</text>
     <text x="390" y="29" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">PHONE / BROWSER</text>
 
-    <!-- Sub-card 1: Optical QR Ingestion -->
+    <!-- Sub-card 1: Account Sign-in -->
     <g transform="translate(20, 68)">
       <rect x="0" y="0" width="370" height="180" rx="10" fill="url(#card-grad-blue)" stroke="#1e3a5f" stroke-width="1" />
       
-      <!-- Mini QR Schematic Graphic -->
+      <!-- Mini Envelope (email magic link) Graphic -->
       <g transform="translate(20, 20)">
         <rect x="0" y="0" width="60" height="60" rx="6" fill="#091422" stroke="#00f2fe" stroke-width="1.2" opacity="0.9" />
-        <!-- QR Corners -->
-        <rect x="6" y="6" width="16" height="16" rx="2" fill="none" stroke="#00f2fe" stroke-width="2" />
-        <rect x="10" y="10" width="8" height="8" fill="#00f2fe" />
-        <rect x="38" y="6" width="16" height="16" rx="2" fill="none" stroke="#00f2fe" stroke-width="2" />
-        <rect x="42" y="10" width="8" height="8" fill="#00f2fe" />
-        <rect x="6" y="38" width="16" height="16" rx="2" fill="none" stroke="#00f2fe" stroke-width="2" />
-        <rect x="10" y="42" width="8" height="8" fill="#00f2fe" />
-        <!-- QR Random Matrix Bits -->
-        <rect x="26" y="10" width="4" height="4" fill="#38bdf8" />
-        <rect x="30" y="18" width="4" height="4" fill="#38bdf8" />
-        <rect x="26" y="26" width="4" height="4" fill="#00f2fe" />
-        <rect x="18" y="28" width="4" height="4" fill="#38bdf8" />
-        <rect x="38" y="28" width="4" height="4" fill="#2dd4bf" />
-        <rect x="30" y="38" width="4" height="4" fill="#38bdf8" />
-        <rect x="38" y="44" width="4" height="4" fill="#00f2fe" />
-        <rect x="46" y="38" width="4" height="4" fill="#38bdf8" />
-        <line x1="2" y1="30" x2="58" y2="30" stroke="#00f2fe" stroke-width="1.5" opacity="0.75" />
+        <rect x="10" y="16" width="40" height="28" rx="3" fill="none" stroke="#00f2fe" stroke-width="2" />
+        <path d="M 10 18 L 30 32 L 50 18" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linejoin="round" />
       </g>
 
-      <text x="96" y="36" fill="#f1f5f9" font-size="14" font-weight="600">Ephemeral QR Ingestion</text>
-      <text x="96" y="54" fill="#64748b" font-size="12">Air-gapped host credential delivery</text>
+      <text x="96" y="36" fill="#f1f5f9" font-size="14" font-weight="600">Account sign-in</text>
+      <text x="96" y="54" fill="#64748b" font-size="12">Email magic link, or a 6-digit Pairing PIN</text>
 
       <!-- Fields list -->
       <g transform="translate(20, 95)" font-family="'JetBrains Mono', monospace" font-size="11">
@@ -248,14 +233,14 @@
 
     <!-- Handshake Steps Interactive Cards -->
     <g transform="translate(20, 68)">
-      <!-- Stage 1: Optical Scan Verification -->
+      <!-- Stage 1: Sign-in Verification -->
       <g transform="translate(0, 0)">
         <rect x="0" y="0" width="500" height="105" rx="8" fill="url(#card-grad-teal)" stroke="#114b59" stroke-width="1" />
         <rect x="16" y="14" width="22" height="22" rx="4" fill="#0d9488" />
         <text x="27" y="29" fill="#fff" font-size="11" font-weight="700" text-anchor="middle">1</text>
         <text x="48" y="29" fill="#e2e8f0" font-size="13" font-weight="600">Out-of-Band Nonce &amp; Host Identity Verification</text>
 
-        <text x="20" y="56" fill="#94a3b8" font-size="12">Client scans QR out-of-band to acquire host fingerprint and pairing secret.</text>
+        <text x="20" y="56" fill="#94a3b8" font-size="12">Client signs in to the account (or enters a Pairing PIN) to bind to the host identity.</text>
         <text x="20" y="74" fill="#2dd4bf" font-family="'JetBrains Mono', monospace" font-size="11">Single-use nonce binds host identity and prevents replay</text>
       </g>
 
@@ -412,12 +397,12 @@
   </g>
 
   <!-- CROSS-COLUMN CONNECTORS & FLOW ARROWS -->
-  <!-- Connector 1: Optical QR Delivery (Host -> Client) -->
+  <!-- Connector 1: Account Sign-in (Host -> Client) -->
   <g opacity="0.9">
     <path d="M 1110 330 L 1090 330 L 1090 148 L 510 148 L 510 330 L 490 330" 
           fill="none" stroke="#00f2fe" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#arr-teal)" />
     <rect x="700" y="135" width="200" height="26" rx="13" fill="#041b29" stroke="#00f2fe" stroke-width="1.2" />
-    <text x="800" y="152" fill="#00f2fe" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600" text-anchor="middle">1. OPTICAL QR TRANSFER</text>
+    <text x="800" y="152" fill="#00f2fe" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600" text-anchor="middle">1. ACCOUNT SIGN-IN</text>
   </g>
 
   <!-- Connector 2: Mutual Handshake (Client <-> Gateway) -->

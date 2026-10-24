@@ -88,12 +88,12 @@ export function forbiddenRoots({ platform, home, uid = null, localAppData = null
   const roots = [];
   if (platform === 'mac') {
     roots.push('/Applications', path.join(home, 'Applications'));
-    if (uid !== null) roots.push(`/tmp/rorca-${uid}`, `/tmp/rorca-${uid}-dev`);
+    if (uid !== null) roots.push(`/tmp/ferryx-${uid}`, `/tmp/ferryx-${uid}-dev`, `/tmp/rorca-${uid}`, `/tmp/rorca-${uid}-dev`);
     roots.push(path.join(home, 'Library/Application Support/Ferryx'), path.join(home, 'Library/LaunchAgents/com.ferryx.daemon'));
   }
   if (platform === 'linux') {
     roots.push('/usr/bin/ferryx', '/opt/ferryx', path.join(home, '.local/share/ferryx'), path.join(home, '.config/systemd/user/ferryx-daemon'));
-    if (uid !== null) roots.push(`/tmp/rorca-${uid}`, `/tmp/rorca-${uid}-dev`);
+    if (uid !== null) roots.push(`/tmp/ferryx-${uid}`, `/tmp/ferryx-${uid}-dev`, `/tmp/rorca-${uid}`, `/tmp/rorca-${uid}-dev`);
   }
   if (platform === 'windows') {
     const lad = localAppData ?? path.win32.join(home, 'AppData', 'Local');

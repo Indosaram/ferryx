@@ -47,7 +47,7 @@ No. If you are an individual or work at a small company, nothing changes. If you
 
 The planned launch price is USD 12 per seat per month, with a minimum of 3 seats. See the [pricing page](/docs/pricing/) for current details.
 
-### Is Ferryx open source?
+### Is Ferryx open source or source-available?
 
 No. Ferryx is source-available: the source is public, but the Ferryx License is not an OSI-approved open-source license, and neither was SUL-1.0.
 

@@ -18,6 +18,8 @@ vi.mock("../../../lib/tauri", () => ({
   enableRemoteGateway: vi.fn(),
   disableRemoteGateway: vi.fn(),
   revokeRemoteDevice: vi.fn(),
+  getAgentControlSettings: () => Promise.resolve(null),
+  setAgentControlSettings: vi.fn(),
 }));
 
 const host: HostEndpoint = {

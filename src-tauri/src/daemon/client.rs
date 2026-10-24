@@ -567,6 +567,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::RemoteSessionDetails { .. }
             | DaemonRequest::RetryRemoteSession { .. }
             | DaemonRequest::SupervisorSnapshot
+            | DaemonRequest::AgentControlSettingsGet
     )
 }
 
@@ -682,6 +683,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::UnsubscribeDag { .. } => "unsubscribeDag",
         DaemonRequest::Shutdown => "shutdown",
         DaemonRequest::AgentControl { .. } => "agentControl",
+        DaemonRequest::AgentControlSettingsGet => "agentControlSettingsGet",
+        DaemonRequest::AgentControlSettingsSet { .. } => "agentControlSettingsSet",
         DaemonRequest::GetAgentIntegration => "getAgentIntegration",
         DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
         DaemonRequest::SupervisorSnapshot => "supervisorSnapshot",
@@ -2432,7 +2435,7 @@ impl DaemonClient {
         }
         // `new_with_socket` is a dependency-injection hook used by tests and local harnesses
         // with arbitrary temporary UDS paths. Section-9 trust requirements govern the fixed
-        // production runtime endpoint, so do not impose `/tmp/rorca-{uid}` directory-mode
+        // production runtime endpoint, so do not impose `/tmp/ferryx-{uid}` directory-mode
         // semantics on unrelated injected sockets.
         if path != get_socket_path() {
             return Ok(());
@@ -2655,6 +2658,16 @@ impl DaemonClient {
         {
             Self::connect_socket(&self.socket_path).await
         } else {
+            // A daemon from before the rename serves only /tmp/rorca-{uid}: reach it there
+            // instead of reporting it busy, until it is upgraded.
+            #[cfg(unix)]
+            if self.socket_path == get_socket_path() {
+                if let Some(legacy) = crate::daemon::server::legacy_owner_socket_path() {
+                    if crate::daemon::server::validate_runtime_socket_path(&legacy).is_ok() {
+                        return Self::connect_socket(&legacy).await;
+                    }
+                }
+            }
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "daemon socket not found or invalid",

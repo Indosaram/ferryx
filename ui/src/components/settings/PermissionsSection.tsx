@@ -337,7 +337,7 @@ export function PermissionsSection() {
       {status !== null && status.platform !== "web" && (
         <SettingRow
           label="Welcome setup"
-          description="Walk through permissions, agents, and your first project again."
+          description="Walk through agents, the command-line tool, and your first project again."
         >
           <Button
             variant="secondary"

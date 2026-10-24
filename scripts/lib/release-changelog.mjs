@@ -276,7 +276,8 @@ export function generateChangelog({
   return sections.join("\n\n") + "\n";
 }
 
-const RELEASE_TAG_PATTERN = /^v\d{4}\.\d{2}\.\d{2}\.\d+$/;
+// Current vYYYY.MMDD.N tags plus the legacy vYYYY.MM.DD.N form (scripts/release-tag-policy.mjs).
+const RELEASE_TAG_PATTERN = /^v\d{4}\.(?:\d{4}|\d{2}\.\d{2})\.\d+$/;
 
 export const CHANGELOG_HEADER = [
   "# Changelog",
@@ -292,7 +293,7 @@ function runGit(args) {
 }
 
 /**
- * Lists date-based release tags (vYYYY.MM.DD.N), newest first.
+ * Lists date-based release tags (vYYYY.MMDD.N and legacy vYYYY.MM.DD.N), newest first.
  *
  * @param {Function} [execFn] - Returns raw `git tag` output; for testing
  * @returns {string[]}
@@ -383,10 +384,10 @@ export function buildChangelogFile({ repo, allTags, tags = allTags, existing = "
  * @returns {string[]}
  */
 export function selectTagRange(allTags, { from = null, to = null } = {}) {
-  if (allTags.length === 0) throw new Error("no release tags (vYYYY.MM.DD.N) found");
+  if (allTags.length === 0) throw new Error("no release tags (vYYYY.MMDD.N or vYYYY.MM.DD.N) found");
   const indexOf = (tag, flag) => {
     const index = allTags.indexOf(tag);
-    if (index < 0) throw new Error(`${flag} ${tag} is not a release tag (vYYYY.MM.DD.N) in this repository`);
+    if (index < 0) throw new Error(`${flag} ${tag} is not a release tag (vYYYY.MMDD.N or vYYYY.MM.DD.N) in this repository`);
     return index;
   };
   const newest = to ? indexOf(to, "--to") : 0;
