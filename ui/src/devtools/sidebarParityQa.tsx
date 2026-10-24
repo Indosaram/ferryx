@@ -67,7 +67,18 @@ export function sidebarParitySections(
   return options.offlineMachine ? [connected, OFFLINE_MACHINE] : [connected];
 }
 
-export const SidebarParityQaState: React.FC<{ state: string; model: RemoteWorkspaceModel }> = ({ state, model }) => {
+/**
+ * One more finished pane than the seeded model has, so the remote's own pane-derived Inbox (3 rows)
+ * never matches the desktop's published Inbox (2 rows) in size: a remote that ignores the
+ * published rows shows a different Inbox count and the QA gate fails.
+ */
+const EXTRA_PANE = { id: "tab-parity-extra", label: "parity extra", activityState: "done" as const };
+
+export const SidebarParityQaState: React.FC<{ state: string; model: RemoteWorkspaceModel }> = ({ state, model: seeded }) => {
+  const model = React.useMemo<RemoteWorkspaceModel>(
+    () => ({ ...seeded, context: { ...seeded.context, terminalTabs: [...(seeded.context.terminalTabs ?? []), EXTRA_PANE] } }),
+    [seeded],
+  );
   const [open, setOpen] = React.useState(true);
   const sections = React.useMemo(() => sidebarParitySections(state === "sidebar-parity-inventory" ? "inventory" : "desktop"), [state]);
   return (
