@@ -31,7 +31,7 @@ No Electron anywhere.
 | Platform | Package | |
 | :--- | :--- | :--- |
 | **macOS** | Universal DMG (Apple Silicon & Intel) | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
-| **Windows** | Installer (x64, not code-signed yet) | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
+| **Windows** | Installer (x64). Windows installer (.exe) is not code-signed | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
 | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
 | **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64) | [`install.sh`](https://relay.ferryx.dev/install.sh) (`curl -fsSL https://relay.ferryx.dev/install.sh \| bash`) |
@@ -81,10 +81,10 @@ transitions.
 
 ### Mobile web pairing
 
-Authenticated remote access over QR or PIN. Stream terminal output to a dependency-free
+Authenticated remote access after you sign in to your Ferryx account. Stream terminal output to a dependency-free
 DOM terminal grid and steer agents from anywhere.
 
-- 6-digit PIN pairing
+- Account sign-in via email magic link
 - Streamed terminal grid
 - Steer agents from a phone
 
@@ -149,7 +149,7 @@ performance benchmark against Electron-based AI IDEs or terminal emulators.
 | Desktop rendering | WGPU native child surfaces |
 | PTY lifecycle | Headless Rust daemon with output replay |
 | Embedded browser | Native WebView split-tabs |
-| Mobile pairing | PIN/QR gateway with a custom DOM terminal grid |
+| Mobile pairing | Account sign-in gateway with a custom DOM terminal grid |
 | Agent supervision | Manifest-driven status detection and notifications |
 
 ## Guides and comparisons
@@ -257,8 +257,6 @@ Questions and ideas are welcome in [Discord](https://discord.gg/Z2hBkQEHUG).
 This project is source-available under the [Ferryx License](LICENSE). It is free for personal use, education, open-source work, non-profits, and companies with fewer than 50 people and less than USD 5M in annual revenue. Larger companies need a Team subscription to use Ferryx for work, after a transition period that ends 90 days after the Team plan opens. Self-hosted relays stay free for everyone. Releases published before this change remain under the Sustainable Use License (SUL-1.0) they shipped with. Contributions require signing the [CLA](CLA.md); see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Code Signing Policy
-
-Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
 
 - **Maintainer**: [@Indosaram](https://github.com/Indosaram)
 - **Privacy**: Ferryx stores workspace data locally. Remote access, embedded websites, external coding agents, and update services can exchange data over the network. See the [Ferryx Privacy Policy](https://ferryx.dev/privacy/) for data handling and deletion choices.

@@ -41,7 +41,7 @@ sha256sum -c SHA256SUMS.txt
 1. Open a terminal tab with ⌘T and start a shell or an agent.
 2. Split the pane with ⌘D (right) or ⌘⇧D (down) when you want two sessions visible at once.
 3. Add a browser tab with ⌘⇧B for whatever you keep checking in a second window.
-4. Pair a phone over QR or PIN if a long run needs a check-in while you're away.
+4. Sign in to your Ferryx account on a phone if a long run needs a check-in while you're away.
 
 The command palette (⌘K) is there if you'd rather browse actions than memorize keys, and the [keyboard shortcuts](/docs/shortcuts/) page lists everything, including in-terminal search (⌘F).
 

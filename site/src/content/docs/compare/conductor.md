@@ -36,7 +36,7 @@ So the honest framing isn't local versus cloud. Both tools run agents locally by
 
 **Where worktrees live.** Conductor puts workspaces outside the repository, under `~/conductor/workspaces/`. Ferryx keeps managed worktrees inside it, at `.orca-worktrees/wt-<slug>` on a branch named `orca/<workspace-id>/<slug>`, with worktree paths jailed to the repository root. Neither is better in the abstract; they trade a tidy home directory against a repository that carries its own worktrees.
 
-**Checking on a run from elsewhere.** Ferryx ships an authenticated mobile web client today: pairing uses a 6-digit PIN or a QR code, the terminal renders through a custom DOM grid rather than xterm.js, and an outbound relay covers machines that aren't on your LAN. Conductor lists an iOS app as coming soon on its homepage and its mobile app under Pro as "coming very soon," so as of 2026-09-19 that comparison is between something shipped and something announced.
+**Checking on a run from elsewhere.** Ferryx ships an authenticated mobile web client today: pairing uses account sign-in with an email magic link, the terminal renders through a custom DOM grid rather than xterm.js, and an outbound relay covers machines that aren't on your LAN. Conductor lists an iOS app as coming soon on its homepage and its mobile app under Pro as "coming very soon," so as of 2026-09-19 that comparison is between something shipped and something announced.
 
 ## When Conductor is the better choice
 

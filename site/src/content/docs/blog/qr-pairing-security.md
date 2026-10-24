@@ -1,23 +1,23 @@
 ---
-title: "QR Pairing Security: What the Code Grants"
-description: "What a pairing QR actually encodes, expiry behavior, and how to revoke a paired device when a phone is lost. Claims map to Ferryx docs and cited sources only."
+title: "Pairing Security: What Signing In Grants"
+description: "What account sign-in and a pairing PIN actually grant, expiry behavior, and how to revoke a paired device when a phone is lost. Claims map to Ferryx docs and cited sources only."
 ---
 
-**QR Pairing Security: What the Code Grants.** What a pairing QR actually encodes, expiry behavior, and how to revoke a paired device when a phone is lost. Claims map to Ferryx docs and cited sources only.
+**Pairing Security: What Signing In Grants.** What account sign-in and a pairing PIN actually grant, expiry behavior, and how to revoke a paired device when a phone is lost. Claims map to Ferryx docs and cited sources only.
 
 ![qr-pairing-security cover](/images/blog/qr-pairing-security/cover.png)
 
-## Code contents
+## What pairing grants
 
-Long agent runs do not wait for you to be at the desk. Remote access that does not require inbound SSH or a vendor-hosted jump box keeps you checking progress, sending input, and watching CI from a phone without exposing a raw shell to the internet. In the specific case of “QR Pairing Security: What the Code Grants”, the Ferryx angle is straightforward: what a pairing qr actually encodes, expiry behavior, and how to revoke a paired device when a phone is lost. claims map to ferryx docs and cited sources only. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
+Long agent runs do not wait for you to be at the desk. Remote access that does not require inbound SSH or a vendor-hosted jump box keeps you checking progress, sending input, and watching CI from a phone without exposing a raw shell to the internet. In the specific case of “Pairing Security: What Signing In Grants”, the Ferryx angle is straightforward: what account sign-in and a pairing pin actually grant, expiry behavior, and how to revoke a paired device when a phone is lost. claims map to ferryx docs and cited sources only. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces. This post keeps its original address but describes the pairing flows that ship today.
 
 ## Lifetime and revocation
 
-Ferryx pairs a mobile or browser client to your daemon through an authenticated gateway using a 6-digit PIN or QR. The remote client renders terminals in a custom DOM grid rather than xterm.js, and an outbound relay covers machines behind NAT. Applied to “qr pairing security ferryx”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
+Ferryx pairs a mobile or browser client to your daemon through an authenticated gateway. The primary path is signing in to your Ferryx account with an email magic link, which links the machine and the client to the same account without copying codes; a local gateway can also issue a 6-digit PIN that expires 60 seconds after creation. The remote client renders terminals in a custom DOM grid rather than xterm.js, and an outbound relay covers machines behind NAT. Applied to “pairing security ferryx”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
 
 ## Practical steps
 
-1. Enable the gateway on the host and generate a pairing PIN or QR.
+1. Enable the gateway on the host and sign in to your Ferryx account there (or generate a 6-digit pairing PIN).
 2. Open the Ferryx remote client on the phone or browser and complete pairing; the session binds to the host identity.
 3. Browse sessions, tap into a pane, and type as if you were local; the DOM grid keeps layout stable on small screens.
 4. For off-LAN access, point the client at your own outbound relay instead of depending on a third-party tunnel.
@@ -34,7 +34,7 @@ Ferryx pairs a mobile or browser client to your daemon through an authenticated 
 
 Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64 installer), and Linux (AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
 
-![QR Pairing Security: What the Code Grants illustration](/images/blog/qr-pairing-security/body-1.png)
+![Pairing Security: What Signing In Grants illustration](/images/blog/qr-pairing-security/body-1.png)
 
 Related reading:
 - [/privacy/](/privacy/)
@@ -50,9 +50,9 @@ No. SSH assumes inbound reachability and hands you a raw shell. Ferryx pairs an 
 
 Typically no inbound ports: the client reaches the host through the gateway or your own outbound relay.
 
-### What does a pairing QR contain?
+### What does pairing grant?
 
-Enough information for the client to complete an authenticated pairing handshake with your host; revoke the device from host settings if the phone is lost.
+A device-scoped grant tied to your account or to a single PIN handshake, not your host shell credentials. PINs expire after 60 seconds; revoke the device from host settings if the phone is lost.
 
 ## Limits and non-goals
 

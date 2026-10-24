@@ -77,10 +77,10 @@ pi、omp、GJC、GitHub Copilot CLI、Cursor CLI、Grok、Kimi、Cline、Aider�
 
 ### 移动端网页配对
 
-通过 QR 码或 PIN 进行身份验证后远程访问。将终端输出流式传输到无需依赖的
+登录 Ferryx 账户完成身份验证后远程访问。将终端输出流式传输到无需依赖的
 DOM 终端网格，并随时随地操控智能体。
 
-- 6 位 PIN 配对
+- 通过邮箱魔法链接登录账户
 - 流式终端网格
 - 用手机操控智能体
 
@@ -137,7 +137,7 @@ Ferryx 原生 Ghostty 和 Rust 组件的架构清单。这不是与基于 Electr
 | 桌面渲染 | WGPU 原生子表面 |
 | PTY 生命周期 | 带输出重放的无头 Rust 守护进程 |
 | 嵌入式浏览器 | 原生 WebView 分屏标签 |
-| 移动端配对 | 带自定义 DOM 终端网格的 PIN / QR 网关 |
+| 移动端配对 | 账户登录网关，配合自定义 DOM 终端网格 |
 | 智能体监控 | 基于清单的状态检测和通知 |
 
 ## 指南与比较
@@ -237,8 +237,6 @@ ferryx/
 本项目以 [Ferryx License](LICENSE) 提供源代码。个人、教育、开源项目、非营利组织，以及员工少于 50 人且年收入低于 500 万美元的公司可免费使用。更大的公司在工作中使用需要订阅 Team 方案（过渡期在 Team 方案开放后 90 天结束）。自托管中继对所有人免费。此前发布的版本仍适用其发布时的 Sustainable Use License (SUL-1.0)。贡献代码需签署 [CLA](CLA.md)。
 
 ## 代码签名政策
-
-由 [SignPath.io](https://signpath.io) 提供免费代码签名，证书由 [SignPath Foundation](https://signpath.org) 提供。
 
 - **维护者**：[@Indosaram](https://github.com/Indosaram)
 - **隐私**：Ferryx 会在本地存储工作区数据。远程访问、嵌入式网站、外部编码智能体和更新服务可能通过网络交换数据。有关数据处理和删除选项，请参阅 [Ferryx 隐私政策](https://ferryx.dev/privacy/)。
