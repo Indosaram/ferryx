@@ -11,6 +11,18 @@ export const MAX_SIDEBAR_WIDTH = 420;
 
 export type WorktreeOrder = Record<string, string[]>;
 
+const persistenceListeners = new Set<() => void>();
+
+/** Fires after the sidebar persists its worktree order or collapsed set in this window. */
+export function subscribeSidebarPersistence(listener: () => void): () => void {
+  persistenceListeners.add(listener);
+  return () => { persistenceListeners.delete(listener); };
+}
+
+function notifySidebarPersistence() {
+  for (const listener of persistenceListeners) listener();
+}
+
 export function clampSidebarWidth(width: number) {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)));
 }
@@ -39,6 +51,7 @@ export function persistWorktreeOrder(order: WorktreeOrder) {
   } catch {
     // A storage failure should not break drag reordering for this session.
   }
+  notifySidebarPersistence();
 }
 
 /** Returns `null` when the accordion has never been persisted, so callers can apply defaults. */
@@ -60,6 +73,7 @@ export function persistCollapsedProjects(collapsed: Set<string>) {
   } catch {
     // A storage failure should not break accordion toggling for this session.
   }
+  notifySidebarPersistence();
 }
 
 export function loadSidebarWidth() {
