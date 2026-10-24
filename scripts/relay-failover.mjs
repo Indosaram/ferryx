@@ -91,7 +91,9 @@ export function validateConfig(raw) {
   return {
     ...raw,
     port,
-    cloudflare: { monitorIntervalSeconds: 60, ...cf },
+    // 15 s with one retry marks the primary unhealthy in about 30-40 s, inside the 2-minute
+    // drill window. Cloudflare plans with a longer minimum interval must raise this.
+    cloudflare: { monitorIntervalSeconds: 15, ...cf },
     drill: { stopSeconds: 120, probeEverySeconds: 5, evidenceDir: ".omo/evidence/relay-failover", ...drill },
   };
 }

@@ -34,7 +34,7 @@
   "cloudflare": {
     "mode": "load-balancer",
     "zone": "ferryx.dev",
-    "monitorIntervalSeconds": 60
+    "monitorIntervalSeconds": 15
   },
   "drill": {
     "probeHost": "maho-win",

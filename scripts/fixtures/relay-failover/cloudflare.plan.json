@@ -16,7 +16,7 @@
         "path": "/healthz",
         "expected_codes": "200",
         "expected_body": "\"ok\":true",
-        "interval": 60,
+        "interval": 15,
         "retries": 1,
         "timeout": 5,
         "follow_redirects": false,

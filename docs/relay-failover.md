@@ -24,7 +24,9 @@ Exactly one host writes account data. The standby's data directory carries the m
 - answers `GET /healthz` with `{"ok":true,"role":"standby"}` (the primary says `"primary"`).
 
 Relay tunnels (control, data, browser sessions) work on the standby, so paired machines keep
-working through a failover. Sign-in, enrollment, grants and billing changes wait for the primary
+working through a failover. On a commercial standby the entitlement check behind every tunnel
+evaluates the replica without persisting the grace transition (and sends no transition notice);
+the primary persists it once it is back. Sign-in, enrollment, grants and billing changes wait for the primary
 or a promotion. The marker is created before the first restore and removed only by
 `promote-standby`.
 
@@ -61,7 +63,8 @@ the primary, so grants and control-channel keys verify on either host.
 ## Cloudflare failover
 
 Used: **Cloudflare Load Balancing** (`cloudflare.mode = "load-balancer"`). One HTTPS monitor
-checks `GET /healthz` every 60 s and expects `"ok":true`. The primary pool (the omarchy tunnel
+checks `GET /healthz` every 15 s (one retry, 5 s timeout, so the primary is marked unhealthy in
+about 30-40 s) and expects `"ok":true`. The primary pool (the omarchy tunnel
 origin) is preferred with `steering_policy: off`; the standby pool (`relay-2.ferryx.dev`) takes
 traffic only while the primary pool is unhealthy, and is also the fallback pool.
 

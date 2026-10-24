@@ -8718,6 +8718,80 @@ mod tests {
         handle.abort();
     }
 
+    /// During a failover the commercial standby must keep admitting enrolled machines: the
+    /// entitlement check evaluates without persisting, while account writes such as a new
+    /// enrollment are still refused with the typed read-only error.
+    #[tokio::test]
+    async fn commercial_standby_accepts_enrolled_machine_control_bind_and_entitlement_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Seed the primary's data (user, session, enrolled machine "owned-machine"/"pubkey-1").
+        let _seeded = test_account_state(
+            tmp.path(),
+            "user-1",
+            "session-token",
+            "owned-machine",
+            "other-machine",
+        );
+        // The same data directory, served as a commercial read-only standby.
+        std::fs::write(
+            tmp.path()
+                .join("account")
+                .join(crate::account::store::store_sqlite::STANDBY_MARKER_FILENAME),
+            b"",
+        )
+        .unwrap();
+        let account = Arc::new(
+            crate::account::service::AccountState::new(
+                tmp.path().join("account"),
+                "https://relay.test",
+                Arc::new(crate::account::mailer::FileMailer::with_dir(
+                    tmp.path().join("mail"),
+                )),
+            )
+            .with_deployment_mode(crate::account::origin::DeploymentMode::Commercial),
+        );
+        assert!(account.is_read_only());
+
+        let now = crate::account::billing::routes::billing_now();
+        let entitlement =
+            crate::account::billing::routes::entitlement_for_user(&account, "user-1", now)
+                .expect("a standby must evaluate entitlement without writing");
+        assert_ne!(
+            entitlement.status,
+            crate::account::billing::entitlement::EntitlementStatus::Stopped
+        );
+
+        let state = RelayState::new_with_key_store(vec![], tmp.path().join("keys.json")).unwrap();
+        state.set_account_state(account.clone());
+        let enrolled = ControlAuth {
+            machine_id: "owned-machine".into(),
+            public_key: "pubkey-1".into(),
+            display_name: "Owned Machine".into(),
+            enrollment_token: None,
+            signature: String::new(),
+            timestamp: 0,
+        };
+        state
+            .bind_machine_key(&enrolled)
+            .expect("an enrolled machine must bind its control tunnel on a commercial standby");
+
+        let (base, handle) =
+            spawn_test_relay_with_account_state(state, Some(account)).await;
+        let http = base.replacen("ws://", "http://", 1);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let enroll = client
+            .post(format!("{http}/api/account/v1/machines/enroll"))
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(enroll.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = enroll.json().await.unwrap();
+        assert_eq!(body["code"], "ACCOUNT_STORE_READ_ONLY");
+        handle.abort();
+    }
+
     /// Owner of the foreign machine in [`test_account_state`]. It needs its own `users` row
     /// because `machines.user_id` is `REFERENCES users(user_id)` and the store enables
     /// `PRAGMA foreign_keys = ON` (store_sqlite/schema.rs:11-12, 65-84).
