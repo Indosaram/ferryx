@@ -1,78 +1,88 @@
-// One desktop state that exercises every sidebar shape both apps must draw the same way: a repo
-// with a local and an SSH member, an offline paired project, a project whose listing failed, a
-// collapsed group and a custom worktree order. Shared by the desktop/remote parity tests.
+// One desktop sidebar state that the desktop and the remote harnesses both render, so their
+// captures can be compared row for row. Data only: each harness turns it into its own inputs.
 import type { ActivitySummary } from "../../lib/activity";
+import type { HostEndpoint } from "../../state/remoteHostStore";
+import type { RegisteredProject } from "../../lib/tauri";
+import type { Worktree } from "../../lib/types";
 import type { WorktreeOrder } from "../../lib/sidebarPersistence";
-import type { SshHost } from "../../lib/sshHosts";
-import type { RegisteredProject, Worktree } from "../../lib/types";
-import type { RemoteHostState } from "../../state/remoteHostStore";
-import { worktreeSortableId } from "./sidebarRows";
+import type { SidebarHost } from "./sidebarLabels";
 
-const REMOTE = "git@github.com:acme/ferryx.git";
-const PAIRED_ID = `daemon:${"a".repeat(64)}`;
+const FERRYX = "/fixture/code/ferryx";
+const FERRYX_SSH = "/home/fixture/ferryx";
+const RELAY = "/home/fixture/relay";
+const SITE = "/fixture/code/site";
+const API_ID = `daemon:${"d".repeat(64)}`;
 
-const row = (path: string, branch: string | null, extra: Partial<Worktree> = {}): Worktree => ({
-  path, head: "abc123", branch, bare: false, detached: false, locked: null, prunable: null, ...extra,
+const row = (path: string, branch: string, extra: Partial<Worktree> = {}): Worktree => ({
+  path, head: "a1b2c3d", branch, bare: false, detached: false, locked: null, prunable: null, ...extra,
 });
 
-const projects: RegisteredProject[] = [
-  { workspaceId: "ferryx", repoRoot: "/repos/ferryx", gitRoot: "/repos/ferryx", gitCommonDir: "/repos/ferryx/.git", gitRemote: REMOTE, gitBranch: "main" },
-  { workspaceId: "ssh:ferryx", repoRoot: "/home/me/ferryx", gitRoot: "/home/me/ferryx", gitRemote: REMOTE, gitBranch: "main", target: { kind: "ssh", hostId: "build" } },
-  { workspaceId: PAIRED_ID, repoRoot: "/srv/app", gitRoot: "/srv/app", remoteWorkspaceId: "app", target: { kind: "pairedDaemon", hostId: "gamma" } },
-  { workspaceId: "docs", repoRoot: "/repos/docs", gitRoot: "/repos/docs" },
-  { workspaceId: "site", repoRoot: "/repos/site", gitRoot: "/repos/site" },
-];
-
-const sshHosts: SshHost[] = [
-  { id: "build", label: "Build box", hostname: "build.local", source: "manual", authMethod: "agent" },
-];
-
-const remoteHostState: RemoteHostState = {
-  hosts: {
-    gamma: { hostId: "gamma", name: "Gamma", address: "", transport: "relay", online: false, authStatus: "paired", grantScope: "machine", generation: "7" },
-  },
-  activeHostId: null,
-  discovering: false,
-  nativeStatus: "ready",
-  machineFeaturesEnabled: true,
+export type SidebarParityFixture = {
+  readonly activeProjectId: string;
+  /** The row both harnesses mark active. */
+  readonly active: { readonly workspaceId: string; readonly worktreeSlug: string; readonly path: string };
+  readonly projects: RegisteredProject[];
+  /** The active project's worktrees. */
+  readonly worktrees: Worktree[];
+  readonly inactiveProjectWorktrees: Record<string, Worktree[]>;
+  readonly sshHosts: readonly SidebarHost[];
+  readonly pairedHosts: Readonly<Record<string, HostEndpoint>>;
+  readonly listingFailures: Readonly<Record<string, string>>;
+  readonly collapsedGroupIds: readonly string[];
+  readonly worktreeOrder: WorktreeOrder;
+  /** One running agent as the desktop sees it (by worktree path). */
+  readonly desktopActivity: Readonly<Record<string, ActivitySummary>>;
+  /** The same agent as the remote session inventory reports it. */
+  readonly remoteActivity: readonly { readonly workspaceId: string; readonly worktreeSlug: string; readonly activityState: "working" }[];
 };
 
-/** feat-b, then the root, then feat-a: not the listing order. */
-const worktreeOrder: WorktreeOrder = {
-  ferryx: [
-    worktreeSortableId("ferryx", "/repos/ferryx-wt/feat-b"),
-    worktreeSortableId("ferryx", "/repos/ferryx"),
-    worktreeSortableId("ferryx", "/repos/ferryx-wt/feat-a"),
-  ],
-};
-
-const working: ActivitySummary = {
-  workingCount: 1, waitingCount: 0, doneCount: 0, runningCount: 1,
-  hasWorking: true, hasWaiting: false, hasDone: false, hasUnread: false,
-};
-
-export const sidebarParityFixture = {
-  projects,
+/**
+ * A local + SSH member of one repo with a custom row order, a standalone SSH project whose
+ * listing fails, a collapsed local project, and an offline paired project.
+ */
+export const sidebarParityFixture: SidebarParityFixture = {
   activeProjectId: "ferryx",
-  activePath: "/repos/ferryx-wt/feat-a",
-  /** The same row as activeProjectId + activePath, named the way the remote inventory names it. */
-  remoteSelection: { workspaceId: "ferryx", worktreeSlug: "feat-a" },
+  active: { workspaceId: "ferryx", worktreeSlug: "remote-settings", path: `${FERRYX}/.orca-worktrees/ferryx/remote-settings` },
+  projects: [
+    { workspaceId: "ferryx", repoRoot: FERRYX, gitRoot: FERRYX, gitRemote: "git@github.com:ferryx/ferryx.git", gitBranch: "main", gitHead: "a1b2c3d", target: { kind: "local" } },
+    { workspaceId: "ssh:omarchy:ferryx", repoRoot: FERRYX_SSH, gitRoot: FERRYX_SSH, gitRemote: "https://github.com/ferryx/ferryx.git", gitBranch: "main", gitHead: "b2c3d4e", hostLabel: "omarchy", target: { kind: "ssh", hostId: "omarchy" } },
+    { workspaceId: "ssh:omarchy:relay", repoRoot: RELAY, gitRoot: RELAY, gitRemote: "git@github.com:ferryx/relay.git", gitBranch: "main", gitHead: "c3d4e5f", hostLabel: "omarchy", target: { kind: "ssh", hostId: "omarchy" } },
+    { workspaceId: "site", repoRoot: SITE, gitRoot: SITE, gitRemote: "git@github.com:ferryx/site.git", gitBranch: "main", gitHead: "d4e5f6a", target: { kind: "local" } },
+    { workspaceId: API_ID, repoRoot: "/Users/fixture/code/api", gitRoot: "/Users/fixture/code/api", remoteWorkspaceId: "api", target: { kind: "pairedDaemon", hostId: "studio" } },
+  ],
   worktrees: [
-    row("/repos/ferryx", "refs/heads/main"),
-    row("/repos/ferryx-wt/feat-a", "refs/heads/orca/ferryx/feat-a"),
-    row("/repos/ferryx-wt/feat-b", "refs/heads/orca/ferryx/feat-b"),
+    row(FERRYX, "main"),
+    row(`${FERRYX}/.orca-worktrees/ferryx/remote-settings`, "orca/ferryx/remote-settings"),
+    row(`${FERRYX}/.orca-worktrees/ferryx/sidebar-polish`, "orca/ferryx/sidebar-polish"),
   ],
   inactiveProjectWorktrees: {
-    "ssh:ferryx": [row("/home/me/ferryx", "main")],
-    [PAIRED_ID]: [row("/srv/app", "refs/heads/main", { workspaceId: PAIRED_ID })],
-    site: [row("/repos/site", "refs/heads/main")],
-  } satisfies Record<string, Worktree[]>,
-  sshHosts,
-  remoteHostState,
-  listingFailures: { docs: "Connection reset by peer" } satisfies Record<string, string>,
-  worktreeOrder,
+    "ssh:omarchy:ferryx": [row(FERRYX_SSH, "main", { workspaceId: "ssh:omarchy:ferryx", hostLabel: "omarchy" })],
+    "ssh:omarchy:relay": [row(RELAY, "main", { workspaceId: "ssh:omarchy:relay", hostLabel: "omarchy" })],
+    site: [row(SITE, "main"), row(`${SITE}/.orca-worktrees/site/launch-page`, "orca/site/launch-page")],
+  },
+  sshHosts: [{ id: "omarchy", label: "omarchy" }],
+  pairedHosts: {
+    studio: {
+      hostId: "studio", name: "Studio Mac", displayName: "Studio Mac", address: "", transport: "relay",
+      online: false, authStatus: "paired", grantScope: "machine", generation: "1", machineId: "machine-studio",
+    },
+  },
+  listingFailures: { "ssh:omarchy:relay": "Connection reset by peer" },
   collapsedGroupIds: ["site"],
-  /** One running agent, as the desktop sees it (by path) and the remote inventory reports it. */
-  desktopActivity: { "/repos/ferryx-wt/feat-b": working } satisfies Record<string, ActivitySummary>,
-  remoteActivity: [{ workspaceId: "ferryx", worktreeSlug: "feat-b", activityState: "working" as const }],
+  // Custom order: the dragged sidebar-polish row and the SSH root sit above the local root.
+  worktreeOrder: {
+    ferryx: [
+      `${FERRYX}/.orca-worktrees/ferryx/sidebar-polish`,
+      FERRYX_SSH,
+      FERRYX,
+      `${FERRYX}/.orca-worktrees/ferryx/remote-settings`,
+    ],
+  },
+  desktopActivity: {
+    [`${FERRYX}/.orca-worktrees/ferryx/sidebar-polish`]: {
+      workingCount: 1, waitingCount: 0, doneCount: 0, runningCount: 1,
+      hasWorking: true, hasWaiting: false, hasDone: false, hasUnread: false,
+    },
+  },
+  remoteActivity: [{ workspaceId: "ferryx", worktreeSlug: "sidebar-polish", activityState: "working" }],
 };

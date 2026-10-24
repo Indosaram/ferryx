@@ -17,14 +17,16 @@ vi.mock("@tauri-apps/api/core", () => ({
   },
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: () => Promise.resolve(() => undefined) }));
-vi.mock("../../lib/sshHosts", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../lib/sshHosts")>()),
-  useSshHosts: () => ({ hosts: sshHostsForTest, loading: false, error: null, refresh: () => Promise.resolve([]) }),
-  subscribeSshHosts: () => () => undefined,
-}));
-const { sshHostsForTest } = vi.hoisted(() => ({
-  sshHostsForTest: [{ id: "build", label: "Build box", hostname: "build.local", source: "manual" as const, authMethod: "agent" as const }],
-}));
+vi.mock("../../lib/sshHosts", async (importOriginal) => {
+  // vi.mock is hoisted above the imports, so the factory loads the fixture itself.
+  const { sidebarParityFixture } = await import("./sidebarParityFixture");
+  const hosts = sidebarParityFixture.sshHosts.map((host) => ({ ...host, hostname: host.label, source: "manual" as const, authMethod: "agent" as const }));
+  return {
+    ...(await importOriginal<typeof import("../../lib/sshHosts")>()),
+    useSshHosts: () => ({ hosts, loading: false, error: null, refresh: () => Promise.resolve(hosts) }),
+    subscribeSshHosts: () => () => undefined,
+  };
+});
 
 import { useDesktopSidebarPublisher } from "../../lib/desktopSidebarSync";
 import {
@@ -127,7 +129,7 @@ function DesktopSidebar() {
       isMac={false}
       projects={fx.projects}
       activeProjectId={fx.activeProjectId}
-      activePath={fx.activePath}
+      activePath={fx.active.path}
       worktrees={fx.worktrees}
       inactiveProjectWorktrees={fx.inactiveProjectWorktrees}
       agents={[]}
@@ -180,7 +182,7 @@ function remoteMachine(published: SidebarModel): RemoteSidebarMachine {
     fetchLike: (path) => Promise.resolve(path === "/api/v1/workspace/sidebar" ? { status: 200, body } : { status: 404, body: "{}" }),
     subscribe: () => noop,
     inventory,
-    selection: fx.remoteSelection,
+    selection: { workspaceId: fx.active.workspaceId, worktreeSlug: fx.active.worktreeSlug },
   };
 }
 
@@ -188,7 +190,7 @@ function seedDesktop(advancedFeatures: boolean) {
   localStorage.setItem(ADVANCED_FEATURES_STORAGE_KEY, String(advancedFeatures));
   localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify(fx.collapsedGroupIds));
   localStorage.setItem(SIDEBAR_WORKTREE_ORDER_STORAGE_KEY, JSON.stringify(fx.worktreeOrder));
-  remoteHostStore.setState(() => fx.remoteHostState);
+  remoteHostStore.setState((state) => ({ ...state, hosts: fx.pairedHosts, nativeStatus: "ready", machineFeaturesEnabled: true }));
   updateListingFailures(() => fx.listingFailures);
 }
 
