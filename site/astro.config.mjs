@@ -67,8 +67,26 @@ export default defineConfig({
           label: 'Getting Started',
           items: [
             { label: 'Introduction', slug: 'docs/introduction' },
+            { label: 'User Guide', slug: 'docs/guide' },
+            { label: 'Troubleshooting', slug: 'docs/troubleshooting' },
             { label: 'Pricing & Plans', slug: 'docs/pricing' },
             { label: 'Self-hosted relay', slug: 'docs/self-hosted-relay' },
+            { label: 'Privacy', slug: 'privacy' },
+            {
+              label: 'Security policy',
+              link: 'https://github.com/Indosaram/ferryx/blob/main/SECURITY.md',
+              attrs: { target: '_blank', rel: 'noopener' },
+            },
+            {
+              label: 'Contributing',
+              link: 'https://github.com/Indosaram/ferryx/blob/main/CONTRIBUTING.md',
+              attrs: { target: '_blank', rel: 'noopener' },
+            },
+            {
+              label: 'Changelog',
+              link: 'https://github.com/Indosaram/ferryx/blob/main/CHANGELOG.md',
+              attrs: { target: '_blank', rel: 'noopener' },
+            },
           ],
         },
         {
@@ -102,6 +120,9 @@ export default defineConfig({
             { label: 'Ferryx vs Wave Terminal', slug: 'compare/wave-terminal' },
             { label: 'Ferryx vs Conductor', slug: 'compare/conductor' },
             { label: 'Ferryx vs Crystal', slug: 'compare/crystal' },
+            { label: 'Ferryx vs cmux', slug: 'compare/cmux' },
+            { label: 'Ferryx vs Orca', slug: 'compare/orca' },
+            { label: 'Ferryx vs Herdr', slug: 'compare/herdr' },
             { label: 'Ferryx vs tmux + worktree', slug: 'compare/tmux-git-worktree' },
             { label: 'Ferryx and Ghostty', slug: 'compare/ghostty' },
           ],

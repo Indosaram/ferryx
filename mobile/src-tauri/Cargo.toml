@@ -3,7 +3,7 @@ name = "ferryx-mobile"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
-license = "SUL-1.0"
+license-file = "../../LICENSE"
 
 [lib]
 name = "ferryx_mobile_lib"

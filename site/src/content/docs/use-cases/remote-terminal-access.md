@@ -25,7 +25,7 @@ Warp's version publishes session state to Warp's cloud and stops syncing when yo
 
 ## What Ferryx does instead
 
-Ferryx (SUL-1.0, Rust and Tauri v2) takes the same problem from the other end: it exposes the terminal itself, not one vendor's agent, and the gateway is yours.
+Ferryx (Ferryx License, Rust and Tauri v2) takes the same problem from the other end: it exposes the terminal itself, not one vendor's agent, and the gateway is yours.
 
 - **Sessions outlive the GUI.** A headless Rust daemon owns the pseudoterminals instead of the desktop window, so closing or reloading the app doesn't kill running processes. There's no separate multiplexer to remember.
 - **Reconnects replay what you missed.** Output lives in a 512 KiB ring buffer per session with monotonic sequence numbers. A reconnecting client receives the output it missed, and if the buffer overflowed it's told there's a gap rather than shown a silently corrupted transcript.
@@ -44,4 +44,4 @@ The verifiable parts are the ones listed above: the gateway requires authenticat
 
 ## Trying it
 
-Ferryx ships as a macOS universal DMG, an x64 Windows installer, and Linux AppImage and .deb packages; a standalone `ferryx-cli` binary runs the same headless daemon on a Linux server with no GUI dependencies, though it isn't published by every release and can be built from source. The project is SUL-1.0 licensed and still early software. For the rest of the workspace, including split panes, embedded browser tabs, and managed git worktrees, see the [introduction](/docs/introduction/) and [git worktree workflow](/use-cases/git-worktree-workflow/); the [product facts](/docs/facts/) page lists the pairing, relay, and packaging details with their sources.
+Ferryx ships as a macOS universal DMG, an x64 Windows installer, and Linux AppImage and .deb packages; a standalone `ferryx-cli` binary runs the same headless daemon on a Linux server with no GUI dependencies, though it isn't published by every release and can be built from source. The project is source-available under the Ferryx License and still early software. For the rest of the workspace, including split panes, embedded browser tabs, and managed git worktrees, see the [introduction](/docs/introduction/) and [git worktree workflow](/use-cases/git-worktree-workflow/); the [product facts](/docs/facts/) page lists the pairing, relay, and packaging details with their sources.
