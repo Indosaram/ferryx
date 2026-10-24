@@ -277,13 +277,51 @@ const remoteSources = import.meta.glob<string>(["../../remote/**/*.{ts,tsx}", "!
 });
 
 const ROW_DEFINITION = /\b(?:function|const|let|var|class|type|interface)\s+(\w*(?:Sidebar(?:Project|Worktree)|InventoryWorktreeRow)\w*)/g;
+/** Import lines name the shared types (`import { type SidebarWorktreeNode }`); they define nothing. */
+const IMPORT_STATEMENT = /^import\b[\s\S]*?;$/gm;
+
+/** The one remote file that draws sidebar rows, by handing them to the shared view. */
+const ROW_OWNER = "../../remote/RemoteSidebar.tsx";
+
+/**
+ * What a hand-drawn sidebar row looks like whatever it is named: list rows, the shared row's
+ * shortcut hook and state-slot test ids, or the shared sidebar pieces rendered from another file.
+ */
+const ROW_MARKERS: readonly { readonly name: string; readonly pattern: RegExp }[] = [
+  { name: 'role="listitem"', pattern: /role=["']listitem["']/ },
+  { name: "worktree shortcut hook", pattern: /data-shortcut-worktree-path/ },
+  { name: "sidebar state slot test id", pattern: /["'](?:worktree-status-dot|remote-machine-badge|worktree-supervisor-slot|worktree-rail-active|project-attention-indicator|project-running-badge)["']/ },
+  { name: "shared sidebar row piece", pattern: /\bimport\b[^;]*\b(?:SidebarView|SidebarWorktreeRow|SidebarProjectHeader|SidebarStateSlot)\b[^;]*from\s+["'][^"']*components\/sidebar\//s },
+];
+
+/** Every row-ownership violation in a set of remote sources. */
+function rowOwnershipViolations(sources: Readonly<Record<string, string>>): string[] {
+  return Object.entries(sources).flatMap(([file, source]) => {
+    const named = [...source.replace(IMPORT_STATEMENT, "").matchAll(ROW_DEFINITION)].map((match) => `${file}: ${match[1]}`);
+    const structural = file === ROW_OWNER ? [] : ROW_MARKERS.filter((marker) => marker.pattern.test(source)).map((marker) => `${file}: ${marker.name}`);
+    return [...named, ...structural];
+  });
+}
 
 describe("remote sidebar row ownership", () => {
   it("defines no sidebar project or worktree row of its own under ui/src/remote", () => {
-    const copies = Object.entries(remoteSources).flatMap(([file, source]) =>
-      [...source.matchAll(ROW_DEFINITION)].map((match) => `${file}: ${match[1]}`));
-
     expect(Object.keys(remoteSources).length).toBeGreaterThan(10);
-    expect(copies).toEqual([]);
+    expect(remoteSources[ROW_OWNER]).toBeDefined();
+    expect(rowOwnershipViolations(remoteSources)).toEqual([]);
+  });
+
+  it("flags a renamed hand-drawn row outside RemoteSidebar.tsx", () => {
+    const planted = {
+      "../../remote/RemoteMachineList.tsx": [
+        "export function RemoteWorktreeItem({ label }: { label: string }) {",
+        '  return <div role="listitem"><button aria-current="true">{label}<span data-testid="worktree-status-dot" /></button></div>;',
+        "}",
+      ].join("\n"),
+    };
+
+    expect(rowOwnershipViolations(planted)).toEqual([
+      '../../remote/RemoteMachineList.tsx: role="listitem"',
+      "../../remote/RemoteMachineList.tsx: sidebar state slot test id",
+    ]);
   });
 });
