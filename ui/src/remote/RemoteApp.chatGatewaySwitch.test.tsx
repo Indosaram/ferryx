@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
+import { openWorkspacePicker } from "./home/phoneHomeTestUtils";
 import { clearStoredAccountSessionToken, storeAccountSessionToken } from "./accountSession";
 import * as accountSessionModule from "./accountSession";
 import * as attachTunnelModule from "./attachTunnel";
@@ -224,11 +225,8 @@ describe("reference chat gateway identity across a machine switch", () => {
 
     render(<RemoteApp />);
     const pick = async (workspaceId: string) => {
-      const trigger = await screen.findByRole("button", { name: /Change workspace context/i });
-      act(() => {
-        fireEvent.click(trigger);
-      });
-      const option = await screen.findByRole("button", { name: `${workspaceId} / main` }, { timeout: 5000 });
+      const picker = await openWorkspacePicker();
+      const option = await within(picker).findByRole("button", { name: `${workspaceId} / main` }, { timeout: 5000 });
       act(() => {
         fireEvent.click(option);
       });
@@ -367,11 +365,8 @@ describe("reference chat gateway identity across a machine switch", () => {
 
     render(<RemoteApp />);
     const pick = async (workspaceId: string) => {
-      const trigger = await screen.findByRole("button", { name: /Change workspace context/i });
-      act(() => {
-        fireEvent.click(trigger);
-      });
-      const option = await screen.findByRole("button", { name: `${workspaceId} / main` }, { timeout: 5000 });
+      const picker = await openWorkspacePicker();
+      const option = await within(picker).findByRole("button", { name: `${workspaceId} / main` }, { timeout: 5000 });
       act(() => {
         fireEvent.click(option);
       });
