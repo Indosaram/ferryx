@@ -224,10 +224,16 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
       expect(screen.queryByRole("heading", { name: /Shell exited|Remote session exited/ })).toBeNull();
       expect(screen.getByTestId("terminal-pane-surface")).toBeInTheDocument();
 
-      // Verify appropriate buttons: Retry button is present, Open new shell is absent during active recovery
+      // Verify appropriate buttons: Retry is always present. A non-SSH reconnecting overlay also
+      // offers the "Open new shell" escape (a session may never come back, e.g. after an OS reboot);
+      // SSH keeps its own reconnect overlay without it.
       const retryBtn = screen.getByRole("button", { name: "Retry session recovery" });
       expect(retryBtn).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();
+      if (transport === "ssh") {
+        expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();
+      } else {
+        expect(screen.getByRole("button", { name: "Open new shell" })).toBeInTheDocument();
+      }
 
       // Verify retry action preserves zero spawn (onOpenNewShell must not be invoked)
       fireEvent.click(retryBtn);

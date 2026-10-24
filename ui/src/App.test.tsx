@@ -219,6 +219,7 @@ vi.mock("./lib/tauri", () => ({
   loadSession: native.loadSession,
   clearSession: native.clearSession,
   listTerminalSessions: native.listTerminalSessions,
+  getHostBootTimeMs: vi.fn(async () => null),
   spawnTerminal: native.spawnTerminal,
   spawnTerminalsBatch: vi.fn(async () => []),
   spawnTerminalDetailed: native.spawnTerminalDetailed,
