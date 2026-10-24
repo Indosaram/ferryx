@@ -82,7 +82,6 @@ import { MobileKeyDock } from "../components/MobileKeyDock";
 import { PairingPage } from "./PairingPage";
 import { RemoteApp, RemoteHostConnection } from "./RemoteApp";
 import { normalizeRemoteWorkspaceState, RemoteWorkspaceMirror, type RemoteContextOption } from "./RemoteSessionList";
-import { sidebarLiveState } from "../components/sidebar/sidebarModel";
 import {
   findSidebarRow,
   publishSidebarRows,
@@ -453,7 +452,7 @@ describe("account worktree picker", () => {
     ];
     const sectionFor = (machineId: string, label: string, rows: FixtureWorktree[]): RemoteSidebarSection => {
       const model = sidebarModelFixture(rows);
-      return { machineId, label, state: "ok", model, live: sidebarLiveState(model, {}, ""), error: null };
+      return { machineId, label, state: "ok", model, signals: {}, error: null };
     };
     const onSelect = vi.fn();
     render(

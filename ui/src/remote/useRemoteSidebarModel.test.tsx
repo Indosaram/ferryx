@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { SidebarModel } from "../components/sidebar/sidebarModel";
+import { sidebarLiveState, type SidebarModel } from "../components/sidebar/sidebarModel";
 import type { SupervisorHttpResponse } from "./remoteSupervisor";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
 import { useRemoteSidebarModel, type RemoteSidebarMachine } from "./useRemoteSidebarModel";
@@ -218,7 +218,9 @@ describe("useRemoteSidebarModel", () => {
 
     await waitFor(() => expect(result.current[0]?.state).toBe("ok"));
 
-    expect(result.current[0]?.live?.rows["sidebar-worktree:ferryx:/code/ferryx"]).toEqual({ active: true, slot: "waiting", supervisorTyping: false });
+    const section = result.current[0];
+    const live = section?.model && section.signals ? sidebarLiveState(section.model, section.signals, "") : null;
+    expect(live?.rows["sidebar-worktree:ferryx:/code/ferryx"]).toEqual({ active: true, slot: "waiting", supervisorTyping: false });
   });
 
   it("keeps one section per account machine, labelled with the machine name", async () => {

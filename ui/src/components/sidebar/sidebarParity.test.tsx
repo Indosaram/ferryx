@@ -2,7 +2,7 @@
 // its Sidebar; the remote renders what that desktop publishes, after the gateway JSON round trip,
 // through its own adapter. Both trees are reduced to what a user perceives (roles, names, test
 // ids, order, state slot text) and must be equal, minus the controls only the desktop can act on.
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { computeAccessibleName, getRole } from "dom-accessibility-api";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -114,6 +114,7 @@ function serializeSidebar(root: Element): string[] {
 }
 
 const noop = () => undefined;
+const FILTER_QUERY = "settings";
 
 function DesktopSidebar() {
   useDesktopSidebarPublisher({
@@ -206,26 +207,49 @@ afterEach(() => {
   worktreeListingFailureStore.reset();
 });
 
+async function renderBoth(advancedFeatures: boolean) {
+  seedDesktop(advancedFeatures);
+  const publishedModel = new Promise<SidebarModel>((resolve) => {
+    tauri.onPublish = (model) => resolve(model as SidebarModel);
+  });
+  const desktop = render(<DesktopSidebar />);
+  const published = await publishedModel;
+  const remote = render(<RemoteSidebarHarness machine={remoteMachine(published)} />);
+  const remoteSection = await waitFor(() => {
+    const section = remote.container.querySelector('[data-testid="remote-sidebar-section"]');
+    if (!section?.querySelector('[data-testid="worktree-region"]')) throw new Error("remote sidebar not loaded yet");
+    return section;
+  });
+  return { desktop: desktop.container.querySelector("aside") ?? desktop.container, remote: remoteSection };
+}
+
+/** Types into a tree's filter box the way a user does. */
+function typeFilter(root: Element, query: string) {
+  const box = root.querySelector('[role="searchbox"], input[type="search"]');
+  if (!(box instanceof HTMLInputElement)) throw new Error("filter box not found");
+  fireEvent.change(box, { target: { value: query } });
+}
+
 describe("desktop and remote sidebar parity", () => {
   it.each([true, false])("draws the same tree on both apps when advanced features are %s", async (advancedFeatures) => {
-    seedDesktop(advancedFeatures);
-    const publishedModel = new Promise<SidebarModel>((resolve) => {
-      tauri.onPublish = (model) => resolve(model as SidebarModel);
-    });
+    const trees = await renderBoth(advancedFeatures);
 
-    const desktop = render(<DesktopSidebar />);
-    const published = await publishedModel;
-    const remote = render(<RemoteSidebarHarness machine={remoteMachine(published)} />);
-    const remoteSection = await waitFor(() => {
-      const section = remote.container.querySelector('[data-testid="remote-sidebar-section"]');
-      if (!section?.querySelector('[data-testid="worktree-region"]')) throw new Error("remote sidebar not loaded yet");
-      return section;
-    });
-
-    const desktopTree = serializeSidebar(desktop.container.querySelector("aside") ?? desktop.container);
+    const desktopTree = serializeSidebar(trees.desktop);
     // A fixture that renders nothing would make the comparison vacuous.
     expect(desktopTree.filter((line) => line.startsWith("listitem")).length).toBeGreaterThanOrEqual(5);
-    expect(serializeSidebar(remoteSection)).toEqual(desktopTree);
+    expect(serializeSidebar(trees.remote)).toEqual(desktopTree);
+  });
+
+  it("draws the same tree, slots and footer on both apps once the same filter is typed", async () => {
+    const trees = await renderBoth(true);
+
+    // The query hides the running row, so a footer or project slot counting hidden rows differs.
+    typeFilter(trees.desktop, FILTER_QUERY);
+    typeFilter(trees.remote, FILTER_QUERY);
+
+    const desktopTree = serializeSidebar(trees.desktop);
+    expect(desktopTree.filter((line) => line.startsWith("listitem")).length).toBeGreaterThanOrEqual(1);
+    expect(serializeSidebar(trees.remote)).toEqual(desktopTree);
   });
 });
 

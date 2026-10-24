@@ -1,18 +1,18 @@
-// Maps a machine's session inventory onto the live signals the shared sidebar derives row and
-// project state from. Inventory rows name a worktree by workspace id and slug; the sidebar keys
+// Maps a machine's session inventory onto the live signals the shared sidebar derives row,
+// project and footer state from (sidebarLiveState, called by RemoteSidebar with its filter). Inventory rows name a worktree by workspace id and slug; the sidebar keys
 // live state by the row's path, so each model row is matched to its inventory rows here.
-import { sidebarLiveState, type SidebarLive, type SidebarModel } from "../components/sidebar/sidebarModel";
+import type { SidebarLiveSignals, SidebarModel } from "../components/sidebar/sidebarModel";
 import { summarizeActivities, type ActivitySummary, type TerminalActivity } from "../lib/activity";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
 
 /** The worktree the remote is attached to, as the inventory names it. */
 export type RemoteSidebarSelection = { readonly workspaceId: string; readonly worktreeSlug: string | null };
 
-export function remoteSidebarLive(
+export function remoteSidebarSignals(
   model: SidebarModel,
   inventory: RemoteSessionInventory | null,
   selection: RemoteSidebarSelection | null,
-): SidebarLive {
+): SidebarLiveSignals {
   const activityByWorktreePath: Record<string, ActivitySummary> = {};
   let activeWorkspaceId: string | undefined;
   let activePath: string | undefined;
@@ -29,9 +29,9 @@ export function remoteSidebarLive(
       if (activities.length > 0) activityByWorktreePath[node.path] = summarizeActivities(activities);
     }
   }
-  return sidebarLiveState(model, {
+  return {
     activityByWorktreePath,
     ...(activeWorkspaceId === undefined ? {} : { activeWorkspaceId }),
     ...(activePath === undefined ? {} : { activePath }),
-  }, "");
+  };
 }

@@ -3,6 +3,7 @@
 // which groups this browser folded and which row is being attached right now.
 import { useState, type ReactNode } from "react";
 
+import { sidebarLiveState } from "../components/sidebar/sidebarModel";
 import type { SidebarModel, SidebarProjectNode, SidebarWorktreeNode } from "../components/sidebar/sidebarModel";
 import { SidebarView, type SidebarInbox } from "../components/sidebar/SidebarView";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
@@ -111,10 +112,12 @@ function MachineSection({ section, sidebar, first, heading }: SectionProps) {
     if (!locked) sidebar.onSelect({ machineId: section.machineId, project, node });
   };
   const notSynced = section.model?.source === "inventory";
+  // The same derivation and filter the desktop Sidebar applies.
+  const live = model && section.signals ? sidebarLiveState(model, section.signals, query) : null;
   // The project whose row the live state marks active is the active project, as on the desktop.
   const activeWorkspaceId = model?.projects
     .flatMap((project) => project.worktrees)
-    .find((node) => section.live?.rows[node.key]?.active)?.workspaceId;
+    .find((node) => live?.rows[node.key]?.active)?.workspaceId;
   return (
     <section
       data-testid="remote-sidebar-section"
@@ -134,10 +137,10 @@ function MachineSection({ section, sidebar, first, heading }: SectionProps) {
       ) : null}
       {first ? sidebar.status : null}
       <SectionState section={section} />
-      {model && section.live ? (
+      {model && live ? (
         <SidebarView
           model={model}
-          live={section.live}
+          live={live}
           {...(activeWorkspaceId === undefined ? {} : { activeWorkspaceId })}
           density={sidebar.density}
           actions={{

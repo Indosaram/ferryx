@@ -1,6 +1,5 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { sidebarLiveState } from "../components/sidebar/sidebarModel";
 import {
   paneSelectionOption,
   RemoteWorkspaceMirror,
@@ -8,7 +7,7 @@ import {
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
 import { REMOTE_COLLAPSED_KEY_PREFIX } from "./RemoteSidebar";
-import { remoteSidebarLive } from "./remoteSidebarLive";
+import { remoteSidebarSignals } from "./remoteSidebarLive";
 import { sidebarModelFixture } from "./remoteSidebarTestUtils";
 import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 
@@ -87,7 +86,7 @@ const ROWS_B = [{ workspaceId: "ws-ferryx-core", slug: "main", label: "main", pr
 function section(machineId: string, label: string, rows: typeof ROWS_A, source: "desktop" | "inventory" = "desktop"): RemoteSidebarSection {
   const model = sidebarModelFixture(rows, { source });
   const selection = machineId === MACHINE_A ? { workspaceId: "ws-ferryx-core", worktreeSlug: "main" } : null;
-  return { machineId, label, state: "ok", model, live: remoteSidebarLive(model, null, selection), error: null };
+  return { machineId, label, state: "ok", model, signals: remoteSidebarSignals(model, null, selection), error: null };
 }
 
 function sections(): RemoteSidebarSection[] {
@@ -228,8 +227,8 @@ describe("remote sidebar drawn by the desktop sidebar view", () => {
         daemonEpoch: "1", title: "docs agent", running: true, agentType: "claude", providerSessionId: null, activityState: "waiting" as const,
       }],
     };
-    const live = remoteSidebarLive(model, inventory, null);
-    renderMirrorWith({ sections: [{ machineId: MACHINE_A, label: "Studio", state: "ok", model, live, error: null }] });
+    const signals = remoteSidebarSignals(model, inventory, null);
+    renderMirrorWith({ sections: [{ machineId: MACHINE_A, label: "Studio", state: "ok", model, signals, error: null }] });
 
     const docsRow = rowButton(machineSection(MACHINE_A), "main", 1);
     expect(docsRow.querySelector('[data-status-state="waiting"]')).not.toBeNull();
@@ -272,7 +271,7 @@ describe("remote sidebar drawn by the desktop sidebar view", () => {
 
   it("seeds folds from the desktop and keeps this browser's folds in session storage only", () => {
     const model = sidebarModelFixture(ROWS_A, { collapsedGroupIds: ["ws-docs"] });
-    const list = [{ machineId: MACHINE_A, label: "Studio", state: "ok" as const, model, live: sidebarLiveState(model, {}, ""), error: null }];
+    const list = [{ machineId: MACHINE_A, label: "Studio", state: "ok" as const, model, signals: {}, error: null }];
     renderMirrorWith({ sections: list });
     const a = machineSection(MACHINE_A);
     expect(within(a).getByRole("button", { name: "Expand docs" })).toHaveAttribute("aria-expanded", "false");

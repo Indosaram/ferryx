@@ -3,8 +3,8 @@
 // connection is replaced, never on a timer.
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { SidebarLive, SidebarModel } from "../components/sidebar/sidebarModel";
-import { remoteSidebarLive, type RemoteSidebarSelection } from "./remoteSidebarLive";
+import type { SidebarLiveSignals, SidebarModel } from "../components/sidebar/sidebarModel";
+import { remoteSidebarSignals, type RemoteSidebarSelection } from "./remoteSidebarLive";
 import { loadRemoteSidebar, SIDEBAR_OFFLINE, type RemoteSidebarResult, type SidebarFetch } from "./remoteSidebarSource";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
 
@@ -40,7 +40,8 @@ export type RemoteSidebarSection = {
   readonly state: RemoteSidebarState;
   /** The last model that loaded; kept while a refetch fails so the section does not blank. */
   readonly model: SidebarModel | null;
-  readonly live: SidebarLive | null;
+  /** Session signals for sidebarLiveState; the view applies its filter when deriving live state. */
+  readonly signals: SidebarLiveSignals | null;
   readonly error: { code: string; message: string } | null;
 };
 
@@ -158,7 +159,7 @@ export function useRemoteSidebarModel({ machines }: { readonly machines: readonl
           machineId: m.machineId,
           label: m.label,
           ...entry,
-          live: entry.model ? remoteSidebarLive(entry.model, m.inventory, m.selection) : null,
+          signals: entry.model ? remoteSidebarSignals(entry.model, m.inventory, m.selection) : null,
         };
       }),
     [machines, settled],

@@ -4,7 +4,7 @@ import React from "react";
 
 import { buildSidebarModel } from "../components/sidebar/sidebarModel";
 import { sidebarParityFixture as fixture } from "../components/sidebar/sidebarParityFixture";
-import { remoteSidebarLive } from "../remote/remoteSidebarLive";
+import { remoteSidebarSignals } from "../remote/remoteSidebarLive";
 import { RemoteWorkspaceMirror, type RemoteWorkspaceModel } from "../remote/RemoteSessionList";
 import type { RemoteSidebarSection } from "../remote/useRemoteSidebarModel";
 
@@ -32,7 +32,7 @@ export function sidebarParitySections(source: "desktop" | "inventory"): RemoteSi
     label: "Fixture Mac",
     state: "ok",
     model,
-    live: remoteSidebarLive(model, null, fixture.active),
+    signals: remoteSidebarSignals(model, null, fixture.active),
     error: null,
   }];
 }
