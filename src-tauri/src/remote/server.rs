@@ -45,7 +45,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 pub const REMOTE_SELECTION_REQUEST_EVENT: &str = "remote_selection_requested";
 const REMOTE_TERMINAL_METADATA_PREFIX: &[u8] = b"\x1b]777;ferryx;";
@@ -7392,9 +7392,70 @@ async fn reference_chat_delete_file(
         .into_response()
 }
 
+/// The web origin (`scheme://host[:port]`) of a URL; `ws`/`wss` map to `http`/`https`.
+fn web_origin(url: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(url.trim()).ok()?;
+    let scheme = match parsed.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        other => other,
+    }
+    .to_string();
+    if scheme != parsed.scheme() {
+        parsed.set_scheme(&scheme).ok()?;
+    }
+    let origin = parsed.origin();
+    origin
+        .is_tuple()
+        .then(|| origin.ascii_serialization())
+}
+
+/// Whether a cross-origin browser call may read this gateway's response.
+///
+/// Only `/api/v1/*` (minus the health probe) answers cross-origin; health and static assets stay
+/// same-origin. Admitted origins: the gateway's own origin, the default relay and the configured
+/// relay override, and the origins of this machine's saved paired hosts. Never with credentials.
+pub(crate) fn cors_origin_allowed(
+    state: &RemoteGatewayState,
+    origin: &axum::http::HeaderValue,
+    parts: &axum::http::request::Parts,
+) -> bool {
+    let path = parts.uri.path();
+    if !path.starts_with("/api/v1/") || path == "/api/v1/health" {
+        return false;
+    }
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    if let Some(host) = parts
+        .headers
+        .get(header::HOST)
+        .and_then(|host| host.to_str().ok())
+    {
+        if origin == format!("http://{host}") || origin == format!("https://{host}") {
+            return true;
+        }
+    }
+    let relay_override = state.config.read().relay_url.clone();
+    let relay_allowed = std::iter::once(crate::remote::state::DEFAULT_RELAY_URL)
+        .chain(relay_override.as_deref())
+        .filter_map(web_origin)
+        .any(|allowed| allowed == origin);
+    relay_allowed
+        || state
+            .cors_saved_host_origins
+            .read()
+            .iter()
+            .filter_map(|saved| web_origin(saved))
+            .any(|allowed| allowed == origin)
+}
+
 pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
+    let cors_state = Arc::clone(&state);
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(AllowOrigin::predicate(move |origin, parts| {
+            cors_origin_allowed(&cors_state, origin, parts)
+        }))
         .allow_methods(Any)
         .allow_headers(Any)
         .expose_headers([axum::http::HeaderName::from_static(ROTATED_TOKEN_HEADER)]);
@@ -8116,6 +8177,10 @@ mod token_lifetime_tests;
 #[cfg(test)]
 #[path = "preference_http_tests.rs"]
 mod preference_http_tests;
+
+#[cfg(test)]
+#[path = "cors_allowlist_tests.rs"]
+mod cors_allowlist_tests;
 
 // The capability document's reference-chat host identity is a cross-task contract (task 12
 // consumes `referenceHostId` for its mutation target), so its regression source lives beside
