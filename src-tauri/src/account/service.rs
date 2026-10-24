@@ -148,6 +148,12 @@ impl AccountState {
         self
     }
 
+    /// True on a warm standby: the data directory carries the standby marker, so the account
+    /// store is a read-only replica of the primary.
+    pub fn is_read_only(&self) -> bool {
+        super::store::store_sqlite::is_read_only(&self.data_dir)
+    }
+
     pub fn with_liveness_probe(self, probe: MachineLivenessProbe) -> Self {
         *self.liveness_probe.lock() = Some(probe);
         self
@@ -289,6 +295,9 @@ pub struct ApiError {
 
 impl From<String> for ApiError {
     fn from(error: String) -> Self {
+        if error.starts_with(super::store::store_sqlite::READ_ONLY_ERROR_CODE) {
+            return Self::read_only();
+        }
         Self::internal(error)
     }
 }
@@ -312,6 +321,17 @@ impl ApiError {
 
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", message)
+    }
+
+    /// A warm-standby relay serves account reads from its replica and refuses every write
+    /// until a failover promotes it, so two writable account databases never coexist.
+    pub fn read_only() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ACCOUNT_STORE_READ_ONLY",
+            "this relay is a read-only standby; account changes are accepted only by the primary",
+        )
+        .with_details(serde_json::json!({ "role": "standby" }))
     }
 
     fn unauthorized(code: &'static str, message: impl Into<String>) -> Self {
@@ -1837,7 +1857,32 @@ pub fn router(state: Arc<AccountState>) -> Router {
         ));
     }
 
-    router.layer(DefaultBodyLimit::max(limit)).with_state(state)
+    router
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            standby_write_guard,
+        ))
+        .layer(DefaultBodyLimit::max(limit))
+        .with_state(state)
+}
+
+/// Refuses every non-read request on a warm standby before any handler runs, so a client gets
+/// the typed `ACCOUNT_STORE_READ_ONLY` error instead of a half-validated request. The store
+/// itself refuses writes as well (`store_sqlite::mutate_transaction`), which also covers the
+/// few GET handlers that write.
+async fn standby_write_guard(
+    State(state): State<Arc<AccountState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let read = matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    if !read && state.is_read_only() {
+        return ApiError::read_only().into_response();
+    }
+    next.run(request).await
 }
 
 pub async fn serve(
@@ -2216,6 +2261,62 @@ mod tests {
             .await
             .expect("unknown account path must still answer");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A warm standby answers reads but refuses an enrollment with the typed read-only error,
+    /// and its store refuses a direct write, so it can never fork the primary's account data.
+    #[tokio::test]
+    async fn standby_refuses_enrollment_with_typed_read_only_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(AccountState::new(
+            tmp.path(),
+            "https://account.test",
+            mailer,
+        ));
+        assert!(!state.is_read_only());
+        std::fs::write(
+            tmp.path()
+                .join(crate::account::store::store_sqlite::STANDBY_MARKER_FILENAME),
+            b"",
+        )
+        .unwrap();
+        assert!(state.is_read_only());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let served_state = state.clone();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router(served_state)).await;
+        });
+
+        let health = state
+            .http_client
+            .get(format!("{origin}/api/account/v1/health"))
+            .send()
+            .await
+            .expect("health probe must be served");
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let enroll = state
+            .http_client
+            .post(format!("{origin}/api/account/v1/machines/enroll"))
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .expect("enroll must answer");
+        assert_eq!(enroll.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = enroll.json().await.expect("typed error body");
+        assert_eq!(body["code"], "ACCOUNT_STORE_READ_ONLY");
+        assert_eq!(body["details"]["role"], "standby");
+
+        let direct = state.mutate(|_store| Ok(()));
+        let error = direct.expect_err("the standby store must refuse writes");
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "ACCOUNT_STORE_READ_ONLY");
     }
 
     fn setup_test_user_and_machine(

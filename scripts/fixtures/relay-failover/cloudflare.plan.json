@@ -1,0 +1,94 @@
+{
+  "dryRun": true,
+  "command": "cloudflare",
+  "mode": "load-balancer",
+  "publicHostname": "relay.ferryx.dev",
+  "steps": [
+    {
+      "id": "monitor",
+      "kind": "api",
+      "method": "POST",
+      "path": "/accounts/{account_id}/load_balancers/monitors",
+      "body": {
+        "type": "https",
+        "description": "ferryx-relay /healthz",
+        "method": "GET",
+        "path": "/healthz",
+        "expected_codes": "200",
+        "expected_body": "\"ok\":true",
+        "interval": 60,
+        "retries": 1,
+        "timeout": 5,
+        "follow_redirects": false,
+        "header": {
+          "Host": [
+            "relay.ferryx.dev"
+          ]
+        }
+      }
+    },
+    {
+      "id": "pool-primary",
+      "kind": "api",
+      "method": "POST",
+      "path": "/accounts/{account_id}/load_balancers/pools",
+      "body": {
+        "name": "ferryx-relay-primary",
+        "monitor": "{monitor.id}",
+        "minimum_origins": 1,
+        "origins": [
+          {
+            "name": "omarchy",
+            "address": "tunnel-id.cfargotunnel.com",
+            "enabled": true,
+            "header": {
+              "Host": [
+                "relay.ferryx.dev"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pool-standby",
+      "kind": "api",
+      "method": "POST",
+      "path": "/accounts/{account_id}/load_balancers/pools",
+      "body": {
+        "name": "ferryx-relay-standby",
+        "monitor": "{monitor.id}",
+        "minimum_origins": 1,
+        "origins": [
+          {
+            "name": "relay-standby",
+            "address": "relay-2.ferryx.dev",
+            "enabled": true,
+            "header": {
+              "Host": [
+                "relay.ferryx.dev"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "load-balancer",
+      "kind": "api",
+      "method": "POST",
+      "path": "/zones/{zone_id}/load_balancers",
+      "body": {
+        "name": "relay.ferryx.dev",
+        "proxied": true,
+        "steering_policy": "off",
+        "default_pools": [
+          "{pool-primary.id}",
+          "{pool-standby.id}"
+        ],
+        "fallback_pool": "{pool-standby.id}",
+        "session_affinity": "none"
+      }
+    }
+  ]
+}

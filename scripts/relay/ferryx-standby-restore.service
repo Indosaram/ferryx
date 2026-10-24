@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh the Ferryx warm-standby account database from Litestream
+ConditionPathExists=@DATA_DIR@/standby.readonly
+
+[Service]
+Type=oneshot
+User=@USER@
+EnvironmentFile=/etc/ferryx/litestream.env
+ExecStart=/usr/local/bin/ferryx-standby-restore.sh @DATA_DIR@ /etc/litestream.yml

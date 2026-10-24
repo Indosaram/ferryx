@@ -7725,7 +7725,8 @@ impl RemoteServerHandle {
         };
         Ok(client
             .with_machine_id(&identity.machine_id)
-            .with_auth_manager((*state.auth_manager).clone()))
+            .with_auth_manager((*state.auth_manager).clone())
+            .with_fallback_urls(crate::remote::relay_client::fallback_relay_urls_from_env()))
     }
 
     /// Swap only the outbound supervisor; HTTP connections and PTY ownership stay intact.
@@ -8052,7 +8053,9 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
             if let Some(identity) = &relay_identity {
                 client = client.with_machine_id(&identity.machine_id);
             }
-            let client = client.with_auth_manager((*state.auth_manager).clone());
+            let client = client
+                .with_auth_manager((*state.auth_manager).clone())
+                .with_fallback_urls(crate::remote::relay_client::fallback_relay_urls_from_env());
             // Publish the one relay pairing authority so daemon/GUI pairing registers
             // its PIN with the relay instead of minting a local-only code.
             let epoch = crate::remote::state::RELAY_PAIRING_EPOCH

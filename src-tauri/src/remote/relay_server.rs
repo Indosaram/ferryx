@@ -3073,6 +3073,7 @@ pub fn relay_router_with_account(
         delivery: state.clone(),
     };
     let mut router = Router::new()
+        .route("/healthz", get(healthz_handler))
         .route("/api/v1/pair/exchange", post(pair_exchange_handler))
         .route("/api/v1/attach/session", post(attach_session_handler))
         .route(
@@ -3137,6 +3138,24 @@ pub fn relay_router_with_account(
 /// Back-compat wrapper: relay-only router with no embedded account service.
 pub fn relay_router_with_grant_key(state: RelayState, account_public_key: Option<String>) -> Router {
     relay_router_with_account(state, account_public_key, None)
+}
+
+/// Liveness probe for load balancers and the public status page.
+///
+/// Side-effect free and unauthenticated. `role` tells a failover pool which host it reached:
+/// `primary` serves a writable account store, `standby` a read-only replica, and `relay` has
+/// no embedded account service.
+async fn healthz_handler(State(state): State<RelayState>) -> Response {
+    let role = match state.inner.account_state.lock().as_ref() {
+        Some(account) if account.is_read_only() => "standby",
+        Some(_) => "primary",
+        None => "relay",
+    };
+    let mut response = Json(serde_json::json!({ "ok": true, "role": role })).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// Spawns the background task that periodically evicts sessions which
@@ -8661,6 +8680,42 @@ mod tests {
         });
 
         (format!("ws://{addr}"), handle)
+    }
+
+    /// `/healthz` is JSON (not the SPA fallback) and reports which failover role it serves.
+    #[tokio::test]
+    async fn healthz_reports_primary_and_standby_roles() {
+        let temp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            temp.path().join("mail"),
+        ));
+        let account = Arc::new(crate::account::service::AccountState::new(
+            temp.path().join("account"),
+            "https://relay.test",
+            mailer,
+        ));
+        let (base, handle) =
+            spawn_test_relay_with_account_state(RelayState::new(vec![]), Some(account)).await;
+        let url = format!("{}/healthz", base.replacen("ws://", "http://", 1));
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let primary = client.get(&url).send().await.unwrap();
+        assert_eq!(primary.status(), StatusCode::OK);
+        let body: serde_json::Value = primary.json().await.unwrap();
+        assert_eq!(body, serde_json::json!({ "ok": true, "role": "primary" }));
+
+        std::fs::create_dir_all(temp.path().join("account")).unwrap();
+        std::fs::write(
+            temp.path()
+                .join("account")
+                .join(crate::account::store::store_sqlite::STANDBY_MARKER_FILENAME),
+            b"",
+        )
+        .unwrap();
+        let standby: serde_json::Value =
+            client.get(&url).send().await.unwrap().json().await.unwrap();
+        assert_eq!(standby["role"], "standby");
+        handle.abort();
     }
 
     /// Owner of the foreign machine in [`test_account_state`]. It needs its own `users` row

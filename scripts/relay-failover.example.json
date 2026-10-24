@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "publicHostname": "relay.ferryx.dev",
+  "deploymentMode": "commercial",
+  "port": 8787,
+  "primary": {
+    "name": "omarchy",
+    "ssh": "omarchy",
+    "user": "indo",
+    "binary": "/home/indo/bin/ferryx-relay",
+    "dataDir": "/home/indo/.ferryx/account-data",
+    "relayDataDir": "/home/indo/.ferryx/relay",
+    "uiDistDir": "/home/indo/ferryx-relay-web/dist",
+    "directHostname": "relay-1.ferryx.dev",
+    "originAddress": "8681ba66-7b83-4645-8b8a-c4f5e1449d88.cfargotunnel.com"
+  },
+  "standby": {
+    "name": "relay-standby",
+    "ssh": null,
+    "user": "ferryx",
+    "binary": "/usr/local/bin/ferryx-relay",
+    "dataDir": "/var/lib/ferryx/account-data",
+    "relayDataDir": "/var/lib/ferryx/relay",
+    "uiDistDir": "/var/lib/ferryx/ui-dist",
+    "directHostname": "relay-2.ferryx.dev",
+    "originAddress": null
+  },
+  "litestream": {
+    "version": "0.3.13",
+    "bucket": "ferryx-relay-litestream",
+    "path": "account-store",
+    "endpoint": "https://<cloudflare-account-id>.r2.cloudflarestorage.com"
+  },
+  "cloudflare": {
+    "mode": "load-balancer",
+    "zone": "ferryx.dev",
+    "monitorIntervalSeconds": 60
+  },
+  "drill": {
+    "probeHost": "maho-win",
+    "stopSeconds": 120,
+    "probeEverySeconds": 5,
+    "evidenceDir": ".omo/evidence/ferryx-adoption-objections-remediation/task-37"
+  }
+}
