@@ -77,6 +77,7 @@ import { Input } from "./ui/input";
 import { SectionHeader } from "./ui/SectionHeader";
 import { SegmentedControl } from "./ui/SegmentedControl";
 import { SupervisorPanel, useSupervisorTyping } from "./supervisor/SupervisorPanel";
+import { useAdvancedFeatures } from "../lib/advancedFeatures";
 import { SidebarStateSlot, type SidebarSlotState } from "./sidebar/SidebarStateSlot";
 import type { SectionId } from "./settings/types";
 import { EmptyWorktreesHint, fileManagerActionLabel, WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
@@ -176,7 +177,8 @@ export function Sidebar({
   const selectWorktree = onSelectWorktree;
   const inboxOpen = attention?.inboxOpen ?? false;
   const [supervisorOpenState, setSupervisorOpen] = useState(false);
-  const supervisorOpen = supervisorOpenState && !inboxOpen;
+  const advancedFeatures = useAdvancedFeatures();
+  const supervisorOpen = supervisorOpenState && !inboxOpen && advancedFeatures;
   const supervisorTyping = useSupervisorTyping();
   const sidebarView = supervisorOpen ? "supervisor" : inboxOpen ? "inbox" : "worktrees";
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -508,13 +510,15 @@ export function Sidebar({
                   countTestId: "sidebar-attention-badge",
                   "data-shortcut": "notifications.toggle",
                 },
-                {
-                  value: "supervisor",
-                  label: "Supervisor",
-                  ariaLabel: supervisorTyping ? "Supervisor (typing)" : "Supervisor",
-                  count: supervisorTyping ? <Eye aria-hidden="true" className="size-3 text-foreground" /> : undefined,
-                  countTestId: "sidebar-supervisor-typing",
-                },
+                ...(advancedFeatures
+                  ? [{
+                      value: "supervisor" as const,
+                      label: "Supervisor",
+                      ariaLabel: supervisorTyping ? "Supervisor (typing)" : "Supervisor",
+                      count: supervisorTyping ? <Eye aria-hidden="true" className="size-3 text-foreground" /> : undefined,
+                      countTestId: "sidebar-supervisor-typing",
+                    }]
+                  : []),
               ]}
             />
           </div>

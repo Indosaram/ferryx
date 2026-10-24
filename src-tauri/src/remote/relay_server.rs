@@ -2281,13 +2281,16 @@ async fn host_http_handler(
     let body = to_bytes(body, body_limit)
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    // Only the relay itself may name a pairing client to the gateway.
+    let mut headers = parts.headers;
+    headers.remove(crate::remote::server::PAIRING_PEER_HEADER);
     proxy_http(
         &state,
         &machine,
         None,
         parts.method,
         &target,
-        parts.headers,
+        headers,
         body.to_vec(),
     )
     .await
@@ -2537,6 +2540,11 @@ async fn exchange_http(
     .unwrap();
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
+    // The gateway keys its per-source PIN failure budget on this address.
+    headers.insert(
+        crate::remote::server::PAIRING_PEER_HEADER,
+        HeaderValue::from_str(&ip.to_string()).unwrap(),
+    );
     let response = proxy_http(
         &state,
         &claim.machine_id,

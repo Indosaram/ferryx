@@ -4,6 +4,7 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -273,7 +274,15 @@ fn pairing_code_lifetime(access_scope: DeviceAccessScope) -> Duration {
         PAIRING_EXPIRY
     }
 }
-const PAIRING_FAILURE_BUDGET: u8 = 5;
+/// Failed attempts one source may spend while its budget window is open.
+const PAIRING_FAILURE_BUDGET: u32 = 5;
+/// Failed attempts all sources together may spend while the window is open, so
+/// rotating source addresses cannot multiply the guesses against one code.
+const PAIRING_GLOBAL_FAILURE_CEILING: u32 = 50;
+/// The longest lifetime any pairing code can have (machine scope).
+const LONGEST_PAIRING_LIFETIME: Duration = Duration::from_secs(600);
+/// Budget key for in-process callers that have no network peer (CLI approval, tests).
+const LOCAL_PAIRING_SOURCE: &str = "local";
 const LAST_SEEN_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
 pub const DEVICE_IDLE_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
 
@@ -358,23 +367,160 @@ mod persisted_instant {
     }
 }
 
+// Stores a monotonic deadline as a wall-clock one so it survives a daemon restart.
+mod persisted_deadline {
+    use super::*;
+
+    fn unix_now() -> Duration {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+    }
+
+    pub fn serialize<S: serde::Serializer>(
+        deadline: &Option<Instant>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        deadline
+            .map(|deadline| unix_now() + deadline.saturating_duration_since(Instant::now()))
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Instant>, D::Error> {
+        let deadline = Option::<Duration>::deserialize(deserializer)?;
+        let now = unix_now();
+        Ok(deadline.map(|deadline| {
+            Instant::now() + deadline.saturating_sub(now).min(LONGEST_PAIRING_LIFETIME)
+        }))
+    }
+}
+
+/// Failed pairing attempts, counted per source and in total.
+///
+/// The window stays open until every code that was live while it was open has
+/// expired, so a 600 s machine code is covered for its whole lifetime instead of
+/// getting a fresh budget every 60 s. It is persisted with the pairing codes so a
+/// daemon restart does not reset it.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairingFailureBudget {
+    #[serde(default, with = "persisted_deadline")]
+    closes_at: Option<Instant>,
+    #[serde(default)]
+    per_source: HashMap<String, u32>,
+    #[serde(default)]
+    total: u32,
+}
+
+impl PairingFailureBudget {
+    fn expire(&mut self, now: Instant) {
+        if self.closes_at.is_none_or(|closes_at| now >= closes_at) {
+            *self = Self::default();
+        }
+    }
+
+    fn admits(&self, source: &str) -> bool {
+        self.total < PAIRING_GLOBAL_FAILURE_CEILING
+            && self.per_source.get(source).copied().unwrap_or(0) < PAIRING_FAILURE_BUDGET
+    }
+
+    /// Combines two views of the same budget (memory and disk) without losing a
+    /// failure either one recorded, e.g. when a persist failed.
+    fn merge(&mut self, mut other: Self, now: Instant) {
+        self.expire(now);
+        other.expire(now);
+        self.closes_at = self.closes_at.max(other.closes_at);
+        self.total = self.total.max(other.total);
+        for (source, count) in other.per_source {
+            let entry = self.per_source.entry(source).or_default();
+            *entry = (*entry).max(count);
+        }
+    }
+}
+
 #[derive(Default)]
 struct PairingWindow {
     codes: HashMap<String, PairingCode>,
+    /// When expired codes were last pruned; pruning runs at most every 60 s.
     started_at: Option<Instant>,
-    failures: u8,
+    failures: PairingFailureBudget,
 }
 
 impl PairingWindow {
     fn refresh(&mut self, now: Instant) {
         if self
             .started_at
-            .is_none_or(|start| now.duration_since(start) >= PAIRING_EXPIRY)
+            .is_none_or(|start| now.saturating_duration_since(start) >= PAIRING_EXPIRY)
         {
-            self.codes
-                .retain(|_, pairing| now.duration_since(pairing.created_at) < pairing.lifetime);
+            self.codes.retain(|_, pairing| {
+                now.saturating_duration_since(pairing.created_at) < pairing.lifetime
+            });
             self.started_at = Some(now);
-            self.failures = 0;
+        }
+        self.failures.expire(now);
+    }
+
+    /// Keeps an open budget window open until every currently live code expires.
+    fn extend_budget(&mut self, now: Instant) {
+        let latest = self
+            .codes
+            .values()
+            .map(|pairing| pairing.created_at + pairing.lifetime)
+            .filter(|expiry| *expiry > now)
+            .max()
+            .unwrap_or(now + PAIRING_EXPIRY);
+        self.failures.closes_at = Some(self.failures.closes_at.map_or(latest, |c| c.max(latest)));
+    }
+
+    /// A code issued while the budget is open joins the window instead of resetting it.
+    fn note_issued(&mut self, now: Instant) {
+        if self.failures.total > 0 {
+            self.extend_budget(now);
+        }
+    }
+
+    fn record_failure(&mut self, source: &str, now: Instant) {
+        self.extend_budget(now);
+        *self.failures.per_source.entry(source.to_owned()).or_default() += 1;
+        self.failures.total += 1;
+    }
+
+    /// Lookup, failure accounting and single-use consumption share one lock, so
+    /// no concurrent request can spend the same budget slot or the same code.
+    fn take_code(
+        &mut self,
+        code: &str,
+        source: &str,
+        now: Instant,
+    ) -> Result<PairingCode, AuthError> {
+        self.refresh(now);
+        if !self.failures.admits(source) {
+            return Err(AuthError::PairingRateLimited);
+        }
+        let Some(pairing) = self.codes.remove(code) else {
+            self.record_failure(source, now);
+            return Err(AuthError::InvalidPairingCode);
+        };
+        if now.saturating_duration_since(pairing.created_at) >= pairing.lifetime {
+            self.record_failure(source, now);
+            return Err(AuthError::ExpiredPairingCode);
+        }
+        Ok(pairing)
+    }
+}
+
+/// The failure-budget key for a pairing attempt from `source`.
+///
+/// IPv6 peers are grouped by /64, the smallest block one client typically controls.
+fn pairing_source_key(source: Option<IpAddr>) -> String {
+    match source.map(|ip| ip.to_canonical()) {
+        None => LOCAL_PAIRING_SOURCE.to_owned(),
+        Some(IpAddr::V4(ip)) => ip.to_string(),
+        Some(IpAddr::V6(ip)) => {
+            let s = ip.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
         }
     }
 }
@@ -386,6 +532,8 @@ struct PersistedAuthState {
     tokens: HashMap<String, String>,
     #[serde(default)]
     pairing_codes: HashMap<String, PairingCode>,
+    #[serde(default)]
+    pairing_failures: PairingFailureBudget,
 }
 
 #[derive(Clone)]
@@ -433,6 +581,7 @@ impl AuthManager {
         Self {
             pairing_window: Arc::new(RwLock::new(PairingWindow {
                 codes: persisted.pairing_codes,
+                failures: persisted.pairing_failures,
                 ..PairingWindow::default()
             })),
             transaction: Arc::new(Mutex::new(())),
@@ -501,12 +650,13 @@ impl AuthManager {
         let code = format!("{pin:06}");
 
         let mut window = self.pairing_window.write();
-        window.refresh(Instant::now());
+        let now = Instant::now();
+        window.refresh(now);
         window.codes.insert(
             code.clone(),
             PairingCode {
                 _code: code.clone(),
-                created_at: Instant::now(),
+                created_at: now,
                 default_permission,
                 access_scope,
                 lifetime: pairing_code_lifetime(access_scope),
@@ -514,6 +664,7 @@ impl AuthManager {
                 attach_public_key: None,
             },
         );
+        window.note_issued(now);
         drop(window);
         self.persist_best_effort();
         code
@@ -571,12 +722,13 @@ impl AuthManager {
     ) {
         let _transaction = self.begin_transaction().ok();
         let mut window = self.pairing_window.write();
-        window.refresh(Instant::now());
+        let now = Instant::now();
+        window.refresh(now);
         window.codes.insert(
             token.to_owned(),
             PairingCode {
                 _code: token.to_owned(),
-                created_at: Instant::now(),
+                created_at: now,
                 default_permission: permission,
                 access_scope,
                 lifetime: pairing_code_lifetime(access_scope),
@@ -584,6 +736,7 @@ impl AuthManager {
                 attach_public_key,
             },
         );
+        window.note_issued(now);
         drop(window);
         self.persist_best_effort();
     }
@@ -608,25 +761,58 @@ impl AuthManager {
         device_name: &str,
         installation_id: Option<&str>,
     ) -> Result<(String, DeviceInfo), AuthError> {
+        self.exchange_pairing_code_from(code, device_name, installation_id, None)
+    }
+
+    /// Exchanges a pairing code on behalf of the network peer `source`.
+    ///
+    /// Each source spends its own failure budget, so one guessing client cannot
+    /// lock out another; a global ceiling still caps all sources together.
+    /// `None` is an in-process caller without a peer.
+    pub fn exchange_pairing_code_from(
+        &self,
+        code: &str,
+        device_name: &str,
+        installation_id: Option<&str>,
+        source: Option<IpAddr>,
+    ) -> Result<(String, DeviceInfo), AuthError> {
+        self.exchange_pairing_code_at(
+            code,
+            device_name,
+            installation_id,
+            &pairing_source_key(source),
+            Instant::now(),
+        )
+    }
+
+    /// Spends one attempt from `source` against the budget, persisting any failure
+    /// so a restart cannot reset it.
+    fn take_pairing_code(
+        &self,
+        code: &str,
+        source: &str,
+        now: Instant,
+    ) -> Result<PairingCode, AuthError> {
+        let taken = self.pairing_window.write().take_code(code, source, now);
+        if matches!(
+            taken,
+            Err(AuthError::InvalidPairingCode | AuthError::ExpiredPairingCode)
+        ) {
+            self.persist_best_effort();
+        }
+        taken
+    }
+
+    fn exchange_pairing_code_at(
+        &self,
+        code: &str,
+        device_name: &str,
+        installation_id: Option<&str>,
+        source: &str,
+        now: Instant,
+    ) -> Result<(String, DeviceInfo), AuthError> {
         let _transaction = self.begin_transaction()?;
-        let pairing = {
-            // Lookup, failure accounting and single-use consumption share one
-            // lock. No concurrent request can spend the same budget slot/code.
-            let mut window = self.pairing_window.write();
-            window.refresh(Instant::now());
-            if window.failures >= PAIRING_FAILURE_BUDGET {
-                return Err(AuthError::PairingRateLimited);
-            }
-            let Some(pairing) = window.codes.remove(code) else {
-                window.failures += 1;
-                return Err(AuthError::InvalidPairingCode);
-            };
-            if pairing.created_at.elapsed() >= pairing.lifetime {
-                window.failures += 1;
-                return Err(AuthError::ExpiredPairingCode);
-            }
-            pairing
-        };
+        let pairing = self.take_pairing_code(code, source, now)?;
 
         let trimmed_name = device_name.trim();
         let effective_name = if trimmed_name.is_empty() {
@@ -777,22 +963,8 @@ impl AuthManager {
         }
 
         let _transaction = self.begin_transaction()?;
-        let mut pairing = {
-            let mut window = self.pairing_window.write();
-            window.refresh(Instant::now());
-            if window.failures >= PAIRING_FAILURE_BUDGET {
-                return Err(AuthError::PairingRateLimited);
-            }
-            let Some(pairing) = window.codes.remove(code) else {
-                window.failures += 1;
-                return Err(AuthError::InvalidPairingCode);
-            };
-            if pairing.created_at.elapsed() >= pairing.lifetime {
-                window.failures += 1;
-                return Err(AuthError::ExpiredPairingCode);
-            }
-            pairing
-        };
+        // The CLI operator is local; it spends the in-process budget.
+        let mut pairing = self.take_pairing_code(code, LOCAL_PAIRING_SOURCE, Instant::now())?;
 
         if let Some(token) = &pairing.approved_token {
             let device_id = self.tokens.read().get(token).cloned();
@@ -1042,7 +1214,11 @@ impl AuthManager {
                 .map_err(|e| AuthError::Storage(format!("lock remote auth state: {e}")))?;
             if let Some(mut state) = load_persisted_auth(path)? {
                 prune_revoked_and_idle_devices(&mut state, unix_now());
-                self.pairing_window.write().codes = state.pairing_codes;
+                {
+                    let mut window = self.pairing_window.write();
+                    window.codes = state.pairing_codes;
+                    window.failures.merge(state.pairing_failures, Instant::now());
+                }
                 *self.devices.write() = state.devices;
                 *self.tokens.write() = state.tokens;
             }
@@ -1062,6 +1238,7 @@ impl AuthManager {
             devices: self.devices.read().clone(),
             tokens: self.tokens.read().clone(),
             pairing_codes: self.pairing_window.read().codes.clone(),
+            pairing_failures: self.pairing_window.read().failures.clone(),
         };
         #[cfg(test)]
         if self
@@ -2646,5 +2823,92 @@ mod persistence_tests {
         assert_eq!(loser, AuthError::InvalidPairingCode);
         assert!(!winner.0.is_empty());
         assert_eq!(manager.list_devices().len(), 1);
+    }
+
+    fn peer(last: u8) -> Option<IpAddr> {
+        Some(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, last)))
+    }
+
+    #[test]
+    fn one_source_exhausting_its_budget_does_not_lock_out_another() {
+        let manager = AuthManager::new();
+        let code = manager.create_pairing_code(DevicePermission::View);
+        for _ in 0..PAIRING_FAILURE_BUDGET {
+            assert!(matches!(
+                manager.exchange_pairing_code_from("000000", "guess", None, peer(2)),
+                Err(AuthError::InvalidPairingCode)
+            ));
+        }
+        assert!(matches!(
+            manager.exchange_pairing_code_from(&code, "attacker", None, peer(2)),
+            Err(AuthError::PairingRateLimited)
+        ));
+        let (token, device) = manager
+            .exchange_pairing_code_from(&code, "owner", None, peer(3))
+            .expect("a different source keeps its own budget");
+        assert_eq!(device.permission, DevicePermission::View);
+        assert_eq!(manager.validate_token(&token).unwrap().id, device.id);
+    }
+
+    #[test]
+    fn the_budget_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-auth.json");
+        let manager = AuthManager::with_persistence(Some(path.clone()));
+        let code = manager.create_pairing_code(DevicePermission::Control);
+        for _ in 0..PAIRING_FAILURE_BUDGET {
+            assert!(manager
+                .exchange_pairing_code_from("000000", "guess", None, peer(2))
+                .is_err());
+        }
+        drop(manager);
+
+        let restarted = AuthManager::with_persistence(Some(path));
+        assert!(matches!(
+            restarted.exchange_pairing_code_from(&code, "after restart", None, peer(2)),
+            Err(AuthError::PairingRateLimited)
+        ));
+        assert!(restarted
+            .exchange_pairing_code_from(&code, "owner", None, peer(3))
+            .is_ok());
+    }
+
+    #[test]
+    fn a_machine_code_allows_at_most_the_global_ceiling_over_its_lifetime() {
+        let manager = AuthManager::new();
+        let code = manager
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+            .unwrap();
+        let issued_at = manager.pairing_window.read().codes[&code].created_at;
+        let lifetime = pairing_code_lifetime(DeviceAccessScope::Machine);
+        let mut source = 0u32;
+        let mut guess = |at: Duration| {
+            source += 1;
+            // Every guess comes from a fresh source, so only the ceiling can stop it.
+            let ip = IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000 + source));
+            manager.exchange_pairing_code_at(
+                "000000",
+                "distributed",
+                None,
+                &pairing_source_key(Some(ip)),
+                issued_at + at,
+            )
+        };
+        let accepted = |result: &Result<(String, DeviceInfo), AuthError>| {
+            !matches!(result, Err(AuthError::PairingRateLimited))
+        };
+
+        // A burst at issue time spends the whole ceiling at once.
+        let burst: Vec<_> = (0..2 * PAIRING_GLOBAL_FAILURE_CEILING)
+            .map(|_| guess(Duration::ZERO))
+            .collect();
+        let mut total = burst.iter().filter(|r| accepted(*r)).count();
+        assert_eq!(total, PAIRING_GLOBAL_FAILURE_CEILING as usize);
+        // One more guess every second for the rest of the 600 s lifetime: a
+        // budget that reset every 60 s would accept more here.
+        for second in 1..lifetime.as_secs() {
+            total += usize::from(accepted(&guess(Duration::from_secs(second))));
+        }
+        assert_eq!(total, PAIRING_GLOBAL_FAILURE_CEILING as usize);
     }
 }

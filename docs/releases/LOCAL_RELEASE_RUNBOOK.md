@@ -221,7 +221,10 @@ destroy active terminal sessions or contaminate acceptance evidence.
 ### 4. Assemble and verify locally
 
 For a production release, use the public key from committed Tauri configuration (do not pass the
-test-only `--pubkey` override):
+test-only `--pubkey` override). `assemble` signs `SHA256SUMS` with the updater key, so export the
+same `TAURI_SIGNING_PRIVATE_KEY` (or `TAURI_SIGNING_PRIVATE_KEY_PATH`) and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` used for updater signing. Install the SBOM generator once with
+`cargo install cargo-cyclonedx --locked`; `minisign`, `npm` and `bun` must be on `PATH`.
 
 ```bash
 bun scripts/release-local.mjs assemble --run "$RUN"
@@ -233,6 +236,49 @@ Windows MSIX, and, when selected, NSIS. It verifies receipt identity, paths, siz
 and the selected channel matrix before creating stable aliases, `latest.json`, and
 `SHA256SUMS.txt`. `verify` checks listed bytes and independently re-derives the publish directory.
 Inspect the final inventory; no MSI or architecture-specific macOS DMG is part of this contract.
+
+### Release provenance
+
+`assemble` then adds the provenance assets (`scripts/release-provenance.mjs`) to `$RUN/publish`,
+and `publish` uploads them with every other file:
+
+| Asset | Content |
+| --- | --- |
+| `ferryx-src-tauri.cdx.json` | CycloneDX 1.5 SBOM of the Rust app (`cargo cyclonedx --target all` on `src-tauri/Cargo.toml`) |
+| `ferryx-ui.cdx.json` | CycloneDX 1.5 SBOM of the UI runtime dependencies (`bunx @cyclonedx/cyclonedx-npm --omit dev`) |
+| `provenance.json` | Tag, commit, `sourceDateEpoch`, Ghostty pin, the plan's toolchain constraints, and per host the recorded toolchain versions and the assets it built (name, kind, size, SHA-256) |
+| `SHA256SUMS` | SHA-256 of every other release asset, in `shasum -a 256 -c` format |
+| `SHA256SUMS.minisig` | minisign signature of `SHA256SUMS` by the updater key (`plugins.updater.pubkey` in `src-tauri/tauri.conf.json`) |
+| `ferryx.rb`, `ferryx-cli.rb` | Homebrew cask (`Ferryx_universal.dmg`) and linux x64 formula (`ferryx-cli-linux-amd64`), rendered by `scripts/release-packaging.mjs` from `SHA256SUMS.txt` with the tag's version and hashes |
+
+Both SBOMs are generated from a clean `git archive` of `plan.json.commitSha`, never from the working
+checkout. Which host builds which asset:
+
+| Host | Assets |
+| --- | --- |
+| `macbook` | `Ferryx.app.tar.gz` (+`.sig`), `Ferryx_universal.app.tar.gz` (+`.sig`), `Ferryx_universal.dmg`, `ferryx-cli-darwin-universal` |
+| `omaki` | `Ferryx_amd64.AppImage` (+`.sig`), `Ferryx_amd64.deb`, `ferryx-cli-linux-amd64` |
+| `maho-win` | `Ferryx_x64.msix`, and `Ferryx_x64-setup.exe` (+`.sig`) when NSIS migration is selected |
+| `macbook` (coordinator) | `latest.json`, `SHA256SUMS.txt`, `ferryx.rb`, `ferryx-cli.rb`, the SBOMs, `provenance.json`, `SHA256SUMS`, `SHA256SUMS.minisig` |
+
+Reproducible build inputs are the commit, the Ghostty pin and `sourceDateEpoch` from `plan.json`,
+the committed `src-tauri/Cargo.lock` and `ui/bun.lock`, and the toolchain versions each host
+reports in its receipt (copied into `provenance.json`). Signing fails closed: without the updater
+key, or with a key that does not match the committed public key, `assemble` removes `publish/`
+and exits non-zero. `verify` checks the signature and every checksum in `SHA256SUMS` before the
+byte-for-byte re-derivation.
+
+Anyone can verify a release independently:
+
+```bash
+gh release download "$TAG" --repo Indosaram/ferryx --dir ferryx-release && cd ferryx-release
+minisign -Vm SHA256SUMS -P RWTLZ1zCtZ3JEO3XhjZZ6Uq3rQtEz2FbBcfxxl/+aFlNKJepqoQNj2Zm
+shasum -a 256 -c SHA256SUMS
+```
+
+`bun scripts/release-provenance.mjs pubkey` prints that `-P` value from the committed config, and
+`bun scripts/release-provenance.mjs verify --dir ferryx-release` runs both checks. Every check
+must exit 0; a single changed byte fails `shasum -c`.
 
 ### 5. Draft review, publication approval, and remote verification
 
@@ -269,6 +315,12 @@ bun scripts/release-local.mjs verify-remote --run "$RUN"
 This verifies public `latest.json` version and availability of `SHA256SUMS.txt`. Final validation
 must also establish exact remote inventory/byte checking if not already guaranteed by the
 published implementation.
+
+Homebrew: the release carries the rendered `ferryx.rb` (cask) and `ferryx-cli.rb` (formula);
+the templates live in `packaging/homebrew/`. No tap is published yet. Once the
+`Indosaram/homebrew-ferryx` tap exists, copy the two files from the public release into its
+`Casks/` and `Formula/` directories. Windows package-manager installs go through the Store
+listing (`winget install --source msstore 9NLHQL5JNLM4`); no winget-pkgs manifest is authored.
 
 Microsoft Partner Center submission is manual and separately approved. The local release may
 produce an unsigned `Ferryx_x64.msix` for Store ingestion, but attaching it to GitHub or making a
@@ -427,6 +479,7 @@ the release: the app could not stage a daemon runtime on users' machines.
 - [ ] Developer ID signing, notarization/stapling, updater signatures, package metadata, and hashes pass.
 - [ ] The macOS post-build release check passes on `Ferryx.app` and `Contents/Helpers/Ferryx Daemon.app`.
 - [ ] `assemble` and `verify` pass against the production updater public key.
+- [ ] `SHA256SUMS`, `SHA256SUMS.minisig`, both `*.cdx.json` SBOMs and `provenance.json` are in `$RUN/publish`, and `minisign -Vm SHA256SUMS -P <pubkey>` plus `shasum -a 256 -c SHA256SUMS` pass there.
 - [ ] Draft bytes and inventory are reviewed before the separate publication approval.
 - [ ] `verify-remote` passes after publication.
 - [ ] Store submission, if performed, has its own approval and Partner Center result.
