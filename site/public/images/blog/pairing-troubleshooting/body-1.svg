@@ -172,7 +172,7 @@
     <text x="49" y="29" fill="#00f2fe" font-size="10.5" font-weight="800" text-anchor="middle">START</text>
     <text x="16" y="62" fill="#ffffff" font-size="16" font-weight="700">Client Pairing</text>
     <text x="16" y="84" fill="#38bdf8" font-size="14" font-weight="600">Handshake Init</text>
-    <text x="16" y="106" fill="#64748b" font-size="12" font-family="'JetBrains Mono', monospace">PIN / QR Scan</text>
+    <text x="16" y="106" fill="#64748b" font-size="12" font-family="'JetBrains Mono', monospace">PIN</text>
   </g>
 
   <!-- Arrow: Start -> Diamond 1 -->
@@ -183,7 +183,7 @@
     <polygon points="0,-72 72,0 0,72 -72,0" fill="url(#diamondGrad1)" stroke="#a855f7" stroke-width="2.5" filter="url(#glowRose)"/>
     <polygon points="0,-64 64,0 0,64 -64,0" fill="#130820" stroke="#c084fc" stroke-width="1" stroke-dasharray="4 4"/>
     <text x="0" y="-12" fill="#e9d5ff" font-size="13" font-weight="800" text-anchor="middle" letter-spacing="1">DECISION 1</text>
-    <text x="0" y="10" fill="#ffffff" font-size="16" font-weight="800" text-anchor="middle">PIN / QR</text>
+    <text x="0" y="10" fill="#ffffff" font-size="16" font-weight="800" text-anchor="middle">PIN</text>
     <text x="0" y="30" fill="#c084fc" font-size="14" font-weight="700" text-anchor="middle">Validated?</text>
   </g>
 
@@ -299,7 +299,7 @@
         Generated 6-digit one-time PIN expires after 3 minutes for replay protection. Re-entry fails.
       </text>
       <rect x="18" y="78" width="704" height="48" rx="8" fill="url(#codeBg)" stroke="#2e1065" stroke-width="1"/>
-      <text x="32" y="108" fill="#c084fc" font-size="13" font-family="'JetBrains Mono', monospace">ferryx pair --generate --ttl 300 --print-qr</text>
+      <text x="32" y="108" fill="#c084fc" font-size="13" font-family="'JetBrains Mono', monospace">ferryx pair --generate --ttl 300</text>
       <rect x="18" y="136" width="704" height="52" rx="8" fill="#130924"/>
       <circle cx="36" cy="162" r="4" fill="#00f2fe"/>
       <text x="50" y="156" fill="#38bdf8" font-size="12" font-weight="700">RESOLUTION FIX:</text>

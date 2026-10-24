@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
+import { openWorkspacePicker } from "./home/phoneHomeTestUtils";
 import { clearStoredAccountSessionToken, storeAccountSessionToken } from "./accountSession";
 import * as accountSessionModule from "./accountSession";
 import * as attachTunnelModule from "./attachTunnel";
@@ -295,12 +296,12 @@ async function mountAccountHarness(initial: SessionRow[], chat?: {
   vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({ transport, close: () => {} });
 
   if (chat) {
-    const ready = r25State(() => screen.queryByRole("button", { name: /Change workspace context/i }) !== null);
+    const ready = r25State(() => screen.queryByTestId("mobile-home-tab-worktrees") !== null);
     render(<RemoteApp />);
     await ready;
   } else {
     render(<RemoteApp />);
-    await waitFor(() => expect(screen.getByRole("button", { name: /Change workspace context/i })).toBeDefined());
+    await waitFor(() => expect(screen.getByTestId("mobile-home-tab-worktrees")).toBeDefined());
   }
 
   return {
@@ -348,19 +349,11 @@ async function mountAccountHarness(initial: SessionRow[], chat?: {
 }
 
 async function openContextPicker(): Promise<void> {
-  const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
-  act(() => {
-    fireEvent.click(trigger);
-  });
+  await openWorkspacePicker();
 }
 
 async function ensureSessionRowsVisible(): Promise<void> {
-  const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
-  if (inventoryRows().length === 0 && trigger.getAttribute("aria-expanded") !== "true") {
-    act(() => {
-      fireEvent.click(trigger);
-    });
-  }
+  await openWorkspacePicker();
 }
 
 /* The sidebar represents a session either as a session row (a still-existing session) or as
@@ -503,7 +496,7 @@ describe("RemoteApp machine inventory selection", () => {
       terminalReady: (socket) => terminalRead?.resolve(socket),
     });
     const rowsReady = r25State(() => sessionRow(SID_SECOND_ROW) !== null);
-    act(() => fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i })));
+    await openWorkspacePicker();
     await rowsReady;
     const row = sessionRow(SID_SECOND_ROW);
     if (!row) throw new Error("Missing R25 native session row");

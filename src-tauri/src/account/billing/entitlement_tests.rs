@@ -2,8 +2,8 @@ use super::*;
 
 #[test]
 fn test_machine_limit_free_plan() {
-    assert_eq!(machine_limit(PlanKey::Free, 0, 0), 1);
-    assert_eq!(machine_limit(PlanKey::Free, 5, 3), 1);
+    assert_eq!(machine_limit(PlanKey::Free, 0, 0), FREE_HOSTS);
+    assert_eq!(machine_limit(PlanKey::Free, 5, 3), FREE_HOSTS);
 }
 
 #[test]
@@ -26,7 +26,7 @@ fn test_machine_limit_team_plan() {
 }
 
 #[test]
-fn test_free_1_machine_ok_2_machines_over_limit() {
+fn test_free_at_limit_ok_one_more_over_limit() {
     let now = 1_000_000;
     let snap_ok = BillingSnapshot {
         plan: PlanKey::Free,
@@ -34,13 +34,13 @@ fn test_free_1_machine_ok_2_machines_over_limit() {
         host_packs: 0,
         status: SubscriptionStatus::Active,
         ends_at: None,
-        machines_used: 1,
+        machines_used: FREE_HOSTS,
         grace_started_at: None,
     };
     let ent_ok = evaluate(&snap_ok, now);
     assert_eq!(ent_ok.effective_plan, PlanKey::Free);
     assert_eq!(ent_ok.status, EntitlementStatus::Ok);
-    assert_eq!(ent_ok.machine_limit, 1);
+    assert_eq!(ent_ok.machine_limit, FREE_HOSTS);
     assert!(ent_ok.remote_allowed);
     assert!(!ent_ok.may_enroll_new);
 
@@ -50,16 +50,73 @@ fn test_free_1_machine_ok_2_machines_over_limit() {
         host_packs: 0,
         status: SubscriptionStatus::Active,
         ends_at: None,
-        machines_used: 2,
+        machines_used: FREE_HOSTS + 1,
         grace_started_at: None,
     };
     let ent_over = evaluate(&snap_over, now);
     assert_eq!(ent_over.effective_plan, PlanKey::Free);
     assert_eq!(ent_over.status, EntitlementStatus::OverLimit);
-    assert_eq!(ent_over.machine_limit, 1);
+    assert_eq!(ent_over.machine_limit, FREE_HOSTS);
     assert_eq!(ent_over.grace_ends_at, Some(now + GRACE_SECS));
     assert!(ent_over.remote_allowed);
     assert!(!ent_over.may_enroll_new);
+}
+
+#[test]
+fn a_free_account_can_enroll_three_machines_and_is_refused_on_the_fourth() {
+    assert_eq!(FREE_HOSTS, 3, "owner decision 2026-10-24: Free covers 3 machines");
+    let now = 1_000_000;
+    let free_with = |machines_used: u32| BillingSnapshot {
+        plan: PlanKey::Free,
+        seats: 0,
+        host_packs: 0,
+        status: SubscriptionStatus::Active,
+        ends_at: None,
+        machines_used,
+        grace_started_at: None,
+    };
+
+    for already_enrolled in 0..3 {
+        let ent = evaluate(&free_with(already_enrolled), now);
+        assert_eq!(ent.status, EntitlementStatus::Ok);
+        assert!(
+            ent.may_enroll_new,
+            "machine {} must be accepted on Free",
+            already_enrolled + 1
+        );
+    }
+
+    let fourth = evaluate(&free_with(3), now);
+    assert_eq!(fourth.machine_limit, 3);
+    assert_eq!(fourth.status, EntitlementStatus::Ok, "3 machines is within the Free plan");
+    assert!(fourth.remote_allowed);
+    assert!(!fourth.may_enroll_new, "the fourth machine must be refused");
+}
+
+#[test]
+fn an_expired_pro_account_over_the_free_limit_keeps_its_machines_and_only_blocks_enrollment() {
+    let ends_at = 2_000_000;
+    let snap = BillingSnapshot {
+        plan: PlanKey::ProMonthly,
+        seats: 1,
+        host_packs: 0,
+        status: SubscriptionStatus::Expired,
+        ends_at: Some(ends_at),
+        machines_used: FREE_HOSTS + 4,
+        grace_started_at: None,
+    };
+
+    let now = ends_at + 1;
+    let ent = evaluate(&snap, now);
+    assert_eq!(ent.effective_plan, PlanKey::Free);
+    assert_eq!(ent.machine_limit, FREE_HOSTS);
+    assert_eq!(ent.status, EntitlementStatus::OverLimit);
+    assert!(
+        ent.remote_allowed,
+        "the machines already enrolled keep remote access during grace"
+    );
+    assert!(!ent.may_enroll_new, "only new enrollment is blocked");
+    assert_eq!(ent.grace_ends_at, Some(now + GRACE_SECS));
 }
 
 #[test]
@@ -71,7 +128,7 @@ fn test_downgrade_grace_6_days_23_hours_allowed_7_days_stopped() {
         host_packs: 0,
         status: SubscriptionStatus::Active,
         ends_at: None,
-        machines_used: 3,
+        machines_used: FREE_HOSTS + 1,
         grace_started_at: Some(grace_start),
     };
 
@@ -169,7 +226,7 @@ fn test_cancelled_valid_before_ends_at_and_free_after_ends_at() {
     let now_after = 2_000_001;
     let ent_after = evaluate(&snap, now_after);
     assert_eq!(ent_after.effective_plan, PlanKey::Free);
-    assert_eq!(ent_after.machine_limit, 1);
+    assert_eq!(ent_after.machine_limit, FREE_HOSTS);
     assert_eq!(ent_after.status, EntitlementStatus::OverLimit);
     assert!(ent_after.remote_allowed);
     assert!(!ent_after.may_enroll_new);
@@ -197,7 +254,7 @@ fn test_active_and_on_trial_status_aware_ends_at_expiry() {
 
     let ent_active_expired = evaluate(&snap_active, 1_500_000);
     assert_eq!(ent_active_expired.effective_plan, PlanKey::Free);
-    assert_eq!(ent_active_expired.machine_limit, 1);
+    assert_eq!(ent_active_expired.machine_limit, FREE_HOSTS);
     assert_eq!(ent_active_expired.status, EntitlementStatus::OverLimit);
 
     let snap_trial = BillingSnapshot {
@@ -217,7 +274,7 @@ fn test_active_and_on_trial_status_aware_ends_at_expiry() {
 
     let ent_trial_expired = evaluate(&snap_trial, 1_500_001);
     assert_eq!(ent_trial_expired.effective_plan, PlanKey::Free);
-    assert_eq!(ent_trial_expired.machine_limit, 1);
+    assert_eq!(ent_trial_expired.machine_limit, FREE_HOSTS);
     assert_eq!(ent_trial_expired.status, EntitlementStatus::OverLimit);
 }
 

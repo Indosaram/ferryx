@@ -469,6 +469,23 @@ impl PairedHostService {
         })
         .await
     }
+    /// Stores the token the host rotated for `previous`. Best effort: on any failure the
+    /// previous token stays stored and keeps working until its expiry, and the next reconnect
+    /// answers the same successor again.
+    pub(crate) async fn adopt_rotated_token(
+        &self,
+        host: String,
+        generation: Epoch,
+        previous: String,
+        fresh: String,
+    ) {
+        if let Err(error) = self
+            .run(move |store| store.replace_rotated_token(&host, generation, &previous, &fresh))
+            .await
+        {
+            tracing::warn!("paired host token rotation not stored: {}", error.code);
+        }
+    }
     pub(crate) async fn current_generation(&self, host: String, generation: Epoch) -> Result<()> {
         #[cfg(test)]
         {

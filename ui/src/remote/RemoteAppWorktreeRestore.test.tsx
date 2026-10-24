@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
+import { openWorkspacePicker } from "./home/phoneHomeTestUtils";
 import {
   storeAccountSessionToken,
   getStoredAccountSessionToken,
@@ -130,15 +131,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
 
     const { unmount } = render(<RemoteApp />);
 
-    const topContextTrigger = await screen.findByRole("button", {
-      name: "Change workspace context",
-    });
-
-    act(() => {
-      fireEvent.click(topContextTrigger);
-    });
-
-    const picker = await screen.findByRole("dialog", { name: "Workspace context" });
+    const picker = await openWorkspacePicker();
     const signOutBtn = within(picker).getByRole("button", { name: "Sign out" });
     expect(signOutBtn).toBeDefined();
 
@@ -354,7 +347,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     render(<RemoteApp />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Change workspace context" })).toBeInTheDocument();
+      expect(screen.getByTestId("mobile-home-tab-worktrees")).toBeInTheDocument();
       expect(screen.getByText("ws-ferryx / main")).toBeInTheDocument();
     });
 
@@ -437,7 +430,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     render(<RemoteApp />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Change workspace context" })).toBeInTheDocument();
+      expect(screen.getByTestId("mobile-home-tab-worktrees")).toBeInTheDocument();
     });
 
     expect(getAccountLastSelectedTarget(window.location.origin)).toEqual({
@@ -469,7 +462,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     render(<RemoteApp />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Change workspace context" })).toBeInTheDocument();
+      expect(screen.getByTestId("mobile-home-tab-worktrees")).toBeInTheDocument();
     });
 
     expect(getAccountLastSelectedTarget(window.location.origin)).toEqual({
@@ -610,7 +603,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     render(<RemoteApp />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Change workspace context" })).toBeInTheDocument();
+      expect(screen.getByTestId("mobile-home-tab-worktrees")).toBeInTheDocument();
     });
 
     expect(getAccountLastSelectedTarget(window.location.origin)).toEqual({
@@ -709,15 +702,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
       expect(acquireCalled).toBe(true);
     });
 
-    const topContextTrigger = await screen.findByRole("button", {
-      name: "Change workspace context",
-    });
-
-    act(() => {
-      fireEvent.click(topContextTrigger);
-    });
-
-    const picker = await screen.findByRole("dialog", { name: "Workspace context" });
+    const picker = await openWorkspacePicker();
     const signOutBtn = within(picker).getByRole("button", { name: "Sign out" });
 
     act(() => {

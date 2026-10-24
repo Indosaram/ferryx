@@ -58,6 +58,9 @@ async function boot() {
 
   if (isTauriApp) {
     void bootTrace("app.import.start");
+    // Resolve the new-vs-existing install default before App can persist any workspace state.
+    const { loadAdvancedFeatures } = await import("./lib/advancedFeatures");
+    loadAdvancedFeatures();
     const { installNativeShortcutTablePush } = await import("./lib/nativeShortcutTable");
     const stopNativeShortcutTablePush = installNativeShortcutTablePush();
     import.meta.hot?.dispose(stopNativeShortcutTablePush);

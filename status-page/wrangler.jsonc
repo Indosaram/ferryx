@@ -1,0 +1,18 @@
+{
+  // Deploy (owner action): wrangler d1 create ferryx-status, paste its id below, then
+  // `bunx wrangler deploy -c status-page/wrangler.jsonc`. The table is created on the first run.
+  "name": "ferryx-status",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "status.ferryx.dev", "custom_domain": true }],
+  "triggers": { "crons": ["* * * * *"] },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "ferryx-status", "database_id": "REPLACE_WITH_D1_DATABASE_ID" }
+  ],
+  "vars": {
+    // Both hosts are probed directly (bypassing the load balancer) plus the public name.
+    "HOSTS": "[{\"name\":\"relay.ferryx.dev\",\"url\":\"https://relay.ferryx.dev\"},{\"name\":\"primary (omarchy)\",\"url\":\"https://relay-1.ferryx.dev\"},{\"name\":\"standby\",\"url\":\"https://relay-2.ferryx.dev\"}]"
+  }
+}

@@ -4,10 +4,16 @@ import { AlertTriangle, Radio, Trash2 } from "lucide-react";
 import {
   disableRemoteGateway,
   enableRemoteGateway,
+  getAgentControlSettings,
+  getDirectAutoTrustStatus,
   getRemoteStatus,
   listRemoteDevices,
   revokeRemoteDevice,
+  setAgentControlSettings,
+  setDirectAutoTrustDisabled,
+  type AgentControlSettings,
   type DeviceInfo,
+  type DirectAutoTrustStatus,
   type RemoteGatewayStatus,
 } from "../../lib/tauri";
 
@@ -30,6 +36,117 @@ type PairingGatewayStatus = RemoteGatewayStatus & {
 
 const ACCESS_DESCRIPTION = "Controls incoming device access only. Outbound machines and workspace sessions are unaffected. Device access is not a machine-project grant.";
 
+const AGENT_CONTROL_WARNING = "Lets paired devices with a Control grant type into your terminals";
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
+  return fallback;
+}
+
+/** The agent-control switch, per-device exclusions and the newest audit lines. Hidden outside the desktop shell. */
+function AgentControlCard({ devices }: { devices: DeviceInfo[] }) {
+  const [settings, setSettings] = useState<AgentControlSettings | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    getAgentControlSettings()
+      .then((loaded) => { if (live) { setSettings(loaded); setLoadError(false); } })
+      .catch(() => { if (live) setLoadError(true); });
+    return () => { live = false; };
+  }, []);
+
+  const save = async (enabled: boolean, excludedDeviceIds: string[]) => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      setSettings(await setAgentControlSettings({ enabled, excludedDeviceIds }));
+    } catch (error: unknown) {
+      setSaveError(errorMessage(error, "Failed to update agent control"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loadError) return <p role="alert" className="mt-8 text-[12px]">Agent control setting unavailable. Reopen this section to retry.</p>;
+  if (!settings) return null;
+
+  const excluded = new Set(settings.excludedDeviceIds);
+  const controlDevices = devices.filter((dev) => dev.permission === "control");
+  const toggleExcluded = (deviceId: string) => {
+    const next = new Set(excluded);
+    if (next.has(deviceId)) next.delete(deviceId); else next.add(deviceId);
+    void save(settings.enabled, [...next].sort());
+  };
+
+  return (
+    <section aria-label="Agent control" className="mt-8 space-y-3">
+      <h3 className="text-[12px] font-semibold">Agent control</h3>
+      <Card className="rounded-lg border border-border bg-card px-3 shadow-none">
+        <SettingRow label="Allow agent control" description={AGENT_CONTROL_WARNING}>
+          <Switch
+            id="agent-control-enable"
+            aria-label="Agent control"
+            checked={settings.enabled}
+            disabled={saving}
+            onCheckedChange={(checked) => void save(checked, settings.excludedDeviceIds)}
+          />
+        </SettingRow>
+        {saveError ? <p role="alert" className="py-2 text-[11px] text-destructive">{saveError}</p> : null}
+        <div className="space-y-1 border-b border-border/40 py-3">
+          <div className="text-[13px] font-medium text-foreground">Excluded devices</div>
+          {controlDevices.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground">No paired devices with a Control grant.</p>
+          ) : (
+            <ul aria-label="Agent control devices" className="space-y-1">
+              {controlDevices.map((dev) => {
+                const isExcluded = excluded.has(dev.id);
+                const name = dev.name || dev.id;
+                return (
+                  <li key={dev.id} className="flex items-center justify-between gap-4 text-[12px]">
+                    <span>{name}{isExcluded ? " (excluded)" : ""}</span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      aria-pressed={isExcluded}
+                      aria-label={`${isExcluded ? "Allow" : "Exclude"} agent control for ${name}`}
+                      disabled={saving}
+                      onClick={() => toggleExcluded(dev.id)}
+                      className="h-7 px-2 text-[11px]"
+                    >
+                      {isExcluded ? "Allow" : "Exclude"}
+                    </Button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+        <div className="space-y-1 py-3">
+          <div className="text-[13px] font-medium text-foreground">Recent activity</div>
+          {settings.audit.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground">No agent control activity yet.</p>
+          ) : (
+            <ol aria-label="Agent control audit" className="max-h-64 space-y-1 overflow-y-auto">
+              {settings.audit.slice(0, 50).map((record, index) => (
+                <li key={`${record.atMs}-${index}`} className="font-mono text-[11px] text-muted-foreground">
+                  {new Date(record.atMs).toLocaleString()} {record.deviceId} {record.op}
+                  {record.sessionId ? ` ${record.sessionId}` : ""} {record.code}
+                  {record.text ? ` "${record.text}"` : ""}
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      </Card>
+    </section>
+  );
+}
+
 /** hideTitle: the embedding container already shows the "Access to This Machine" title. */
 export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: { detailsOnly?: boolean; hideTitle?: boolean } = {}) {
   const [status, setStatus] = useState<PairingGatewayStatus | null>(null);
@@ -44,6 +161,8 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
   const previousMode = useRef<RemoteGatewayStatus["mode"] | null>(null);
   const [statusError, setStatusError] = useState(false);
   const [devicesError, setDevicesError] = useState(false);
+  const [autoTrust, setAutoTrust] = useState<DirectAutoTrustStatus | null>(null);
+  const [autoTrustBusy, setAutoTrustBusy] = useState(false);
 
   const refreshStatus = useCallback(async (): Promise<RemoteGatewayStatus | null> => {
     const [s, devList] = await Promise.all([
@@ -65,6 +184,28 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
   useEffect(() => {
     void refreshStatus();
   }, [refreshStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Optional surface: a host without the command (or a browser build) simply hides the panel.
+    void Promise.resolve()
+      .then(() => getDirectAutoTrustStatus())
+      .then((next) => { if (!cancelled && next) setAutoTrust(next); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleAutoTrustToggle = async (enabled: boolean) => {
+    setAutoTrustBusy(true);
+    setActionError(null);
+    try {
+      setAutoTrust(await setDirectAutoTrustDisabled(!enabled));
+    } catch (error: unknown) {
+      setActionError(error instanceof Error ? error.message : "Failed to update automatic trust");
+    } finally {
+      setAutoTrustBusy(false);
+    }
+  };
 
   const handleToggle = async (enabled: boolean) => {
     setLoading(true);
@@ -204,6 +345,34 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
             </Button>
           </div>
         </div>
+
+        {autoTrust ? (
+          <SettingRow
+            label="Automatic direct trust"
+            description={
+              <>
+                <span data-testid="auto-trust-state">
+                  {autoTrust.enabled
+                    ? "On: machines attested by your account are trusted for direct connections automatically."
+                    : autoTrust.disabledByEnv
+                      ? "Off: disabled by FERRYX_DIRECT_AUTO_TRUST on this machine."
+                      : "Off: only manually trusted machines may connect directly."}
+                </span>
+                <span className="mt-1 block break-all font-mono" data-testid="pinned-account-key">
+                  Pinned account key: {autoTrust.pinnedAccountKey ?? "None"}
+                </span>
+              </>
+            }
+          >
+            <Switch
+              id="remote-auto-trust"
+              aria-label="Automatic direct trust"
+              checked={!autoTrust.disabledBySetting}
+              disabled={autoTrustBusy}
+              onCheckedChange={(checked) => void handleAutoTrustToggle(checked)}
+            />
+          </SettingRow>
+        ) : null}
       </div>
 
       <div className="mt-8 space-y-3">
@@ -269,6 +438,8 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
           )}
         </Card>
       </div>
+
+      <AgentControlCard devices={devices} />
     </section>
   );
 }

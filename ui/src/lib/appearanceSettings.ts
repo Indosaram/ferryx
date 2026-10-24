@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import { isDesktopShell } from "./clientRuntime";
 import { APPEARANCE_SETTINGS_STORAGE_KEY } from "./storageKeys";
 
 export type AppearanceTheme = "charcoal" | "dark" | "light" | "system";
@@ -88,12 +90,78 @@ export function resetAppearanceSettings(storage: Storage | null = browserStorage
   return next;
 }
 
+const LIGHT_QUERY = "(prefers-color-scheme: light)";
+
+/** The last OS theme the desktop window reported; null until a theme event arrives. */
+let nativeOsTheme: "light" | "dark" | null = null;
+
+export function _resetNativeOsThemeForTest() {
+  nativeOsTheme = null;
+}
+
+/** True when the OS asks for light: the native window theme event wins, else prefers-color-scheme. */
+export function prefersLightColorScheme(): boolean {
+  if (nativeOsTheme) return nativeOsTheme === "light";
+  return typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia(LIGHT_QUERY).matches;
+}
+
+function hasDesktopShell(): boolean {
+  return typeof window !== "undefined"
+    && isDesktopShell(Boolean((window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__));
+}
+
+/**
+ * Calls `onChange` whenever the OS color scheme flips: the `prefers-color-scheme` media query,
+ * plus the native window theme event in the desktop shell (some WebViews do not update the media
+ * query when the OS appearance changes). Returns the unsubscribe function.
+ */
+export function subscribeSystemColorScheme(onChange: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  const media = typeof window.matchMedia === "function" ? window.matchMedia(LIGHT_QUERY) : null;
+  const handleMedia = () => {
+    // A media change after a native event is newer information than that event.
+    nativeOsTheme = null;
+    onChange();
+  };
+  media?.addEventListener?.("change", handleMedia);
+
+  let active = true;
+  let unlistenNative: (() => void) | null = null;
+  if (hasDesktopShell()) {
+    try {
+      const win = getCurrentWindow();
+      // Window shims without theme events (older shells, partial mocks) keep the media query only.
+      if (typeof win?.onThemeChanged === "function") void win
+        .onThemeChanged((event) => {
+          if (event.payload !== "light" && event.payload !== "dark") return;
+          nativeOsTheme = event.payload;
+          onChange();
+        })
+        .then(
+          (unlisten) => {
+            if (active) unlistenNative = unlisten;
+            else unlisten();
+          },
+          (error: unknown) => console.warn("Ferryx could not follow the OS theme event", error),
+        );
+    } catch (error) {
+      console.warn("Ferryx could not follow the OS theme event", error);
+    }
+  }
+
+  return () => {
+    active = false;
+    media?.removeEventListener?.("change", handleMedia);
+    unlistenNative?.();
+    unlistenNative = null;
+  };
+}
+
 function resolvedTheme(theme: AppearanceTheme): Exclude<AppearanceTheme, "system"> {
   if (theme !== "system") return theme;
-  if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
-    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-  }
-  return "dark";
+  return prefersLightColorScheme() ? "light" : "dark";
 }
 
 /** Maps the app theme preference onto the light/dark side the native terminal theme follows. */
@@ -155,12 +223,22 @@ export function useApplyAppearanceSettings() {
 
   useEffect(() => {
     applyAppearanceSettings(settings);
-    if (settings.theme !== "system" || typeof window.matchMedia !== "function") return;
-    const query = window.matchMedia("(prefers-color-scheme: light)");
-    const handleChange = () => applyAppearanceSettings(settings);
-    query.addEventListener?.("change", handleChange);
-    return () => query.removeEventListener?.("change", handleChange);
+    if (settings.theme !== "system") return;
+    return subscribeSystemColorScheme(() => applyAppearanceSettings(settings));
   }, [settings]);
 
   return settings;
+}
+
+/** What the theme preference resolves to right now; follows OS flips while it is "system". */
+export function useResolvedTheme(theme: AppearanceTheme): Exclude<AppearanceTheme, "system"> {
+  const [resolved, setResolved] = useState(() => resolvedTheme(theme));
+
+  useEffect(() => {
+    setResolved(resolvedTheme(theme));
+    if (theme !== "system") return;
+    return subscribeSystemColorScheme(() => setResolved(resolvedTheme(theme)));
+  }, [theme]);
+
+  return resolved;
 }

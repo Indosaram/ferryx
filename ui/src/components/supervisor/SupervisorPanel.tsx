@@ -1,15 +1,23 @@
 import { Eye, Pause, Play } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import { cn } from "../../lib/cn";
 import {
   actingSessionIds,
   setSupervisorLanePaused,
+  supervisorGoal,
+  supervisorStopReasonLabel,
   useSupervisor,
   type SupervisorAction,
+  type SupervisorGoalMode,
+  type SupervisorGoalRequest,
+  type SupervisorGoalView,
   type SupervisorLane,
+  type SupervisorRequirementStatus,
   type SupervisorSnapshot,
 } from "../../lib/supervisor";
+import { SegmentedControl } from "../ui/SegmentedControl";
 
 function clock(atMs: number): string {
   const date = new Date(atMs);
@@ -37,6 +45,111 @@ async function togglePause(lane: SupervisorLane) {
       description: String((error as { message?: unknown })?.message ?? error),
     });
   }
+}
+
+const GOAL_MODES: ReadonlyArray<{ value: SupervisorGoalMode; label: string }> = [
+  { value: "off", label: "Off" },
+  { value: "supervised", label: "Supervised" },
+  { value: "full", label: "Full" },
+];
+
+const CHIP_TONE: Record<SupervisorRequirementStatus, string> = {
+  met: "bg-accent text-foreground",
+  unmet: "bg-destructive/10 text-foreground",
+  pending: "bg-white/[0.06] text-muted-foreground",
+  waived: "bg-white/[0.04] text-muted-foreground line-through",
+};
+
+function GoalButton({ children, onClick, disabled, ghost, label }: { children: React.ReactNode; onClick: () => void; disabled: boolean; ghost?: boolean; label?: string }) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "inline-flex h-5 shrink-0 items-center rounded-[5px] px-2 text-[10.5px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50",
+        ghost ? "text-muted-foreground hover:text-foreground" : "bg-card text-foreground hover:bg-black/40",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** One lane's goal contract: requirements, turn budget, mode, the proposed next step and owner revisions. */
+function LaneGoal({ lane, goal }: { lane: SupervisorLane; goal: SupervisorGoalView }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async (request: SupervisorGoalRequest, failure: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await supervisorGoal(request);
+    } catch (caught) {
+      const message = String((caught as { message?: unknown })?.message ?? caught);
+      setError(message);
+      toast.error(failure, { description: message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const awaiting = goal.proposal?.state === "awaiting_approval" ? goal.proposal : null;
+  return (
+    <div data-testid="supervisor-lane-goal" className="flex flex-col gap-1 px-2 pt-1 text-[11px] leading-snug">
+      <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+        <span>Requirements</span>
+        <span data-testid="supervisor-goal-turns" className="ml-auto font-mono">{goal.turnsUsed} / {goal.turnLimit} turns</span>
+      </div>
+      {goal.requirements.length > 0 ? (
+        <ul className="flex flex-col gap-0.5">
+          {goal.requirements.map((requirement) => (
+            <li key={requirement.id} data-testid="supervisor-requirement" className="flex items-baseline gap-1.5">
+              <span data-testid="supervisor-requirement-status" data-status={requirement.status} className={cn("shrink-0 rounded-[4px] px-1 text-[10px]", CHIP_TONE[requirement.status] ?? CHIP_TONE.pending)}>
+                {requirement.status}
+              </span>
+              <span className="min-w-0 truncate text-foreground/90" title={requirement.verifier ? `${requirement.text} (${requirement.verifier})` : requirement.text}>{requirement.text}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <span className="text-muted-foreground">No requirements yet.</span>
+      )}
+      {goal.stopReason ? (
+        <span data-testid="supervisor-goal-stop" className="text-foreground">{supervisorStopReasonLabel(goal.stopReason)}</span>
+      ) : null}
+      <SegmentedControl
+        label={`Supervision mode for ${lane.title}`}
+        value={goal.mode}
+        options={GOAL_MODES}
+        onChange={(mode) => {
+          if (busy || mode === goal.mode) return;
+          void run({ action: "mode", laneKey: lane.key, mode }, "Could not change the supervision mode");
+        }}
+      />
+      {awaiting ? (
+        <div data-testid="supervisor-goal-proposal" className="flex flex-col gap-1 rounded-md bg-card p-1.5">
+          <span className="text-[10px] text-muted-foreground">Next step ready</span>
+          <q className="min-w-0 break-words font-mono text-foreground">{awaiting.text}</q>
+          <div className="flex gap-1">
+            <GoalButton disabled={busy} onClick={() => void run({ action: "approve", laneKey: lane.key }, "Could not approve the next step")}>Approve</GoalButton>
+            <GoalButton ghost disabled={busy} onClick={() => void run({ action: "discard", laneKey: lane.key }, "Could not discard the next step")}>Discard</GoalButton>
+          </div>
+        </div>
+      ) : null}
+      {goal.pendingRevisions.map((revision) => (
+        <div key={revision.id} data-testid="supervisor-goal-revision" className="flex flex-col gap-1 rounded-md bg-card p-1.5">
+          <span className="text-[10px] text-muted-foreground">Goal change from your words</span>
+          <q className="min-w-0 break-words text-foreground">{revision.instructionQuote}</q>
+          <div className="flex gap-1">
+            <GoalButton disabled={busy} onClick={() => void run({ action: "acceptRevision", id: revision.id }, "Could not accept the goal change")}>Accept</GoalButton>
+            <GoalButton ghost disabled={busy} onClick={() => void run({ action: "rejectRevision", id: revision.id }, "Could not reject the goal change")}>Reject</GoalButton>
+          </div>
+        </div>
+      ))}
+      {error ? <span data-testid="supervisor-goal-error" role="alert" className="font-mono text-[10.5px] text-destructive">{error}</span> : null}
+    </div>
+  );
 }
 
 /** The Supervisor sidebar view: what the hub supervisor drives, its pause, and what it typed. */
@@ -124,6 +237,7 @@ export function SupervisorPanelView({ snapshot, now }: { snapshot: SupervisorSna
                   <dt className="pt-px text-[10px] text-muted-foreground">Goal</dt>
                   <dd className="min-w-0 truncate text-foreground/90" title={lane.goal ?? lane.title}>{lane.goal ?? lane.title}</dd>
                 </dl>
+                {lane.goalContract ? <LaneGoal lane={lane} goal={lane.goalContract} /> : null}
               </li>
             );
           })}

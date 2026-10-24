@@ -27,6 +27,7 @@ import { CompatibilityTerminal } from "./CompatibilityTerminal";
 import { isNativeRendererUnavailable, subscribeNativeRendererAvailability } from "../lib/nativeTerminalLifecycle";
 import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
 import { DagPaneBadge } from "./dag/DagPaneBadge";
+import { useAdvancedFeatures } from "../lib/advancedFeatures";
 import { remoteHostStore } from "../state/remoteHostStore";
 
 type TerminalPaneProps = {
@@ -105,6 +106,7 @@ export function TerminalPane({
   onBackendSessionUnavailable,
 }: TerminalPaneProps) {
   const [pendingLocal, setPendingLocal] = useState(false);
+  const advancedFeatures = useAdvancedFeatures();
   const [replacementError, setReplacementError] = useState<string | null>(null);
   const titleId = useId();
   const descId = useId();
@@ -346,15 +348,17 @@ export function TerminalPane({
       data-testid="terminal-pane-surface"
       className="relative h-full w-full min-h-0 min-w-0 overflow-hidden"
     >
-      <DagPaneBadge
-        projectPath={session.worktreePath ?? session.cwd}
-        workspaceId={session.workspaceId}
-        paneId={session.id}
-        providerSessionId={session.providerSession?.id ?? null}
-        sessions={sessions}
-        agentPresent={activity?.isAgent === true}
-        agentWorking={activity?.isAgent === true && activity.state === "working"}
-      />
+      {advancedFeatures ? (
+        <DagPaneBadge
+          projectPath={session.worktreePath ?? session.cwd}
+          workspaceId={session.workspaceId}
+          paneId={session.id}
+          providerSessionId={session.providerSession?.id ?? null}
+          sessions={sessions}
+          agentPresent={activity?.isAgent === true}
+          agentWorking={activity?.isAgent === true && activity.state === "working"}
+        />
+      ) : null}
       {nativeRendererUnavailable && session.backendSessionId && !isStandbyBackendSessionId(session.backendSessionId) ? (
         <CompatibilityTerminal backendSessionId={session.backendSessionId} />
       ) : <NativeTerminalPane

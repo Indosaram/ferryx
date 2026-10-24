@@ -1,6 +1,6 @@
 // Seeded mobile chat states for real-browser QA: open /mobile-chat-qa.html?state=empty|stream|running|long (dev server only).
 
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { MobileTopBar, type MobileTopBarAttention } from "../remote/chat/MobileTopBar";
 import { MobileSessionSwitcherSheet } from "../remote/chat/MobileSessionSwitcherSheet";
@@ -9,6 +9,7 @@ import { RemoteWorkspaceMirror, type RemoteWorkspaceModel, type RemoteTerminalTa
 import { MobileChatWorkspace } from "../remote/chat/MobileChatWorkspace";
 import type { MobileChatMessageProps } from "../remote/chat/MobileChatMessage";
 import type { ChatAttachment, ChatWorkItem } from "../remote/chat/MobileChatComponents";
+import { PHONE_HOME_QA_STATES, PhoneHomeQaState, QaSessionStrip, SESSION_STRIP_QA_STATES } from "./phoneHomeQaStates";
 
 const STATE = (() => {
   if (typeof window === "undefined") return "stream";
@@ -247,6 +248,19 @@ function buildMessages(state: string): MobileChatMessageProps[] {
 }
 
 export const MobileChatQaHarness: React.FC = () => {
+  // The visual QA script waits on this flag instead of a fixed delay.
+  useEffect(() => {
+    document.documentElement.dataset.qaReady = "true";
+  }, []);
+  if ((PHONE_HOME_QA_STATES as readonly string[]).includes(STATE)) {
+    return <PhoneHomeQaState state={STATE} model={SEEDED_MODEL} />;
+  }
+  return <ChatQaHarness />;
+};
+
+const sessionStrip = (SESSION_STRIP_QA_STATES as readonly string[]).includes(STATE);
+
+const ChatQaHarness: React.FC = () => {
   const seeded = useMemo(() => buildMessages(STATE), []);
   const [messages, setMessages] = useState<MobileChatMessageProps[]>(seeded);
   const [isRunning, setIsRunning] = useState(STATE === "running");
@@ -309,8 +323,10 @@ export const MobileChatQaHarness: React.FC = () => {
           onOpenSwitcher={() => setSwitcherOpen(true)}
           menuOpen={menuOpen}
           onOpenMenu={() => setMenuOpen(true)}
+          onBack={sessionStrip ? () => undefined : undefined}
         />
       </div>
+      {sessionStrip ? <QaSessionStrip state={STATE} /> : null}
 
       <RemoteWorkspaceMirror
         model={SEEDED_MODEL}

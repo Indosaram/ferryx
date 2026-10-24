@@ -1,4 +1,4 @@
-import { Ellipsis, MessageSquare, Server, SquareTerminal } from "lucide-react";
+import { ChevronLeft, Ellipsis, MessageSquare, Server, SquareTerminal } from "lucide-react";
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../../lib/agentIcon";
 import { cn } from "../../lib/cn";
 
@@ -53,6 +53,8 @@ export interface MobileTopBarProps {
   readonly menuOpen?: boolean;
   readonly onOpenMenu?: () => void;
   readonly hideControls?: boolean;
+  /** Phone home: returns from the Session screen to the home destination it was opened from. */
+  readonly onBack?: () => void;
 }
 
 export function MobileTopBar({
@@ -72,6 +74,7 @@ export function MobileTopBar({
   menuOpen = false,
   onOpenMenu,
   hideControls = false,
+  onBack,
 }: MobileTopBarProps) {
   const logo = resolveAgentLogo(agentType);
   const monochrome = isMonochromeAgentLogo(agentType);
@@ -83,7 +86,19 @@ export function MobileTopBar({
     >
       <div className="h-14 flex items-center gap-2 max-[374px]:gap-0">
         {/* Left island: the workspace-context switcher (paseo compact-header.tsx island chrome). */}
-        <div className="rounded-full p-[7px] max-[374px]:p-1 bg-chat-surface-raised shadow-sm">
+        <div className="flex gap-0.5 rounded-full p-[7px] max-[374px]:p-1 bg-chat-surface-raised shadow-sm">
+          {onBack ? (
+            <button
+              type="button"
+              data-testid="mobile-session-back"
+              aria-label="Back to home"
+              title="Back to home"
+              onClick={onBack}
+              className={cn(ICON_BUTTON_32, "text-chat-foreground-secondary hover:text-chat-foreground")}
+            >
+              <ChevronLeft aria-hidden="true" className="size-4" />
+            </button>
+          ) : null}
           <button
             type="button"
             aria-label="Change workspace context"

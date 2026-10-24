@@ -22,8 +22,11 @@ import {
   getCurrentVersion,
   getUpdateStatus,
   relaunchApp,
+  getUpdateChannel,
+  setUpdateChannel,
   subscribeUpdateStatus,
   updatesManagedExternally,
+  type UpdateChannel,
   type UpdateStatus,
 } from "../../lib/updater";
 import {
@@ -33,6 +36,7 @@ import {
   setDaemonSupervisor,
 } from "../../lib/tauri";
 import { classifyNavigatorPlatform } from "../../lib/platform";
+import { saveAdvancedFeatures, useAdvancedFeatures } from "../../lib/advancedFeatures";
 import type { CliLauncherStatus } from "../../lib/types";
 
 import { SettingRow, SettingsHeading } from "./primitives";
@@ -92,6 +96,7 @@ function externallyManagedUpdateMessage(host: ExternallyManagedHost): string {
 
 export function SoftwareUpdateCard() {
   const [status, setStatus] = useState<UpdateStatus>(() => getUpdateStatus());
+  const [channel, setChannel] = useState<UpdateChannel>(() => getUpdateChannel());
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [managedExternally, setManagedExternally] = useState<boolean>(false);
 
@@ -154,6 +159,31 @@ export function SoftwareUpdateCard() {
       <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
         Ferryx restarts, but active agents and terminal sessions continue in the background.
       </p>
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <div>
+          <p className="text-[12px] font-medium">Update channel</p>
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            Beta gets pre-release builds first. Switching back to Stable waits for the next stable release.
+          </p>
+        </div>
+        <Select
+          value={channel}
+          disabled={busy || isDownloaded}
+          onValueChange={(value) => {
+            const next: UpdateChannel = value === "beta" ? "beta" : "stable";
+            setChannel(next);
+            void setUpdateChannel(next);
+          }}
+        >
+          <SelectTrigger aria-label="Update channel" className="h-8 w-[140px] text-[12px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="stable">Stable</SelectItem>
+            <SelectItem value="beta">Beta</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
       <p
         data-testid="settings-update-status"
         aria-live="polite"
@@ -330,6 +360,7 @@ export function GeneralSection() {
   const { settings, updateSettings } = useGeneralSettings();
   const [managedExternally, setManagedExternally] = useState<boolean>(false);
   const [sidebarOpenStartup, setSidebarOpenStartup] = useState<boolean>(() => loadSidebarOpenStartup());
+  const advancedFeatures = useAdvancedFeatures();
   const [supervisor, setSupervisor] = useState<{ supported: boolean; enabled: boolean } | null>(null);
   const [supervisorBusy, setSupervisorBusy] = useState(false);
   const [supervisorError, setSupervisorError] = useState<string | null>(null);
@@ -428,6 +459,17 @@ export function GeneralSection() {
                 <SelectItem value="eager">Eager (Legacy)</SelectItem>
               </SelectContent>
             </Select>
+          </SettingRow>
+          <SettingRow
+            label="Advanced features"
+            description="Show the built-in browser, agent run graph, supervisor, and the Browser and Notifications settings. Open browser panes and keyboard shortcuts keep working either way."
+          >
+            <Switch
+              id="general-advanced-features"
+              aria-label="Advanced features"
+              checked={advancedFeatures}
+              onCheckedChange={(checked) => saveAdvancedFeatures(checked)}
+            />
           </SettingRow>
           {supervisor?.supported ? (
             <SettingRow

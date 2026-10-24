@@ -576,10 +576,27 @@ fn evaluate_and_persist(
     user_id: &str,
     now: u64,
 ) -> Result<OwnerEvaluation, ApiError> {
+    if state.is_read_only() {
+        return evaluate_read_only(state, user_id, now);
+    }
     state.mutate(|store| {
         let scope = owner_scope_for_user(store, user_id);
         Ok(evaluate_owner_and_persist(store, &scope, now))
     })
+}
+
+/// A warm standby cannot persist the grace transition, but it must still answer entitlement
+/// checks so enrolled machines keep their tunnels during a failover. It evaluates the same
+/// rules on a loaded snapshot and discards the snapshot; the primary persists the transition
+/// once it is back (or after a promotion).
+fn evaluate_read_only(
+    state: &AccountState,
+    user_id: &str,
+    now: u64,
+) -> Result<OwnerEvaluation, ApiError> {
+    let mut snapshot = load_store(state)?;
+    let scope = owner_scope_for_user(&snapshot, user_id);
+    Ok(evaluate_owner_and_persist(&mut snapshot, &scope, now))
 }
 
 pub fn entitlement_for_user_in_store(
@@ -608,6 +625,10 @@ async fn evaluate_user(
 ) -> Result<OwnerEvaluation, ApiError> {
     let state_clone = state.clone();
     let user_id_owned = user_id.to_string();
+    if state.is_read_only() {
+        // No transition is persisted on a standby, so no transition notice is sent either.
+        return offload(move || evaluate_read_only(&state_clone, &user_id_owned, now)).await;
+    }
     let (evaluation, prev_status, owner_key) = offload(move || {
         state_clone.mutate(|store| {
             let scope = owner_scope_for_user(store, &user_id_owned);

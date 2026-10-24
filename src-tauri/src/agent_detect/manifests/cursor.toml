@@ -1,6 +1,8 @@
 # Ported from herdr on 2026-08-28.
 # Source manifest id "cursor"; extracted byte-accurately from the embedded corpus.
 id = "cursor"
+display_name = "Cursor CLI"
+homepage = "https://cursor.com/cli"
 version = "2026.08.03.1"
 min_engine_version = 1
 updated_at = "2026-08-03T01:08:04Z"
