@@ -25,6 +25,7 @@ export const SCENARIOS = Object.freeze([
   { id: 'Q11', title: 'SSH session survives GUI quit; uncertain write never replayed', platforms: PLATFORMS },
   { id: 'Q12', title: 'exited and disconnected entries never satisfy live assertions', platforms: PLATFORMS },
   { id: 'Q13', title: 'legacy single job migration without stopping its owner', platforms: PLATFORMS },
+  { id: 'Q14', title: 'host reboot: pre-boot sessions settle as exited, panes offer a new shell, no infinite Reconnecting', platforms: PLATFORMS },
 ]);
 
 export const SCENARIO_IDS = Object.freeze(SCENARIOS.map((s) => s.id));
