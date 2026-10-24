@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 /**
  * Discovers the previous git release tag relative to the given current tag or commit.
@@ -273,4 +274,190 @@ export function generateChangelog({
   }
 
   return sections.join("\n\n") + "\n";
+}
+
+const RELEASE_TAG_PATTERN = /^v\d{4}\.\d{2}\.\d{2}\.\d+$/;
+
+export const CHANGELOG_HEADER = [
+  "# Changelog",
+  "",
+  "All notable changes to Ferryx, one section per date-based release tag (newest first).",
+  "Generated from Conventional Commit subjects by",
+  "`bun scripts/lib/release-changelog.mjs --write-changelog`; do not edit sections by hand.",
+  "",
+].join("\n");
+
+function runGit(args) {
+  return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+}
+
+/**
+ * Lists date-based release tags (vYYYY.MM.DD.N), newest first.
+ *
+ * @param {Function} [execFn] - Returns raw `git tag` output; for testing
+ * @returns {string[]}
+ */
+export function listReleaseTags(execFn = null) {
+  const raw = execFn ? execFn() : runGit(["tag", "--list", "v*", "--sort=-v:refname"]);
+  return raw
+    .split("\n")
+    .map((t) => t.trim())
+    .filter((t) => RELEASE_TAG_PATTERN.test(t));
+}
+
+/**
+ * Renders one CHANGELOG.md section for a release tag from its commit log.
+ *
+ * @param {object} options
+ * @param {string} options.repo
+ * @param {string} options.tag
+ * @param {string | null} options.prevTag - Older tag; null for the first release
+ * @param {Function} [options.execGitFn] - Returns `%h\t%s` log text for { tag, prevTag }
+ * @returns {string}
+ */
+export function renderChangelogSection({ repo, tag, prevTag, execGitFn = null }) {
+  const gitLogText = execGitFn
+    ? execGitFn({ tag, prevTag })
+    : runGit(["log", prevTag ? `${prevTag}..${tag}` : tag, "--no-merges", "--pretty=format:%h\t%s"]);
+  const categories = parseConventionalCommits(gitLogText);
+  const lines = [`## ${tag}`, ""];
+  const titles = [
+    ["feat", "Features"],
+    ["fix", "Bug Fixes"],
+    ["perf", "Performance"],
+    ["refactor", "Refactoring"],
+    ["docs", "Documentation"],
+    ["chore", "Maintenance & Internal"],
+    ["other", "Other Changes"],
+  ];
+  let any = false;
+  for (const [key, title] of titles) {
+    const items = categories[key];
+    if (!items.length) continue;
+    any = true;
+    lines.push(`### ${title}`, "");
+    for (const item of items) {
+      lines.push(item.scope ? `- **${item.scope}**: ${item.subject} (${item.hash})` : `- ${item.subject} (${item.hash})`);
+    }
+    lines.push("");
+  }
+  if (!any) lines.push("No commits.", "");
+  if (prevTag) lines.push(`**Full Changelog**: https://github.com/${repo}/compare/${prevTag}...${tag}`, "");
+  return lines.join("\n");
+}
+
+/**
+ * Builds CHANGELOG.md content: sections for release tags missing from `existing` are
+ * prepended above the sections already present, newest first.
+ *
+ * @param {object} options
+ * @param {string} options.repo
+ * @param {string[]} options.allTags - Every release tag, newest first (for previous-tag lookup)
+ * @param {string[]} [options.tags] - Tags to write (subset of allTags); defaults to allTags
+ * @param {string} [options.existing] - Current CHANGELOG.md content
+ * @param {Function} [options.execGitFn]
+ * @returns {{ content: string, added: string[] }}
+ */
+export function buildChangelogFile({ repo, allTags, tags = allTags, existing = "", execGitFn = null }) {
+  const present = new Set(
+    [...existing.matchAll(/^## (v\S+)\s*$/gm)].map((m) => m[1]),
+  );
+  const added = tags.filter((tag) => !present.has(tag));
+  const sections = added.map((tag) => {
+    const index = allTags.indexOf(tag);
+    const prevTag = index >= 0 && index + 1 < allTags.length ? allTags[index + 1] : null;
+    return renderChangelogSection({ repo, tag, prevTag, execGitFn });
+  });
+  const firstSection = existing.search(/^## /m);
+  const body = firstSection >= 0 ? existing.slice(firstSection) : "";
+  const content = [CHANGELOG_HEADER, ...sections, body].filter(Boolean).join("\n").replace(/\n+$/, "\n");
+  return { content, added };
+}
+
+/**
+ * Selects the inclusive tag range [from, to] from tags sorted newest first.
+ * Throws when a bound is not a known release tag or the range is inverted.
+ *
+ * @param {string[]} allTags
+ * @param {{ from?: string | null, to?: string | null }} range
+ * @returns {string[]}
+ */
+export function selectTagRange(allTags, { from = null, to = null } = {}) {
+  if (allTags.length === 0) throw new Error("no release tags (vYYYY.MM.DD.N) found");
+  const indexOf = (tag, flag) => {
+    const index = allTags.indexOf(tag);
+    if (index < 0) throw new Error(`${flag} ${tag} is not a release tag (vYYYY.MM.DD.N) in this repository`);
+    return index;
+  };
+  const newest = to ? indexOf(to, "--to") : 0;
+  const oldest = from ? indexOf(from, "--from") : allTags.length - 1;
+  if (newest > oldest) throw new Error(`empty tag range: --from ${from} is newer than --to ${to}`);
+  return allTags.slice(newest, oldest + 1);
+}
+
+/**
+ * CLI: `--write-changelog [--dry-run] [--from <tag>] [--to <tag>] [--file <path>] [--repo <owner/name>]`.
+ * Prepends a section for every release tag in range that CHANGELOG.md lacks. With --dry-run
+ * the resulting file is printed instead of written. Returns the process exit code.
+ *
+ * @param {string[]} argv
+ * @param {{ stdout?: (s: string) => void, stderr?: (s: string) => void, listTagsFn?: Function, execGitFn?: Function }} [io]
+ * @returns {number}
+ */
+export function runChangelogCli(argv, io = {}) {
+  const stdout = io.stdout ?? ((s) => process.stdout.write(s));
+  const stderr = io.stderr ?? ((s) => process.stderr.write(s));
+  const opts = { write: false, dryRun: false, from: null, to: null, file: "CHANGELOG.md", repo: "Indosaram/ferryx" };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    const value = () => {
+      const next = argv[i + 1];
+      if (!next || next.startsWith("--")) throw new Error(`${arg} needs a value`);
+      i += 1;
+      return next;
+    };
+    try {
+      if (arg === "--write-changelog") opts.write = true;
+      else if (arg === "--dry-run") opts.dryRun = true;
+      else if (arg === "--from") opts.from = value();
+      else if (arg === "--to") opts.to = value();
+      else if (arg === "--file") opts.file = value();
+      else if (arg === "--repo") opts.repo = value();
+      else throw new Error(`unknown argument ${arg}`);
+    } catch (error) {
+      stderr(`release-changelog: ${error.message}\n`);
+      return 2;
+    }
+  }
+  if (!opts.write) {
+    stderr("usage: bun scripts/lib/release-changelog.mjs --write-changelog [--dry-run] [--from <tag>] [--to <tag>] [--file <path>] [--repo <owner/name>]\n");
+    return 2;
+  }
+  try {
+    const allTags = listReleaseTags(io.listTagsFn ?? null);
+    const tags = selectTagRange(allTags, { from: opts.from, to: opts.to });
+    const existing = existsSync(opts.file) ? readFileSync(opts.file, "utf8") : "";
+    const { content, added } = buildChangelogFile({
+      repo: opts.repo,
+      allTags,
+      tags,
+      existing,
+      execGitFn: io.execGitFn ?? null,
+    });
+    if (opts.dryRun) {
+      stdout(content);
+      stderr(`release-changelog: dry run, ${added.length} new section(s) for ${tags.length} tag(s) in range\n`);
+    } else {
+      writeFileSync(opts.file, content, "utf8");
+      stderr(`release-changelog: wrote ${opts.file} (${added.length} new section(s))\n`);
+    }
+    return 0;
+  } catch (error) {
+    stderr(`release-changelog: ${error.message}\n`);
+    return 1;
+  }
+}
+
+if (import.meta.main) {
+  process.exit(runChangelogCli(process.argv.slice(2)));
 }

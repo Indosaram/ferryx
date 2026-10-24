@@ -376,17 +376,43 @@ async fn health_check() -> Json<HealthResponse> {
     })
 }
 
+/// Header the relay sets on a forwarded pair exchange with the client's address.
+pub(crate) const PAIRING_PEER_HEADER: &str = "x-ferryx-pairing-peer";
+
+/// The source whose failure budget a pair exchange spends.
+///
+/// Relay traffic reaches the gateway through the daemon's loopback tunnel, so only
+/// a loopback peer may name the original client; a direct LAN peer is identified
+/// by its own socket address and cannot spoof another source.
+fn pairing_peer(peer: Option<SocketAddr>, headers: &HeaderMap) -> Option<std::net::IpAddr> {
+    let peer = peer?.ip();
+    if peer.to_canonical().is_loopback() {
+        if let Some(reported) = headers
+            .get(PAIRING_PEER_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse().ok())
+        {
+            return Some(reported);
+        }
+    }
+    Some(peer)
+}
+
 async fn pair_exchange(
     State(state): State<Arc<RemoteGatewayState>>,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     Json(payload): Json<PairExchangeRequest>,
 ) -> Result<Response, Response> {
     let identity = load_gateway_identity(Arc::clone(&state)).await?;
+    let source = pairing_peer(peer.map(|axum::Extension(info)| info.0), &headers);
     let (token, device) = state
         .auth_manager
-        .exchange_pairing_code_with_installation(
+        .exchange_pairing_code_from(
             &payload.code,
             &payload.device_name,
             payload.installation_id.as_deref(),
+            source,
         )
         .map_err(|e| match e {
             AuthError::InvalidPairingCode => {
@@ -397,7 +423,15 @@ async fn pair_exchange(
             }
             AuthError::PairingRateLimited => (
                 StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({"code": "pairing_rate_limited"})),
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "code": "pairing_rate_limited",
+                    "error": {
+                        "code": "PAIRING_RATE_LIMITED",
+                        "message": "Too many failed pairing attempts from this source",
+                        "retryable": true,
+                    },
+                })),
             )
                 .into_response(),
             AuthError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
@@ -7710,7 +7744,11 @@ async fn bind_and_serve(
 
     let state_clone = Arc::clone(&state);
     tokio::spawn(async move {
-        axum::serve(listener, router)
+        // The peer address keys the per-source pairing failure budget.
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
             .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.await;
             })
