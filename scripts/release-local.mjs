@@ -56,7 +56,14 @@ export class StoreMsixError extends Error {
   }
 }
 
-/** Reads one entry from a zip (MSIX) archive; supports stored and deflated entries. */
+const ZIP_U16_MAX = 0xffff;
+const ZIP_U32_MAX = 0xffffffff;
+
+/**
+ * Reads one entry from a zip (MSIX) archive; supports stored and deflated entries and ZIP64
+ * archives (MakeAppx always writes MSIX packages as ZIP64: saturated EOCD fields, a ZIP64 EOCD
+ * locator/record, and 0x0001 extended-information extra fields on central directory entries).
+ */
 function readZipEntry(buffer, entryName) {
   const eocdMin = buffer.length - 22;
   let eocd = -1;
@@ -67,17 +74,45 @@ function readZipEntry(buffer, entryName) {
     }
   }
   if (eocd < 0) return null;
-  const entries = buffer.readUInt16LE(eocd + 10);
+  let entries = buffer.readUInt16LE(eocd + 10);
   let offset = buffer.readUInt32LE(eocd + 16);
+  if (entries === ZIP_U16_MAX || offset === ZIP_U32_MAX) {
+    const locator = eocd - 20;
+    if (locator < 0 || buffer.readUInt32LE(locator) !== 0x07064b50) return null;
+    const record = Number(buffer.readBigUInt64LE(locator + 8));
+    if (buffer.readUInt32LE(record) !== 0x06064b50) return null;
+    entries = Number(buffer.readBigUInt64LE(record + 32));
+    offset = Number(buffer.readBigUInt64LE(record + 48));
+  }
   for (let n = 0; n < entries; n += 1) {
     if (buffer.readUInt32LE(offset) !== 0x02014b50) return null;
     const method = buffer.readUInt16LE(offset + 10);
-    const compressedSize = buffer.readUInt32LE(offset + 20);
+    let compressedSize = buffer.readUInt32LE(offset + 20);
+    const uncompressedSize = buffer.readUInt32LE(offset + 24);
     const nameLength = buffer.readUInt16LE(offset + 28);
     const extraLength = buffer.readUInt16LE(offset + 30);
     const commentLength = buffer.readUInt16LE(offset + 32);
-    const localOffset = buffer.readUInt32LE(offset + 42);
+    let localOffset = buffer.readUInt32LE(offset + 42);
     const name = buffer.toString("utf8", offset + 46, offset + 46 + nameLength);
+    // ZIP64 extended information: 8-byte values present only for saturated fields, in the
+    // order uncompressed size, compressed size, local header offset.
+    let extra = offset + 46 + nameLength;
+    const extraEnd = extra + extraLength;
+    while (extra + 4 <= extraEnd) {
+      const id = buffer.readUInt16LE(extra);
+      const size = buffer.readUInt16LE(extra + 2);
+      if (id === 0x0001) {
+        let field = extra + 4;
+        if (uncompressedSize === ZIP_U32_MAX) field += 8;
+        if (compressedSize === ZIP_U32_MAX) {
+          compressedSize = Number(buffer.readBigUInt64LE(field));
+          field += 8;
+        }
+        if (localOffset === ZIP_U32_MAX) localOffset = Number(buffer.readBigUInt64LE(field));
+        break;
+      }
+      extra += 4 + size;
+    }
     if (name === entryName) {
       const localNameLength = buffer.readUInt16LE(localOffset + 26);
       const localExtraLength = buffer.readUInt16LE(localOffset + 28);

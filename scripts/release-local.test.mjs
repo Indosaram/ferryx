@@ -21,8 +21,8 @@ import { msixWithVersion } from "./fixtures/msix-fixture.mjs";
 
 const SCRIPT_PATH = join(process.cwd(), "scripts", "release-local.mjs");
 
-function writeMsix(path, version) {
-  writeFileSync(path, msixWithVersion(version));
+function writeMsix(path, version, options = {}) {
+  writeFileSync(path, msixWithVersion(version, options));
 }
 
 const STORE_PLAN = {
@@ -598,6 +598,24 @@ test("store gate: MSIX at the canonical quad version yields the 'Store submissio
     mkdirSync(join(tmp, "artifacts", "windows"), { recursive: true });
     writeMsix(join(tmp, "artifacts", "windows", "Ferryx_x64.msix"), STORE_PLAN.msixVersion);
     assert.equal(assertStoreMsix({ runDir: tmp, plan: STORE_PLAN }), "Store submission pending: 2026.908.1.0");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("store gate: reads ZIP64 MSIX archives as written by MakeAppx", async () => {
+  const { assertStoreMsix, StoreMsixError } = await import("./release-local.mjs");
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-store-gate-zip64-"));
+  try {
+    mkdirSync(join(tmp, "artifacts", "windows"), { recursive: true });
+    const msix = join(tmp, "artifacts", "windows", "Ferryx_x64.msix");
+    writeMsix(msix, STORE_PLAN.msixVersion, { zip64: true });
+    assert.equal(assertStoreMsix({ runDir: tmp, plan: STORE_PLAN }), "Store submission pending: 2026.908.1.0");
+    writeMsix(msix, "2026.908.1.1", { zip64: true });
+    assert.throws(
+      () => assertStoreMsix({ runDir: tmp, plan: STORE_PLAN }),
+      (err) => err instanceof StoreMsixError && err.code === "STORE_MSIX_VERSION_MISMATCH",
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
