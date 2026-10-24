@@ -4,9 +4,38 @@
 //! If that epoch predates the host boot time, the daemon (and every PTY it owned)
 //! cannot still be alive.
 
+/// QA-only override of the reported boot time (daemon-lifetime harness Q14 simulates a host
+/// reboot without rebooting). Honored only in a `local-split-qa` build and only while the QA
+/// marker [`QA_RUN_ID_ENV`] is set, the same marker the harness exports on mac, linux and windows.
+pub const QA_HOST_BOOT_TIME_ENV: &str = "FERRYX_QA_HOST_BOOT_TIME_MS";
+/// The cross-platform QA run marker (scripts/qa/daemon-lifetime/lib/guards.mjs isolationEnv).
+pub const QA_RUN_ID_ENV: &str = "FERRYX_QA_RUN_ID";
+
 /// Host boot time in milliseconds since the UNIX epoch, or `None` when unavailable.
 pub fn host_boot_time_ms() -> Option<u64> {
+    #[cfg(feature = "local-split-qa")]
+    {
+        let run_id = std::env::var(QA_RUN_ID_ENV).ok();
+        let value = std::env::var(QA_HOST_BOOT_TIME_ENV).ok();
+        if let Some(boot_ms) = qa_host_boot_override(run_id.as_deref(), value.as_deref()) {
+            tracing::info!(boot_ms, "QA host boot time override applied");
+            return Some(boot_ms);
+        }
+    }
     imp::host_boot_time_ms()
+}
+
+/// The QA boot-time override from the marker and override values: `None` outside a
+/// `local-split-qa` build, without a non-empty QA run marker, or for an unparsable value.
+#[cfg_attr(not(any(feature = "local-split-qa", test)), allow(dead_code))]
+pub(crate) fn qa_host_boot_override(run_id: Option<&str>, value: Option<&str>) -> Option<u64> {
+    if !cfg!(feature = "local-split-qa") {
+        return None;
+    }
+    if !matches!(run_id, Some(id) if !id.trim().is_empty()) {
+        return None;
+    }
+    value?.trim().parse().ok()
 }
 
 /// Parses the `btime <secs>` line of `/proc/stat` and returns it in milliseconds.
@@ -115,6 +144,22 @@ softirq 1277516 0 362035 0 104 46281 0 2 340871 0 528223
         assert_eq!(parse_proc_stat_btime("btime\n"), None);
         assert_eq!(parse_proc_stat_btime("btime -5\n"), None);
         assert_eq!(parse_proc_stat_btime("btime 12 34\n"), None);
+    }
+
+    #[test]
+    fn qa_boot_override_is_ignored_without_the_qa_marker() {
+        assert_eq!(qa_host_boot_override(None, Some("1769212345000")), None);
+        assert_eq!(qa_host_boot_override(Some(""), Some("1769212345000")), None);
+        assert_eq!(qa_host_boot_override(Some("   "), Some("1769212345000")), None);
+    }
+
+    #[test]
+    fn qa_boot_override_applies_with_the_marker_only_in_qa_builds() {
+        let expected = if cfg!(feature = "local-split-qa") { Some(1_769_212_345_000) } else { None };
+        assert_eq!(qa_host_boot_override(Some("20261024t120000z"), Some(" 1769212345000 ")), expected);
+        assert_eq!(qa_host_boot_override(Some("20261024t120000z"), None), None);
+        assert_eq!(qa_host_boot_override(Some("20261024t120000z"), Some("soon")), None);
+        assert_eq!(qa_host_boot_override(Some("20261024t120000z"), Some("-5")), None);
     }
 
     /// Cross-checks the sysctl read against the independent `sysctl -n kern.boottime` text.

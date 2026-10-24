@@ -24,7 +24,15 @@ export async function Q00(ctx, result) {
     return;
   }
   const key = ctx.keys.A;
-  const job = await ctx.jobs.inspect(key);
+  let job = await ctx.jobs.inspect(key);
+  if (ctx.platform === 'linux' && job.state === 'activating') {
+    // owner.json is published ~40ms before systemd processes sd_notify READY=1.
+    const deadline = Date.now() + 5000;
+    while (job.state !== 'Running' && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      job = await ctx.jobs.inspect(key);
+    }
+  }
   await evidence(ctx, result, 'job-inspect.json', job);
   const identity = await ownerIdentity(ctx);
   await evidence(ctx, result, 'owner.json', identity);

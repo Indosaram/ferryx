@@ -38,11 +38,12 @@ import * as g1 from './scenarios/q00-q03.mjs';
 import * as g2 from './scenarios/q04-q06.mjs';
 import * as g3 from './scenarios/q07-q09.mjs';
 import * as g4 from './scenarios/q10-q13.mjs';
+import * as g5 from './scenarios/q14.mjs';
 import { recoverOwnerAfterException, invalidateOwnerState } from './scenarios/common.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '../../..');
-export const RUNNERS = Object.freeze({ ...g1, ...g2, ...g3, ...g4 });
+export const RUNNERS = Object.freeze({ ...g1, ...g2, ...g3, ...g4, Q14: g5.Q14 });
 
 const syncExec = (cmd, args) => {
   const r = spawnSync(cmd, args, { encoding: 'utf8' });
