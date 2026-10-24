@@ -49,6 +49,7 @@ fn daemon_listens_on_new_and_legacy_socket_paths() -> TestResult<()> {
         std::fs::create_dir_all(root.join(dir))?;
     }
     let executor = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let _guard = executor.enter();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ferryx"))
         .arg("--daemon")
         // Never inherit live daemon endpoints, remote configuration, or the user's home.
