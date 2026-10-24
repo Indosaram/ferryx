@@ -2401,6 +2401,9 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["agent-control", "sessions", _])
             | ("GET", ["agent-control", "sessions", _, "wait"])
             | ("POST", ["agent-control", "sessions", _, "send" | "answer" | "stop"])
+            // Supervisor view. The lane key rides in the pause body, never in the path.
+            | ("GET", ["supervisor"])
+            | ("POST", ["supervisor", "pause"])
             | ("GET", ["attach"])
     )
 }
@@ -4647,7 +4650,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_control_routes_join_the_allowlist_without_loosening_it() {
+    fn agent_control_and_supervisor_routes_join_the_allowlist_without_loosening_it() {
         assert!(allowed_http_route(&Method::GET, "agent-control/sessions"));
         assert!(allowed_http_route(&Method::GET, "agent-control/events"));
         assert!(allowed_http_route(
@@ -4670,6 +4673,8 @@ mod tests {
             &Method::POST,
             "agent-control/sessions/s-1/stop"
         ));
+        assert!(allowed_http_route(&Method::GET, "supervisor"));
+        assert!(allowed_http_route(&Method::POST, "supervisor/pause"));
         for (method, path) in [
             (Method::GET, "reference-chat/session-1"),
             (Method::GET, "reference-chat/x/secret"),
@@ -4677,6 +4682,12 @@ mod tests {
             (Method::POST, "admin"),
             (Method::DELETE, "agent-control/sessions/s-1"),
             (Method::GET, "agent-control/sessions/s-1/send"),
+            (Method::DELETE, "supervisor"),
+            (Method::POST, "supervisor"),
+            (Method::GET, "supervisor/pause"),
+            (Method::POST, "supervisor/x/y"),
+            (Method::GET, "supervisor/x/y"),
+            (Method::POST, "supervisor/lane-1/pause"),
         ] {
             assert!(
                 !allowed_http_route(&method, path),
