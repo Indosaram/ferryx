@@ -1,5 +1,6 @@
 // One desktop sidebar state that the desktop and the remote harnesses both render, so their
 // captures can be compared row for row. Data only: each harness turns it into its own inputs.
+import type { ActivitySummary } from "../../lib/activity";
 import type { HostEndpoint } from "../../state/remoteHostStore";
 import type { RegisteredProject } from "../../lib/tauri";
 import type { Worktree } from "../../lib/types";
@@ -29,6 +30,10 @@ export type SidebarParityFixture = {
   readonly listingFailures: Readonly<Record<string, string>>;
   readonly collapsedGroupIds: readonly string[];
   readonly worktreeOrder: WorktreeOrder;
+  /** One running agent as the desktop sees it (by worktree path). */
+  readonly desktopActivity: Readonly<Record<string, ActivitySummary>>;
+  /** The same agent as the remote session inventory reports it. */
+  readonly remoteActivity: readonly { readonly workspaceId: string; readonly worktreeSlug: string; readonly activityState: "working" }[];
 };
 
 /**
@@ -73,4 +78,11 @@ export const sidebarParityFixture: SidebarParityFixture = {
       `${FERRYX}/.orca-worktrees/ferryx/remote-settings`,
     ],
   },
+  desktopActivity: {
+    [`${FERRYX}/.orca-worktrees/ferryx/sidebar-polish`]: {
+      workingCount: 1, waitingCount: 0, doneCount: 0, runningCount: 1,
+      hasWorking: true, hasWaiting: false, hasDone: false, hasUnread: false,
+    },
+  },
+  remoteActivity: [{ workspaceId: "ferryx", worktreeSlug: "sidebar-polish", activityState: "working" }],
 };
