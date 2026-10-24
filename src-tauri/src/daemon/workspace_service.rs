@@ -22,6 +22,7 @@ pub struct DaemonWorkspaceService {
     pub(crate) mutation_gate: parking_lot::Mutex<()>,
     pub(crate) catalog: parking_lot::Mutex<Result<Catalog, String>>,
     pub(crate) catalog_path: PathBuf,
+    pub(crate) sidebar: super::sidebar_snapshot::SidebarSnapshotStore,
     workspace_queues: parking_lot::Mutex<
         std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
     >,
@@ -100,6 +101,9 @@ impl DaemonWorkspaceService {
         Self {
             machine_events: std::sync::Arc::new(Default::default()),
             journal,
+            sidebar: super::sidebar_snapshot::SidebarSnapshotStore::load(
+                catalog_path.with_file_name("desktop-sidebar.v1.json"),
+            ),
             worktree_changes: tokio::sync::broadcast::channel(64).0,
 
             project_reads: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
@@ -362,6 +366,17 @@ impl DaemonWorkspaceService {
 
     pub fn catalog(&self) -> Result<Catalog, String> {
         self.catalog.lock().clone()
+    }
+
+    /// Blocking: stores the desktop sidebar model and announces its new revision once.
+    pub fn sync_desktop_sidebar(
+        &self,
+        model: serde_json::Value,
+    ) -> Result<u64, super::sidebar_snapshot::SidebarRejection> {
+        let revision = self.sidebar.store(model)?;
+        self.machine_events.publish("sidebarChanged", None, None,
+            serde_json::json!({"revision": revision}));
+        Ok(revision)
     }
 
     /// Blocking domain operation; async transports must use run_blocking.

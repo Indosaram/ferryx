@@ -293,6 +293,15 @@ pub async fn cmd_sync_desktop_local_projects(
     daemon_client.sync_desktop_local_projects(projects).await
 }
 
+/// Publishes the desktop sidebar model; the daemon persists it off the async runtime.
+#[tauri::command]
+pub async fn cmd_sync_desktop_sidebar(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    model: serde_json::Value,
+) -> Result<u64, IpcError> {
+    daemon_client.sync_desktop_sidebar(model).await
+}
+
 #[tauri::command]
 pub async fn cmd_project_branches(
     registry: State<'_, WorkspaceRegistry>,
