@@ -1,4 +1,5 @@
 import { isDesktopShell } from "./clientRuntime";
+import type { SidebarModel } from "../components/sidebar/sidebarModel";
 import type { DagRunSnapshot } from "./dagTypes";
 import type { RunTarget } from "./scopedContracts";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
@@ -233,6 +234,11 @@ export async function registerProject(request: { workspaceId: string; repoPath: 
 
 export async function syncDesktopLocalProjects(projects: readonly { workspaceId: string; repoRoot: string }[]): Promise<void> {
   return invokeCommand<void>("cmd_sync_desktop_local_projects", { projects });
+}
+
+/** Publishes the desktop sidebar model; resolves with the revision the daemon assigned. */
+export async function syncDesktopSidebar(model: SidebarModel): Promise<number> {
+  return invokeCommand<number>("cmd_sync_desktop_sidebar", { model });
 }
 
 /** Desktop removal only detaches paired references; remote unregister is an explicit typed mutation. */

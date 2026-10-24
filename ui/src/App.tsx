@@ -162,6 +162,7 @@ import { resolveWorktreeOwnerId } from "./lib/worktreeOwnership";
 import { createClosedTabStack } from "./lib/closedTabStack";
 import { switchDebug } from "./lib/switchDebug";
 import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
+import { useDesktopSidebarPublisher } from "./lib/desktopSidebarSync";
 import {
   isTerminalTab,
   worktreeIdentity,
@@ -1122,6 +1123,14 @@ function WorkspaceApp({
     },
   );
   const inactiveProjectWorktreesRef = useRef(inactiveProjectWorktrees);
+  useDesktopSidebarPublisher({
+    enabled: isNativeRuntime,
+    projects,
+    activeProjectId: activeProject.workspaceId,
+    worktrees: state.worktrees,
+    inactiveProjectWorktrees,
+    emptyWorkspaceIds: emptySidebarWorkspaceIds(projects, activeProject.workspaceId, state, listWorkspaceSnapshots()),
+  });
 
   // Dag journals: watch every known project root, worktree and live session root so any omo
   // graph run anywhere lights up the activity badge, regardless of which cwd the app started in.
