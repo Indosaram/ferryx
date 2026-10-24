@@ -111,6 +111,10 @@ function MachineSection({ section, sidebar, first, heading }: SectionProps) {
     if (!locked) sidebar.onSelect({ machineId: section.machineId, project, node });
   };
   const notSynced = section.model?.source === "inventory";
+  // The project whose row the live state marks active is the active project, as on the desktop.
+  const activeWorkspaceId = model?.projects
+    .flatMap((project) => project.worktrees)
+    .find((node) => section.live?.rows[node.key]?.active)?.workspaceId;
   return (
     <section
       data-testid="remote-sidebar-section"
@@ -134,6 +138,7 @@ function MachineSection({ section, sidebar, first, heading }: SectionProps) {
         <SidebarView
           model={model}
           live={section.live}
+          {...(activeWorkspaceId === undefined ? {} : { activeWorkspaceId })}
           density={sidebar.density}
           actions={{
             selectWorktree: select,

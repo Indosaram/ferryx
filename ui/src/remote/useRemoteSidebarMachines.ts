@@ -4,25 +4,25 @@
 import { useMemo, useRef } from "react";
 
 import type { AccountMachineView } from "./accountSession";
+import { discoverySidebarModel } from "./accountSidebarFallback";
 import type { SupervisorFrameBus } from "./home/machineSupervisorSources";
 import { tunnelSupervisorFetch, type MachineLink } from "./home/machineSupervisorSources";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
 import type { RemoteSidebarSelection } from "./remoteSidebarLive";
 import type { SidebarFetch } from "./remoteSidebarSource";
+import type { MachineDiscoveryStatus } from "./useAccountWorktrees";
 import type { RemoteSidebarMachine } from "./useRemoteSidebarModel";
 
 /** The machine id frames of a direct (non-account) pairing are published under. */
 export const DIRECT_SIDEBAR_MACHINE = "direct";
-
-/** An account machine without an open tunnel answers as offline, so its last list stays shown;
- * the next selection opens a tunnel, which changes the connection and refetches. */
-const unlinkedFetch: SidebarFetch = () => Promise.reject(new Error("No open connection to this computer"));
 
 type AccountInput = {
   readonly kind: "account";
   readonly machines: readonly AccountMachineView[];
   readonly linkFor: (machineId: string) => MachineLink | null;
   readonly inventories: Readonly<Record<string, RemoteSessionInventory>>;
+  /** Discovery per machine: its last listing, and whether its connect failed. */
+  readonly statuses: Readonly<Record<string, MachineDiscoveryStatus>>;
   readonly activeMachineId: string | null;
 };
 
@@ -71,18 +71,22 @@ export function useRemoteSidebarMachines(input: RemoteSidebarMachinesInput): Rem
         : [];
       break;
     case "account":
-      machines = input.machines.flatMap((machine): RemoteSidebarMachine[] => {
-        if (machine.online === false) return [];
-        const link = input.linkFor(machine.machineId);
-        return [{
+      machines = input.machines.map((machine): RemoteSidebarMachine => {
+        const status = input.statuses[machine.machineId];
+        const offline = machine.online === false || status?.status === "offline";
+        // An online machine is only read over an open tunnel; without one it keeps its last list.
+        const link = offline ? null : input.linkFor(machine.machineId);
+        return {
           machineId: machine.machineId,
           label: machine.displayName || machine.machineId,
-          fetchLike: link ? tunnelSupervisorFetch(link.transport, link.deviceToken) : unlinkedFetch,
+          fetchLike: link ? tunnelSupervisorFetch(link.transport, link.deviceToken) : null,
           subscribe: subscribe(machine.machineId),
           connectionId: link ? `${idOf(link.transport)}:${link.deviceToken}` : "unlinked",
           inventory: input.inventories[machine.machineId] ?? null,
           selection: machine.machineId === input.activeMachineId ? selection : null,
-        }];
+          unreachable: offline || status?.status === "error",
+          fallback: link ? null : discoverySidebarModel(status),
+        };
       });
       break;
     default: {
@@ -92,10 +96,11 @@ export function useRemoteSidebarMachines(input: RemoteSidebarMachinesInput): Rem
   }
   // The model hook keys subscriptions by id and connection; live state follows the inventories.
   const key = machines
-    .map((m) => `${m.machineId}\u0000${m.connectionId ?? ""}\u0000${m.inventory?.revision ?? ""}\u0000${m.inventory?.fetchedAt ?? ""}`)
+    .map((m) => `${m.machineId}\u0000${m.connectionId ?? ""}\u0000${m.inventory?.revision ?? ""}\u0000${m.inventory?.fetchedAt ?? ""}\u0000${m.unreachable ? 1 : 0}`)
     .join("\u0001");
   const selectionKey = selection ? `${selection.workspaceId}\u0000${selection.worktreeSlug ?? ""}` : "";
-  // key and selectionKey carry every input the list is built from.
+  // key, selectionKey and the discovery statuses carry every input the list is built from.
+  const statuses = input.kind === "account" ? input.statuses : null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  return useMemo(() => machines, [key, selectionKey]);
+  return useMemo(() => machines, [key, selectionKey, statuses]);
 }

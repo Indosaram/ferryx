@@ -2744,6 +2744,7 @@ export const RemoteHostConnection: React.FC<{
               ? { transport: activeTunnelConnection.transport, deviceToken: activeTunnelConnection.deviceToken }
               : accountDiscovery.peekConnection(machineId),
           inventories: accountDiscovery.sessionInventories,
+          statuses: accountDiscovery.machineStatuses,
           activeMachineId: activeTunnelConnection?.machine.machineId ?? null,
           bus: supervisorBus,
           selection: sidebarSelection,
