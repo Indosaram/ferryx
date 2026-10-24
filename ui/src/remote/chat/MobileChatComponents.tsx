@@ -27,6 +27,7 @@ import {
   MessageSquare,
 } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { handleExternalLinkClick } from "../../lib/externalLinks";
 import {
   referenceHistoryDisclosure,
   type ReferenceAbandonedBranch,
@@ -736,6 +737,7 @@ export const ChatMarkdownImage: React.FC<{ src?: string; alt?: string }> = ({ sr
       data-testid="markdown-remote-image"
       href={href}
       target="_blank"
+      onClick={handleExternalLinkClick}
       rel="noopener noreferrer"
       className={cn(className, "underline underline-offset-2 hover:text-chat-foreground")}
     >
@@ -763,6 +765,7 @@ const REFERENCE_PROSE_COMPONENTS = {
     <a
       href={href}
       target="_blank"
+      onClick={handleExternalLinkClick}
       rel="noopener noreferrer"
       className="text-chat-link underline underline-offset-2 decoration-chat-link/60 hover:decoration-chat-link"
     >
@@ -1048,6 +1051,7 @@ export const ReferenceImagePart: React.FC<{
       <a
         href={src}
         target="_blank"
+        onClick={handleExternalLinkClick}
         rel="noopener noreferrer"
         title={part.ref}
         className={cn(
