@@ -478,6 +478,9 @@ pub struct DaemonRemoteStatus {
     pub gate_status: Option<crate::remote::server::DirectGatewayGateStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_reason: Option<String>,
+    /// Insecure transport modes in effect in the daemon process (`direct`, `relay`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub insecure_modes: Vec<String>,
 }
 
 /// One action on a lane's goal contract, as the desktop (`cmd_supervisor_goal`), the CLI
@@ -2271,6 +2274,7 @@ mod tests {
                 control_channel_connected: None,
                 gate_status: None,
                 gate_reason: None,
+                insecure_modes: Vec::new(),
             },
         };
         let status_json = serde_json::to_string(&remote_status_resp).expect("serialize status");

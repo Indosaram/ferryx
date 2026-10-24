@@ -285,6 +285,13 @@ const LONGEST_PAIRING_LIFETIME: Duration = Duration::from_secs(600);
 const LOCAL_PAIRING_SOURCE: &str = "local";
 const LAST_SEEN_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
 pub const DEVICE_IDLE_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
+/// Absolute lifetime of one device bearer token, on top of the idle expiry above.
+pub const TOKEN_ABSOLUTE_LIFETIME_SECS: u64 = 90 * 24 * 60 * 60;
+/// A token used within this window before its absolute expiry is rotated transparently.
+pub const TOKEN_ROTATION_WINDOW_SECS: u64 = 7 * 24 * 60 * 60;
+/// How long an expired token is kept so it can still be refused with `TokenExpired` rather than
+/// an indistinguishable `Unauthorized`; after that it is pruned with the rest of the store.
+const EXPIRED_TOKEN_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -337,6 +344,46 @@ struct PairingCode {
     approved_token: Option<String>,
     #[serde(default)]
     attach_public_key: Option<String>,
+}
+
+/// Issue time of one bearer token and the token it was rotated to, if any.
+///
+/// Stores written before tokens carried an issue time have no entry; such a token is stamped on
+/// its first use after upgrade, so already-paired devices start their 90-day lifetime then
+/// instead of being refused.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenMeta {
+    issued_at: u64,
+    #[serde(default)]
+    successor: Option<String>,
+}
+
+impl TokenMeta {
+    fn issued(now: u64) -> Self {
+        Self {
+            issued_at: now,
+            successor: None,
+        }
+    }
+}
+
+fn token_expired(issued_at: u64, now: u64) -> bool {
+    now.saturating_sub(issued_at) >= TOKEN_ABSOLUTE_LIFETIME_SECS
+}
+
+fn token_in_rotation_window(issued_at: u64, now: u64) -> bool {
+    let age = now.saturating_sub(issued_at);
+    age >= TOKEN_ABSOLUTE_LIFETIME_SECS - TOKEN_ROTATION_WINDOW_SECS
+        && age < TOKEN_ABSOLUTE_LIFETIME_SECS
+}
+
+fn mint_bearer_token() -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect()
 }
 
 // Preserve monotonic expiry in-process while storing portable wall-clock timestamps.
@@ -533,6 +580,8 @@ struct PersistedAuthState {
     #[serde(default)]
     pairing_codes: HashMap<String, PairingCode>,
     #[serde(default)]
+    token_meta: HashMap<String, TokenMeta>,
+    #[serde(default)]
     pairing_failures: PairingFailureBudget,
 }
 
@@ -544,6 +593,8 @@ pub struct AuthManager {
     /// Device Bearer Tokens: long-lived credentials issued to paired remote
     /// control clients. Maps token -> owning device id.
     tokens: Arc<RwLock<HashMap<String, String>>>,
+    /// Issue time and rotation successor per device bearer token.
+    token_meta: Arc<RwLock<HashMap<String, TokenMeta>>>,
     /// Machine Tokens: credentials used by the local daemon to authenticate
     /// its reverse tunnel connection to the relay. Distinct tier from device
     /// bearer tokens; a machine token identifies the host, not a paired
@@ -554,6 +605,9 @@ pub struct AuthManager {
     last_persisted_at: Arc<RwLock<Instant>>,
     #[cfg(test)]
     injected_snapshot_failure: Arc<std::sync::atomic::AtomicBool>,
+    /// Test clock in unix seconds; zero means the real clock.
+    #[cfg(test)]
+    clock: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Default for AuthManager {
@@ -587,13 +641,33 @@ impl AuthManager {
             transaction: Arc::new(Mutex::new(())),
             devices: Arc::new(RwLock::new(persisted.devices)),
             tokens: Arc::new(RwLock::new(persisted.tokens)),
+            token_meta: Arc::new(RwLock::new(persisted.token_meta)),
             machine_tokens: Arc::new(RwLock::new(std::collections::HashSet::new())),
             revocations: Arc::new(RwLock::new(HashMap::new())),
             persistence_path,
             last_persisted_at: Arc::new(RwLock::new(Instant::now())),
             #[cfg(test)]
             injected_snapshot_failure: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            clock: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Wall-clock unix seconds, overridable in tests.
+    fn now(&self) -> u64 {
+        #[cfg(test)]
+        {
+            let injected = self.clock.load(std::sync::atomic::Ordering::SeqCst);
+            if injected != 0 {
+                return injected;
+            }
+        }
+        unix_now()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_clock(&self, unix_secs: u64) {
+        self.clock.store(unix_secs, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Generates a new Machine Token authenticating this daemon's reverse
@@ -826,7 +900,7 @@ impl AuthManager {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
-        let now = unix_now();
+        let now = self.now();
 
         if let Some(token) = pairing.approved_token.clone() {
             let existing_device = effective_installation_id.as_deref().and_then(|inst_id| {
@@ -884,9 +958,10 @@ impl AuthManager {
             if let Err(err) = self.persist_durable() {
                 if let Some(path) = self.persistence_path.as_deref() {
                     if let Ok(Some(mut state)) = load_persisted_auth(path) {
-                        prune_revoked_and_idle_devices(&mut state, unix_now());
+                        prune_revoked_and_idle_devices(&mut state, self.now());
                         *self.devices.write() = state.devices;
                         *self.tokens.write() = state.tokens;
+                        *self.token_meta.write() = state.token_meta;
                     }
                 }
                 self.pairing_window
@@ -906,11 +981,7 @@ impl AuthManager {
                 .cloned()
         });
 
-        let token: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(64)
-            .map(char::from)
-            .collect();
+        let token = mint_bearer_token();
 
         let (device_id, created_at) = match &existing_device {
             Some(existing) => (existing.id.clone(), existing.created_at),
@@ -935,14 +1006,19 @@ impl AuthManager {
 
         self.devices.write().insert(device_id.clone(), info.clone());
         self.tokens.write().insert(token.clone(), device_id.clone());
+        self.token_meta
+            .write()
+            .insert(token.clone(), TokenMeta::issued(now));
         if let Err(err) = self.persist_durable() {
             self.devices.write().remove(&device_id);
             self.tokens.write().remove(&token);
+            self.token_meta.write().remove(&token);
             if let Some(path) = self.persistence_path.as_deref() {
                 if let Ok(Some(mut state)) = load_persisted_auth(path) {
-                    prune_revoked_and_idle_devices(&mut state, unix_now());
+                    prune_revoked_and_idle_devices(&mut state, self.now());
                     *self.devices.write() = state.devices;
                     *self.tokens.write() = state.tokens;
+                    *self.token_meta.write() = state.token_meta;
                 }
             }
             self.pairing_window
@@ -977,13 +1053,9 @@ impl AuthManager {
         }
 
         let device_id = uuid::Uuid::new_v4().to_string();
-        let token: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(64)
-            .map(char::from)
-            .collect();
+        let token = mint_bearer_token();
 
-        let now = unix_now();
+        let now = self.now();
         let info = DeviceInfo {
             id: device_id.clone(),
             name: "cli-paired-device".to_string(),
@@ -998,6 +1070,9 @@ impl AuthManager {
 
         self.devices.write().insert(device_id.clone(), info.clone());
         self.tokens.write().insert(token.clone(), device_id.clone());
+        self.token_meta
+            .write()
+            .insert(token.clone(), TokenMeta::issued(now));
         pairing.approved_token = Some(token.clone());
         self.pairing_window
             .write()
@@ -1006,11 +1081,13 @@ impl AuthManager {
         if let Err(err) = self.persist_durable() {
             self.devices.write().remove(&device_id);
             self.tokens.write().remove(&token);
+            self.token_meta.write().remove(&token);
             if let Some(path) = self.persistence_path.as_deref() {
                 if let Ok(Some(mut state)) = load_persisted_auth(path) {
-                    prune_revoked_and_idle_devices(&mut state, unix_now());
+                    prune_revoked_and_idle_devices(&mut state, self.now());
                     *self.devices.write() = state.devices;
                     *self.tokens.write() = state.tokens;
+                    *self.token_meta.write() = state.token_meta;
                 }
             }
             pairing.approved_token = None;
@@ -1031,7 +1108,11 @@ impl AuthManager {
         }
         .ok_or(AuthError::Unauthorized)?;
 
-        let now = unix_now();
+        let now = self.now();
+        let issued_at = self.token_meta.read().get(token).map(|meta| meta.issued_at);
+        if issued_at.is_some_and(|issued_at| token_expired(issued_at, now)) {
+            return Err(AuthError::TokenExpired);
+        }
         let result = {
             let mut devices = self.devices.write();
             let device = devices.get_mut(&device_id).ok_or(AuthError::Unauthorized)?;
@@ -1042,12 +1123,92 @@ impl AuthManager {
             device.clone()
         };
 
-        let should_persist = self.last_persisted_at.read().elapsed() >= LAST_SEEN_PERSIST_INTERVAL;
+        // A token from a store that predates issue times starts its lifetime now, durably.
+        let stamped = issued_at.is_none();
+        if stamped {
+            self.token_meta
+                .write()
+                .insert(token.to_owned(), TokenMeta::issued(now));
+        }
+        let should_persist =
+            stamped || self.last_persisted_at.read().elapsed() >= LAST_SEEN_PERSIST_INTERVAL;
         if should_persist {
             self.persist_best_effort();
         }
 
         Ok(result)
+    }
+
+    /// Cheap in-memory check: is this token inside the last week of its absolute lifetime?
+    /// No store transaction is taken, so callers can ask on every request.
+    pub fn token_near_expiry(&self, token: &str) -> bool {
+        let now = self.now();
+        self.token_meta
+            .read()
+            .get(token)
+            .is_some_and(|meta| token_in_rotation_window(meta.issued_at, now))
+    }
+
+    /// Cheap in-memory check: has this known token reached its absolute lifetime?
+    pub fn token_is_expired(&self, token: &str) -> bool {
+        let now = self.now();
+        self.token_meta
+            .read()
+            .get(token)
+            .is_some_and(|meta| token_expired(meta.issued_at, now))
+    }
+
+    /// Rotates a live token that is inside the rotation window and returns the token the client
+    /// should switch to. The presented token stays valid until its own absolute expiry, so a
+    /// client that misses the answer can retry; a repeated call returns the same successor rather
+    /// than minting another. `None` when the token is not eligible (unknown, idle, outside the
+    /// window, or already expired, which `validate_token` refuses on its own).
+    pub fn rotate_if_near_expiry(&self, token: &str) -> Result<Option<String>, AuthError> {
+        if !self.token_near_expiry(token) {
+            return Ok(None);
+        }
+        let _transaction = self.begin_transaction()?;
+        let now = self.now();
+        let Some(meta) = self.token_meta.read().get(token).cloned() else {
+            return Ok(None);
+        };
+        if !token_in_rotation_window(meta.issued_at, now) {
+            return Ok(None);
+        }
+        let Some(device_id) = self.tokens.read().get(token).cloned() else {
+            return Ok(None);
+        };
+        let live = self.devices.read().get(&device_id).is_some_and(|device| {
+            !device.revoked && now.saturating_sub(device.last_seen_at) <= DEVICE_IDLE_EXPIRY_SECS
+        });
+        if !live {
+            return Ok(None);
+        }
+        if let Some(successor) = meta
+            .successor
+            .filter(|successor| self.tokens.read().get(successor) == Some(&device_id))
+        {
+            return Ok(Some(successor));
+        }
+        let fresh = mint_bearer_token();
+        self.tokens.write().insert(fresh.clone(), device_id);
+        {
+            let mut metas = self.token_meta.write();
+            metas.insert(fresh.clone(), TokenMeta::issued(now));
+            if let Some(presented) = metas.get_mut(token) {
+                presented.successor = Some(fresh.clone());
+            }
+        }
+        if let Err(err) = self.persist_durable() {
+            self.tokens.write().remove(&fresh);
+            let mut metas = self.token_meta.write();
+            metas.remove(&fresh);
+            if let Some(presented) = metas.get_mut(token) {
+                presented.successor = None;
+            }
+            return Err(err);
+        }
+        Ok(Some(fresh))
     }
 
     pub fn device_for_attach_key(&self, attach_public_key: &str) -> Option<DeviceInfo> {        let key = attach_public_key.trim();
@@ -1213,7 +1374,7 @@ impl AuthManager {
             file.lock()
                 .map_err(|e| AuthError::Storage(format!("lock remote auth state: {e}")))?;
             if let Some(mut state) = load_persisted_auth(path)? {
-                prune_revoked_and_idle_devices(&mut state, unix_now());
+                prune_revoked_and_idle_devices(&mut state, self.now());
                 {
                     let mut window = self.pairing_window.write();
                     window.codes = state.pairing_codes;
@@ -1221,6 +1382,7 @@ impl AuthManager {
                 }
                 *self.devices.write() = state.devices;
                 *self.tokens.write() = state.tokens;
+                *self.token_meta.write() = state.token_meta;
             }
             Some(file)
         } else {
@@ -1234,10 +1396,19 @@ impl AuthManager {
             return Ok(());
         };
         *self.last_persisted_at.write() = Instant::now();
+        let tokens = self.tokens.read().clone();
+        let token_meta = self
+            .token_meta
+            .read()
+            .iter()
+            .filter(|(token, _)| tokens.contains_key(*token))
+            .map(|(token, meta)| (token.clone(), meta.clone()))
+            .collect();
         let snapshot = PersistedAuthState {
             devices: self.devices.read().clone(),
-            tokens: self.tokens.read().clone(),
+            tokens,
             pairing_codes: self.pairing_window.read().codes.clone(),
+            token_meta,
             pairing_failures: self.pairing_window.read().failures.clone(),
         };
         #[cfg(test)]
@@ -1381,15 +1552,26 @@ fn apply_revocation_journal(state: &mut PersistedAuthState, path: &Path) -> Resu
 }
 
 /// Drops devices that older builds tombstoned with `revoked: true` or devices
-/// that have been idle longer than `DEVICE_IDLE_EXPIRY_SECS`, together with their tokens.
+/// that have been idle longer than `DEVICE_IDLE_EXPIRY_SECS`, together with their tokens, and
+/// tokens long past their absolute lifetime.
 fn prune_revoked_and_idle_devices(state: &mut PersistedAuthState, now: u64) {
     let PersistedAuthState {
-        devices, tokens, ..
+        devices,
+        tokens,
+        token_meta,
+        ..
     } = state;
     devices.retain(|_, device| {
         !device.revoked && now.saturating_sub(device.last_seen_at) <= DEVICE_IDLE_EXPIRY_SECS
     });
-    tokens.retain(|_, device_id| devices.contains_key(device_id));
+    tokens.retain(|token, device_id| {
+        devices.contains_key(device_id)
+            && token_meta.get(token).is_none_or(|meta| {
+                now.saturating_sub(meta.issued_at)
+                    < TOKEN_ABSOLUTE_LIFETIME_SECS + EXPIRED_TOKEN_RETENTION_SECS
+            })
+    });
+    token_meta.retain(|token, _| tokens.contains_key(token));
 }
 
 /// Writes `value` as JSON, restricting access to the current user.
@@ -1518,6 +1700,8 @@ pub enum AuthError {
     PairingRateLimited,
     #[error("Unauthorized access")]
     Unauthorized,
+    #[error("Device token has reached its absolute lifetime")]
+    TokenExpired,
     #[error("Auth storage error: {0}")]
     Storage(String),
 }

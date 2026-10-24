@@ -6553,6 +6553,11 @@ impl DaemonServer {
                             control_channel_connected,
                             gate_status,
                             gate_reason,
+                            insecure_modes: crate::ipc::run_blocking(|| {
+                                Ok(crate::remote::security_settings::active_insecure_modes())
+                            })
+                            .await
+                            .unwrap_or_default(),
                         },
                     }
                 }

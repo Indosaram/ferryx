@@ -90,6 +90,8 @@ import {
 } from "./chat/MobileChatComponents";
 import {
   hostTransportUrl,
+  noteTokenRotation,
+  onDeviceTokenRotated,
   remoteApiUrl,
   remoteApiUrl as apiUrl,
   remoteSocketUrl,
@@ -555,6 +557,7 @@ export async function readChatGatewayIdentity(args: {
     return null;
   }
   if (!response.ok) return null;
+  noteTokenRotation(args.token, response);
   try {
     return parseChatGatewayIdentity(await response.json());
   } catch {
@@ -1157,6 +1160,17 @@ export const RemoteHostConnection: React.FC<{
     const stored = remoteHostStore.getState().hosts[hostId]?.directHints;
     return stored?.length ? stored : readDirectCandidateHints(hostId, readUrlHints);
   });
+  // The host rotates a bearer token near its absolute expiry when this client reconnects. Adopt
+  // the replacement only for the credential this host actually stores, so a rotation answered
+  // for another host's token, or after a re-pair, cannot overwrite it.
+  useEffect(() => onDeviceTokenRotated((previous, fresh) => {
+    const host = remoteHostStore.getState().hosts[hostId];
+    const stored = host?.deviceToken ?? getRemoteAuthToken(hostId);
+    if (stored !== previous) return;
+    setRemoteAuthToken(fresh, hostId);
+    if (host) remoteHostStore.upsertHost({ ...host, deviceToken: fresh });
+    setToken((current) => (current === previous ? fresh : current));
+  }), [hostId]);
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const modelRef = useRef(model);
   const modelMachineIdRef = useRef<string | null>(null);

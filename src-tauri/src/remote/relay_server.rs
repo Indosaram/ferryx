@@ -146,6 +146,9 @@ enum PairingWait {
 }
 
 pub const RELAY_STAGE_HEADER: &str = "x-ferryx-relay-stage";
+/// Response headers a browser client may read across origins: the relay stage, and the
+/// replacement bearer token the host gateway answers after a transparent rotation.
+const RELAY_EXPOSED_HEADERS: &str = "x-ferryx-relay-stage, x-ferryx-rotated-token";
 pub const RELAY_STAGE_DATA_PAIRING_TIMEOUT: &str = "data_pairing_timeout";
 pub const RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT: &str = "upstream_transfer_timeout";
 
@@ -3031,7 +3034,7 @@ fn apply_cors_headers(headers: &mut HeaderMap) {
     );
     headers.insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        HeaderValue::from_static(RELAY_STAGE_HEADER),
+        HeaderValue::from_static(RELAY_EXPOSED_HEADERS),
     );
 }
 

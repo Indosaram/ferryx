@@ -74,6 +74,7 @@ import { showNotificationPermissionHint } from "./lib/notificationPermissionHint
 import { getCurrentVersion } from "./lib/updater";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
+import { InsecureTransportBanner } from "./components/InsecureTransportBanner";
 import type { SectionId } from "./components/settings/types";
 import type { MachineProjectTarget, RemoteContext } from "./lib/machineNavigation";
 import {
@@ -3931,6 +3932,7 @@ function WorkspaceApp({
       )}
 
       <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background">
+        <InsecureTransportBanner />
         <RemoteBrowserSharingIndicator
           isSharing={remoteBrowserSharingActive}
           onReclaim={handleReclaimRemoteBrowser}
