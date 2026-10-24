@@ -391,6 +391,7 @@ impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> 
     }
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(not(target_os = "macos"))]
 impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> {
     fn is_supported(&self) -> bool {

@@ -76,11 +76,13 @@ fn reload_from_origin<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> Result<
         .map_err(webview_unreachable)
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(not(target_os = "macos"))]
 fn reload_from_origin<R: tauri::Runtime>(_webview: &tauri::Webview<R>) -> Result<(), IpcError> {
     Err(unsupported_error())
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "linux")]
 fn reload_bypassing_cache<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> Result<(), IpcError> {
     use webkit2gtk::WebViewExt;
