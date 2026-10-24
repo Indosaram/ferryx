@@ -17,7 +17,7 @@ Facts as of 2026-10: checked on 2026-10-24 against the Orca [README](https://git
 | Agents | Any CLI agent; status detection ships for eleven | Any CLI agent |
 | Editor | Read-only file previews, no editor or LSP | Built-in editor (Monaco) with autosave |
 | Mobile | Authenticated mobile web client, PIN or QR pairing | iOS App Store app and Android APK |
-| License | Source-available, SUL-1.0 | MIT |
+| License | Source-available under the Ferryx License, free for individuals and small companies | MIT |
 
 ## Where the two actually differ
 
@@ -35,7 +35,7 @@ Orca's design mode is the standout: click any element in a real Chromium window 
 
 ## When Orca is the better choice
 
-If you want one application that covers agents, editing, review and merge, Orca is the better choice: design mode, diff annotation, GitHub and Linear inside the app, and native mobile apps are all things Ferryx doesn't do. Its MIT license also matters if you need OSI open source, which Ferryx's SUL-1.0 is not, and its release cadence means features land fast.
+If you want one application that covers agents, editing, review and merge, Orca is the better choice: design mode, diff annotation, GitHub and Linear inside the app, and native mobile apps are all things Ferryx doesn't do. Its MIT license also matters if you need OSI open source, which the Ferryx License is not, and its release cadence means features land fast.
 
 Ferryx is the better fit when you'd rather keep your own editor and want a lighter terminal workspace with no bundled Chromium, where sessions outlive the window and survive an update handover.
 

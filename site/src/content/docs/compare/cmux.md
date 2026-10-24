@@ -16,7 +16,7 @@ Facts as of 2026-10: checked on 2026-10-24 against the cmux [README](https://git
 | Windows | x64 installer (not code-signed yet) | No desktop app; [Windows request](https://github.com/manaflow-ai/cmux/issues/1012) is open |
 | Linux | AppImage and .deb (x86_64), plus a headless `ferryx-cli` | No desktop app; [Linux request #330](https://github.com/manaflow-ai/cmux/issues/330) is open, its most-reacted issue |
 | Terminal core | libghostty-vt parser, WGPU renderer | libghostty, reads your existing Ghostty config |
-| License | Source-available, SUL-1.0 | The README calls it "Free and GPL-licensed" |
+| License | Source-available under the Ferryx License, free for individuals and small companies | The README calls it "Free and GPL-licensed" |
 | Remote | SSH workspaces, mobile web client, outbound relay | `cmux ssh user@remote`, plus Cloud workspaces |
 
 ## Where the two actually differ
@@ -37,7 +37,7 @@ cmux's notification rings are the feature people come for: a pane gets a blue ri
 
 ## When cmux is the better choice
 
-If you only work on a Mac and want the most native-feeling agent terminal there is, cmux is the stronger pick: a Swift/AppKit app that reads your existing Ghostty config, a notification system built around "which pane needs me," and an agent-drivable browser. Its GPL-licensed app and CLI also matter if you need OSI open source on the desktop, which Ferryx's SUL-1.0 is not. cmux additionally offers Cloud workspaces from the app (Cmd+Y), and Ferryx has no hosted tier at all.
+If you only work on a Mac and want the most native-feeling agent terminal there is, cmux is the stronger pick: a Swift/AppKit app that reads your existing Ghostty config, a notification system built around "which pane needs me," and an agent-drivable browser. Its GPL-licensed app and CLI also matter if you need OSI open source on the desktop, which the Ferryx License is not. cmux additionally offers Cloud workspaces from the app (Cmd+Y), and Ferryx has no hosted tier at all.
 
 Ferryx is the better fit when the same workspace has to run on Windows or Linux, or when agents must keep running after the window closes or reloads.
 

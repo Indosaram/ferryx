@@ -16,7 +16,7 @@ Facts as of 2026-10: checked on 2026-10-24 against the Herdr [README](https://gi
 | Platforms | macOS universal DMG, Windows x64 installer, Linux AppImage and .deb, headless `ferryx-cli` | Linux and macOS via install script, Homebrew or mise; Windows via PowerShell installer |
 | Agents | Any CLI agent; status detection ships for eleven | Any CLI agent, with working/blocked/idle status per pane |
 | Remote | SSH workspaces, mobile web client, outbound relay | Saved SSH machines in one window with independent reconnects |
-| License | Source-available, SUL-1.0 | Apache-2.0 (relicensed from AGPL-3.0 in July 2026, [#1340](https://github.com/herdrdev/herdr/issues/1340)) |
+| License | Source-available under the Ferryx License, free for individuals and small companies | Apache-2.0 (relicensed from AGPL-3.0 in July 2026, [#1340](https://github.com/herdrdev/herdr/issues/1340)) |
 
 ## Where the two actually differ
 
@@ -30,7 +30,7 @@ Facts as of 2026-10: checked on 2026-10-24 against the Herdr [README](https://gi
 
 ## What Herdr does better
 
-Herdr runs anywhere a terminal does, as one lightweight binary with no Electron and no desktop environment, so it works over plain SSH on a headless box. It puts several machines in one window with a combined agent list and independent reconnects. Its socket API lets agents orchestrate other agents, it has a plugin marketplace, and its permissive Apache-2.0 license clears corporate open-source policies that SUL-1.0 may not.
+Herdr runs anywhere a terminal does, as one lightweight binary with no Electron and no desktop environment, so it works over plain SSH on a headless box. It puts several machines in one window with a combined agent list and independent reconnects. Its socket API lets agents orchestrate other agents, it has a plugin marketplace, and its permissive Apache-2.0 license clears corporate open-source policies that the source-available Ferryx License may not.
 
 ## When Herdr is the better choice
 
