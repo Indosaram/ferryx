@@ -215,6 +215,7 @@ and `publish` uploads them with every other file:
 | `provenance.json` | Tag, commit, `sourceDateEpoch`, Ghostty pin, the plan's toolchain constraints, and per host the recorded toolchain versions and the assets it built (name, kind, size, SHA-256) |
 | `SHA256SUMS` | SHA-256 of every other release asset, in `shasum -a 256 -c` format |
 | `SHA256SUMS.minisig` | minisign signature of `SHA256SUMS` by the updater key (`plugins.updater.pubkey` in `src-tauri/tauri.conf.json`) |
+| `ferryx.rb`, `ferryx-cli.rb` | Homebrew cask (`Ferryx_universal.dmg`) and linux x64 formula (`ferryx-cli-linux-amd64`), rendered by `scripts/release-packaging.mjs` from `SHA256SUMS.txt` with the tag's version and hashes |
 
 Both SBOMs are generated from a clean `git archive` of `plan.json.commitSha`, never from the working
 checkout. Which host builds which asset:
@@ -224,7 +225,7 @@ checkout. Which host builds which asset:
 | `macbook` | `Ferryx.app.tar.gz` (+`.sig`), `Ferryx_universal.app.tar.gz` (+`.sig`), `Ferryx_universal.dmg`, `ferryx-cli-darwin-universal` |
 | `omaki` | `Ferryx_amd64.AppImage` (+`.sig`), `Ferryx_amd64.deb`, `ferryx-cli-linux-amd64` |
 | `maho-win` | `Ferryx_x64.msix`, and `Ferryx_x64-setup.exe` (+`.sig`) when NSIS migration is selected |
-| `macbook` (coordinator) | `latest.json`, `SHA256SUMS.txt`, the SBOMs, `provenance.json`, `SHA256SUMS`, `SHA256SUMS.minisig` |
+| `macbook` (coordinator) | `latest.json`, `SHA256SUMS.txt`, `ferryx.rb`, `ferryx-cli.rb`, the SBOMs, `provenance.json`, `SHA256SUMS`, `SHA256SUMS.minisig` |
 
 Reproducible build inputs are the commit, the Ghostty pin and `sourceDateEpoch` from `plan.json`,
 the committed `src-tauri/Cargo.lock` and `ui/bun.lock`, and the toolchain versions each host
@@ -280,6 +281,12 @@ bun scripts/release-local.mjs verify-remote --run "$RUN"
 This verifies public `latest.json` version and availability of `SHA256SUMS.txt`. Final validation
 must also establish exact remote inventory/byte checking if not already guaranteed by the
 published implementation.
+
+Homebrew: the release carries the rendered `ferryx.rb` (cask) and `ferryx-cli.rb` (formula);
+the templates live in `packaging/homebrew/`. No tap is published yet. Once the
+`Indosaram/homebrew-ferryx` tap exists, copy the two files from the public release into its
+`Casks/` and `Formula/` directories. Windows package-manager installs go through the Store
+listing (`winget install --source msstore 9NLHQL5JNLM4`); no winget-pkgs manifest is authored.
 
 Microsoft Partner Center submission is manual and separately approved. The local release may
 produce an unsigned `Ferryx_x64.msix` for Store ingestion, but attaching it to GitHub or making a
