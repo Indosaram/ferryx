@@ -178,6 +178,7 @@ unmeasured performance claims:
 - [Security policy](SECURITY.md): how to report a vulnerability privately, supported versions, threat model
 - [Contributing](CONTRIBUTING.md): build prerequisites, test commands, and the license for contributions
 - [Changelog](CHANGELOG.md): changes per release tag
+- [Roadmap](ROADMAP.md): what is being worked on now, next, and later
 - Questions: [Discord](https://discord.gg/Z2hBkQEHUG)
 
 ## Build from source
