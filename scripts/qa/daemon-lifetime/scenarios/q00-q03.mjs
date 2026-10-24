@@ -1,6 +1,7 @@
 // Q00-Q03: ownership precondition and GUI-independence on quit, kill and OS termination.
 
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { hjoin } from '../lib/hostpath.mjs';
 import { assertion, block } from '../lib/summary.mjs';
 import { evidence, dataConn, ownerIdentity, seedLocalSession, nonceRoundTrip, assertInventoryKept, assertSameOwner, requireOwner, counterCommand, DAEMON_READY_TIMEOUT_MS } from './common.mjs';
@@ -24,7 +25,16 @@ export async function Q00(ctx, result) {
     return;
   }
   const key = ctx.keys.A;
-  const job = await ctx.jobs.inspect(key);
+  let job = await ctx.jobs.inspect(key);
+  // Linux: owner.json is published at sd_notify READY=1, ~40ms before systemd moves the unit from
+  // activating to active. The harness has no event for that transition; bounded 5s re-inspect.
+  if (ctx.platform === 'linux' && job.state === 'activating') {
+    const deadline = Date.now() + 5_000;
+    while (job.state === 'activating' && Date.now() < deadline) {
+      await delay(100);
+      job = await ctx.jobs.inspect(key);
+    }
+  }
   await evidence(ctx, result, 'job-inspect.json', job);
   const identity = await ownerIdentity(ctx);
   await evidence(ctx, result, 'owner.json', identity);

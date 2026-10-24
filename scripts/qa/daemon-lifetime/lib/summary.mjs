@@ -10,6 +10,7 @@ export const SCENARIOS = Object.freeze([
   { id: 'Q01', title: 'normal GUI quit keeps daemon and children', platforms: PLATFORMS },
   { id: 'Q02', title: 'kill of the recorded GUI pid keeps daemon and children', platforms: PLATFORMS },
   { id: 'Q03', title: 'OS-attributed GUI termination keeps daemon', platforms: PLATFORMS },
+  { id: 'Q03b', title: 'OS-attributed quit after a handover keeps every adopted session child', platforms: ['mac', 'linux'] },
   { id: 'Q04', title: 'listener stall beyond SUPERVISED_START_WAIT: zero supervisor mutations', platforms: PLATFORMS },
   { id: 'Q04b', title: 'loaded-idle QA job: one plain kickstart', platforms: ['mac'] },
   { id: 'Q05', title: 'probe faults classify Unknown: zero mutations', platforms: PLATFORMS },

@@ -34,14 +34,16 @@ ones to you. Native Rust on Tauri v2 with a libghostty terminal core; no Electro
 | **Windows** | Installer (x64), not code-signed; Store version pending certification | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
 | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
-| **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64) | [`install.sh`](https://relay.ferryx.dev/install.sh) (`curl -fsSL https://relay.ferryx.dev/install.sh \| bash`) |
+| **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64 only; arm64: [build from source](CONTRIBUTING.md#build-prerequisites)) | [`install.sh`](https://relay.ferryx.dev/install.sh) (`curl -fsSL https://relay.ferryx.dev/install.sh \| bash`) |
 
 The macOS, Windows, and Linux links resolve against the latest release. Local release assembly
 stages the headless `ferryx-cli` beside the Linux AppImage and `.deb` (as
 `ferryx-cli-linux-amd64`) and, when the universal macOS CLI is present, as
 `ferryx-cli-darwin-universal`, so the one-line installer above resolves a current artifact when
-the release publishes one and otherwise fails closed. Verify downloads with the `SHA256SUMS.txt`
-published alongside the binaries:
+the release publishes one and otherwise fails closed. No prebuilt `ferryx-cli` exists for Linux
+arm64; the installer exits with code 2 there and points to the source build. The installers
+check the downloaded `ferryx-cli` against the release's `SHA256SUMS` and refuse a mismatch.
+Verify other downloads with the checksums published alongside the binaries:
 
 ```bash
 sha256sum -c SHA256SUMS.txt
@@ -100,7 +102,7 @@ To operate your own relay instead of the default service, follow the
 [self-hosted relay guide](https://ferryx.dev/docs/self-hosted-relay/) for TLS, mail delivery,
 machine enrollment, and the separate desktop account and gateway settings.
 
-- Headless `ferryx-cli` needs no display server; on Linux its shared crate still links GTK 3 and WebKitGTK 4.1
+- Headless `ferryx-cli` needs no display server and links no GTK, WebKitGTK, or JavaScriptCore; on Linux it needs only glibc (`libc`, `libm`, `libgcc_s`)
 - Outbound encrypted relay tunnel: no inbound SSH, open ports, or public IP needed
 - Native terminal split-panes and remote Git worktrees run directly on the machine
 
@@ -231,7 +233,9 @@ unmeasured performance claims:
 - [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
 
 On Linux, install the GTK 3, WebKitGTK 4.1, and other system libraries required by
-[Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop or CLI binary.
+[Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop app. The
+headless CLI builds without them:
+`cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin ferryx-cli`.
 
 ### Clone and install
 

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager, Runtime};
 
 pub const REMOTE_FILE_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -372,6 +373,7 @@ pub struct RemoteFileFetched {
     pub byte_length: u64,
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_remote_file_fetch<R: Runtime>(
     app: AppHandle<R>,

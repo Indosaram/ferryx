@@ -4,6 +4,7 @@ use crate::ssh::SshHost;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager, Runtime};
 
 /// Serializes every read-modify-write of the SSH host store.
@@ -189,6 +190,7 @@ where
     Ok(hosts)
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) fn get_ssh_store_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
     if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR") {
         return Ok(PathBuf::from(dir).join("ssh_hosts.json"));
@@ -206,6 +208,7 @@ pub(crate) fn get_ssh_store_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathB
     }
 }
 
+#[cfg(feature = "desktop")]
 pub fn resolve_home_dir<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     app.path().home_dir().ok().or_else(|| {
         std::env::var_os("HOME")
@@ -214,6 +217,7 @@ pub fn resolve_home_dir<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     })
 }
 
+#[cfg(feature = "desktop")]
 pub fn system_ssh_config_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     resolve_home_dir(app).map(|home| home.join(".ssh").join("config"))
 }
@@ -268,6 +272,7 @@ fn read_ssh_config_file(path: &Path) -> Result<SystemSshConfigResult, IpcError> 
     })
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_read_system_config<R: Runtime>(
     app: AppHandle<R>,
@@ -356,12 +361,14 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_list_hosts<R: Runtime>(app: AppHandle<R>) -> Result<Vec<SshHost>, IpcError> {
     let path = get_ssh_store_path(&app)?;
     run_blocking(move || Ok(load_store(&path)?.hosts)).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_import_config<R: Runtime>(
     app: AppHandle<R>,
@@ -394,6 +401,7 @@ fn import_config_into_store(path: &PathBuf, config_text: &str) -> Result<Vec<Ssh
     Ok(store.hosts)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_update_host<R: Runtime>(
     app: AppHandle<R>,
@@ -418,6 +426,7 @@ pub async fn cmd_ssh_update_host<R: Runtime>(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_delete_host<R: Runtime>(
     app: AppHandle<R>,
@@ -479,6 +488,7 @@ pub async fn ssh_test_connection_summary(host: SshHost) -> SshTargetSummary {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_test_connection(
     daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
@@ -498,6 +508,7 @@ pub async fn cmd_ssh_test_connection(
     Ok(summary)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_set_password(
     daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
@@ -531,6 +542,7 @@ pub async fn cmd_ssh_set_password(
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_clear_password(
     daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
@@ -560,6 +572,7 @@ async fn clear_password_in_daemon(
     }
 }
 
+#[cfg(feature = "desktop")]
 /// Explicit user-selected artifact installation; no build or download is performed.
 #[tauri::command]
 pub async fn cmd_ssh_install_project_helper<R: Runtime>(
@@ -581,11 +594,13 @@ pub async fn cmd_ssh_install_project_helper<R: Runtime>(
     Ok(location)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_prepare_integration(host: SshHost) -> Result<(), IpcError> {
     crate::ssh::direct::ensure_remote_extension_installed(&host).await
 }
 
+#[cfg(feature = "desktop")]
 /// Deletes the Ferryx agent-state extension from the stored host `host_id`, file by file, only
 /// where it is still byte-for-byte a payload Ferryx wrote.
 #[tauri::command]
@@ -771,6 +786,7 @@ pub(crate) fn parse_node_install_report(stdout: &[u8]) -> Result<SshNodeInstallR
     serde_json::from_value(last).map_err(|_| node_install_error("parse", Some(0), String::new()))
 }
 
+#[cfg(feature = "desktop")]
 /// Installs the Ferryx CLI on a stored SSH host and enrolls it with a one-time install key.
 #[tauri::command]
 pub async fn cmd_ssh_install_ferryx_node<R: Runtime>(
@@ -835,6 +851,7 @@ pub fn resolve_bundled_helper_binary(target_triple: &str) -> Result<PathBuf, Ipc
     ))
 }
 
+#[cfg(feature = "desktop")]
 pub fn bundled_helper_path<R: Runtime>(
     app: &AppHandle<R>,
     target_triple: &str,
@@ -869,6 +886,7 @@ pub fn bundled_helper_path<R: Runtime>(
     resolve_bundled_helper_binary(target_triple)
 }
 
+#[cfg(feature = "desktop")]
 pub fn bundled_helper_version<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
@@ -977,6 +995,7 @@ pub async fn ensure_qualified_ssh_helper(
     Ok(location)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_sync_tailscale<R: Runtime>(app: AppHandle<R>) -> Result<SshTailscaleSyncResult, IpcError> {
     let _sync = SSH_TAILSCALE_SYNC.lock().await;
@@ -1153,6 +1172,7 @@ pub struct HelperUpdateState {
     pub decision: Option<crate::ssh::helper_setup::HelperUpgradeDecision>,
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_provision_helper(
     host: SshHost,
@@ -1168,6 +1188,7 @@ pub async fn cmd_ssh_provision_helper(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_helper_update_state<R: Runtime>(
     app: AppHandle<R>,
@@ -1227,6 +1248,7 @@ pub struct SshClipboardImagePaste {
     pub byte_length: usize,
 }
 
+#[cfg(feature = "desktop")]
 /// Copies the clipboard image to the SSH host that owns `workspace_id` so the remote agent can
 /// open it, and answers with the path to paste. `Ok(None)` means the clipboard held nothing the
 /// remote could use, which leaves the caller on its local paste chord.
@@ -1260,6 +1282,7 @@ pub async fn cmd_ssh_paste_clipboard_image<R: Runtime>(
     }))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_list_remote_worktrees<R: Runtime>(
     app: AppHandle<R>,
@@ -1272,6 +1295,7 @@ pub async fn cmd_ssh_list_remote_worktrees<R: Runtime>(
     crate::ssh::worktree::list_remote(&host, &environment, &project.repo_root).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_create_remote_worktree<R: Runtime>(
     app: AppHandle<R>,
@@ -1328,6 +1352,7 @@ pub async fn cmd_ssh_create_remote_worktree<R: Runtime>(
     Ok(created)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_delete_remote_worktree<R: Runtime>(
     app: AppHandle<R>,

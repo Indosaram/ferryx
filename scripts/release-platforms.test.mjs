@@ -815,6 +815,7 @@ fi
 if [ "$1" = "--version" ]; then
   echo "cargo 1.92.0 (mock)"
 elif [ "$1" = "build" ]; then
+  printf "%s\n" "$*" >> "$CARGO_TARGET_DIR/cargo-build-args.log"
   mkdir -p "$CARGO_TARGET_DIR/release"
   printf "ELF_MOCK_CLI_BYTES" > "$CARGO_TARGET_DIR/release/ferryx-cli"
   exit 0
@@ -853,6 +854,9 @@ fi
     assert.ok(existsSync(cliFile), "Standalone CLI binary must exist in output directory");
     assert.equal(readFileSync(cliFile, "utf8"), "ELF_MOCK_CLI_BYTES");
     assert.equal(existsSync(tarGzFile), false, "AppImage.tar.gz must NOT be created");
+    // The standalone Linux CLI must build without the desktop feature, so it links no GTK/WebKit.
+    const cargoBuildArgs = readFileSync(join(workspaceDir, "cargo-target", "cargo-build-args.log"), "utf8");
+    assert.match(cargoBuildArgs, /--release --no-default-features --bin ferryx-cli/);
     assert.match(runRes, /---BUILD_RESULT---/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });

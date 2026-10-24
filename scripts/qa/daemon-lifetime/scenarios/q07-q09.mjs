@@ -179,8 +179,14 @@ export async function stageGeneration(ctx, artifact, { deadlineMs = STAGE_TIMEOU
   return { exe, key: ctx.keys[artifact.name], present: appeared && await ctx.agent.call('exists', { file: exe }), waitedMs: Date.now() - startedAt };
 }
 
-/** One control RequestUpgrade from the current owner to artifact; asserts the Q08 contract. */
-async function upgradeStep(ctx, result, artifact, pair, tag, { guiDriven = false } = {}) {
+/**
+ * One control RequestUpgrade from the current owner to artifact; asserts the Q08 contract.
+ * recoverable (Q03b): the successor may also own through the recorded decision
+ * (authority-recovered) when the commit reply is lost, as on Linux where the predecessor retires
+ * before its CommitHandoverOk lands.
+ */
+export async function upgradeStep(ctx, result, artifact, pair, tag, { guiDriven = false, recoverable = false } = {}) {
+  const acceptRecovered = guiDriven || recoverable;
   // Q08's GUI-end round trips between A_B and B_C interrupt the pair's local counter and start a
   // QA_A counter instead (rerun2b: B_C local max 297); every step starts from fresh pair counters.
   await restartCounters(ctx, ctx.state.conn, pair);
@@ -225,12 +231,12 @@ async function upgradeStep(ctx, result, artifact, pair, tag, { guiDriven = false
   // its CommitHandoverOk; the candidate then owns through the recorded decision (authority-recovered,
   // rerun2h), the designed outcome of a lost reply. The predecessor-committed receipt follows the
   // same reply path, so it is required only when the candidate saw the reply.
-  const adopted = await ctx.agent.call('waitLog', { file: receiptFile(ctx.layout, AUTHORITY_STAGE), pattern: stagePattern(succ.pid, ownedStagePattern(guiDriven)), deadlineMs: 30_000 });
+  const adopted = await ctx.agent.call('waitLog', { file: receiptFile(ctx.layout, AUTHORITY_STAGE), pattern: stagePattern(succ.pid, ownedStagePattern(acceptRecovered)), deadlineMs: 30_000 });
   const stages = await readStages(ctx, authority.from);
   const inv = authorityInvariant(stages, succ.pid);
   await evidence(ctx, result, `${tag}-authority.json`, { operationId: authority.operationId, stages, inv });
-  assertion(result, `${tag}: candidate wrote ${guiDriven ? 'authority-adopted or authority-recovered' : 'authority-adopted'}`, Boolean(adopted.matched), adopted);
-  const commit = commitEvidence({ stages, predPid: pred.pid, succPid: succ.pid, guiDriven, ownedLine: adopted.matched });
+  assertion(result, `${tag}: candidate wrote ${acceptRecovered ? 'authority-adopted or authority-recovered' : 'authority-adopted'}`, Boolean(adopted.matched), adopted);
+  const commit = commitEvidence({ stages, predPid: pred.pid, succPid: succ.pid, guiDriven, recoverable, ownedLine: adopted.matched });
   assertion(result, `${tag}: ${commit.label}`, commit.ok, inv.stages);
   assertion(result, `${tag}: candidate stages before commit were sampled`, ['candidate-admitted', 'authority-validated', 'commit-sent'].every((s) => inv.candidatePreCommit.includes(s)), inv.candidatePreCommit);
   assertion(result, `${tag}: candidate accepted nothing on any inherited listener before commit`, inv.candidatePreCommit.length > 0 && inv.acceptedBeforeCommit.length === 0, inv.acceptedBeforeCommit);
@@ -325,9 +331,9 @@ export function ownedStagePattern(guiDriven) {
  * so when the reply was lost (the candidate recovered) the candidate must instead show that it
  * sent the commit and then recovered from the recorded decision.
  */
-export function commitEvidence({ stages, predPid, succPid, guiDriven, ownedLine }) {
+export function commitEvidence({ stages, predPid, succPid, guiDriven, recoverable = false, ownedLine }) {
   const by = (pid, stage) => stages.some((r) => r.producerPid === pid && r.stage === stage);
-  if (guiDriven && /authority-recovered/.test(ownedLine ?? '')) {
+  if ((guiDriven || recoverable) && /authority-recovered/.test(ownedLine ?? '')) {
     return { label: 'lost commit reply settled by the recorded decision (commit-sent then authority-recovered)', ok: ['commit-sent', 'authority-recovered'].every((s) => by(succPid, s)) };
   }
   const pred = guiDriven ? ['predecessor-committed'] : ['predecessor-prepared', 'predecessor-committed'];

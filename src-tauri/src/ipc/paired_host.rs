@@ -3,10 +3,11 @@ use crate::{
     daemon::client::DaemonClient,
     paired_host::{
         inventory::{HostView, MigrationReceipt},
-        service::{InventoryChangeEvent, MigrationRequest, PairRequest, Result},
+        service::{InventoryChangeEvent, MigrationRequest, PairRequest, RedeemGrantRequest, Result},
     },
 };
 use std::sync::Arc;
+#[cfg(feature = "desktop")]
 use tauri::{Emitter, State};
 
 pub const PAIRED_HOST_INVENTORY_CHANGED_EVENT: &str = "paired_host_inventory_changed";
@@ -31,6 +32,7 @@ pub struct PairedSessionActorIdentity {
     pub generation: Option<u64>,
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_retry_paired_session<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -71,6 +73,7 @@ pub async fn cmd_retry_paired_session<R: tauri::Runtime>(
     Ok(retry_res)
 }
 
+#[cfg(feature = "desktop")]
 pub fn emit_paired_host_inventory_changed<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     event: &InventoryChangeEvent,
@@ -78,6 +81,7 @@ pub fn emit_paired_host_inventory_changed<R: tauri::Runtime>(
     app.emit(PAIRED_HOST_INVENTORY_CHANGED_EVENT, event)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn paired_host_operation<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -106,6 +110,7 @@ pub async fn paired_host_operation<R: tauri::Runtime>(
     res
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn paired_host_list(daemon: State<'_, Arc<DaemonClient>>) -> Result<Vec<HostView>> {
     daemon.paired_host_list().await
@@ -128,6 +133,7 @@ pub async fn reachability_list_view(daemon: &DaemonClient) -> Result<PairedHostR
     })
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn paired_host_reachability_list(
     daemon: State<'_, Arc<DaemonClient>>,
@@ -152,6 +158,7 @@ pub async fn route_list_view(daemon: &DaemonClient) -> Result<PairedHostRouteLis
     })
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn paired_host_route_list(
     daemon: State<'_, Arc<DaemonClient>>,
@@ -159,6 +166,7 @@ pub async fn paired_host_route_list(
     route_list_view(&daemon).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn paired_host_pair<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -178,6 +186,7 @@ pub async fn paired_host_pair<R: tauri::Runtime>(
     Ok(host)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn paired_host_migrate_legacy<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
@@ -188,6 +197,38 @@ pub async fn paired_host_migrate_legacy<R: tauri::Runtime>(
     Ok(receipt)
 }
 
+#[cfg(feature = "desktop")]
+/// Redeems an account grant end-to-end encrypted with this client's own attach key.
+#[tauri::command]
+pub async fn paired_host_redeem_grant<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    daemon: State<'_, Arc<DaemonClient>>,
+    request: RedeemGrantRequest,
+) -> Result<HostView> {
+    let host = daemon.paired_host_redeem_grant(request).await?;
+    let _ = emit_paired_host_inventory_changed(
+        &app,
+        &InventoryChangeEvent {
+            r#type: "pair".into(),
+            host: Some(host.clone()),
+            host_id: Some(host.host_id.clone()),
+            generation: Some(host.generation.0.to_string()),
+        },
+    );
+    Ok(host)
+}
+
+#[cfg(feature = "desktop")]
+/// The public half of the key this client attaches with; the grant binds it. The private
+/// half never leaves the daemon.
+#[tauri::command]
+pub async fn paired_host_client_attach_public_key(
+    daemon: State<'_, Arc<DaemonClient>>,
+) -> Result<String> {
+    daemon.paired_host_client_attach_public_key().await
+}
+
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn paired_host_forget<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -209,6 +250,7 @@ pub async fn paired_host_forget<R: tauri::Runtime>(
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn paired_host_read(
     daemon: State<'_, Arc<DaemonClient>>,
@@ -217,6 +259,7 @@ pub async fn paired_host_read(
     daemon.paired_host_read(request).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn paired_host_capabilities(
     daemon: State<'_, Arc<DaemonClient>>,
@@ -231,6 +274,7 @@ pub struct RemoteClipboardImagePaste {
     pub byte_length: usize,
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_daemon_paste_clipboard_image<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -304,6 +348,7 @@ pub async fn cmd_daemon_paste_clipboard_image<R: tauri::Runtime>(
     }
 }
 
+#[cfg(feature = "desktop")]
 /// Fetches a file a paired-host terminal names into the local remote-files cache.
 ///
 /// `session_id` is the id the desktop UI holds: the local relayed proxy id
@@ -352,6 +397,7 @@ pub async fn cmd_paired_file_fetch<R: tauri::Runtime>(
 }
 
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn paired_host_attach_session(
     daemon: State<'_, Arc<DaemonClient>>,

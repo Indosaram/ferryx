@@ -435,13 +435,19 @@ pub(crate) fn log_native_switch_debug(entry: Value) {
         }
     }
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let persist = move || {
         let _guard = _guard;
         let file_name = switch_debug_file_for_event(&full_entry.event);
         if let Err(error) = append_switch_debug_entry(&std::env::temp_dir(), file_name, &full_entry) {
             tracing::warn!(?error, "Could not persist native switch debug entry");
         }
-    });
+    };
+    // Callers include threads outside any Tokio runtime, so the headless build uses a plain
+    // thread where the desktop build uses Tauri's runtime-independent blocking pool.
+    #[cfg(feature = "desktop")]
+    tauri::async_runtime::spawn_blocking(persist);
+    #[cfg(not(feature = "desktop"))]
+    std::thread::spawn(persist);
 }
 
 fn append_switch_debug_entry(
@@ -514,6 +520,7 @@ fn close_cached_switch_debug_files() {
     *SINK_FILES.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_switch_debug_log(mut entry: SwitchDebugEntry) -> Result<(), IpcError> {
     if !should_persist_event(&entry.event) {

@@ -2462,6 +2462,17 @@ const UP_USAGE: &str = "usage: ferryx-cli up [--key-stdin | --key-env] [--email 
 const SERVICE_USAGE: &str =
     "usage: ferryx-cli service <install|status|uninstall> [--json]";
 
+/// The `ferryx-cli --version` output line.
+pub fn cli_version_line() -> String {
+    format!("ferryx-cli {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// True when `ferryx-cli up` was asked for help (`--help`/`-h`).
+pub fn up_help_requested(args: &[String]) -> bool {
+    args.get(1).is_some_and(|arg| arg == "up")
+        && args.iter().skip(2).any(|arg| arg == "--help" || arg == "-h")
+}
+
 /// Where `ferryx-cli up` takes its install key from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpKeySource {
@@ -2869,6 +2880,10 @@ pub fn up_summary_exit_code(summary: &UpSummary, no_service: bool) -> i32 {
 
 /// Entry for `ferryx-cli up`: parses, runs, prints, and returns the process exit code.
 pub fn up_cli_main(args: &[String]) -> i32 {
+    if up_help_requested(args) {
+        println!("{UP_USAGE}");
+        return UP_EXIT_OK;
+    }
     let json = args.iter().skip(2).any(|arg| arg == "--json");
     let command = match parse_up_cli(args) {
         Ok(command) => command,
@@ -4009,6 +4024,19 @@ mod tests {
             "INSTALL_KEY_IN_ARGV"
         );
         assert!(parse_up_cli(["ferryx-cli", "account"]).is_err());
+    }
+
+    #[test]
+    fn up_help_is_recognized_and_version_line_names_the_binary() {
+        assert!(up_help_requested(&up_args(&["--help"])));
+        assert!(up_help_requested(&up_args(&["-h"])));
+        assert!(up_help_requested(&up_args(&["--json", "--help"])));
+        assert!(!up_help_requested(&up_args(&["--json"])));
+        assert!(!up_help_requested(&["ferryx-cli".to_string(), "--help".to_string()]));
+        assert_eq!(
+            cli_version_line(),
+            format!("ferryx-cli {}", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]

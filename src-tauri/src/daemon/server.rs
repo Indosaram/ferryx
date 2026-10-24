@@ -5374,6 +5374,15 @@ impl DaemonServer {
                             commit_latency_ms,
                             "Handover committed after adopting the transferred sessions"
                         );
+                        // QA fault (adoption todo 15): Q03b's failure case kills every adopted
+                        // child right after commit. Read only under local-split-qa + QA marker env.
+                        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                        if crate::daemon::qa_producers::kill_adopted_requested() {
+                            crate::daemon::qa_producers::kill_adopted_children(
+                                &self.terminal_service,
+                                &adopted_sessions,
+                            );
+                        }
                         // This successor now owns the sessions, so the next login must start its
                         // generation, not the retiring predecessor's. A GUI-free upgrade has no GUI
                         // that would register it, and the candidate job was started without login
@@ -5453,6 +5462,15 @@ impl DaemonServer {
                                 // The predecessor committed and is retiring with exit 0; take over as
                                 // the unit's main process exactly as the confirmed path does.
                                 crate::daemon::supervisor_linux::notify_main_pid_ready();
+                                // QA fault (adoption todo 15): the recovered path also makes this
+                                // successor the committed owner, so Q03b's fault applies here too.
+                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                if crate::daemon::qa_producers::kill_adopted_requested() {
+                                    crate::daemon::qa_producers::kill_adopted_children(
+                                        &self.terminal_service,
+                                        &adopted_sessions,
+                                    );
+                                }
                             } else {
                                 // Not Retired: the predecessor never closed its authority. Closing
                                 // these copies releases nothing it holds.
@@ -6992,6 +7010,21 @@ impl DaemonServer {
                     Ok(receipt) => DaemonResponse::PairedHostMigrateLegacyOk { receipt },
                     Err(error) => DaemonResponse::PairedHostError { error },
                 },
+                Ok(DaemonRequest::PairedHostRedeemGrant { request }) => match self.paired_hosts.redeem_grant(request).await {
+                    Ok(host) => DaemonResponse::PairedHostPairOk { host },
+                    Err(error) => DaemonResponse::PairedHostError { error },
+                },
+                Ok(DaemonRequest::PairedHostClientAttachKey) => match crate::ipc::run_blocking(|| {
+                    Ok(crate::paired_host::secure_http::client_attach_public_key())
+                }).await {
+                    Ok(Ok(public_key)) => DaemonResponse::PairedHostClientAttachKeyOk { public_key },
+                    Ok(Err(error)) => DaemonResponse::PairedHostError {
+                        error: crate::paired_host::service::ServiceError::new(error.code, "client attach identity unavailable"),
+                    },
+                    Err(_) => DaemonResponse::PairedHostError {
+                        error: crate::paired_host::service::ServiceError::unavailable(),
+                    },
+                },
                 Ok(DaemonRequest::PairedHostForget { host_id, expected_generation }) => match self.paired_hosts.forget(host_id, expected_generation).await {
                     Ok(()) => DaemonResponse::PairedHostForgetOk,
                     Err(error) => DaemonResponse::PairedHostError { error },
@@ -7006,6 +7039,7 @@ impl DaemonServer {
                         capabilities.push("pairedHostInventoryV1".into());
                         capabilities.push(crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY.into());
                         capabilities.push(crate::paired_host::route_view::PAIRED_HOST_ROUTE_CAPABILITY.into());
+                        capabilities.push("pairedHostE2EV1".into());
                     }
                     capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY.into());
                     #[cfg(unix)]

@@ -274,6 +274,7 @@ pub fn install_launcher(
     ))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_cli_launcher_status() -> Result<CliLauncherStatus, IpcError> {
     run_blocking(|| {
@@ -289,6 +290,7 @@ pub async fn cmd_cli_launcher_status() -> Result<CliLauncherStatus, IpcError> {
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_cli_launcher_install() -> Result<CliLauncherStatus, IpcError> {
     run_blocking(|| {

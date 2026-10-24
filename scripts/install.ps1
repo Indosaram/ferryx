@@ -21,6 +21,13 @@
 #                        (default: latest, must match ^[A-Za-z0-9._-]+$)
 #   FERRYX_INSTALL_KEY : install key (same as -Key)
 #
+# Every downloaded binary is checked against the SHA256SUMS of the same GitHub release
+# (FERRYX_VERSION, or the latest release); a source whose bytes do not match is skipped, and
+# the install fails when no source matches.
+#
+# Exit codes: 0 installed, 1 install failure, 2 usage error or unsupported architecture
+# (only windows/amd64 has a prebuilt ferryx-cli), otherwise the exit code of "ferryx-cli up".
+#
 # Windows PowerShell 5.1 compatible; ASCII only.
 
 param(
@@ -257,8 +264,8 @@ if ([string]::IsNullOrEmpty($rawArch)) {
     exit 1
 }
 if ($rawArch.ToUpperInvariant() -ne "AMD64") {
-    Write-FerryxError ('Unsupported CPU architecture ''{0}''. The Ferryx CLI is published for windows/amd64 only.' -f $rawArch)
-    exit 1
+    Write-FerryxError ('Windows {0} has no prebuilt ferryx-cli yet; build from source: https://github.com/Indosaram/ferryx/blob/main/CONTRIBUTING.md#build-prerequisites' -f $rawArch)
+    exit 2
 }
 $platformOs = "windows"
 $platformArch = "amd64"
@@ -270,14 +277,16 @@ $artifactName = "ferryx-cli-windows-amd64.exe"
 $primaryUrl = $FerryxOrigin + "/download/" + $artifactName
 $secondaryUrl = $FerryxOrigin + "/download/ferryx-cli"
 if ($FerryxVersion -eq "latest") {
-    $githubUrl = "https://github.com/Indosaram/ferryx/releases/latest/download/" + $artifactName
+    $releaseBaseUrl = "https://github.com/Indosaram/ferryx/releases/latest/download"
 } else {
-    $githubUrl = "https://github.com/Indosaram/ferryx/releases/download/" + $FerryxVersion + "/" + $artifactName
+    $releaseBaseUrl = "https://github.com/Indosaram/ferryx/releases/download/" + $FerryxVersion
 }
+$githubUrl = $releaseBaseUrl + "/" + $artifactName
 
 # 4. Temporary download location.
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ferryx-install-" + [System.Guid]::NewGuid().ToString("N"))
 $tempExe = Join-Path $tempDir "ferryx-cli.exe"
+$tempSums = Join-Path $tempDir "SHA256SUMS"
 
 try {
     try {
@@ -287,9 +296,42 @@ try {
         exit 1
     }
 
+    # 4a. Fetch the release checksums. Releases publish SHA256SUMS; older ones SHA256SUMS.txt.
+    Write-Host ("--> Downloading SHA256SUMS from " + $releaseBaseUrl + " ...")
+    $sumsFound = $false
+    foreach ($sumsName in @("SHA256SUMS", "SHA256SUMS.txt")) {
+        try {
+            Invoke-FerryxDownload -Url ($releaseBaseUrl + "/" + $sumsName) -Destination $tempSums
+        } catch {
+            Remove-Item -LiteralPath $tempSums -Force -ErrorAction SilentlyContinue
+            continue
+        }
+        if ((Test-Path -LiteralPath $tempSums -PathType Leaf) -and ((Get-Item -LiteralPath $tempSums).Length -gt 0)) {
+            $sumsFound = $true
+            break
+        }
+    }
+    if (-not $sumsFound) {
+        Write-FerryxError ("could not download SHA256SUMS from " + $releaseBaseUrl + "; refusing to install an unverified binary.")
+        exit 1
+    }
+    $expectedSha256 = $null
+    foreach ($line in (Get-Content -LiteralPath $tempSums)) {
+        $fields = $line.Trim() -split '\s+'
+        if ($fields.Count -ge 2 -and ($fields[1] -eq $artifactName -or $fields[1] -eq ("*" + $artifactName))) {
+            $expectedSha256 = $fields[0].ToLowerInvariant()
+            break
+        }
+    }
+    if ($null -eq $expectedSha256 -or $expectedSha256 -notmatch '^[0-9a-f]{64}$') {
+        Write-FerryxError ("SHA256SUMS from " + $releaseBaseUrl + " has no valid entry for " + $artifactName + ".")
+        exit 1
+    }
+
     # 5. Download, rejecting any source whose payload is not a Windows executable.
     Write-Host ("--> Downloading ferryx-cli for " + $platformOs + "/" + $platformArch + "...")
     $downloadSucceeded = $false
+    $checksumMismatch = $false
     foreach ($url in @($primaryUrl, $secondaryUrl, $githubUrl)) {
         Write-Host ("    Trying " + $url + " ...")
         try {
@@ -308,6 +350,13 @@ try {
             continue
         }
         if (Test-FerryxWindowsExecutable -Path $tempExe) {
+            $actualSha256 = (Get-FileHash -LiteralPath $tempExe -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualSha256 -ne $expectedSha256) {
+                Write-Host ("    Skipping: SHA256 mismatch (expected " + $expectedSha256 + ", got " + $actualSha256 + ")")
+                $checksumMismatch = $true
+                continue
+            }
+            Write-Host ("    SHA256 verified: " + $actualSha256)
             $downloadSucceeded = $true
             break
         }
@@ -315,6 +364,10 @@ try {
     }
 
     if (-not $downloadSucceeded) {
+        if ($checksumMismatch) {
+            Write-FerryxError ("no downloaded ferryx-cli matched the SHA256SUMS of the release (" + $artifactName + ").")
+            exit 1
+        }
         Write-FerryxError "Failed to download ferryx-cli from available endpoints."
         exit 1
     }

@@ -1,4 +1,4 @@
-use tauri::Url;
+use url::Url;
 
 pub const BROWSER_SESSION_CREATED_EVENT: &str = "browser_session_created";
 pub const BROWSER_OPEN_REQUESTED_EVENT: &str = "browser_open_requested";

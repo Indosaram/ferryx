@@ -21,6 +21,22 @@ export interface HostView {
 export interface MigrationReceipt { hostId: string; generation: string }
 export interface PairHostRequest { relayOrigin: string; pin: string; displayLabel: string }
 export interface LegacyCredentialRequest { relayOrigin: string; machineId: string; displayLabel: string; deviceToken: string }
+/** Account grant redeemed inside the daemon's own encrypted tunnel; the device key never leaves Rust. */
+export interface RedeemGrantRequest {
+  relayOrigin: string;
+  machineId: string;
+  displayLabel: string;
+  pairingToken: string;
+  machineAttachPublicKey: string;
+  enrollmentEpoch: string;
+  accountSessionToken: string;
+}
+export interface PairedHostCapabilities {
+  pairedHostInventoryV1: boolean;
+  pairedDaemonProxyV1: boolean;
+  /** The daemon redeems grants and carries relay traffic end-to-end encrypted. */
+  pairedHostE2EV1?: boolean;
+}
 
 export interface PairedHostError {
   code: string;
@@ -108,11 +124,14 @@ function sanitizeErrorDetails(value: unknown): Record<string, string> | undefine
 
 export interface PairedHostCommands {
   list(): Promise<HostView[]>;
-  capabilities(): Promise<{ pairedHostInventoryV1: boolean; pairedDaemonProxyV1: boolean }>;
+  capabilities(): Promise<PairedHostCapabilities>;
   pair(request: PairHostRequest): Promise<HostView>;
   forget(request: MigrationReceipt): Promise<void>;
   migrate(request: LegacyCredentialRequest): Promise<MigrationReceipt>;
   read(request: MigrationReceipt): Promise<HostView>;
+  /** Present only on daemons reporting pairedHostE2EV1. */
+  redeemGrant?(request: RedeemGrantRequest): Promise<HostView>;
+  clientAttachPublicKey?(): Promise<string>;
 }
 // No raw native exception crosses this boundary: it may contain request credentials.
 // Structured error fields {code, message, details, retryable} are sanitized and preserved.
@@ -129,11 +148,19 @@ async function command<T>(name: string, request?: object): Promise<T> {
 }
 export const nativePairedHostCommands: PairedHostCommands = {
   list: () => command("paired_host_list"),
-  capabilities: () => command("paired_host_capabilities"),
+  capabilities: async () => {
+    const answer = await command<PairedHostCapabilities>("paired_host_capabilities");
+    return { ...answer, pairedHostE2EV1: typeof answer.pairedHostE2EV1 === "boolean" ? answer.pairedHostE2EV1 : false };
+  },
   pair: request => command("paired_host_pair", request),
   forget: request => command("paired_host_forget", request),
   migrate: request => command("paired_host_migrate_legacy", request),
   read: request => command("paired_host_read", request),
+  redeemGrant: request => command("paired_host_redeem_grant", request),
+  clientAttachPublicKey: async () => {
+    const answer = await command<string | { publicKey: string }>("paired_host_client_attach_public_key");
+    return typeof answer === "string" ? answer : answer.publicKey;
+  },
 };
 function validGeneration(value: unknown): value is string {
   return typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 18446744073709551615n;

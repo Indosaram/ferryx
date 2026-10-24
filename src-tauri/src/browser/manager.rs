@@ -674,7 +674,7 @@ impl BrowserManager {
             bridge.popup_opens.remove(browser_id);
         }
         let removed = self.sessions.write().remove(browser_id);
-        #[cfg(target_os = "windows")]
+        #[cfg(all(feature = "desktop", target_os = "windows"))]
         if let Some(session) = removed.as_ref() {
             crate::browser::bridge::windows::forget_webview(&session.webview_label);
         }

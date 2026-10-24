@@ -144,7 +144,8 @@ it("routes shared-relay hosts with isolated credentials and fresh event tickets"
   await act(async () => { remoteHostStore.setActiveHost(remoteHostKey(relayOrigin, "machine-b")); });
   expect(first.close).toHaveBeenCalledOnce();
   expect(fetcher).toHaveBeenCalledWith("https://relay.example/host/machine-b/api/v1/workspace/state", {
-    headers: { Authorization: "Bearer machine-b-token" },
+    // Relay `/host/` requests carry the client build so the relay can count plaintext clients.
+    headers: { Authorization: "Bearer machine-b-token", "X-Ferryx-Client-Build": "dev" },
   });
   expect(EventSocket.instances.at(-1)?.url).toBe("wss://relay.example/host/machine-b/api/v1/events?ticket=machine-b-ticket");
   const restored = createRemoteHostStore().getState();

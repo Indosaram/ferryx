@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+#[cfg(feature = "desktop")]
 use tauri::ipc::{Channel, Response};
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 pub const TERMINAL_OUTPUT_EVENT: &str = "terminal_output";
@@ -37,6 +39,7 @@ pub struct TerminalReplayGapFields {
 }
 
 static CWD_CACHE: Mutex<Option<HashMap<String, (Instant, PathBuf)>>> = Mutex::new(None);
+#[cfg(feature = "desktop")]
 static TERMINAL_OUTPUT_CHANNEL: Mutex<Option<Channel<Response>>> = Mutex::new(None);
 
 pub fn get_cached_cwd(session_id: &str) -> Option<PathBuf> {
@@ -199,6 +202,7 @@ pub fn stop_managed_pump(session_id: &str) {
     crate::terminal::metrics::clear_pending_batch_read(session_id);
 }
 
+#[cfg(feature = "desktop")]
 pub fn start_managed_pump<R: Runtime>(
     session_id: String,
     app_handle: AppHandle<R>,
@@ -208,6 +212,7 @@ pub fn start_managed_pump<R: Runtime>(
     start_managed_pump_token(session_id, app_handle, attachment, token);
 }
 
+#[cfg(feature = "desktop")]
 pub fn start_managed_pump_token<R: Runtime>(
     session_id: String, app_handle: AppHandle<R>, attachment: DaemonAttachment, token: PumpToken,
 ) {
@@ -710,11 +715,13 @@ fn encode_terminal_output_frame(
     Some(frame)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn cmd_terminal_output_channel(channel: Channel<Response>) {
     *TERMINAL_OUTPUT_CHANNEL.lock() = Some(channel);
 }
 
+#[cfg(feature = "desktop")]
 fn flush_terminal_output<R: Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
@@ -774,6 +781,7 @@ fn flush_terminal_output<R: Runtime>(
     }
 }
 
+#[cfg(feature = "desktop")]
 fn emit_terminal_replay_gap<R: Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
@@ -838,6 +846,7 @@ fn emit_terminal_replay_gap<R: Runtime>(
     }
 }
 
+#[cfg(feature = "desktop")]
 fn emit_terminal_exit<R: Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
@@ -4049,6 +4058,7 @@ pub fn start_qa_split_watchers(daemon_client: std::sync::Arc<DaemonClient>) {
     qa_split_producers::start_watchers(daemon_client);
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_spawn_operation(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -4142,6 +4152,7 @@ pub async fn cmd_terminal_spawn_operation(
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_spawn<R: Runtime>(
     app: AppHandle<R>,
@@ -4975,6 +4986,7 @@ pub struct SpawnTerminalBatchEntry {
     pub error: Option<String>,
 }
 
+#[cfg(feature = "desktop")]
 /// Batch spawn for workspace restore/recovery: collapses N per-session spawn
 /// invocations into one IPC round trip. Each entry spawns independently and
 /// reports its own failure without aborting the rest of the batch.
@@ -5016,6 +5028,7 @@ fn hub_attach_retry_deadline() -> std::time::Duration {
     std::time::Duration::from_secs(10)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_attach<R: Runtime>(
     app: AppHandle<R>,
@@ -5101,6 +5114,7 @@ pub async fn cmd_terminal_attach<R: Runtime>(
     })?
 }
 
+#[cfg(feature = "desktop")]
 async fn terminal_attach<R: Runtime>(
     app: AppHandle<R>,
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5223,6 +5237,7 @@ async fn terminal_attach<R: Runtime>(
     Ok(resp)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_history_snapshot(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5234,6 +5249,7 @@ pub async fn cmd_terminal_history_snapshot(
     Ok(history)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_describe(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5242,6 +5258,7 @@ pub async fn cmd_terminal_describe(
     daemon_client.describe_session(&session_id).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_get_cwd(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5387,6 +5404,7 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_write(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5405,6 +5423,7 @@ pub async fn cmd_terminal_write(
     result
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_resize(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5415,6 +5434,7 @@ pub async fn cmd_terminal_resize(
     daemon_client.resize_terminal(&session_id, cols, rows).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_remote_write(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5434,6 +5454,7 @@ pub async fn cmd_terminal_remote_write(
     result
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_remote_resize(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5463,6 +5484,7 @@ pub(crate) fn remote_control_result(
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_signal(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5474,6 +5496,7 @@ pub async fn cmd_terminal_signal(
         .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_remote_status(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5482,6 +5505,7 @@ pub async fn cmd_terminal_remote_status(
     daemon_client.remote_session_status(&session_id).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_remote_retry(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5490,6 +5514,7 @@ pub async fn cmd_terminal_remote_retry(
     daemon_client.retry_remote_session(&session_id).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_detach(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5499,6 +5524,7 @@ pub async fn cmd_terminal_detach(
     daemon_client.detach_terminal(&session_id).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_close(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5508,6 +5534,7 @@ pub async fn cmd_terminal_close(
     daemon_client.close_terminal(&session_id).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_hibernate(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5517,6 +5544,7 @@ pub async fn cmd_terminal_hibernate(
     daemon_client.hibernate_terminal(&session_id).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_suspend(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5525,6 +5553,7 @@ pub async fn cmd_terminal_suspend(
     daemon_client.suspend_terminal(&session_id).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_resume(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -5533,6 +5562,7 @@ pub async fn cmd_terminal_resume(
     daemon_client.resume_terminal(&session_id).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_terminal_list(
     daemon_client: State<'_, Arc<DaemonClient>>,

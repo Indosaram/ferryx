@@ -16,7 +16,9 @@ use crate::{
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
-use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::tungstenite::Message;
+#[cfg(feature = "local-split-qa")]
+use {crate::paired_host::secure_http::PairedStream, tokio_tungstenite::MaybeTlsStream};
 type Result<T> = std::result::Result<T, ClientError>;
 /// Bound on one relay->direct upgrade. Input queued in the owner mailbox while
 /// it runs must still be answered well inside the 30s operation deadline.
@@ -35,7 +37,7 @@ pub struct Descriptor {
     pub after_sequence: Option<Epoch>,
 }
 pub struct Transport {
-    pub(crate) socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    pub(crate) socket: crate::paired_host::secure_http::PairedSocket,
     pub(crate) lease: CredentialLease,
     /// Direct-route epoch this socket actually rides; `None` on the relay.
     pub(crate) direct_epoch: Option<u64>,
@@ -332,8 +334,11 @@ impl Proxy {
     pub(crate) fn qa_route_receipt(&self) -> std::result::Result<PairedRouteReceipt, &'static str> {
         let transport = self.transport.as_ref().ok_or("OWNER_UNAVAILABLE")?;
         let peer = match transport.socket.get_ref() {
-            MaybeTlsStream::Plain(socket) => socket.peer_addr(),
-            MaybeTlsStream::Rustls(socket) => socket.get_ref().0.peer_addr(),
+            MaybeTlsStream::Plain(PairedStream::Net(socket)) => socket.peer_addr(),
+            MaybeTlsStream::Rustls(socket) => match &socket.get_ref().0 {
+                PairedStream::Net(socket) => socket.peer_addr(),
+                PairedStream::Tunnel(_) => return Err("QA_LOOPBACK_REQUIRED"),
+            },
             _ => return Err("QA_LOOPBACK_REQUIRED"),
         }.map_err(|_| "OWNER_UNAVAILABLE")?;
         Ok(PairedRouteReceipt {
@@ -350,8 +355,11 @@ impl Proxy {
     pub(crate) fn qa_drop_loopback_transport(&mut self) -> std::result::Result<(), &'static str> {
         let transport = self.transport.as_ref().ok_or("OWNER_UNAVAILABLE")?;
         let peer = match transport.socket.get_ref() {
-            MaybeTlsStream::Plain(socket) => socket.peer_addr(),
-            MaybeTlsStream::Rustls(socket) => socket.get_ref().0.peer_addr(),
+            MaybeTlsStream::Plain(PairedStream::Net(socket)) => socket.peer_addr(),
+            MaybeTlsStream::Rustls(socket) => match &socket.get_ref().0 {
+                PairedStream::Net(socket) => socket.peer_addr(),
+                PairedStream::Tunnel(_) => return Err("QA_LOOPBACK_REQUIRED"),
+            },
             _ => return Err("QA_LOOPBACK_REQUIRED"),
         }.map_err(|_| "OWNER_UNAVAILABLE")?;
         if !peer.ip().is_loopback() { return Err("QA_LOOPBACK_REQUIRED"); }

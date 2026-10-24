@@ -81,7 +81,7 @@ impl Drop for LiveStream {
 
 /// Aborts the journal watcher however this stream ends, including when the future
 /// is dropped by device revocation rather than returning.
-struct WatcherGuard(tauri::async_runtime::JoinHandle<()>);
+struct WatcherGuard(tokio::task::JoinHandle<()>);
 impl Drop for WatcherGuard {
     fn drop(&mut self) {
         self.0.abort();

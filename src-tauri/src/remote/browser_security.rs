@@ -5,7 +5,7 @@ use crate::remote::auth::DevicePermission;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tauri::Url;
+use url::Url;
 
 pub const MAX_EVAL_RESULT_BYTES: usize = 65_536; // 64 KiB UTF-8
 pub const MAX_REQUEST_WIRE_BYTES: usize = 64 * 1024;

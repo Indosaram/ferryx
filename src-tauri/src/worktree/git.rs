@@ -1320,7 +1320,7 @@ pub fn select_project_remote(remotes: &str) -> Option<String> {
 
 fn is_hosted_git_remote(remote: &str) -> bool {
     if remote.contains("://") {
-        return tauri::Url::parse(remote).is_ok_and(|url| {
+        return url::Url::parse(remote).is_ok_and(|url| {
             matches!(url.scheme(), "ssh" | "git" | "https" | "http")
                 && url.host_str().is_some()
                 && !url.path().trim_matches('/').is_empty()
