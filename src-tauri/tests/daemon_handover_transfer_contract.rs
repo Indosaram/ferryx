@@ -1690,3 +1690,309 @@ async fn an_upgrade_binary_request_hands_every_session_to_the_new_daemon() {
     }
 }
 
+
+/// The delivery shortfall a lossy predecessor presents to the successor's commit verdict.
+#[derive(Debug, Clone, Copy)]
+enum DeliveryShortfall {
+    /// Offers 2, delivers 1, reports no owned count (an older predecessor): only the
+    /// offered/accepted check can refuse the commit.
+    Offered,
+    /// Offers 1, delivers 1, owned 2: offered/accepted agree, so only the owned/accepted check
+    /// sees the session that never travelled.
+    Owned,
+}
+
+#[tokio::test]
+async fn a_successor_that_receives_fewer_sessions_than_offered_aborts_and_the_predecessor_keeps_them() {
+    run_delivery_shortfall_case(DeliveryShortfall::Offered).await;
+}
+
+#[tokio::test]
+async fn a_successor_that_receives_fewer_sessions_than_owned_aborts_and_the_predecessor_keeps_them() {
+    run_delivery_shortfall_case(DeliveryShortfall::Owned).await;
+}
+
+type UpstreamLines = tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>;
+
+/// Sends one request line to the real predecessor and returns its one-line answer.
+async fn forward_line(
+    up_write: &mut tokio::net::unix::OwnedWriteHalf,
+    up_lines: &mut UpstreamLines,
+    line: &str,
+) -> String {
+    up_write.write_all(format!("{line}\n").as_bytes()).await.expect("forward to predecessor");
+    up_write.flush().await.expect("flush to predecessor");
+    up_lines
+        .next_line()
+        .await
+        .expect("read predecessor answer")
+        .expect("predecessor closed without answering")
+}
+
+/// TransferSessions through the lossy forwarder: the real predecessor exports every session to
+/// the forwarder, which delivers only one of them to the successor and then reports the
+/// shortfall's offered/owned counts.
+async fn deliver_one_session_short(
+    up_write: &mut tokio::net::unix::OwnedWriteHalf,
+    up_lines: &mut UpstreamLines,
+    runtime: &Path,
+    successor_socket: PathBuf,
+    shortfall: DeliveryShortfall,
+) -> String {
+    use ferryx_lib::daemon::handover_socket::{
+        connect_handover_socket, recv_session_with_owner, send_session, send_transfer_done,
+        HandoverSocketListener,
+    };
+    let own_path = runtime.join("handover-lossy-forwarder.sock");
+    let listener = HandoverSocketListener::bind(&own_path).expect("bind forwarder handover socket");
+    let drain = tokio::task::spawn_blocking(move || {
+        let (stream, _creds) = listener.accept().expect("predecessor connects to the forwarder");
+        let mut exports = Vec::new();
+        while let Some(frame) = recv_session_with_owner(&stream).expect("receive predecessor export") {
+            exports.push(frame);
+        }
+        (stream, exports)
+    });
+    let request = DaemonRequest::TransferSessions {
+        handover_socket_path: own_path.to_string_lossy().into_owned(),
+    };
+    let answer = forward_line(up_write, up_lines, &serde_json::to_string(&request).unwrap()).await;
+    match serde_json::from_str::<DaemonResponse>(&answer).expect("TransferSessions answer") {
+        DaemonResponse::TransferSessionsOk { transferred_count: 2, requested_count: 2 } => {}
+        other => panic!("the predecessor must export both sessions to the forwarder: {other:?}"),
+    }
+    let (predecessor_stream, mut exports) = drain.await.expect("drain worker");
+    assert_eq!(exports.len(), 2, "the forwarder must hold both exports");
+    // The withheld export only holds a duplicate of the master fd; the predecessor keeps its own.
+    let withheld = exports.pop().expect("withheld export");
+    tokio::task::spawn_blocking(move || {
+        const TRANSFER_ID: &str = "00000000-0000-4000-8000-00000000d0d0";
+        let (stream, _creds) =
+            connect_handover_socket(&successor_socket).expect("connect the successor's handover socket");
+        let mut seq = 1;
+        for (export, owner) in exports {
+            send_session(&stream, TRANSFER_ID, seq, export, owner).expect("deliver one session");
+            seq += 1;
+        }
+        send_transfer_done(&stream, TRANSFER_ID, seq).expect("send TRANSFER_DONE");
+    })
+    .await
+    .expect("delivery worker");
+    drop(withheld);
+    drop(predecessor_stream);
+    let (transferred_count, requested_count) = match shortfall {
+        DeliveryShortfall::Offered => (2, 0),
+        DeliveryShortfall::Owned => (1, 2),
+    };
+    serde_json::to_string(&DaemonResponse::TransferSessionsOk { transferred_count, requested_count }).unwrap()
+}
+
+/// One successor connection to the lossy forwarder. Every request is relayed to the real
+/// predecessor's legacy socket except TransferSessions (delivered short) and CommitHandover,
+/// which is refused: committing would retire the predecessor and kill the withheld session.
+async fn forward_lossy_connection(
+    stream: UnixStream,
+    predecessor_legacy: PathBuf,
+    runtime: PathBuf,
+    shortfall: DeliveryShortfall,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    let upstream = UnixStream::connect(&predecessor_legacy).await.expect("connect predecessor legacy socket");
+    let (up_read, mut up_write) = upstream.into_split();
+    let mut up_lines = BufReader::new(up_read).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let request: DaemonRequest = serde_json::from_str(&line).expect("successor request");
+        let reply = match request {
+            DaemonRequest::TransferSessions { handover_socket_path } => {
+                seen.lock().unwrap().push("transferSessions".into());
+                deliver_one_session_short(
+                    &mut up_write,
+                    &mut up_lines,
+                    &runtime,
+                    PathBuf::from(handover_socket_path),
+                    shortfall,
+                )
+                .await
+            }
+            DaemonRequest::CommitHandover { .. } => {
+                seen.lock().unwrap().push("commitHandover".into());
+                serde_json::to_string(&DaemonResponse::Error {
+                    message: "lossy forwarder never commits".into(),
+                    code: None,
+                    details: None,
+                })
+                .unwrap()
+            }
+            other => {
+                if matches!(other, DaemonRequest::AbortHandover) {
+                    seen.lock().unwrap().push("abortHandover".into());
+                }
+                forward_line(&mut up_write, &mut up_lines, &line).await
+            }
+        };
+        if write.write_all(format!("{reply}\n").as_bytes()).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// The successor's delivery verdict (server.rs handover_delivery_verdict_owned) is the only gate
+/// between a lossy transfer and a commit that retires the predecessor. A predecessor that
+/// delivers fewer sessions than it offered or owned must be refused before CommitHandover, and
+/// every session must stay readable and writable on the predecessor.
+async fn run_delivery_shortfall_case(shortfall: DeliveryShortfall) {
+    use std::sync::{Arc, Mutex};
+    let mut daemons = PrivateDaemons::with_v5_flag(None);
+    let socket_path = daemons.socket();
+    let d1 = daemons.launch(None).await;
+    let canonical_repo = daemons.repo();
+    let pid_d1 = daemons.pid(d1);
+
+    let mut client1 = TestDaemonClient::connect(&socket_path, pid_d1)
+        .await
+        .expect("Client connect to D1");
+    let ws_id = "ws-delivery-verdict";
+    client1
+        .register_workspace(ws_id, &canonical_repo)
+        .await
+        .expect("register ws on D1");
+
+    let mut sessions = Vec::new();
+    for i in 0..2 {
+        let session_id = client1
+            .spawn_with_shell(
+                &format!("req-verdict-s{i}"),
+                ws_id,
+                80,
+                24,
+                Some("/bin/sh"),
+                Some(&canonical_repo),
+            )
+            .await
+            .expect("spawn shell on D1");
+        let mut attach = TestAttachStream::attach(&socket_path, pid_d1, &session_id, None)
+            .await
+            .expect("attach to session on D1");
+        client1.write_input(&session_id, b"stty -echo\n").await.expect("disable echo");
+        client1
+            .write_input(&session_id, b"printf 'V5_CHILD_PID=%s\\n' \"$$\"\n")
+            .await
+            .expect("report child pid");
+        let child_pid = attach
+            .await_child_pid(Duration::from_secs(10))
+            .await
+            .expect("shell must report its pid");
+        sessions.push((session_id, child_pid));
+    }
+    let mut before = client1.list_sessions().await.expect("list_sessions before");
+    before.sort();
+
+    let legacy = match client1
+        .send_request(&DaemonRequest::PrepareHandover)
+        .await
+        .expect("PrepareHandover on D1")
+    {
+        DaemonResponse::PrepareHandoverOk { legacy_socket_path, active_sessions } => {
+            for (session_id, _) in &sessions {
+                assert!(active_sessions.contains(session_id), "active_sessions must include {session_id}");
+            }
+            PathBuf::from(legacy_socket_path)
+        }
+        other => panic!("Expected PrepareHandoverOk, got {other:?}"),
+    };
+
+    let runtime = daemons.root.path().join("runtime");
+    let forwarder_path = runtime.join("legacy-lossy-forwarder.sock");
+    let forwarder_listener =
+        tokio::net::UnixListener::bind(&forwarder_path).expect("bind lossy forwarder");
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let forwarder = {
+        let (seen, runtime) = (Arc::clone(&seen), runtime.clone());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = forwarder_listener.accept().await {
+                held.push(tokio::spawn(forward_lossy_connection(
+                    stream,
+                    legacy.clone(),
+                    runtime.clone(),
+                    shortfall,
+                    Arc::clone(&seen),
+                )));
+            }
+        })
+    };
+
+    let mut successor = daemons
+        .command()
+        .arg("--handover-from")
+        .arg(&forwarder_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn successor");
+    let successor_pid = successor.id();
+    match timeout(DAEMON_READY_BUDGET, tokio::task::spawn_blocking(move || successor.wait())).await {
+        Ok(waited) => {
+            let _status = waited.expect("successor wait worker").expect("wait for successor");
+        }
+        Err(_) => {
+            // SAFETY: signalling the successor this test spawned.
+            unsafe { libc::kill(successor_pid as i32, libc::SIGKILL) };
+            panic!("the successor never settled the lossy handover");
+        }
+    }
+    forwarder.abort();
+
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen.iter().any(|s| s == "transferSessions"), "the successor must reach the transfer: {seen:?}");
+    assert!(
+        !seen.iter().any(|s| s == "commitHandover"),
+        "the delivery verdict must stop the successor before CommitHandover ({shortfall:?}): {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|s| s == "abortHandover"),
+        "the successor must abort the handover so the predecessor resumes: {seen:?}"
+    );
+    let log = std::fs::read_to_string(daemons.root.path().join("data/logs/daemon.log")).unwrap_or_default();
+    let verdict = match shortfall {
+        DeliveryShortfall::Offered => "predecessor offered 2 session(s) but delivered 1",
+        DeliveryShortfall::Owned => "predecessor owned 2 session(s) but only 1 survived",
+    };
+    assert!(log.contains(verdict), "the abort must come from the delivery verdict ({verdict}); log:\n{log}");
+
+    // Every predecessor session stays readable and writable on D1.
+    let mut client1 = TestDaemonClient::connect(&socket_path, pid_d1)
+        .await
+        .expect("D1 still owns the public socket");
+    let mut after = client1.list_sessions().await.expect("list_sessions after abort");
+    after.sort();
+    assert_eq!(before, after, "the predecessor must keep every session");
+    for (session_id, child_pid) in &sessions {
+        assert!(process_is_alive(*child_pid), "session child {child_pid} must survive the refused handover");
+        let described = client1.describe_session(session_id).await.expect("describe on D1");
+        assert!(described.running, "{session_id} must still run on D1: {described:?}");
+        let mut attach = TestAttachStream::attach(&socket_path, pid_d1, session_id, None)
+            .await
+            .expect("session readable on D1 after the refused handover");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let split = nonce / 2;
+        let rest = nonce - split;
+        let marker = format!("VERDICT_KEPT_{split}_{rest}");
+        client1
+            .write_input(
+                session_id,
+                format!("printf 'VERDICT_%s_%s\\n' 'KEPT_{split}' '{rest}'\n").as_bytes(),
+            )
+            .await
+            .expect("session writable on D1 after the refused handover");
+        attach
+            .await_pattern_in_history_or_stream(&marker, Duration::from_secs(10))
+            .await
+            .expect("D1 must execute input after the refused handover");
+    }
+}
