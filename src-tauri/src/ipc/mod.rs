@@ -65,6 +65,7 @@ pub mod supervisor;
 #[cfg(feature = "desktop")]
 pub mod system_resources;
 pub mod terminal;
+#[cfg(feature = "desktop")]
 pub mod terminal_grid;
 #[cfg(test)]
 pub mod pane_liveness_contract;
@@ -126,6 +127,7 @@ pub use remote_auto_trust::*;
 #[cfg(feature = "desktop")]
 pub use session::*;
 pub use terminal::*;
+#[cfg(feature = "desktop")]
 pub use terminal_grid::*;
 pub use worktree::*;
 #[cfg(feature = "desktop")]
