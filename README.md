@@ -34,14 +34,16 @@ ones to you. Native Rust on Tauri v2 with a libghostty terminal core; no Electro
 | **Windows** | Installer (x64), not code-signed; Store version pending certification | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
 | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
-| **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64) | [`install.sh`](https://relay.ferryx.dev/install.sh) (`curl -fsSL https://relay.ferryx.dev/install.sh \| bash`) |
+| **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64 only; arm64: [build from source](CONTRIBUTING.md#build-prerequisites)) | [`install.sh`](https://relay.ferryx.dev/install.sh) (`curl -fsSL https://relay.ferryx.dev/install.sh \| bash`) |
 
 The macOS, Windows, and Linux links resolve against the latest release. Local release assembly
 stages the headless `ferryx-cli` beside the Linux AppImage and `.deb` (as
 `ferryx-cli-linux-amd64`) and, when the universal macOS CLI is present, as
 `ferryx-cli-darwin-universal`, so the one-line installer above resolves a current artifact when
-the release publishes one and otherwise fails closed. Verify downloads with the `SHA256SUMS.txt`
-published alongside the binaries:
+the release publishes one and otherwise fails closed. No prebuilt `ferryx-cli` exists for Linux
+arm64; the installer exits with code 2 there and points to the source build. The installers
+check the downloaded `ferryx-cli` against the release's `SHA256SUMS` and refuse a mismatch.
+Verify other downloads with the checksums published alongside the binaries:
 
 ```bash
 sha256sum -c SHA256SUMS.txt
