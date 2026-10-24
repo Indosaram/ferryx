@@ -647,6 +647,10 @@ fn classify_content_type(header: Option<&reqwest::header::HeaderValue>) -> &'sta
 }
 
 fn map_ticket_error(status: reqwest::StatusCode, bytes: &[u8]) -> ClientError {
+    // The relay refuses plaintext (`E2E_REQUIRED`): this host must be re-paired.
+    if status.as_u16() == 426 {
+        return ClientError::local("REPAIR_REQUIRED");
+    }
     if let Ok(envelope) = serde_json::from_slice::<m::ErrorEnvelope>(bytes) {
         let mut error = project_remote_error(envelope.error);
         if !error.details.contains_key("status") {
@@ -755,6 +759,10 @@ fn map_operation_http_error(
     relay_stage: Option<&str>,
     bytes: &[u8],
 ) -> ClientError {
+    // The relay refuses plaintext (`E2E_REQUIRED`): this host must be re-paired.
+    if status.as_u16() == 426 {
+        return ClientError::local("REPAIR_REQUIRED");
+    }
     if let Ok(envelope) = serde_json::from_slice::<m::ErrorEnvelope>(bytes) {
         let error = project_remote_error(envelope.error);
         return ClientError {
@@ -810,10 +818,26 @@ fn map_operation_http_error(
 /// A live authenticated DAG stream. Holding the lease keeps the stream bound to the
 /// generation that authorized it: a forget or re-pair cancels it.
 pub struct PairedDagStream {
-    pub socket: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    pub socket: super::secure_http::PairedSocket,
     pub lease: CredentialLease,
+}
+
+/// `/api/v1/{segments}?{query}` exactly as the gateway sees it, percent-encoded the same
+/// way the network path encodes it.
+fn gateway_path(segments: &[String], query: &[(String, String)]) -> Result<String> {
+    let mut url = Url::parse("http://localhost/").map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+    url.path_segments_mut()
+        .map_err(|_| ClientError::local("INVALID_REQUEST"))?
+        .pop_if_empty()
+        .extend(segments.iter().map(String::as_str));
+    if !query.is_empty() {
+        url.query_pairs_mut()
+            .extend_pairs(query.iter().map(|(k, v)| (k, v)));
+    }
+    Ok(match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_owned(),
+    })
 }
 
 pub struct MachineClient {
@@ -965,13 +989,14 @@ impl MachineClient {
         query: &[(String, String)],
         ticket_target: &str,
         max_frame: usize,
-    ) -> Result<(
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        Option<u64>,
-    )> {
+    ) -> Result<(super::secure_http::PairedSocket, Option<u64>)> {
         let base = super::direct_client::request_base(host)?;
+        if base.direct_epoch.is_none() {
+            return self
+                .open_relay_socket(host, lease, &base.url, segments, query, ticket_target, max_frame)
+                .await
+                .map(|socket| (socket, None));
+        }
         let first = self
             .open_socket_at(&base.url, lease, segments, query, ticket_target, max_frame)
             .await;
@@ -980,11 +1005,61 @@ impl MachineClient {
                 super::direct_client::report_direct_loss(host, epoch);
                 let relay = Url::parse(&crate::remote::relay_client::live_relay_url(&host.host_id))
                     .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-                self.open_socket_at(&relay, lease, segments, query, ticket_target, max_frame)
+                self.open_relay_socket(host, lease, &relay, segments, query, ticket_target, max_frame)
                     .await
                     .map(|socket| (socket, None))
             }
             (result, epoch) => result.map(|socket| (socket, epoch)),
+        }
+    }
+
+    /// A relay socket: end-to-end encrypted when this generation was paired with the
+    /// machine's attach key (the bearer travels inside the tunnel, no ticket), else the
+    /// legacy plaintext relay path with a one-time `REPAIR_REQUIRED` warning.
+    #[allow(clippy::too_many_arguments)]
+    async fn open_relay_socket(
+        &self,
+        host: &HostView,
+        lease: &CredentialLease,
+        relay: &Url,
+        segments: &[String],
+        query: &[(String, String)],
+        ticket_target: &str,
+        max_frame: usize,
+    ) -> Result<super::secure_http::PairedSocket> {
+        let Some(attach) = lease.attach() else {
+            super::secure_http::warn_repair_required(&host.host_id, lease.generation().0);
+            return self
+                .open_socket_at(relay, lease, segments, query, ticket_target, max_frame)
+                .await;
+        };
+        let path = gateway_path(segments, query)?;
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(max_frame))
+            .max_frame_size(Some(max_frame));
+        let bearer = lease.token()?.to_owned();
+        let relay_origin = crate::remote::relay_client::live_relay_url(&host.relay_origin);
+        let target = super::secure_http::SecureTarget {
+            http: &self.http,
+            host_id: &host.host_id,
+            generation: lease.generation().0,
+            relay_origin: &relay_origin,
+            machine_id: &host.machine_id,
+            attach,
+            bearer: &bearer,
+        };
+        let mut cancelled = lease.cancellation();
+        let result = tokio::select! { biased;
+            _ = cancelled.changed() => Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
+            result = super::secure_http::open_secure_websocket(&target, &path, config) => result,
+        };
+        match result {
+            Err(error) if error.code == "E2E_UNSUPPORTED" => {
+                super::secure_http::warn_e2e_unsupported(&host.host_id, lease.generation().0);
+                self.open_socket_at(relay, lease, segments, query, ticket_target, max_frame)
+                    .await
+            }
+            other => other,
         }
     }
 
@@ -996,11 +1071,7 @@ impl MachineClient {
         query: &[(String, String)],
         ticket_target: &str,
         max_frame: usize,
-    ) -> Result<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    > {
+    ) -> Result<super::secure_http::PairedSocket> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut url = base.clone();
         url.path_segments_mut()
@@ -1025,13 +1096,21 @@ impl MachineClient {
                 .parse()
                 .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
         );
+        if is_relay_transport(base) {
+            request.headers_mut().insert(
+                super::secure_http::CLIENT_BUILD_HEADER,
+                tokio_tungstenite::tungstenite::http::HeaderValue::from_static(
+                    super::secure_http::CLIENT_BUILD,
+                ),
+            );
+        }
         let mut cancelled = lease.cancellation();
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(Some(max_frame))
             .max_frame_size(Some(max_frame));
-        let (socket, _) = tokio::select! { biased;
+        let socket = tokio::select! { biased;
             _ = cancelled.changed() => return Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
-            result = tokio::time::timeout(Duration::from_secs(30), tokio_tungstenite::connect_async_with_config(request, Some(config), true)) =>
+            result = tokio::time::timeout(Duration::from_secs(30), super::secure_http::connect_net_websocket(request, config)) =>
                 result.map_err(|_| ClientError::local("TIMEOUT"))?.map_err(|e| {
                     tracing::error!("Failed to connect to paired host websocket: {:?}", e);
                     ClientError::local("HOST_UNAVAILABLE")
@@ -1055,12 +1134,19 @@ impl MachineClient {
             .map_err(|_| ClientError::local("INVALID_REQUEST"))?
             .extend(["api", "v1", "socket-ticket"]);
         let body = serde_json::json!({ "target": target }).to_string();
-        let response = self
+        let mut request = self
             .http
             .post(url)
             .bearer_auth(lease.token()?)
             .header("content-type", "application/json")
-            .body(body)
+            .body(body);
+        if is_relay {
+            request = request.header(
+                super::secure_http::CLIENT_BUILD_HEADER,
+                super::secure_http::CLIENT_BUILD,
+            );
+        }
+        let response = request
             .send()
             .await
             .map_err(|error| {
@@ -1142,6 +1228,9 @@ impl MachineClient {
         directory: bool,
     ) -> Result<(Vec<u8>, Option<String>)> {
         let base = super::direct_client::request_base(host)?;
+        if base.direct_epoch.is_none() {
+            return self.http_relay(host, base.url, lease, route, directory).await;
+        }
         let first = self.http_at(base.url, lease, route, directory).await;
         match (first, base.direct_epoch) {
             (Err(error), Some(epoch)) if super::direct_client::is_transport_failure(&error) => {
@@ -1151,10 +1240,113 @@ impl MachineClient {
                 }
                 let relay = Url::parse(&crate::remote::relay_client::live_relay_url(&host.host_id))
                     .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-                self.http_at(relay, lease, route, directory).await
+                self.http_relay(host, relay, lease, route, directory).await
             }
             (result, _) => result,
         }
+    }
+
+    /// A relay request: through the host's shared end-to-end encrypted session when this
+    /// generation carries the machine attach key, else the legacy plaintext relay path.
+    async fn http_relay(
+        &self,
+        host: &HostView,
+        relay: Url,
+        lease: &CredentialLease,
+        route: &Route,
+        directory: bool,
+    ) -> Result<(Vec<u8>, Option<String>)> {
+        match lease.attach() {
+            Some(attach) => match self.http_secure(host, attach, lease, route, directory).await {
+                Err(error) if error.code == "E2E_UNSUPPORTED" => {
+                    super::secure_http::warn_e2e_unsupported(&host.host_id, lease.generation().0);
+                    self.http_at(relay, lease, route, directory).await
+                }
+                other => other,
+            },
+            None => {
+                super::secure_http::warn_repair_required(&host.host_id, lease.generation().0);
+                self.http_at(relay, lease, route, directory).await
+            }
+        }
+    }
+
+    /// The same request, status, size, content-type, rotation and error handling as
+    /// [`Self::http_at`], carried inside the encrypted tunnel to the machine's gateway.
+    async fn http_secure(
+        &self,
+        host: &HostView,
+        attach: &super::inventory::HostAttach,
+        lease: &CredentialLease,
+        route: &Route,
+        directory: bool,
+    ) -> Result<(Vec<u8>, Option<String>)> {
+        let mut segments = vec!["api".to_owned(), "v1".to_owned()];
+        segments.extend(route.segments.iter().cloned());
+        let path = gateway_path(&segments, &route.query)?;
+        let bearer = lease.token()?.to_owned();
+        let mut headers = vec![
+            ("Authorization", format!("Bearer {bearer}")),
+            ("Accept", "application/json".to_owned()),
+            ("X-Ferryx-Client-Build", super::secure_http::CLIENT_BUILD.to_owned()),
+        ];
+        if route.body.is_some() {
+            headers.push(("Content-Type", "application/json".to_owned()));
+        }
+        let limit = if directory { m::DIRECTORY_JSON_MAX_BYTES } else { route.response_limit };
+        let budget = route
+            .budget_secs
+            .unwrap_or(if route.body.is_some() { 60 } else { 45 });
+        let relay_origin = crate::remote::relay_client::live_relay_url(&host.relay_origin);
+        let target = super::secure_http::SecureTarget {
+            http: &self.http,
+            host_id: &host.host_id,
+            generation: lease.generation().0,
+            relay_origin: &relay_origin,
+            machine_id: &host.machine_id,
+            attach,
+            bearer: &bearer,
+        };
+        let mut cancellation = lease.cancellation();
+        let response = tokio::select! { biased;
+            _ = cancellation.changed() => return Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
+            result = tokio::time::timeout(
+                Duration::from_secs(budget),
+                super::secure_http::shared_request(
+                    &target,
+                    route.method.as_str(),
+                    &path,
+                    &headers,
+                    route.body.as_deref(),
+                    limit,
+                    route.idempotent,
+                ),
+            ) => result.map_err(|_| ClientError::local("TIMEOUT"))??,
+        };
+        let status = reqwest::StatusCode::from_u16(response.status)
+            .map_err(|_| ClientError::local("PAIRED_HOST_INVALID_RESPONSE"))?;
+        if status.is_redirection() {
+            return Err(ClientError::local("PAIRED_HOST_REDIRECT_REJECTED"));
+        }
+        if status.as_u16() == 204 {
+            return Ok((b"null".to_vec(), None));
+        }
+        let content_type = response
+            .header("content-type")
+            .and_then(|v| reqwest::header::HeaderValue::from_str(v).ok());
+        let json = response
+            .header("content-type")
+            .is_some_and(|v| v.split(';').next().map(str::trim) == Some("application/json"));
+        if status.is_success() && !json {
+            return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
+        }
+        let rotated = response
+            .header(crate::remote::server::ROTATED_TOKEN_HEADER)
+            .map(str::to_owned);
+        if !status.is_success() {
+            return Err(map_operation_http_error(status, content_type.as_ref(), None, &response.body));
+        }
+        Ok((response.body, rotated))
     }
 
     async fn http_at(
@@ -1164,6 +1356,7 @@ impl MachineClient {
         route: &Route,
         directory: bool,
     ) -> Result<(Vec<u8>, Option<String>)> {
+        let is_relay = is_relay_transport(&base);
         let mut url = base;
         {
             let mut segments = url
@@ -1180,6 +1373,12 @@ impl MachineClient {
             .http
             .request(route.method.clone(), url)
             .bearer_auth(lease.token()?);
+        if is_relay {
+            request = request.header(
+                super::secure_http::CLIENT_BUILD_HEADER,
+                super::secure_http::CLIENT_BUILD,
+            );
+        }
         if let Some(body) = &route.body {
             request = request
                 .header("content-type", "application/json")

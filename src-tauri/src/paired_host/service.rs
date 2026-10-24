@@ -240,6 +240,19 @@ pub struct MigrationRequest {
     pub display_label: String,
     pub device_token: Secret,
 }
+/// Redeems an account grant end-to-end encrypted: the relay only allocates the opaque
+/// session (with the account session token) and never sees the exchange or the token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RedeemGrantRequest {
+    pub relay_origin: String,
+    pub machine_id: String,
+    pub display_label: String,
+    pub pairing_token: Secret,
+    pub machine_attach_public_key: String,
+    pub enrollment_epoch: String,
+    pub account_session_token: Secret,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceError {
@@ -704,6 +717,10 @@ impl PairedHostService {
             .json(
                 self.http
                     .get(format!("{host_id}/api/v1/capabilities"))
+                    .header(
+                        super::secure_http::CLIENT_BUILD_HEADER,
+                        super::secure_http::CLIENT_BUILD,
+                    )
                     .bearer_auth(token),
             )
             .await?;
@@ -778,6 +795,7 @@ impl PairedHostService {
         }
         let exchanged: Exchange = self.json(self.http.post(format!("{origin}/api/v1/pair/exchange"))
             .header("content-type", "application/json")
+            .header(super::secure_http::CLIENT_BUILD_HEADER, super::secure_http::CLIENT_BUILD)
             .body(serde_json::to_vec(&serde_json::json!({"pin": request.pin.0, "deviceName": "Ferryx Desktop"})).map_err(|_| ServiceError::invalid())?)).await?;
         let grant_scope = self
             .authenticate(&origin, &exchanged.machine_id, &exchanged.token.0)
@@ -836,6 +854,173 @@ impl PairedHostService {
             });
         }
         Ok(receipt)
+    }
+    pub async fn redeem_grant(&self, request: RedeemGrantRequest) -> Result<HostView> {
+        let mut host = tokio::time::timeout(Duration::from_secs(45), self.redeem_inner(request))
+            .await
+            .map_err(|_| ServiceError {
+                code: "TIMEOUT".into(),
+                message: "Grant redemption timed out after 45 seconds".into(),
+                details: None,
+                retryable: Some(true),
+            })??;
+        // The capabilities round-trip inside the tunnel just reached the host.
+        if self
+            .record_reachability(host.host_id.clone(), host.generation, ReachabilityState::Online, None)
+            .await
+        {
+            host.online = true;
+        }
+        stop_direct(
+            &GLOBAL_DIRECT_ROUTES,
+            &host.host_id,
+            host.generation.0.saturating_sub(1),
+        );
+        self.authority_changed(&host.host_id);
+        if let Some(sink) = &self.event_sink {
+            sink(InventoryChangeEvent {
+                r#type: "pair".into(),
+                host: Some(host.clone()),
+                host_id: Some(host.host_id.clone()),
+                generation: Some(host.generation.0.to_string()),
+            });
+        }
+        Ok(host)
+    }
+    async fn redeem_inner(&self, request: RedeemGrantRequest) -> Result<HostView> {
+        use super::secure_http::SecureHttpSession;
+        let origin = self.origin(&request.relay_origin)?;
+        let host_id = inventory::host_key(&origin, &request.machine_id)?;
+        let label = &request.display_label;
+        let token_ok = |value: &str| {
+            !value.is_empty() && value.len() <= 8192 && value.bytes().all(|b| (33..=126).contains(&b))
+        };
+        if label.is_empty()
+            || label.len() > 256
+            || label.chars().any(char::is_control)
+            || !token_ok(&request.pairing_token.0)
+            || !token_ok(&request.account_session_token.0)
+        {
+            return Err(ServiceError::invalid());
+        }
+        let attach = inventory::HostAttach {
+            machine_attach_public_key: request.machine_attach_public_key,
+            enrollment_epoch: request.enrollment_epoch,
+        };
+        if !attach.is_valid() {
+            return Err(ServiceError::invalid());
+        }
+        let snapshot = self.run(|store| store.generation_snapshot()).await?;
+        let client_error =
+            |error: super::client::ClientError| ServiceError::new(error.code, "paired host grant redemption failed");
+        let mut session = SecureHttpSession::establish(
+            &self.http,
+            &origin,
+            &request.account_session_token.0,
+            &request.machine_id,
+            &attach,
+        )
+        .await
+        .map_err(client_error)?;
+        const LIMIT: usize = 64 * 1024;
+        let build = || ("X-Ferryx-Client-Build", super::secure_http::CLIENT_BUILD.to_owned());
+        let exchange_body = serde_json::to_vec(&serde_json::json!({
+            "code": request.pairing_token.0,
+            "deviceName": label,
+        }))
+        .map_err(|_| ServiceError::invalid())?;
+        let (exchange, reusable) = session
+            .request(
+                "POST",
+                "/api/v1/pair/exchange",
+                &[("Content-Type", "application/json".to_owned()), build()],
+                Some(exchange_body.as_slice()),
+                LIMIT,
+            )
+            .await
+            .map_err(|(error, _)| client_error(error))?;
+        if !(200..300).contains(&exchange.status) {
+            let status = reqwest::StatusCode::from_u16(exchange.status)
+                .unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
+            return Err(map_http_error(status, &exchange.body));
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Exchange {
+            token: Secret,
+            machine_id: String,
+            device: crate::remote::auth::DeviceInfo,
+        }
+        let exchanged: Exchange = serde_json::from_slice(&exchange.body).map_err(|_| ServiceError {
+            code: "MALFORMED_RESPONSE".into(),
+            message: "Failed to parse pairing exchange".into(),
+            details: None,
+            retryable: Some(false),
+        })?;
+        if exchanged.machine_id != request.machine_id || !token_ok(&exchanged.token.0) {
+            return Err(InventoryError::Unauthorized.into());
+        }
+        // Verify the issued credential inside the same tunnel, or a fresh one if the
+        // gateway closed the connection after the exchange.
+        if !reusable {
+            session = SecureHttpSession::establish(
+                &self.http,
+                &origin,
+                &exchanged.token.0,
+                &request.machine_id,
+                &attach,
+            )
+            .await
+            .map_err(client_error)?;
+        }
+        let (caps, _) = session
+            .request(
+                "GET",
+                "/api/v1/capabilities",
+                &[("Authorization", format!("Bearer {}", exchanged.token.0)), build()],
+                None,
+                LIMIT,
+            )
+            .await
+            .map_err(|(error, _)| client_error(error))?;
+        drop(session);
+        if !(200..300).contains(&caps.status) {
+            let status = reqwest::StatusCode::from_u16(caps.status)
+                .unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
+            return Err(map_http_error(status, &caps.body));
+        }
+        let caps: crate::remote::machine_protocol::Capabilities =
+            serde_json::from_slice(&caps.body).map_err(|_| ServiceError {
+                code: "MALFORMED_RESPONSE".into(),
+                message: "Failed to parse capabilities".into(),
+                details: None,
+                retryable: Some(false),
+            })?;
+        if caps.machine_id != request.machine_id
+            || (caps.access_scope == crate::remote::machine_protocol::AccessScope::Machine
+                && caps.permission != crate::remote::machine_protocol::Permission::Control)
+        {
+            return Err(InventoryError::Unauthorized.into());
+        }
+        let grant_scope = match caps.access_scope {
+            crate::remote::machine_protocol::AccessScope::Machine => GrantScope::Machine,
+            crate::remote::machine_protocol::AccessScope::Mirror => GrantScope::Mirror,
+        };
+        let device_id = Some(exchanged.device.id);
+        let pairing = Pairing {
+            relay_origin: origin,
+            machine_id: request.machine_id,
+            display_label: request.display_label,
+            grant_scope,
+            device_token: exchanged.token.0,
+        };
+        self.run(move |store| {
+            if store.generation_snapshot()?.get(&host_id) != snapshot.get(&host_id) {
+                return Err(InventoryError::StaleGeneration);
+            }
+            store.pair_attached(&pairing, device_id, attach)
+        })
+        .await
     }
     async fn migrate_inner(
         &self,

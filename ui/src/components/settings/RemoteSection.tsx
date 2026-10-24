@@ -386,6 +386,39 @@ export function RemoteSection({
     setBusy(true);
     setActionError(null);
     try {
+      // A daemon that redeems grants itself keeps the device key in Rust and stores the host with
+      // its machine attach key, so its relay traffic is end-to-end encrypted from the start.
+      const capabilities = await nativePairedHostCommands.capabilities().catch(() => null);
+      if (
+        capabilities?.pairedHostE2EV1 === true
+        && nativePairedHostCommands.redeemGrant
+        && nativePairedHostCommands.clientAttachPublicKey
+      ) {
+        const clientPublicKey = await nativePairedHostCommands.clientAttachPublicKey();
+        const grant = await requestGrant(
+          accountOrigin,
+          accountToken,
+          machine,
+          clientPublicKey,
+          { grantScope: "machine" },
+        );
+        await nativePairedHostCommands.redeemGrant({
+          relayOrigin: grant.relayOrigin || accountOrigin,
+          machineId: machine.machineId,
+          displayLabel: machine.displayName,
+          pairingToken: grant.pairingToken,
+          machineAttachPublicKey: grant.machineAttachPublicKey,
+          enrollmentEpoch: String(machine.enrollmentEpoch),
+          accountSessionToken: accountToken,
+        });
+        await refreshAccountMachines(
+          accountToken,
+          accountOrigin,
+          (message) => `Connected, but the machine list could not be refreshed: ${message}`,
+        );
+        return;
+      }
+
       const attachKey = await getOrCreateAttachKey();
       if (!attachKey) throw new Error("ATTACH_KEY_UNSUPPORTED");
 

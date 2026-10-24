@@ -1,4 +1,4 @@
-import { remoteApiUrl } from "./remoteClient";
+import { remoteFetch } from "./remoteClient";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { ChatWorkItem, ToolCallCardProps, ToolStatus } from "./chat/MobileChatComponents";
 import {
@@ -588,7 +588,7 @@ export async function fetchAgentConversation(args: FetchAgentConversationArgs): 
     });
   } else {
     try {
-      response = await fetch(remoteApiUrl(baseUrl, path), {
+      response = await remoteFetch(baseUrl, path, {
         headers: { Authorization: `Bearer ${token}` },
         signal,
       });
@@ -1168,7 +1168,7 @@ export async function fetchReferenceHistory(args: {
   const path = `${referenceChatRoute(sessionId, "history")}?${query}`;
   let response: Response;
   try {
-    response = await fetch(remoteApiUrl(baseUrl, path), {
+    response = await remoteFetch(baseUrl, path, {
       headers: { Authorization: `Bearer ${token}` },
       signal,
     });

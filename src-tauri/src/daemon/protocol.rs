@@ -866,6 +866,10 @@ pub enum DaemonRequest {
     PairedHostMigrateLegacy {
         request: crate::paired_host::service::MigrationRequest,
     },
+    PairedHostRedeemGrant {
+        request: crate::paired_host::service::RedeemGrantRequest,
+    },
+    PairedHostClientAttachKey,
     #[serde(rename_all = "camelCase")]
     PairedHostForget {
         host_id: String,
@@ -1017,6 +1021,10 @@ pub enum DaemonResponse {
         receipt: crate::paired_host::inventory::MigrationReceipt,
     },
     PairedHostForgetOk,
+    #[serde(rename_all = "camelCase")]
+    PairedHostClientAttachKeyOk {
+        public_key: String,
+    },
     #[serde(rename_all = "camelCase")]
     RemoteAttachSessionOk {
         session_id: String,
