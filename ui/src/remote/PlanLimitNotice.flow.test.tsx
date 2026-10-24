@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
+import { openWorkspacePicker } from "./home/phoneHomeTestUtils";
 import {
   PLAN_LIMIT_REACHED,
   REMOTE_SUSPENDED,
@@ -445,26 +446,11 @@ function setupHarness(options: HarnessOptions = {}) {
 }
 
 async function awaitWorktreeOption(): Promise<HTMLElement> {
-  const query = () => screen.queryByRole("button", { name: /main/i });
-  const existing = query();
-  if (existing) return existing;
-
-  const ensureExpanded = () => {
-    const trigger = screen.queryByRole("button", { name: /Change workspace context/i });
-    if (trigger && trigger.getAttribute("aria-expanded") !== "true") {
-      act(() => {
-        fireEvent.click(trigger);
-      });
-    }
-  };
-  ensureExpanded();
-
-  return awaitDomTransition(() => {
-    const button = query();
-    if (button) return button;
-    ensureExpanded();
-    return query();
-  }, "worktree option button");
+  const picker = await openWorkspacePicker({ timeout: AWAIT_DEADLINE_MS });
+  return awaitDomTransition(
+    () => within(picker).queryByRole("button", { name: /main/i }),
+    "worktree option button",
+  );
 }
 
 function awaitPlanLimitNotice(): Promise<HTMLElement> {
