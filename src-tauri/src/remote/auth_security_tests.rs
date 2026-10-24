@@ -54,17 +54,21 @@ fn new_window_discards_expired_codes_and_restores_pairing() {
     {
         // Advance the budget clock without sleeping; rotation cannot reset it.
         let mut window = auth.pairing_window.write();
-        assert_eq!(window.failures, 5);
+        assert_eq!(window.failures.total, 5);
+        assert_eq!(window.failures.per_source[LOCAL_PAIRING_SOURCE], 5);
         let start = window.started_at.unwrap();
         // Both fixture PINs are expired at rollover; code lifetime is separate
         // from the budget boundary and must be established explicitly.
         for pairing in window.codes.values_mut() {
             pairing.created_at = start;
         }
+        // The budget window closes when the last live code expires.
+        window.failures.closes_at = Some(start + PAIRING_EXPIRY);
         window.refresh(start + PAIRING_EXPIRY - Duration::from_nanos(1));
-        assert_eq!(window.failures, 5);
+        assert_eq!(window.failures.total, 5);
         window.refresh(start + PAIRING_EXPIRY);
-        assert_eq!(window.failures, 0);
+        assert_eq!(window.failures.total, 0);
+        assert!(window.failures.per_source.is_empty());
         assert!(window.codes.is_empty());
         // Return the fixture clock to the present before calling the public API.
         window.started_at = Some(Instant::now());
@@ -90,10 +94,14 @@ fn late_generated_pin_survives_failure_window_rollover() {
         let mut window = auth.pairing_window.write();
         window.started_at = Some(now - PAIRING_EXPIRY);
         window.codes.get_mut(&code).unwrap().created_at = now - Duration::from_secs(1);
-        window.failures = 4;
+        window.failures = PairingFailureBudget {
+            closes_at: Some(now),
+            per_source: HashMap::from([(LOCAL_PAIRING_SOURCE.to_owned(), 4)]),
+            total: 4,
+        };
         // When the independent failure window rolls over (no clock sleeps).
         window.refresh(now);
-        assert_eq!(window.failures, 0);
+        assert_eq!(window.failures.total, 0);
     }
     // Then the one-second-old PIN still pairs with its original permission.
     let (token, device) = auth

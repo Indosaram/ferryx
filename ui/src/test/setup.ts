@@ -209,8 +209,11 @@ if (typeof window !== "undefined") {
 const { beforeEach: setupBeforeEach } = await import("vitest");
 const { clearHmrWorkspaceState } = await import("../state/hmrWorkspaceState");
 const { clearWorkspaceSnapshot } = await import("../state/workspaceSnapshotCache");
+const { setAdvancedFeaturesFallbackForTests } = await import("../lib/advancedFeatures");
 
 setupBeforeEach(() => {
+  // Suites that clear localStorage still render every surface; advancedFeatures tests opt out.
+  setAdvancedFeaturesFallbackForTests(true);
   const clearCaptures = (globalThis as unknown as { __clearPointerCaptures?: () => void }).__clearPointerCaptures;
   if (clearCaptures) clearCaptures();
   clearHmrWorkspaceState();
