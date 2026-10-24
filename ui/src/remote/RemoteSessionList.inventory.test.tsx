@@ -204,6 +204,21 @@ describe("remote sidebar drawn by the desktop sidebar view", () => {
     expect(within(sidebarRoot()).getAllByTestId("worktree-rail-active")).toHaveLength(1);
   });
 
+  it("marks the attached worktree's project header current, like the desktop, and no other", () => {
+    desktopViewport();
+    renderMirrorWith();
+    // Project headers are the named buttons outside the worktree rows (a root row shares the name).
+    const header = (scope: HTMLElement, name: string) => {
+      const found = within(scope).getAllByRole("button", { name }).filter((b) => !b.closest('[data-testid="remote-sidebar-row"]'));
+      expect(found).toHaveLength(1);
+      return found[0];
+    };
+    const a = machineSection(MACHINE_A);
+    expect(header(a, "ferryx-core")).toHaveAttribute("aria-current", "true");
+    expect(header(a, "docs")).not.toHaveAttribute("aria-current");
+    expect(header(machineSection(MACHINE_B), "ferryx-core")).not.toHaveAttribute("aria-current");
+  });
+
   it("shows worktree activity from the machine's session inventory through the shared live state", () => {
     const model = sidebarModelFixture(ROWS_A);
     const inventory = {

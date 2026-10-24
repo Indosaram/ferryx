@@ -18,14 +18,20 @@ export const SIDEBAR_CHANGED_FRAME = "sidebarChanged";
 export type RemoteSidebarMachine = {
   readonly machineId: string;
   readonly label: string;
-  readonly fetchLike: SidebarFetch;
+  /** Null while no connection to the machine is open: nothing is fetched or subscribed. */
+  readonly fetchLike: SidebarFetch | null;
   readonly subscribe: (handler: (frame: unknown) => void) => () => void;
   readonly connectionId?: string;
   readonly inventory: RemoteSessionInventory | null;
   readonly selection: RemoteSidebarSelection | null;
+  /** Presence says offline, or the last connect failed: the only cases worded as unreachable. */
+  readonly unreachable?: boolean;
+  /** The list shown while unconnected before any model loaded (built from discovery). */
+  readonly fallback?: SidebarModel | null;
 };
 
-export type RemoteSidebarState = "loading" | "ok" | "offline" | "error";
+/** `disconnected`: online but no connection is open; the last or fallback list stays, unworded. */
+export type RemoteSidebarState = "loading" | "ok" | "disconnected" | "offline" | "error";
 
 export type RemoteSidebarSection = {
   readonly machineId: string;
@@ -39,6 +45,15 @@ export type RemoteSidebarSection = {
 };
 
 type Settled = Pick<RemoteSidebarSection, "state" | "model" | "error">;
+
+const UNREACHABLE_ERROR = { code: SIDEBAR_OFFLINE, message: "This computer is not reachable" } as const;
+
+/** A machine with no open connection: never fetched, so its state comes from presence alone. */
+function unconnected(machine: RemoteSidebarMachine, previous: Settled | undefined): Settled {
+  const model = previous?.model ?? machine.fallback ?? null;
+  if (machine.unreachable) return { state: "offline", model, error: UNREACHABLE_ERROR };
+  return model ? { state: "disconnected", model, error: null } : { state: "loading", model: null, error: null };
+}
 
 function frameOf(frame: unknown): Record<string, unknown> | null {
   let value = frame;
@@ -89,6 +104,7 @@ export function useRemoteSidebarModel({ machines }: { readonly machines: readonl
     const cleanups: Array<() => void> = [];
     for (const machine of machinesRef.current) {
       const { machineId } = machine;
+      if (!machine.fetchLike) continue;
       let alive = true;
       let inFlight = false;
       let again = false;
@@ -103,6 +119,7 @@ export function useRemoteSidebarModel({ machines }: { readonly machines: readonl
           do {
             again = false;
             const current = machinesRef.current.find((m) => m.machineId === machineId) ?? machine;
+            if (!current.fetchLike) return;
             let result: RemoteSidebarResult;
             try {
               result = await loadRemoteSidebar(current.fetchLike);
@@ -134,7 +151,9 @@ export function useRemoteSidebarModel({ machines }: { readonly machines: readonl
   return useMemo(
     () =>
       machines.map((m): RemoteSidebarSection => {
-        const entry = settled[m.machineId] ?? { state: "loading", model: null, error: null };
+        const entry = m.fetchLike
+          ? settled[m.machineId] ?? { state: "loading", model: null, error: null }
+          : unconnected(m, settled[m.machineId]);
         return {
           machineId: m.machineId,
           label: m.label,
