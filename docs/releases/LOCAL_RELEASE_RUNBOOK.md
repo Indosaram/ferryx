@@ -381,6 +381,35 @@ All four must exit 0, and both `spctl` results must report `source=Notarized Dev
 missing helper bundle, a helper that fails verification, or a helper Gatekeeper rejects blocks
 the release: the app could not stage a daemon runtime on users' machines.
 
+## Mobile (Android/iOS)
+
+The mobile companion (`mobile/`) follows the same local-only rule: AABs and IPAs are built,
+signed, and uploaded from the owner's machine. No GitHub Actions workflow may build, sign, or
+upload them, and no Play/App Store credential (upload keystore, `keystore.properties`, App Store
+Connect API key, `APPLE_*` signing secrets) may appear in `.github/workflows`. `bun
+scripts/release-workflow-policy.mjs` (covered by `scripts/release-workflow.test.mjs`) must still
+pass after any workflow change.
+
+Mobile is versioned separately from the three-host desktop plan: store version `1.0.0` (semver)
+plus a strictly increasing Android `versionCode` (`FERRYX_ANDROID_VERSION_CODE`) and iOS build
+number (`--build-number`). It is not part of `plan.json`, `release-local.mjs`, receipts, or the
+updater manifest; stores update the app.
+
+1. Start from a reviewed, clean commit. Run `bun run --cwd mobile test` and
+   `bun run --cwd ui build:mobile`.
+2. Android: with JDK 17, SDK 36, and `NDK_HOME` set to NDK `28.2.13676358`, and with the upload
+   keystore described by `mobile/keystore.properties` or `FERRYX_ANDROID_KEYSTORE_PROPERTIES`, run
+   `bun run android:init` and
+   `bun run android:build -- --aab --target aarch64 --target armv7 --target x86_64` from `mobile/`.
+   The Gradle log must not show `WARNING: Ferryx release signing disabled`; `jarsigner -verify`
+   and `zipalign -c -P 16 -v 4` (16 KB alignment) must pass.
+3. iOS: with `APPLE_DEVELOPMENT_TEAM` set, run `bun run ios:init` and
+   `bun run ios:build -- --export-method app-store-connect --build-number <n>`, then validate and
+   upload the IPA with Transporter or `xcrun altool`.
+4. Store submission (Play closed testing/production, TestFlight/App Review) is a separate,
+   owner-approved step, the same as Partner Center for MSIX. The full command reference and the
+   owner checklist are in [mobile/README.md](../../mobile/README.md#release-build-owner-machine-only).
+
 ## Checks, cleanup, and recovery
 
 ### Completion checklist
@@ -395,6 +424,7 @@ the release: the app could not stage a daemon runtime on users' machines.
 - [ ] Draft bytes and inventory are reviewed before the separate publication approval.
 - [ ] `verify-remote` passes after publication.
 - [ ] Store submission, if performed, has its own approval and Partner Center result.
+- [ ] Mobile store builds, if any, were built and signed locally and versionCode/build number increased.
 
 ### Failure recovery
 
