@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { SidebarLiveSignals, SidebarModel } from "../components/sidebar/sidebarModel";
-import { remoteSidebarSignals, type RemoteSidebarSelection } from "./remoteSidebarLive";
+import { remoteSidebarSignals, type RemoteSidebarSelection, type RemoteSidebarSupervisor } from "./remoteSidebarLive";
 import { loadRemoteSidebar, SIDEBAR_OFFLINE, type RemoteSidebarResult, type SidebarFetch } from "./remoteSidebarSource";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
 
@@ -93,7 +93,13 @@ function settle(previous: Settled | undefined, result: RemoteSidebarResult): Set
   }
 }
 
-export function useRemoteSidebarModel({ machines }: { readonly machines: readonly RemoteSidebarMachine[] }): RemoteSidebarSection[] {
+export type RemoteSidebarModelInput = {
+  readonly machines: readonly RemoteSidebarMachine[];
+  /** Each machine's hub supervisor, by machine id; drives the "supervisor typing" row slot. */
+  readonly supervisors?: Readonly<Record<string, RemoteSidebarSupervisor>>;
+};
+
+export function useRemoteSidebarModel({ machines, supervisors }: RemoteSidebarModelInput): RemoteSidebarSection[] {
   const machinesRef = useRef(machines);
   machinesRef.current = machines;
   const [settled, setSettled] = useState<Record<string, Settled>>({});
@@ -159,9 +165,9 @@ export function useRemoteSidebarModel({ machines }: { readonly machines: readonl
           machineId: m.machineId,
           label: m.label,
           ...entry,
-          signals: entry.model ? remoteSidebarSignals(entry.model, m.inventory, m.selection) : null,
+          signals: entry.model ? remoteSidebarSignals(entry.model, m.inventory, m.selection, supervisors?.[m.machineId] ?? null) : null,
         };
       }),
-    [machines, settled],
+    [machines, settled, supervisors],
   );
 }

@@ -55,12 +55,13 @@ import { isStandaloneRemoteGroup, projectDisplayLabel, projectHostLabel } from "
 import { buildSidebarModel, sidebarLiveState, type SidebarProjectNode, type SidebarRowLive, type SidebarWorktreeNode } from "./sidebar/sidebarModel";
 import { applyWorktreeOrder, emptyProjectGroupIds, groupWorktreesByProject, initialCollapsedProjects, seedCollapsedProjects } from "./sidebar/sidebarRows";
 import { SidebarProjectHeader } from "./sidebar/SidebarProjectHeader";
+import { supervisorTypingIn } from "./sidebar/sidebarSupervisor";
 import { SidebarView, type SidebarReorder } from "./sidebar/SidebarView";
 import type { SidebarViewId } from "./sidebar/SidebarViewTabs";
 import { SidebarWorktreeRow } from "./sidebar/SidebarWorktreeRow";
 import type { SectionId } from "./settings/types";
 import { openProjectMenu } from "./sidebarProjectMenu";
-import { agentsByWorktreePath, SortableWorktreeRow, supervisorTypingIn, WorktreeRow, worktreeListRowProps, worktreeSortableId } from "./WorktreeList";
+import { agentsByWorktreePath, SortableWorktreeRow, WorktreeRow, worktreeListRowProps, worktreeSortableId } from "./WorktreeList";
 import { useSupervisor } from "../lib/supervisor";
 
 export {

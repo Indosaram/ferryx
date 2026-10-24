@@ -153,6 +153,7 @@ import { toast } from "sonner";
 import { AccountSheet, getStoredAccountEmail, storeAccountEmail } from "./home/AccountSheet";
 import { createSupervisorFrameBus } from "./home/machineSupervisorSources";
 import { DIRECT_SIDEBAR_MACHINE, useRemoteSidebarMachines } from "./useRemoteSidebarMachines";
+import { remoteSupervisorTyping } from "./remoteSidebarLive";
 import { directSidebarInventory } from "./directSidebarInventory";
 import { useRemoteSidebarModel } from "./useRemoteSidebarModel";
 import { SupervisorHome } from "./home/SupervisorHome";
@@ -2758,10 +2759,13 @@ export const RemoteHostConnection: React.FC<{
           selection: sidebarSelection,
         },
   );
-  const sidebarSections = useRemoteSidebarModel({ machines: sidebarMachines });
+  const sidebarSupervisors = useMemo(() => Object.fromEntries(phoneSupervisor.machines.flatMap((machine) =>
+    machine.snapshot ? [[machine.machineId, { snapshot: machine.snapshot, now: phoneSupervisor.now }]] : [])),
+  [phoneSupervisor.machines, phoneSupervisor.now]);
+  const sidebarSections = useRemoteSidebarModel({ machines: sidebarMachines, supervisors: sidebarSupervisors });
   const sidebarSupervisor = isAccountMode && desktopSidebar
     ? {
-        typing: false,
+        typing: remoteSupervisorTyping(sidebarSupervisors),
         content: (
           <div data-testid="remote-sidebar-supervisor" className="flex min-h-0 flex-1 flex-col overflow-y-auto">
             <SupervisorHome

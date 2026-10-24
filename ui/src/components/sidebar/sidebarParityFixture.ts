@@ -12,6 +12,7 @@ const FERRYX_SSH = "/home/fixture/ferryx";
 const RELAY = "/home/fixture/relay";
 const SITE = "/fixture/code/site";
 const API_ID = `daemon:${"d".repeat(64)}`;
+const DOCS_ID = `daemon:${"e".repeat(64)}`;
 
 const row = (path: string, branch: string, extra: Partial<Worktree> = {}): Worktree => ({
   path, head: "a1b2c3d", branch, bare: false, detached: false, locked: null, prunable: null, ...extra,
@@ -32,13 +33,16 @@ export type SidebarParityFixture = {
   readonly worktreeOrder: WorktreeOrder;
   /** One running agent as the desktop sees it (by worktree path). */
   readonly desktopActivity: Readonly<Record<string, ActivitySummary>>;
+  /** The hub supervisor lane typing into one worktree right now (relative to the render clock). */
+  readonly supervisorLane: { readonly sessionId: string; readonly cwd: string };
   /** The same agent as the remote session inventory reports it. */
-  readonly remoteActivity: readonly { readonly workspaceId: string; readonly worktreeSlug: string | null; readonly activityState: "working" | "done" }[];
+  readonly remoteActivity: readonly { readonly workspaceId: string; readonly worktreeSlug: string | null; readonly activityState: "working" | "waiting" | "done" }[];
 };
 
 /**
  * A local + SSH member of one repo with a custom row order, a standalone SSH project whose
- * listing fails, a collapsed local project, and an offline paired project.
+ * listing fails, a collapsed local project with a waiting agent, an offline and an online paired
+ * project, an unseen finished agent, and the hub supervisor typing into the active row.
  */
 export const sidebarParityFixture: SidebarParityFixture = {
   activeProjectId: "ferryx",
@@ -49,6 +53,7 @@ export const sidebarParityFixture: SidebarParityFixture = {
     { workspaceId: "ssh:omarchy:relay", repoRoot: RELAY, gitRoot: RELAY, gitRemote: "git@github.com:ferryx/relay.git", gitBranch: "main", gitHead: "c3d4e5f", hostLabel: "omarchy", target: { kind: "ssh", hostId: "omarchy" } },
     { workspaceId: "site", repoRoot: SITE, gitRoot: SITE, gitRemote: "git@github.com:ferryx/site.git", gitBranch: "main", gitHead: "d4e5f6a", target: { kind: "local" } },
     { workspaceId: API_ID, repoRoot: "/Users/fixture/code/api", gitRoot: "/Users/fixture/code/api", remoteWorkspaceId: "api", target: { kind: "pairedDaemon", hostId: "studio" } },
+    { workspaceId: DOCS_ID, repoRoot: "/Users/fixture/code/docs", gitRoot: "/Users/fixture/code/docs", remoteWorkspaceId: "docs", target: { kind: "pairedDaemon", hostId: "laptop" } },
   ],
   worktrees: [
     row(FERRYX, "main"),
@@ -65,6 +70,10 @@ export const sidebarParityFixture: SidebarParityFixture = {
     studio: {
       hostId: "studio", name: "Studio Mac", displayName: "Studio Mac", address: "", transport: "relay",
       online: false, authStatus: "paired", grantScope: "machine", generation: "1", machineId: "machine-studio",
+    },
+    laptop: {
+      hostId: "laptop", name: "Laptop", displayName: "Laptop", address: "", transport: "relay",
+      online: true, authStatus: "paired", grantScope: "machine", generation: "1", machineId: "machine-laptop",
     },
   },
   listingFailures: { "ssh:omarchy:relay": "Connection reset by peer" },
@@ -88,9 +97,16 @@ export const sidebarParityFixture: SidebarParityFixture = {
       workingCount: 0, waitingCount: 0, doneCount: 1, runningCount: 0,
       hasWorking: false, hasWaiting: false, hasDone: true, hasUnread: false,
     },
+    // An agent waiting for input inside a collapsed project: the project slot and footer show it.
+    [SITE]: {
+      workingCount: 0, waitingCount: 1, doneCount: 0, runningCount: 0,
+      hasWorking: false, hasWaiting: true, hasDone: false, hasUnread: false,
+    },
   },
+  supervisorLane: { sessionId: "hub-lane-1", cwd: `${FERRYX}/.orca-worktrees/ferryx/remote-settings` },
   remoteActivity: [
     { workspaceId: "ferryx", worktreeSlug: "sidebar-polish", activityState: "working" },
     { workspaceId: "ferryx", worktreeSlug: null, activityState: "done" },
+    { workspaceId: "site", worktreeSlug: null, activityState: "waiting" },
   ],
 };

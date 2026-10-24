@@ -7,16 +7,17 @@ import type { ActivitySummary } from "../lib/activity";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
 import { getHostPlatform } from "../lib/platform";
 import { revealPath } from "../lib/tauri";
-import { actingSessionIds, useSupervisor, type SupervisorSnapshot } from "../lib/supervisor";
+import { useSupervisor } from "../lib/supervisor";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { worktreeRowLive, type SidebarRowLive } from "./sidebar/sidebarModel";
 import { SidebarEmptyStatus, SidebarWorktreeRow, SidebarWorktreesEmpty } from "./sidebar/SidebarWorktreeRow";
 import { SIDEBAR_EMPTY_TEXT, worktreeLabel, worktreeRowHost } from "./sidebar/sidebarLabels";
 import { worktreeSortableId } from "./sidebar/sidebarRows";
+import { isSameWorktreePath, normalizeWorktreePath, supervisorTypingIn } from "./sidebar/sidebarSupervisor";
 import { IconButton } from "./ui/IconButton";
 
-export { worktreeSortableId };
+export { isSameWorktreePath, normalizeWorktreePath, supervisorTypingIn, worktreeSortableId };
 
 type WorktreeListProps = {
   readonly worktrees: readonly Worktree[];
@@ -96,27 +97,6 @@ export function fileManagerActionLabel() {
   return "Open in File Manager";
 }
 
-function isCaseInsensitivePlatform(): boolean {
-  const platform = getHostPlatform();
-  return platform === "macos" || platform === "windows";
-}
-
-export function normalizeWorktreePath(p: string, caseInsensitive = isCaseInsensitivePlatform()): string {
-  let normalized = p.trim().replace(/\\/g, "/");
-  normalized = normalized.replace(/\/+/g, "/");
-  if (normalized.length > 1 && normalized.endsWith("/")) {
-    normalized = normalized.slice(0, -1);
-  }
-  if (caseInsensitive) {
-    normalized = normalized.toLowerCase();
-  }
-  return normalized;
-}
-
-export function isSameWorktreePath(pathA: string, pathB: string, caseInsensitive?: boolean): boolean {
-  return normalizeWorktreePath(pathA, caseInsensitive) === normalizeWorktreePath(pathB, caseInsensitive);
-}
-
 /**
  * The repository root worktree is identified by comparing its path against the project repo root.
  * If no repo root is available, falls back to checking if the branch is not an `orca/<ws>/<slug>` worktree branch.
@@ -126,13 +106,6 @@ export function isPrimaryWorktree(worktree: Worktree, repoRoot?: string | null):
     return isSameWorktreePath(worktree.path, repoRoot);
   }
   return worktreeIdentity(worktree) === null;
-}
-
-/** True when a supervised lane rooted at this worktree was typed into within the acting window. */
-export function supervisorTypingIn(snapshot: SupervisorSnapshot, now: number, worktreePath: string): boolean {
-  const acting = actingSessionIds(snapshot, now);
-  if (acting.size === 0) return false;
-  return snapshot.lanes.some((lane) => lane.sessionId !== null && acting.has(lane.sessionId) && isSameWorktreePath(lane.cwd, worktreePath));
 }
 
 export const WorktreeRow = memo(function WorktreeRow({

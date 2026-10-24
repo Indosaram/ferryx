@@ -4,6 +4,7 @@
 // ids, order, state slot text) and must be equal, minus the controls only the desktop can act on.
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { computeAccessibleName, getRole } from "dom-accessibility-api";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const tauri = vi.hoisted(() => ({ published: [] as unknown[], onPublish: null as ((model: unknown) => void) | null }));
@@ -29,12 +30,14 @@ vi.mock("../../lib/sshHosts", async (importOriginal) => {
 });
 
 import { useDesktopSidebarPublisher } from "../../lib/desktopSidebarSync";
+import { EMPTY_SNAPSHOT, setSupervisorSnapshotForTest, type SupervisorSnapshot } from "../../lib/supervisor";
 import {
   ADVANCED_FEATURES_STORAGE_KEY,
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
   SIDEBAR_WORKTREE_ORDER_STORAGE_KEY,
 } from "../../lib/storageKeys";
 import { RemoteSidebar } from "../../remote/RemoteSidebar";
+import { remoteSupervisorTyping } from "../../remote/remoteSidebarLive";
 import type { RemoteSessionInventory } from "../../remote/remoteSessionInventory";
 import { useRemoteSidebarModel, type RemoteSidebarMachine } from "../../remote/useRemoteSidebarModel";
 import { remoteHostStore } from "../../state/remoteHostStore";
@@ -157,9 +160,20 @@ const inventory: RemoteSessionInventory = {
   fetchedAt: 0,
 };
 
+/** The hub snapshot both apps receive: one lane the supervisor typed into a moment ago. */
+function supervisorSnapshot(): SupervisorSnapshot {
+  return {
+    hub: { available: true, running: true },
+    lanes: [{ key: "lane-1", title: "remote-settings", status: "running", sessionId: fx.supervisorLane.sessionId, cwd: fx.supervisorLane.cwd, goal: null, paused: false, lastActivityAt: "" }],
+    watched: [],
+    actions: [{ deviceId: "hub", op: "type", sessionId: fx.supervisorLane.sessionId, requestId: null, code: "OK", atMs: Date.now(), text: "continue" }],
+  };
+}
+
 /** The phone/browser side: one machine whose gateway answers with the desktop's published model. */
 function RemoteSidebarHarness({ machine }: { readonly machine: RemoteSidebarMachine }) {
-  const sections = useRemoteSidebarModel({ machines: [machine] });
+  const [supervisors] = useState(() => ({ [machine.machineId]: { snapshot: supervisorSnapshot(), now: Date.now() } }));
+  const sections = useRemoteSidebarModel({ machines: [machine], supervisors });
   return (
     <RemoteSidebar
       sections={sections}
@@ -169,7 +183,7 @@ function RemoteSidebarHarness({ machine }: { readonly machine: RemoteSidebarMach
       view="worktrees"
       onViewChange={noop}
       inbox={{ rows: [], onOpen: noop, onDismiss: noop }}
-      supervisor={{ typing: false, content: null }}
+      supervisor={{ typing: remoteSupervisorTyping(supervisors), content: null }}
     />
   );
 }
@@ -198,10 +212,12 @@ function seedDesktop(advancedFeatures: boolean) {
 beforeEach(() => {
   tauri.published = [];
   tauri.onPublish = null;
+  setSupervisorSnapshotForTest(supervisorSnapshot());
 });
 
 afterEach(() => {
   cleanup();
+  setSupervisorSnapshotForTest(EMPTY_SNAPSHOT);
   localStorage.clear();
   remoteHostStore.reset();
   worktreeListingFailureStore.reset();
