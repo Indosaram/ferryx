@@ -33,7 +33,7 @@ Ferryx approaches the same problem locally and without a cloud. The daemon owns 
 - **Where work runs.** Ferryx runs entirely locally. Warp runs locally too, and Warp Factories runs fleets of agents in cloud infrastructure.
 - **Process survival.** Closing or reloading the Ferryx GUI doesn't kill running agent processes, and reconnecting replays missed output from a ring buffer with monotonic sequence numbers.
 - **Remote viewing.** Warp publishes a session to its cloud and hands you a link. Ferryx pairs a device directly with your daemon over your own gateway or relay.
-- **Agent breadth.** Warp documents enhanced support for sixteen named CLI agents ([docs](https://docs.warp.dev/agents/cli-agents/overview/), checked 2026-10-24). Ferryx runs any command in a pane and ships status detection for eleven agents.
+- **Agent breadth.** Warp documents enhanced support for sixteen named CLI agents ([docs](https://docs.warp.dev/agents/cli-agents/overview/), checked 2026-10-24). Ferryx runs any command in a pane and ships status detection for <!-- agents:count -->16<!-- /agents:count --> agents.
 - **Worktree isolation.** Ferryx manages worktrees at `.orca-worktrees/<workspace-id>/<slug>` on `orca/<workspace-id>/<slug>` branches; Warp leaves worktrees to you or to the agent.
 - **Enterprise surface.** Warp markets named solutions for financial services, insurance, and telecommunications and holds SOC 2 certification. Ferryx has no enterprise program; it's an early local desktop app.
 

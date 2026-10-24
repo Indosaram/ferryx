@@ -66,12 +66,13 @@ Every release publishes `SHA256SUMS.txt` beside the binaries, so a download can 
 ## Coding agents
 
 Agents are ordinary commands: anything you can start in a terminal runs in a Ferryx pane, including
-Claude Code, Codex, and Gemini CLI. What is agent-specific is *status detection* — reading a pane's
+Claude Code, Codex, and Antigravity (agy). What is agent-specific is *status detection* — reading a pane's
 output to decide whether that agent is working, waiting on you, or idle.
 
-Status-detection manifests ship for eleven agents: Antigravity, Claude Code, Cline, Codex, GitHub
-Copilot CLI, Cursor, Gajae Code (gjc), Grok, Kimi, OMO, and OpenCode
-(`src-tauri/src/agent_detect/manifests/`, registered in `src-tauri/src/agent_detect/engine.rs`).
+Status-detection manifests ship for <!-- agents:count -->16<!-- /agents:count --> agents:
+<!-- agents:list -->Aider, Antigravity, Claude Code, Cline, Codex, Crush, Cursor CLI, Droid, GitHub Copilot CLI, GJC, Grok, Kimi, OmO, omp, OpenCode, and pi<!-- /agents:list -->
+(`src-tauri/src/agent_detect/manifests/`, registered in `src-tauri/src/agent_detect/engine.rs`; the list and count on this site are generated
+from those manifests by `scripts/gen-site-agents.mjs`).
 Detection drives the pane status indicator, notifications, and the macOS Dock attention badge.
 
 ## Git worktree isolation

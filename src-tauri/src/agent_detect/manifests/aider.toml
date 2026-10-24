@@ -4,6 +4,8 @@
 # idle and blocked also require the word "aider" on screen (the "Aider v" header,
 # ".aider*", or "... each aider commit."). Mid-stream text has no stable anchor.
 id = "aider"
+display_name = "Aider"
+homepage = "https://aider.chat"
 version = "2026.10.22.1"
 min_engine_version = 1
 updated_at = "2026-10-22T00:00:00Z"

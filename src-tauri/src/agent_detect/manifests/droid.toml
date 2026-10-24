@@ -4,6 +4,8 @@
 # working rule. The tool-confirmation labels "Yes, allow" / "No, cancel" come from strings
 # in the shipped binary (remote-droid.md "Approval prompt"); their layout is unmeasured.
 id = "droid"
+display_name = "Droid"
+homepage = "https://factory.ai"
 version = "2026.10.22.1"
 min_engine_version = 1
 updated_at = "2026-10-22T00:00:00Z"

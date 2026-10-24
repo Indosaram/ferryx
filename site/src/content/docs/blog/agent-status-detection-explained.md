@@ -1,17 +1,17 @@
 ---
 title: "How Agent Status Detection Works in Ferryx"
-description: "Eleven agent manifests report working, waiting, or idle. What panes listen for and how the attention counter stays honest."
+description: "Shipped agent manifests report working, waiting, or idle. What panes listen for and how the attention counter stays honest."
 ---
 
-**How Agent Status Detection Works in Ferryx.** Eleven agent manifests report working, waiting, or idle. What panes listen for and how the attention counter stays honest.
+**How Agent Status Detection Works in Ferryx.** Status-detection manifests for <!-- agents:count -->16<!-- /agents:count --> agents report working, waiting, or idle. What panes listen for and how the attention counter stays honest.
 
 ![agent-status-detection-explained cover](/images/blog/agent-status-detection-explained/cover.png)
 
 ## What gets detected
 
-Running more than one coding agent against a single checkout is how teams lose work: both agents see the same files, both commit into the same history, and a refactor from one invalidates an edit the other is halfway through. Ferryx turns the clone-per-agent workaround into a managed feature so parallel runs stay visible in one window without stepping on each other. In the specific case of “How Agent Status Detection Works in Ferryx”, the Ferryx angle is straightforward: eleven agent manifests report working, waiting, or idle. what panes listen for and how the attention counter stays honest. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
+Running more than one coding agent against a single checkout is how teams lose work: both agents see the same files, both commit into the same history, and a refactor from one invalidates an edit the other is halfway through. Ferryx turns the clone-per-agent workaround into a managed feature so parallel runs stay visible in one window without stepping on each other. In the specific case of “How Agent Status Detection Works in Ferryx”, the Ferryx angle is straightforward: manifests for <!-- agents:count -->16<!-- /agents:count --> agents report working, waiting, or idle. what panes listen for and how the attention counter stays honest. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
 
-## Manifests for eleven agents
+## One manifest per detected agent
 
 Ferryx is a desktop terminal workspace for running several CLI coding agents at the same time. Each agent runs in its own terminal pane and, when isolation is requested, its own managed Git worktree under `.orca-worktrees/wt-<slug>` on a branch named `orca/<workspace-id>/<slug>`. Applied to “agent status detection ferryx”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
 
@@ -19,7 +19,7 @@ Ferryx is a desktop terminal workspace for running several CLI coding agents at 
 
 1. Open the project as a Ferryx workspace so tabs, panes, and sessions share one sidebar.
 2. Request a managed worktree for each agent that needs isolation; Ferryx creates it inside the repository root and names the branch for you.
-3. Start each agent (Claude Code, Codex, Gemini CLI, or any shell command) in its own pane with ⌘T and ⌘D splits.
+3. Start each agent (Claude Code, Codex, Antigravity (agy), or any shell command) in its own pane with ⌘T and ⌘D splits.
 4. Watch status badges and the attention counter instead of polling every pane; open a browser tab with ⌘⇧B for CI or PR checks.
 5. When an agent finishes, review its diff from that worktree and merge in a deliberate order before cleaning the branch up.
 
@@ -52,7 +52,7 @@ Not when each agent has its own worktree. Shared-checkout collisions (including 
 
 ### Which agents are supported?
 
-Anything you can run in a shell works. Ferryx additionally ships status-detection manifests for eleven named agents so panes report working, waiting, or idle.
+Anything you can run in a shell works. Ferryx additionally ships status-detection manifests for <!-- agents:count -->16<!-- /agents:count --> named agents so panes report working, waiting, or idle.
 
 ## Limits and non-goals
 
