@@ -2,8 +2,15 @@ import { Plus, Terminal, type LucideIcon } from "lucide-react";
 import type { RemoteTerminalTabInfo } from "../RemoteSessionList";
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../../lib/agentIcon";
 import { cn } from "../../lib/cn";
-import { touchStatusLabel } from "../remoteInventoryRows";
 import { MobileSheet, MobileSheetItem } from "./MobileSheet";
+
+/** Status vocabulary from t3code STATUS_LABEL_BY_STATUS (t3code, MIT): working -> "Working",
+ * waiting -> "Approval", done recedes with no label. */
+function touchStatusLabel(activity: "working" | "waiting" | "done" | null): { text: string; className: string } | null {
+  if (activity === "working") return { text: "Working", className: "text-status-working" };
+  if (activity === "waiting") return { text: "Approval", className: "text-status-warning" };
+  return null;
+}
 
 /**
  * Mobile session switcher bottom sheet (plan todo 7e): lists open tabs in the current
@@ -85,7 +92,7 @@ export function MobileSessionSwitcherSheet({
             ? tab.worktreeLabel
             : undefined;
 
-        const status = touchStatusLabel((tab.activityState as any) ?? null);
+        const status = touchStatusLabel(tab.activityState ?? null);
         const trailing = status ? (
           // not aria-hidden: the status is how a screen-reader user finds the session needing approval
           <span className={cn("text-[12px] font-medium tabular-nums", status.className)}>

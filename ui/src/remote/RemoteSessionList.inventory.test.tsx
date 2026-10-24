@@ -1,11 +1,16 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sidebarLiveState } from "../components/sidebar/sidebarModel";
 import {
   paneSelectionOption,
   RemoteWorkspaceMirror,
   type RemoteContextOption,
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
+import { REMOTE_COLLAPSED_KEY_PREFIX } from "./RemoteSidebar";
+import { remoteSidebarLive } from "./remoteSidebarLive";
+import { sidebarModelFixture } from "./remoteSidebarTestUtils";
+import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 
 const MACHINE_A = "mach-macos-primary-01";
 const MACHINE_B = "mach-linux-headless-02";
@@ -72,6 +77,23 @@ function mirrorModel(): RemoteWorkspaceModel {
   };
 }
 
+const ROWS_A = [
+  { workspaceId: "ws-ferryx-core", slug: null, label: "ferryx-core", projectLabel: "ferryx-core" },
+  { workspaceId: "ws-ferryx-core", slug: "main", label: "main", projectLabel: "ferryx-core" },
+  { workspaceId: "ws-docs", slug: "main", label: "main", projectLabel: "docs" },
+];
+const ROWS_B = [{ workspaceId: "ws-ferryx-core", slug: "main", label: "main", projectLabel: "ferryx-core" }];
+
+function section(machineId: string, label: string, rows: typeof ROWS_A, source: "desktop" | "inventory" = "desktop"): RemoteSidebarSection {
+  const model = sidebarModelFixture(rows, { source });
+  const selection = machineId === MACHINE_A ? { workspaceId: "ws-ferryx-core", worktreeSlug: "main" } : null;
+  return { machineId, label, state: "ok", model, live: remoteSidebarLive(model, null, selection), error: null };
+}
+
+function sections(): RemoteSidebarSection[] {
+  return [section(MACHINE_A, "Studio", ROWS_A), section(MACHINE_B, "Headless", ROWS_B)];
+}
+
 function desktopViewport() {
   vi.stubGlobal("matchMedia", (query: string) => ({
     matches: query === "(min-width: 768px)",
@@ -96,185 +118,244 @@ function phoneViewport() {
   }));
 }
 
-function renderMirror() {
-  return renderMirrorWith(mirrorModel());
-}
+type RenderInput = { model?: RemoteWorkspaceModel; sections?: RemoteSidebarSection[]; pending?: RemoteContextOption | null };
 
-function renderMirrorWith(model: RemoteWorkspaceModel) {
+function renderMirrorWith({ model = mirrorModel(), sections: list = sections(), pending = null }: RenderInput = {}) {
   const onSelect = vi.fn();
   const onCreateTerminal = vi.fn();
   const onSelectorOpenChange = vi.fn();
-  render(
+  const view = render(
     <RemoteWorkspaceMirror
       model={model}
-      pending={null}
+      pending={pending}
       selectorOpen
       onSelectorOpenChange={onSelectorOpenChange}
       onSelect={onSelect}
       onCreateTerminal={onCreateTerminal}
       activeMachineId={MACHINE_A}
+      sidebarSections={list}
     />,
   );
-  return { onSelect, onCreateTerminal, onSelectorOpenChange };
+  return { onSelect, onCreateTerminal, onSelectorOpenChange, ...view };
 }
 
-function groupRows(root: HTMLElement): Array<{ projectKey: string; worktree: string; sessions: string[] }> {
-  return within(root)
-    .getAllByTestId("remote-worktree-group")
-    .map((group) => {
-      const [worktreeRow] = within(group).getAllByRole("button");
-      return {
-        projectKey: group.closest("[data-project-key]")?.getAttribute("data-project-key") ?? "",
-        worktree: worktreeRow?.getAttribute("aria-label") ?? "",
-        sessions: within(group)
-          .queryAllByTestId("remote-session-row")
-          .map((row) => row.textContent ?? "")
-          .sort(),
-      };
-    });
+function sidebarRoot(): HTMLElement {
+  return screen.queryByTestId("remote-desktop-sidebar") ?? screen.getByTestId("remote-sidebar-drawer");
 }
 
-function serializeGroups(root: HTMLElement): string[] {
-  return groupRows(root)
-    .map((group) => `${group.projectKey}|${group.worktree}|${group.sessions.join(",")}`)
-    .sort();
+function machineSection(machineId: string): HTMLElement {
+  const found = sidebarRoot().querySelector<HTMLElement>(`[data-testid="remote-sidebar-section"][data-machine-id="${machineId}"]`);
+  if (!found) throw new Error(`no sidebar section for ${machineId}`);
+  return found;
 }
 
-function worktreeRowSummaries(root: HTMLElement): string[] {
-  return within(root)
-    .getAllByTestId("remote-worktree-group")
-    .map((group) => {
-      const [row] = within(group).getAllByRole("button");
-      const aria = row?.getAttribute("aria-label") ?? "";
-      const visible = row
-        ? within(row).getByTestId("worktree-label-text").textContent ?? ""
-        : "";
-      return `${aria}|${visible}`;
-    })
-    .sort();
+function rowButton(scope: HTMLElement, label: string, index = 0): HTMLElement {
+  const rows = within(scope).getAllByTestId("remote-sidebar-row").filter((row) => row.textContent?.startsWith(label));
+  const row = rows[index];
+  if (!row) throw new Error(`no sidebar row ${label}`);
+  return within(row).getByRole("button");
 }
+
+function strip(): HTMLElement {
+  return screen.getByRole("tablist", { name: "Terminal tabs" });
+}
+
+beforeEach(() => sessionStorage.clear());
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
 
-describe("remote session inventory rows", () => {
-  it("renders every session under its own worktree, root worktree included, with no machine chooser", () => {
-    renderMirror();
-    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
+describe("remote sidebar drawn by the desktop sidebar view", () => {
+  it("renders one section per machine with the desktop's project order and one row per worktree", () => {
+    renderMirrorWith();
+    const a = machineSection(MACHINE_A);
+    const b = machineSection(MACHINE_B);
 
-    expect(within(dialog).getAllByRole("button", { name: "ws-ferryx-core / main" })).toHaveLength(2);
-    expect(within(dialog).getByRole("button", { name: "ws-docs / main" })).toBeInTheDocument();
-
-    // Placement, not row order: every session row sits inside the worktree that owns it, and each
-    // worktree group is qualified by its machine.
-    expect(serializeGroups(dialog)).toEqual(
-      [
-        `mach-macos-primary-01\u0000ws-ferryx-core|ws-ferryx-core / main|agent (1a),agent (1b)`,
-        `mach-macos-primary-01\u0000ws-ferryx-core|ws-ferryx-core / ferryx-core (root)|root (done)`,
-        `mach-linux-headless-02\u0000ws-ferryx-core|ws-ferryx-core / main|headless (1a)`,
-        `mach-macos-primary-01\u0000ws-docs|ws-docs / main|`,
-      ].sort(),
-    );
-    expect(within(dialog).getAllByTestId("remote-session-row")).toHaveLength(4);
-    // Sidebar rows carry no git data (ui/DESIGN.md section 4 rule 6): no primary badge anywhere.
-    expect(within(dialog).queryAllByTestId("worktree-primary-badge")).toHaveLength(0);
-
-    expect(dialog.textContent).not.toMatch(/mach-macos-primary-01|mach-linux-headless-02/);
-    expect(within(dialog).queryByRole("button", { name: "Machines" })).toBeNull();
+    expect(within(a).getByRole("heading", { name: "Studio" })).toBeInTheDocument();
+    expect(within(b).getByRole("heading", { name: "Headless" })).toBeInTheDocument();
+    expect(within(a).getAllByTestId("remote-sidebar-row").map((row) => row.textContent)).toEqual(["ferryx-core", "main", "main"]);
+    expect(within(b).getAllByTestId("remote-sidebar-row").map((row) => row.textContent)).toEqual(["main"]);
+    // Sessions live in the terminal strip, not as nested sidebar rows; rows carry no git data.
+    expect(within(sidebarRoot()).queryByRole("tab", { name: /agent/ })).toBeNull();
+    expect(within(sidebarRoot()).queryAllByTestId("worktree-primary-badge")).toHaveLength(0);
+    expect(within(sidebarRoot()).queryByRole("button", { name: "Machines" })).toBeNull();
   });
 
-  it("labels worktree rows with the worktree name alone and no git decoration", () => {
-    renderMirror();
-    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
+  it("hides the desktop-only edit controls: no add project, settings, resize or row menus", () => {
+    desktopViewport();
+    renderMirrorWith();
+    const sidebar = sidebarRoot();
+    expect(within(sidebar).queryByRole("button", { name: "Add project" })).toBeNull();
+    expect(within(sidebar).queryByRole("button", { name: "Settings" })).toBeNull();
+    expect(within(sidebar).queryByRole("button", { name: "Hide sidebar" })).toBeNull();
+    expect(within(sidebar).queryByRole("button", { name: /More actions for/ })).toBeNull();
+    expect(within(sidebar).queryByRole("button", { name: /Add worktree to/ })).toBeNull();
+  });
 
-    // Accessible names keep the full project/worktree identity; the visible text carries the
-    // worktree name alone, and the root worktree is never named after the active context. The
-    // root row is told apart by its "root" label, not a badge.
-    expect(worktreeRowSummaries(dialog)).toEqual(
-      [
-        "ws-docs / main|main",
-        "ws-ferryx-core / ferryx-core (root)|root",
-        "ws-ferryx-core / main|main",
-        "ws-ferryx-core / main|main",
-      ].sort(),
-    );
-    for (const group of within(dialog).getAllByTestId("remote-worktree-group")) {
-      const [row] = within(group).getAllByRole("button");
-      expect(row.querySelector(".lucide-git-branch, .lucide-check")).toBeNull();
-      expect(within(row).queryByLabelText("Active")).toBeNull();
+  it("marks only the attached worktree active, on its own machine, with the guide-rail marker", () => {
+    desktopViewport();
+    renderMirrorWith();
+    const a = machineSection(MACHINE_A);
+    expect(rowButton(a, "main", 0)).toHaveAttribute("aria-current", "true");
+    expect(rowButton(a, "main", 1)).not.toHaveAttribute("aria-current");
+    expect(rowButton(machineSection(MACHINE_B), "main")).not.toHaveAttribute("aria-current");
+    expect(within(sidebarRoot()).getAllByTestId("worktree-rail-active")).toHaveLength(1);
+  });
+
+  it("shows worktree activity from the machine's session inventory through the shared live state", () => {
+    const model = sidebarModelFixture(ROWS_A);
+    const inventory = {
+      machineId: MACHINE_A, revision: "1", completeness: "complete" as const, unavailableWorkspaceIds: [], fetchedAt: 1,
+      entries: [{
+        machineId: MACHINE_A, workspaceId: "ws-docs", worktreeSlug: "main", worktreeLabel: "main", sessionId: "s-docs",
+        daemonEpoch: "1", title: "docs agent", running: true, agentType: "claude", providerSessionId: null, activityState: "waiting" as const,
+      }],
+    };
+    const live = remoteSidebarLive(model, inventory, null);
+    renderMirrorWith({ sections: [{ machineId: MACHINE_A, label: "Studio", state: "ok", model, live, error: null }] });
+
+    const docsRow = rowButton(machineSection(MACHINE_A), "main", 1);
+    expect(docsRow.querySelector('[data-status-state="waiting"]')).not.toBeNull();
+    expect(rowButton(machineSection(MACHINE_A), "main", 0).querySelector("[data-status-state]")).toBeNull();
+    expect(screen.getByTestId("sidebar-status-footer")).toHaveTextContent("1 needs input");
+  });
+
+  it("selects a worktree with its machine identity and closes the drawer", () => {
+    const { onSelect, onSelectorOpenChange, onCreateTerminal } = renderMirrorWith();
+    fireEvent.click(rowButton(machineSection(MACHINE_B), "main"));
+
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith({ workspaceId: "ws-ferryx-core", worktreeSlug: "main", worktreeLabel: "main", machineId: MACHINE_B });
+    expect(JSON.stringify(onSelect.mock.calls[0]?.[0])).not.toMatch(/bearer|authorization|token/i);
+    expect(onSelectorOpenChange).toHaveBeenCalledWith(false);
+    expect(onCreateTerminal).not.toHaveBeenCalled();
+  });
+
+  it("selects the root worktree with a null slug, never the context worktree", () => {
+    const { onSelect } = renderMirrorWith();
+    fireEvent.click(rowButton(machineSection(MACHINE_A), "ferryx-core"));
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-ferryx-core", worktreeSlug: null, machineId: MACHINE_A }));
+  });
+
+  it("disables every row while a selection is pending and marks the pending row busy", () => {
+    const pending: RemoteContextOption = { workspaceId: "ws-docs", worktreeSlug: "main", worktreeLabel: "main", machineId: MACHINE_A };
+    const { onSelect } = renderMirrorWith({ pending });
+    const a = machineSection(MACHINE_A);
+    const docs = rowButton(a, "main", 1);
+
+    expect(docs.closest('[data-testid="remote-sidebar-row"]')).toHaveAttribute("aria-busy", "true");
+    expect(rowButton(a, "main", 0).closest('[data-testid="remote-sidebar-row"]')).not.toHaveAttribute("aria-busy");
+    expect(rowButton(machineSection(MACHINE_B), "main").closest('[data-testid="remote-sidebar-row"]')).not.toHaveAttribute("aria-busy");
+    for (const row of within(sidebarRoot()).getAllByTestId("remote-sidebar-row")) {
+      expect(within(row).getByRole("button")).toHaveAttribute("aria-disabled", "true");
     }
+    fireEvent.click(docs);
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it("nests worktrees behind the project guide rail and marks only the active row on it", () => {
-    desktopViewport();
-    renderMirror();
-    const sidebar = screen.getByTestId("remote-desktop-sidebar");
+  it("seeds folds from the desktop and keeps this browser's folds in session storage only", () => {
+    const model = sidebarModelFixture(ROWS_A, { collapsedGroupIds: ["ws-docs"] });
+    const list = [{ machineId: MACHINE_A, label: "Studio", state: "ok" as const, model, live: sidebarLiveState(model, {}), error: null }];
+    renderMirrorWith({ sections: list });
+    const a = machineSection(MACHINE_A);
+    expect(within(a).getByRole("button", { name: "Expand docs" })).toHaveAttribute("aria-expanded", "false");
+    expect(within(a).getAllByTestId("remote-sidebar-row")).toHaveLength(2);
 
-    for (const group of within(sidebar).getAllByTestId("remote-worktree-group")) {
-      const rail = group.closest('[data-testid="remote-project-worktrees"]');
-      expect(rail).not.toBeNull();
-      expect(rail).toHaveClass("ml-3", "border-l", "border-worktree-sidebar-border", "pl-2");
-      const [row] = within(group).getAllByRole("button");
-      const railMarker = row.querySelector('[data-testid="worktree-rail-active"]');
-      if (row.getAttribute("aria-current") === "true") {
-        expect(railMarker).not.toBeNull();
-        expect(row).toHaveClass("bg-worktree-sidebar-accent");
-      } else {
-        expect(railMarker).toBeNull();
-      }
-    }
-    expect(within(sidebar).getAllByTestId("worktree-rail-active")).toHaveLength(1);
+    fireEvent.click(within(a).getByRole("button", { name: "Collapse ferryx-core" }));
+    expect(within(a).queryAllByTestId("remote-sidebar-row")).toHaveLength(0);
+    expect(JSON.parse(sessionStorage.getItem(`${REMOTE_COLLAPSED_KEY_PREFIX}${MACHINE_A}`) ?? "null")).toEqual(["ws-docs", "ws-ferryx-core"]);
+    // The published model itself is never mutated: folds are local to this browser.
+    expect(model.collapsedGroupIds).toEqual(["ws-docs"]);
+
+    cleanup();
+    renderMirrorWith({ sections: list });
+    expect(within(machineSection(MACHINE_A)).queryAllByTestId("remote-sidebar-row")).toHaveLength(0);
   });
 
-  it("renders project headers with a chevron toggle and folder that collapse the rail", () => {
-    desktopViewport();
-    renderMirror();
-    const sidebar = screen.getByTestId("remote-desktop-sidebar");
-    const section = sidebar.querySelector('section[aria-label="ws-docs"]') as HTMLElement;
-    expect(section).not.toBeNull();
-    const header = section.firstElementChild as HTMLElement;
-    expect(header).toHaveClass("h-7");
-    expect(header.className).toContain("text-[12px]");
-    expect(header.querySelector(".lucide-folder")).not.toBeNull();
-
-    const toggle = within(section).getByRole("button", { name: "Collapse ws-docs" });
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(toggle).toHaveClass("size-5");
-    expect(within(section).getAllByTestId("remote-worktree-group")).toHaveLength(1);
-
-    fireEvent.click(toggle);
-    expect(within(section).queryAllByTestId("remote-worktree-group")).toHaveLength(0);
-    const expand = within(section).getByRole("button", { name: "Expand ws-docs" });
-    expect(expand).toHaveAttribute("aria-expanded", "false");
-
-    fireEvent.click(expand);
-    expect(within(section).getAllByTestId("remote-worktree-group")).toHaveLength(1);
+  it("marks a section rebuilt from the inventory as not synced with the desktop", () => {
+    renderMirrorWith({ sections: [section(MACHINE_A, "Studio", ROWS_A, "inventory"), section(MACHINE_B, "Headless", ROWS_B)] });
+    expect(within(machineSection(MACHINE_A)).getByTestId("remote-sidebar-not-synced")).toBeInTheDocument();
+    expect(within(machineSection(MACHINE_B)).queryByTestId("remote-sidebar-not-synced")).toBeNull();
   });
 
-  it("shows worktree activity through the sidebar state slot", () => {
-    desktopViewport();
-    renderMirror();
-    const sidebar = screen.getByTestId("remote-desktop-sidebar");
-    const rootRow = within(sidebar).getByRole("button", { name: "ws-ferryx-core / ferryx-core (root)" });
-    const slot = within(rootRow).getByTestId("worktree-status-dot");
-    expect(slot).toHaveClass("ml-auto");
-    expect(slot.querySelector('[data-status-state="done"]')).not.toBeNull();
+  it("keeps the last list while a machine is offline and says so", () => {
+    const stale = section(MACHINE_A, "Studio", ROWS_A);
+    renderMirrorWith({ sections: [{ ...stale, state: "offline", error: { code: "OFFLINE", message: "gone" } }] });
+    expect(within(machineSection(MACHINE_A)).getByRole("status")).toHaveTextContent("Can't reach this computer right now. Showing the last list.");
+    expect(within(machineSection(MACHINE_A)).getAllByTestId("remote-sidebar-row")).toHaveLength(3);
+  });
 
-    const docsRow = within(sidebar).getByRole("button", { name: "ws-docs / main" });
-    expect(within(docsRow).queryByTestId("worktree-status-dot")).toBeNull();
+  it("renders the same rows in the persistent desktop sidebar and the mobile drawer, at their own density", () => {
+    phoneViewport();
+    renderMirrorWith();
+    const drawerRows = within(sidebarRoot()).getAllByTestId("remote-sidebar-row").map((row) => row.textContent);
+    const touchRow = rowButton(machineSection(MACHINE_A), "main");
+    expect(touchRow).toHaveClass("min-h-11");
+    expect(within(touchRow).getByText("main")).toHaveClass("text-[14px]");
+    cleanup();
+
+    desktopViewport();
+    renderMirrorWith();
+    expect(screen.queryByRole("dialog", { name: "Workspace context" })).toBeNull();
+    expect(within(sidebarRoot()).getAllByTestId("remote-sidebar-row").map((row) => row.textContent)).toEqual(drawerRows);
+    const compactRow = rowButton(machineSection(MACHINE_A), "main");
+    expect(compactRow).toHaveClass("h-7");
+    expect(compactRow).not.toHaveClass("min-h-11");
+  });
+
+  it("keeps the drawer closed until it is opened on a phone viewport", () => {
+    render(
+      <RemoteWorkspaceMirror model={mirrorModel()} pending={null} selectorOpen={false} onSelectorOpenChange={vi.fn()} onSelect={vi.fn()} sidebarSections={sections()} />,
+    );
+    expect(screen.queryByRole("dialog", { name: "Workspace context" })).toBeNull();
+    expect(screen.queryByTestId("remote-desktop-sidebar")).toBeNull();
+    expect(screen.queryByTestId("remote-sidebar-drawer")).toBeNull();
+  });
+
+  it("opens the phone drawer as a full-height side panel, not a floating sheet", () => {
+    renderMirrorWith();
+    const drawer = screen.getByTestId("remote-sidebar-drawer");
+    expect(drawer.className).toContain("inset-y-0");
+    expect(drawer.className).toContain("left-0");
+    expect(drawer.className).toContain("w-[88%]");
+    expect(drawer.className).toContain("max-w-[340px]");
+    expect(drawer.className).toContain("animate-drawer-in");
+    expect(drawer.className).not.toContain("rounded-lg");
+    expect(within(drawer).getAllByTestId("remote-sidebar-row").length).toBeGreaterThan(1);
+  });
+});
+
+describe("remote terminal tab strip", () => {
+  function tabNames() {
+    return within(strip()).getAllByRole("tab").map((tab) => tab.getAttribute("aria-label"));
+  }
+
+  it("lists the attached worktree's sessions on its own machine only, with declared activity", () => {
+    renderMirrorWith();
+    expect(tabNames().sort()).toEqual(["agent (1a) (working)", "agent (1b) (waiting)"]);
+    const tabs = within(strip()).getAllByRole("tab");
+    expect(tabs.find((tab) => tab.textContent === "agent (1a)")?.querySelector('[data-testid="tab-working-indicator"]')).not.toBeNull();
+    expect(tabs.find((tab) => tab.textContent === "agent (1b)")?.querySelector('[data-testid="tab-waiting-indicator"]')).not.toBeNull();
+  });
+
+  it("marks the mirrored session selected only when its epoch matches the context epoch", () => {
+    const matching = mirrorModel();
+    matching.context.activeTerminal = { sessionId: "s-1a-working", running: true, daemonEpoch: 101 };
+    renderMirrorWith({ model: matching });
+    expect(within(strip()).getByRole("tab", { name: "agent (1a) (working)" })).toHaveAttribute("aria-selected", "true");
+    cleanup();
+
+    const stale = mirrorModel();
+    stale.context.activeTerminal = { sessionId: "s-1a-working", running: true, daemonEpoch: 999 };
+    renderMirrorWith({ model: stale });
+    expect(within(strip()).getByRole("tab", { name: "agent (1a) (working)" })).toHaveAttribute("aria-selected", "false");
   });
 
   it("selects an existing session with machine, epoch, workspace and session identity and never creates a terminal", () => {
-    const { onSelect, onCreateTerminal, onSelectorOpenChange } = renderMirror();
-    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-
-    const waitingRow = within(dialog)
-      .getAllByTestId("remote-session-row")
-      .find((row) => row.textContent === "agent (1b)");
-    expect(waitingRow).toBeDefined();
-    fireEvent.click(waitingRow!);
+    const { onSelect, onCreateTerminal } = renderMirrorWith();
+    fireEvent.click(within(strip()).getByRole("tab", { name: "agent (1b) (waiting)" }));
 
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(onSelect).toHaveBeenCalledWith({
@@ -287,18 +368,23 @@ describe("remote session inventory rows", () => {
     });
     expect(JSON.stringify(onSelect.mock.calls[0]?.[0])).not.toMatch(/bearer|authorization|token/i);
     expect(onCreateTerminal).not.toHaveBeenCalled();
-    expect(onSelectorOpenChange).toHaveBeenCalledWith(false);
   });
 
-  it("keeps the second machine's identical session id as a distinct row and target", () => {
-    const { onSelect } = renderMirror();
-    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-
-    const headlessRow = within(dialog)
-      .getAllByTestId("remote-session-row")
-      .find((row) => row.textContent === "headless (1a)");
-    fireEvent.click(headlessRow!);
-
+  it("keeps the second machine's identical session id as a distinct target once that machine is attached", () => {
+    const onSelect = vi.fn();
+    render(
+      <RemoteWorkspaceMirror
+        model={mirrorModel()}
+        pending={null}
+        selectorOpen
+        onSelectorOpenChange={vi.fn()}
+        onSelect={onSelect}
+        activeMachineId={MACHINE_B}
+        sidebarSections={sections()}
+      />,
+    );
+    expect(within(strip()).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["headless (1a)"]);
+    fireEvent.click(within(strip()).getByRole("tab", { name: "headless (1a)" }));
     expect(onSelect).toHaveBeenCalledWith({
       workspaceId: "ws-ferryx-core",
       worktreeSlug: "main",
@@ -310,60 +396,19 @@ describe("remote session inventory rows", () => {
   });
 
   it("creates a terminal only from the explicit New terminal control", () => {
-    const { onSelect, onCreateTerminal } = renderMirror();
-    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-
-    fireEvent.click(within(dialog).getByTestId("remote-new-terminal"));
-
+    const { onSelect, onCreateTerminal } = renderMirrorWith();
+    fireEvent.click(screen.getByTestId("remote-new-terminal"));
     expect(onCreateTerminal).toHaveBeenCalledTimes(1);
     expect(onSelect).not.toHaveBeenCalled();
-  });
-
-  it("shows a status glyph only for sessions that declare activity metadata", () => {
-    renderMirror();
-    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-    const rows = within(dialog).getAllByTestId("remote-session-row");
-
-    const working = rows.find((row) => row.textContent === "agent (1a)")!;
-    const waiting = rows.find((row) => row.textContent === "agent (1b)")!;
-    const done = rows.find((row) => row.textContent === "root (done)")!;
-    const runningOnly = rows.find((row) => row.textContent === "headless (1a)")!;
-
-    expect(working.querySelector('[data-status-state="working"]')).not.toBeNull();
-    expect(waiting.querySelector('[data-status-state="waiting"]')).not.toBeNull();
-    expect(done.querySelector('[data-status-state="done"]')).not.toBeNull();
-    expect(runningOnly.querySelector("[data-status-state]")).toBeNull();
-    expect(runningOnly.querySelector('[data-testid$="-indicator"]')).toBeNull();
-  });
-
-  it("marks the mirrored session active only when its epoch matches the context epoch", () => {
-    const matching = mirrorModel();
-    matching.context.activeTerminal = { sessionId: "s-1a-working", running: true, daemonEpoch: 101 };
-    renderMirrorWith(matching);
-    const activeRow = within(screen.getByTestId("remote-sidebar-drawer"))
-      .getAllByTestId("remote-session-row")
-      .find((row) => row.textContent === "agent (1a)");
-    expect(activeRow).toHaveAttribute("aria-current", "true");
-    cleanup();
-
-    const stale = mirrorModel();
-    stale.context.activeTerminal = { sessionId: "s-1a-working", running: true, daemonEpoch: 999 };
-    renderMirrorWith(stale);
-    const staleRow = within(screen.getByTestId("remote-sidebar-drawer"))
-      .getAllByTestId("remote-session-row")
-      .find((row) => row.textContent === "agent (1a)");
-    expect(staleRow).not.toHaveAttribute("aria-current");
   });
 
   it("selects a root-worktree pane with a null slug instead of the context worktree", () => {
     const model = mirrorModel();
     model.context.activeTabId = "tab-root";
-    model.context.terminalTabs = [
-      { id: "tab-root", label: "root shell", worktreeSlug: null, sessionId: "s-root", daemonEpoch: 303 },
-    ];
-    const { onSelect } = renderMirrorWith(model);
+    model.context.terminalTabs = [{ id: "tab-root", label: "root shell", worktreeSlug: null, sessionId: "s-root", daemonEpoch: 303 }];
+    const { onSelect } = renderMirrorWith({ model });
 
-    fireEvent.click(within(screen.getByTestId("remote-sidebar-drawer")).getByRole("tab", { name: "root shell" }));
+    fireEvent.click(within(strip()).getByRole("tab", { name: "root shell" }));
 
     expect(onSelect).toHaveBeenCalledWith({
       workspaceId: "ws-ferryx-core",
@@ -377,175 +422,20 @@ describe("remote session inventory rows", () => {
 
   it("selects a pane that declares its own workspace instead of the context workspace", () => {
     const model = mirrorModel();
-    model.context.terminalTabs = [
-      { id: "tab-docs", label: "docs shell", workspaceId: "ws-docs", worktreeSlug: "main" },
-    ];
-    const { onSelect } = renderMirrorWith(model);
+    model.context.terminalTabs = [{ id: "tab-docs", label: "docs shell", workspaceId: "ws-docs", worktreeSlug: "main" }];
+    const { onSelect } = renderMirrorWith({ model });
 
-    fireEvent.click(within(screen.getByTestId("remote-sidebar-drawer")).getByRole("tab", { name: "docs shell" }));
+    fireEvent.click(within(strip()).getByRole("tab", { name: "docs shell" }));
 
-    expect(onSelect).toHaveBeenCalledWith({
-      workspaceId: "ws-docs",
-      worktreeSlug: "main",
-      worktreeLabel: "main",
-      tabId: "tab-docs",
-    });
+    expect(onSelect).toHaveBeenCalledWith({ workspaceId: "ws-docs", worktreeSlug: "main", worktreeLabel: "main", tabId: "tab-docs" });
   });
 
-  it("renders the same inventory rows in the persistent desktop sidebar and the mobile drawer", () => {
-    renderMirror();
-    const drawerGroups = serializeGroups(screen.getByTestId("remote-sidebar-drawer"));
-    cleanup();
-
-    desktopViewport();
-    renderMirror();
-    const sidebar = screen.getByTestId("remote-desktop-sidebar");
-
-    expect(screen.queryByRole("dialog", { name: "Workspace context" })).toBeNull();
-    expect(serializeGroups(sidebar)).toEqual(drawerGroups);
-    expect(drawerGroups).toHaveLength(4);
-    expect(within(sidebar).getAllByTestId("remote-session-row")).toHaveLength(4);
-  });
-
-  it("keeps the drawer closed until it is opened on a phone viewport", () => {
-    const onSelect = vi.fn();
-    render(
-      <RemoteWorkspaceMirror
-        model={mirrorModel()}
-        pending={null}
-        selectorOpen={false}
-        onSelectorOpenChange={vi.fn()}
-        onSelect={onSelect}
-      />,
-    );
-
-    expect(screen.queryByRole("dialog", { name: "Workspace context" })).toBeNull();
-    expect(screen.queryByTestId("remote-desktop-sidebar")).toBeNull();
-    expect(screen.queryByTestId("remote-sidebar-drawer")).toBeNull();
-  });
-
-  it("opens the phone drawer as a full-height side panel, not a floating sheet", () => {
-    renderMirror();
-    const drawer = screen.getByTestId("remote-sidebar-drawer");
-
-    expect(drawer.className).toContain("inset-y-0");
-    expect(drawer.className).toContain("left-0");
-    expect(drawer.className).toContain("w-[88%]");
-    expect(drawer.className).toContain("max-w-[340px]");
-    expect(drawer.className).toContain("animate-drawer-in");
-    expect(drawer.className).not.toContain("max-h-full");
-    expect(drawer.className).not.toContain("rounded-lg");
-    expect(within(drawer).getByTestId("remote-new-terminal")).toBeInTheDocument();
-    expect(within(drawer).getAllByTestId("remote-worktree-group").length).toBeGreaterThan(1);
-  });
-
-  it("sizes touch rows for thumbs under a matchMedia matches:false stub", () => {
-    phoneViewport();
-    renderMirror();
-    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-
-    const rows = within(dialog).getAllByTestId("remote-session-row");
-    const workingRow = rows.find((row) => row.textContent === "agent (1a)")!;
-    expect(workingRow).toHaveClass("min-h-11");
-    expect(workingRow).not.toHaveClass("min-h-[24px]");
-    expect(within(workingRow).getByText("agent (1a)")).toHaveClass("text-[14px]");
-    expect(within(workingRow).getByTestId("tab-terminal-icon")).toHaveClass("size-4");
-
-    const [firstGroup] = within(dialog).getAllByTestId("remote-worktree-group");
-    const worktreeRow = within(firstGroup).getAllByRole("button")[0];
-    expect(worktreeRow).toHaveClass("min-h-11");
-    expect(worktreeRow).not.toHaveClass("h-7");
-    expect(worktreeRow.querySelector('[data-testid="worktree-label-text"]')).toHaveClass("text-[14px]");
-
-    const section = document.querySelector('section[aria-label="ws-ferryx-core"]');
-    expect(section).not.toBeNull();
-    const header = section!.firstElementChild as HTMLElement;
-    expect(header.className).toContain("text-[12px]");
-    expect(header.className).toContain("font-medium");
-    expect(header.className).toContain("text-chat-foreground-secondary");
-    expect(header.className).toContain("border-b");
-    expect(header.className).not.toContain("uppercase");
-    // Same anatomy as the desktop header, with a thumb-sized toggle.
-    expect(header).toHaveClass("min-h-11");
-    expect(header.querySelector(".lucide-folder")).not.toBeNull();
-    expect(within(header).getByRole("button", { name: "Collapse ws-ferryx-core" })).toHaveClass("size-11");
-    expect(within(dialog).queryAllByTestId("worktree-primary-badge")).toHaveLength(0);
-  });
-
-  it("labels touch rows with the T3 status vocabulary as a caption outside the row button", () => {
-    phoneViewport();
-    renderMirror();
-    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-    const rows = within(dialog).getAllByTestId("remote-session-row");
-    const captionOf = (row: HTMLElement | undefined) =>
-      row?.parentElement?.querySelector('[data-testid="row-status-label"]') ?? null;
-
-    const workingRow = rows.find((row) => row.textContent === "agent (1a)")!;
-    const workingCaption = captionOf(workingRow) as HTMLElement | null;
-    expect(workingCaption).not.toBeNull();
-    expect(workingCaption!.textContent).toBe("Working");
-    expect(workingCaption!.className).toContain("text-status-working");
-    expect(workingCaption!.className).toContain("text-[12px]");
-    expect(workingCaption!.className).toContain("tabular-nums");
-    expect(workingCaption!.className).toContain("right-2");
-    expect(workingRow.querySelector('[data-testid="row-status-label"]')).toBeNull();
-
-    const waitingRow = rows.find((row) => row.textContent === "agent (1b)")!;
-    const waitingCaption = captionOf(waitingRow) as HTMLElement | null;
-    expect(waitingCaption).not.toBeNull();
-    expect(waitingCaption!.textContent).toBe("Approval");
-    expect(waitingCaption!.className).toContain("text-status-warning");
-
-    expect(captionOf(rows.find((row) => row.textContent === "root (done)")!)).toBeNull();
-    expect(captionOf(rows.find((row) => row.textContent === "headless (1a)")!)).toBeNull();
-  });
-
-  it("renders pane rows with touch height, labels and a status caption", () => {
-    phoneViewport();
-    const model = mirrorModel();
-    model.context.terminalTabs = [
-      {
-        id: "tab-editor",
-        label: "editor",
-        sessionId: "s-editor",
-        worktreeSlug: "main",
-        activityState: "working",
-      },
-    ];
-    renderMirrorWith(model);
-
-    const tab = screen.getByRole("tab", { name: "editor (working)" });
-    expect(tab).toHaveClass("min-h-11");
-    expect(tab).not.toHaveClass("min-h-[24px]");
-    expect(within(tab).getByText("editor")).toHaveClass("text-[14px]");
-    const caption = tab.parentElement?.querySelector(
-      '[data-testid="row-status-label"]',
-    ) as HTMLElement | null;
-    expect(caption).not.toBeNull();
-    expect(caption!.textContent).toBe("Working");
-  });
-
-  it("keeps desktop sidebar rows at min-h-[24px] when matchMedia matches:true", () => {
-    desktopViewport();
-    const model = mirrorModel();
-    model.context.terminalTabs = [
-      { id: "tab-editor", label: "editor", sessionId: "s-editor", worktreeSlug: "main", activityState: "working" },
-    ];
-    renderMirrorWith(model);
-    const sidebar = screen.getByTestId("remote-desktop-sidebar");
-
-    for (const row of within(sidebar).getAllByTestId("remote-session-row")) {
-      expect(row).toHaveClass("min-h-[24px]");
-      expect(row).not.toHaveClass("min-h-11");
-    }
-    const tab = within(sidebar).getByRole("tab", { name: "editor (working)" });
-    expect(tab).toHaveClass("min-h-[24px]");
-    expect(tab).not.toHaveClass("min-h-11");
-    expect(within(sidebar).queryAllByTestId("row-status-label")).toHaveLength(0);
-    const [firstGroup] = within(sidebar).getAllByTestId("remote-worktree-group");
-    const worktreeRow = within(firstGroup).getAllByRole("button")[0];
-    expect(worktreeRow).toHaveClass("h-7");
-    expect(worktreeRow).not.toHaveClass("min-h-11");
+  it("disables the tabs and marks the pending session busy while a selection is pending", () => {
+    const pending: RemoteContextOption = { workspaceId: "ws-ferryx-core", worktreeSlug: "main", worktreeLabel: "main", machineId: MACHINE_A, sessionId: "s-1b-waiting" };
+    renderMirrorWith({ pending });
+    for (const tab of within(strip()).getAllByRole("tab")) expect(tab).toBeDisabled();
+    expect(within(strip()).getByRole("tab", { name: "agent (1b) (waiting)" })).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByTestId("remote-new-terminal")).toBeDisabled();
   });
 });
 

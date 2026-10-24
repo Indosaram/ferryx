@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { normalizeRemoteWorkspaceState } from "./RemoteSessionList";
 import { RemoteApp } from "./RemoteApp";
@@ -47,11 +47,15 @@ it("sends the backend session identity when selecting an SSH session", async () 
   vi.stubGlobal("WebSocket", class {
     close() {}
   });
-  const fetcher = vi.fn(async (_url: RequestInfo | URL, _options?: RequestInit) => new Response(JSON.stringify(inventory)));
+  // The SSH worktree is attached with no focused terminal; its sessions fill the tab strip.
+  const attached = { ...inventory, activeContext: { workspaceId: "ssh:build", worktreeLabel: "repo", sessionId: null, terminalTabs: [] } };
+  const fetcher = vi.fn(async (_url: RequestInfo | URL, _options?: RequestInit) => new Response(JSON.stringify(attached)));
   vi.stubGlobal("fetch", ticketed(fetcher));
   await act(async () => { render(<RemoteApp />); });
-  fireEvent.click(screen.getByRole("button", { name: "Change workspace context" }));
-  const option = screen.getByRole("button", { name: /Terminal 2/ });
+  const strip = screen.getByRole("tablist", { name: "Terminal tabs" });
+  expect(within(strip).getAllByRole("tab").map((tab) => tab.getAttribute("data-session-id"))).toEqual(["ssh-one", "ssh-two"]);
+  expect(within(strip).getAllByRole("tab").every((tab) => tab.getAttribute("aria-selected") === "false")).toBe(true);
+  const option = within(strip).getByRole("tab", { name: "Terminal 2" });
   await act(async () => { fireEvent.click(option); });
   // Match the selection POST specifically: authenticated GETs now also carry an
   // init argument (the Authorization header), so "has an init" is no longer unique.

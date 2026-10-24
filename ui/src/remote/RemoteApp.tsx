@@ -152,6 +152,10 @@ import { paneSupervision } from "../lib/supervisorModel";
 import { toast } from "sonner";
 import { AccountSheet, getStoredAccountEmail, storeAccountEmail } from "./home/AccountSheet";
 import { createSupervisorFrameBus } from "./home/machineSupervisorSources";
+import { DIRECT_SIDEBAR_MACHINE, useRemoteSidebarMachines } from "./useRemoteSidebarMachines";
+import { directSidebarInventory } from "./directSidebarInventory";
+import { useRemoteSidebarModel } from "./useRemoteSidebarModel";
+import { SupervisorHome } from "./home/SupervisorHome";
 import { buildInboxRows, optionForSession, type InboxRow } from "./home/phoneHomeModel";
 import { PhoneHomeView } from "./home/PhoneHomeView";
 import { SupervisorSessionStrip } from "./home/SupervisorSessionStrip";
@@ -2117,6 +2121,8 @@ export const RemoteHostConnection: React.FC<{
           return;
         }
         if (inventoryEvent.kind !== "ignored") return;
+      } else {
+        supervisorBus.emit(DIRECT_SIDEBAR_MACHINE, text);
       }
 
       const change = parseActiveSelectionEvent(text);
@@ -2695,7 +2701,8 @@ export const RemoteHostConnection: React.FC<{
   const phoneHome = !desktopSidebar && isAccountMode && planLimitNotice === null;
   const phoneNav = usePhoneNavigation(phoneHome);
   const phoneSupervisor = usePhoneSupervisor({
-    enabled: phoneHome,
+    // The phone home and the wide sidebar's Supervisor tab both read it.
+    enabled: phoneHome || (desktopSidebar && isAccountMode && planLimitNotice === null),
     discovery: accountDiscovery,
     active: activeTunnelConnection,
     bus: supervisorBus,
@@ -2711,6 +2718,65 @@ export const RemoteHostConnection: React.FC<{
     ? accountDiscovery.sessionInventories[activeTunnelConnection.machine.machineId] ?? null
     : null;
   inventoryRef.current = activeMachineInventory;
+
+  /* The sidebar draws each machine's desktop-published model with the desktop's own view. */
+  const directSidebarFetch = useMemo(
+    () =>
+      !isAccountMode && token
+        ? async (path: string) => {
+            const response = await fetch(apiUrl(transportBaseUrl, path), { headers: { Authorization: `Bearer ${token}` } });
+            return { status: response.status, body: await response.text() };
+          }
+        : null,
+    [isAccountMode, token, transportBaseUrl],
+  );
+  const sidebarSelection = model.context.workspaceId
+    ? { workspaceId: model.context.workspaceId, worktreeSlug: model.context.worktreeSlug }
+    : null;
+  const directInventory = useMemo(() => (isAccountMode ? null : directSidebarInventory(model)), [isAccountMode, model]);
+  const sidebarMachines = useRemoteSidebarMachines(
+    isAccountMode
+      ? {
+          kind: "account",
+          machines: accountDiscovery.machines,
+          linkFor: (machineId) =>
+            activeTunnelConnection && !activeTunnelConnection.isClosed && activeTunnelConnection.machine.machineId === machineId
+              ? { transport: activeTunnelConnection.transport, deviceToken: activeTunnelConnection.deviceToken }
+              : accountDiscovery.peekConnection(machineId),
+          inventories: accountDiscovery.sessionInventories,
+          activeMachineId: activeTunnelConnection?.machine.machineId ?? null,
+          bus: supervisorBus,
+          selection: sidebarSelection,
+        }
+      : {
+          kind: "direct",
+          fetchLike: directSidebarFetch,
+          connectionId: `${transportBaseUrl}\u0000${token ?? ""}`,
+          inventory: directInventory,
+          bus: supervisorBus,
+          selection: sidebarSelection,
+        },
+  );
+  const sidebarSections = useRemoteSidebarModel({ machines: sidebarMachines });
+  const sidebarSupervisor = isAccountMode && desktopSidebar
+    ? {
+        typing: false,
+        content: (
+          <div data-testid="remote-sidebar-supervisor" className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+            <SupervisorHome
+              machines={phoneSupervisor.machines}
+              now={phoneSupervisor.now}
+              needsYou={new Set<string>()}
+              onSetPaused={phoneSupervisor.setPaused}
+              onOpenLane={(machineId, sessionId) => {
+                const option = optionForSession(accountDiscovery.accountOptions, machineId, sessionId);
+                if (option) void selectAccountOption(option);
+              }}
+            />
+          </div>
+        ),
+      }
+    : undefined;
 
   /* Pane rows render from the model's tab strip, which is a snapshot taken when the model
      was built. Observations arrive afterwards, so the live inventory wins over the snapshot
@@ -4424,6 +4490,7 @@ export const RemoteHostConnection: React.FC<{
         onSelectorOpenChange={() => {}}
         onSignOut={handleSignOut}
         activeMachineId={activeMachineId}
+        sidebarSections={sidebarSections}
         pickerStatus={accountPickerStatus}
         onSelect={(option) => {
           const accountOpt = (option as Partial<AccountWorktreeOption>).machineId
@@ -4622,6 +4689,8 @@ export const RemoteHostConnection: React.FC<{
         onOpenHosts={isAccountMode ? undefined : () => setHostDrawerOpen(true)}
         onSignOut={isAccountMode ? handleSignOut : undefined}
         activeMachineId={activeMachineId}
+        sidebarSections={sidebarSections}
+        supervisor={sidebarSupervisor}
         pickerStatus={
           accountPreselection && creationError ? (
             <>

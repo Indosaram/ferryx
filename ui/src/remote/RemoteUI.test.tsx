@@ -82,6 +82,17 @@ import { MobileKeyDock } from "../components/MobileKeyDock";
 import { PairingPage } from "./PairingPage";
 import { RemoteApp, RemoteHostConnection } from "./RemoteApp";
 import { normalizeRemoteWorkspaceState, RemoteWorkspaceMirror, type RemoteContextOption } from "./RemoteSessionList";
+import { sidebarLiveState } from "../components/sidebar/sidebarModel";
+import {
+  findSidebarRow,
+  publishSidebarRows,
+  querySidebarRow,
+  resetSidebarRows,
+  sidebarFixtureResponse,
+  sidebarModelFixture,
+  type FixtureWorktree,
+} from "./remoteSidebarTestUtils";
+import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 import { remoteHostStore } from "../state/remoteHostStore";
 import { clearRemoteAuthToken, setRemoteAuthToken } from "../lib/remoteClient";
 import { clearStoredAccountSessionToken, storeAccountSessionToken } from "./accountSession";
@@ -231,6 +242,8 @@ function ticketed(inner: typeof fetch): typeof fetch {
     }
     const lane = chatLaneFixture(url);
     if (lane !== null) return lane;
+    const sidebar = sidebarFixtureResponse(url);
+    if (sidebar !== null) return sidebar;
     return inner(input, init);
   }) as unknown as typeof fetch;
 }
@@ -396,35 +409,52 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  resetSidebarRows();
   EventWebSocket.latest = null;
   vi.unstubAllGlobals();
 });
 
-// The pane list now lives inside the worktree sheet, so pane queries open it first.
+// The panes live in the terminal tab strip above the terminal; it renders before the workspace
+// state lands, so pane queries wait for its tabs. Fake-timer suites already hold their tabs.
 async function openWorktreeSheet(): Promise<HTMLElement> {
   const existing = screen.queryByRole("tablist", { name: /terminal tabs/i });
-  if (existing) return existing;
-  // act() flushes the sheet open without touching timers, which some suites fake.
+  if (existing && within(existing).queryAllByRole("tab").length > 0) return existing;
+  return waitFor(() => {
+    const strip = screen.getByRole("tablist", { name: /terminal tabs/i });
+    expect(within(strip).queryAllByRole("tab").length).toBeGreaterThan(0);
+    return strip;
+  });
+}
+
+// A tab captured before a selection re-renders the strip may be stale, so look it up again.
+async function sheetTab(name: string): Promise<HTMLElement> {
+  return within(await openWorktreeSheet()).getByRole("tab", { name });
+}
+
+// The worktree drawer: the sidebar rows and the Machines entry. act() flushes it open without
+// touching timers, which some suites fake.
+async function openWorktreeDrawer(): Promise<HTMLElement> {
+  const open = screen.queryByRole("dialog", { name: "Workspace context" });
+  if (open) return open;
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
   });
-  return screen.getByRole("tablist", { name: /terminal tabs/i });
-}
-
-// Tapping a tab closes the sheet and unmounts its rows, so a row captured before the tap is stale.
-async function sheetTab(name: string): Promise<HTMLElement> {
-  return within(await openWorktreeSheet()).getByRole("tab", { name });
+  return screen.getByRole("dialog", { name: "Workspace context" });
 }
 
 describe("account worktree picker", () => {
   afterEach(() => cleanup());
 
-  it("lists worktrees grouped by project without machine names and dispatches the hidden machine", () => {
+  it("lists one section per machine, never the machine id, and dispatches the row's machine", () => {
     const options: RemoteContextOption[] = [
       { workspaceId: "ws-ferryx", worktreeSlug: "main", worktreeLabel: "main", machineId: "mach-a" },
       { workspaceId: "ws-ferryx", worktreeSlug: "main", worktreeLabel: "main", machineId: "mach-b" },
       { workspaceId: "ws-infra", worktreeSlug: "prod", worktreeLabel: "prod", machineId: "mach-b" },
     ];
+    const sectionFor = (machineId: string, label: string, rows: FixtureWorktree[]): RemoteSidebarSection => {
+      const model = sidebarModelFixture(rows);
+      return { machineId, label, state: "ok", model, live: sidebarLiveState(model, {}), error: null };
+    };
     const onSelect = vi.fn();
     render(
       <RemoteWorkspaceMirror
@@ -436,30 +466,26 @@ describe("account worktree picker", () => {
         selectorOpen
         onSelectorOpenChange={() => {}}
         onSelect={onSelect}
+        sidebarSections={[
+          sectionFor("mach-a", "Studio", [{ workspaceId: "ws-ferryx", slug: "main" }]),
+          sectionFor("mach-b", "Build box", [{ workspaceId: "ws-ferryx", slug: "main" }, { workspaceId: "ws-infra", slug: "prod" }]),
+        ]}
       />,
     );
 
     const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-    // One project group per machine and workspace: the same workspace on two machines stays two
-    // distinct groups, and the machine itself is never rendered.
-    const groupKeys = within(dialog)
-      .getAllByTestId("remote-worktree-group")
-      .map((group) => group.closest("[data-project-key]")?.getAttribute("data-project-key"));
-    expect(groupKeys).toEqual([
-      "mach-a\u0000ws-ferryx",
-      "mach-b\u0000ws-ferryx",
-      "mach-b\u0000ws-infra",
-    ]);
-    expect(new Set(groupKeys).size).toBe(3);
-    expect(
-      within(dialog).getAllByRole("region").every((section) => (section.getAttribute("aria-label") ?? "").length > 0),
-    ).toBe(true);
+    // One section per machine, headed by its display name; the same workspace on two machines
+    // stays two distinct sections, and the machine id itself is never rendered.
+    const sections = within(dialog).getAllByTestId("remote-sidebar-section");
+    expect(sections.map((section) => section.getAttribute("aria-label"))).toEqual(["Studio", "Build box"]);
+    expect(sections.map((section) => within(section).getAllByTestId("remote-sidebar-row").map((row) => row.getAttribute("data-workspace-id"))))
+      .toEqual([["ws-ferryx"], ["ws-ferryx", "ws-infra"]]);
     expect(dialog.textContent).not.toMatch(/mach-a|mach-b/);
 
     // Same workspace/worktree on two machines stays two distinct targets.
-    const mainRows = within(dialog).getAllByRole("button", { name: "ws-ferryx / main" });
-    expect(mainRows).toHaveLength(2);
-    fireEvent.click(mainRows[1]);
+    const mainRows = sections.map((section) => querySidebarRow("ws-ferryx", "main", section));
+    expect(mainRows.every((row) => row !== null)).toBe(true);
+    fireEvent.click(mainRows[1]!);
     expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ machineId: "mach-b", workspaceId: "ws-ferryx", worktreeSlug: "main" }));
   });
 });
@@ -663,8 +689,8 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("fetch", ticketed(request));
     await act(async () => { render(<RemoteApp />); });
     await switchToTerminalMode();
-    await openWorktreeSheet();
-    const button = screen.getByRole("button", { name: "New terminal tab" });
+    const button = await screen.findByRole("button", { name: "New terminal tab" });
+    await waitFor(() => expect(button).toBeEnabled());
     await act(async () => { fireEvent.click(button); });
     expect(request).toHaveBeenCalledWith(expect.stringContaining("/api/v1/workspace/select"), expect.objectContaining({
       method: "POST",
@@ -689,8 +715,8 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("fetch", ticketed(request));
     await act(async () => { render(<RemoteApp />); });
     await switchToTerminalMode();
-    await openWorktreeSheet();
-    const button = screen.getByRole("button", { name: "New terminal tab" });
+    const button = await screen.findByRole("button", { name: "New terminal tab" });
+    await waitFor(() => expect(button).toBeEnabled());
     await act(async () => { fireEvent.click(button); fireEvent.click(button); });
     expect(request.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
     await act(async () => {
@@ -723,12 +749,15 @@ describe("Remote UI Components", () => {
       activeContext: { workspaceId, activeTerminal: null },
       projects: [{ workspaceId, worktrees: [{ worktreeSlug: "feature", worktreeLabel: "long".repeat(100) }] }],
     }))));
+    publishSidebarRows([{ workspaceId, slug: "feature", label: "long".repeat(100), projectLabel: workspaceId }]);
     await act(async () => { render(<RemoteApp />); });
-    fireEvent.click(screen.getByRole("button", { name: "Change workspace context" }));
-    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-    expect(dialog.querySelector(".overflow-y-auto")).toHaveClass("overflow-x-hidden", "min-h-0");
-    expect(within(dialog).getByRole("heading", { name: workspaceId })).toHaveClass("min-w-0", "truncate");
-    await openWorktreeSheet();
+    await openWorktreeDrawer();
+    const row = await findSidebarRow(workspaceId, "feature");
+    // The tree scrolls vertically only; long project and worktree names truncate in place.
+    expect(row.closest(".overflow-y-auto")).toHaveClass("overflow-x-hidden", "min-h-0");
+    expect(within(row).getByText("long".repeat(100))).toHaveClass("min-w-0", "truncate");
+    const header = screen.getByRole("button", { name: workspaceId });
+    expect(within(header).getByText(workspaceId)).toHaveClass("min-w-0", "truncate");
     expect(screen.getByRole("button", { name: "New terminal tab" })).toBeEnabled();
   });
 
@@ -741,7 +770,7 @@ describe("Remote UI Components", () => {
     expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
     // Disconnect drops the session token, so the same mount renders the login
     // screen; a hook declared below that early return changes the hook count.
-    await openWorktreeSheet();
+    await openWorktreeDrawer();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Machines" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Machines" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Remove pairing" })); });
@@ -783,6 +812,10 @@ describe("Remote UI Components", () => {
       "fetch",
       ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(safeServerWorkspaceState))),
     );
+    publishSidebarRows([
+      { workspaceId: "remote-e2e", slug: "mobile-control" },
+      { workspaceId: "other-project", slug: "other-worktree" },
+    ]);
 
     render(<RemoteApp />);
     await switchToTerminalMode();
@@ -794,11 +827,8 @@ describe("Remote UI Components", () => {
     expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
       "remote-e2e / mobile-control",
     );
-    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
-    const selector = screen.getByRole("dialog", { name: /Workspace context/i });
-    expect(
-      within(selector).getByRole("button", { name: /other-project.*other-worktree/i }),
-    ).toBeEnabled();
+    await openWorktreeDrawer();
+    expect(await findSidebarRow("other-project", "other-worktree")).not.toHaveAttribute("aria-disabled");
     expect(document.body.textContent).not.toMatch(/\/(Users|private|Volumes)\//);
   });
 
@@ -812,6 +842,10 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse(confirmedNoFocusState));
     vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
+    publishSidebarRows([
+      { workspaceId: "ferryx-ui", slug: "main" },
+      { workspaceId: "api-service", slug: "feature/remote-safe" },
+    ]);
 
     render(<RemoteApp />);
     await switchToTerminalMode();
@@ -826,13 +860,8 @@ describe("Remote UI Components", () => {
     expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
       "ferryx-ui / main",
     );
-    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
-
-    const selector = screen.getByRole("dialog", { name: /Workspace context/i });
-    const target = within(selector).getByRole("button", {
-      name: /api-service.*feature\/remote-safe/i,
-    });
-    fireEvent.click(target);
+    await openWorktreeDrawer();
+    fireEvent.click(await findSidebarRow("api-service", "feature/remote-safe"));
 
     // Picking a worktree dismisses the selector instead of leaving it stuck open.
     expect(screen.queryByRole("dialog", { name: /Workspace context/i })).toBeNull();
@@ -890,19 +919,18 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse(confirmedNoFocusState));
     vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
+    publishSidebarRows([
+      { workspaceId: "ferryx-ui", slug: "main" },
+      { workspaceId: "api-service", slug: "feature/remote-safe" },
+    ]);
 
     render(<RemoteApp />);
     await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
     expect(eventSocket().url).toMatch(/\/api\/v1\/events\?ticket=ui-test-ticket$/);
-    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
-    const selector = screen.getByRole("dialog", { name: /Workspace context/i });
-    fireEvent.click(
-      within(selector).getByRole("button", {
-        name: /api-service.*feature\/remote-safe/i,
-      }),
-    );
+    await openWorktreeDrawer();
+    fireEvent.click(await findSidebarRow("api-service", "feature/remote-safe"));
 
     // The selection POST is in flight; the desktop has not confirmed yet. Counted per endpoint,
     // so the assertion says exactly what it means: one state read and one selection POST.
@@ -947,18 +975,20 @@ describe("Remote UI Components", () => {
         .mockResolvedValue(jsonResponse(focusedState));
       vi.stubGlobal("fetch", ticketed(fetchMock));
       vi.stubGlobal("WebSocket", EventWebSocket);
+      publishSidebarRows([
+        { workspaceId: "ferryx-ui", slug: "main" },
+        { workspaceId: "api-service", slug: "feature/remote-safe" },
+      ]);
 
       render(<RemoteApp />);
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });
-      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
-      fireEvent.click(
-        within(screen.getByRole("dialog", { name: /Workspace context/i })).getByRole("button", {
-          name: /api-service.*feature\/remote-safe/i,
-        }),
-      );
+      await openWorktreeDrawer();
+      const row = querySidebarRow("api-service", "feature/remote-safe");
+      if (!row) throw new Error("api-service / feature/remote-safe row not rendered");
+      fireEvent.click(row);
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
@@ -974,12 +1004,10 @@ describe("Remote UI Components", () => {
         await vi.advanceTimersByTimeAsync(10_000);
       });
 
-      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
-      expect(
-        within(screen.getByRole("dialog", { name: /Workspace context/i })).getByRole("button", {
-          name: /api-service.*feature\/remote-safe/i,
-        }),
-      ).toBeEnabled();
+      await openWorktreeDrawer();
+      const released = querySidebarRow("api-service", "feature/remote-safe");
+      expect(released).not.toBeNull();
+      expect(released).not.toHaveAttribute("aria-disabled");
     } finally {
       vi.useRealTimers();
     }
@@ -1910,7 +1938,7 @@ describe("Remote UI Components", () => {
     expect(within(plainTab).queryByTestId("tab-agent-icon")).not.toBeInTheDocument();
   });
 
-  it("context selector exposes worktree attention in its accessible name", async () => {
+  it("context selector shows each worktree's declared attention in its row state", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const stateWithAttention = {
       ...focusedState,
@@ -1931,25 +1959,23 @@ describe("Remote UI Components", () => {
     };
     vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithAttention))));
     vi.stubGlobal("WebSocket", EventWebSocket);
+    publishSidebarRows([
+      { workspaceId: "ferryx-ui", slug: "main" },
+      { workspaceId: "api-service", slug: "feature/remote-safe" },
+    ]);
 
     render(<RemoteApp />);
     await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
-    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
-    const selector = screen.getByRole("dialog", { name: /Workspace context/i });
-
-    // The worktree with waiting attention exposes "waiting" in its button accessible name
-    const waitingOption = within(selector).getByRole("button", {
-      name: /ferryx-ui.*main.*waiting/i,
-    });
-    expect(waitingOption).toBeInTheDocument();
-
-    const workingOption = within(selector).getByRole("button", {
-      name: /api-service.*feature\/remote-safe.*working/i,
-    });
-    expect(workingOption).toBeInTheDocument();
+    await openWorktreeDrawer();
+    // Each worktree row carries the attention its gateway declared in the shared state slot.
+    const waitingOption = await findSidebarRow("ferryx-ui", "main");
+    await waitFor(() => expect(waitingOption.querySelector('[data-status-state="waiting"]')).not.toBeNull());
+    const workingOption = await findSidebarRow("api-service", "feature/remote-safe");
+    expect(workingOption.querySelector('[data-status-state="working"]')).not.toBeNull();
+    expect(workingOption.querySelector('[data-status-state="waiting"]')).toBeNull();
   });
 
   it("immediately remounts RemoteTerminal to session when selecting a tab with sessionId before confirmation", async () => {
@@ -2499,7 +2525,7 @@ describe("Remote UI Components", () => {
     expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
 
     // Disconnect now lives in the Machines drawer, behind a confirmation step.
-    await openWorktreeSheet();
+    await openWorktreeDrawer();
     fireEvent.click(screen.getByRole("button", { name: "Machines" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
 
@@ -2526,7 +2552,7 @@ describe("Remote UI Components", () => {
 
     await screen.findByTestId("remote-terminal");
 
-    await openWorktreeSheet();
+    await openWorktreeDrawer();
     fireEvent.click(screen.getByRole("button", { name: "Machines" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
 
@@ -2555,7 +2581,7 @@ describe("Remote UI Components", () => {
 
     await screen.findByTestId("remote-terminal");
 
-    await openWorktreeSheet();
+    await openWorktreeDrawer();
     fireEvent.click(screen.getByRole("button", { name: "Machines" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
     expect(screen.getByRole("button", { name: "Confirm disconnect" })).toBeInTheDocument();
@@ -2733,7 +2759,7 @@ describe("Remote UI Components", () => {
       // 4. Deferred consume avoids premature terminal transition while still pending
       expect(screen.queryByTestId("remote-terminal")).toBeNull();
 
-      // 5. Complete consumption: resolves token and transitions to AccountMachinesPage
+      // 5. Complete consumption: resolves token and transitions to the account worktree picker
       // without jumping back to saved host or permanently overriding host switching
       await act(async () => {
         consumeDeferred.resolve(
