@@ -29,9 +29,11 @@ const MAX_MACHINE_ID: usize = 128;
 /// Set to `0` to disable account-attested automatic pinning on this machine (default on).
 pub const AUTO_TRUST_ENV: &str = "FERRYX_DIRECT_AUTO_TRUST";
 
-/// Whether account-attested automatic pinning is enabled (env opt-out, default on).
+/// Whether account-attested automatic pinning is enabled: default on, turned off by the env
+/// opt-out or by the user's persisted "disable auto-trust" setting.
 pub fn auto_trust_enabled() -> bool {
     auto_trust_enabled_from(std::env::var(AUTO_TRUST_ENV).ok().as_deref())
+        && !crate::remote::security_settings::load().disable_auto_trust
 }
 
 pub fn auto_trust_enabled_from(value: Option<&str>) -> bool {

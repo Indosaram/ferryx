@@ -22,11 +22,12 @@ export const GITHUB_RELEASE_DOWNLOAD_BASE = 'https://github.com/Indosaram/ferryx
 
 /**
  * Not a download destination. Ferryx has no published Microsoft Store listing: as of
- * 2026-09-19 the Store search and catalogue APIs return no such product, and the MSIX in the
- * GitHub release is an unsigned Store-ingestion package. This constant exists only so
- * analytics can still recognise a Store link if one is ever published or linked externally;
- * replace it with the apps.microsoft.com detail URL (ProductId) when a listing goes live, and
- * only then offer it as a Windows download.
+ * 2026-10-24 `bun scripts/store-listing-status.mjs` reports product 9NLHQL5JNLM4 as not live
+ * (apps.microsoft.com redirects to 404/ProductNotFound), and the MSIX in the GitHub release is an
+ * unsigned Store-ingestion package. The Store is the signed Windows channel once certified. This
+ * constant exists only so analytics can still recognise a Store link; when the status script
+ * reports live, replace it with https://apps.microsoft.com/detail/9NLHQL5JNLM4 and make the
+ * Store the first Windows download, keeping the .exe as the secondary unsigned installer.
  */
 export const MICROSOFT_STORE_SEARCH_URL = 'https://apps.microsoft.com/search?query=Ferryx';
 
@@ -69,7 +70,7 @@ export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = 
       fileType: '.exe',
       url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`,
       recommended: true,
-      notes: 'Installs for the current user and updates itself in place',
+      notes: 'Not code-signed; Store version pending certification. Installs for the current user and updates itself in place',
     },
     assets: [
       {
@@ -79,9 +80,10 @@ export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = 
         fileType: '.exe',
         url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`,
         recommended: true,
-        // The installer is not yet Authenticode-signed, so SmartScreen warns on first run;
-        // saying so here is more useful than letting the warning come as a surprise.
-        notes: 'Not code-signed yet: Windows SmartScreen shows a warning — check SHA256SUMS.txt before running',
+        // The installer is not Authenticode-signed (the signed channel is the Microsoft Store,
+        // which is still pending certification), so SmartScreen warns on first run; saying so
+        // here is more useful than letting the warning come as a surprise.
+        notes: 'Not code-signed; Store version pending certification. SmartScreen shows a warning — check SHA256SUMS.txt before running',
       },
     ],
   },

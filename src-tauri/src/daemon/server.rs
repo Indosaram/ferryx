@@ -6710,6 +6710,11 @@ impl DaemonServer {
                             control_channel_connected,
                             gate_status,
                             gate_reason,
+                            insecure_modes: crate::ipc::run_blocking(|| {
+                                Ok(crate::remote::security_settings::active_insecure_modes())
+                            })
+                            .await
+                            .unwrap_or_default(),
                         },
                     }
                 }
@@ -6985,20 +6990,31 @@ impl DaemonServer {
                     capabilities.push("sessionOwnershipTransferV1".into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
                     enabled: self.agent_integration.enabled(),
                 },
                 Ok(DaemonRequest::SupervisorSnapshot) => DaemonResponse::SupervisorSnapshotOk {
-                    snapshot: crate::hub_runtime::supervisor_snapshot(&self).await,
+                    snapshot: crate::hub_runtime::supervisor_snapshot(self.remote_state()).await,
                 },
                 Ok(DaemonRequest::SupervisorSetPaused { lane_key, paused }) => {
-                    match crate::hub_runtime::set_lane_paused(&self, &lane_key, paused).await {
-                        Ok(paused) => DaemonResponse::SupervisorSetPausedOk { paused },
-                        Err(message) => DaemonResponse::Error {
-                            message,
+                    match crate::hub_runtime::set_lane_paused(self.remote_state(), &lane_key, paused, "desktop").await {
+                        Ok(_) => DaemonResponse::SupervisorSetPausedOk { paused },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
                             code: Some("SUPERVISOR_UNAVAILABLE".into()),
+                            details: None,
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorGoal { request }) => {
+                    match crate::hub_runtime::supervisor_goal(self.remote_state(), request).await {
+                        Ok(snapshot) => DaemonResponse::SupervisorGoalOk { snapshot },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
                             details: None,
                         },
                     }

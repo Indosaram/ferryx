@@ -1,12 +1,18 @@
 ---
+// Generated from the shipped detection manifests by scripts/gen-site-agents.mjs (prebuild).
+import agents from '../../data/agents.json';
+
+const agentNames = agents.map((agent) => agent.displayName);
+const agentList = `${agentNames.slice(0, -1).join(', ')}, and ${agentNames[agentNames.length - 1]}`;
+
 const faqs: { q: string; a: string }[] = [
   {
     q: "Is Ferryx free?",
-    a: "Yes. Ferryx is free to download, and local use needs no account. The source ships under SUL-1.0, which allows personal, non-commercial, and your own internal business use; it is not OSI-approved open source.",
+    a: "For individuals, yes. Ferryx is free to download, and local use needs no account. The source ships under the Ferryx License: it is free for personal use, education, open-source work, non-profits, and companies with fewer than 50 people and less than USD 5M in revenue. Larger companies need a Team subscription for work use. It is source-available, not OSI-approved open source.",
   },
   {
     q: "Which agents does it support?",
-    a: "Any command that runs in a terminal runs in a pane, including Claude Code, Codex, and Gemini CLI. Status detection for working, waiting on you, and idle ships for 11 agents: Antigravity, Claude Code, Cline, Codex, GitHub Copilot CLI, Cursor, Gajae Code, Grok, Kimi, OMO, and OpenCode.",
+    a: `Any command that runs in a terminal runs in a pane, including Claude Code, Codex, and Antigravity (agy). Status detection for working, waiting on you, and idle ships for ${agents.length} agents: ${agentList}.`,
   },
   {
     q: "Will my agents keep running if I close the app?",
@@ -18,7 +24,7 @@ const faqs: { q: string; a: string }[] = [
   },
   {
     q: "Can I check on agents from my phone?",
-    a: "Yes. Pair a phone or browser with a 6-digit PIN or QR code and the mobile web client streams your terminals over an outbound relay tunnel, with no inbound SSH port or public IP required. A self-hosted relay works too, and remote access stays off unless you turn it on.",
+    a: "Yes. Sign in to your Ferryx account on a phone or browser with an email magic link and the mobile web client streams your terminals over an outbound relay tunnel, with no inbound SSH port or public IP required. A self-hosted relay works too, and remote access stays off unless you turn it on.",
   },
   {
     q: "Why does Windows warn when I install it?",

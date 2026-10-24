@@ -478,6 +478,66 @@ pub struct DaemonRemoteStatus {
     pub gate_status: Option<crate::remote::server::DirectGatewayGateStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_reason: Option<String>,
+    /// Insecure transport modes in effect in the daemon process (`direct`, `relay`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub insecure_modes: Vec<String>,
+}
+
+/// One action on a lane's goal contract, as the desktop (`cmd_supervisor_goal`), the CLI
+/// (`ferryx-cli supervisor goal`) and the daemon wire carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SupervisorGoalAction {
+    /// Create or replace the lane's contract. Mode and turn limit keep their current values
+    /// (or the defaults for a new contract) when omitted.
+    Set {
+        lane_key: String,
+        requirements: Vec<ferryx_hub::goals::contract::RequirementSpec>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<ferryx_hub::goals::GoalMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_limit: Option<u32>,
+    },
+    Show {
+        lane_key: String,
+    },
+    Mode {
+        lane_key: String,
+        mode: ferryx_hub::goals::GoalMode,
+    },
+    /// Send the lane's proposal awaiting approval, once. Nothing awaiting is REQUEST_CONFLICT.
+    Approve {
+        lane_key: String,
+    },
+    /// Drop the lane's proposal awaiting approval without sending it.
+    Discard {
+        lane_key: String,
+    },
+    AcceptRevision {
+        id: i64,
+    },
+    RejectRevision {
+        id: i64,
+    },
+}
+
+impl SupervisorGoalAction {
+    /// The lane the action names; revision actions name a revision id instead.
+    pub fn lane_key(&self) -> Option<&str> {
+        match self {
+            Self::Set { lane_key, .. }
+            | Self::Show { lane_key }
+            | Self::Mode { lane_key, .. }
+            | Self::Approve { lane_key }
+            | Self::Discard { lane_key } => Some(lane_key),
+            Self::AcceptRevision { .. } | Self::RejectRevision { .. } => None,
+        }
+    }
+
+    /// Show is the only action that changes nothing.
+    pub fn mutates(&self) -> bool {
+        !matches!(self, Self::Show { .. })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -708,6 +768,10 @@ pub enum DaemonRequest {
     SupervisorSetPaused {
         lane_key: String,
         paused: bool,
+    },
+    /// Show or steer one lane's goal contract. Gated by `supervisorGoalV1`.
+    SupervisorGoal {
+        request: SupervisorGoalAction,
     },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
@@ -1153,6 +1217,11 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     SupervisorSetPausedOk {
         paused: bool,
+    },
+    /// The supervisor snapshot after a `SupervisorGoal` action.
+    #[serde(rename_all = "camelCase")]
+    SupervisorGoalOk {
+        snapshot: serde_json::Value,
     },
     #[serde(rename_all = "camelCase")]
     AttachOk {
@@ -1739,6 +1808,70 @@ mod tests {
     }
 
     #[test]
+    fn every_supervisor_goal_action_round_trips_on_the_daemon_wire() {
+        use ferryx_hub::goals::contract::RequirementSpec;
+        use ferryx_hub::goals::GoalMode;
+        let requirement = RequirementSpec { id: "r1".into(), text: "tests pass".into(), verifier: "cargo test".into() };
+        let cases = vec![
+            (
+                SupervisorGoalAction::Set {
+                    lane_key: "ledger".into(),
+                    requirements: vec![requirement.clone()],
+                    mode: Some(GoalMode::Full),
+                    turn_limit: Some(7),
+                },
+                serde_json::json!({"type":"supervisorGoal","request":{"action":"set","laneKey":"ledger",
+                    "requirements":[{"id":"r1","text":"tests pass","verifier":"cargo test"}],"mode":"full","turnLimit":7}}),
+            ),
+            (
+                SupervisorGoalAction::Set { lane_key: "ledger".into(), requirements: vec![requirement], mode: None, turn_limit: None },
+                serde_json::json!({"type":"supervisorGoal","request":{"action":"set","laneKey":"ledger",
+                    "requirements":[{"id":"r1","text":"tests pass","verifier":"cargo test"}]}}),
+            ),
+            (
+                SupervisorGoalAction::Show { lane_key: "ledger".into() },
+                serde_json::json!({"type":"supervisorGoal","request":{"action":"show","laneKey":"ledger"}}),
+            ),
+            (
+                SupervisorGoalAction::Mode { lane_key: "ledger".into(), mode: GoalMode::Supervised },
+                serde_json::json!({"type":"supervisorGoal","request":{"action":"mode","laneKey":"ledger","mode":"supervised"}}),
+            ),
+            (
+                SupervisorGoalAction::Approve { lane_key: "ledger".into() },
+                serde_json::json!({"type":"supervisorGoal","request":{"action":"approve","laneKey":"ledger"}}),
+            ),
+            (
+                SupervisorGoalAction::Discard { lane_key: "ledger".into() },
+                serde_json::json!({"type":"supervisorGoal","request":{"action":"discard","laneKey":"ledger"}}),
+            ),
+            (
+                SupervisorGoalAction::AcceptRevision { id: 3 },
+                serde_json::json!({"type":"supervisorGoal","request":{"action":"acceptRevision","id":3}}),
+            ),
+            (
+                SupervisorGoalAction::RejectRevision { id: 4 },
+                serde_json::json!({"type":"supervisorGoal","request":{"action":"rejectRevision","id":4}}),
+            ),
+        ];
+        for (action, wire) in cases {
+            let request = DaemonRequest::SupervisorGoal { request: action.clone() };
+            assert_eq!(serde_json::to_value(&request).unwrap(), wire);
+            match serde_json::from_value::<DaemonRequest>(wire).unwrap() {
+                DaemonRequest::SupervisorGoal { request } => assert_eq!(request, action),
+                other => panic!("decoded as {other:?}"),
+            }
+        }
+        let refused = serde_json::from_value::<DaemonRequest>(serde_json::json!(
+            {"type":"supervisorGoal","request":{"action":"mode","laneKey":"ledger","mode":"turbo"}}
+        ));
+        assert!(refused.is_err(), "an unknown mode is refused on the wire");
+        let ok = DaemonResponse::SupervisorGoalOk { snapshot: serde_json::json!({"lanes": []}) };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorGoalOk""#), "{text}");
+        assert!(matches!(serde_json::from_str::<DaemonResponse>(&text).unwrap(), DaemonResponse::SupervisorGoalOk { .. }));
+    }
+
+    #[test]
     fn upload_clipboard_image_protocol_round_trip() {
         let req = DaemonRequest::UploadClipboardImage {
             file_name: "screenshot.png".to_string(),
@@ -2141,6 +2274,7 @@ mod tests {
                 control_channel_connected: None,
                 gate_status: None,
                 gate_reason: None,
+                insecure_modes: Vec::new(),
             },
         };
         let status_json = serde_json::to_string(&remote_status_resp).expect("serialize status");

@@ -40,7 +40,7 @@ export function Hero({ basePath, locale }: { readonly basePath: string; readonly
             rel="noreferrer"
             className="underline underline-offset-4 hover:text-ink transition-colors"
           >
-            SUL-1.0
+            Ferryx License
           </a>{" "}
           &middot;{" "}
           <a

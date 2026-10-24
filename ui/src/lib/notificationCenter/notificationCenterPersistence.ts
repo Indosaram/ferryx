@@ -22,11 +22,23 @@ function isCounter(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
+/** A malformed payload drops the whole row: a supervisor row without one cannot be labelled. */
+function restoreSupervisor(value: unknown): NotificationEntry["supervisor"] | null {
+  if (!isObject(value)) return null;
+  const { laneKey, stopReason, awaitingApproval, goalRevision } = value;
+  if (typeof laneKey !== "string" || typeof awaitingApproval !== "boolean") return null;
+  if (stopReason !== null && typeof stopReason !== "string") return null;
+  if (goalRevision === undefined) return { laneKey, stopReason, awaitingApproval };
+  if (typeof goalRevision !== "number" || !Number.isSafeInteger(goalRevision) || goalRevision < 0) return null;
+  return { laneKey, stopReason, awaitingApproval, goalRevision };
+}
+
 function restoreEntry(value: unknown): NotificationEntry | null {
   if (!isObject(value) || typeof value.workspaceId !== "string" || typeof value.sessionId !== "string"
     || value.id !== notificationEntryId(value.workspaceId, value.sessionId)
     || (value.subject !== "agent" && value.subject !== "terminal")
-    || (value.reason !== "waiting" && value.reason !== "done" && value.reason !== "bell")
+    || (value.reason !== "waiting" && value.reason !== "done" && value.reason !== "bell"
+      && value.reason !== "supervisor")
     || !isTimestamp(value.firstOccurredAt) || !isTimestamp(value.lastOccurredAt)
     || !isCounter(value.updateOrder) || !isCounter(value.revision) || !isCounter(value.occurrenceCount)
     || !isObject(value.labels) || !isObject(value.read)) return null;
@@ -43,11 +55,18 @@ function restoreEntry(value: unknown): NotificationEntry | null {
     read = { seen: true, seenAt: value.read.seenAt };
   } else return null;
 
+  let supervisor: NotificationEntry["supervisor"] | null = null;
+  if (value.reason === "supervisor") {
+    supervisor = restoreSupervisor(value.supervisor);
+    if (!supervisor) return null;
+  }
+
   return {
     id: value.id, workspaceId: value.workspaceId, sessionId: value.sessionId,
     labels, subject: value.subject, reason: value.reason,
     firstOccurredAt: value.firstOccurredAt, lastOccurredAt: value.lastOccurredAt,
     updateOrder: value.updateOrder, revision: value.revision, occurrenceCount: value.occurrenceCount, read,
+    ...(supervisor ? { supervisor } : {}),
   };
 }
 

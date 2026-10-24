@@ -146,6 +146,9 @@ enum PairingWait {
 }
 
 pub const RELAY_STAGE_HEADER: &str = "x-ferryx-relay-stage";
+/// Response headers a browser client may read across origins: the relay stage, and the
+/// replacement bearer token the host gateway answers after a transparent rotation.
+const RELAY_EXPOSED_HEADERS: &str = "x-ferryx-relay-stage, x-ferryx-rotated-token";
 pub const RELAY_STAGE_DATA_PAIRING_TIMEOUT: &str = "data_pairing_timeout";
 pub const RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT: &str = "upstream_transfer_timeout";
 
@@ -2281,13 +2284,16 @@ async fn host_http_handler(
     let body = to_bytes(body, body_limit)
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    // Only the relay itself may name a pairing client to the gateway.
+    let mut headers = parts.headers;
+    headers.remove(crate::remote::server::PAIRING_PEER_HEADER);
     proxy_http(
         &state,
         &machine,
         None,
         parts.method,
         &target,
-        parts.headers,
+        headers,
         body.to_vec(),
     )
     .await
@@ -2401,6 +2407,9 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["agent-control", "sessions", _])
             | ("GET", ["agent-control", "sessions", _, "wait"])
             | ("POST", ["agent-control", "sessions", _, "send" | "answer" | "stop"])
+            // Supervisor view. The lane key rides in the pause body, never in the path.
+            | ("GET", ["supervisor"])
+            | ("POST", ["supervisor", "pause"])
             | ("GET", ["attach"])
     )
 }
@@ -2537,6 +2546,11 @@ async fn exchange_http(
     .unwrap();
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
+    // The gateway keys its per-source PIN failure budget on this address.
+    headers.insert(
+        crate::remote::server::PAIRING_PEER_HEADER,
+        HeaderValue::from_str(&ip.to_string()).unwrap(),
+    );
     let response = proxy_http(
         &state,
         &claim.machine_id,
@@ -3020,7 +3034,7 @@ fn apply_cors_headers(headers: &mut HeaderMap) {
     );
     headers.insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        HeaderValue::from_static(RELAY_STAGE_HEADER),
+        HeaderValue::from_static(RELAY_EXPOSED_HEADERS),
     );
 }
 
@@ -4647,7 +4661,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_control_routes_join_the_allowlist_without_loosening_it() {
+    fn agent_control_and_supervisor_routes_join_the_allowlist_without_loosening_it() {
         assert!(allowed_http_route(&Method::GET, "agent-control/sessions"));
         assert!(allowed_http_route(&Method::GET, "agent-control/events"));
         assert!(allowed_http_route(
@@ -4670,6 +4684,8 @@ mod tests {
             &Method::POST,
             "agent-control/sessions/s-1/stop"
         ));
+        assert!(allowed_http_route(&Method::GET, "supervisor"));
+        assert!(allowed_http_route(&Method::POST, "supervisor/pause"));
         for (method, path) in [
             (Method::GET, "reference-chat/session-1"),
             (Method::GET, "reference-chat/x/secret"),
@@ -4677,6 +4693,12 @@ mod tests {
             (Method::POST, "admin"),
             (Method::DELETE, "agent-control/sessions/s-1"),
             (Method::GET, "agent-control/sessions/s-1/send"),
+            (Method::DELETE, "supervisor"),
+            (Method::POST, "supervisor"),
+            (Method::GET, "supervisor/pause"),
+            (Method::POST, "supervisor/x/y"),
+            (Method::GET, "supervisor/x/y"),
+            (Method::POST, "supervisor/lane-1/pause"),
         ] {
             assert!(
                 !allowed_http_route(&method, path),
@@ -9522,7 +9544,8 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
-                // Second machine owned by user creates an active over_limit violation on Free (2 > 1)
+                // More machines owned by the user create an active over_limit violation on Free
+                // (FREE_HOSTS + 1 > FREE_HOSTS).
                 store.machines.insert(
                     "rec-owned-2".into(),
                     crate::account::store::MachineRecord {
@@ -9539,6 +9562,7 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
+                seed_free_over_limit_fillers(store, user_id, now);
                 store.billing_states.insert(
                     user_id.into(),
                     crate::account::store::BillingStateRecord {
@@ -9649,7 +9673,8 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
-                // Second machine owned by user creates an active over_limit violation on Free (2 > 1)
+                // More machines owned by the user create an active over_limit violation on Free
+                // (FREE_HOSTS + 1 > FREE_HOSTS).
                 store.machines.insert(
                     "rec-stopped-ctrl-2".into(),
                     crate::account::store::MachineRecord {
@@ -9666,6 +9691,7 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
+                seed_free_over_limit_fillers(store, user_id, now);
                 store.billing_states.insert(
                     user_id.into(),
                     crate::account::store::BillingStateRecord {
@@ -9977,7 +10003,7 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
-                // Second machine creates an active over_limit violation on Free (2 > 1)
+                // More machines create an active over_limit violation on Free (FREE_HOSTS + 1 > FREE_HOSTS).
                 store.machines.insert(
                     "rec-owned-2".into(),
                     crate::account::store::MachineRecord {
@@ -9994,6 +10020,7 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
+                seed_free_over_limit_fillers(store, user_id, now);
                 store.billing_states.insert(
                     user_id.into(),
                     crate::account::store::BillingStateRecord {
@@ -10132,10 +10159,38 @@ mod tests {
         )
     }
 
+    /// Seeds `FREE_HOSTS - 1` extra machines for `user_id`. Added to a fixture that already
+    /// holds two machines, the owner is one machine over the Free limit.
+    fn seed_free_over_limit_fillers(
+        store: &mut crate::account::store::AccountStore,
+        user_id: &str,
+        now: u64,
+    ) {
+        for index in 0..crate::account::billing::entitlement::FREE_HOSTS - 1 {
+            let id = format!("filler-{user_id}-{index}");
+            store.machines.insert(
+                format!("rec-{id}"),
+                crate::account::store::MachineRecord {
+                    machine_record_id: format!("rec-{id}"),
+                    owner_user_id: user_id.into(),
+                    machine_id: id.clone(),
+                    display_name: id.clone(),
+                    public_key: format!("pubkey-{id}"),
+                    attach_public_key: format!("attachkey-{id}"),
+                    relay_origin: "https://relay.test".into(),
+                    platform: "linux".into(),
+                    enrollment_epoch: 1,
+                    enrolled_at: now,
+                    last_seen_at: now,
+                },
+            );
+        }
+    }
+
     /// Enrolls `machine_count` machines for `user_id` — the first carrying `public_key` and
     /// `machine_id` — and seeds the owner's grace start when one is given.
     ///
-    /// Two machines on the Free plan are over the limit of one, so an owner seeded with a
+    /// `FREE_HOSTS + 1` machines on the Free plan are over its limit, so an owner seeded with a
     /// grace start is a real violation rather than a hypothetical one.
     fn seed_suspension_owner(
         account: &Arc<crate::account::service::AccountState>,
@@ -10264,7 +10319,7 @@ mod tests {
             machine_id,
             &identity.public_key,
             Some(now),
-            2,
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
         );
         let (base, server) =
             spawn_test_relay_with_account_state(state.clone(), Some(account.clone())).await;
@@ -10337,7 +10392,7 @@ mod tests {
             stopped_id,
             &stopped_identity.public_key,
             Some(now),
-            2,
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
         );
         let healthy_id = "healthy-owner-machine";
         let healthy_identity = identity(203, healthy_id);
@@ -10437,7 +10492,7 @@ mod tests {
             machine_id,
             &identity.public_key,
             Some(now),
-            2,
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
         );
         let (base, server) =
             spawn_test_relay_with_account_state(state.clone(), Some(account.clone())).await;
@@ -10504,7 +10559,7 @@ mod tests {
             "the sweep persists the stop through the billing store"
         );
 
-        // Resolution: the owner upgrades to Pro, so both machines fit the plan limit.
+        // Resolution: the owner upgrades to Pro, so every machine fits the plan limit.
         account
             .mutate(|store| {
                 store.subscriptions.insert(
@@ -10561,7 +10616,7 @@ mod tests {
             machine_id,
             &identity.public_key,
             Some(now.saturating_sub(crate::account::billing::entitlement::GRACE_SECS + 30)),
-            2,
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
         );
         state.set_account_state(account);
 

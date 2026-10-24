@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::remote::reference_chat::types::ReferencePromptAnswer;
 
+pub mod delivery;
 pub mod events;
 pub mod policy;
 

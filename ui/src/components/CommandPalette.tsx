@@ -2,7 +2,7 @@ import { GitBranch, Search, TerminalSquare, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { isMacShortcutPlatform, resolvedShortcuts, shortcutLabel } from "../lib/shortcuts";
-import { useShortcutOverrides } from "../lib/shortcutOverrides";
+import { useShortcutOverrides, useShortcutPreset } from "../lib/shortcutOverrides";
 import { staticTabLabel } from "../lib/tabTitle";
 import type { WorkspaceTab, Worktree } from "../lib/types";
 
@@ -20,6 +20,7 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
   const inputRef = useRef<HTMLInputElement>(null);
   const isMac = isMacShortcutPlatform();
   const { overrides: shortcutOverrides } = useShortcutOverrides();
+  const { preset: shortcutPreset } = useShortcutPreset(isMac);
   const normalizedQuery = query.trim().toLowerCase();
   const filteredWorktrees = useMemo(
     () => worktrees.filter((worktree) => worktreeSearchText(worktree).includes(normalizedQuery)),
@@ -120,10 +121,10 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
         </div>
 
         <div className="flex flex-wrap gap-x-3 gap-y-1 border-t border-border px-3 py-2 text-[10px] text-muted-foreground">
-          {resolvedShortcuts(shortcutOverrides).map((shortcut) => (
+          {resolvedShortcuts(shortcutOverrides, shortcutPreset, isMac).map((shortcut) => (
             <span key={shortcut.id} className="inline-flex items-center gap-1">
               <span>{shortcut.title}</span>
-              <kbd className="rounded border border-border bg-muted px-1 py-px text-foreground">{shortcutLabel(shortcut.id, isMac, shortcutOverrides)}</kbd>
+              <kbd className="rounded border border-border bg-muted px-1 py-px text-foreground">{shortcutLabel(shortcut.id, isMac, shortcutOverrides, shortcutPreset)}</kbd>
             </span>
           ))}
         </div>

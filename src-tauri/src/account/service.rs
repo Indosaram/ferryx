@@ -453,7 +453,7 @@ impl MachineViewResponse {
     }
 }
 
-fn bearer(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<String> {
     let value = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
@@ -1778,6 +1778,10 @@ pub fn router(state: Arc<AccountState>) -> Router {
         .route("/api/account/v1/device/approve", get(device_approve_get))
         .route("/api/account/v1/logout", post(logout))
         .route(
+            "/api/account/v1/account/delete",
+            post(super::deletion::delete_account),
+        )
+        .route(
             "/api/account/v1/enrollment-codes",
             post(create_enrollment_code),
         )
@@ -2934,8 +2938,33 @@ mod tests {
         }
     }
 
+    /// Seeds `count` already-enrolled machines for `user_id`, so a fixture reaches the Free
+    /// limit (`FREE_HOSTS`) without enrolling each machine through the API.
+    fn seed_filler_machines(store: &mut AccountStore, user_id: &str, count: u32, now: u64) {
+        for index in 0..count {
+            let record_id = format!("rec-filler-{user_id}-{index}");
+            store.machines.insert(
+                record_id.clone(),
+                MachineRecord {
+                    machine_record_id: record_id,
+                    owner_user_id: user_id.into(),
+                    machine_id: format!("filler-{user_id}-{index}"),
+                    display_name: format!("Filler {index}"),
+                    public_key: format!("pubkey-filler-{user_id}-{index}"),
+                    attach_public_key: format!("attachkey-filler-{user_id}-{index}"),
+                    relay_origin: "https://relay.test".into(),
+                    platform: "linux".into(),
+                    enrollment_epoch: 1,
+                    enrolled_at: now,
+                    last_seen_at: now,
+                },
+            );
+        }
+    }
+
     #[tokio::test]
-    async fn free_second_machine_enroll_is_402() {
+    async fn free_enroll_past_the_limit_is_402() {
+        use crate::account::billing::entitlement::FREE_HOSTS;
         let tmp = tempfile::tempdir().unwrap();
         let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
             tmp.path().join("mail"),
@@ -2978,6 +3007,8 @@ mod tests {
                         ..Default::default()
                     },
                 );
+                // The first FREE_HOSTS - 1 machines are already enrolled.
+                seed_filler_machines(store, user_id, FREE_HOSTS - 1, now);
                 Ok(())
             })
             .unwrap();
@@ -2989,7 +3020,7 @@ mod tests {
             Bytes::from(serde_json::to_vec(&req1).unwrap()),
         )
         .await
-        .expect("first free machine enrollment must succeed");
+        .expect("the last machine within the Free limit must enroll");
         assert_eq!(resp1.0.account_id, user_id);
 
         let id2 = test_identity("free-machine-2");
@@ -2999,13 +3030,13 @@ mod tests {
             Bytes::from(serde_json::to_vec(&req2).unwrap()),
         )
         .await
-        .expect_err("second free machine enrollment must fail with 402");
+        .expect_err("enrolling past the Free limit must fail with 402");
         assert_eq!(err2.status, StatusCode::PAYMENT_REQUIRED);
         assert_eq!(err2.code, "PLAN_LIMIT_REACHED");
         let details = err2.details.expect("PLAN_LIMIT_REACHED carries details");
         assert_eq!(details["plan"], "free");
-        assert_eq!(details["limit"], 1);
-        assert_eq!(details["used"], 1);
+        assert_eq!(details["limit"], FREE_HOSTS);
+        assert_eq!(details["used"], FREE_HOSTS);
     }
 
     #[tokio::test]
@@ -3156,9 +3187,9 @@ mod tests {
         assert_eq!(resp1.0.enrollment_epoch, "1");
         let machine_rec_id = resp1.0.machine_record_id.clone();
 
-        // Populate a second machine owned by the user so machines_used (2) > limit (1) creates an
-        // active over_limit violation; with grace_started_at > GRACE_SECS in the past, evaluate_owner
-        // legitimately computes EntitlementStatus::Stopped.
+        // Populate more machines owned by the user so machines_used (FREE_HOSTS + 1) > limit
+        // (FREE_HOSTS) creates an active over_limit violation; with grace_started_at > GRACE_SECS
+        // in the past, evaluate_owner legitimately computes EntitlementStatus::Stopped.
         state
             .mutate(|store| {
                 store.machines.insert(
@@ -3176,6 +3207,12 @@ mod tests {
                         enrolled_at: now,
                         last_seen_at: now,
                     },
+                );
+                seed_filler_machines(
+                    store,
+                    user_id,
+                    crate::account::billing::entitlement::FREE_HOSTS - 1,
+                    now,
                 );
                 store.billing_states.insert(
                     user_id.into(),
@@ -3286,7 +3323,8 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
-                // Second machine owned by user creates an active over_limit violation (2 > 1 limit on Free)
+                // More machines owned by the user create an active over_limit violation on Free
+                // (FREE_HOSTS + 1 > FREE_HOSTS).
                 store.machines.insert(
                     "rec-stopped-2".into(),
                     MachineRecord {
@@ -3302,6 +3340,12 @@ mod tests {
                         enrolled_at: now,
                         last_seen_at: now,
                     },
+                );
+                seed_filler_machines(
+                    store,
+                    user_id,
+                    crate::account::billing::entitlement::FREE_HOSTS - 1,
+                    now,
                 );
                 store.billing_states.insert(
                     user_id.into(),
@@ -3446,6 +3490,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_free_enroll_atomic_transaction_race() {
+        use crate::account::billing::entitlement::FREE_HOSTS;
         let tmp = tempfile::tempdir().unwrap();
         let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
             tmp.path().join("mail"),
@@ -3488,6 +3533,9 @@ mod tests {
                         ..Default::default()
                     },
                 );
+                // The account sits one machine below the Free limit, so the two racing
+                // enrollments compete for the last slot.
+                seed_filler_machines(store, user_id, FREE_HOSTS - 1, now);
                 Ok(())
             })
             .unwrap();
@@ -3564,14 +3612,14 @@ mod tests {
         assert_eq!(err.code, "PLAN_LIMIT_REACHED");
         let details = err.details.expect("PLAN_LIMIT_REACHED carries details");
         assert_eq!(details["plan"], "free");
-        assert_eq!(details["limit"], 1);
-        assert_eq!(details["used"], 1);
+        assert_eq!(details["limit"], FREE_HOSTS);
+        assert_eq!(details["used"], FREE_HOSTS);
 
         let store_after = state.load().expect("load store after race");
         assert_eq!(
             store_after.machines.len(),
-            1,
-            "final stored machines must be exactly 1"
+            FREE_HOSTS as usize,
+            "final stored machines must be exactly the Free limit"
         );
         assert_eq!(
             store_after.enrollment_codes.len(),
