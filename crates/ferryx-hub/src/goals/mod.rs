@@ -3,6 +3,7 @@
 //! row are never touched here.
 pub mod assess;
 pub mod contract;
+pub mod converge;
 pub mod evidence;
 pub mod prompts;
 pub mod turns;
