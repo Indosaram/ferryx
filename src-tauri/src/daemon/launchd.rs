@@ -89,7 +89,7 @@ pub fn launchd_log_dir_for(home: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
 
 /// Whether this process may manage the developer's real LaunchAgent.
 ///
-/// `false` for the dev runtime (`/tmp/rorca-<uid>-dev`, i.e. debug builds) and for any
+/// `false` for the dev runtime (`/tmp/ferryx-<uid>-dev`, i.e. debug builds) and for any
 /// `FERRYX_DATA_DIR`/`FERRYX_RUNTIME_DIR`/`FERRYX_SESSION_DIR` override, because those mark an
 /// isolated fixture: installing an agent there would point the user's login-time autostart at a
 /// throwaway test build. Also `false` on every non-macOS target, where no agent exists.

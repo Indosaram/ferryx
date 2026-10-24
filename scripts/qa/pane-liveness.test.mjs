@@ -143,6 +143,10 @@ test('preflight rejects production runtime roots, preexisting isolation roots, r
     : `/tmp/rorca-${process.getuid?.() ?? 0}`;
   expect(() => preflight({ scenario: 'split-happy', headless: false, binary, evidenceDir: evidence, isolationRoot: prodRoot }))
     .toThrowError(/PRODUCTION_RUNTIME_ROOT/);
+  if (process.platform !== 'win32') {
+    expect(() => preflight({ scenario: 'split-happy', headless: false, binary, evidenceDir: evidence, isolationRoot: `/tmp/ferryx-${process.getuid?.() ?? 0}` }))
+      .toThrowError(/PRODUCTION_RUNTIME_ROOT/);
+  }
   expect(() => preflight({ scenario: 'split-happy', headless: false, binary, evidenceDir: evidence, isolationRoot: join(homedir(), '.rorca') }))
     .toThrowError(/PRODUCTION_RUNTIME_ROOT/);
   expect(() => preflight({ scenario: 'split-happy', headless: false, binary, evidenceDir: evidence, isolationRoot: root }))

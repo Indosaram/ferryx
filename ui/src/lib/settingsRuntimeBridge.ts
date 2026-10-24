@@ -3,7 +3,9 @@ import {
   APPEARANCE_SETTINGS_EVENT,
   applyAppearanceSettings,
   loadAppearanceSettings,
+  prefersLightColorScheme,
   resolveTerminalAppearance,
+  subscribeSystemColorScheme,
   type AppearanceSettingsState,
 } from "./appearanceSettings";
 import { setTerminalAppearance } from "./tauri";
@@ -26,14 +28,10 @@ function isDesktopShell() {
   return selectDesktopShell(Boolean((window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__));
 }
 
-function prefersLightScheme() {
-  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: light)").matches;
-}
-
 /** Desktop-only: tells the native terminal which side of the app appearance to follow. */
 function pushTerminalAppearance(settings: AppearanceSettingsState) {
   if (!isDesktopShell()) return;
-  const appearance = resolveTerminalAppearance(settings.theme, prefersLightScheme());
+  const appearance = resolveTerminalAppearance(settings.theme, prefersLightColorScheme());
   if (appearance === lastPushedAppearance) return;
   lastPushedAppearance = appearance;
   const request = ++pushRequest;
@@ -58,14 +56,13 @@ export function installSettingsRuntimeBridge() {
   applyAppearanceSettings(initial);
   pushTerminalAppearance(initial);
 
-  const media = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-color-scheme: light)") : null;
   const handleSystemThemeChange = () => {
     const settings = loadAppearanceSettings();
     if (settings.theme !== "system") return;
     applyAppearanceSettings(settings);
     pushTerminalAppearance(settings);
   };
-  media?.addEventListener?.("change", handleSystemThemeChange);
+  const unsubscribeSystemTheme = subscribeSystemColorScheme(handleSystemThemeChange);
 
   const handleAppearanceSettingChange = (event: Event) => {
     const detail = (event as CustomEvent<AppearanceSettingsState>).detail;
@@ -73,7 +70,7 @@ export function installSettingsRuntimeBridge() {
   };
   window.addEventListener(APPEARANCE_SETTINGS_EVENT, handleAppearanceSettingChange);
   uninstallListeners = () => {
-    media?.removeEventListener?.("change", handleSystemThemeChange);
+    unsubscribeSystemTheme();
     window.removeEventListener(APPEARANCE_SETTINGS_EVENT, handleAppearanceSettingChange);
   };
 }
