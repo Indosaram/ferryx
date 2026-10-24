@@ -7,19 +7,30 @@ export interface NotificationLabels {
 
 export type NotificationReadState = { unread: true } | { seen: true; seenAt: number };
 
+/** Why the hub supervisor handed a lane to the owner. Lives only inside its entry. */
+export interface SupervisorNotification {
+  laneKey: string;
+  stopReason: string | null;
+  awaitingApproval: boolean;
+  /** The lane goal revision this hand-off belongs to. */
+  goalRevision?: number;
+}
+
 export interface NotificationEntry {
   id: string;
   workspaceId: string;
   sessionId: string;
   labels: NotificationLabels;
   subject: "agent" | "terminal";
-  reason: "waiting" | "done" | "bell";
+  reason: "waiting" | "done" | "bell" | "supervisor";
   firstOccurredAt: number;
   lastOccurredAt: number;
   updateOrder: number;
   revision: number;
   occurrenceCount: number;
   read: NotificationReadState;
+  /** Present only on reason "supervisor" entries. */
+  supervisor?: SupervisorNotification;
 }
 
 export interface InboxState {
@@ -48,6 +59,11 @@ export interface ActivityOccurrence extends BellOccurrence {
   notificationSuppressed?: boolean;
 }
 
+/** A supervisor stop or awaiting approval on the lane bound to this pane. */
+export interface SupervisorOccurrence extends Omit<BellOccurrence, "occurrenceId"> {
+  supervisor: SupervisorNotification & { goalRevision: number };
+}
+
 export interface ReadAcknowledgement {
   id: string;
   expectedRevision?: number;
@@ -57,6 +73,14 @@ export const MAX_NOTIFICATION_ENTRIES = 200;
 
 export function notificationEntryId(workspaceId: string, sessionId: string): string {
   return JSON.stringify(["session", workspaceId, sessionId]);
+}
+
+/** One hand-off is one (lane, goal revision, stop reason or awaiting approval). */
+export function supervisorHandoffKey(supervisor: SupervisorNotification): string {
+  return JSON.stringify([
+    supervisor.laneKey, supervisor.goalRevision ?? 0, supervisor.stopReason ?? "awaiting_approval",
+    supervisor.awaitingApproval,
+  ]);
 }
 
 export function emptyInboxState(): InboxState {

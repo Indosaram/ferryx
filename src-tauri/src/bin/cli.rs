@@ -17,6 +17,9 @@ fn main() {
     if args.get(1).is_some_and(|arg| arg == "agents") {
         std::process::exit(ferryx_lib::agent_control::run_agents_cli(&args));
     }
+    if args.get(1).is_some_and(|arg| arg == "supervisor") {
+        std::process::exit(ferryx_lib::cli::supervisor_goal::run_supervisor_cli(&args));
+    }
     if args.get(1).is_some_and(|arg| arg == "hub") {
         std::process::exit(ferryx_lib::hub_runtime::run_hub_cli(&args));
     }
@@ -113,7 +116,7 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
-            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|--daemon>");
+            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|--daemon>");
             std::process::exit(1);
         }
         LaunchMode::DaemonSupervisor => std::process::exit(run_daemon_supervisor(&args)),

@@ -1,6 +1,8 @@
 import React from "react";
 import { AlertTriangle } from "lucide-react";
 import { Button } from "../components/ui/button";
+import { isIosCompanion } from "../lib/clientRuntime";
+import { handleExternalLinkClick } from "../lib/externalLinks";
 import { REMOTE_SUSPENDED, type PlanLimitState } from "./accountSession";
 
 export const DEFAULT_PRICING_URL = "https://ferryx.dev/docs/pricing/";
@@ -127,16 +129,23 @@ export const PlanLimitNotice: React.FC<PlanLimitNoticeProps> = ({
         data-testid="remote-plan-limit-coming-soon"
         className="min-w-0 max-w-sm break-words text-xs text-chat-foreground-secondary"
       >
-        Paid plans coming soon.{" "}
-        <a
-          data-testid="remote-plan-limit-pricing"
-          href={pricingUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="underline underline-offset-2 hover:text-chat-foreground"
-        >
-          See planned pricing
-        </a>
+        Paid plans coming soon.
+        {/* The iOS companion shows no outbound purchase link (App Store guideline 3.1.1). */}
+        {isIosCompanion() ? null : (
+          <>
+            {" "}
+            <a
+              data-testid="remote-plan-limit-pricing"
+              href={pricingUrl}
+              target="_blank"
+              rel="noreferrer"
+              onClick={handleExternalLinkClick}
+              className="underline underline-offset-2 hover:text-chat-foreground"
+            >
+              See planned pricing
+            </a>
+          </>
+        )}
       </p>
       <div className="flex flex-wrap items-center justify-center gap-2" data-testid="remote-plan-limit-actions">
         {onRetry ? (

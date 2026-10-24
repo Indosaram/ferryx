@@ -146,6 +146,9 @@ enum PairingWait {
 }
 
 pub const RELAY_STAGE_HEADER: &str = "x-ferryx-relay-stage";
+/// Response headers a browser client may read across origins: the relay stage, and the
+/// replacement bearer token the host gateway answers after a transparent rotation.
+const RELAY_EXPOSED_HEADERS: &str = "x-ferryx-relay-stage, x-ferryx-rotated-token";
 pub const RELAY_STAGE_DATA_PAIRING_TIMEOUT: &str = "data_pairing_timeout";
 pub const RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT: &str = "upstream_transfer_timeout";
 
@@ -2281,13 +2284,16 @@ async fn host_http_handler(
     let body = to_bytes(body, body_limit)
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    // Only the relay itself may name a pairing client to the gateway.
+    let mut headers = parts.headers;
+    headers.remove(crate::remote::server::PAIRING_PEER_HEADER);
     proxy_http(
         &state,
         &machine,
         None,
         parts.method,
         &target,
-        parts.headers,
+        headers,
         body.to_vec(),
     )
     .await
@@ -2401,6 +2407,9 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["agent-control", "sessions", _])
             | ("GET", ["agent-control", "sessions", _, "wait"])
             | ("POST", ["agent-control", "sessions", _, "send" | "answer" | "stop"])
+            // Supervisor view. The lane key rides in the pause body, never in the path.
+            | ("GET", ["supervisor"])
+            | ("POST", ["supervisor", "pause"])
             | ("GET", ["attach"])
     )
 }
@@ -2537,6 +2546,11 @@ async fn exchange_http(
     .unwrap();
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
+    // The gateway keys its per-source PIN failure budget on this address.
+    headers.insert(
+        crate::remote::server::PAIRING_PEER_HEADER,
+        HeaderValue::from_str(&ip.to_string()).unwrap(),
+    );
     let response = proxy_http(
         &state,
         &claim.machine_id,
@@ -3020,7 +3034,7 @@ fn apply_cors_headers(headers: &mut HeaderMap) {
     );
     headers.insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        HeaderValue::from_static(RELAY_STAGE_HEADER),
+        HeaderValue::from_static(RELAY_EXPOSED_HEADERS),
     );
 }
 
@@ -4647,7 +4661,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_control_routes_join_the_allowlist_without_loosening_it() {
+    fn agent_control_and_supervisor_routes_join_the_allowlist_without_loosening_it() {
         assert!(allowed_http_route(&Method::GET, "agent-control/sessions"));
         assert!(allowed_http_route(&Method::GET, "agent-control/events"));
         assert!(allowed_http_route(
@@ -4670,6 +4684,8 @@ mod tests {
             &Method::POST,
             "agent-control/sessions/s-1/stop"
         ));
+        assert!(allowed_http_route(&Method::GET, "supervisor"));
+        assert!(allowed_http_route(&Method::POST, "supervisor/pause"));
         for (method, path) in [
             (Method::GET, "reference-chat/session-1"),
             (Method::GET, "reference-chat/x/secret"),
@@ -4677,6 +4693,12 @@ mod tests {
             (Method::POST, "admin"),
             (Method::DELETE, "agent-control/sessions/s-1"),
             (Method::GET, "agent-control/sessions/s-1/send"),
+            (Method::DELETE, "supervisor"),
+            (Method::POST, "supervisor"),
+            (Method::GET, "supervisor/pause"),
+            (Method::POST, "supervisor/x/y"),
+            (Method::GET, "supervisor/x/y"),
+            (Method::POST, "supervisor/lane-1/pause"),
         ] {
             assert!(
                 !allowed_http_route(&method, path),
