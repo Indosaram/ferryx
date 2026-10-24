@@ -19,6 +19,10 @@ Thumbs.db
 
 # Agent session runtime state
 .omo/
+.evidence/
+task-2/
+/recovery-*.md
+/PARITY.md
 
 # Local secrets (updater signing key)
 .env

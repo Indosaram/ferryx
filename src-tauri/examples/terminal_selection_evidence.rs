@@ -214,8 +214,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frame.width_px, frame.height_px, frame.rendered_row_count, frame.rebuilt_row_count
     );
 
-    // 5. Output directory setup
-    let evidence_dir = PathBuf::from(".omo/evidence/terminal-input-fixes/selection");
+    // 5. Output directory setup: `--out <dir>` or a temp dir (never the repo tree)
+    let mut args = std::env::args().skip(1);
+    let mut out_dir: Option<PathBuf> = None;
+    while let Some(arg) = args.next() {
+        if arg == "--out" {
+            out_dir = args.next().map(PathBuf::from);
+        } else if let Some(value) = arg.strip_prefix("--out=") {
+            out_dir = Some(PathBuf::from(value));
+        }
+    }
+    let evidence_dir = out_dir.unwrap_or_else(|| {
+        std::env::temp_dir().join("ferryx-evidence/terminal-input-fixes/selection")
+    });
     fs::create_dir_all(&evidence_dir)?;
 
     let png_path = evidence_dir.join("c3-terminal-selection.png");
