@@ -4,6 +4,7 @@ use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+#[cfg(feature = "desktop")]
 use tauri::Manager;
 
 #[cfg(all(test, unix))]
@@ -19,11 +20,13 @@ pub struct AgentDetection {
     pub path: Option<String>,
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_agents_detect(names: Vec<String>) -> Result<Vec<AgentDetection>, super::IpcError> {
     super::run_blocking(move || Ok(detect_agents(&names))).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_agent_session_discover(
     daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
@@ -35,6 +38,7 @@ pub async fn cmd_agent_session_discover(
         .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_agent_state_reset<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,

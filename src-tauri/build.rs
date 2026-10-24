@@ -98,6 +98,12 @@ fn main() {
         std::process::exit(1);
     }
 
+    // tauri-build reads `DEP_TAURI_DEV`, which only exists when the `tauri` crate is linked, so
+    // the desktop-free CLI build (`--no-default-features`) skips it entirely.
+    if std::env::var_os("CARGO_FEATURE_DESKTOP").is_none() {
+        return;
+    }
+
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
     {

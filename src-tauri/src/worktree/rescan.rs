@@ -18,7 +18,9 @@
 //! of a workspace, consistent with the path jail.
 
 use crate::ipc::run_blocking;
-use crate::ipc::worktree::{emit_worktree_changed, WorktreeChangeKind};
+#[cfg(feature = "desktop")]
+use crate::ipc::worktree::emit_worktree_changed;
+use crate::ipc::worktree::WorktreeChangeKind;
 use crate::worktree::registry::WorkspaceRegistry;
 use crate::worktree::{Worktree, WorktreeIdentity, WorktreeManager};
 use parking_lot::Mutex;
@@ -542,6 +544,7 @@ where
 /// by `MissedTickBehavior::Delay`.
 const WORKSPACE_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[cfg(feature = "desktop")]
 /// Spawns the GUI-process rescan task: every 30s, sweep all registered git
 /// workspaces and emit `worktree_changed` for externally changed worktrees.
 /// Each workspace is scanned in its own bounded `run_blocking` job and its

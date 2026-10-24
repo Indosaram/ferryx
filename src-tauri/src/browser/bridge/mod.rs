@@ -40,26 +40,26 @@
 // macOS, Linux and Windows each have a real platform module; only the catch-all target
 // uses the fallback, and the bridge tests exercise it on every target.
 pub mod cdp_order;
-#[cfg(any(
-    test,
-    not(any(target_os = "macos", target_os = "linux", target_os = "windows"))
+#[cfg(all(
+    feature = "desktop",
+    any(test, not(any(target_os = "macos", target_os = "linux", target_os = "windows")))
 ))]
 pub mod fallback;
 pub mod keys;
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "desktop", target_os = "linux"))]
 pub mod linux;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "desktop", target_os = "macos"))]
 pub mod macos;
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "desktop", target_os = "windows"))]
 pub mod windows;
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(feature = "desktop", not(any(target_os = "macos", target_os = "linux", target_os = "windows"))))]
 use fallback as platform;
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "desktop", target_os = "linux"))]
 use linux as platform;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "desktop", target_os = "macos"))]
 use macos as platform;
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "desktop", target_os = "windows"))]
 use windows as platform;
 
 use crate::browser::manager::BrowserManager;
@@ -144,7 +144,7 @@ const MAX_ID_BYTES: usize = 128;
 
 fn http_url(raw: Option<String>) -> Result<String, EnvelopeError> {
     let raw = raw.ok_or(EnvelopeError::Missing("url"))?;
-    match tauri::Url::parse(&raw) {
+    match url::Url::parse(&raw) {
         Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => Ok(parsed.to_string()),
         _ => Err(EnvelopeError::BadUrl(raw)),
     }
@@ -265,7 +265,7 @@ pub enum NewWindowDecision {
 }
 
 pub fn new_window_policy(kind: TrustedBridgeKind, url: &str) -> NewWindowDecision {
-    let http = tauri::Url::parse(url)
+    let http = url::Url::parse(url)
         .is_ok_and(|parsed| matches!(parsed.scheme(), "http" | "https"));
     match kind {
         TrustedBridgeKind::Isolated => NewWindowDecision::Deny,
@@ -276,6 +276,7 @@ pub fn new_window_policy(kind: TrustedBridgeKind, url: &str) -> NewWindowDecisio
     }
 }
 
+#[cfg(feature = "desktop")]
 /// Drops per-webview platform bridge state for a closed session. Windows already does
 /// this from BrowserManager::remove_session; macOS keeps its retained world in a
 /// main-thread map, so the removal is dispatched there.
@@ -356,6 +357,7 @@ pub struct BridgeInstallCtx {
     pub sink: BridgeSink,
 }
 
+#[cfg(feature = "desktop")]
 /// Installs the trusted bridge for one freshly created guest (main thread, after
 /// `add_child`, before the guest leaves about:blank).
 pub(crate) fn install<R: tauri::Runtime>(
@@ -365,6 +367,7 @@ pub(crate) fn install<R: tauri::Runtime>(
     platform::install(webview, ctx)
 }
 
+#[cfg(feature = "desktop")]
 /// Evaluates `script` in the guest's isolated world (main frame).
 pub(crate) async fn eval_in_world<R: tauri::Runtime>(
     webview: tauri::Webview<R>,

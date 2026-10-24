@@ -40,6 +40,7 @@ pub const fn hard_reload_supported() -> bool {
     !matches!(hard_reload_support(), HardReloadSupport::Unsupported)
 }
 
+#[cfg(feature = "desktop")]
 /// Reloads `webview` bypassing the HTTP cache.
 ///
 /// A caller that asked for fresh content must never silently receive cached bytes, so this never
@@ -59,6 +60,7 @@ fn unsupported_error() -> IpcError {
     )
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 fn reload_from_origin<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> Result<(), IpcError> {
     webview
@@ -74,11 +76,13 @@ fn reload_from_origin<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> Result<
         .map_err(webview_unreachable)
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(not(target_os = "macos"))]
 fn reload_from_origin<R: tauri::Runtime>(_webview: &tauri::Webview<R>) -> Result<(), IpcError> {
     Err(unsupported_error())
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "linux")]
 fn reload_bypassing_cache<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> Result<(), IpcError> {
     use webkit2gtk::WebViewExt;
@@ -90,11 +94,13 @@ fn reload_bypassing_cache<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> Res
         .map_err(webview_unreachable)
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(not(target_os = "linux"))]
 fn reload_bypassing_cache<R: tauri::Runtime>(_webview: &tauri::Webview<R>) -> Result<(), IpcError> {
     Err(unsupported_error())
 }
 
+#[cfg(feature = "desktop")]
 fn webview_unreachable(error: tauri::Error) -> IpcError {
     IpcError::new(
         IpcErrorCode::InternalError,

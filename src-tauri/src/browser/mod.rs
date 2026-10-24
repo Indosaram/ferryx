@@ -7,7 +7,7 @@ pub mod download;
 pub mod find;
 pub mod guest;
 pub mod hard_reload;
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "desktop", target_os = "linux"))]
 pub mod linux;
 pub mod manager;
 pub mod model;
@@ -19,6 +19,7 @@ pub mod remote_input;
 pub mod remote_service;
 #[cfg(test)]
 mod remote_service_tests;
+#[cfg(feature = "desktop")]
 pub mod screenshot;
 pub mod security;
 pub mod snapshot_source;

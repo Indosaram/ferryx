@@ -9,6 +9,7 @@ use crate::worktree::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 pub const WORKTREE_CHANGED_EVENT: &str = "worktree_changed";
@@ -64,6 +65,7 @@ pub struct WorktreeChangedPayload {
     pub kind: WorktreeChangeKind,
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) fn emit_worktree_changed<R: Runtime>(
     app: &AppHandle<R>,
     workspace_id: String,
@@ -81,6 +83,7 @@ pub(crate) fn emit_worktree_changed<R: Runtime>(
     .map_err(|error| IpcError::internal(format!("failed to emit worktree_changed: {error}")))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_worktree_list<R: Runtime>(
     app: AppHandle<R>,
@@ -124,6 +127,7 @@ pub async fn cmd_worktree_list<R: Runtime>(
     .await
 }
 
+#[cfg(feature = "desktop")]
 /// Lists the registered local repository's worktrees that Git knows about but that live outside
 /// the project folder (for example Orca's). The UI asks before importing any of them; remote and
 /// paired projects have no local Git state to inspect and report none.
@@ -143,6 +147,7 @@ pub async fn cmd_worktree_list_external(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_worktree_create<R: Runtime>(
     app: AppHandle<R>,
@@ -179,6 +184,7 @@ pub async fn cmd_worktree_create<R: Runtime>(
     Ok(created)
 }
 
+#[cfg(feature = "desktop")]
 async fn delete_worktree<R: Runtime>(
     app: AppHandle<R>,
     registry: State<'_, WorkspaceRegistry>,
@@ -248,6 +254,7 @@ async fn delete_worktree<R: Runtime>(
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_worktree_delete<R: Runtime>(
     app: AppHandle<R>,
@@ -257,6 +264,7 @@ pub async fn cmd_worktree_delete<R: Runtime>(
     delete_worktree(app, registry, request, false).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_worktree_delete_destructive<R: Runtime>(
     app: AppHandle<R>,
@@ -266,6 +274,7 @@ pub async fn cmd_worktree_delete_destructive<R: Runtime>(
     delete_worktree(app, registry, request, true).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_worktree_delete_preview(
     registry: State<'_, WorkspaceRegistry>,
@@ -283,6 +292,7 @@ pub async fn cmd_worktree_delete_preview(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_worktree_status<R: Runtime>(
     app: AppHandle<R>,
