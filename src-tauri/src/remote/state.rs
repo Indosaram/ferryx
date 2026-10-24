@@ -820,6 +820,9 @@ pub struct RemoteGatewayState {
     pub event_tx: broadcast::Sender<String>,
     pub is_running: RwLock<bool>,
     pub bound_address: RwLock<Option<String>>,
+    /// Origins of this machine's saved paired hosts. A browser page served by one of them may
+    /// call this gateway's `/api/v1/*` routes cross-origin, so the CORS allowlist admits them.
+    pub cors_saved_host_origins: RwLock<Vec<String>>,
     config_path: Option<PathBuf>,
     pub desktop_event_sink: RwLock<Option<DesktopEventSink>>,
     /// The single relay pairing authority owned by the running gateway.
@@ -1038,6 +1041,7 @@ impl RemoteGatewayState {
             event_tx,
             is_running: RwLock::new(false),
             bound_address: RwLock::new(None),
+            cors_saved_host_origins: RwLock::new(Vec::new()),
             config_path,
             desktop_event_sink: RwLock::new(None),
             relay_pairing: RwLock::new(None),

@@ -3447,6 +3447,18 @@ pub(crate) fn handover_delivery_verdict(offered: usize, accepted: usize) -> Resu
     ))
 }
 
+/// Publish the saved paired hosts' origins to the gateway's CORS allowlist. A failed read
+/// leaves the previous list in place.
+async fn refresh_cors_saved_host_origins(
+    paired_hosts: crate::paired_host::service::PairedHostService,
+    remote_state: Arc<RemoteGatewayState>,
+) {
+    if let Ok(hosts) = paired_hosts.list().await {
+        *remote_state.cors_saved_host_origins.write() =
+            hosts.into_iter().map(|host| host.relay_origin).collect();
+    }
+}
+
 /// Gate the commit on what the predecessor OWNED, not merely on what it managed to send.
 ///
 /// `offered` counts only the sessions the predecessor successfully exported. A session that
@@ -3700,8 +3712,18 @@ impl DaemonServer {
         // listens for.
         let mut paired_hosts = paired_hosts;
         {
+            // Keep the gateway's CORS allowlist in step with the saved paired hosts. The lister
+            // is cloned before the sink is installed, so it shares the inventory but not the sink.
+            let cors_lister = paired_hosts.clone();
+            let cors_state = Arc::clone(&remote_state);
             let inventory_sink_tx = remote_event_tx.clone();
             paired_hosts.set_event_sink(Arc::new(move |event| {
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(refresh_cors_saved_host_origins(
+                        cors_lister.clone(),
+                        Arc::clone(&cors_state),
+                    ));
+                }
                 let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
                 let _ = inventory_sink_tx.send(DaemonRemoteEvent {
                     event: crate::ipc::paired_host::PAIRED_HOST_INVENTORY_CHANGED_EVENT.to_string(),
@@ -8008,6 +8030,8 @@ impl DaemonServer {
         mut config: RemoteGatewayConfig,
     ) -> Result<(), String> {
         config.port = REMOTE_GATEWAY_PORT;
+        refresh_cors_saved_host_origins(self.paired_hosts.clone(), Arc::clone(&self.remote_state))
+            .await;
         self.configure_gateway(config).await
     }
 
