@@ -42,7 +42,7 @@ Ferryx maintains compatibility with earlier runtime and branch conventions. The 
 
 ### Host Environment
 
-* **Architecture:** Linux `x86_64` is the primary CI-tested and release target (`.github/workflows/build-test.yml:53-66`, `scripts/lib/release-platforms.mjs:576-624`). Linux `aarch64` is supported as a source-build target (`src-tauri/native_terminal/build_ghostty.rs:129-132,315-319`), not as an audited official binary.
+* **Architecture:** Linux `x86_64` is the only architecture with prebuilt binaries (`.github/workflows/build-test.yml:53-66`, `scripts/lib/release-platforms.mjs:576-624`). Linux `aarch64` has no prebuilt `ferryx-cli`: the one-line installer exits with code 2 and points to [the source build](../CONTRIBUTING.md#build-prerequisites) (`src-tauri/native_terminal/build_ghostty.rs:129-132,315-319`).
 * **Init System:** `systemd` is recommended as an external process manager, not a runtime daemon prerequisite.
 * **Operating Account:** A standard, non-root user account is recommended. The daemon verifies that the runtime directory is owned by the process real UID (`src-tauri/src/daemon/server.rs:434-439`), without explicitly blocking `root`. Running as `root` carries operational risks, including root-owned cache and worktree files conflicting with unprivileged workflows.
 * **Core Utilities:** `hostname` is resolved via `PATH` lookup with fallback to `"Ferryx machine"` (`src-tauri/src/remote/auth.rs:86-94`). Git is used for worktree operations (`src-tauri/src/worktree/manager.rs:1-5`). Shell tools like `curl`, `ss`, `lsof`, and `ip` are suggested diagnostic aids.
@@ -120,8 +120,10 @@ curl -fsSL https://relay.ferryx.dev/install.sh | bash
 ```
 
 The installer detects the OS/architecture, downloads the matching standalone `ferryx-cli`
-binary from the relay (falling back to the GitHub release), verifies the Linux ELF header,
-and installs to `~/.local/bin` (or `/usr/local/bin` when run as root). Override the target
+binary from the relay (falling back to the GitHub release), verifies the Linux ELF header and
+the SHA256 checksum listed in the release's `SHA256SUMS`, and installs to `~/.local/bin` (or
+`/usr/local/bin` when run as root). On Linux `aarch64` it exits with code 2 because no prebuilt
+binary exists; use Option C. Pass `--no-up` to install without running `ferryx-cli up`. Override the target
 directory with `FERRYX_INSTALL_DIR`, or the download origin with `FERRYX_ORIGIN`.
 The same script is served from `https://ferryx.dev/install.sh`.
 
