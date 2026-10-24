@@ -257,14 +257,14 @@ guides, and an embedded demo running the real product components.
 
 ## Contributing
 
-Contributions are welcome. Branch from `main`, run the validation commands above, and
-open a pull request describing the user-visible result.
+Contributions are welcome. Branch from `main`, run the validation commands above, sign the
+[CLA](CLA.md), and open a pull request describing the user-visible result.
 
 Questions and ideas are welcome in [Discord](https://discord.gg/Z2hBkQEHUG).
 
 ## License
 
-This project is licensed under the [Sustainable Use License (SUL-1.0)](LICENSE): it permits personal, non-commercial, and internal business use; distribution is subject to its non-commercial terms and required notices.
+This project is source-available under the [Ferryx License](LICENSE). It is free for personal use, education, open-source work, non-profits, and companies with fewer than 50 people and less than USD 5M in annual revenue. Larger companies need a Team subscription to use Ferryx for work, after a transition period that ends 90 days after the Team plan opens. Self-hosted relays stay free for everyone. Releases published before this change remain under the Sustainable Use License (SUL-1.0) they shipped with. Contributions require signing the [CLA](CLA.md); see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Code Signing Policy
 
