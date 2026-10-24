@@ -695,6 +695,21 @@ describe("App project workspace flow", () => {
     );
   });
 
+  it("does not publish the sidebar model outside the native runtime", async () => {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([
+      { workspaceId: "web-local", repoRoot: "/repo/web-local", gitRoot: "/repo/web-local" },
+    ]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "web-local");
+    native.isTauriRuntime.mockReturnValue(false);
+    native.syncDesktopSidebar.mockReset().mockResolvedValue(1);
+
+    render(<App />);
+    expect(await screen.findByText("Active project web-local")).toBeInTheDocument();
+    await act(async () => { window.dispatchEvent(new StorageEvent("storage")); });
+
+    expect(native.syncDesktopSidebar).not.toHaveBeenCalled();
+  });
+
   it("resends unchanged desktop membership after reconnect and includes failed registrations", async () => {
     native.syncDesktopLocalProjects.mockReset().mockResolvedValue(undefined);
     native.registerProject.mockRejectedValueOnce(new Error("missing volume"));
