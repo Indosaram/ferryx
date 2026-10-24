@@ -20,6 +20,13 @@ import { generateChangelog } from "./lib/release-changelog.mjs";
 import { parsePlan, parseReceipt } from "./lib/release-contract.mjs";
 import { loadHostConfig, redactProcessOutput } from "./lib/release-hosts.mjs";
 import { buildHost, preflightAll } from "./lib/release-platforms.mjs";
+import {
+  attachReleaseProvenance,
+  generateSboms,
+  PROVENANCE_ASSET_NAMES,
+  PROVENANCE_NAME,
+  verifyChecksums,
+} from "./release-provenance.mjs";
 import { parseReleaseTag, toAppVersion, toMsixVersion } from "./sync-version.mjs";
 
 function assertNotInCI(stageName) {
@@ -337,21 +344,48 @@ export async function buildRelease({
 }
 
 /**
- * Assembles and verifies release manifest, deterministic aliases, and SHA256SUMS.txt.
+ * Assembles and verifies release manifest, deterministic aliases, and SHA256SUMS.txt, then
+ * attaches provenance: CycloneDX SBOMs, provenance.json, SHA256SUMS and SHA256SUMS.minisig
+ * (signed with the updater key from TAURI_SIGNING_PRIVATE_KEY[_PATH]).
  */
-export function assembleReleaseRun({ runDir, pubkey = null }) {
+export function assembleReleaseRun({
+  runDir,
+  pubkey = null,
+  env = process.env,
+  minisignBin,
+  sbomGenerator = generateSboms,
+  sourceRepo = null,
+}) {
   assertNotInCI("assemble");
 
   if (!runDir) throw new Error("Missing required argument: --run");
   const resolvedRunDir = resolve(runDir);
 
-  const { state } = validatePreparedRun(resolvedRunDir);
+  const { plan, state, configPath } = validatePreparedRun(resolvedRunDir);
   const planPath = join(resolvedRunDir, "plan.json");
   const receiptsDir = join(resolvedRunDir, "receipts");
   const artifactsDir = join(resolvedRunDir, "artifacts");
   const outDir = join(resolvedRunDir, "publish");
 
   const result = assembleRelease({ planPath, receiptsDir, artifactsDir, outDir, publicKey: pubkey });
+  try {
+    attachReleaseProvenance({
+      publishDir: outDir,
+      plan,
+      state,
+      receipts: result.receipts,
+      sourceRepo: sourceRepo ?? loadHostConfig(configPath).repository,
+      publicKey: pubkey || state.updaterPublicKey,
+      env,
+      minisignBin,
+      sbomGenerator,
+    });
+  } catch (err) {
+    // assembleRelease created outDir in this call; never leave a half-sealed publish directory.
+    rmSync(outDir, { recursive: true, force: true });
+    throw err;
+  }
+  result.files = readdirSync(outDir).sort();
   writeFileSync(join(resolvedRunDir, "assembly-state.json"), JSON.stringify({
     schemaVersion: 1,
     planDigest: state.planDigest,
@@ -370,6 +404,7 @@ export async function verifyReleaseRun({ runDir, pubkey = null }) {
   const resolvedRunDir = resolve(runDir);
   const planPath = join(resolvedRunDir, "plan.json");
   const plan = validateAssemblyState(resolvedRunDir);
+  const { state } = validatePreparedRun(resolvedRunDir);
 
   const publishDir = join(resolvedRunDir, "publish");
   if (!existsSync(publishDir)) {
@@ -407,6 +442,13 @@ export async function verifyReleaseRun({ runDir, pubkey = null }) {
     }
   }
 
+  // Signed SHA256SUMS must verify against the updater key and cover every published file.
+  verifyChecksums({ dir: publishDir, publicKey: pubkey || state.updaterPublicKey });
+  const provenance = JSON.parse(readFileSync(join(publishDir, PROVENANCE_NAME), "utf8"));
+  if (provenance.commitSha !== plan.commitSha || provenance.tag !== plan.tag) {
+    throw new Error(`${PROVENANCE_NAME} does not match the release plan commit/tag`);
+  }
+
   // Re-derive output in private temp directory to verify repeatability
   const tempDir = mkdtempSync(join(tmpdir(), "ferryx-verify-repeatability-"));
   try {
@@ -419,7 +461,13 @@ export async function verifyReleaseRun({ runDir, pubkey = null }) {
       publicKey: pubkey,
     });
 
-    const origFiles = readdirSync(publishDir).sort();
+    // Provenance assets (SBOMs, provenance.json, SHA256SUMS[.minisig]) are covered by the
+    // signature check above; everything else must re-derive byte-for-byte.
+    const allPublished = readdirSync(publishDir).sort();
+    for (const name of PROVENANCE_ASSET_NAMES) {
+      if (!allPublished.includes(name)) throw new Error(`Provenance asset missing from publish directory: ${name}`);
+    }
+    const origFiles = allPublished.filter((name) => !PROVENANCE_ASSET_NAMES.includes(name));
     const tempFiles = readdirSync(tempPublish).sort();
     if (origFiles.length !== tempFiles.length) {
       throw new Error(
