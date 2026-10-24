@@ -2,6 +2,8 @@
 mod machine_owner_socket;
 #[path = "agent_control_service.rs"]
 pub(crate) mod agent_control_service;
+#[path = "supervisor_api.rs"]
+pub(crate) mod supervisor_api;
 use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
 use crate::remote::browser_admission::AdmissionController;
@@ -376,17 +378,43 @@ async fn health_check() -> Json<HealthResponse> {
     })
 }
 
+/// Header the relay sets on a forwarded pair exchange with the client's address.
+pub(crate) const PAIRING_PEER_HEADER: &str = "x-ferryx-pairing-peer";
+
+/// The source whose failure budget a pair exchange spends.
+///
+/// Relay traffic reaches the gateway through the daemon's loopback tunnel, so only
+/// a loopback peer may name the original client; a direct LAN peer is identified
+/// by its own socket address and cannot spoof another source.
+fn pairing_peer(peer: Option<SocketAddr>, headers: &HeaderMap) -> Option<std::net::IpAddr> {
+    let peer = peer?.ip();
+    if peer.to_canonical().is_loopback() {
+        if let Some(reported) = headers
+            .get(PAIRING_PEER_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse().ok())
+        {
+            return Some(reported);
+        }
+    }
+    Some(peer)
+}
+
 async fn pair_exchange(
     State(state): State<Arc<RemoteGatewayState>>,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     Json(payload): Json<PairExchangeRequest>,
 ) -> Result<Response, Response> {
     let identity = load_gateway_identity(Arc::clone(&state)).await?;
+    let source = pairing_peer(peer.map(|axum::Extension(info)| info.0), &headers);
     let (token, device) = state
         .auth_manager
-        .exchange_pairing_code_with_installation(
+        .exchange_pairing_code_from(
             &payload.code,
             &payload.device_name,
             payload.installation_id.as_deref(),
+            source,
         )
         .map_err(|e| match e {
             AuthError::InvalidPairingCode => {
@@ -397,10 +425,21 @@ async fn pair_exchange(
             }
             AuthError::PairingRateLimited => (
                 StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({"code": "pairing_rate_limited"})),
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "code": "pairing_rate_limited",
+                    "error": {
+                        "code": "PAIRING_RATE_LIMITED",
+                        "message": "Too many failed pairing attempts from this source",
+                        "retryable": true,
+                    },
+                })),
             )
                 .into_response(),
             AuthError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+            AuthError::TokenExpired => {
+                machine_error(StatusCode::UNAUTHORIZED, "TOKEN_EXPIRED")
+            }
             AuthError::Storage(err) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Auth storage error: {err}"),
@@ -3869,6 +3908,9 @@ async fn get_capabilities(
             }
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+            if crate::hub_runtime::supervisor_available() {
+                capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
+            }
             capabilities
         } else { vec![] },
         "browser": {
@@ -7354,7 +7396,8 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .expose_headers([axum::http::HeaderName::from_static(ROTATED_TOKEN_HEADER)]);
 
     let mut router = Router::new()
         .route("/api/v1/health", get(health_check))
@@ -7464,6 +7507,13 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
             )),
         )
+        .route("/api/v1/supervisor", get(supervisor_api::http_snapshot))
+        .route(
+            "/api/v1/supervisor/pause",
+            post(supervisor_api::http_pause).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
         .route(
             "/api/v1/workspace/projects",
             get(super::workspace_api::list_scoped)
@@ -7531,6 +7581,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .fallback(remote_fallback)
         .method_not_allowed_fallback(remote_method_not_allowed)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            token_lifetime_middleware,
+        ))
         .layer(cors)
         .layer(axum::Extension(Arc::new(
             super::filesystem::BrowseLimits::default(),
@@ -7552,6 +7606,53 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     router
 }
 
+/// Response header carrying the replacement bearer token after a transparent rotation.
+pub const ROTATED_TOKEN_HEADER: &str = "x-ferryx-rotated-token";
+
+/// The routes a client calls when it (re)connects; only these rotate a token near its expiry.
+fn is_reconnect_route(path: &str) -> bool {
+    matches!(path, "/api/v1/capabilities" | "/api/v1/socket-ticket")
+}
+
+/// Enforces the bearer token's absolute lifetime on every route and rotates it on reconnect.
+///
+/// An expired token is refused here with the typed `TOKEN_EXPIRED` envelope, before any handler
+/// maps the failure to a generic 401. A successful reconnect inside the last week of the token's
+/// lifetime answers the replacement in [`ROTATED_TOKEN_HEADER`]; the presented token keeps working
+/// until its own expiry, so a client that misses the header loses nothing and retries next time.
+async fn token_lifetime_middleware(
+    State(state): State<Arc<RemoteGatewayState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let token = extract_token(request.headers());
+    if token
+        .as_deref()
+        .is_some_and(|token| state.auth_manager.token_is_expired(token))
+    {
+        return machine_error(StatusCode::UNAUTHORIZED, "TOKEN_EXPIRED");
+    }
+    let rotates = is_reconnect_route(request.uri().path());
+    let mut response = next.run(request).await;
+    let Some(token) = token.filter(|token| {
+        rotates
+            && response.status().is_success()
+            && state.auth_manager.token_near_expiry(token)
+    }) else {
+        return response;
+    };
+    match state.auth_manager.rotate_if_near_expiry(&token) {
+        Ok(Some(fresh)) => {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&fresh) {
+                response.headers_mut().insert(ROTATED_TOKEN_HEADER, value);
+            }
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!("device token rotation failed: {error}"),
+    }
+    response
+}
+
 pub static ALLOW_INSECURE_DIRECT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -7561,12 +7662,7 @@ pub fn set_allow_insecure_direct(allow: bool) {
 
 pub fn is_insecure_direct_allowed() -> bool {
     ALLOW_INSECURE_DIRECT.load(std::sync::atomic::Ordering::Relaxed)
-        || std::env::var("FERRYX_ALLOW_INSECURE_DIRECT")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-        || std::env::var("FERRYX_ALLOW_INSECURE_LAN")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+        || crate::remote::security_settings::insecure_direct_env_enabled()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7629,7 +7725,8 @@ impl RemoteServerHandle {
         };
         Ok(client
             .with_machine_id(&identity.machine_id)
-            .with_auth_manager((*state.auth_manager).clone()))
+            .with_auth_manager((*state.auth_manager).clone())
+            .with_fallback_urls(crate::remote::relay_client::fallback_relay_urls_from_env()))
     }
 
     /// Swap only the outbound supervisor; HTTP connections and PTY ownership stay intact.
@@ -7710,7 +7807,11 @@ async fn bind_and_serve(
 
     let state_clone = Arc::clone(&state);
     tokio::spawn(async move {
-        axum::serve(listener, router)
+        // The peer address keys the per-source pairing failure budget.
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
             .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.await;
             })
@@ -7952,7 +8053,9 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
             if let Some(identity) = &relay_identity {
                 client = client.with_machine_id(&identity.machine_id);
             }
-            let client = client.with_auth_manager((*state.auth_manager).clone());
+            let client = client
+                .with_auth_manager((*state.auth_manager).clone())
+                .with_fallback_urls(crate::remote::relay_client::fallback_relay_urls_from_env());
             // Publish the one relay pairing authority so daemon/GUI pairing registers
             // its PIN with the relay instead of minting a local-only code.
             let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
@@ -8005,6 +8108,10 @@ mod p19_insecure_direct_tests;
 #[cfg(test)]
 #[path = "p20_insecure_relay_tests.rs"]
 mod p20_insecure_relay_tests;
+
+#[cfg(test)]
+#[path = "token_lifetime_tests.rs"]
+mod token_lifetime_tests;
 
 #[cfg(test)]
 #[path = "preference_http_tests.rs"]

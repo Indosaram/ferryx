@@ -6,6 +6,8 @@
 # screens/gjc/*.screen) renders the interrupt hint with theme brackets
 # (default " ⠏ Working… ⟦esc⟧", also ⟨esc⟩ and ASCII [esc]) and indents the line.
 id = "gjc"
+display_name = "GJC"
+homepage = "https://github.com/Yeachan-Heo/gajae-code"
 version = "2026.08.31.1"
 min_engine_version = 1
 updated_at = "2026-08-31T00:00:00Z"

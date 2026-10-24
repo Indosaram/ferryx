@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import React, { useState, useEffect } from "react";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
+import { openWorkspacePicker } from "./home/phoneHomeTestUtils";
 import { storeAccountSessionToken, clearStoredAccountSessionToken, storeAccountOrigin, clearStoredAccountOrigin } from "./accountSession";
 import { remoteHostStore } from "../state/remoteHostStore";
 import * as attachTunnelModule from "./attachTunnel";
@@ -286,12 +287,9 @@ describe("RemoteApp createWebSocket factory stability regression", () => {
 
     render(<TestWrapper />);
 
-    const contextTrigger = await screen.findByRole("button", { name: /Change workspace context/i });
-    act(() => {
-      contextTrigger.click();
-    });
+    const picker = await openWorkspacePicker();
 
-    const worktreeOption = await screen.findByRole("button", { name: /main/i });
+    const worktreeOption = await within(picker).findByRole("button", { name: /main/i });
     act(() => {
       worktreeOption.click();
     });

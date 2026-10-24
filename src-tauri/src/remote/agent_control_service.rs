@@ -22,9 +22,9 @@ use futures_util::stream::{self, StreamExt as _};
 /// Record that a person typed into `session_id` through the daemon input path.
 pub(crate) fn note_human_keystrokes(session_id: &str) {
     let clock = reference_input::SystemReferenceClock;
-    reference_chat_runtime()
-        .input
-        .note_raw_input(session_id, clock.now_ms());
+    let now = clock.now_ms();
+    reference_chat_runtime().input.note_raw_input(session_id, now);
+    crate::hub_runtime::note_lane_keystrokes(session_id, now);
 }
 
 fn refuse_if_human_typing(session_id: &str) -> Result<(), ScopeError> {
@@ -247,6 +247,9 @@ pub(crate) async fn handle_as(
     authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
 ) -> Result<serde_json::Value, ScopeError> {
     let result = dispatch(state, op.clone(), authorize).await;
+    if result.is_ok() && op.is_input_mutation() {
+        crate::hub_runtime::note_agent_control_input(&op);
+    }
     record_audit(
         state,
         AuditRecord::for_op(
@@ -264,16 +267,31 @@ pub(crate) async fn handle_as(
 /// Desktop event the Supervisor view refetches on: a supervisor typed, or was refused.
 pub(crate) const SUPERVISOR_CHANGED_EVENT: &str = "supervisor_changed";
 
-/// Append one audit line; an input line also tells the desktop to refresh what it shows.
+/// Machine-events type a paired phone refetches the supervisor snapshot on.
+pub(crate) const SUPERVISOR_CHANGED_MACHINE_EVENT: &str = "supervisorChanged";
+
+/// Tell every Supervisor view to refetch: the desktop and mirror through their desktop event,
+/// machine-scope sockets through their own event domain. `payload` names what changed
+/// (`{sessionId}` or `{laneKey}`).
+pub(crate) fn publish_supervisor_changed(state: &RemoteGatewayState, payload: serde_json::Value) {
+    if let Some(services) = &state.machine_services {
+        services.workspaces.machine_events.publish(
+            SUPERVISOR_CHANGED_MACHINE_EVENT,
+            None,
+            None,
+            payload.clone(),
+        );
+    }
+    state.emit_desktop_event(SUPERVISOR_CHANGED_EVENT, payload);
+}
+
+/// Append one audit line; an input line also tells the Supervisor views to refresh.
 fn record_audit(state: &Arc<RemoteGatewayState>, record: AuditRecord) {
     let input = record.is_input();
     let session_id = record.session_id.clone();
     state.agent_control_audit.record(record);
     if input {
-        state.emit_desktop_event(
-            SUPERVISOR_CHANGED_EVENT,
-            serde_json::json!({ "sessionId": session_id }),
-        );
+        publish_supervisor_changed(state, serde_json::json!({ "sessionId": session_id }));
     }
 }
 
@@ -589,7 +607,7 @@ fn control_finish(result: Result<serde_json::Value, ScopeError>) -> Response {
 }
 
 #[allow(clippy::result_large_err)]
-fn http_device(
+pub(crate) fn http_device(
     state: &RemoteGatewayState,
     headers: &HeaderMap,
     mutation: bool,

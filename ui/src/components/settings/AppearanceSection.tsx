@@ -2,6 +2,7 @@ import { Palette, RotateCcw } from "lucide-react";
 
 import {
   useAppearanceSettings,
+  useResolvedTheme,
   type AppearanceSettingsState,
 } from "../../lib/appearanceSettings";
 import { Button } from "../ui/button";
@@ -16,6 +17,7 @@ import { SettingRow, SettingsGroup, SettingsHeading } from "./primitives";
 
 export function AppearanceSection() {
   const { settings, updateSettings, resetSettings } = useAppearanceSettings();
+  const resolvedTheme = useResolvedTheme(settings.theme);
 
   return (
     <section aria-labelledby="settings-appearance-heading">
@@ -45,7 +47,11 @@ export function AppearanceSection() {
         <div className="border-b border-border">
           <SettingRow
             label="Theme mode"
-            description="Select the base color theme for the desktop interface."
+            description={
+              settings.theme === "system"
+                ? `Follows your OS appearance, terminal included. Currently ${resolvedTheme === "light" ? "Light" : "Dark"}.`
+                : "Select the base color theme for the desktop interface."
+            }
           >
             <Select
               value={settings.theme}
@@ -66,7 +72,7 @@ export function AppearanceSection() {
                 <SelectItem value="charcoal">Charcoal (Default)</SelectItem>
                 <SelectItem value="dark">Dark</SelectItem>
                 <SelectItem value="light">Light</SelectItem>
-                <SelectItem value="system">System</SelectItem>
+                <SelectItem value="system">System (follow OS)</SelectItem>
               </SelectContent>
             </Select>
           </SettingRow>

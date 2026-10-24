@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev --port 14173",
+    "prebuild": "bun ../scripts/gen-site-agents.mjs",
     "build": "astro build",
     "preview": "astro preview --port 14173",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",

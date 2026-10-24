@@ -146,6 +146,9 @@ enum PairingWait {
 }
 
 pub const RELAY_STAGE_HEADER: &str = "x-ferryx-relay-stage";
+/// Response headers a browser client may read across origins: the relay stage, and the
+/// replacement bearer token the host gateway answers after a transparent rotation.
+const RELAY_EXPOSED_HEADERS: &str = "x-ferryx-relay-stage, x-ferryx-rotated-token";
 pub const RELAY_STAGE_DATA_PAIRING_TIMEOUT: &str = "data_pairing_timeout";
 pub const RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT: &str = "upstream_transfer_timeout";
 
@@ -2281,13 +2284,16 @@ async fn host_http_handler(
     let body = to_bytes(body, body_limit)
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    // Only the relay itself may name a pairing client to the gateway.
+    let mut headers = parts.headers;
+    headers.remove(crate::remote::server::PAIRING_PEER_HEADER);
     proxy_http(
         &state,
         &machine,
         None,
         parts.method,
         &target,
-        parts.headers,
+        headers,
         body.to_vec(),
     )
     .await
@@ -2401,6 +2407,9 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["agent-control", "sessions", _])
             | ("GET", ["agent-control", "sessions", _, "wait"])
             | ("POST", ["agent-control", "sessions", _, "send" | "answer" | "stop"])
+            // Supervisor view. The lane key rides in the pause body, never in the path.
+            | ("GET", ["supervisor"])
+            | ("POST", ["supervisor", "pause"])
             | ("GET", ["attach"])
     )
 }
@@ -2537,6 +2546,11 @@ async fn exchange_http(
     .unwrap();
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
+    // The gateway keys its per-source PIN failure budget on this address.
+    headers.insert(
+        crate::remote::server::PAIRING_PEER_HEADER,
+        HeaderValue::from_str(&ip.to_string()).unwrap(),
+    );
     let response = proxy_http(
         &state,
         &claim.machine_id,
@@ -3020,7 +3034,7 @@ fn apply_cors_headers(headers: &mut HeaderMap) {
     );
     headers.insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        HeaderValue::from_static(RELAY_STAGE_HEADER),
+        HeaderValue::from_static(RELAY_EXPOSED_HEADERS),
     );
 }
 
@@ -3059,6 +3073,7 @@ pub fn relay_router_with_account(
         delivery: state.clone(),
     };
     let mut router = Router::new()
+        .route("/healthz", get(healthz_handler))
         .route("/api/v1/pair/exchange", post(pair_exchange_handler))
         .route("/api/v1/attach/session", post(attach_session_handler))
         .route(
@@ -3123,6 +3138,24 @@ pub fn relay_router_with_account(
 /// Back-compat wrapper: relay-only router with no embedded account service.
 pub fn relay_router_with_grant_key(state: RelayState, account_public_key: Option<String>) -> Router {
     relay_router_with_account(state, account_public_key, None)
+}
+
+/// Liveness probe for load balancers and the public status page.
+///
+/// Side-effect free and unauthenticated. `role` tells a failover pool which host it reached:
+/// `primary` serves a writable account store, `standby` a read-only replica, and `relay` has
+/// no embedded account service.
+async fn healthz_handler(State(state): State<RelayState>) -> Response {
+    let role = match state.inner.account_state.lock().as_ref() {
+        Some(account) if account.is_read_only() => "standby",
+        Some(_) => "primary",
+        None => "relay",
+    };
+    let mut response = Json(serde_json::json!({ "ok": true, "role": role })).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// Spawns the background task that periodically evicts sessions which
@@ -4647,7 +4680,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_control_routes_join_the_allowlist_without_loosening_it() {
+    fn agent_control_and_supervisor_routes_join_the_allowlist_without_loosening_it() {
         assert!(allowed_http_route(&Method::GET, "agent-control/sessions"));
         assert!(allowed_http_route(&Method::GET, "agent-control/events"));
         assert!(allowed_http_route(
@@ -4670,6 +4703,8 @@ mod tests {
             &Method::POST,
             "agent-control/sessions/s-1/stop"
         ));
+        assert!(allowed_http_route(&Method::GET, "supervisor"));
+        assert!(allowed_http_route(&Method::POST, "supervisor/pause"));
         for (method, path) in [
             (Method::GET, "reference-chat/session-1"),
             (Method::GET, "reference-chat/x/secret"),
@@ -4677,6 +4712,12 @@ mod tests {
             (Method::POST, "admin"),
             (Method::DELETE, "agent-control/sessions/s-1"),
             (Method::GET, "agent-control/sessions/s-1/send"),
+            (Method::DELETE, "supervisor"),
+            (Method::POST, "supervisor"),
+            (Method::GET, "supervisor/pause"),
+            (Method::POST, "supervisor/x/y"),
+            (Method::GET, "supervisor/x/y"),
+            (Method::POST, "supervisor/lane-1/pause"),
         ] {
             assert!(
                 !allowed_http_route(&method, path),
@@ -8641,6 +8682,116 @@ mod tests {
         (format!("ws://{addr}"), handle)
     }
 
+    /// `/healthz` is JSON (not the SPA fallback) and reports which failover role it serves.
+    #[tokio::test]
+    async fn healthz_reports_primary_and_standby_roles() {
+        let temp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            temp.path().join("mail"),
+        ));
+        let account = Arc::new(crate::account::service::AccountState::new(
+            temp.path().join("account"),
+            "https://relay.test",
+            mailer,
+        ));
+        let (base, handle) =
+            spawn_test_relay_with_account_state(RelayState::new(vec![]), Some(account)).await;
+        let url = format!("{}/healthz", base.replacen("ws://", "http://", 1));
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let primary = client.get(&url).send().await.unwrap();
+        assert_eq!(primary.status(), StatusCode::OK);
+        let body: serde_json::Value = primary.json().await.unwrap();
+        assert_eq!(body, serde_json::json!({ "ok": true, "role": "primary" }));
+
+        std::fs::create_dir_all(temp.path().join("account")).unwrap();
+        std::fs::write(
+            temp.path()
+                .join("account")
+                .join(crate::account::store::store_sqlite::STANDBY_MARKER_FILENAME),
+            b"",
+        )
+        .unwrap();
+        let standby: serde_json::Value =
+            client.get(&url).send().await.unwrap().json().await.unwrap();
+        assert_eq!(standby["role"], "standby");
+        handle.abort();
+    }
+
+    /// During a failover the commercial standby must keep admitting enrolled machines: the
+    /// entitlement check evaluates without persisting, while account writes such as a new
+    /// enrollment are still refused with the typed read-only error.
+    #[tokio::test]
+    async fn commercial_standby_accepts_enrolled_machine_control_bind_and_entitlement_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Seed the primary's data (user, session, enrolled machine "owned-machine"/"pubkey-1").
+        let _seeded = test_account_state(
+            tmp.path(),
+            "user-1",
+            "session-token",
+            "owned-machine",
+            "other-machine",
+        );
+        // The same data directory, served as a commercial read-only standby.
+        std::fs::write(
+            tmp.path()
+                .join("account")
+                .join(crate::account::store::store_sqlite::STANDBY_MARKER_FILENAME),
+            b"",
+        )
+        .unwrap();
+        let account = Arc::new(
+            crate::account::service::AccountState::new(
+                tmp.path().join("account"),
+                "https://relay.test",
+                Arc::new(crate::account::mailer::FileMailer::with_dir(
+                    tmp.path().join("mail"),
+                )),
+            )
+            .with_deployment_mode(crate::account::origin::DeploymentMode::Commercial),
+        );
+        assert!(account.is_read_only());
+
+        let now = crate::account::billing::routes::billing_now();
+        let entitlement =
+            crate::account::billing::routes::entitlement_for_user(&account, "user-1", now)
+                .expect("a standby must evaluate entitlement without writing");
+        assert_ne!(
+            entitlement.status,
+            crate::account::billing::entitlement::EntitlementStatus::Stopped
+        );
+
+        let state = RelayState::new_with_key_store(vec![], tmp.path().join("keys.json")).unwrap();
+        state.set_account_state(account.clone());
+        let enrolled = ControlAuth {
+            machine_id: "owned-machine".into(),
+            public_key: "pubkey-1".into(),
+            display_name: "Owned Machine".into(),
+            enrollment_token: None,
+            signature: String::new(),
+            timestamp: 0,
+        };
+        state
+            .bind_machine_key(&enrolled)
+            .expect("an enrolled machine must bind its control tunnel on a commercial standby");
+
+        let (base, handle) =
+            spawn_test_relay_with_account_state(state, Some(account)).await;
+        let http = base.replacen("ws://", "http://", 1);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let enroll = client
+            .post(format!("{http}/api/account/v1/machines/enroll"))
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(enroll.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = enroll.json().await.unwrap();
+        assert_eq!(body["code"], "ACCOUNT_STORE_READ_ONLY");
+        handle.abort();
+    }
+
     /// Owner of the foreign machine in [`test_account_state`]. It needs its own `users` row
     /// because `machines.user_id` is `REFERENCES users(user_id)` and the store enables
     /// `PRAGMA foreign_keys = ON` (store_sqlite/schema.rs:11-12, 65-84).
@@ -9522,7 +9673,8 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
-                // Second machine owned by user creates an active over_limit violation on Free (2 > 1)
+                // More machines owned by the user create an active over_limit violation on Free
+                // (FREE_HOSTS + 1 > FREE_HOSTS).
                 store.machines.insert(
                     "rec-owned-2".into(),
                     crate::account::store::MachineRecord {
@@ -9539,6 +9691,7 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
+                seed_free_over_limit_fillers(store, user_id, now);
                 store.billing_states.insert(
                     user_id.into(),
                     crate::account::store::BillingStateRecord {
@@ -9649,7 +9802,8 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
-                // Second machine owned by user creates an active over_limit violation on Free (2 > 1)
+                // More machines owned by the user create an active over_limit violation on Free
+                // (FREE_HOSTS + 1 > FREE_HOSTS).
                 store.machines.insert(
                     "rec-stopped-ctrl-2".into(),
                     crate::account::store::MachineRecord {
@@ -9666,6 +9820,7 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
+                seed_free_over_limit_fillers(store, user_id, now);
                 store.billing_states.insert(
                     user_id.into(),
                     crate::account::store::BillingStateRecord {
@@ -9977,7 +10132,7 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
-                // Second machine creates an active over_limit violation on Free (2 > 1)
+                // More machines create an active over_limit violation on Free (FREE_HOSTS + 1 > FREE_HOSTS).
                 store.machines.insert(
                     "rec-owned-2".into(),
                     crate::account::store::MachineRecord {
@@ -9994,6 +10149,7 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
+                seed_free_over_limit_fillers(store, user_id, now);
                 store.billing_states.insert(
                     user_id.into(),
                     crate::account::store::BillingStateRecord {
@@ -10132,10 +10288,38 @@ mod tests {
         )
     }
 
+    /// Seeds `FREE_HOSTS - 1` extra machines for `user_id`. Added to a fixture that already
+    /// holds two machines, the owner is one machine over the Free limit.
+    fn seed_free_over_limit_fillers(
+        store: &mut crate::account::store::AccountStore,
+        user_id: &str,
+        now: u64,
+    ) {
+        for index in 0..crate::account::billing::entitlement::FREE_HOSTS - 1 {
+            let id = format!("filler-{user_id}-{index}");
+            store.machines.insert(
+                format!("rec-{id}"),
+                crate::account::store::MachineRecord {
+                    machine_record_id: format!("rec-{id}"),
+                    owner_user_id: user_id.into(),
+                    machine_id: id.clone(),
+                    display_name: id.clone(),
+                    public_key: format!("pubkey-{id}"),
+                    attach_public_key: format!("attachkey-{id}"),
+                    relay_origin: "https://relay.test".into(),
+                    platform: "linux".into(),
+                    enrollment_epoch: 1,
+                    enrolled_at: now,
+                    last_seen_at: now,
+                },
+            );
+        }
+    }
+
     /// Enrolls `machine_count` machines for `user_id` — the first carrying `public_key` and
     /// `machine_id` — and seeds the owner's grace start when one is given.
     ///
-    /// Two machines on the Free plan are over the limit of one, so an owner seeded with a
+    /// `FREE_HOSTS + 1` machines on the Free plan are over its limit, so an owner seeded with a
     /// grace start is a real violation rather than a hypothetical one.
     fn seed_suspension_owner(
         account: &Arc<crate::account::service::AccountState>,
@@ -10264,7 +10448,7 @@ mod tests {
             machine_id,
             &identity.public_key,
             Some(now),
-            2,
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
         );
         let (base, server) =
             spawn_test_relay_with_account_state(state.clone(), Some(account.clone())).await;
@@ -10337,7 +10521,7 @@ mod tests {
             stopped_id,
             &stopped_identity.public_key,
             Some(now),
-            2,
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
         );
         let healthy_id = "healthy-owner-machine";
         let healthy_identity = identity(203, healthy_id);
@@ -10437,7 +10621,7 @@ mod tests {
             machine_id,
             &identity.public_key,
             Some(now),
-            2,
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
         );
         let (base, server) =
             spawn_test_relay_with_account_state(state.clone(), Some(account.clone())).await;
@@ -10504,7 +10688,7 @@ mod tests {
             "the sweep persists the stop through the billing store"
         );
 
-        // Resolution: the owner upgrades to Pro, so both machines fit the plan limit.
+        // Resolution: the owner upgrades to Pro, so every machine fits the plan limit.
         account
             .mutate(|store| {
                 store.subscriptions.insert(
@@ -10561,7 +10745,7 @@ mod tests {
             machine_id,
             &identity.public_key,
             Some(now.saturating_sub(crate::account::billing::entitlement::GRACE_SECS + 30)),
-            2,
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
         );
         state.set_account_state(account);
 

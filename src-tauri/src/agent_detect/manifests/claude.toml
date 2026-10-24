@@ -1,4 +1,6 @@
 id = "claude"
+display_name = "Claude Code"
+homepage = "https://www.anthropic.com/claude-code"
 version = "2026.08.27.1"
 min_engine_version = 1
 aliases = ["claude-code"]

@@ -371,7 +371,9 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "terminal.copyMode",
     title: "Toggle terminal copy mode",
     group: "Terminal Panes",
-    binding: { key: "x", mod: true, shift: true, nonMac: { mod: false, control: true } },
+    // Mod+Shift+Space (Cmd on macOS, Ctrl elsewhere); the earlier Mod+Shift+X chord stays an alias.
+    binding: { key: "Space", mod: true, shift: true },
+    aliases: [{ key: "x", mod: true, shift: true }],
     source: "ferryx",
   },
   {
@@ -441,11 +443,69 @@ export type ShortcutOverrideMap = Partial<Record<ShortcutActionId, ShortcutBindi
 
 const NO_OVERRIDES: ShortcutOverrideMap = Object.freeze({});
 
-/** The live registry: defaults with user overrides applied and unbound actions removed. */
-export function resolvedShortcuts(overrides: ShortcutOverrideMap = NO_OVERRIDES): readonly ShortcutDefinition[] {
-  if (Object.keys(overrides).length === 0) return SHORTCUTS;
+/**
+ * Named binding sets picked in Settings. `default` is the registry above. `terminal-first`
+ * (Windows/Linux only; macOS always resolves `default`) leaves Ctrl+digit, Ctrl+Tab,
+ * Ctrl+Shift+Tab and Ctrl+PageUp/PageDown to the terminal and moves those actions to Alt-based
+ * chords under the same action ids. Sparse user overrides apply on top of either preset.
+ */
+export type ShortcutPreset = "default" | "terminal-first";
+
+export const SHORTCUT_PRESETS: readonly ShortcutPreset[] = ["default", "terminal-first"];
+
+type PresetBindings = { readonly binding: ShortcutBinding; readonly aliases?: readonly ShortcutBinding[] };
+
+const PRESET_DIGITS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"] as const;
+
+/**
+ * The `terminal-first` replacements; ids not listed keep their default bindings. The Ctrl chords
+ * stay as aliases so they still work outside a terminal; inside `.terminal-host` the yield
+ * predicate hands them to the PTY instead.
+ */
+export const TERMINAL_FIRST_BINDINGS: Readonly<Partial<Record<ShortcutActionId, PresetBindings>>> = {
+  ...Object.fromEntries(PRESET_DIGITS.map((digit) => [
+    `tab.select${digit}`,
+    { binding: { key: digit, alt: true }, aliases: [{ key: digit, control: true }] },
+  ])),
+  // Alt+digit now selects tabs, so workspaces move to Alt+Shift+digit.
+  ...Object.fromEntries(PRESET_DIGITS.map((digit) => [`workspace.select${digit}`, { binding: { key: digit, alt: true, shift: true } }])),
+  "tab.next": {
+    binding: { key: "PageDown", alt: true },
+    aliases: [{ key: "]", mod: true, shift: true }, { key: "PageDown", control: true }, { key: "Tab", control: true }],
+  },
+  "tab.previous": {
+    binding: { key: "PageUp", alt: true },
+    aliases: [{ key: "[", mod: true, shift: true }, { key: "PageUp", control: true }, { key: "Tab", control: true, shift: true }],
+  },
+};
+
+/** The preset's replacement table, or null when the platform/preset keeps the defaults. */
+export function shortcutPresetLayer(
+  preset: ShortcutPreset,
+  isMac: boolean,
+): Readonly<Partial<Record<ShortcutActionId, PresetBindings>>> | null {
+  if (isMac || preset !== "terminal-first") return null;
+  return TERMINAL_FIRST_BINDINGS;
+}
+
+/** The live registry: defaults with the preset, then user overrides, applied and unbound actions removed. */
+export function resolvedShortcuts(
+  overrides: ShortcutOverrideMap = NO_OVERRIDES,
+  preset: ShortcutPreset = "default",
+  isMac = detectMacPlatform(),
+): readonly ShortcutDefinition[] {
+  const layer = shortcutPresetLayer(preset, isMac);
+  if (!layer && Object.keys(overrides).length === 0) return SHORTCUTS;
   const resolved: ShortcutDefinition[] = [];
-  for (const shortcut of SHORTCUTS) {
+  for (const original of SHORTCUTS) {
+    const replacement = layer?.[original.id];
+    let shortcut: ShortcutDefinition = original;
+    if (replacement) {
+      const { aliases: _presetAliases, ...base } = original;
+      shortcut = replacement.aliases
+        ? { ...base, binding: replacement.binding, aliases: replacement.aliases }
+        : { ...base, binding: replacement.binding };
+    }
     if (!Object.prototype.hasOwnProperty.call(overrides, shortcut.id)) {
       resolved.push(shortcut);
       continue;
@@ -458,8 +518,13 @@ export function resolvedShortcuts(overrides: ShortcutOverrideMap = NO_OVERRIDES)
   return resolved;
 }
 
-function resolvedShortcut(id: ShortcutActionId, overrides: ShortcutOverrideMap): ShortcutDefinition | undefined {
-  return resolvedShortcuts(overrides).find((shortcut) => shortcut.id === id);
+function resolvedShortcut(
+  id: ShortcutActionId,
+  overrides: ShortcutOverrideMap,
+  preset: ShortcutPreset,
+  isMac: boolean,
+): ShortcutDefinition | undefined {
+  return resolvedShortcuts(overrides, preset, isMac).find((shortcut) => shortcut.id === id);
 }
 
 export type ReservedChord = {
@@ -520,13 +585,14 @@ export function findConflict(
   binding: ShortcutBinding,
   overrides: ShortcutOverrideMap = NO_OVERRIDES,
   isMac = detectMacPlatform(),
+  preset: ShortcutPreset = "default",
 ): ShortcutConflict | null {
   const chord = effectiveChord(binding, isMac);
   const reserved = RESERVED_CHORDS.find((candidate) =>
     (candidate.platform === "all" || (candidate.platform === "mac") === isMac)
     && effectiveChord(candidate.binding, isMac) === chord);
   if (reserved) return { kind: "reserved", chord: reserved };
-  for (const shortcut of resolvedShortcuts(overrides)) {
+  for (const shortcut of resolvedShortcuts(overrides, preset, isMac)) {
     if (shortcut.id === actionId || surfacesAreExclusive(actionId, shortcut.id)) continue;
     if ([shortcut.binding, ...(shortcut.aliases ?? [])].some((candidate) => effectiveChord(candidate, isMac) === chord)) {
       return { kind: "action", actionId: shortcut.id, title: shortcut.title };
@@ -557,28 +623,39 @@ export function formatBindingLabel(rawBinding: ShortcutBinding, isMac = detectMa
     .join("+");
 }
 
-export function shortcutLabel(id: ShortcutActionId, isMac = detectMacPlatform(), overrides: ShortcutOverrideMap = NO_OVERRIDES): string {
-  const shortcut = resolvedShortcut(id, overrides);
+export function shortcutLabel(
+  id: ShortcutActionId,
+  isMac = detectMacPlatform(),
+  overrides: ShortcutOverrideMap = NO_OVERRIDES,
+  preset: ShortcutPreset = "default",
+): string {
+  const shortcut = resolvedShortcut(id, overrides, preset, isMac);
   if (!shortcut) return "";
   return formatBindingLabel(shortcut.binding, isMac);
 }
 
-export function shortcutAliasesLabels(id: ShortcutActionId, isMac = detectMacPlatform(), overrides: ShortcutOverrideMap = NO_OVERRIDES): string[] {
-  const shortcut = resolvedShortcut(id, overrides);
+export function shortcutAliasesLabels(
+  id: ShortcutActionId,
+  isMac = detectMacPlatform(),
+  overrides: ShortcutOverrideMap = NO_OVERRIDES,
+  preset: ShortcutPreset = "default",
+): string[] {
+  const shortcut = resolvedShortcut(id, overrides, preset, isMac);
   if (!shortcut?.aliases?.length) return [];
   return shortcut.aliases.map((alias) => formatBindingLabel(alias, isMac));
 }
 
 export function useShortcuts(
   handlers: Partial<Record<ShortcutActionId, () => void>>,
-  options: { isMac?: boolean; overrides?: ShortcutOverrideMap } = {},
+  options: { isMac?: boolean; overrides?: ShortcutOverrideMap; preset?: ShortcutPreset } = {},
 ) {
   const isMac = options.isMac ?? detectMacPlatform();
   const overrides = options.overrides ?? NO_OVERRIDES;
+  const preset = options.preset ?? "default";
 
   useEffect(() => {
     const registration = ++shortcutRegistration;
-    const shortcuts = resolvedShortcuts(overrides);
+    const shortcuts = resolvedShortcuts(overrides, preset, isMac);
     switchDebug("shortcut.hook.register", { registration, isMac, ...shortcutContext(),
       enabled: shortcuts.filter(({ id }) => handlers[id]).map(({ id }) => id),
       disabled: shortcuts.filter(({ id }) => !handlers[id]).map(({ id }) => id) });
@@ -612,7 +689,7 @@ export function useShortcuts(
           continue;
         }
         trace("match", { action: shortcut.id });
-        if (shouldYieldControlLetterToTerminal(event, isMac)) {
+        if (shouldYieldControlLetterToTerminal(event, isMac, preset)) {
           trace("reject", { action: shortcut.id, reason: "terminal-control-letter" });
           continue;
         }
@@ -639,7 +716,7 @@ export function useShortcuts(
       window.removeEventListener("keydown", handleKeyDown, true);
       switchDebug("shortcut.hook.unregister", { registration });
     };
-  }, [handlers, isMac, overrides]);
+  }, [handlers, isMac, overrides, preset]);
 }
 
 export function isMacShortcutPlatform() {
@@ -713,6 +790,9 @@ export function matchesBinding(event: KeyboardEvent, rawBinding: ShortcutBinding
   if (key === "PageUp") {
     return ecode === "PageUp" || ekey === "PageUp";
   }
+  if (key === "Space") {
+    return ecode === "Space" || ekey === " " || ekey === "Space" || ekey === "Spacebar";
+  }
   if (key === "]") {
     return ecode === "BracketRight" || ekey === "]" || ekey === "}";
   }
@@ -759,12 +839,29 @@ function isTerminalTarget(target: EventTarget | null) {
  * Only the bare chords yield: a chord carrying another modifier (Ctrl+Shift+*), the
  * non-letter chords (Ctrl+digit, Ctrl+Tab, Ctrl+PageUp/PageDown) and every macOS
  * chord stay claimed, because there `mod` is Cmd and this predicate is never true.
+ *
+ * The `terminal-first` preset widens this off macOS: Ctrl+digit, Ctrl+Tab, Ctrl+Shift+Tab and
+ * Ctrl+PageUp/PageDown also reach the terminal, even when a user override binds them.
  */
-export function shouldYieldControlLetterToTerminal(event: KeyboardEvent, isMac: boolean): boolean {
+export function shouldYieldControlLetterToTerminal(
+  event: KeyboardEvent,
+  isMac: boolean,
+  preset: ShortcutPreset = "default",
+): boolean {
   if (isMac) return false;
   if (!isTerminalTarget(event.target)) return false;
-  if (!event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+  if (!event.ctrlKey || event.metaKey || event.altKey) return false;
+  if (preset === "terminal-first" && isTerminalFirstControlChord(event)) return true;
+  if (event.shiftKey) return false;
   return /^[a-zA-Z]$/.test(event.key);
+}
+
+/** Ctrl+digit, Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+PageUp/PageDown; the caller already checked Ctrl. */
+function isTerminalFirstControlChord(event: KeyboardEvent): boolean {
+  if (event.code === "Tab" || event.key === "Tab") return true;
+  if (event.shiftKey) return false;
+  if (/^(Digit|Numpad)[0-9]$/.test(event.code) || /^[0-9]$/.test(event.key)) return true;
+  return event.key === "PageUp" || event.key === "PageDown" || event.code === "PageUp" || event.code === "PageDown";
 }
 
 function normalizeKey(key: string) {

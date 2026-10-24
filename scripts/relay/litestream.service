@@ -1,0 +1,17 @@
+# Continuous replication of the account database. Enabled on the primary only; on the
+# standby it stays disabled until `relay-failover.mjs promote-standby` enables it.
+[Unit]
+Description=Litestream replication of the Ferryx account database
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+EnvironmentFile=/etc/ferryx/litestream.env
+ExecStart=/usr/local/bin/litestream replicate -config /etc/litestream.yml
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

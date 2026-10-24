@@ -8,18 +8,22 @@ export type OnboardingStepId =
   | "account"
   | "intro"
   | "features"
-  | "permissions"
   | "agents"
   | "cli"
   | "project";
 
 export const ONBOARDING_VERSION = 1;
 
+/**
+ * macOS permissions are not part of the first-run flow. Each one is requested
+ * when the feature that needs it is first used (notifications on the first
+ * notify, Full Disk Access when a read hits a TCC-protected path); Settings >
+ * Permissions remains the place to review all of them.
+ */
 export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
   "account",
   "intro",
   "features",
-  "permissions",
   "agents",
   "cli",
   "project",
@@ -34,14 +38,6 @@ export type OnboardingState = {
 };
 
 export type PermissionKey = "fullDiskAccess" | "accessibility" | "notifications";
-
-export type PermissionPriority = "recommended" | "optional";
-
-export const PERMISSION_PRIORITY: Record<PermissionKey, PermissionPriority> = {
-  fullDiskAccess: "recommended",
-  accessibility: "recommended",
-  notifications: "optional",
-};
 
 export type OnboardingContext = {
   permissions: SystemPermissionsStatus | null;
@@ -124,7 +120,7 @@ export function loadOnboardingState(
       if (legacy === "true") {
         const migrated: OnboardingState = {
           version: 1,
-          completedSteps: ["intro", "permissions"],
+          completedSteps: ["intro"],
           dismissed: false,
         };
         saveOnboardingState(migrated, storage);
@@ -230,11 +226,6 @@ export function isOnboardingStepSatisfied(
       return ctx.accountLinked === true;
     case "intro":
       return ctx.projectCount > 0;
-    case "permissions": {
-      const keys = visiblePermissionKeys(ctx.permissions);
-      if (keys.length === 0) return true;
-      return keys.every((key) => ctx.permissions?.[key]?.granted === true);
-    }
     case "agents":
       return ctx.agents !== null && ctx.agents.some((a) => a.available);
     case "cli":
@@ -248,11 +239,7 @@ export function isOnboardingStepSatisfied(
 }
 
 export function wizardSteps(ctx: OnboardingContext): OnboardingStepId[] {
-  const visible = visiblePermissionKeys(ctx.permissions);
   return ONBOARDING_STEP_ORDER.filter((step) => {
-    if (step === "permissions" && visible.length === 0) {
-      return false;
-    }
     // Unknown CLI status (null) keeps the step so it can load its own status.
     if (step === "cli" && ctx.cli !== null && !ctx.cli.isSupported) {
       return false;

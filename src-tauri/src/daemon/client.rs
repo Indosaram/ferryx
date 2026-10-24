@@ -687,6 +687,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
         DaemonRequest::SupervisorSnapshot => "supervisorSnapshot",
         DaemonRequest::SupervisorSetPaused { .. } => "supervisorSetPaused",
+        DaemonRequest::SupervisorGoal { .. } => "supervisorGoal",
     }
 }
 
@@ -873,13 +874,27 @@ struct ActiveConnection {
     writer: OwnedWriteHalf,
 }
 
+/// Default budget for one daemon request/response exchange.
+const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Budget for a mutating supervisor goal action. An approve waits in `send_confirmed` for the
+/// pane to start the turn (up to the 120s turn-start maximum), so the client must outlast it
+/// and let the daemon report the outcome. Matches the CLI's `GOAL_CLI_TIMEOUT`.
+const SUPERVISOR_GOAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
+    match request {
+        DaemonRequest::SupervisorGoal { request } if request.mutates() => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
+        _ => DEFAULT_REQUEST_TIMEOUT,
+    }
+}
 
 impl ActiveConnection {
     async fn request(
         &mut self,
         req: &DaemonRequest,
     ) -> Result<DaemonResponse, RequestAttemptError> {
-        self.request_with_timeout(req, std::time::Duration::from_secs(15))
+        self.request_with_timeout(req, request_timeout(req))
             .await
     }
 
@@ -2386,7 +2401,7 @@ impl DaemonClient {
         }
         // `new_with_socket` is a dependency-injection hook used by tests and local harnesses
         // with arbitrary temporary UDS paths. Section-9 trust requirements govern the fixed
-        // production runtime endpoint, so do not impose `/tmp/rorca-{uid}` directory-mode
+        // production runtime endpoint, so do not impose `/tmp/ferryx-{uid}` directory-mode
         // semantics on unrelated injected sockets.
         if path != get_socket_path() {
             return Ok(());
@@ -2609,6 +2624,16 @@ impl DaemonClient {
         {
             Self::connect_socket(&self.socket_path).await
         } else {
+            // A daemon from before the rename serves only /tmp/rorca-{uid}: reach it there
+            // instead of reporting it busy, until it is upgraded.
+            #[cfg(unix)]
+            if self.socket_path == get_socket_path() {
+                if let Some(legacy) = crate::daemon::server::legacy_owner_socket_path() {
+                    if crate::daemon::server::validate_runtime_socket_path(&legacy).is_ok() {
+                        return Self::connect_socket(&legacy).await;
+                    }
+                }
+            }
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "daemon socket not found or invalid",
@@ -5157,6 +5182,25 @@ mod tests {
     use crate::daemon::protocol::{
         DaemonRequest, DaemonResponse, DaemonStreamMessage, DAEMON_PROTOCOL_VERSION,
     };
+
+    #[test]
+    fn a_goal_approval_outlasts_the_turn_start_wait_and_other_requests_keep_fifteen_seconds() {
+        use crate::daemon::protocol::SupervisorGoalAction;
+        let approve = DaemonRequest::SupervisorGoal {
+            request: SupervisorGoalAction::Approve { lane_key: "ledger".into() },
+        };
+        assert_eq!(request_timeout(&approve), std::time::Duration::from_secs(180));
+        assert!(
+            request_timeout(&approve)
+                > std::time::Duration::from_millis(crate::agent_control::delivery::TURN_START_MAX_MS)
+        );
+        let show = DaemonRequest::SupervisorGoal {
+            request: SupervisorGoalAction::Show { lane_key: "ledger".into() },
+        };
+        assert_eq!(request_timeout(&show), std::time::Duration::from_secs(15));
+        assert_eq!(request_timeout(&DaemonRequest::SupervisorSnapshot), std::time::Duration::from_secs(15));
+        assert_eq!(request_timeout(&DaemonRequest::Ping), std::time::Duration::from_secs(15));
+    }
     use crate::daemon::server::DaemonServer;
     use crate::remote::state::RemoteNetworkMode;
     use std::os::unix::fs::symlink;
