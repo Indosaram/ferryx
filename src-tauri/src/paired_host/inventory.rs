@@ -486,6 +486,13 @@ impl Inventory {
         }
     }
     fn commit(&mut self, candidate: Disk, id: &str) -> Result<()> {
+        self.write_disk(candidate)?;
+        self.invalidate(id);
+        Ok(())
+    }
+    /// Persists `candidate` with the same external-change and read-back checks as [`Self::commit`]
+    /// but leaves live leases running: for changes that do not alter a host's authority.
+    fn write_disk(&mut self, candidate: Disk) -> Result<()> {
         if self.fenced {
             return Err(InventoryError::Unavailable);
         }
@@ -504,8 +511,32 @@ impl Inventory {
             return Err(InventoryError::Unavailable);
         }
         self.disk = candidate;
-        self.invalidate(id);
         Ok(())
+    }
+    /// Adopts the bearer token the host rotated for this exact credential. Same device, same
+    /// authority: the generation is kept and live leases continue on the previous token, which the
+    /// host still honours until its own expiry. A re-pair or a different stored token wins.
+    pub fn replace_rotated_token(
+        &mut self,
+        id: &str,
+        generation: Epoch,
+        previous: &str,
+        fresh: &str,
+    ) -> Result<()> {
+        self.validate_generation(id, generation)?;
+        if !valid_text(fresh, 8192) || !fresh.bytes().all(|b| (33..=126).contains(&b)) {
+            return Err(InventoryError::InvalidInput);
+        }
+        let mut candidate = self.disk.clone();
+        let row = candidate
+            .hosts
+            .get_mut(id)
+            .ok_or(InventoryError::StaleGeneration)?;
+        if row.device_token.as_deref() != Some(previous) {
+            return Err(InventoryError::StaleGeneration);
+        }
+        row.device_token = Some(fresh.to_owned());
+        self.write_disk(candidate)
     }
     fn next_generation(&self, id: &str) -> Result<Epoch> {
         self.disk

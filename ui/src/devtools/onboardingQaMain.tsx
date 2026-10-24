@@ -279,7 +279,6 @@ function OnboardingQaApp(): JSX.Element {
     <div className="min-h-screen w-full bg-background">
       <WelcomeWizard
         steps={steps}
-        permissionsStatus={permissionsFixture}
         agents={agentsFixture}
         isMac={platformParam === "macos"}
         doneSteps={doneParam}
@@ -290,10 +289,6 @@ function OnboardingQaApp(): JSX.Element {
         onFinish={() => logQa("onFinish")}
         onSkip={() => logQa("onSkip")}
         onRemindLater={() => logQa("onRemindLater")}
-        fetchPermissions={async () => {
-          logQa("fetchPermissions");
-          return permissionsFixture;
-        }}
         loadCliStatus={async () => {
           logQa("loadCliStatus");
           return cliFixture;

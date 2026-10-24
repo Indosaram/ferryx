@@ -19,19 +19,19 @@ This baseline is genuinely good. Many engineers should keep using it. Nothing on
 
 Plenty of people have automated the recipe, and a comparison that pretends otherwise isn't useful. The ones worth knowing, all read 2026-09-19:
 
-- **[workmux](https://github.com/raine/workmux)** (MIT, Rust): git worktrees plus tmux windows as isolated dev environments, with kitty, WezTerm, and Zellij as alternative backends. The most direct expression of the pattern.
-- **[worktrunk](https://worktrunk.dev/)** ([source](https://github.com/max-sixty/worktrunk), MIT or Apache-2.0): a worktree CLI built for parallel agents, where worktrees are addressed by branch name and paths come from a configurable template. The most popular of the group by stars.
+- **[workmux](https://github.com/raine/workmux)** (MIT, Rust; OSI open source, where Ferryx is source-available): git worktrees plus tmux windows as isolated dev environments, with kitty, WezTerm, and Zellij as alternative backends. The most direct expression of the pattern.
+- **[worktrunk](https://worktrunk.dev/)** ([source](https://github.com/max-sixty/worktrunk), MIT or Apache-2.0, OSI open source rather than source-available): a worktree CLI built for parallel agents, where worktrees are addressed by branch name and paths come from a configurable template. The most popular of the group by stars.
 - **[lazyworktree](https://github.com/chmouel/lazyworktree)** (Apache-2.0, Go): a keyboard-first TUI for worktrees with CI and PR status, tmux and Zellij integration, and a pane showing active Claude, Codex, Copilot, and pi sessions per worktree.
-- **[tmux-worktree](https://github.com/denesbeck/tmux-worktree)** (MIT): a tmux plugin that creates, switches, and removes worktrees from a floating popup, each in its own tmux window.
+- **[tmux-worktree](https://github.com/denesbeck/tmux-worktree)** (MIT, OSI open source rather than source-available): a tmux plugin that creates, switches, and removes worktrees from a floating popup, each in its own tmux window.
 
-If you already live in the terminal and want the bookkeeping gone, one of these is probably a better fit than a desktop app. They're smaller, they're open source in the OSI sense, and they compose with the setup you have. Ferryx isn't trying to be a better workmux.
+If you already live in the terminal and want the bookkeeping gone, one of these is probably a better fit than a desktop app. They're smaller, they're open source in the OSI sense where Ferryx is source-available, and they compose with the setup you have. Ferryx isn't trying to be a better workmux.
 
 ## What Ferryx actually changes
 
 Ferryx is a source-available desktop app (Ferryx License) built with Rust and Tauri v2. It parses terminal output with libghostty-vt and renders panes with WGPU on a native surface, with no Electron. The honest framing is ergonomics and bookkeeping, not capability. Every item in this list is something a determined engineer could assemble with tmux plus scripts, or get from the CLIs above:
 
 - Worktree bookkeeping. Each managed worktree lives in `.orca-worktrees/wt-<slug>` on a branch named `orca/<workspace-id>/<slug>`, and worktree paths are jailed to the repository root. You don't invent directory names or branch names by hand; the app does it the same way every time, whichever agent is in the pane.
-- Visible state. Each agent gets its own pane in a split layout, and panes and tabs can be rearranged with drag-and-drop, so who's doing what is visible at a glance. Status-detection manifests ship for eleven agents, so a pane reports working, waiting, or idle without you reading the scrollback.
+- Visible state. Each agent gets its own pane in a split layout, and panes and tabs can be rearranged with drag-and-drop, so who's doing what is visible at a glance. Status-detection manifests ship for <!-- agents:count -->16<!-- /agents:count --> agents, so a pane reports working, waiting, or idle without you reading the scrollback.
 - An embedded browser. Browser tabs use native WebViews and sit beside terminal panes, keeping docs or a dashboard next to the agents instead of in another window.
 - Session lifetime. A headless Rust PTY daemon owns the pseudoterminals, so closing or reloading the GUI doesn't kill running agent processes. Output is buffered in a 512 KiB ring buffer with monotonic sequence numbers, and reconnecting replays the output you missed.
 - A phone client. An authenticated mobile remote client renders the terminal with a custom DOM grid, no xterm.js involved, so a running session can be checked from a phone.

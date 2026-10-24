@@ -4,7 +4,6 @@ import {
   ONBOARDING_STEP_ORDER,
   ONBOARDING_VERSION,
   OPEN_ONBOARDING_EVENT,
-  PERMISSION_PRIORITY,
   dismissOnboarding,
   initialWizardStepIndex,
   isOnboardingStepSatisfied,
@@ -206,17 +205,15 @@ describe("onboarding exports and constants", () => {
       "account",
       "intro",
       "features",
-      "permissions",
       "agents",
       "cli",
       "project",
     ]);
     expect(OPEN_ONBOARDING_EVENT).toBe("ferryx:open-onboarding");
-    expect(PERMISSION_PRIORITY).toEqual({
-      fullDiskAccess: "recommended",
-      accessibility: "recommended",
-      notifications: "optional",
-    });
+  });
+
+  it("has no permissions step in the first-run flow", () => {
+    expect(ONBOARDING_STEP_ORDER as readonly string[]).not.toContain("permissions");
   });
 });
 
@@ -257,13 +254,13 @@ describe("loadOnboardingState", () => {
     const storage = createMockStorage({
       [ONBOARDING_STORAGE_KEY]: JSON.stringify({
         version: 1,
-        completedSteps: ["intro", "future_step", "intro", "permissions"],
+        completedSteps: ["intro", "future_step", "intro", "permissions", "agents"],
         dismissed: false,
       }),
     });
     expect(loadOnboardingState(storage)).toEqual({
       version: 1,
-      completedSteps: ["intro", "permissions"],
+      completedSteps: ["intro", "agents"],
       dismissed: false,
     });
   });
@@ -315,13 +312,13 @@ describe("loadOnboardingState", () => {
     const loaded = loadOnboardingState(storage);
     expect(loaded).toEqual({
       version: 1,
-      completedSteps: ["intro", "permissions"],
+      completedSteps: ["intro"],
       dismissed: false,
     });
     expect(storage.getItem(PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY)).toBeNull();
     expect(JSON.parse(storage.getItem(ONBOARDING_STORAGE_KEY) ?? "{}")).toEqual({
       version: 1,
-      completedSteps: ["intro", "permissions"],
+      completedSteps: ["intro"],
       dismissed: false,
     });
   });
@@ -334,7 +331,7 @@ describe("loadOnboardingState", () => {
     const loaded = loadOnboardingState(storage);
     expect(loaded).toEqual({
       version: 1,
-      completedSteps: ["intro", "permissions"],
+      completedSteps: ["intro"],
       dismissed: false,
     });
     expect(storage.getItem(PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY)).toBeNull();
@@ -346,7 +343,7 @@ describe("saveOnboardingState", () => {
     const storage = createMockStorage();
     const state: OnboardingState = {
       version: 1,
-      completedSteps: ["intro", "permissions"],
+      completedSteps: ["intro", "agents"],
       dismissed: false,
     };
     saveOnboardingState(state, storage);
@@ -369,11 +366,11 @@ describe("markOnboardingStepsCompleted", () => {
     const result1 = markOnboardingStepsCompleted(["agents", "intro"], storage);
     expect(result1.completedSteps).toEqual(["intro", "agents"]);
 
-    const result2 = markOnboardingStepsCompleted(["permissions", "intro"], storage);
-    expect(result2.completedSteps).toEqual(["intro", "permissions", "agents"]);
+    const result2 = markOnboardingStepsCompleted(["features", "intro"], storage);
+    expect(result2.completedSteps).toEqual(["intro", "features", "agents"]);
 
     const stored = JSON.parse(storage.getItem(ONBOARDING_STORAGE_KEY) ?? "{}");
-    expect(stored.completedSteps).toEqual(["intro", "permissions", "agents"]);
+    expect(stored.completedSteps).toEqual(["intro", "features", "agents"]);
   });
 });
 
@@ -470,48 +467,6 @@ describe("isOnboardingStepSatisfied", () => {
     ).toBe(true);
   });
 
-  it("satisfies permissions when visiblePermissionKeys is empty", () => {
-    const linuxCtx: OnboardingContext = {
-      permissions: linuxPermissionsStatus,
-      agents: null,
-      cli: null,
-      projectCount: 0,
-      accountLinked: true,
-    };
-    expect(isOnboardingStepSatisfied("permissions", linuxCtx)).toBe(true);
-
-    const webCtx: OnboardingContext = {
-      permissions: webPermissionsStatus,
-      agents: null,
-      cli: null,
-      projectCount: 0,
-      accountLinked: true,
-    };
-    expect(isOnboardingStepSatisfied("permissions", webCtx)).toBe(true);
-  });
-
-  it("satisfies permissions when all visible permissions are granted", () => {
-    const grantedCtx: OnboardingContext = {
-      permissions: macosAllGrantedStatus,
-      agents: null,
-      cli: null,
-      projectCount: 0,
-      accountLinked: true,
-    };
-    expect(isOnboardingStepSatisfied("permissions", grantedCtx)).toBe(true);
-  });
-
-  it("does not satisfy permissions when visible permissions are missing", () => {
-    const missingCtx: OnboardingContext = {
-      permissions: macosPermissionsStatus,
-      agents: null,
-      cli: null,
-      projectCount: 0,
-      accountLinked: true,
-    };
-    expect(isOnboardingStepSatisfied("permissions", missingCtx)).toBe(false);
-  });
-
   it("satisfies agents only when an available agent exists, regardless of the cli", () => {
     expect(
       isOnboardingStepSatisfied("agents", {
@@ -605,7 +560,6 @@ describe("pendingOnboardingSteps", () => {
     };
     expect(pendingOnboardingSteps(state, ctx)).toEqual([
       "features",
-      "permissions",
       "project",
     ]);
   });
@@ -613,7 +567,7 @@ describe("pendingOnboardingSteps", () => {
   it("lists cli as pending when the launcher is supported but not installed", () => {
     const state: OnboardingState = {
       version: 1,
-      completedSteps: ["intro", "features", "permissions", "agents", "project"],
+      completedSteps: ["intro", "features", "agents", "project"],
       dismissed: false,
     };
     const ctx: OnboardingContext = {
@@ -629,7 +583,7 @@ describe("pendingOnboardingSteps", () => {
   it("returns empty when all steps completed or satisfied", () => {
     const state: OnboardingState = {
       version: 1,
-      completedSteps: ["intro", "features", "permissions", "agents", "project"],
+      completedSteps: ["intro", "features", "agents", "project"],
       dismissed: false,
     };
     const ctx: OnboardingContext = {
@@ -644,7 +598,7 @@ describe("pendingOnboardingSteps", () => {
 });
 
 describe("initialWizardStepIndex", () => {
-  const steps = ["intro", "features", "permissions", "agents", "project"] as const;
+  const steps = ["intro", "features", "agents", "project"] as const;
 
   it("skips the informational features step and lands on the first actionable one", () => {
     const state: OnboardingState = {
@@ -654,18 +608,18 @@ describe("initialWizardStepIndex", () => {
     };
     const ctx: OnboardingContext = {
       permissions: macosPermissionsStatus,
-      agents: [{ name: "claude", available: true }],
+      agents: null,
       cli: cliInstalled,
       projectCount: 1,
       accountLinked: true,
     };
-    expect(initialWizardStepIndex(steps, state, ctx)).toBe(steps.indexOf("permissions"));
+    expect(initialWizardStepIndex(steps, state, ctx)).toBe(steps.indexOf("agents"));
   });
 
   it("lands on features when it is the only pending step", () => {
     const state: OnboardingState = {
       version: 1,
-      completedSteps: ["intro", "permissions", "agents", "project"],
+      completedSteps: ["intro", "agents", "project"],
       dismissed: false,
     };
     const ctx: OnboardingContext = {
@@ -696,7 +650,7 @@ describe("initialWizardStepIndex", () => {
 });
 
 describe("wizardSteps", () => {
-  it("includes features and permissions on macOS", () => {
+  it("includes features but never a permissions step on macOS", () => {
     const ctx: OnboardingContext = {
       permissions: macosPermissionsStatus,
       agents: null,
@@ -708,7 +662,6 @@ describe("wizardSteps", () => {
       "account",
       "intro",
       "features",
-      "permissions",
       "agents",
       "cli",
       "project",
@@ -729,7 +682,7 @@ describe("wizardSteps", () => {
     expect(wizardSteps({ ...ctx, cli: cliInstalled })).toContain("cli");
   });
 
-  it("omits permissions on Linux where visible permissions are empty", () => {
+  it("uses the same steps on Linux", () => {
     const ctx: OnboardingContext = {
       permissions: linuxPermissionsStatus,
       agents: null,
@@ -771,35 +724,6 @@ describe("satisfiedOnboardingSteps", () => {
       "account",
       "intro",
       "features",
-      "agents",
-      "cli",
-      "project",
-    ]);
-  });
-
-  it("includes permissions when every visible permission is granted", () => {
-    const storage = createMockStorage();
-    saveOnboardingState(
-      {
-        version: 1,
-        completedSteps: ["intro", "features"],
-        dismissed: false,
-      },
-      storage,
-    );
-    const state = loadOnboardingState(storage);
-    const ctx: OnboardingContext = {
-      permissions: macosAllGrantedStatus,
-      agents: [{ name: "claude", available: true }],
-      cli: cliInstalled,
-      projectCount: 1,
-      accountLinked: true,
-    };
-    expect(satisfiedOnboardingSteps(state, ctx)).toEqual([
-      "account",
-      "intro",
-      "features",
-      "permissions",
       "agents",
       "cli",
       "project",
@@ -894,7 +818,7 @@ describe("shouldAutoOpenOnboarding", () => {
   it("returns false when no pending steps remain", () => {
     const state: OnboardingState = {
       version: 1,
-      completedSteps: ["intro", "features", "permissions", "agents", "project"],
+      completedSteps: ["intro", "features", "agents", "project"],
       dismissed: false,
     };
     expect(shouldAutoOpenOnboarding(state, pendingCtx)).toBe(false);
@@ -904,7 +828,7 @@ describe("shouldAutoOpenOnboarding", () => {
     const storage = createMockStorage({
       [ONBOARDING_STORAGE_KEY]: JSON.stringify({
         version: 1,
-        completedSteps: ["intro", "features", "permissions", "agents", "project"],
+        completedSteps: ["intro", "features", "agents", "project"],
         dismissed: false,
       }),
     });
@@ -957,14 +881,13 @@ describe("features step", () => {
   it("stays pending until it is recorded in completedSteps", () => {
     const upgraded: OnboardingState = {
       version: 1,
-      completedSteps: ["intro", "permissions", "agents", "project"],
+      completedSteps: ["intro", "agents", "project"],
       dismissed: false,
     };
     expect(pendingOnboardingSteps(upgraded, satisfiedCtx)).toEqual(["features"]);
     expect(satisfiedOnboardingSteps(upgraded, satisfiedCtx)).toEqual([
       "account",
       "intro",
-      "permissions",
       "agents",
       "cli",
       "project",
@@ -983,7 +906,7 @@ describe("features step", () => {
   it("never triggers auto-open on its own after upgrade", () => {
     const upgraded: OnboardingState = {
       version: 1,
-      completedSteps: ["intro", "permissions", "agents", "project"],
+      completedSteps: ["intro", "agents", "project"],
       dismissed: false,
     };
     expect(pendingOnboardingSteps(upgraded, satisfiedCtx)).toEqual(["features"]);

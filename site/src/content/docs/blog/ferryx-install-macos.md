@@ -9,11 +9,23 @@ description: "Download the universal DMG, clear Gatekeeper warnings, and underst
 
 ## Download and verify
 
-Terminal tooling fails in confusing ways because several layers (OS, WebView, PTY, daemon, renderer) can each produce similar symptoms. A structured triage path saves you from restarting blindly and killing sessions that were fine. In the specific case of “Installing Ferryx on macOS: DMG, Gatekeeper, Notarization”, the Ferryx angle is straightforward: download the universal dmg, clear gatekeeper warnings, and understand notarization prompts on first launch. claims map to ferryx docs and cited sources only. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
+Ferryx ships one universal DMG for Apple Silicon and Intel Macs, macOS 10.15 or later. It is signed with a Developer ID and notarized by Apple, so it installs without disabling Gatekeeper.
+
+1. Download [Ferryx_universal.dmg](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) and `SHA256SUMS.txt` from the [latest release](https://github.com/Indosaram/ferryx/releases/latest).
+2. Check the download before you open it. In the folder holding both files, run `shasum -a 256 -c SHA256SUMS.txt --ignore-missing`. The DMG line must read `OK`.
+3. Optional: confirm Apple's verdict yourself with `spctl -a -vvv -t install Ferryx_universal.dmg`. A good download reports `accepted` and `source=Notarized Developer ID`. The release process runs this same check on every published DMG and refuses to publish one that fails it.
 
 ## Gatekeeper prompts
 
-Most Ferryx issues cluster into install/platform quirks, IME and rendering oddities, daemon socket permissions, and overlay states like Shell exited. The product facts page and architecture doc are the first places to confirm expected behavior before changing anything. Applied to “install ferryx macos dmg”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
+Gatekeeper steps for the notarized DMG:
+
+1. Double-click `Ferryx_universal.dmg`. macOS mounts it and Gatekeeper checks the notarization. On a slow or offline network, the first open can pause for a few seconds while that check runs.
+2. Drag **Ferryx** onto the **Applications** shortcut in the DMG window, then eject the DMG.
+3. Open Ferryx from Applications or Launchpad. The first launch shows the standard prompt that Ferryx is "an app downloaded from the Internet." Click **Open**. This prompt appears once per installed copy.
+4. If macOS instead says Apple cannot check the app for malicious software, or that it "is damaged and can't be opened," the copy did not come intact from the release page. Delete it, download again, and repeat the checksum step. Do not run `xattr -cr` or turn off Gatekeeper. A notarized build never needs either.
+5. If you copied the app in some other way and macOS blocks it, open **System Settings > Privacy & Security** and click **Open Anyway** next to the Ferryx message, then confirm with your password. Prefer a fresh download over this step.
+
+Updates installed from inside Ferryx are signed and notarized the same way, so they do not show the first-launch prompt again. Running sessions survive the update because the daemon hands them to the new version.
 
 ## Practical steps
 

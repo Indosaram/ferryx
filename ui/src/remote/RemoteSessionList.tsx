@@ -445,6 +445,11 @@ type RemoteWorkspaceMirrorProps = {
   activeMachineId?: string | null;
   /** Inventory loading/offline/error rows, rendered only inside the opened picker. */
   pickerStatus?: ReactNode;
+  /**
+   * Phone home only: render the inventory as a full-width page body instead of a drawer, without
+   * the session-scoped inbox toggle, pane stepper or close control. `children` is ignored.
+   */
+  inline?: boolean;
   children?: ReactNode;
 };
 
@@ -527,6 +532,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   creationError,
   activeMachineId = null,
   pickerStatus,
+  inline = false,
   children,
 }) => {
   const desktopSidebar = useRemoteDesktopSidebar();
@@ -748,6 +754,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
 
   const sidebarBody = (
     <>
+      {inline ? null : (
       <div className="flex h-8 items-center justify-between border-b border-worktree-sidebar-border px-1.5">
         <button
           type="button"
@@ -780,12 +787,14 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
           </button>
         )}
       </div>
-      {inboxOpen ? (
+      )}
+      {inboxOpen && !inline ? (
         <div data-testid="remote-attention-inbox" className="flex max-h-96 min-h-0 flex-col">
           <AttentionInbox rows={attentionRows} onOpen={openAttentionRow} compact />
         </div>
       ) : (
         <>
+          {inline ? null : (
           <div className="flex h-7 shrink-0 items-center gap-0.5 border-b border-worktree-sidebar-border px-1">
             <button
               type="button"
@@ -826,6 +835,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
               <ChevronRight className="size-3.5" aria-hidden="true" />
             </button>
           </div>
+          )}
           <div
             role="tablist"
             aria-label="Terminal tabs"
@@ -930,6 +940,20 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
       </div>
     </>
   );
+
+  if (inline) {
+    return (
+      <div
+        data-testid="remote-worktrees-inline"
+        aria-label="Workspace context"
+        role="region"
+        className="flex min-h-0 min-w-0 flex-1 flex-col bg-worktree-sidebar text-worktree-sidebar-foreground"
+      >
+        {sidebarBody}
+        {creationError ? <p role="alert" className="shrink-0 px-3 py-2 text-xs text-destructive">{creationError}</p> : null}
+      </div>
+    );
+  }
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">

@@ -1666,3 +1666,24 @@ export async function logoutAccountSession(origin: string, token: string): Promi
   }
 }
 
+
+export const ACCOUNT_CONFIRMATION_MISMATCH = "CONFIRMATION_MISMATCH";
+export const ACCOUNT_SUBSCRIPTION_ACTIVE = "SUBSCRIPTION_ACTIVE";
+
+/**
+ * Permanently deletes the signed-in account. `confirmEmail` must equal the account email.
+ * Failures throw AccountSessionError with the server's code: CONFIRMATION_MISMATCH (400),
+ * SUBSCRIPTION_ACTIVE (409), UNAUTHORIZED (401), else DELETE_ACCOUNT_FAILED.
+ */
+export async function deleteAccount(origin: string, sessionToken: string, confirmEmail: string): Promise<void> {
+  const res = await fetchWithTimeout(`${cleanOrigin(origin)}/api/account/v1/account/delete`, {
+    method: "POST",
+    headers: bearerJson(sessionToken),
+    body: JSON.stringify({ confirmEmail }),
+  });
+  if (!res.ok) await throwAccountResponseError(res, "DELETE_ACCOUNT_FAILED", "Failed to delete account");
+  const data = await readJsonObject(res, "Delete account");
+  if (data.deleted !== true) {
+    throw new AccountSessionError("INVALID_RESPONSE", "Delete account response did not confirm deletion", res.status);
+  }
+}

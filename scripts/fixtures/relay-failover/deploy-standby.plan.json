@@ -1,0 +1,206 @@
+{
+  "dryRun": true,
+  "command": "deploy-standby",
+  "publicHostname": "relay.ferryx.dev",
+  "blockedOn": null,
+  "steps": [
+    {
+      "id": "build-relay",
+      "host": "local",
+      "kind": "run",
+      "description": "release-profile relay binary (todo 33)",
+      "command": "cd src-tauri && cargo build --release --bin ferryx-relay"
+    },
+    {
+      "id": "primary-secrets-present",
+      "host": "omarchy",
+      "kind": "run",
+      "description": "primary has the object-store credentials",
+      "command": "sudo test -s /etc/ferryx/litestream.env"
+    },
+    {
+      "id": "primary-install-litestream",
+      "host": "omarchy",
+      "kind": "run",
+      "description": "install litestream 0.3.13",
+      "command": "command -v litestream >/dev/null && litestream version | grep -q 'v0.3.13' || { curl -fsSL https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz | tar -xz -C /tmp litestream && sudo install -m 0755 /tmp/litestream /usr/local/bin/litestream; }"
+    },
+    {
+      "id": "primary-litestream-config",
+      "host": "omarchy",
+      "kind": "file",
+      "description": "write /etc/litestream.yml",
+      "path": "/etc/litestream.yml",
+      "mode": "0644",
+      "content": "# Rendered by scripts/relay-failover.mjs. Credentials come from /etc/ferryx/litestream.env\n# (LITESTREAM_ACCESS_KEY_ID, LITESTREAM_SECRET_ACCESS_KEY), never from this file.\ndbs:\n  - path: /home/indo/.ferryx/account-data/account-store.sqlite3\n    replicas:\n      - type: s3\n        bucket: ferryx-relay-litestream\n        path: account-store\n        endpoint: https://account-id.r2.cloudflarestorage.com\n        region: auto\n        force-path-style: true\n        sync-interval: 1s\n"
+    },
+    {
+      "id": "primary-litestream-unit",
+      "host": "omarchy",
+      "kind": "file",
+      "description": "write /etc/systemd/system/litestream.service",
+      "path": "/etc/systemd/system/litestream.service",
+      "mode": "0644",
+      "content": "# Continuous replication of the account database. Enabled on the primary only; on the\n# standby it stays disabled until `relay-failover.mjs promote-standby` enables it.\n[Unit]\nDescription=Litestream replication of the Ferryx account database\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=indo\nEnvironmentFile=/etc/ferryx/litestream.env\nExecStart=/usr/local/bin/litestream replicate -config /etc/litestream.yml\nRestart=always\nRestartSec=5s\n\n[Install]\nWantedBy=multi-user.target\n"
+    },
+    {
+      "id": "primary-replicate",
+      "host": "omarchy",
+      "kind": "run",
+      "description": "start replicating the primary account database",
+      "command": "sudo systemctl daemon-reload && sudo systemctl enable --now litestream.service"
+    },
+    {
+      "id": "primary-replica-exists",
+      "host": "omarchy",
+      "kind": "run",
+      "description": "the replica has a generation",
+      "command": "litestream generations -config /etc/litestream.yml '/home/indo/.ferryx/account-data/account-store.sqlite3' | grep -q ."
+    },
+    {
+      "id": "standby-secrets-present",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "standby has the object-store credentials and relay env",
+      "command": "sudo test -s /etc/ferryx/litestream.env && sudo test -s /etc/ferryx/relay.env"
+    },
+    {
+      "id": "standby-user-and-dirs",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "service user and private data directories",
+      "command": "id -u 'ferryx' >/dev/null 2>&1 || sudo useradd -r -s /usr/sbin/nologin -d /var/lib/ferryx 'ferryx'; sudo install -d -m 0700 -o 'ferryx' -g 'ferryx' '/var/lib/ferryx/account-data' '/var/lib/ferryx/relay' && sudo install -d -m 0755 -o 'ferryx' -g 'ferryx' '/var/lib/ferryx/ui-dist'"
+    },
+    {
+      "id": "standby-marker",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "mark the data directory read-only before any database exists",
+      "command": "sudo -u 'ferryx' touch '/var/lib/ferryx/account-data/standby.readonly'"
+    },
+    {
+      "id": "copy-ui",
+      "host": "omarchy",
+      "kind": "run",
+      "description": "copy the served remote web client from the primary",
+      "command": "rsync -a --delete '/home/indo/ferryx-relay-web/dist/' 'root@standby.example.net:/var/lib/ferryx/ui-dist/'"
+    },
+    {
+      "id": "copy-signing-key",
+      "host": "omarchy",
+      "kind": "run",
+      "description": "same account signing key, so grants verify on both hosts",
+      "command": "rsync -a '/home/indo/.ferryx/account-data/account-signing-key.json' 'root@standby.example.net:/var/lib/ferryx/account-data/account-signing-key.json'"
+    },
+    {
+      "id": "copy-relay-keys",
+      "host": "omarchy",
+      "kind": "run",
+      "description": "same durable machine key registry",
+      "command": "rsync -a '/home/indo/.ferryx/relay/machine_keys.json' 'root@standby.example.net:/var/lib/ferryx/relay/machine_keys.json'"
+    },
+    {
+      "id": "copy-binary",
+      "host": "local",
+      "kind": "run",
+      "description": "ship the release binary",
+      "command": "scp src-tauri/target/release/ferryx-relay 'root@standby.example.net:/tmp/ferryx-relay'"
+    },
+    {
+      "id": "install-binary",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "install the relay binary",
+      "command": "sudo install -m 0755 /tmp/ferryx-relay '/usr/local/bin/ferryx-relay'"
+    },
+    {
+      "id": "standby-install-litestream",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "install litestream 0.3.13",
+      "command": "command -v litestream >/dev/null && litestream version | grep -q 'v0.3.13' || { curl -fsSL https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz | tar -xz -C /tmp litestream && sudo install -m 0755 /tmp/litestream /usr/local/bin/litestream; }"
+    },
+    {
+      "id": "standby-litestream-config",
+      "host": "root@standby.example.net",
+      "kind": "file",
+      "description": "write /etc/litestream.yml",
+      "path": "/etc/litestream.yml",
+      "mode": "0644",
+      "content": "# Rendered by scripts/relay-failover.mjs. Credentials come from /etc/ferryx/litestream.env\n# (LITESTREAM_ACCESS_KEY_ID, LITESTREAM_SECRET_ACCESS_KEY), never from this file.\ndbs:\n  - path: /var/lib/ferryx/account-data/account-store.sqlite3\n    replicas:\n      - type: s3\n        bucket: ferryx-relay-litestream\n        path: account-store\n        endpoint: https://account-id.r2.cloudflarestorage.com\n        region: auto\n        force-path-style: true\n        sync-interval: 1s\n"
+    },
+    {
+      "id": "standby-restore-script",
+      "host": "root@standby.example.net",
+      "kind": "file",
+      "description": "write /usr/local/bin/ferryx-standby-restore.sh",
+      "path": "/usr/local/bin/ferryx-standby-restore.sh",
+      "mode": "0755",
+      "content": "#!/usr/bin/env bash\n# Refreshes a warm standby's account database from the Litestream replica.\n#\n# Runs only while the data directory carries the standby marker (`standby.readonly`). A\n# promoted host has no marker, so a stray timer run can never overwrite a writable database.\n# The restore lands in a temporary file in the same directory and replaces the live file with\n# an atomic rename; the relay opens a fresh SQLite connection per request, so the next read\n# sees the new copy.\n#\n# Usage: ferryx-standby-restore.sh <account data dir> [litestream config]\nset -euo pipefail\n\nDATA_DIR=\"${1:?usage: ferryx-standby-restore.sh <account data dir> [litestream config]}\"\nCONFIG=\"${2:-/etc/litestream.yml}\"\nDB=\"$DATA_DIR/account-store.sqlite3\"\nMARKER=\"$DATA_DIR/standby.readonly\"\n\nif [[ ! -f \"$MARKER\" ]]; then\n  echo \"ferryx-standby-restore: $MARKER is absent; this host is writable, refusing to restore\" >&2\n  exit 0\nfi\n\ntmp=\"$(mktemp \"$DATA_DIR/.restore.XXXXXXXX\")\"\nrm -f \"$tmp\"\ntrap 'rm -f \"$tmp\" \"$tmp-wal\" \"$tmp-shm\"' EXIT\n\nlitestream restore -config \"$CONFIG\" -if-replica-exists -o \"$tmp\" \"$DB\"\nif [[ ! -f \"$tmp\" ]]; then\n  echo \"ferryx-standby-restore: no replica yet; keeping the current copy\" >&2\n  exit 0\nfi\n\nchmod 600 \"$tmp\"\nmv -f \"$tmp\" \"$DB\"\nrm -f \"$DB-wal\" \"$DB-shm\"\necho \"ferryx-standby-restore: refreshed $DB\"\n"
+    },
+    {
+      "id": "standby-relay-unit",
+      "host": "root@standby.example.net",
+      "kind": "file",
+      "description": "write /etc/systemd/system/ferryx-relay.service",
+      "path": "/etc/systemd/system/ferryx-relay.service",
+      "mode": "0644",
+      "content": "# Same unit name as the primary on omarchy (`ferryx-relay.service`). The deploy plan installs it\n# on the warm standby together with the `standby.conf` drop-in; environment that differs per host\n# lives in drop-ins and private EnvironmentFiles, never in this file.\n[Unit]\nDescription=Ferryx Relay & Account Service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=ferryx\nWorkingDirectory=/\nEnvironment=FERRYX_DEPLOYMENT_MODE=commercial\nEnvironment=FERRYX_ACCOUNT_ORIGIN=https://relay.ferryx.dev\nEnvironment=FERRYX_ACCOUNT_RELAY_ORIGIN=https://relay.ferryx.dev\nEnvironment=FERRYX_ACCOUNT_DATA_DIR=/var/lib/ferryx/account-data\nEnvironment=FERRYX_RELAY_DATA_DIR=/var/lib/ferryx/relay\nEnvironment=FERRYX_UI_DIST_DIR=/var/lib/ferryx/ui-dist\nEnvironmentFile=-/etc/ferryx/relay.env\nExecStart=/usr/local/bin/ferryx-relay --port 8787\nRestart=always\nRestartSec=3s\nLimitNOFILE=65535\n\n[Install]\nWantedBy=multi-user.target\n"
+    },
+    {
+      "id": "standby-restore-unit",
+      "host": "root@standby.example.net",
+      "kind": "file",
+      "description": "write /etc/systemd/system/ferryx-standby-restore.service",
+      "path": "/etc/systemd/system/ferryx-standby-restore.service",
+      "mode": "0644",
+      "content": "[Unit]\nDescription=Refresh the Ferryx warm-standby account database from Litestream\nConditionPathExists=/var/lib/ferryx/account-data/standby.readonly\n\n[Service]\nType=oneshot\nUser=ferryx\nEnvironmentFile=/etc/ferryx/litestream.env\nExecStart=/usr/local/bin/ferryx-standby-restore.sh /var/lib/ferryx/account-data /etc/litestream.yml\n"
+    },
+    {
+      "id": "standby-restore-timer",
+      "host": "root@standby.example.net",
+      "kind": "file",
+      "description": "write /etc/systemd/system/ferryx-standby-restore.timer",
+      "path": "/etc/systemd/system/ferryx-standby-restore.timer",
+      "mode": "0644",
+      "content": "[Unit]\nDescription=Refresh the Ferryx warm-standby account database every minute\n\n[Timer]\nOnBootSec=30s\nOnUnitActiveSec=60s\nAccuracySec=5s\n\n[Install]\nWantedBy=timers.target\n"
+    },
+    {
+      "id": "standby-litestream-unit",
+      "host": "root@standby.example.net",
+      "kind": "file",
+      "description": "write /etc/systemd/system/litestream.service",
+      "path": "/etc/systemd/system/litestream.service",
+      "mode": "0644",
+      "content": "# Continuous replication of the account database. Enabled on the primary only; on the\n# standby it stays disabled until `relay-failover.mjs promote-standby` enables it.\n[Unit]\nDescription=Litestream replication of the Ferryx account database\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=ferryx\nEnvironmentFile=/etc/ferryx/litestream.env\nExecStart=/usr/local/bin/litestream replicate -config /etc/litestream.yml\nRestart=always\nRestartSec=5s\n\n[Install]\nWantedBy=multi-user.target\n"
+    },
+    {
+      "id": "standby-first-restore",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "restore the primary's database into the read-only data dir",
+      "command": "sudo systemctl daemon-reload && sudo systemctl start ferryx-standby-restore.service"
+    },
+    {
+      "id": "standby-start",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "start the relay and the restore timer; the standby never replicates",
+      "command": "sudo systemctl disable --now litestream.service && sudo systemctl enable --now ferryx-relay.service ferryx-standby-restore.timer"
+    },
+    {
+      "id": "standby-health",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "local /healthz answers role=standby",
+      "command": "curl -sf http://127.0.0.1:8787/healthz | grep -q '\"role\":\"standby\"'"
+    },
+    {
+      "id": "standby-refuses-writes",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "an enrollment against the standby gets the typed read-only error",
+      "command": "curl -s -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:8787/api/account/v1/machines/enroll | grep -q ACCOUNT_STORE_READ_ONLY"
+    }
+  ]
+}

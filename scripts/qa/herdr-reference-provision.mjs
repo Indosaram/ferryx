@@ -228,7 +228,7 @@ function productionRuntimeDir(platform) {
     return join(base, "Ferryx", "runtime");
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : null;
-  return uid === null ? null : "/tmp/rorca-" + uid;
+  return uid === null ? null : "/tmp/ferryx-" + uid;
 }
 
 /**
@@ -270,7 +270,9 @@ function daemonTransportForHost(host) {
   // No opt-in: driving a production daemon is not authorized, so the production runtime
   // directory is refused whenever the config names it, and no config field can lift that.
   const production = productionRuntimeDir(platform);
-  if (production && resolve(production) === runtimeDir) {
+  // For one release the pre-rename /tmp/rorca-<uid> is served by the production daemon too.
+  const legacyProduction = production && platform !== "win32" ? production.replace("/tmp/ferryx-", "/tmp/rorca-") : null;
+  if ([production, legacyProduction].some((dir) => dir && resolve(dir) === runtimeDir)) {
     throw blocked(
       "daemon-runtime-is-production",
       host.id + " points at the platform production runtime directory " + runtimeDir +

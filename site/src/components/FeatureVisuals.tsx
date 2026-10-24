@@ -93,7 +93,7 @@ export function AgentsVisual() {
   const agents = [
     { name: "claude", task: "refactor ipc layer" },
     { name: "codex", task: "add regression test" },
-    { name: "gemini", task: "update docs" },
+    { name: "agy", task: "update docs" },
   ];
   return (
     <Chrome label="agents">

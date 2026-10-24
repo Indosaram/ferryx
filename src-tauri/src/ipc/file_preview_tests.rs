@@ -63,6 +63,55 @@ fn reason_of(error: &crate::ipc::error::IpcError) -> String {
         .to_string()
 }
 
+#[test]
+fn eperm_under_a_tcc_protected_folder_requires_full_disk_access() {
+    let home = Path::new("/Users/someone");
+    let eperm = std::io::Error::from_raw_os_error(libc::EPERM);
+    let eacces = std::io::Error::from_raw_os_error(libc::EACCES);
+    for protected in [
+        "/Users/someone/Documents/notes.md",
+        "/Users/someone/Desktop/a.txt",
+        "/Users/someone/Library/Mail/V10/x",
+        "/Users/someone/Library/Application Support/com.apple.TCC/TCC.db",
+        "/Volumes/External/readme.md",
+    ] {
+        assert!(
+            full_disk_access_required(&eperm, Path::new(protected), Some(home)),
+            "{protected}"
+        );
+        assert!(
+            !full_disk_access_required(&eacces, Path::new(protected), Some(home)),
+            "EACCES is a mode-bit refusal: {protected}"
+        );
+    }
+    for unprotected in [
+        "/Users/someone/code/project/README.md",
+        "/Users/someone/DocumentsArchive/a.txt",
+        "/tmp/a.txt",
+    ] {
+        assert!(
+            !full_disk_access_required(&eperm, Path::new(unprotected), Some(home)),
+            "{unprotected}"
+        );
+    }
+    assert!(!full_disk_access_required(
+        &eperm,
+        Path::new("/Users/someone/Documents/a"),
+        None
+    ));
+}
+
+#[test]
+fn io_failure_reports_the_full_disk_access_flag_as_a_machine_field() {
+    let error = io_failure(
+        &std::io::Error::from_raw_os_error(libc::EACCES),
+        Path::new("/tmp/locked.txt"),
+    );
+    assert_eq!(reason_of(&error), "PermissionDenied");
+    let details = error.details.as_ref().expect("machine details");
+    assert_eq!(details["fullDiskAccessRequired"], serde_json::json!(false));
+}
+
 fn png_bytes(width: u32, height: u32) -> Vec<u8> {
     let mut out = Vec::new();
     {

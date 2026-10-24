@@ -4,6 +4,8 @@
 # pi does not. Every pi rule needs the senpi context meter and vetoes the omo tags,
 # and outranks the omo rule it shadows.
 id = "pi"
+display_name = "pi"
+homepage = "https://github.com/badlogic/pi-mono"
 version = "2026.10.22.1"
 min_engine_version = 1
 updated_at = "2026-10-22T00:00:00Z"

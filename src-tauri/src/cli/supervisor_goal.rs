@@ -1,0 +1,359 @@
+//! `ferryx-cli supervisor goal ...`: show or steer one lane's goal contract through the running
+//! daemon. Connect-only like `ferryx-cli agents`: never spawns, upgrades or retries, and prints one
+//! JSON value. Exit codes follow `agent_control::exit_code_for` (REQUEST_CONFLICT is 4).
+
+use serde_json::Value;
+
+use crate::agent_control::{failure, UsageError, EXIT_INVALID, EXIT_NOT_FOUND, EXIT_OK};
+use crate::daemon::protocol::{DaemonRequest, DaemonResponse, SupervisorGoalAction, DAEMON_PROTOCOL_VERSION};
+use ferryx_hub::goals::contract::RequirementSpec;
+use ferryx_hub::goals::GoalMode;
+
+pub const SUPERVISOR_USAGE: &str = "usage: ferryx-cli supervisor goal set <lane> (--requirement <id>|<text>|<verifier>)... [--requirements-json <json>] [--mode <off|supervised|full>] [--turn-limit <n>] [--json]\n       ferryx-cli supervisor goal show <lane> [--json]\n       ferryx-cli supervisor goal mode <lane> <off|supervised|full> [--json]\n       ferryx-cli supervisor goal approve <lane> [--json]\n       ferryx-cli supervisor goal discard <lane> [--json]\n       ferryx-cli supervisor goal accept-revision <id> [--json]\n       ferryx-cli supervisor goal reject-revision <id> [--json]";
+
+/// How long one goal action may take: an approve waits for the pane to start the turn.
+const GOAL_CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+fn take_values(args: &mut Vec<String>, name: &str) -> Result<Vec<String>, UsageError> {
+    let mut values = Vec::new();
+    while let Some(index) = args.iter().position(|arg| arg == name) {
+        if index + 1 >= args.len() {
+            return Err(UsageError(format!("{name} needs a value")));
+        }
+        values.push(args.remove(index + 1));
+        args.remove(index);
+    }
+    Ok(values)
+}
+
+fn take_value(args: &mut Vec<String>, name: &str) -> Result<Option<String>, UsageError> {
+    let mut values = take_values(args, name)?;
+    if values.len() > 1 {
+        return Err(UsageError(format!("{name} may be given once")));
+    }
+    Ok(values.pop())
+}
+
+fn lane_arg(rest: &[String]) -> Result<String, UsageError> {
+    let lane = rest.first().ok_or_else(|| UsageError("a lane key is required".into()))?;
+    if lane.trim().is_empty() || lane.starts_with("--") {
+        return Err(UsageError(format!("not a lane key: {lane}")));
+    }
+    Ok(lane.clone())
+}
+
+fn id_arg(rest: &[String]) -> Result<i64, UsageError> {
+    rest.first()
+        .ok_or_else(|| UsageError("a revision id is required".into()))?
+        .parse::<i64>()
+        .map_err(|_| UsageError("the revision id must be a number".into()))
+}
+
+fn mode_arg(text: &str) -> Result<GoalMode, UsageError> {
+    text.parse::<GoalMode>()
+        .map_err(|_| UsageError("mode must be off, supervised or full".into()))
+}
+
+fn requirement_arg(text: &str) -> Result<RequirementSpec, UsageError> {
+    let mut parts = text.splitn(3, '|');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(id), Some(requirement), Some(verifier))
+            if !id.trim().is_empty() && !requirement.trim().is_empty() && !verifier.trim().is_empty() =>
+        {
+            Ok(RequirementSpec {
+                id: id.trim().to_owned(),
+                text: requirement.trim().to_owned(),
+                verifier: verifier.trim().to_owned(),
+            })
+        }
+        _ => Err(UsageError(format!("--requirement must be <id>|<text>|<verifier>: {text}"))),
+    }
+}
+
+/// Parse `ferryx-cli supervisor goal ...` (`args[0]` is the binary, `args[1]` is `supervisor`).
+pub fn parse_supervisor_cli(args: &[String]) -> Result<SupervisorGoalAction, UsageError> {
+    if args.get(1).map(String::as_str) != Some("supervisor") || args.get(2).map(String::as_str) != Some("goal") {
+        return Err(UsageError(SUPERVISOR_USAGE.into()));
+    }
+    let command = args.get(3).cloned().ok_or_else(|| UsageError(SUPERVISOR_USAGE.into()))?;
+    // JSON is the only output format; --json is accepted so callers can state it explicitly.
+    let mut rest: Vec<String> = args.iter().skip(4).filter(|arg| *arg != "--json").cloned().collect();
+    let action = match command.as_str() {
+        "set" => {
+            let mut requirements = take_values(&mut rest, "--requirement")?
+                .iter()
+                .map(|text| requirement_arg(text))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(json) = take_value(&mut rest, "--requirements-json")? {
+                let parsed: Vec<RequirementSpec> = serde_json::from_str(&json)
+                    .map_err(|error| UsageError(format!("--requirements-json: {error}")))?;
+                requirements.extend(parsed);
+            }
+            if requirements.is_empty() {
+                return Err(UsageError("give at least one --requirement or --requirements-json".into()));
+            }
+            let mode = take_value(&mut rest, "--mode")?.map(|mode| mode_arg(&mode)).transpose()?;
+            let turn_limit = take_value(&mut rest, "--turn-limit")?
+                .map(|limit| match limit.parse::<u32>() {
+                    Ok(limit) if limit > 0 => Ok(limit),
+                    _ => Err(UsageError("--turn-limit must be a positive number".into())),
+                })
+                .transpose()?;
+            SupervisorGoalAction::Set { lane_key: lane_arg(&rest)?, requirements, mode, turn_limit }
+        }
+        "show" => SupervisorGoalAction::Show { lane_key: lane_arg(&rest)? },
+        "mode" => {
+            let lane_key = lane_arg(&rest)?;
+            let mode = rest.get(1).ok_or_else(|| UsageError("a mode is required".into()))?;
+            SupervisorGoalAction::Mode { lane_key, mode: mode_arg(mode)? }
+        }
+        "approve" => SupervisorGoalAction::Approve { lane_key: lane_arg(&rest)? },
+        "discard" => SupervisorGoalAction::Discard { lane_key: lane_arg(&rest)? },
+        "accept-revision" => SupervisorGoalAction::AcceptRevision { id: id_arg(&rest)? },
+        "reject-revision" => SupervisorGoalAction::RejectRevision { id: id_arg(&rest)? },
+        other => return Err(UsageError(format!("unknown goal command {other}\n{SUPERVISOR_USAGE}"))),
+    };
+    Ok(action)
+}
+
+/// The JSON and exit code a daemon reply maps to.
+pub fn outcome_of(response: DaemonResponse) -> (Value, i32) {
+    match response {
+        DaemonResponse::SupervisorGoalOk { snapshot } => {
+            let mut value = serde_json::json!({ "ok": true });
+            if let (Some(out), Value::Object(fields)) = (value.as_object_mut(), snapshot) {
+                out.extend(fields);
+            }
+            (value, EXIT_OK)
+        }
+        DaemonResponse::Error { message, code, .. } => {
+            let code = code.unwrap_or_default();
+            failure(if code.is_empty() { "INTERNAL" } else { &code }, &message)
+        }
+        other => failure("INTERNAL", &format!("unexpected daemon response: {other:?}")),
+    }
+}
+
+#[cfg(unix)]
+async fn connect_daemon() -> Result<tokio::net::UnixStream, (Value, i32)> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let path = crate::daemon::server::get_socket_path();
+    let not_running = || {
+        let (value, _) = failure("NOT_FOUND", &format!("no Ferryx daemon is listening at {}", path.display()));
+        (value, EXIT_NOT_FOUND)
+    };
+    let metadata = std::fs::symlink_metadata(&path).map_err(|_| not_running())?;
+    // SAFETY: getuid takes no arguments, dereferences nothing and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if !metadata.file_type().is_socket() || metadata.uid() != uid {
+        return Err(failure("FORBIDDEN", "the daemon socket is not a socket owned by this user"));
+    }
+    tokio::net::UnixStream::connect(&path).await.map_err(|_| not_running())
+}
+
+#[cfg(not(unix))]
+async fn connect_daemon() -> Result<tokio::net::TcpStream, (Value, i32)> {
+    let path = crate::daemon::server::get_socket_path();
+    let not_running = || {
+        let (value, _) = failure("NOT_FOUND", "no Ferryx daemon is listening");
+        (value, EXIT_NOT_FOUND)
+    };
+    let port: u16 = tokio::fs::read_to_string(&path)
+        .await
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .ok_or_else(not_running)?;
+    tokio::net::TcpStream::connect(("127.0.0.1", port)).await.map_err(|_| not_running())
+}
+
+/// Send one goal action to the running daemon, gated on `supervisorGoalV1` so an older daemon
+/// never receives a request it cannot parse. A lost answer to a mutation is
+/// OPERATION_OUTCOME_UNKNOWN and is not sent again.
+pub async fn request_goal(action: SupervisorGoalAction) -> (Value, i32) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let stream = match connect_daemon().await {
+        Ok(stream) => stream,
+        Err(failed) => return failed,
+    };
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half);
+    async fn exchange<R, W>(reader: &mut BufReader<R>, writer: &mut W, request: &DaemonRequest) -> Result<DaemonResponse, String>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        let mut line = serde_json::to_string(request).map_err(|error| error.to_string())?;
+        line.push('\n');
+        writer.write_all(line.as_bytes()).await.map_err(|error| error.to_string())?;
+        writer.flush().await.map_err(|error| error.to_string())?;
+        let mut response = String::new();
+        if reader.read_line(&mut response).await.map_err(|error| error.to_string())? == 0 {
+            return Err("the daemon closed the connection".into());
+        }
+        serde_json::from_str(response.trim()).map_err(|error| format!("unreadable daemon response: {error}"))
+    }
+    let handshake = DaemonRequest::Handshake {
+        version: DAEMON_PROTOCOL_VERSION,
+        token: crate::daemon::client::read_transport_token(),
+    };
+    match exchange(&mut reader, &mut write_half, &handshake).await {
+        Ok(DaemonResponse::HandshakeOk { .. }) => {}
+        Ok(DaemonResponse::ProtocolMismatch { .. }) => return failure("UNSUPPORTED", "the daemon speaks another protocol version"),
+        Ok(other) => return failure("UNSUPPORTED", &format!("unexpected handshake response: {other:?}")),
+        Err(message) => return failure("INTERNAL", &message),
+    }
+    let required = crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY;
+    match exchange(&mut reader, &mut write_half, &DaemonRequest::GetCapabilities).await {
+        Ok(DaemonResponse::CapabilitiesOk { capabilities }) if capabilities.iter().any(|known| known == required) => {}
+        Ok(DaemonResponse::CapabilitiesOk { .. }) => {
+            return failure("UNSUPPORTED", &format!("this daemon does not advertise {required}"))
+        }
+        Ok(other) => return failure("INTERNAL", &format!("unexpected capabilities response: {other:?}")),
+        Err(message) => return failure("INTERNAL", &message),
+    }
+    let mutates = action.mutates();
+    match exchange(&mut reader, &mut write_half, &DaemonRequest::SupervisorGoal { request: action }).await {
+        Ok(response) => outcome_of(response),
+        Err(message) if mutates => failure("OPERATION_OUTCOME_UNKNOWN", &message),
+        Err(message) => failure("INTERNAL", &message),
+    }
+}
+
+/// Run `ferryx-cli supervisor ...`: print one JSON value on stdout and return the exit code.
+pub fn run_supervisor_cli(args: &[String]) -> i32 {
+    let (value, code) = match parse_supervisor_cli(args) {
+        Err(UsageError(message)) => {
+            let (value, _) = failure("INVALID_REQUEST", &message);
+            (value, EXIT_INVALID)
+        }
+        Ok(action) => {
+            let mutates = action.mutates();
+            match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => runtime.block_on(async {
+                    match tokio::time::timeout(GOAL_CLI_TIMEOUT, request_goal(action)).await {
+                        Ok(result) => result,
+                        Err(_) if mutates => failure(
+                            "OPERATION_OUTCOME_UNKNOWN",
+                            "the daemon did not answer before the wait budget elapsed; the outcome is unknown",
+                        ),
+                        Err(_) => failure("TIMEOUT", "the daemon did not answer before the wait budget elapsed"),
+                    }
+                }),
+                Err(error) => failure("INTERNAL", &error.to_string()),
+            }
+        }
+    };
+    println!("{value}");
+    code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_control::EXIT_REFUSED;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_cli_parses_every_goal_command() {
+        assert_eq!(
+            parse_supervisor_cli(&argv(&[
+                "ferryx-cli", "supervisor", "goal", "set", "ledger",
+                "--requirement", "r1|tests pass|cargo test",
+                "--requirement", "r2|docs updated|git diff docs",
+                "--mode", "full", "--turn-limit", "5", "--json",
+            ]))
+            .unwrap(),
+            SupervisorGoalAction::Set {
+                lane_key: "ledger".into(),
+                requirements: vec![
+                    RequirementSpec { id: "r1".into(), text: "tests pass".into(), verifier: "cargo test".into() },
+                    RequirementSpec { id: "r2".into(), text: "docs updated".into(), verifier: "git diff docs".into() },
+                ],
+                mode: Some(GoalMode::Full),
+                turn_limit: Some(5),
+            }
+        );
+        assert_eq!(
+            parse_supervisor_cli(&argv(&[
+                "ferryx-cli", "supervisor", "goal", "set", "ledger",
+                "--requirements-json", r#"[{"id":"r1","text":"tests pass","verifier":"cargo test"}]"#,
+            ]))
+            .unwrap(),
+            SupervisorGoalAction::Set {
+                lane_key: "ledger".into(),
+                requirements: vec![RequirementSpec { id: "r1".into(), text: "tests pass".into(), verifier: "cargo test".into() }],
+                mode: None,
+                turn_limit: None,
+            }
+        );
+        assert_eq!(
+            parse_supervisor_cli(&argv(&["ferryx-cli", "supervisor", "goal", "show", "ledger", "--json"])).unwrap(),
+            SupervisorGoalAction::Show { lane_key: "ledger".into() }
+        );
+        assert_eq!(
+            parse_supervisor_cli(&argv(&["ferryx-cli", "supervisor", "goal", "mode", "ledger", "supervised"])).unwrap(),
+            SupervisorGoalAction::Mode { lane_key: "ledger".into(), mode: GoalMode::Supervised }
+        );
+        assert_eq!(
+            parse_supervisor_cli(&argv(&["ferryx-cli", "supervisor", "goal", "approve", "ledger"])).unwrap(),
+            SupervisorGoalAction::Approve { lane_key: "ledger".into() }
+        );
+        assert_eq!(
+            parse_supervisor_cli(&argv(&["ferryx-cli", "supervisor", "goal", "discard", "ledger"])).unwrap(),
+            SupervisorGoalAction::Discard { lane_key: "ledger".into() }
+        );
+        assert_eq!(
+            parse_supervisor_cli(&argv(&["ferryx-cli", "supervisor", "goal", "accept-revision", "3"])).unwrap(),
+            SupervisorGoalAction::AcceptRevision { id: 3 }
+        );
+        assert_eq!(
+            parse_supervisor_cli(&argv(&["ferryx-cli", "supervisor", "goal", "reject-revision", "4", "--json"])).unwrap(),
+            SupervisorGoalAction::RejectRevision { id: 4 }
+        );
+    }
+
+    #[test]
+    fn the_cli_refuses_bad_input_before_contacting_a_daemon() {
+        for words in [
+            &["ferryx-cli", "supervisor"][..],
+            &["ferryx-cli", "supervisor", "goal"],
+            &["ferryx-cli", "supervisor", "goal", "frobnicate", "ledger"],
+            &["ferryx-cli", "supervisor", "goal", "show"],
+            &["ferryx-cli", "supervisor", "goal", "set", "ledger"],
+            &["ferryx-cli", "supervisor", "goal", "set", "ledger", "--requirement", "only-an-id"],
+            &["ferryx-cli", "supervisor", "goal", "set", "ledger", "--requirement", "r1|t|v", "--turn-limit", "0"],
+            &["ferryx-cli", "supervisor", "goal", "set", "ledger", "--requirement", "r1|t|v", "--mode", "turbo"],
+            &["ferryx-cli", "supervisor", "goal", "mode", "ledger"],
+            &["ferryx-cli", "supervisor", "goal", "mode", "ledger", "turbo"],
+            &["ferryx-cli", "supervisor", "goal", "accept-revision", "abc"],
+            &["ferryx-cli", "supervisor", "goal", "reject-revision"],
+        ] {
+            assert!(parse_supervisor_cli(&argv(words)).is_err(), "{words:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn a_request_conflict_exits_four_and_a_goal_reply_exits_zero() {
+        assert_eq!(crate::agent_control::exit_code_for("REQUEST_CONFLICT"), EXIT_REFUSED);
+        let (value, code) = outcome_of(DaemonResponse::Error {
+            message: "lane ledger has no proposal awaiting approval".into(),
+            code: Some("REQUEST_CONFLICT".into()),
+            details: None,
+        });
+        assert_eq!(code, EXIT_REFUSED);
+        assert_eq!(code, 4);
+        assert_eq!(value["code"], "REQUEST_CONFLICT");
+        assert_eq!(value["ok"], false);
+        let (value, code) = outcome_of(DaemonResponse::SupervisorGoalOk {
+            snapshot: serde_json::json!({"goal": {"laneKey": "ledger", "goalContract": {"requirements": []}}}),
+        });
+        assert_eq!(code, EXIT_OK);
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["goal"]["laneKey"], "ledger");
+        let (_, code) = outcome_of(DaemonResponse::Error { message: "x".into(), code: Some("NOT_FOUND".into()), details: None });
+        assert_eq!(code, EXIT_NOT_FOUND);
+    }
+}

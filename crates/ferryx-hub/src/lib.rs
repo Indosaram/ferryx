@@ -22,6 +22,7 @@ pub mod discord_voice;
 pub mod effect;
 pub mod error;
 pub mod fleet;
+pub mod goals;
 pub mod http;
 pub mod hub;
 pub mod hub_env;

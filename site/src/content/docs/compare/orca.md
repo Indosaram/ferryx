@@ -14,9 +14,9 @@ Facts as of 2026-10: checked on 2026-10-24 against the Orca [README](https://git
 | :--- | :--- | :--- |
 | Platforms | macOS universal DMG, Windows x64 installer, Linux AppImage and .deb | macOS (Apple Silicon and Intel), Windows .exe, Linux AppImage, AUR |
 | Shell | Tauri v2 with the OS webview, terminal rendered by WGPU | Electron (`electron` 43.8.1 in `package.json`) |
-| Agents | Any CLI agent; status detection ships for eleven | Any CLI agent |
+| Agents | Any CLI agent; status detection ships for <!-- agents:count -->16<!-- /agents:count --> | Any CLI agent |
 | Editor | Read-only file previews, no editor or LSP | Built-in editor (Monaco) with autosave |
-| Mobile | Authenticated mobile web client, PIN or QR pairing | iOS App Store app and Android APK |
+| Mobile | Authenticated mobile web client, account sign-in or PIN pairing | iOS App Store app and Android APK |
 | License | Source-available under the Ferryx License, free for individuals and small companies | MIT |
 
 ## Where the two actually differ

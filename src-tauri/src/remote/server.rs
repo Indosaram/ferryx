@@ -2,6 +2,8 @@
 mod machine_owner_socket;
 #[path = "agent_control_service.rs"]
 pub(crate) mod agent_control_service;
+#[path = "supervisor_api.rs"]
+pub(crate) mod supervisor_api;
 use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
 use crate::remote::browser_admission::AdmissionController;
@@ -43,7 +45,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 pub const REMOTE_SELECTION_REQUEST_EVENT: &str = "remote_selection_requested";
 const REMOTE_TERMINAL_METADATA_PREFIX: &[u8] = b"\x1b]777;ferryx;";
@@ -435,6 +437,9 @@ async fn pair_exchange(
             )
                 .into_response(),
             AuthError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+            AuthError::TokenExpired => {
+                machine_error(StatusCode::UNAUTHORIZED, "TOKEN_EXPIRED")
+            }
             AuthError::Storage(err) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Auth storage error: {err}"),
@@ -3903,6 +3908,9 @@ async fn get_capabilities(
             }
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+            if crate::hub_runtime::supervisor_available() {
+                capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
+            }
             capabilities
         } else { vec![] },
         "browser": {
@@ -7384,11 +7392,73 @@ async fn reference_chat_delete_file(
         .into_response()
 }
 
+/// The web origin (`scheme://host[:port]`) of a URL; `ws`/`wss` map to `http`/`https`.
+fn web_origin(url: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(url.trim()).ok()?;
+    let scheme = match parsed.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        other => other,
+    }
+    .to_string();
+    if scheme != parsed.scheme() {
+        parsed.set_scheme(&scheme).ok()?;
+    }
+    let origin = parsed.origin();
+    origin
+        .is_tuple()
+        .then(|| origin.ascii_serialization())
+}
+
+/// Whether a cross-origin browser call may read this gateway's response.
+///
+/// Only `/api/v1/*` (minus the health probe) answers cross-origin; health and static assets stay
+/// same-origin. Admitted origins: the gateway's own origin, the default relay and the configured
+/// relay override, and the origins of this machine's saved paired hosts. Never with credentials.
+pub(crate) fn cors_origin_allowed(
+    state: &RemoteGatewayState,
+    origin: &axum::http::HeaderValue,
+    parts: &axum::http::request::Parts,
+) -> bool {
+    let path = parts.uri.path();
+    if !path.starts_with("/api/v1/") || path == "/api/v1/health" {
+        return false;
+    }
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    if let Some(host) = parts
+        .headers
+        .get(header::HOST)
+        .and_then(|host| host.to_str().ok())
+    {
+        if origin == format!("http://{host}") || origin == format!("https://{host}") {
+            return true;
+        }
+    }
+    let relay_override = state.config.read().relay_url.clone();
+    let relay_allowed = std::iter::once(crate::remote::state::DEFAULT_RELAY_URL)
+        .chain(relay_override.as_deref())
+        .filter_map(web_origin)
+        .any(|allowed| allowed == origin);
+    relay_allowed
+        || state
+            .cors_saved_host_origins
+            .read()
+            .iter()
+            .filter_map(|saved| web_origin(saved))
+            .any(|allowed| allowed == origin)
+}
+
 pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
+    let cors_state = Arc::clone(&state);
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(AllowOrigin::predicate(move |origin, parts| {
+            cors_origin_allowed(&cors_state, origin, parts)
+        }))
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .expose_headers([axum::http::HeaderName::from_static(ROTATED_TOKEN_HEADER)]);
 
     let mut router = Router::new()
         .route("/api/v1/health", get(health_check))
@@ -7498,6 +7568,13 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
             )),
         )
+        .route("/api/v1/supervisor", get(supervisor_api::http_snapshot))
+        .route(
+            "/api/v1/supervisor/pause",
+            post(supervisor_api::http_pause).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
         .route(
             "/api/v1/workspace/projects",
             get(super::workspace_api::list_scoped)
@@ -7565,6 +7642,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .fallback(remote_fallback)
         .method_not_allowed_fallback(remote_method_not_allowed)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            token_lifetime_middleware,
+        ))
         .layer(cors)
         .layer(axum::Extension(Arc::new(
             super::filesystem::BrowseLimits::default(),
@@ -7586,6 +7667,53 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     router
 }
 
+/// Response header carrying the replacement bearer token after a transparent rotation.
+pub const ROTATED_TOKEN_HEADER: &str = "x-ferryx-rotated-token";
+
+/// The routes a client calls when it (re)connects; only these rotate a token near its expiry.
+fn is_reconnect_route(path: &str) -> bool {
+    matches!(path, "/api/v1/capabilities" | "/api/v1/socket-ticket")
+}
+
+/// Enforces the bearer token's absolute lifetime on every route and rotates it on reconnect.
+///
+/// An expired token is refused here with the typed `TOKEN_EXPIRED` envelope, before any handler
+/// maps the failure to a generic 401. A successful reconnect inside the last week of the token's
+/// lifetime answers the replacement in [`ROTATED_TOKEN_HEADER`]; the presented token keeps working
+/// until its own expiry, so a client that misses the header loses nothing and retries next time.
+async fn token_lifetime_middleware(
+    State(state): State<Arc<RemoteGatewayState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let token = extract_token(request.headers());
+    if token
+        .as_deref()
+        .is_some_and(|token| state.auth_manager.token_is_expired(token))
+    {
+        return machine_error(StatusCode::UNAUTHORIZED, "TOKEN_EXPIRED");
+    }
+    let rotates = is_reconnect_route(request.uri().path());
+    let mut response = next.run(request).await;
+    let Some(token) = token.filter(|token| {
+        rotates
+            && response.status().is_success()
+            && state.auth_manager.token_near_expiry(token)
+    }) else {
+        return response;
+    };
+    match state.auth_manager.rotate_if_near_expiry(&token) {
+        Ok(Some(fresh)) => {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&fresh) {
+                response.headers_mut().insert(ROTATED_TOKEN_HEADER, value);
+            }
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!("device token rotation failed: {error}"),
+    }
+    response
+}
+
 pub static ALLOW_INSECURE_DIRECT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -7595,12 +7723,7 @@ pub fn set_allow_insecure_direct(allow: bool) {
 
 pub fn is_insecure_direct_allowed() -> bool {
     ALLOW_INSECURE_DIRECT.load(std::sync::atomic::Ordering::Relaxed)
-        || std::env::var("FERRYX_ALLOW_INSECURE_DIRECT")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-        || std::env::var("FERRYX_ALLOW_INSECURE_LAN")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+        || crate::remote::security_settings::insecure_direct_env_enabled()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7663,7 +7786,8 @@ impl RemoteServerHandle {
         };
         Ok(client
             .with_machine_id(&identity.machine_id)
-            .with_auth_manager((*state.auth_manager).clone()))
+            .with_auth_manager((*state.auth_manager).clone())
+            .with_fallback_urls(crate::remote::relay_client::fallback_relay_urls_from_env()))
     }
 
     /// Swap only the outbound supervisor; HTTP connections and PTY ownership stay intact.
@@ -7990,7 +8114,9 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
             if let Some(identity) = &relay_identity {
                 client = client.with_machine_id(&identity.machine_id);
             }
-            let client = client.with_auth_manager((*state.auth_manager).clone());
+            let client = client
+                .with_auth_manager((*state.auth_manager).clone())
+                .with_fallback_urls(crate::remote::relay_client::fallback_relay_urls_from_env());
             // Publish the one relay pairing authority so daemon/GUI pairing registers
             // its PIN with the relay instead of minting a local-only code.
             let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
@@ -8045,8 +8171,16 @@ mod p19_insecure_direct_tests;
 mod p20_insecure_relay_tests;
 
 #[cfg(test)]
+#[path = "token_lifetime_tests.rs"]
+mod token_lifetime_tests;
+
+#[cfg(test)]
 #[path = "preference_http_tests.rs"]
 mod preference_http_tests;
+
+#[cfg(test)]
+#[path = "cors_allowlist_tests.rs"]
+mod cors_allowlist_tests;
 
 // The capability document's reference-chat host identity is a cross-task contract (task 12
 // consumes `referenceHostId` for its mutation target), so its regression source lives beside

@@ -109,7 +109,11 @@ async fn git_text(cwd: &std::path::Path, args: &[&str]) -> Result<String> {
 
 /// Uncommitted tracked files and unpushed commits on this lane's worktrees.
 /// A directory that is not a git repository has nothing to settle.
-async fn worktree_reasons(pool: &SqlitePool, key: &str, cwd: &str) -> Result<Vec<String>> {
+pub(crate) async fn worktree_reasons(
+    pool: &SqlitePool,
+    key: &str,
+    cwd: &str,
+) -> Result<Vec<String>> {
     let cwd = std::path::Path::new(cwd);
     let probe = match git_output(cwd, &["rev-parse", "--is-inside-work-tree"]).await {
         Ok(output) => output,

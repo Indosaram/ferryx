@@ -3,7 +3,8 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AttentionInbox } from "./AttentionInbox";
-import type { AttentionRow } from "./attentionModel";
+import { buildAttentionRows, type AttentionRow } from "./attentionModel";
+import { notificationEntryId } from "../../../lib/notificationCenter/types";
 
 const NOW = 1_000_000_000;
 
@@ -49,6 +50,22 @@ describe("AttentionInbox", () => {
     render(<AttentionInbox rows={[waiting]} onOpen={onOpen} now={NOW} />);
     fireEvent.click(screen.getByTestId("attention-row"));
     expect(onOpen).toHaveBeenCalledWith(waiting);
+  });
+
+  it("labels a supervisor hand-off from the fixed map and focuses its pane on click", () => {
+    const [stopped] = buildAttentionRows([{
+      id: notificationEntryId("ws-1", "pane-1"), workspaceId: "ws-1", sessionId: "pane-1",
+      labels: { agentLabel: "Ledger", workspaceLabel: "ferryx", worktreeLabel: "main" },
+      subject: "agent", reason: "supervisor", firstOccurredAt: NOW, lastOccurredAt: NOW,
+      updateOrder: 1, revision: 1, occurrenceCount: 1, read: { unread: true },
+      supervisor: { laneKey: "ledger", stopReason: "delivery_uncertain", awaitingApproval: false, goalRevision: 2 },
+    }]);
+    const onOpen = vi.fn();
+    render(<AttentionInbox rows={[stopped]} onOpen={onOpen} now={NOW} />);
+    expect(screen.getByTestId("attention-row-supervisor")).toHaveTextContent("Instruction may not have arrived");
+    expect(screen.queryByText("Waiting")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("attention-row"));
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1", sessionId: "pane-1", revision: 1 }));
   });
 
   it("dismissing a row does not also open it", () => {

@@ -28,7 +28,7 @@ ferryx/
 ## WHERE TO LOOK
 | Task | Location | Notes |
 |------|----------|-------|
-| Headless PTY Daemon & Sockets | `src-tauri/src/daemon/` | UDS v5 server at `/tmp/rorca-{uid}/daemon.sock`, flock sync |
+| Headless PTY Daemon & Sockets | `src-tauri/src/daemon/` | UDS v5 server at `/tmp/ferryx-{uid}/daemon.sock`, flock sync |
 | Binary IPC & Command Layer | `src-tauri/src/ipc/` | Typed Tauri commands, 20-byte stream headers, `run_blocking` |
 | Remote Gateway & Auth | `src-tauri/src/remote/` | Axum server, 6-digit PIN pairing, active desktop session lock |
 | Terminal Ring Buffer & PTY | `src-tauri/src/terminal/` | `portable-pty`, 512 KiB ring buffer with `ReplayGap` detection |
@@ -121,5 +121,10 @@ cargo run --manifest-path src-tauri/Cargo.toml -- --daemon
   hosted release workflow.
 
 ## NOTES
-- Headless daemon UDS socket lives at `/tmp/rorca-{uid}/daemon.sock` locked with `flock`.
+- Headless daemon UDS socket lives at `/tmp/ferryx-{uid}/daemon.sock` (`-dev` suffix for debug builds), locked with `flock`.
+- For one release the daemon also serves the pre-rename `/tmp/rorca-{uid}/daemon.sock` (same
+  protocol, 0600 socket in a 0700 dir, guarded by that dir's `daemon.lock`) so older GUIs still
+  connect, and new clients fall back to it when only a pre-rename daemon is running. Under a
+  `FERRYX_RUNTIME_DIR` override the legacy dir exists only if `FERRYX_LEGACY_RUNTIME_DIR` names
+  one. Remove `get_legacy_runtime_dir` and its callers in the release after.
 - PTY ring buffer overflow emits `ReplayGap` to signal terminal re-sync requirements.

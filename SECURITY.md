@@ -10,6 +10,10 @@ vulnerability. Include the affected version (release tag), platform, and the ste
 proof of concept needed to reproduce the problem. Reports are handled by the maintainer on a
 best-effort basis; there is no guaranteed response or fix timeline.
 
+The user-facing security model (relay encryption, agent control, machine grants, the shared
+trust root, data retention, the updater trust chain) and the limits of the hosted relay are
+published at <https://ferryx.dev/docs/security/>.
+
 ## Supported versions
 
 Ferryx is calendar-versioned (`vYYYY.MM.DD.N`). Only the latest release on the
@@ -36,6 +40,10 @@ fixes. Fixes ship in a new release; older releases are not patched. See
 - **Self-hosting.** Running your own relay moves the relay and account trust onto
   infrastructure you operate; see the
   [self-hosted relay guide](https://ferryx.dev/docs/self-hosted-relay/).
+- **Hosted relay availability.** `relay.ferryx.dev` runs on a primary host with a read-only
+  warm standby behind a health-checked failover; there is no SLA. Measured uptime of both
+  hosts is public at [status.ferryx.dev](https://status.ferryx.dev/), and the operations
+  runbook is [docs/relay-failover.md](docs/relay-failover.md).
 
 In scope: the desktop app, the headless daemon and `ferryx-cli`, the remote gateway, the
 mobile web client, `ferryx-relay` and its account service, and the install scripts published

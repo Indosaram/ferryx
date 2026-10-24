@@ -59,7 +59,7 @@ Per-agent worktree flags are per agent. Three gaps open as soon as you mix them,
 Ferryx is a desktop workspace built with Rust and Tauri v2 that applies one convention to everything in the window. Any agent you can start from a shell runs in a pane:
 
 - **One worktree scheme for every agent.** Managed worktrees live in `.orca-worktrees/wt-<slug>` on branches named `orca/<workspace-id>/<slug>`, and worktree paths are jailed to the repository root. The scheme doesn't depend on which vendor's CLI is in the pane, so Claude Code and Codex on the same repo get the same treatment and don't reach for each other's branches.
-- **Status you can see without reading scrollback.** Each agent gets its own pane in a split layout, rearrangeable by drag-and-drop. Status-detection manifests ship for eleven agents, including Claude Code, Codex, Cursor, Cline, GitHub Copilot CLI, OpenCode, Grok, and Kimi, so a pane reports whether its agent is working, waiting on you, or idle.
+- **Status you can see without reading scrollback.** Each agent gets its own pane in a split layout, rearrangeable by drag-and-drop. Status-detection manifests ship for <!-- agents:count -->16<!-- /agents:count --> agents, including Claude Code, Codex, Cursor, Cline, GitHub Copilot CLI, OpenCode, Grok, and Kimi, so a pane reports whether its agent is working, waiting on you, or idle.
 - **An embedded browser beside the panes.** Browser tabs use native WebViews, so documentation or a preview sits next to the terminals without a second window.
 
 Session lifetime works differently from a plain GUI terminal, and this part no worktree flag addresses:

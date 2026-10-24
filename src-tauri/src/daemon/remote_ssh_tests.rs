@@ -147,7 +147,7 @@ async fn remote_persistence_migration_recovers_from_partial_durable_file() {
     );
 }
 
-/// `/tmp/rorca-{uid}` is wiped on reboot, so remote descriptors persisted there vanished
+/// The `/tmp` runtime dir is wiped on reboot, so remote descriptors persisted there vanished
 /// while the host-side helper daemons survived. Persistence must move to the durable
 /// identity directory, migrating whatever the previous location still holds.
 #[tokio::test]

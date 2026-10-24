@@ -114,7 +114,7 @@ export interface NotificationCenterPopoverProps {
 }
 
 function reasonToStatusDotState(reason: NotificationEntry["reason"]): StatusDotState {
-  if (reason === "waiting") return "waiting";
+  if (reason === "waiting" || reason === "supervisor") return "waiting";
   if (reason === "done") return "done";
   return "unread";
 }

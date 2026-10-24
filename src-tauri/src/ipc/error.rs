@@ -75,6 +75,9 @@ pub enum IpcErrorCode {
     PtyKillError,
     ChannelError,
     NativeTerminalUnsupported,
+    /// No GPU adapter or device: the native renderer cannot present, so the UI falls back to
+    /// the DOM grid renderer instead of leaving a blank surface.
+    NativeRendererUnavailable,
     CliFileCollision,
     CliDirectoryCollision,
     CliParentSymlinkDenied,
@@ -246,6 +249,7 @@ impl IpcErrorCode {
             "DAEMON_UPDATE_PENDING" => Self::DaemonUpdatePending,
             "DAEMON_BUSY" => Self::DaemonBusy,
             "DAEMON_DETACH_UNAVAILABLE" => Self::DaemonDetachUnavailable,
+            "NATIVE_RENDERER_UNAVAILABLE" => Self::NativeRendererUnavailable,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -465,6 +469,13 @@ impl From<crate::native_terminal::NativeTerminalError> for IpcError {
             // tab switch. The frontend recognises this code and drops the update silently.
             crate::native_terminal::NativeTerminalError::SessionDetached(_) => {
                 IpcErrorCode::SessionNotFound
+            }
+            crate::native_terminal::NativeTerminalError::GpuAdapterUnavailable(_)
+            | crate::native_terminal::NativeTerminalError::GpuDeviceUnavailable(_)
+            | crate::native_terminal::NativeTerminalError::GpuSurfaceUnsupported(_) => {
+                return Self::new(IpcErrorCode::NativeRendererUnavailable, message).with_details(
+                    json!({ "source": "wgpu", "kind": "renderer_unavailable" }),
+                );
             }
             _ => IpcErrorCode::InternalError,
         };

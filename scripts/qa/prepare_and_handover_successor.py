@@ -13,7 +13,10 @@ EXPECTED_MACHINE_ID = "2773ab38-d556-4a81-ae49-18a3b0fb83af"
 
 def get_socket_path():
     uid = os.getuid()
-    return f"/tmp/rorca-{uid}/daemon.sock"
+    current = f"/tmp/ferryx-{uid}/daemon.sock"
+    legacy = f"/tmp/rorca-{uid}/daemon.sock"
+    # A daemon from before the rename serves only the legacy path.
+    return legacy if not os.path.exists(current) and os.path.exists(legacy) else current
 
 def compute_sha256(filepath):
     h = hashlib.sha256()

@@ -1,3 +1,8 @@
+---
+// Generated from the shipped detection manifests by scripts/gen-site-agents.mjs (prebuild).
+import agents from '../../data/agents.json';
+---
+
 <section id="problems" class="py-20 sm:py-24 border-t border-line bg-page">
   <div class="mx-auto max-w-6xl px-4 sm:px-6">
     <div class="text-center max-w-2xl mx-auto mb-16">
@@ -61,7 +66,7 @@
         </h3>
         <p class="mt-3 text-[15px] leading-relaxed text-ink-soft">
           See which agent is working, waiting on you or idle without scanning tabs, and get a
-          notification when one needs input. Detection covers 11 agents and also drives the
+          notification when one needs input. Detection covers {agents.length} agents and also drives the
           macOS Dock attention badge.
         </p>
       </div>

@@ -1550,6 +1550,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(remote_manager)
         .manage(workspace_registry)
         .manage(ipc::worktree_disk::WorktreeDiskScans::default())
+        .manage(ipc::terminal_grid::TerminalGridStreams::default())
         .manage(notification_audio)
         .manage(notification_activations)
         .manage(driver_broker)
@@ -1633,6 +1634,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_terminal_suspend,
         cmd_terminal_resume,
         cmd_terminal_list,
+        cmd_terminal_grid_attach,
+        cmd_terminal_grid_resize,
+        cmd_terminal_grid_detach,
         cmd_terminal_preferences,
         cmd_terminal_apply_overrides,
         cmd_terminal_set_appearance,
@@ -1664,6 +1668,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_remote_pairing_create,
         cmd_remote_devices,
         cmd_remote_device_revoke,
+        cmd_remote_auto_trust_status,
+        cmd_remote_set_auto_trust_disabled,
         cmd_remote_set_active_selection,
         cmd_remote_get_active_selection,
         cmd_project_initial,
@@ -1746,6 +1752,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::agent_integration::cmd_agent_integration_remove_local,
         ipc::supervisor::cmd_supervisor_snapshot,
         ipc::supervisor::cmd_supervisor_set_paused,
+        ipc::agent_control_settings::cmd_agent_control_get,
+        ipc::agent_control_settings::cmd_agent_control_set,
+        ipc::supervisor::cmd_supervisor_goal,
         cmd_browser_create,
         cmd_browser_open_devtools,
         cmd_browser_inject_element_picker,

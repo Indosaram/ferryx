@@ -32,14 +32,48 @@ builds, never by describing a smaller value as safe.
 The required plan identity is:
 
 ```text
-tag:          vYYYY.MM.DD or vYYYY.MM.DD.R
-app/updater:  YYYY.(MM * 100 + DD).R
-MSIX:         YYYY.(MM * 100 + DD).R.0
+tag:          vYYYY.MMDD.N
+app/updater:  YYYY.(MM * 100 + DD).N
+MSIX:         YYYY.(MM * 100 + DD).N.0
 ```
 
-For example, `v2026.09.08.1` maps to app version `2026.908.1` and MSIX version
-`2026.908.1.0`. `prepare` validates the calendar date and records all three values. All host
-receipts must repeat the plan's `runId`, source SHA, and app version.
+For example, `v2026.1024.1` maps to app version `2026.1024.1` and MSIX version
+`2026.1024.1.0`, and `v2026.0908.1` maps to `2026.908.1`. `prepare` validates the calendar date
+and records all three values. All host receipts must repeat the plan's `runId`, source SHA, and
+app version.
+
+### Tag scheme
+
+Every new release tag is `vYYYY.MMDD.N`: a four-digit year (2026 or later), the zero-padded month
+and day of a real calendar date, and a revision `N` of 1..65535 without leading zeros, counting
+releases of that day. `scripts/release-tag-policy.mjs` enforces it, and `release-local.mjs prepare`
+refuses any other tag before it reads the config, touches git, or builds. Check a tag by hand with:
+
+```bash
+bun scripts/release-tag-policy.mjs "$TAG"   # exit 0 = conforming, 1 = rejected
+```
+
+Tags made before this policy (`0.1.0`, `v0.1.0`, and the `vYYYY.MM.DD.N` series such as
+`v2026.08.26.1`-`.11`) are published and stay in place: never delete, move, or re-point them.
+They are listed as legacy in `CHANGELOG.md`, and the version tools still parse the
+`vYYYY.MM.DD.N` form so plans and receipts of those releases keep validating. The app versions
+both forms produce are the same, so the change does not reorder updates.
+
+### Update channels
+
+The in-app updater has two channels, chosen in Settings > General > Software Update > "Update
+channel". Stable is the default.
+
+| Channel | Manifest (asset of the latest GitHub release) |
+| --- | --- |
+| Stable | `latest.json` (the `plugins.updater.endpoints` entry in `src-tauri/tauri.conf.json`) |
+| Beta | `latest-beta.json`, then `latest.json` when no beta manifest is published |
+
+Endpoints are fixed in `src-tauri/src/ipc/updater.rs` (`STABLE_UPDATE_ENDPOINT`,
+`BETA_UPDATE_ENDPOINT`); the UI sends only the channel name. To ship a beta, assemble the release
+as usual, copy its signed `latest.json` to `latest-beta.json` in `$RUN/publish` before publishing,
+and keep the stable `latest.json` pointing at the last stable build. Both manifests are signed with
+the same updater key, so a beta never bypasses signature verification.
 
 ## One-time host configuration
 
@@ -113,7 +147,7 @@ that are new and dedicated to this release:
 
 ```bash
 export RELEASE_CONFIG="$HOME/.config/ferryx/release-hosts.json"
-export TAG="v2026.09.08.1"
+export TAG="v2026.1024.1"
 export COMMIT="<reviewed-sha-or-ref>"
 export RUN="$HOME/ferryx-release-runs/$TAG"
 ```
@@ -293,6 +327,41 @@ produce an unsigned `Ferryx_x64.msix` for Store ingestion, but attaching it to G
 GitHub Release public does not submit it to the Store. Verify the reserved Store identity and
 MSIX version, then obtain Store-submission approval before uploading in Partner Center.
 
+### 6. Store submission
+
+The Microsoft Store is the signed Windows channel: the Store signs the MSIX it publishes, so Store
+installs show no SmartScreen warning. No code-signing certificate is bought and SignPath is not
+used. Every release with a Windows build must therefore produce `Ferryx_x64.msix` at the plan's
+canonical quad version (`plan.json.msixVersion`, e.g. `2026.1024.1.0`).
+
+`assemble` enforces this. When a `maho-win` receipt or Windows artifacts exist, it reads the
+receipt's MSIX, opens its `AppxManifest.xml`, and refuses to assemble with a typed error:
+`STORE_MSIX_MISSING` (no MSIX), `STORE_MSIX_INVALID` (no readable manifest), or
+`STORE_MSIX_VERSION_MISMATCH` (Identity version is not the canonical quad). On success,
+`assemble` and `publish` both print:
+
+```text
+Store submission pending: <msixVersion>
+```
+
+That line is a to-do, not a status. After publication, submit the release's `Ferryx_x64.msix` to
+the existing product `9NLHQL5JNLM4` by following
+[MS_STORE_RESUBMISSION_RECOVERY.md](MS_STORE_RESUBMISSION_RECOVERY.md), either through the
+Partner Center UI or with `msstore submission`. Executors use the `ferryx-store-resubmission`
+skill (Maho/Aside browser, per the owner's rules). Submission acceptance is not certification,
+and certification is not public availability. Check the public listing with:
+
+```bash
+bun scripts/store-listing-status.mjs
+```
+
+It reports `live` only when `https://apps.microsoft.com/detail/9NLHQL5JNLM4` serves the Ferryx
+product page. Until it reports `live`, the site and READMEs keep the `.exe` row labeled "not
+code-signed; Store version pending certification" and do not link the Store. Once it is live, make
+the Store the first Windows download in `site/src/lib/downloads.ts`, `README.md`, and
+`README.zh-CN.md`, keep the `.exe` as a secondary unsigned installer, and document
+`winget install --source msstore 9NLHQL5JNLM4`.
+
 ## Installing locally onto this Mac
 
 `release-local.mjs` never replaces `/Applications/Ferryx.app`. Any local install
@@ -433,6 +502,35 @@ All four must exit 0, and both `spctl` results must report `source=Notarized Dev
 missing helper bundle, a helper that fails verification, or a helper Gatekeeper rejects blocks
 the release: the app could not stage a daemon runtime on users' machines.
 
+## Mobile (Android/iOS)
+
+The mobile companion (`mobile/`) follows the same local-only rule: AABs and IPAs are built,
+signed, and uploaded from the owner's machine. No GitHub Actions workflow may build, sign, or
+upload them, and no Play/App Store credential (upload keystore, `keystore.properties`, App Store
+Connect API key, `APPLE_*` signing secrets) may appear in `.github/workflows`. `bun
+scripts/release-workflow-policy.mjs` (covered by `scripts/release-workflow.test.mjs`) must still
+pass after any workflow change.
+
+Mobile is versioned separately from the three-host desktop plan: store version `1.0.0` (semver)
+plus a strictly increasing Android `versionCode` (`FERRYX_ANDROID_VERSION_CODE`) and iOS build
+number (`--build-number`). It is not part of `plan.json`, `release-local.mjs`, receipts, or the
+updater manifest; stores update the app.
+
+1. Start from a reviewed, clean commit. Run `bun run --cwd mobile test` and
+   `bun run --cwd ui build:mobile`.
+2. Android: with JDK 17, SDK 36, and `NDK_HOME` set to NDK `28.2.13676358`, and with the upload
+   keystore described by `mobile/keystore.properties` or `FERRYX_ANDROID_KEYSTORE_PROPERTIES`, run
+   `bun run android:init` and
+   `bun run android:build -- --aab --target aarch64 --target armv7 --target x86_64` from `mobile/`.
+   The Gradle log must not show `WARNING: Ferryx release signing disabled`; `jarsigner -verify`
+   and `zipalign -c -P 16 -v 4` (16 KB alignment) must pass.
+3. iOS: with `APPLE_DEVELOPMENT_TEAM` set, run `bun run ios:init` and
+   `bun run ios:build -- --export-method app-store-connect --build-number <n>`, then validate and
+   upload the IPA with Transporter or `xcrun altool`.
+4. Store submission (Play closed testing/production, TestFlight/App Review) is a separate,
+   owner-approved step, the same as Partner Center for MSIX. The full command reference and the
+   owner checklist are in [mobile/README.md](../../mobile/README.md#release-build-owner-machine-only).
+
 ## Checks, cleanup, and recovery
 
 ### Completion checklist
@@ -440,6 +538,7 @@ the release: the app could not stage a daemon runtime on users' machines.
 - [ ] Pull-request checks are green; no hosted workflow builds/signs/publishes releases.
 - [ ] Config is credential-free and unchanged; all roots are dedicated and meet configured budgets.
 - [ ] Plan tag, app version, MSIX version, source SHA, Ghostty pin, channels, and updater key are reviewed.
+- [ ] The tag passes `bun scripts/release-tag-policy.mjs "$TAG"`; no published tag was deleted or moved.
 - [ ] All three receipts match the plan and list only the expected artifacts.
 - [ ] Developer ID signing, notarization/stapling, updater signatures, package metadata, and hashes pass.
 - [ ] The macOS post-build release check passes on `Ferryx.app` and `Contents/Helpers/Ferryx Daemon.app`.
@@ -447,7 +546,8 @@ the release: the app could not stage a daemon runtime on users' machines.
 - [ ] `SHA256SUMS`, `SHA256SUMS.minisig`, both `*.cdx.json` SBOMs and `provenance.json` are in `$RUN/publish`, and `minisign -Vm SHA256SUMS -P <pubkey>` plus `shasum -a 256 -c SHA256SUMS` pass there.
 - [ ] Draft bytes and inventory are reviewed before the separate publication approval.
 - [ ] `verify-remote` passes after publication.
-- [ ] Store submission, if performed, has its own approval and Partner Center result.
+- [ ] `assemble` printed `Store submission pending: <msixVersion>`; the MSIX was submitted per step 6 with its own approval and Partner Center result, and `bun scripts/store-listing-status.mjs` was recorded.
+- [ ] Mobile store builds, if any, were built and signed locally and versionCode/build number increased.
 
 ### Failure recovery
 
@@ -464,3 +564,34 @@ run directory whose exact path and ownership have been reviewed, and only after 
 longer needed. If publication fails after draft creation, leave the draft private, inspect it,
 and resolve or delete it through a separately reviewed GitHub action; never pretend the partial
 operation succeeded.
+
+## Production relay build
+
+The production relay (`relay.ferryx.dev`) runs the standalone `ferryx-relay` binary. Build it with
+the release profile:
+
+```bash
+cd src-tauri && cargo build --release --bin ferryx-relay
+# output: $CARGO_TARGET_DIR/release/ferryx-relay (default src-tauri/target/release/ferryx-relay)
+```
+
+This replaces the earlier dev-profile build with optimization overrides
+(`CARGO_PROFILE_DEV_OPT_LEVEL=3` and related settings) used for the 2026-10-22 deploy. The release
+profile runs the bundled-helper freshness gate in `src-tauri/build.rs`, so build from a checkout
+whose `src-tauri/resources/helpers/manifest.json` matches the staged helpers; if the gate fails,
+fix the staging rather than falling back to the dev profile. Build on the Linux x86_64 relay host
+or an equivalent builder, never in hosted CI.
+
+Redeploying is an owner action. On the relay host, back up the running binary, install the new one,
+and restart the unit; keep the existing `FERRYX_DEPLOYMENT_MODE` drop-in, without which the relay
+refuses to start:
+
+```bash
+cp ~/bin/ferryx-relay ~/bin/ferryx-relay.bak-$(date +%Y%m%d-%H%M%S)
+install -m 0755 "$CARGO_TARGET_DIR/release/ferryx-relay" ~/bin/ferryx-relay
+sudo systemctl restart ferryx-relay
+```
+
+Verify against `relay.ferryx.dev` only: the health endpoint returns 200, and the entitlement
+endpoint returns 401 without credentials. Paired daemons reconnect within their 30 s retry after
+the restart.

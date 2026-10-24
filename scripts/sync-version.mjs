@@ -17,7 +17,7 @@ function getDaysInMonth(year, month) {
 }
 
 function isCalVerShaped(tag) {
-  return typeof tag === "string" && /^v?\d{4}\.\d{1,2}\.\d{1,2}(?:\.|$)/.test(tag);
+  return typeof tag === "string" && /^v?\d{4}\.(?:\d{1,2}\.\d{1,2}(?:\.|$)|\d{4}\.)/.test(tag);
 }
 
 function parseGenericSemVer(tag) {
@@ -35,16 +35,20 @@ export function parseReleaseTag(tag) {
   if (typeof tag !== "string" || !tag.trim()) {
     throw new Error(`Invalid release tag: expected non-empty string, got ${typeof tag}`);
   }
-  if (/^v?\d{4}\.\d{2}\.\d{2}\.0\d+$/.test(tag)) {
-    throw new Error(`Invalid release tag "${tag}": leading zeros are not allowed in revision`);
-  }
-  if (/^v?\d{4}\.(?:\d|\d{3,})\.\d+(?:\.\d+)?$/.test(tag) || /^v?\d{4}\.\d+\.(?:\d|\d{3,})(?:\.\d+)?$/.test(tag)) {
-    throw new Error(`Invalid release tag "${tag}": month and day must be 2 digits (MM.DD)`);
-  }
-
-  const match = tag.match(/^v?(\d{4})\.(\d{2})\.(\d{2})(?:\.(0|[1-9]\d*))?$/);
+  // Current scheme vYYYY.MMDD.N (scripts/release-tag-policy.mjs). The legacy vYYYY.MM.DD[.R]
+  // form stays parseable for plans and receipts of releases already published.
+  let match = tag.match(/^v?(\d{4})\.(\d{2})(\d{2})\.(0|[1-9]\d*)$/);
   if (!match) {
-    throw new Error(`Invalid release tag format: "${tag}". Expected vYYYY.MM.DD or vYYYY.MM.DD.R`);
+    if (/^v?\d{4}\.\d{2}\.\d{2}\.0\d+$/.test(tag)) {
+      throw new Error(`Invalid release tag "${tag}": leading zeros are not allowed in revision`);
+    }
+    if (/^v?\d{4}\.(?:\d|\d{3,})\.\d+(?:\.\d+)?$/.test(tag) || /^v?\d{4}\.\d+\.(?:\d|\d{3,})(?:\.\d+)?$/.test(tag)) {
+      throw new Error(`Invalid release tag "${tag}": month and day must be 2 digits (MM.DD)`);
+    }
+    match = tag.match(/^v?(\d{4})\.(\d{2})\.(\d{2})(?:\.(0|[1-9]\d*))?$/);
+  }
+  if (!match) {
+    throw new Error(`Invalid release tag format: "${tag}". Expected vYYYY.MMDD.N (legacy: vYYYY.MM.DD or vYYYY.MM.DD.R)`);
   }
 
   const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];

@@ -21,6 +21,10 @@ pub enum Purpose {
     InboxClass,
     /// omo-gateway cron remediation: the root cause of a failed cron job.
     CronCause,
+    /// Supervisor goal loop: grades a settled turn against the lane's goal contract.
+    GapAssess,
+    /// Supervisor goal loop: the blind second check before a lane is called complete.
+    ConvergenceCheck,
 }
 
 impl Purpose {
@@ -32,6 +36,8 @@ impl Purpose {
             Self::KibitzerWake => "kibitzer_wake",
             Self::InboxClass => "inbox_class",
             Self::CronCause => "cron_cause",
+            Self::GapAssess => "gap_assess",
+            Self::ConvergenceCheck => "convergence_check",
         }
     }
 
@@ -42,6 +48,7 @@ impl Purpose {
             Self::EventWake | Self::KibitzerWake | Self::OwnerIntent => "wake",
             Self::CronCause => "needs_owner_login_or_quota",
             Self::DoneDiff => "diff_gate_failed",
+            Self::GapAssess | Self::ConvergenceCheck => "judge_unavailable",
         }
     }
 
@@ -52,6 +59,7 @@ impl Purpose {
             Self::EventWake | Self::KibitzerWake | Self::OwnerIntent => "wake",
             Self::CronCause => "needs_owner_login_or_quota",
             Self::DoneDiff => "diff_gate_failed",
+            Self::GapAssess | Self::ConvergenceCheck => "judge_unavailable",
         }
     }
 
@@ -346,7 +354,8 @@ impl Judge {
         }
     }
 
-    fn bare() -> Self {
+    /// A judge with no binary config, no pool and no fallback model.
+    pub(crate) fn bare() -> Self {
         Self {
             typesafe: BTreeMap::new(),
             offline_fallback: None,
@@ -398,6 +407,57 @@ impl Judge {
     pub fn with_jev_enabled(mut self, enabled: bool) -> Self {
         self.jev_enabled = enabled;
         self
+    }
+
+    /// One free-text structured turn on the configured fallback model, for the goal
+    /// evaluators. It counts against the fallback daily cap and is a `judge_calls` row.
+    /// No fallback model, an open breaker or a spent cap is
+    /// [`GoalError::JudgeUnavailable`](crate::goals::GoalError::JudgeUnavailable), as is a
+    /// failed or timed-out model turn. typesafe-judge is never used for free text.
+    pub async fn structured(
+        &self,
+        purpose: Purpose,
+        prompt: &str,
+    ) -> std::result::Result<String, crate::goals::GoalError> {
+        use crate::goals::GoalError;
+        let Some(model) = &self.fallback else {
+            return Err(GoalError::JudgeUnavailable);
+        };
+        let open = breaker()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .open_until(Instant::now());
+        if open.is_some() {
+            return Err(GoalError::JudgeUnavailable);
+        }
+        let (_, fallback_today) = self.counts_today().await;
+        if fallback_today >= self.fallback_cap {
+            self.record_kind(
+                purpose,
+                "structured",
+                0,
+                &format!("capped:{}", purpose.capped_choice()),
+                true,
+            )
+            .await;
+            return Err(GoalError::JudgeUnavailable);
+        }
+        let start = Instant::now();
+        let answer = tokio::time::timeout(FALLBACK_TIMEOUT, model.complete(prompt)).await;
+        let (outcome, result) = match answer {
+            Ok(Ok(text)) => ("ok", Ok(text)),
+            Ok(Err(error)) => {
+                tracing::warn!(%error, purpose = purpose.as_str(), "structured judge turn failed");
+                ("failed", Err(GoalError::JudgeUnavailable))
+            }
+            Err(_) => {
+                tracing::warn!(purpose = purpose.as_str(), "structured judge turn timed out");
+                ("timeout", Err(GoalError::JudgeUnavailable))
+            }
+        };
+        self.record_kind(purpose, "structured", elapsed_ms(start), outcome, true)
+            .await;
+        result
     }
 
     /// omo `JevCli::choice`: jev unless disabled, breaker-open or over the day's cap; a failed

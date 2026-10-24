@@ -8,7 +8,10 @@ PROTOCOL_VERSION = 5
 
 def get_socket_path():
     uid = os.getuid()
-    return f"/tmp/rorca-{uid}/daemon.sock"
+    current = f"/tmp/ferryx-{uid}/daemon.sock"
+    legacy = f"/tmp/rorca-{uid}/daemon.sock"
+    # A daemon from before the rename serves only the legacy path.
+    return legacy if not os.path.exists(current) and os.path.exists(legacy) else current
 
 def send_request(sock, req_dict):
     payload = json.dumps(req_dict).encode("utf-8")
