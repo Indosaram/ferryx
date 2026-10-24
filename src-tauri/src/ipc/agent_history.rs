@@ -181,6 +181,7 @@ fn history_store() -> Result<&'static Mutex<History>, IpcError> {
     })
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_agent_history_search(
     provider: String,
@@ -209,6 +210,7 @@ pub async fn cmd_agent_history_search(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_agent_history_read(
     entry_key: String,

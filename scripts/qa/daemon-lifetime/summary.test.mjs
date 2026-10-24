@@ -14,7 +14,7 @@ import { Q11, openSettings, nthReceiptPattern, SETTINGS_OPENED_RECEIPT, SETTINGS
 const RUN = '20261019t064512z';
 
 test('every todo 12 scenario exists with its platform scope and a runner', () => {
-  assert.deepEqual(SCENARIO_IDS, ['Q00', 'Q01', 'Q02', 'Q03', 'Q04', 'Q04b', 'Q05', 'Q06', 'Q06w', 'Q07', 'Q08', 'Q08b', 'Q09', 'Q10', 'Q10b', 'Q11', 'Q12', 'Q13', 'Q14']);
+  assert.deepEqual(SCENARIO_IDS, ['Q00', 'Q01', 'Q02', 'Q03', 'Q03b', 'Q04', 'Q04b', 'Q05', 'Q06', 'Q06w', 'Q07', 'Q08', 'Q08b', 'Q09', 'Q10', 'Q10b', 'Q11', 'Q12', 'Q13', 'Q14']);
   assert.ok(assertRunnersComplete(RUNNERS, SCENARIO_IDS));
   assert.throws(() => assertRunnersComplete({ Q00() {} }, ['Q00', 'Q01']), /no runner for Q01/);
   const by = (p) => Object.fromEntries(newSummary({ runId: RUN, platform: p, host: 'h' }).scenarios.map((s) => [s.id, s.applicable]));

@@ -285,6 +285,7 @@ fn read_clipboard_image_from(tools: &[(&str, &[&str])]) -> Option<ClipboardImage
     None
 }
 
+#[cfg(feature = "desktop")]
 /// Reads the clipboard on the thread the platform requires and hands back the bytes.
 ///
 /// macOS pasteboard access follows the same main-thread dispatch the native terminal paste path
@@ -891,6 +892,7 @@ pub struct LocalClipboardImagePaste {
     pub byte_length: usize,
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_local_paste_clipboard_image<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,

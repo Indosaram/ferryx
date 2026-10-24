@@ -290,9 +290,9 @@ async fn run_watcher_loop_observed(
 pub fn spawn_dag_watcher(
     project_path: PathBuf,
     sink: TaggedSink,
-) -> tauri::async_runtime::JoinHandle<()> {
+) -> tokio::task::JoinHandle<()> {
     let tagged = project_path.to_string_lossy().to_string();
-    tauri::async_runtime::spawn(async move {
+    tokio::spawn(async move {
         run_watcher_loop(tagged, project_path, sink).await;
     })
 }

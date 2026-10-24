@@ -595,3 +595,15 @@ sudo systemctl restart ferryx-relay
 Verify against `relay.ferryx.dev` only: the health endpoint returns 200, and the entitlement
 endpoint returns 401 without credentials. Paired daemons reconnect within their 30 s retry after
 the restart.
+
+## Relay end-to-end encryption rollout (todo 7)
+
+Order matters. Ship the daemons and clients first, and deploy the relay last. Updated clients ask
+the relay for an encrypted session (`?e2e=1`), so the relay has to be the final piece to change.
+
+- Deploying the production relay is an owner action. Do not do it from a release run.
+- Leave `FERRYX_RELAY_REQUIRE_E2E` unset for this release. Plaintext keeps working for old clients
+  and PIN-paired devices. Todo 11 sets it after release R plus one cycle.
+- Watch the `ferryx::relay::e2e` deprecation warnings. The `client_build` field shows which
+  clients still use plaintext.
+- Rollback is redeploying the previous relay build.

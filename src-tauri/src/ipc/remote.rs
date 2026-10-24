@@ -13,6 +13,7 @@ use crate::remote::state::{
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+#[cfg(feature = "desktop")]
 use tauri::State;
 
 #[derive(Clone)]
@@ -188,6 +189,7 @@ pub struct CreatePairingCodeResponse {
     pub relay_url: Option<String>,
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_remote_status(
     manager: State<'_, Arc<RemoteGatewayManager>>,
@@ -270,6 +272,7 @@ pub async fn cmd_remote_status(
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_remote_enable(
     manager: State<'_, Arc<RemoteGatewayManager>>,
@@ -317,6 +320,7 @@ pub async fn cmd_remote_enable(
     cmd_remote_status(manager).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_remote_disable(
     manager: State<'_, Arc<RemoteGatewayManager>>,
@@ -351,6 +355,7 @@ pub async fn cmd_remote_disable(
     cmd_remote_status(manager).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_remote_pairing_create(
     manager: State<'_, Arc<RemoteGatewayManager>>,
@@ -419,6 +424,7 @@ pub async fn cmd_remote_pairing_create(
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_remote_devices(
     manager: State<'_, Arc<RemoteGatewayManager>>,
@@ -429,6 +435,7 @@ pub async fn cmd_remote_devices(
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_remote_device_revoke(
     manager: State<'_, Arc<RemoteGatewayManager>>,
@@ -543,6 +550,7 @@ fn sanitize_session_id(value: Option<String>) -> Option<String> {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_remote_set_active_selection<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -605,6 +613,7 @@ pub async fn cmd_remote_set_active_selection<R: tauri::Runtime>(
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_remote_get_active_selection(
     manager: State<'_, Arc<RemoteGatewayManager>>,

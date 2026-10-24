@@ -103,8 +103,21 @@ forwards ciphertext and cannot read terminal content or the pairing capability.
 The handshake itself lives in `src-tauri/src/remote/attach_crypto.rs` and is covered by tests that
 splice a recording proxy between the two ends: the recorded bytes never contain the planted payload,
 an unbound device key is rejected, a substituted machine key cannot complete the handshake, and a
-plaintext client cannot attach. Connecting that handshake to the relay and desktop paths is the part
-still in progress, so do not describe a live account attach as encrypted until that wiring lands.
+plaintext client cannot attach.
+
+That handshake now carries relay-proxied web and paired-host traffic. Updated web and desktop
+clients that hold an attach key reach the `/host/...` APIs and WebSockets only through
+`POST /api/v1/attach/session?e2e=1` followed by `/tunnel/opaque/{id}`, and the relay splices
+ciphertext it cannot read. Devices paired by PIN have no attach key. They see a `REPAIR_REQUIRED`
+re-pair prompt and stay on plaintext, with a deprecation warning in the relay log, until todo 11.
+
+Setting `FERRYX_RELAY_REQUIRE_E2E=1` on the relay refuses every plaintext route with
+`E2E_REQUIRED` (HTTP 426). It is unset by default.
+
+Tests: `an_e2e_host_proxy_request_never_reaches_the_relay_in_plaintext`,
+`a_legacy_client_without_e2e_still_works_and_logs_deprecation`,
+`a_relay_requiring_e2e_refuses_plaintext_with_a_typed_error`, and
+`ui/src/remote/remoteClient.relayE2E.test.ts`.
 
 ## Commercial billing and operations
 

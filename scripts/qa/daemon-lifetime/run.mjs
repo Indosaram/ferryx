@@ -4,6 +4,9 @@
 //   node scripts/qa/daemon-lifetime/run.mjs --platform mac|linux|windows --all
 //   node scripts/qa/daemon-lifetime/run.mjs --platform linux --only Q01,Q08
 //   node scripts/qa/daemon-lifetime/run.mjs --platform mac --self-check     (no build, no QA: guards + hooks)
+//   node scripts/qa/daemon-lifetime/run.mjs --platform mac --only Q03b --fault kill-adopted
+//       (adoption todo 15 failure case: FERRYX_QA_FAULT=kill-adopted reaches every QA process;
+//        Q03b must FAIL with per-pid evidence and the run exits non-zero)
 //   node scripts/qa/daemon-lifetime/run.mjs --platform mac --self-test-reload
 //       (harness failure self-test: builds a throwaway worktree with self-test-reload.patch, which
 //        re-adds supervisor::reload in the client, runs Q00+Q04, and exits 0 only if Q04 FAILS)
@@ -23,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { makeRunId, tauriQaConfig, isolationLayout, isolationEnv, assertIsolatedEnv, forbiddenRoots, assertQaExecutable, qaSupervisorName, GuardError } from './lib/guards.mjs';
 import { newSummary, selectScenarios, settle, block, applyQ00Gate, computeExitCode, validateSummary, scenarioById } from './lib/summary.mjs';
 import { hostFor, buildPlan, assertQaBuild, worktreePaths } from './lib/hosts.mjs';
-import { probeHooks, missingHooksFor } from './lib/hooks.mjs';
+import { probeHooks, missingHooksFor, QA_FAULT_ENV, QA_FAULTS } from './lib/hooks.mjs';
 import { generationKey, assertDistinctKeys } from './lib/wire.mjs';
 import { startAgent, fetchHostFile } from './lib/remote.mjs';
 import { createJobs } from './lib/jobs.mjs';
@@ -35,6 +38,7 @@ import { createAppReplacer } from './lib/replace.mjs';
 import { sshHostId } from './lib/sshd.mjs';
 import { run } from './lib/proc.mjs';
 import * as g1 from './scenarios/q00-q03.mjs';
+import { Q03b } from './scenarios/q03b.mjs';
 import * as g2 from './scenarios/q04-q06.mjs';
 import * as g3 from './scenarios/q07-q09.mjs';
 import * as g4 from './scenarios/q10-q13.mjs';
@@ -43,7 +47,7 @@ import { recoverOwnerAfterException, invalidateOwnerState } from './scenarios/co
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '../../..');
-export const RUNNERS = Object.freeze({ ...g1, ...g2, ...g3, ...g4, Q14: g5.Q14 });
+export const RUNNERS = Object.freeze({ ...g1, Q03b, ...g2, ...g3, ...g4, Q14: g5.Q14 });
 
 const syncExec = (cmd, args) => {
   const r = spawnSync(cmd, args, { encoding: 'utf8' });
@@ -63,7 +67,7 @@ export function signMacQaBundle({ appPath, entitlements, workspaceDir, exec = sy
 export const DEFAULT_WORKTREE_SLUG = 'daemon-lifetime-w5-t12-20261018';
 
 export function parseArgs(argv) {
-  const out = { platform: null, all: false, only: [], selfCheck: false, selfTestReload: false, evidenceDir: null, runId: null, keepRunDir: false, v1Worktree: null, baselineWorktree: null, worktreeSlug: DEFAULT_WORKTREE_SLUG };
+  const out = { platform: null, all: false, only: [], selfCheck: false, selfTestReload: false, evidenceDir: null, runId: null, keepRunDir: false, v1Worktree: null, baselineWorktree: null, worktreeSlug: DEFAULT_WORKTREE_SLUG, fault: null };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--platform') out.platform = argv[++i];
@@ -76,10 +80,17 @@ export function parseArgs(argv) {
     else if (a === '--v1-worktree') out.v1Worktree = argv[++i];
     else if (a === '--baseline-worktree') out.baselineWorktree = argv[++i];
     else if (a === '--worktree-slug') out.worktreeSlug = argv[++i];
+    else if (a === '--fault') out.fault = argv[++i];
     else throw new Error(`unknown argument ${a}`);
   }
   if (!['mac', 'linux', 'windows'].includes(out.platform)) throw new Error('--platform mac|linux|windows is required');
   if (!/^[a-z0-9][a-z0-9-]*$/.test(out.worktreeSlug ?? '')) throw new Error('--worktree-slug must be lowercase letters, digits and -');
+  if (out.fault !== null) {
+    // A fault is a harness self-test of one scenario: it must never leak into an --all run.
+    const only = QA_FAULTS[out.fault];
+    if (!only) throw new Error(`--fault must be one of ${Object.keys(QA_FAULTS).join(', ')}`);
+    if (out.all || out.selfCheck || out.selfTestReload || out.only.length !== 1 || out.only[0] !== only) throw new Error(`--fault ${out.fault} runs with --only ${only} alone`);
+  }
   if (out.selfTestReload) {
     if (out.selfCheck || out.all || out.only.length) throw new Error('--self-test-reload runs Q04 only; it takes no --all, --only or --self-check');
     out.only = ['Q04'];
@@ -450,6 +461,12 @@ async function main() {
   const home = host.transport.kind === 'local' ? os.homedir() : (await agent.call('exec', host.platform === 'windows' ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', '$env:USERPROFILE'] } : { command: 'sh', args: ['-c', 'printf %s "$HOME"'] })).stdout.trim();
   const forbidden = forbiddenRoots({ platform: host.platform, home, uid });
   const env = isolationEnv({ runId, layout, platform: host.platform });
+  // adoption todo 15: the selected fault reaches the GUI and, through the QA job's forwarded env
+  // (launchd.rs QA_JOB_BARRIER_ENV, supervisor_linux.rs QA_BARRIER_KEYS), every QA daemon.
+  if (opts.fault) {
+    env[QA_FAULT_ENV] = opts.fault;
+    summary.fault = { env: QA_FAULT_ENV, value: opts.fault, expect: `${QA_FAULTS[opts.fault]} FAIL` };
+  }
   assertIsolatedEnv(env, { runId, forbidden, platform: host.platform });
 
   // Release daemon owner record: recorded, compared at the end, never touched. readFile returns

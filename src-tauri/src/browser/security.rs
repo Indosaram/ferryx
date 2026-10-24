@@ -1,4 +1,4 @@
-use tauri::Url;
+use url::Url;
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq)]

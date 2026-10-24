@@ -27,7 +27,12 @@ export const HOOKS = Object.freeze([
   { id: 'forceFallback', owner: 'todo 12 (FERRYX_QA_FORCE_FALLBACK=1 under local-split-qa routes connect_or_spawn to the detached fallback)', files: ['src-tauri/src/daemon/owner_admission.rs'], pattern: /FORCE_FALLBACK_ENV: &str = "FERRYX_QA_FORCE_FALLBACK"/, scenarios: ['Q06', 'Q06w'] },
   { id: 'detachGuard', owner: 'todo 6 carry-over (Windows detach guard returns DAEMON_DETACH_UNAVAILABLE inside a no-breakaway job)', files: ['src-tauri/src/daemon/client.rs'], pattern: /code = "DAEMON_DETACH_UNAVAILABLE"/, scenarios: ['Q06w'], platforms: ['windows'] },
   { id: 'qaHostBootOverride', owner: 'adoption todo 14 (host_boot.rs honors FERRYX_QA_HOST_BOOT_TIME_MS under local-split-qa while FERRYX_QA_RUN_ID is set)', files: ['src-tauri/src/host_boot.rs'], pattern: /QA_HOST_BOOT_TIME_ENV: &str = "FERRYX_QA_HOST_BOOT_TIME_MS"[\s\S]*qa_host_boot_override\(run_id/, scenarios: ['Q14'] },
+  { id: 'killAdoptedFault', owner: 'adoption todo 15 (qa_producers.rs QA_FAULT_KILL_ADOPTED: FERRYX_QA_FAULT=kill-adopted beside FERRYX_QA_RUN_ID kills every adopted child after commit)', files: ['src-tauri/src/daemon/qa_producers.rs'], pattern: /pub const QA_FAULT_KILL_ADOPTED: &str = "kill-adopted"/, scenarios: ['Q03b'], platforms: ['mac', 'linux'] },
 ]);
+
+/** adoption todo 15: runner-selectable FERRYX_QA_FAULT values (qa_producers.rs QA_FAULT_*), each with the only scenario it may run with. */
+export const QA_FAULT_ENV = 'FERRYX_QA_FAULT';
+export const QA_FAULTS = Object.freeze({ 'kill-adopted': 'Q03b' });
 
 /** todo 8's FERRYX_QA_HANDOVER_FAULT commit-phase values (daemon/qa_producers.rs). */
 export const HANDOVER_FAULT_ENV = 'FERRYX_QA_HANDOVER_FAULT';

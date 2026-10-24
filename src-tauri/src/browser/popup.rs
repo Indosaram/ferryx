@@ -144,7 +144,7 @@ pub fn clear_all() {
 /// This is the origin the opener sees on a popup's message. It is read from the tab's
 /// recorded URL, never from the message, so a popup cannot claim to be another origin.
 pub fn origin_of(url: &str) -> Option<String> {
-    let parsed = tauri::Url::parse(url).ok()?;
+    let parsed = url::Url::parse(url).ok()?;
     let origin = parsed.origin().ascii_serialization();
     if origin == "null" {
         None

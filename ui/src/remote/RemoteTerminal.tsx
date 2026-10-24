@@ -70,6 +70,9 @@ type RemoteTerminalProps = {
   readonly onAgentStateFrame?: (raw: string) => void;
   readonly followHostSize?: boolean;
   readonly showTitleBar?: boolean;
+  readonly showKeyDock?: boolean;
+  /** Dials a local transport instead of a gateway socket (desktop compatibility renderer). */
+  readonly createLocalSocket?: (sessionId: string) => WebSocketLike;
 };
 
 export const MIN_TERMINAL_FONT_SIZE = 10;
@@ -457,6 +460,8 @@ export function RemoteTerminal({
   onAgentStateFrame,
   followHostSize = false,
   showTitleBar = true,
+  showKeyDock = true,
+  createLocalSocket,
 }: RemoteTerminalProps) {
   const socketRef = useRef<WebSocket | WebSocketLike | null>(null);
   const dialEpochRef = useRef(0);
@@ -1228,6 +1233,15 @@ export function RemoteTerminal({
         }
       };
 
+      if (createLocalSocket) {
+        try {
+          initSocket(createLocalSocket(socketRequest.sessionId));
+        } catch (error) {
+          reportDialFailure(error);
+        }
+        return;
+      }
+
       if (isAccountSession && createWebSocket) {
         const epoch = daemonEpoch !== undefined && daemonEpoch !== null ? String(daemonEpoch).trim() : "";
         if (!epoch) {
@@ -1261,6 +1275,24 @@ export function RemoteTerminal({
           transportUrl,
           attachKey,
         ).then(initSocket).catch(reportDialFailure);
+        return;
+      }
+
+      if (createWebSocket) {
+        // A relay host reached end-to-end encrypted: the same gateway terminal protocol, carried
+        // inside the attach tunnel (bearer in the tunnel, no socket ticket).
+        const query = new URLSearchParams({ render: "grid" });
+        if (!followHostSize) {
+          query.set("cols", String(socketRequest.geometry.cols));
+          query.set("rows", String(socketRequest.geometry.rows));
+        }
+        try {
+          Promise.resolve(createWebSocket(`/api/v1/terminal/${socketRequest.sessionId}?${query.toString()}`))
+            .then(initSocket)
+            .catch(reportDialFailure);
+        } catch (error) {
+          reportDialFailure(error);
+        }
         return;
       }
 
@@ -1381,7 +1413,7 @@ export function RemoteTerminal({
       }
       currentSocket?.close();
     };
-  }, [onSocketLifecycle, socketRequest, transportUrl, onTransportFailure, isAccountSession, attachKey, createWebSocket, daemonEpoch, followHostSize, onAgentStateFrame]);
+  }, [onSocketLifecycle, socketRequest, transportUrl, onTransportFailure, isAccountSession, attachKey, createWebSocket, daemonEpoch, followHostSize, onAgentStateFrame, createLocalSocket]);
 
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     const socket = socketRef.current;
@@ -2074,7 +2106,7 @@ export function RemoteTerminal({
           </span>
         ) : null}
       </div>
-      <MobileKeyDock onSendKey={sendKey} />
+      {showKeyDock ? <MobileKeyDock onSendKey={sendKey} /> : null}
     </div>
   );
 }

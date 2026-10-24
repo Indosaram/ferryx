@@ -4,6 +4,7 @@ use crate::browser::{
     BrowserSessionCreatedPayload, BrowserSessionSummary, BrowserWaitCondition,
     CreateBrowserRequest,
 };
+#[cfg(feature = "desktop")]
 use crate::ipc::browser::{
     browser_automation_act, browser_automation_snapshot, browser_download_with_session,
     browser_get_dialogs, browser_handle_dialog, browser_set_dialog_policy, close_browser_session,
@@ -17,6 +18,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::BufReader;
 
@@ -610,6 +612,7 @@ fn remote_url_error_to_ipc(e: IpcError) -> IpcError {
     }
 }
 
+#[cfg(feature = "desktop")]
 /// Builds the script for a remote-operation keypress. It reuses the remote executor's
 /// builder, which dispatches the trimmed key that validate_page_key returns.
 fn keypress_operation_script(key: &str) -> Result<String, IpcError> {
@@ -617,6 +620,7 @@ fn keypress_operation_script(key: &str) -> Result<String, IpcError> {
         .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e.to_string()))
 }
 
+#[cfg(feature = "desktop")]
 pub async fn execute_remote_operation<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,
@@ -1674,6 +1678,7 @@ pub fn read_port_from_file(path: &Path) -> Result<u16, BrowserError> {
     Ok(port)
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(unix)]
 pub fn start_browser_cli_server<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -1682,6 +1687,7 @@ pub fn start_browser_cli_server<R: tauri::Runtime>(
     start_browser_cli_server_at_path(app, manager, &browser_cli_socket_path())
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(unix)]
 fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -1915,6 +1921,7 @@ fn ipc_error_code_string(code: IpcErrorCode) -> String {
         .unwrap_or_else(|| format!("{code:?}"))
 }
 
+#[cfg(feature = "desktop")]
 async fn handle_connection<S, R: tauri::Runtime>(
     stream: S,
     app: AppHandle<R>,
@@ -1987,6 +1994,7 @@ where
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 async fn run_framed_ipc_loop<R, W, Rt: tauri::Runtime>(
     reader: &mut R,
     writer: &mut W,
@@ -2160,6 +2168,7 @@ where
     }
 }
 
+#[cfg(feature = "desktop")]
 async fn execute_request<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,

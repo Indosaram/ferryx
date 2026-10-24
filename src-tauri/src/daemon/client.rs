@@ -661,6 +661,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::PairedHostRead { .. } => "pairedHostRead",
         DaemonRequest::PairedHostPair { .. } => "pairedHostPair",
         DaemonRequest::PairedHostMigrateLegacy { .. } => "pairedHostMigrateLegacy",
+        DaemonRequest::PairedHostRedeemGrant { .. } => "pairedHostRedeemGrant",
+        DaemonRequest::PairedHostClientAttachKey => "pairedHostClientAttachKey",
         DaemonRequest::PairedHostForget { .. } => "pairedHostForget",
         DaemonRequest::PairedHostRevoke { .. } => "pairedHostRevoke",
         DaemonRequest::RemoteCreateMachinePairingCode => "remoteCreateMachinePairingCode",
@@ -2296,9 +2298,18 @@ impl DaemonClient {
         &self,
     ) -> crate::paired_host::service::Result<serde_json::Value> {
         // The connect-only path checks inventory support before forwarding this query.
-        self.paired_host_request(DaemonRequest::GetCapabilities)
-            .await?;
-        Ok(serde_json::json!({"pairedHostInventoryV1": true, "pairedDaemonProxyV1": true}))
+        match self.paired_host_request(DaemonRequest::GetCapabilities).await? {
+            DaemonResponse::CapabilitiesOk { capabilities } => Ok(serde_json::json!({
+                "pairedHostInventoryV1": true,
+                "pairedDaemonProxyV1": true,
+                "pairedHostE2EV1": capabilities.iter().any(|c| c == "pairedHostE2EV1"),
+            })),
+            _ => Ok(serde_json::json!({
+                "pairedHostInventoryV1": true,
+                "pairedDaemonProxyV1": true,
+                "pairedHostE2EV1": false,
+            })),
+        }
     }
     /// The local daemon's advertised capability list, over the connect-only paired path.
     pub async fn paired_daemon_capabilities(
@@ -2358,6 +2369,29 @@ impl DaemonClient {
             .await?
         {
             DaemonResponse::PairedHostForgetOk => Ok(()),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
+    pub async fn paired_host_redeem_grant(
+        &self,
+        request: crate::paired_host::service::RedeemGrantRequest,
+    ) -> crate::paired_host::service::Result<crate::paired_host::inventory::HostView> {
+        match self
+            .paired_host_request(DaemonRequest::PairedHostRedeemGrant { request })
+            .await?
+        {
+            DaemonResponse::PairedHostPairOk { host } => Ok(host),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
+    pub async fn paired_host_client_attach_public_key(
+        &self,
+    ) -> crate::paired_host::service::Result<String> {
+        match self
+            .paired_host_request(DaemonRequest::PairedHostClientAttachKey)
+            .await?
+        {
+            DaemonResponse::PairedHostClientAttachKeyOk { public_key } => Ok(public_key),
             _ => Err(crate::paired_host::service::ServiceError::unavailable()),
         }
     }

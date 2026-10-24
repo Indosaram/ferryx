@@ -630,7 +630,7 @@ export NO_STRIP=true
 rm -rf "$CARGO_TARGET_DIR/release/bundle"
 cd "$source_dir"
 bun tauri build --bundles appimage,deb
-cargo build --manifest-path "$source_dir/src-tauri/Cargo.toml" --release --bin ferryx-cli
+cargo build --manifest-path "$source_dir/src-tauri/Cargo.toml" --release --no-default-features --bin ferryx-cli
 cp "$CARGO_TARGET_DIR/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64" || cp "$source_dir/src-tauri/target/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64"
 test -s "$out_dir/ferryx-cli-linux-amd64"
 appimages=()
