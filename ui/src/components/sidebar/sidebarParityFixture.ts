@@ -39,8 +39,6 @@ export type SidebarParityFixture = {
   readonly desktopAgents: readonly ActiveAgent[];
   /** The hub supervisor lane typing into one worktree right now (relative to the render clock). */
   readonly supervisorLane: { readonly sessionId: string; readonly cwd: string };
-  /** The same agent as the remote session inventory reports it. */
-  readonly remoteActivity: readonly { readonly workspaceId: string; readonly worktreeSlug: string | null; readonly activityState: "working" | "waiting" | "done" }[];
 };
 
 /**
@@ -115,9 +113,4 @@ export const sidebarParityFixture: SidebarParityFixture = {
     worktreePath: `${FERRYX}/.orca-worktrees/ferryx/sidebar-polish-2`,
   }],
   supervisorLane: { sessionId: "hub-lane-1", cwd: `${FERRYX}/.orca-worktrees/ferryx/remote-settings` },
-  remoteActivity: [
-    { workspaceId: "ferryx", worktreeSlug: "sidebar-polish", activityState: "working" },
-    { workspaceId: "ferryx", worktreeSlug: null, activityState: "done" },
-    { workspaceId: "site", worktreeSlug: null, activityState: "waiting" },
-  ],
 };

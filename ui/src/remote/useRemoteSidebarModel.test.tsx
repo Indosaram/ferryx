@@ -141,6 +141,16 @@ describe("useRemoteSidebarModel", () => {
     expect(result.current[0]?.model?.source).toBe("inventory");
   });
 
+  it("falls back to the inventory when a published model carries malformed activity", async () => {
+    const malformed = { ...published(7, "ferryx"), signals: { unreadWorktreePaths: {}, agentStateByPath: {}, activityByWorktreePath: { "/code/ferryx": { hasWaiting: "yes" } } } };
+    const m = fakeMachine(() => ({ ...inventoryRoutes, "/api/v1/workspace/sidebar": json(200, { model: malformed }) }));
+    const { result } = renderHook(() => useRemoteSidebarModel({ machines: [m.machine] }));
+
+    await waitFor(() => expect(result.current[0]?.state).toBe("ok"));
+
+    expect(result.current[0]?.model?.source).toBe("inventory");
+  });
+
   it("settles as error when the fallback builder throws, and recovers on the next sidebarChanged", async () => {
     builder.throwNext = true;
     const m = fakeMachine(() => inventoryRoutes);

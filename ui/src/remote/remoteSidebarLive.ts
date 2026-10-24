@@ -1,6 +1,8 @@
-// Maps a machine's session inventory onto the live signals the shared sidebar derives row,
-// project and footer state from (sidebarLiveState, called by RemoteSidebar with its filter). Inventory rows name a worktree by workspace id and slug; the sidebar keys
-// live state by the row's path, so each model row is matched to its inventory rows here.
+// Live signals for one machine's sidebar (sidebarLiveState, called by RemoteSidebar with its
+// filter). A desktop-published snapshot carries the desktop's own reduced signals, activity
+// included, and those are used as-is so both apps draw from identical inputs. Only a snapshot
+// without published activity (the inventory fallback, or a desktop older than that field) has its
+// activity rebuilt from the session inventory, matched to model rows by workspace id and slug.
 import type { SidebarLiveSignals, SidebarModel } from "../components/sidebar/sidebarModel";
 import { supervisorTypingIn } from "../components/sidebar/sidebarSupervisor";
 import { actingSessionIds, type SupervisorSnapshot } from "../lib/supervisorModel";
@@ -24,6 +26,7 @@ export function remoteSidebarSignals(
   selection: RemoteSidebarSelection | null,
   supervisor: RemoteSidebarSupervisor | null = null,
 ): SidebarLiveSignals {
+  const published = model.signals?.activityByWorktreePath;
   const activityByWorktreePath: Record<string, ActivitySummary> = {};
   let activeWorkspaceId: string | undefined;
   let activePath: string | undefined;
@@ -33,6 +36,7 @@ export function remoteSidebarSignals(
         activeWorkspaceId = node.workspaceId;
         activePath = node.path;
       }
+      if (published) continue;
       const activities: TerminalActivity[] = (inventory?.entries ?? []).flatMap((entry) =>
         entry.activityState && entry.workspaceId === node.workspaceId && entry.worktreeSlug === node.worktreeSlug
           ? [{ state: entry.activityState, title: entry.title ?? "", isAgent: entry.agentType !== null, ...(entry.agentType ? { agentType: entry.agentType } : {}) }]
@@ -44,7 +48,8 @@ export function remoteSidebarSignals(
     activityByWorktreePath,
     ...(activeWorkspaceId === undefined ? {} : { activeWorkspaceId }),
     ...(activePath === undefined ? {} : { activePath }),
-    // The desktop's bell marks and bare agent states, published with the snapshot.
+    // The desktop's activity, bell marks and bare agent states, published with the snapshot; its
+    // activity replaces the inventory reconstruction above whenever it is present.
     ...(model.signals ?? {}),
     ...(supervisor ? { isSupervisorTyping: (path: string) => supervisorTypingIn(supervisor.snapshot, supervisor.now, path) } : {}),
   };

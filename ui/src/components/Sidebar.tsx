@@ -252,7 +252,7 @@ export function Sidebar({
   const { snapshot: supervisorSnapshot, now: supervisorNow } = useSupervisor();
   const live = useMemo(() => sidebarLiveState(model, {
     activityByWorktreePath,
-    // The same reduced signals the publisher sends to the remote.
+    // The same reduced signals the publisher sends to the remote (its activity overrides the raw map).
     ...sidebarSessionSignals(model, { activityByWorktreePath, unreadWorktreePaths, agentStateByPath: agentStatesByPath(agentsByPath) }),
     activeWorkspaceId: activeProjectId,
     activePath,

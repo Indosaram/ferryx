@@ -95,9 +95,24 @@ const isAgentStateRecord = (value: unknown) => {
   return r !== null && Object.values(r).every((state) => AGENT_STATES.includes(state as AgentState));
 };
 
+const ACTIVITY_COUNTS = ["workingCount", "waitingCount", "doneCount", "runningCount"] as const;
+const ACTIVITY_FLAGS = ["hasWorking", "hasWaiting", "hasDone", "hasUnread"] as const;
+
+function isActivitySummary(value: unknown): boolean {
+  const a = objectOf(value);
+  return a !== null && ACTIVITY_COUNTS.every((field) => typeof a[field] === "number") &&
+    ACTIVITY_FLAGS.every((field) => typeof a[field] === "boolean") && (a.agentType === undefined || isString(a.agentType));
+}
+
+const isActivityRecord = (value: unknown) => {
+  const r = objectOf(value);
+  return r !== null && Object.values(r).every(isActivitySummary);
+};
+
 function isSessionSignals(value: unknown): boolean {
   const s = objectOf(value);
-  return s !== null && isFlagRecord(s.unreadWorktreePaths) && isAgentStateRecord(s.agentStateByPath);
+  return s !== null && isFlagRecord(s.unreadWorktreePaths) && isAgentStateRecord(s.agentStateByPath) &&
+    (s.activityByWorktreePath === undefined || isActivityRecord(s.activityByWorktreePath));
 }
 
 /** Structural guard for the wire model: one malformed node rejects the whole snapshot. */

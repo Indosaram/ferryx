@@ -151,15 +151,15 @@ function DesktopSidebar() {
   );
 }
 
+/**
+ * The remote's own session inventory knows no activity at all: every dot, project slot and footer
+ * count the remote draws must come from the snapshot the desktop published.
+ */
 const inventory: RemoteSessionInventory = {
   machineId: "desk",
   revision: "1",
   completeness: "complete",
-  entries: fx.remoteActivity.map((activity, index) => ({
-    machineId: "desk", workspaceId: activity.workspaceId, worktreeSlug: activity.worktreeSlug, worktreeLabel: null,
-    sessionId: `session-${index}`, daemonEpoch: null, title: null, running: true, agentType: null,
-    providerSessionId: null, activityState: activity.activityState,
-  })),
+  entries: [],
   unavailableWorkspaceIds: [],
   fetchedAt: 0,
 };
