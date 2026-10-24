@@ -20,6 +20,7 @@ import { generateChangelog } from "./lib/release-changelog.mjs";
 import { parsePlan, parseReceipt } from "./lib/release-contract.mjs";
 import { loadHostConfig, redactProcessOutput } from "./lib/release-hosts.mjs";
 import { buildHost, preflightAll } from "./lib/release-platforms.mjs";
+import { writeHomebrewPackages } from "./release-packaging.mjs";
 import {
   attachReleaseProvenance,
   generateSboms,
@@ -345,8 +346,9 @@ export async function buildRelease({
 
 /**
  * Assembles and verifies release manifest, deterministic aliases, and SHA256SUMS.txt, then
- * attaches provenance: CycloneDX SBOMs, provenance.json, SHA256SUMS and SHA256SUMS.minisig
- * (signed with the updater key from TAURI_SIGNING_PRIVATE_KEY[_PATH]).
+ * renders the Homebrew cask and formula from SHA256SUMS.txt, then attaches provenance:
+ * CycloneDX SBOMs, provenance.json, SHA256SUMS and SHA256SUMS.minisig (signed with the
+ * updater key from TAURI_SIGNING_PRIVATE_KEY[_PATH]), so the Homebrew files are signed too.
  */
 export function assembleReleaseRun({
   runDir,
@@ -369,6 +371,7 @@ export function assembleReleaseRun({
 
   const result = assembleRelease({ planPath, receiptsDir, artifactsDir, outDir, publicKey: pubkey });
   try {
+    writeHomebrewPackages({ sumsPath: join(outDir, "SHA256SUMS.txt"), outDir, tag: plan.tag, repo: plan.repo });
     attachReleaseProvenance({
       publishDir: outDir,
       plan,
@@ -459,6 +462,12 @@ export async function verifyReleaseRun({ runDir, pubkey = null }) {
       artifactsDir: join(resolvedRunDir, "artifacts"),
       outDir: tempPublish,
       publicKey: pubkey,
+    });
+    writeHomebrewPackages({
+      sumsPath: join(tempPublish, "SHA256SUMS.txt"),
+      outDir: tempPublish,
+      tag: plan.tag,
+      repo: plan.repo,
     });
 
     // Provenance assets (SBOMs, provenance.json, SHA256SUMS[.minisig]) are covered by the
