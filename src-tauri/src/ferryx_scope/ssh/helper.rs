@@ -309,15 +309,20 @@ impl Runtime {
                     return Err("FORBIDDEN".into());
                 }
                 let destination = base.join(slug);
+                // git rejects Windows verbatim (`\\?\`) paths that come from the canonicalized repo.
+                let repo_str = repo.to_string_lossy();
+                let repo_arg = repo_str.strip_prefix(r"\\?\").unwrap_or(&repo_str);
+                let dest_str = destination.to_string_lossy();
+                let dest_arg = dest_str.strip_prefix(r"\\?\").unwrap_or(&dest_str);
                 let branch = format!("{}/{ws}/{slug}", layout.branch_prefix);
                 let mut command = std::process::Command::new("git");
                 #[cfg(windows)]
                 std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
                 let output = command
                     .arg("-C")
-                    .arg(repo)
+                    .arg(repo_arg)
                     .args(["worktree", "add", "-b", &branch, "--"])
-                    .arg(&destination)
+                    .arg(dest_arg)
                     .arg("HEAD")
                     .output()
                     .map_err(|e| e.to_string())?;

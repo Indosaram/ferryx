@@ -882,8 +882,8 @@ pub fn run_watchdog_with(host: &mut dyn WatchdogHost) -> i32 {
 
 #[cfg(windows)]
 pub use platform::{
-    ensure, installed, register_for_login, reload, remove_autostart, run_watchdog,
-    uninstall,
+    ensure, installed, register_for_login, register_staged_for_login, reload, remove_autostart,
+    run_watchdog, uninstall,
 };
 
 #[cfg(windows)]

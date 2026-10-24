@@ -102,9 +102,11 @@ pub mod tests {
     fn create_legacy_orca_worktree(manager: &WorktreeManager, ws: &str, slug: &str) -> std::path::PathBuf {
         let path = manager.repo_root().join(LEGACY_DIR).join(ws).join(slug);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // git rejects Windows verbatim (`\\?\`) paths that come from the canonicalized repo root.
+        let path_arg = git::strip_verbatim_prefix(path.to_str().unwrap());
         git::run_git(
             manager.repo_root(),
-            &["worktree", "add", "-b", &format!("{LEGACY_PREFIX}/{ws}/{slug}"), path.to_str().unwrap()],
+            &["worktree", "add", "-b", &format!("{LEGACY_PREFIX}/{ws}/{slug}"), &path_arg],
         )
         .unwrap();
         fs::canonicalize(path).unwrap()
