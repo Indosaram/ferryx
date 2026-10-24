@@ -10,6 +10,7 @@ import { loadCollapsedProjects, loadWorktreeOrder, subscribeSidebarPersistence }
 import { syncDesktopSidebar, type RegisteredProject } from "./tauri";
 import type { ActiveAgent, Worktree } from "./types";
 import type { ActivitySummary } from "./activity";
+import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
 
 /** The daemon owns the revision and the clock only stamps the snapshot, so neither decides "changed". */
 function modelContentKey(model: SidebarModel) {
@@ -69,8 +70,8 @@ export type DesktopSidebarInput = {
   readonly activityByWorktreePath: Readonly<Record<string, ActivitySummary | undefined>>;
   readonly unreadWorktreePaths: Readonly<Record<string, boolean>>;
   readonly agents: readonly ActiveAgent[];
-  /** The desktop Inbox tab's count, published so the remote's Inbox tab shows the same number. */
-  readonly attentionCount: number;
+  /** The desktop Inbox's rows, published so the remote's Inbox lists and counts the same rows. */
+  readonly attentionRows: readonly AttentionRow[];
 };
 
 /** Publishes the model the desktop sidebar renders, from the same builder hook the Sidebar calls. */
@@ -97,7 +98,7 @@ export function useDesktopSidebarPublisher(input: DesktopSidebarInput) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- persistenceVersion invalidates the storage reads inside
   }, [projects, activeProjectId, emptyKey, persistenceVersion]);
   const built = useSidebarModel({ projects, activeProjectId, worktrees, inactiveProjectWorktrees }, persisted).model;
-  const { activityByWorktreePath, unreadWorktreePaths, agents, attentionCount } = input;
+  const { activityByWorktreePath, unreadWorktreePaths, agents, attentionRows } = input;
   const model = useMemo(() => enabled
     ? {
         ...built,
@@ -105,10 +106,10 @@ export function useDesktopSidebarPublisher(input: DesktopSidebarInput) {
           activityByWorktreePath,
           unreadWorktreePaths,
           agentStateByPath: agentStatesByPath(agents.map((agent) => [agent.worktreePath, agent] as const)),
-          attentionCount,
+          attentionRows,
         }),
       }
-    : null, [activityByWorktreePath, agents, attentionCount, built, enabled, unreadWorktreePaths]);
+    : null, [activityByWorktreePath, agents, attentionRows, built, enabled, unreadWorktreePaths]);
 
   const modelRef = useRef(model);
   modelRef.current = model;

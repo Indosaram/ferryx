@@ -63,6 +63,9 @@ const DESKTOP_ONLY_CONTROLS: readonly { readonly role: string; readonly name: Re
   { role: "button", name: /^Delete worktree$/ },
   { role: "button", name: /^Remove project$/ },
   { role: "button", name: /: open remote settings for /, keepText: true },
+  // The Inbox's write actions: only the desktop owns its notification centre.
+  { role: "button", name: /^Dismiss / },
+  { role: "button", name: /^Mark all read$/ },
 ];
 
 /**
@@ -119,7 +122,7 @@ function serializeSidebar(root: Element): string[] {
 const noop = () => undefined;
 const FILTER_QUERY = "settings";
 
-function DesktopSidebar() {
+function DesktopSidebar({ inboxOpen = false }: { readonly inboxOpen?: boolean }) {
   useDesktopSidebarPublisher({
     enabled: true,
     projects: fx.projects,
@@ -130,7 +133,7 @@ function DesktopSidebar() {
     activityByWorktreePath: fx.desktopActivity,
     unreadWorktreePaths: fx.desktopUnread,
     agents: fx.desktopAgents,
-    attentionCount: fx.desktopAttention.length,
+    attentionRows: fx.desktopAttention,
   });
   return (
     <Sidebar
@@ -147,7 +150,7 @@ function DesktopSidebar() {
       onCreateWorktree={noop}
       onOpenSettings={noop}
       onOpenResources={noop}
-      attention={{ rows: [...fx.desktopAttention], onOpen: noop, onDismiss: noop, onDismissAll: noop, inboxOpen: false, onInboxOpenChange: noop }}
+      attention={{ rows: [...fx.desktopAttention], onOpen: noop, onDismiss: noop, onDismissAll: noop, inboxOpen, onInboxOpenChange: noop }}
     />
   );
 }
@@ -179,7 +182,7 @@ function supervisorSnapshot(): SupervisorSnapshot {
 const REMOTE_PANE_ATTENTION = [{ id: "pane-1", revision: 0, workspaceId: "ferryx", sessionId: "pane-1", state: "done" as const, who: "Coder" }];
 
 /** The phone/browser side: one machine whose gateway answers with the desktop's published model. */
-function RemoteSidebarHarness({ machine }: { readonly machine: RemoteSidebarMachine }) {
+function RemoteSidebarHarness({ machine, view }: { readonly machine: RemoteSidebarMachine; readonly view: "worktrees" | "inbox" }) {
   const [supervisors] = useState(() => ({ [machine.machineId]: { snapshot: supervisorSnapshot(), now: Date.now() } }));
   const sections = useRemoteSidebarModel({ machines: [machine], supervisors });
   return (
@@ -188,9 +191,10 @@ function RemoteSidebarHarness({ machine }: { readonly machine: RemoteSidebarMach
       density="compact"
       pending={null}
       onSelect={noop}
-      view="worktrees"
+      view={view}
       onViewChange={noop}
       inbox={{ rows: REMOTE_PANE_ATTENTION, onOpen: noop, onDismiss: noop }}
+      onOpenPublishedAttention={noop}
       supervisor={{ typing: remoteSupervisorTyping(supervisors), content: null }}
     />
   );
@@ -231,14 +235,14 @@ afterEach(() => {
   worktreeListingFailureStore.reset();
 });
 
-async function renderBoth(advancedFeatures: boolean) {
+async function renderBoth(advancedFeatures: boolean, view: "worktrees" | "inbox" = "worktrees") {
   seedDesktop(advancedFeatures);
   const publishedModel = new Promise<SidebarModel>((resolve) => {
     tauri.onPublish = (model) => resolve(model as SidebarModel);
   });
-  const desktop = render(<DesktopSidebar />);
+  const desktop = render(<DesktopSidebar inboxOpen={view === "inbox"} />);
   const published = await publishedModel;
-  const remote = render(<RemoteSidebarHarness machine={remoteMachine(published)} />);
+  const remote = render(<RemoteSidebarHarness machine={remoteMachine(published)} view={view} />);
   const remoteSection = await waitFor(() => {
     const section = remote.container.querySelector('[data-testid="remote-sidebar-section"]');
     if (!section?.querySelector('[data-testid="worktree-region"]')) throw new Error("remote sidebar not loaded yet");
@@ -277,6 +281,19 @@ describe("desktop and remote sidebar parity", () => {
 
     const desktopTree = serializeSidebar(trees.desktop);
     expect(desktopTree.filter((line) => line.startsWith("listitem")).length).toBeGreaterThanOrEqual(1);
+    expect(serializeSidebar(trees.remote)).toEqual(desktopTree);
+  });
+
+  it("lists the same Inbox rows on both apps, under the same tab count", async () => {
+    // advancedFeatures false: the publisher skips a model identical to the previous test's (true).
+    const trees = await renderBoth(false, "inbox");
+
+    const desktopTree = serializeSidebar(trees.desktop);
+    const listed = desktopTree.filter((line) => line.includes("testid=attention-row "));
+    // The remote's own pane rows differ in number and content, so a remote listing them fails.
+    expect(listed).toHaveLength(fx.desktopAttention.length);
+    expect(REMOTE_PANE_ATTENTION.length).not.toBe(fx.desktopAttention.length);
+    expect(desktopTree).toContain(`tab name="Inbox (${listed.length})" testid=- aria-selected=true`);
     expect(serializeSidebar(trees.remote)).toEqual(desktopTree);
   });
 });

@@ -3,8 +3,12 @@
 // publisher sends the same object inside the snapshot, so the remote derives its rows, project
 // slots and footer from the identical inputs instead of reconstructing them.
 import type { ActivitySummary } from "../../lib/activity";
+import type { AttentionRow } from "../../features/ferryx/attention/attentionModel";
 import type { AgentState } from "../../lib/types";
 import type { SidebarModel } from "./sidebarModel";
+
+/** At most this many Inbox rows ride in one snapshot (the desktop's first, most urgent rows). */
+export const PUBLISHED_ATTENTION_ROWS_CAP = 50;
 
 export type SidebarSessionSignals = {
   /**
@@ -18,10 +22,11 @@ export type SidebarSessionSignals = {
   /** Bare agent state for rows the desktop has no activity summary for (the slot's fallback). */
   readonly agentStateByPath: Readonly<Record<string, AgentState>>;
   /**
-   * The count on the desktop's Inbox tab (its notification centre's attention rows). Published so
-   * the remote's Inbox tab shows the same number; absent from older snapshots.
+   * The desktop Inbox's rows (its notification centre), in its order and capped. The remote lists
+   * exactly these and counts them, so its Inbox tab and list agree with each other and with the
+   * desktop. Absent from older snapshots.
    */
-  readonly attentionCount?: number;
+  readonly attentionRows?: readonly AttentionRow[];
 };
 
 export const AGENT_STATES: readonly AgentState[] = ["starting", "working", "waiting", "exited", "failed"];
@@ -34,7 +39,7 @@ export function sidebarSessionSignals(model: SidebarModel, raw: {
   readonly activityByWorktreePath?: Readonly<Record<string, ActivitySummary | undefined>>;
   readonly unreadWorktreePaths?: Readonly<Record<string, boolean>>;
   readonly agentStateByPath?: Readonly<Record<string, AgentState | undefined>>;
-  readonly attentionCount?: number;
+  readonly attentionRows?: readonly AttentionRow[];
 }): SidebarSessionSignals {
   const activityByWorktreePath: Record<string, ActivitySummary> = {};
   const unreadWorktreePaths: Record<string, boolean> = {};
@@ -51,6 +56,6 @@ export function sidebarSessionSignals(model: SidebarModel, raw: {
     activityByWorktreePath,
     unreadWorktreePaths,
     agentStateByPath,
-    ...(raw.attentionCount === undefined ? {} : { attentionCount: raw.attentionCount }),
+    ...(raw.attentionRows === undefined ? {} : { attentionRows: raw.attentionRows.slice(0, PUBLISHED_ATTENTION_ROWS_CAP) }),
   };
 }

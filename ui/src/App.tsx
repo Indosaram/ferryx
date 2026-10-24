@@ -2085,7 +2085,7 @@ function WorkspaceApp({
     // liveActivityLookup reads only the mounted workspace id and its per-session activity map.
     [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
   );
-  // Publishes what the Sidebar draws, Inbox count included (declared here, after attentionRows).
+  // Publishes what the Sidebar draws, Inbox rows included (declared here, after attentionRows).
   useDesktopSidebarPublisher({
     enabled: isNativeRuntime,
     projects,
@@ -2096,7 +2096,7 @@ function WorkspaceApp({
     activityByWorktreePath: worktreeActivity,
     unreadWorktreePaths: state.unreadWorktreePaths,
     agents,
-    attentionCount: attentionRows.length,
+    attentionRows,
   });
   const [pendingTabClose, setPendingTabClose] = useState<{
     kind: "pane" | "tab";

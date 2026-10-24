@@ -4,7 +4,7 @@ import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { IconButton } from "../components/ui/IconButton";
 import { buildRemoteAttentionRows, type AttentionRow } from "../features/ferryx/attention/attentionModel";
 import { buildRemoteInventory, declaresOwnProperty, type RemoteInventoryModel } from "./remoteInventoryView";
-import { RemoteSidebar, type RemoteSidebarTarget } from "./RemoteSidebar";
+import { RemoteSidebar, type PublishedAttentionTarget, type RemoteSidebarTarget } from "./RemoteSidebar";
 import { RemoteTerminalTabStrip, stripTabs, type RemoteStripTab } from "./RemoteTerminalTabStrip";
 import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 
@@ -513,6 +513,24 @@ export function sidebarRowOption(model: RemoteWorkspaceModel, target: RemoteSide
   };
 }
 
+/**
+ * The option a desktop-published Inbox row opens: that machine's session when the inventory knows
+ * it, otherwise that machine's workspace (its root worktree first). Read-only: nothing is written
+ * back to the desktop.
+ */
+export function publishedAttentionOption(model: RemoteWorkspaceModel, target: PublishedAttentionTarget): RemoteContextOption {
+  const { machineId, row } = target;
+  const accountMachines = model.options.some((option) => option.machineId !== undefined);
+  const onMachine = (option: RemoteContextOption) =>
+    !option.unavailable && option.workspaceId === row.workspaceId && (!accountMachines || option.machineId === machineId);
+  const session = model.options.find((option) => onMachine(option) && option.sessionId === row.sessionId);
+  if (session) return session;
+  const worktrees = model.options.filter((option) => onMachine(option) && !option.sessionId);
+  const known = worktrees.find((option) => option.worktreeSlug === null) ?? worktrees[0];
+  if (known) return known;
+  return { workspaceId: row.workspaceId, worktreeSlug: null, worktreeLabel: null, ...(accountMachines ? { machineId } : {}) };
+}
+
 export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   model,
   pending,
@@ -574,6 +592,12 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
     onSelectorOpenChange(false);
   };
 
+  const openPublishedAttention = (target: PublishedAttentionTarget) => {
+    if (pending !== null) return;
+    onSelectorOpenChange(false);
+    selectOption(publishedAttentionOption(model, target));
+  };
+
   const sidebarEmpty = sidebarSections.length === 0;
   const busyTab = pending?.sessionId ? tabs.find((tab) => tab.sessionId === pending.sessionId)?.key ?? null : null;
   const createDisabled = pending !== null || !model.context.workspaceId;
@@ -597,7 +621,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             selectOption(sidebarRowOption(model, target));
           }}
           view={inline ? "worktrees" : view}
-          {...(inline ? {} : { onViewChange: changeView, inbox: { rows: attentionRows, onOpen: openAttentionRow, onDismiss: () => undefined } })}
+          {...(inline ? {} : { onViewChange: changeView, inbox: { rows: attentionRows, onOpen: openAttentionRow, onDismiss: () => undefined }, onOpenPublishedAttention: openPublishedAttention })}
           {...(supervisor && !inline ? { supervisor } : {})}
           status={pickerStatus}
         />

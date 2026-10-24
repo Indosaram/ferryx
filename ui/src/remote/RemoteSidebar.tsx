@@ -6,6 +6,7 @@ import { useState, type ReactNode } from "react";
 import { sidebarLiveState } from "../components/sidebar/sidebarModel";
 import type { SidebarModel, SidebarProjectNode, SidebarWorktreeNode } from "../components/sidebar/sidebarModel";
 import { SidebarView, type SidebarInbox } from "../components/sidebar/SidebarView";
+import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { SidebarWorktreeRow, type SidebarDensity } from "../components/sidebar/SidebarWorktreeRow";
 import { cn } from "../lib/cn";
@@ -64,6 +65,11 @@ export type RemoteSidebarProps = {
   readonly view: SidebarViewId;
   readonly onViewChange?: (view: SidebarViewId) => void;
   readonly inbox?: SidebarInbox;
+  /**
+   * Opens a row from a desktop's published Inbox (the remote never writes desktop state, so those
+   * rows have no dismiss). Without it, a published row's click does nothing.
+   */
+  readonly onOpenPublishedAttention?: (target: PublishedAttentionTarget) => void;
   readonly supervisor?: { readonly typing: boolean; readonly content: ReactNode };
   /** Account inventory loading/offline rows, shown above the tree. */
   readonly status?: ReactNode;
@@ -115,24 +121,54 @@ type SectionProps = {
   readonly sidebar: RemoteSidebarProps;
   readonly first: boolean;
   readonly heading: boolean;
-  /** The Inbox tab count the machines' desktops published; null when none publishes one. */
-  readonly inboxCount: number | null;
+  /** The Inbox the first section shows: the desktops' published rows, or the remote's own. */
+  readonly inbox: SidebarInbox | undefined;
 };
 
+/** A desktop-published Inbox row and the machine whose desktop published it. */
+export type PublishedAttentionTarget = { readonly machineId: string; readonly row: AttentionRow };
+
 /**
- * The Inbox tab's count as the desktops draw it: the sum of the counts their snapshots publish
- * (one desktop: exactly its own). Null when no section carries one (inventory fallback or an older
- * desktop), so the remote counts its own rows as before.
+ * The Inbox rows the machines' desktops published, every machine's in section order. Row ids are
+ * namespaced by machine so two desktops' rows never share a key; `targets` maps each back. Null when
+ * no desktop-sourced section carries rows (inventory fallback or an older desktop), so the remote
+ * lists its own rows. Either way the tab counts exactly the rows listed under it.
  */
-export function publishedInboxCount(sections: readonly Pick<RemoteSidebarSection, "model">[]): number | null {
-  const counts = sections.flatMap((section) => {
-    const count = section.model?.source === "desktop" ? section.model.signals?.attentionCount : undefined;
-    return count === undefined ? [] : [count];
-  });
-  return counts.length === 0 ? null : counts.reduce((sum, count) => sum + count, 0);
+export function publishedInbox(
+  sections: readonly Pick<RemoteSidebarSection, "machineId" | "model">[],
+): { readonly rows: AttentionRow[]; readonly targets: ReadonlyMap<string, PublishedAttentionTarget> } | null {
+  let published = false;
+  const rows: AttentionRow[] = [];
+  const targets = new Map<string, PublishedAttentionTarget>();
+  for (const section of sections) {
+    const sectionRows = section.model?.source === "desktop" ? section.model.signals?.attentionRows : undefined;
+    if (sectionRows === undefined) continue;
+    published = true;
+    for (const row of sectionRows) {
+      const id = JSON.stringify([section.machineId, row.id]);
+      rows.push({ ...row, id });
+      targets.set(id, { machineId: section.machineId, row });
+    }
+  }
+  return published ? { rows, targets } : null;
 }
 
-function MachineSection({ section, sidebar, first, heading, inboxCount }: SectionProps) {
+function sidebarInbox(sidebar: RemoteSidebarProps): SidebarInbox | undefined {
+  if (!sidebar.inbox) return undefined;
+  const published = publishedInbox(sidebar.sections);
+  if (!published) return sidebar.inbox;
+  const open = sidebar.onOpenPublishedAttention;
+  return {
+    rows: published.rows,
+    onOpen: (row) => {
+      const target = published.targets.get(row.id);
+      if (target && open) open(target);
+    },
+    // No dismiss: it would write the desktop's notification centre, and the remote never does.
+  };
+}
+
+function MachineSection({ section, sidebar, first, heading, inbox }: SectionProps) {
   const [collapsed, setCollapsed] = useState<string[] | null>(() => readCollapsed(section.machineId));
   const [query, setQuery] = useState("");
   const model: SidebarModel | null = section.model
@@ -187,7 +223,7 @@ function MachineSection({ section, sidebar, first, heading, inboxCount }: Sectio
           }}
           filter={{ query, onChange: setQuery }}
           view={first ? sidebar.view : "worktrees"}
-          {...(first && sidebar.inbox ? { inbox: inboxCount === null ? sidebar.inbox : { ...sidebar.inbox, count: inboxCount } } : {})}
+          {...(first && inbox ? { inbox } : {})}
           {...(first && sidebar.supervisor ? { supervisor: sidebar.supervisor } : {})}
           renderRow={(project, node, live) => (
             <div
@@ -217,11 +253,11 @@ export function RemoteSidebar(sidebar: RemoteSidebarProps) {
   const heading = sidebar.sections.length > 1;
   const sections = sidebar.view === "worktrees" ? sidebar.sections : sidebar.sections.slice(0, 1);
   if (sections.length === 0) return <>{sidebar.status}</>;
-  const inboxCount = publishedInboxCount(sidebar.sections);
+  const inbox = sidebarInbox(sidebar);
   return (
     <>
       {sections.map((section, index) => (
-        <MachineSection key={section.machineId} section={section} sidebar={sidebar} first={index === 0} heading={heading} inboxCount={inboxCount} />
+        <MachineSection key={section.machineId} section={section} sidebar={sidebar} first={index === 0} heading={heading} inbox={inbox} />
       ))}
     </>
   );

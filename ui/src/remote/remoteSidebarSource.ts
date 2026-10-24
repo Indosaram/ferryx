@@ -4,7 +4,7 @@
 import { buildSidebarModel, type SidebarModel } from "../components/sidebar/sidebarModel";
 import type { RegisteredProject } from "../lib/tauri";
 import type { AgentState, Worktree } from "../lib/types";
-import { AGENT_STATES } from "../components/sidebar/sidebarSessionSignals";
+import { AGENT_STATES, PUBLISHED_ATTENTION_ROWS_CAP } from "../components/sidebar/sidebarSessionSignals";
 import type { SupervisorFetch, SupervisorHttpResponse } from "./remoteSupervisor";
 
 /** Same adapter as the supervisor feed: the device token is already bound, callers pass a path. */
@@ -113,7 +113,20 @@ function isSessionSignals(value: unknown): boolean {
   const s = objectOf(value);
   return s !== null && isFlagRecord(s.unreadWorktreePaths) && isAgentStateRecord(s.agentStateByPath) &&
     (s.activityByWorktreePath === undefined || isActivityRecord(s.activityByWorktreePath)) &&
-    (s.attentionCount === undefined || (Number.isInteger(s.attentionCount) && (s.attentionCount as number) >= 0));
+    (s.attentionRows === undefined ||
+      (Array.isArray(s.attentionRows) && s.attentionRows.length <= PUBLISHED_ATTENTION_ROWS_CAP && s.attentionRows.every(isAttentionRow)));
+}
+
+const isOptional = (value: unknown, check: (value: unknown) => boolean) => value === undefined || check(value);
+const isFiniteNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value);
+
+/** One published desktop Inbox row (AttentionRow). */
+function isAttentionRow(value: unknown): boolean {
+  const r = objectOf(value);
+  return r !== null && isString(r.id) && isFiniteNumber(r.revision) && isString(r.workspaceId) && isString(r.sessionId) &&
+    (r.state === "needs-you" || r.state === "done") && isString(r.who) &&
+    isOptional(r.location, isString) && isOptional(r.text, isString) && isOptional(r.at, isFiniteNumber) &&
+    isOptional(r.supervisorLabel, isString);
 }
 
 /** Structural guard for the wire model: one malformed node rejects the whole snapshot. */

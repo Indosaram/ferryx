@@ -52,7 +52,7 @@ export function sidebarParitySections(
           activityByWorktreePath: fixture.desktopActivity,
           unreadWorktreePaths: fixture.desktopUnread,
           agentStateByPath: agentStatesByPath(fixture.desktopAgents.map((agent) => [agent.worktreePath, agent] as const)),
-          attentionCount: fixture.desktopAttention.length,
+          attentionRows: fixture.desktopAttention,
         }),
       }
     : built;

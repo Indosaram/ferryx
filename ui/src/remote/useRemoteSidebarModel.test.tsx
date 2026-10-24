@@ -151,8 +151,12 @@ describe("useRemoteSidebarModel", () => {
     expect(result.current[0]?.model?.source).toBe("inventory");
   });
 
-  it("falls back to the inventory when a published model carries a malformed inbox count", async () => {
-    const malformed = { ...published(8, "ferryx"), signals: { unreadWorktreePaths: {}, agentStateByPath: {}, attentionCount: -1 } };
+  it.each([
+    ["a malformed inbox row", [{ id: "r", revision: 1, workspaceId: "ferryx", sessionId: "s", state: "maybe", who: "Coder" }]],
+    ["more inbox rows than the cap", Array.from({ length: 51 }, (_, i) => ({ id: `r${i}`, revision: 1, workspaceId: "ferryx", sessionId: "s", state: "done", who: "Coder" }))],
+    ["inbox rows that are not a list", { r: 1 }],
+  ])("falls back to the inventory when a published model carries %s", async (_label, attentionRows) => {
+    const malformed = { ...published(8, "ferryx"), signals: { unreadWorktreePaths: {}, agentStateByPath: {}, attentionRows } };
     const m = fakeMachine(() => ({ ...inventoryRoutes, "/api/v1/workspace/sidebar": json(200, { model: malformed }) }));
     const { result } = renderHook(() => useRemoteSidebarModel({ machines: [m.machine] }));
 
