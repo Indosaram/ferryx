@@ -17,12 +17,18 @@ export const planPrice = (plan, val, suffix = '') =>
 
 export const availabilityLabel = (plan) => (isComingSoon(plan) ? 'Coming soon' : 'Available now');
 
+export const teamPlan = pricingData.plans.team;
+
 Ferryx connects your terminals, agents, and Git worktrees across local and remote machines.
 
 Our commercial hosted relay network allows connecting remote machines, accessing terminals from web browsers, and coordinating agent workflows without manual port forwarding or VPN configuration.
 
 :::note[Paid Plans Coming Soon]
-**Only the Free plan is available today.** Pro and Team are coming soon: the machine limits below are final, but their prices are planned and checkout is not open yet.
+**Only the Free plan is available today.** Pro and Team are coming soon: the machine limits below are final, but their prices are planned and checkout is not open yet. Business and Enterprise are not priced yet; see [Business and Enterprise](#4-business-and-enterprise) below.
+:::
+
+:::caution[Company Use]
+Ferryx is free for individuals, education, open-source work, non-profits, and companies with fewer than 50 employees and contractors and less than USD 5M in annual revenue. Larger companies need the Team plan or higher to use Ferryx for work, starting 90 days after the Team plan opens; until then, work use stays free. See the [license](https://github.com/Indosaram/ferryx/blob/main/LICENSE).
 :::
 
 :::tip[Local and Self-Hosted are Perpetually Free]
@@ -41,6 +47,7 @@ Our commercial hosted relay network allows connecting remote machines, accessing
 | **Connected Machines** | {pricingData.plans.free.machine_limit} machine | Up to {pricingData.plans.pro.machine_limit} machines | {pricingData.plans.team.machine_limit} |
 | **Extra Machine Expansion** | — | {planPrice(pricingData.plans.pro, pricingData.plans.pro.extra_host_pack.monthly, ' / mo')} or {formatPrice(pricingData.plans.pro.extra_host_pack.annual, ' / yr')} per {pricingData.plans.pro.extra_host_pack.hosts} hosts | {planPrice(pricingData.plans.team, pricingData.plans.team.extra_host_pack.annual, ' / yr')} per {pricingData.plans.team.extra_host_pack.hosts} hosts (Annual) |
 | **Seat Requirements** | 1 user | 1 user | Minimum {pricingData.plans.team.min_seats} seats |
+| **Team List Price** | — | — | {planPrice(teamPlan, teamPlan.list_monthly, ' / seat / mo')} after the launch period |
 | **Managed Relay Network** | Included | Included | Included (Pooled) |
 | **Direct P2P & QUIC Tunnels** | Included | Included | Included |
 | **Mobile & Web Terminal Access** | Included | Included | Included |
@@ -65,11 +72,17 @@ Our commercial hosted relay network allows connecting remote machines, accessing
 
 ### 3. Team Plan (Coming Soon)
 - **Availability:** {availabilityLabel(pricingData.plans.team)}. Checkout is not open yet.
-- **Planned Price:** {formatPrice(pricingData.plans.team.monthly, ' / seat / month')} or {formatPrice(pricingData.plans.team.annual, ' / seat / year')}.
+- **Planned Launch Price:** {formatPrice(pricingData.plans.team.monthly, ' / seat / month')} or {formatPrice(pricingData.plans.team.annual, ' / seat / year')}.
+- **Planned List Price:** {formatPrice(teamPlan.list_monthly, ' / seat / month')} or {formatPrice(teamPlan.list_annual, ' / seat / year')}. {teamPlan.launch_price_note}
 - **Minimum Seats:** {pricingData.plans.team.min_seats} seats.
 - **Pooled Machine Capacity:** Each seat contributes {pricingData.plans.team.hosts_per_seat} machines to an organization-wide pool (e.g., a 5-seat team shares 50 connected machines across all members).
 - **Team Host Expansion:** Additional host packs (+{pricingData.plans.team.extra_host_pack.hosts} machines), planned at {formatPrice(pricingData.plans.team.extra_host_pack.annual, ' / year')} per pack.
 - **Management:** Organization owner and admin roles, centralized member invitations, and shared license enforcement.
+
+### 4. Business and Enterprise
+- **Business (waitlist):** {pricingData.plans.business.description} Minimum {pricingData.plans.business.min_seats} seats.
+- **Enterprise (quote):** {pricingData.plans.enterprise.description}
+- Features listed here are on the roadmap and not available today. Neither plan is needed to run a self-hosted relay; self-hosted relays stay free on every plan.
 
 ---
 
