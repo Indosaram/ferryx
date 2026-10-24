@@ -1,17 +1,17 @@
 import { useSortable } from "@dnd-kit/sortable";
-import { Eye, LockKeyhole, Plus, Trash2 } from "lucide-react";
+import { LockKeyhole, Plus, Trash2 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import type { ActivitySummary } from "../lib/activity";
-import { cn } from "../lib/cn";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
 import { getHostPlatform } from "../lib/platform";
 import { revealPath } from "../lib/tauri";
 import { actingSessionIds, useSupervisor, type SupervisorSnapshot } from "../lib/supervisor";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
-import { SidebarStateSlot } from "./sidebar/SidebarStateSlot";
+import type { SidebarRowLive } from "./sidebar/sidebarModel";
+import { SidebarEmptyStatus, SidebarWorktreeRow, SidebarWorktreesEmpty } from "./sidebar/SidebarWorktreeRow";
 import { SIDEBAR_EMPTY_TEXT, worktreeLabel, worktreeRowHost } from "./sidebar/sidebarLabels";
 import { worktreeSortableId } from "./sidebar/sidebarRows";
 import { supervisorSlotWins, worktreeRowSlot } from "./sidebar/sidebarSlots";
@@ -50,7 +50,45 @@ export type WorktreeRowProps = {
   readonly onCreateWorktree?: (worktree: Worktree) => void;
   readonly onDelete: (worktree: Worktree) => void;
   readonly onResetAgentState?: (worktree: Worktree) => void;
+  /** Precomputed row state (sidebarLiveState); without it the row derives its own. */
+  readonly live?: SidebarRowLive;
 };
+
+/** What one list row needs besides the worktree: the list's selection and live inputs. */
+export type WorktreeListRowContext = Pick<
+  WorktreeListProps,
+  "repoRoot" | "activePath" | "activeWorkspaceId" | "statuses" | "unreadWorktreePaths" | "activityByWorktreePath" |
+  "onSelect" | "onCreateWorktree" | "onDelete" | "onResetAgentState" | "sortableWorkspaceId"
+> & { readonly agentsByPath: ReadonlyMap<string, ActiveAgent> };
+
+/** Row props for one worktree of a list; the sidebar container and WorktreeList share it. */
+export function worktreeListRowProps(worktree: Worktree, context: WorktreeListRowContext): WorktreeRowProps {
+  const effectiveWorkspaceId = worktree.workspaceId ?? context.sortableWorkspaceId;
+  const active =
+    worktree.path === context.activePath &&
+    (!context.activeWorkspaceId || !effectiveWorkspaceId || effectiveWorkspaceId === context.activeWorkspaceId);
+  // Paired terminal proxy is unavailable: path-only local terminal data
+  // must never light up a machine row with the same absolute path.
+  const paired = worktree.workspaceId?.startsWith("daemon:");
+  const summary = paired ? undefined : context.activityByWorktreePath?.[worktree.path];
+  return {
+    worktree,
+    repoRoot: context.repoRoot,
+    active,
+    agent: paired ? undefined : context.agentsByPath.get(worktree.path),
+    status: paired ? undefined : context.statuses[worktree.path],
+    unread: !paired && !active && Boolean(summary?.hasUnread || context.unreadWorktreePaths?.[worktree.path]),
+    activitySummary: summary,
+    onSelect: context.onSelect,
+    onCreateWorktree: context.onCreateWorktree,
+    onDelete: context.onDelete,
+    onResetAgentState: context.onResetAgentState,
+  };
+}
+
+export function agentsByWorktreePath(agents: readonly ActiveAgent[]): Map<string, ActiveAgent> {
+  return new Map(agents.map((agent) => [agent.worktreePath, agent]));
+}
 
 export function fileManagerActionLabel() {
   const platform = getHostPlatform();
@@ -109,6 +147,7 @@ export const WorktreeRow = memo(function WorktreeRow({
   onCreateWorktree,
   onDelete,
   onResetAgentState,
+  live,
 }: WorktreeRowProps) {
   const menuUnlistenRef = useRef<(() => void) | null>(null);
 
@@ -132,6 +171,7 @@ export const WorktreeRow = memo(function WorktreeRow({
   const { snapshot: supervisor, now: supervisorNow } = useSupervisor();
   const supervisorTyping = supervisorSlotWins(slotState, isRemote, supervisorTypingIn(supervisor, supervisorNow, worktree.path));
   const hostName = worktreeRowHost(worktree);
+  const rowLive: SidebarRowLive = live ?? { active, slot: slotState, supervisorTyping };
 
   const handleContextMenu = (event: React.MouseEvent) => {
     event.preventDefault();
@@ -203,67 +243,23 @@ export const WorktreeRow = memo(function WorktreeRow({
     : null;
 
   return (
-    <>
-      <div
-        data-stale={isStale ? "true" : undefined}
-        data-disabled={isDisabled ? "true" : undefined}
-        onContextMenu={handleContextMenu}
-        className={cn(
-          "group/worktree-row relative my-0.5 w-full rounded-md transition-colors",
-          isDisabled && "opacity-60",
-          active
-            ? "bg-worktree-sidebar-accent text-foreground"
-            : "bg-transparent hover:bg-white/[0.04]",
-        )}
-      >
-        {active ? (
-          <span
-            aria-hidden="true"
-            data-testid="worktree-rail-active"
-            className="pointer-events-none absolute -left-[9px] top-1 bottom-1 w-px bg-worktree-sidebar-ring"
-          />
-        ) : null}
-        <button
-          type="button"
-          onClick={() => {
-            if (unavailableReason) {
-              toast.info(unavailableReason);
-              return;
-            }
-            onSelect(worktree);
-          }}
-          data-shortcut-worktree-path={worktree.path}
-          data-shortcut-workspace-id={worktree.workspaceId ?? ""}
-          aria-current={active ? "true" : undefined}
-          aria-disabled={isDisabled ? "true" : undefined}
-          title={unavailableReason ?? (isRemote ? `Remote SSH root: ${worktree.path}${worktree.hostLabel ? ` (${worktree.hostLabel})` : ""}` : undefined)}
-          className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 pr-8 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-disabled:cursor-not-allowed"
-        >
-          <span
-            className={cn(
-              "min-w-0 truncate text-[12px] font-semibold leading-tight",
-              active ? "text-foreground" : "text-worktree-sidebar-foreground",
-            )}
-          >
-            {displayName}
-          </span>
-          {supervisorTyping ? (
-            <span data-testid="worktree-supervisor-slot" className="ml-auto inline-flex min-w-0 shrink-0 items-center gap-1 truncate text-[10px] leading-none text-foreground">
-              <Eye aria-hidden="true" className="size-2.5 shrink-0" />
-              <span className="truncate">supervisor typing</span>
-            </span>
-          ) : (
-            <SidebarStateSlot
-              state={slotState}
-              host={hostName}
-              title={isRemote && slotState === null ? (worktree.hostSummary ? `${worktree.hostLabel ?? "Remote"} (${worktree.hostSummary})` : hostName) : undefined}
-              className="ml-auto min-w-0 truncate"
-              data-testid={slotState ? "worktree-status-dot" : "remote-machine-badge"}
-            />
-          )}
-        </button>
-
-        <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/worktree-row:opacity-100">
+    <SidebarWorktreeRow
+      node={{ path: worktree.path, label: displayName, hostLabel: hostName ?? null, stale: isStale }}
+      live={rowLive}
+      disabled={isDisabled}
+      onContextMenu={handleContextMenu}
+      onSelect={() => {
+        if (unavailableReason) {
+          toast.info(unavailableReason);
+          return;
+        }
+        onSelect(worktree);
+      }}
+      shortcutWorkspaceId={worktree.workspaceId ?? ""}
+      title={unavailableReason ?? (isRemote ? `Remote SSH root: ${worktree.path}${worktree.hostLabel ? ` (${worktree.hostLabel})` : ""}` : undefined)}
+      slotTitle={isRemote && rowLive.slot === null ? (worktree.hostSummary ? `${worktree.hostLabel ?? "Remote"} (${worktree.hostSummary})` : hostName) : undefined}
+      trailing={
+        <>
           {worktree.locked ? <LockKeyhole className="mr-0.5 size-3 text-status-warning" /> : null}
           {onCreateWorktree ? (
             <IconButton
@@ -289,11 +285,9 @@ export const WorktreeRow = memo(function WorktreeRow({
               <Trash2 className="size-3" />
             </IconButton>
           ) : null}
-        </div>
-
-      </div>
-
-    </>
+        </>
+      }
+    />
   );
 });
 
@@ -301,7 +295,7 @@ type SortableWorktreeRowProps = WorktreeRowProps & {
   readonly workspaceId: string;
 };
 
-const SortableWorktreeRow = memo(function SortableWorktreeRow({
+export const SortableWorktreeRow = memo(function SortableWorktreeRow({
   workspaceId,
   ...rowProps
 }: SortableWorktreeRowProps) {
@@ -345,51 +339,19 @@ export function WorktreeList({
   label = "Worktrees",
   emptyState,
 }: WorktreeListProps) {
-  const agentsByPath = useMemo(() => {
-    const map = new Map<string, ActiveAgent>();
-    for (const agent of agents) {
-      map.set(agent.worktreePath, agent);
-    }
-    return map;
-  }, [agents]);
+  const agentsByPath = useMemo(() => agentsByWorktreePath(agents), [agents]);
 
   if (worktrees.length === 0) {
-    return emptyState ? (
-      <div role="status" className="px-2 py-1.5 text-[11px] leading-relaxed text-muted-foreground">
-        {emptyState}
-      </div>
-    ) : null;
+    return emptyState ? <SidebarEmptyStatus>{emptyState}</SidebarEmptyStatus> : null;
   }
 
   return (
     <div role="list" aria-label={label} className="m-0 p-0">
       {worktrees.map((worktree) => {
-        const effectiveWorkspaceId = worktree.workspaceId ?? sortableWorkspaceId;
-        const active =
-          worktree.path === activePath &&
-          (!activeWorkspaceId || !effectiveWorkspaceId || effectiveWorkspaceId === activeWorkspaceId);
-        // Paired terminal proxy is unavailable: path-only local terminal data
-        // must never light up a machine row with the same absolute path.
-        const paired = worktree.workspaceId?.startsWith("daemon:");
-        const agent = paired ? undefined : agentsByPath.get(worktree.path);
-        const status = paired ? undefined : statuses[worktree.path];
-        const summary = paired ? undefined : activityByWorktreePath?.[worktree.path];
-        const hasUnread = !paired && !active && Boolean(summary?.hasUnread || unreadWorktreePaths?.[worktree.path]);
-
-        const rowProps: WorktreeRowProps = {
-          worktree,
-          repoRoot,
-          active,
-          agent,
-          status,
-          unread: hasUnread,
-          activitySummary: summary,
-          onSelect,
-          onCreateWorktree,
-          onDelete,
-          onResetAgentState,
-        };
-
+        const rowProps = worktreeListRowProps(worktree, {
+          repoRoot, activePath, activeWorkspaceId, statuses, unreadWorktreePaths, activityByWorktreePath,
+          onSelect, onCreateWorktree, onDelete, onResetAgentState, sortableWorkspaceId, agentsByPath,
+        });
         const rowKey = worktree.workspaceId ? `${worktree.workspaceId}:${worktree.path}` : worktree.path;
 
         return sortableWorkspaceId ? (
@@ -406,18 +368,5 @@ export function WorktreeList({
 
 /** Default empty-state hint for a project section: says what is going on and offers the one action. */
 export function EmptyWorktreesHint({ onCreateWorktree }: { readonly onCreateWorktree?: () => void }) {
-  return (
-    <span className="flex items-center justify-between gap-2">
-      <span>{SIDEBAR_EMPTY_TEXT.noWorktrees}</span>
-      {onCreateWorktree ? (
-        <button
-          type="button"
-          onClick={onCreateWorktree}
-          className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-foreground hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          Add worktree
-        </button>
-      ) : null}
-    </span>
-  );
+  return <SidebarWorktreesEmpty text={SIDEBAR_EMPTY_TEXT.noWorktrees} onCreateWorktree={onCreateWorktree} />;
 }
