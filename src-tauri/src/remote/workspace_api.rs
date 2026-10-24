@@ -942,15 +942,25 @@ pub async fn list(state: State<Arc<RemoteGatewayState>>, headers: HeaderMap) -> 
 /// GET /api/v1/workspace/sidebar: the desktop's sidebar model, or `{model: null}` before any sync.
 pub async fn sidebar(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap) -> Response {
     let id = uuid::Uuid::new_v4().to_string();
-    execute(state, headers, false, id.clone(), move |state, headers, _context| {
-        match authorize(state, headers) {
+    execute(
+        state,
+        headers,
+        false,
+        id.clone(),
+        move |state, headers, _context| match authorize(state, headers) {
             Ok(_) => {
-                let services = state.machine_services.as_ref().expect("authorized services");
-                response(200, serde_json::json!({"model": services.workspaces.sidebar.model()}))
+                let services = state
+                    .machine_services
+                    .as_ref()
+                    .expect("authorized services");
+                response(
+                    200,
+                    serde_json::json!({"model": services.workspaces.sidebar.model()}),
+                )
             }
             Err(e) => failure(&e, &id),
-        }
-    })
+        },
+    )
     .await
 }
 

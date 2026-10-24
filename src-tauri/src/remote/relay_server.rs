@@ -4427,7 +4427,10 @@ mod tests {
         assert!(allowed_http_route(&Method::GET, "workspace/sidebar"));
         assert!(validate_http_query("workspace/sidebar", None).is_ok());
         for method in [Method::POST, Method::DELETE, Method::PUT] {
-            assert!(!allowed_http_route(&method, "workspace/sidebar"), "{method} stays refused");
+            assert!(
+                !allowed_http_route(&method, "workspace/sidebar"),
+                "{method} stays refused"
+            );
         }
         assert!(!allowed_http_route(&Method::GET, "workspace/sidebar/extra"));
         assert!(!allowed_http_route(&Method::GET, "workspace/../sidebar"));

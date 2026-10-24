@@ -3339,11 +3339,19 @@ impl DaemonClient {
     }
 
     pub async fn sync_desktop_sidebar(&self, model: serde_json::Value) -> Result<u64, IpcError> {
-        match self.send_request(DaemonRequest::SyncDesktopSidebar { model }).await? {
+        match self
+            .send_request(DaemonRequest::SyncDesktopSidebar { model })
+            .await?
+        {
             DaemonResponse::SyncDesktopSidebarOk { revision } => Ok(revision),
-            DaemonResponse::Error { message, code, details } => {
+            DaemonResponse::Error {
+                message,
+                code,
+                details,
+            } => {
                 let mut error = IpcError::new(
-                    code.as_deref().map_or(IpcErrorCode::InternalError, IpcErrorCode::from_code_str),
+                    code.as_deref()
+                        .map_or(IpcErrorCode::InternalError, IpcErrorCode::from_code_str),
                     message,
                 );
                 error.details = details;

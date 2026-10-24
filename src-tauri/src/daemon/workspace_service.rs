@@ -374,8 +374,12 @@ impl DaemonWorkspaceService {
         model: serde_json::Value,
     ) -> Result<u64, super::sidebar_snapshot::SidebarRejection> {
         let revision = self.sidebar.store(model)?;
-        self.machine_events.publish("sidebarChanged", None, None,
-            serde_json::json!({"revision": revision}));
+        self.machine_events.publish(
+            "sidebarChanged",
+            None,
+            None,
+            serde_json::json!({"revision": revision}),
+        );
         Ok(revision)
     }
 

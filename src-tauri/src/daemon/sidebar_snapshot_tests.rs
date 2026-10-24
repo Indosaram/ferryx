@@ -27,11 +27,20 @@ async fn fixture() -> Fixture {
             Some(root.path().join("data/auth")),
         ));
         let auth = &server.remote_state().auth_manager;
-        let pin = auth.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
+        let pin = auth
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+            .unwrap();
         let (token, _) = auth.exchange_pairing_code(&pin, "sidebar machine").unwrap();
-        let pin = auth.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Mirror).unwrap();
+        let pin = auth
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Mirror)
+            .unwrap();
         let (mirror_token, _) = auth.exchange_pairing_code(&pin, "sidebar mirror").unwrap();
-        Ok(Fixture { root, server, token, mirror_token })
+        Ok(Fixture {
+            root,
+            server,
+            token,
+            mirror_token,
+        })
     })
     .await
     .unwrap()
@@ -47,12 +56,18 @@ async fn exchange(server: &Arc<DaemonServer>, request: &DaemonRequest) -> Daemon
     let handler = Arc::clone(server);
     let serving = tokio::spawn(async move { handler.handle_client(server_side).await });
     let (read_half, mut write_half) = tokio::io::split(client);
-    write_half.write_all(format!("{frame}\n").as_bytes()).await.unwrap();
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(10), BufReader::new(read_half).read_line(&mut line))
+    write_half
+        .write_all(format!("{frame}\n").as_bytes())
         .await
-        .unwrap()
         .unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        BufReader::new(read_half).read_line(&mut line),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     drop(write_half);
     serving.abort();
     serde_json::from_str(line.trim()).unwrap()
@@ -71,7 +86,11 @@ async fn get_sidebar(server: &Arc<DaemonServer>, token: Option<&str>) -> (u16, V
             .await
             .unwrap();
     });
-    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().unwrap();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
     let request = client.get(format!("http://{addr}/api/v1/workspace/sidebar"));
     let request = match token {
         Some(token) => request.bearer_auth(token),
@@ -81,7 +100,10 @@ async fn get_sidebar(server: &Arc<DaemonServer>, token: Option<&str>) -> (u16, V
     let status = response.status().as_u16();
     let body = response.json::<Value>().await.unwrap();
     stop.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), gateway).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), gateway)
+        .await
+        .unwrap()
+        .unwrap();
     (status, body)
 }
 
@@ -101,8 +123,20 @@ async fn sidebar_route_serves_null_before_sync_then_the_synced_model() {
     let (status, body) = get_sidebar(&fixture.server, Some(&fixture.token)).await;
     assert_eq!((status, body), (200, json!({"model": null})));
 
-    let response = exchange(&fixture.server, &DaemonRequest::SyncDesktopSidebar { model: model("ferryx") }).await;
-    assert!(matches!(response, DaemonResponse::SyncDesktopSidebarOk { revision: 1 }), "{response:?}");
+    let response = exchange(
+        &fixture.server,
+        &DaemonRequest::SyncDesktopSidebar {
+            model: model("ferryx"),
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            response,
+            DaemonResponse::SyncDesktopSidebarOk { revision: 1 }
+        ),
+        "{response:?}"
+    );
     let (status, body) = get_sidebar(&fixture.server, Some(&fixture.token)).await;
     let mut expected = model("ferryx");
     expected["revision"] = json!(1);
@@ -114,9 +148,15 @@ async fn sidebar_route_serves_null_before_sync_then_the_synced_model() {
 async fn sidebar_route_refuses_missing_and_mirror_credentials() {
     let fixture = fixture().await;
     let (status, body) = get_sidebar(&fixture.server, None).await;
-    assert_eq!((status, body["error"]["code"].as_str()), (401, Some("UNAUTHORIZED")));
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (401, Some("UNAUTHORIZED"))
+    );
     let (status, body) = get_sidebar(&fixture.server, Some(&fixture.mirror_token)).await;
-    assert_eq!((status, body["error"]["code"].as_str()), (403, Some("MACHINE_ACCESS_REQUIRED")));
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (403, Some("MACHINE_ACCESS_REQUIRED"))
+    );
     close(fixture).await;
 }
 
@@ -133,7 +173,12 @@ async fn sidebar_sync_rejects_oversize_and_bad_schema_with_structured_errors() {
         (json!(["not", "an", "object"]), "INVALID_REQUEST"),
     ];
     for (rejected, expected) in cases {
-        match exchange(&fixture.server, &DaemonRequest::SyncDesktopSidebar { model: rejected }).await {
+        match exchange(
+            &fixture.server,
+            &DaemonRequest::SyncDesktopSidebar { model: rejected },
+        )
+        .await
+        {
             DaemonResponse::Error { code, message, .. } => {
                 assert_eq!(code.as_deref(), Some(expected));
                 assert!(!message.is_empty());
@@ -145,28 +190,47 @@ async fn sidebar_sync_rejects_oversize_and_bad_schema_with_structured_errors() {
         }
     }
     let (_, body) = get_sidebar(&fixture.server, Some(&fixture.token)).await;
-    assert_eq!(body, json!({"model": null}), "a refused model is never served");
+    assert_eq!(
+        body,
+        json!({"model": null}),
+        "a refused model is never served"
+    );
     close(fixture).await;
 }
 
 #[tokio::test]
 async fn sidebar_changed_is_published_once_per_accepted_store() {
     let fixture = fixture().await;
-    let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
+    let service = Arc::clone(
+        &fixture
+            .server
+            .remote_state()
+            .machine_services
+            .as_ref()
+            .unwrap()
+            .workspaces,
+    );
     let mut events = service.machine_events.subscribe();
     let mut wrong_version = model("v0");
     wrong_version["schemaVersion"] = json!(0);
     for request in [model("a"), wrong_version, model("b")] {
-        exchange(&fixture.server, &DaemonRequest::SyncDesktopSidebar { model: request }).await;
+        exchange(
+            &fixture.server,
+            &DaemonRequest::SyncDesktopSidebar { model: request },
+        )
+        .await;
     }
     let mut seen = Vec::new();
     while let Ok(event) = events.try_recv() {
         seen.push((event["type"].clone(), event["payload"].clone()));
     }
-    assert_eq!(seen, vec![
-        (json!("sidebarChanged"), json!({"revision": 1})),
-        (json!("sidebarChanged"), json!({"revision": 2})),
-    ]);
+    assert_eq!(
+        seen,
+        vec![
+            (json!("sidebarChanged"), json!({"revision": 1})),
+            (json!("sidebarChanged"), json!({"revision": 2})),
+        ]
+    );
     drop(service);
     close(fixture).await;
 }
@@ -185,7 +249,11 @@ async fn sidebar_snapshot_survives_reload_from_disk() {
         let served = reloaded.model().unwrap();
         assert_eq!(served["projects"][0]["label"], "second");
         assert_eq!(served["revision"], 2);
-        assert_eq!(reloaded.store(model("third")).unwrap(), 3, "revisions continue after reload");
+        assert_eq!(
+            reloaded.store(model("third")).unwrap(),
+            3,
+            "revisions continue after reload"
+        );
         drop(reloaded);
         root.close().unwrap();
         Ok(())

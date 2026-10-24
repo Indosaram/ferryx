@@ -61,7 +61,11 @@ impl SidebarSnapshotStore {
                 }
             },
         };
-        Self { path, writer: Mutex::new(()), current: RwLock::new(current) }
+        Self {
+            path,
+            writer: Mutex::new(()),
+            current: RwLock::new(current),
+        }
     }
 
     /// Blocking: validates, assigns the next revision and persists atomically (temp + rename).
@@ -69,12 +73,21 @@ impl SidebarSnapshotStore {
         if !accepts(&model) {
             return Err(SidebarRejection::UnsupportedSchema);
         }
-        if serde_json::to_vec(&model).map_err(std::io::Error::from)?.len() > SIDEBAR_MODEL_MAX_BYTES {
+        if serde_json::to_vec(&model)
+            .map_err(std::io::Error::from)?
+            .len()
+            > SIDEBAR_MODEL_MAX_BYTES
+        {
             return Err(SidebarRejection::TooLarge);
         }
         let _writer = self.writer.lock();
-        let previous = self.model().and_then(|current| current["revision"].as_u64()).unwrap_or(0);
-        let revision = previous.checked_add(1).ok_or(SidebarRejection::RevisionExhausted)?;
+        let previous = self
+            .model()
+            .and_then(|current| current["revision"].as_u64())
+            .unwrap_or(0);
+        let revision = previous
+            .checked_add(1)
+            .ok_or(SidebarRejection::RevisionExhausted)?;
         model["revision"] = Value::from(revision);
         crate::remote::auth::write_private_json(&self.path, &model)?;
         *self.current.write() = Some(Arc::new(model));
