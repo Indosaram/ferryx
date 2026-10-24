@@ -36,6 +36,12 @@ const READER_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MASTER_RELEASE_TIMEOUT: Duration = READER_SHUTDOWN_TIMEOUT;
 const TERM_GRACE_TIMEOUT: Duration = Duration::from_secs(1);
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(1);
+/// Scheduling allowance on top of the close's own bounds. The phase deadlines and poll overshoots
+/// summed in [`close_fence_for`] are what a close spends when its wake-ups land on time; on a
+/// loaded host each of them can land late, and a fence that stops at the exact sum reports a
+/// timeout for a close that does complete. The fence exists only so a waiter never hangs on a close
+/// that cannot finish, so the allowance costs nothing on the path where the close completes.
+const CLOSE_FENCE_SCHEDULING_SLACK: Duration = Duration::from_secs(5);
 
 /// The worst case ONE close can spend before it leaves the registry, for the TERM grace that close
 /// was invoked with: the grace phase itself, the KILL+reap phase, the observed master release, the
@@ -67,6 +73,7 @@ fn close_fence_for(grace: Duration) -> Duration {
         + READER_SHUTDOWN_TIMEOUT * READER_WAIT_STAGES
         + REAP_POLL_INTERVAL * 2
         + READER_WAIT_POLL_INTERVAL * 2
+        + CLOSE_FENCE_SCHEDULING_SLACK
 }
 
 /// Decides a UTF-8 `LANG` override for PTY children whose inherited environment selects
@@ -2849,11 +2856,11 @@ mod tests {
     /// This is the regression that FAILS on the pre-fix code. There the bound was the module constant
     /// - `TERM_GRACE_TIMEOUT + KILL_REAP_TIMEOUT + MASTER_RELEASE_TIMEOUT + READER_SHUTDOWN_TIMEOUT *
     /// READER_WAIT_STAGES` = 10 s - with no function of the grace at all, so the second assertion
-    /// below, which requires 14.14 s for the 5 s machine grace, cannot be satisfied by it.
+    /// below, which requires 19.14 s for the 5 s machine grace, cannot be satisfied by it.
     ///
     /// The poll quantization of the bounded waits is part of that sum: dropping those terms from
-    /// `close_fence_for` (14 s here) fails the second assertion too, which is what keeps the
-    /// allowance from being removed without a test noticing.
+    /// `close_fence_for` (19 s here) fails the second assertion too, and so does dropping the
+    /// scheduling allowance, which keeps either from being removed without a test noticing.
     #[test]
     fn the_close_fence_tracks_the_grace_the_close_runs_with() {
         let default_fence = close_fence_for(TERM_GRACE_TIMEOUT);
@@ -2870,7 +2877,8 @@ mod tests {
                 + MASTER_RELEASE_TIMEOUT
                 + READER_SHUTDOWN_TIMEOUT * READER_WAIT_STAGES
                 + REAP_POLL_INTERVAL * 2
-                + READER_WAIT_POLL_INTERVAL * 2,
+                + READER_WAIT_POLL_INTERVAL * 2
+                + CLOSE_FENCE_SCHEDULING_SLACK,
             "the fence must cover every phase the close runs after its grace phase"
         );
     }
