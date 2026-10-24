@@ -102,7 +102,7 @@ remains alive. Stopping the daemon or rebooting its host can end live PTYs.
 | Fact | Value | Source |
 | :--- | :--- | :--- |
 | Gateway | Authenticated Axum WebSocket server | `src-tauri/src/remote/` |
-| Pairing | 6-digit PIN (also available as a QR code) | `src-tauri/src/remote/` |
+| Pairing | Account sign-in (email magic link); a 60-second 6-digit PIN remains for local gateway pairing | `src-tauri/src/remote/` |
 | Mobile terminal | Custom DOM grid, no xterm.js dependency | `ui/src/remote/` |
 | Off-LAN access | Configurable outbound relay tunnel; no inbound SSH port or public IP required | `src-tauri/src/remote/` |
 | Paired machine path | Relay first; a live session upgrades to a direct QUIC path (UDP, IPv4) when both sides trust each other, and falls back to the relay on loss | `src-tauri/src/paired_host/`, `src-tauri/src/terminal/paired_runtime.rs` |
