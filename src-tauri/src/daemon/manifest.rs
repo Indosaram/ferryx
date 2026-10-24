@@ -29,15 +29,21 @@ impl HandoverManifest {
         }
         let lock = options.open(path.with_extension("lock"))?;
         lock.lock()?;
-        let mut manifest = match fs::read(path) {
-            Ok(data) => serde_json::from_slice(&data)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
-            Err(error) => return Err(error),
-        };
-        update(&mut manifest);
-        manifest.save_to_path(path)?;
-        Ok(manifest)
+        let result = (|| {
+            let mut manifest = match fs::read(path) {
+                Ok(data) => serde_json::from_slice(&data)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+                Err(error) => return Err(error),
+            };
+            update(&mut manifest);
+            manifest.save_to_path(path)?;
+            Ok(manifest)
+        })();
+        // Release explicitly instead of on close: a child forked by another thread (PTY spawn)
+        // inherits this descriptor until it execs, and the lock lives as long as any copy does.
+        lock.unlock()?;
+        result
     }
 
     pub fn load_from_path(path: &Path) -> Self {
