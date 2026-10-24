@@ -99,14 +99,23 @@ export function useRemoteSidebarModel({ machines }: { readonly machines: readonl
           return;
         }
         inFlight = true;
-        do {
-          again = false;
-          const current = machinesRef.current.find((m) => m.machineId === machineId) ?? machine;
-          const result = await loadRemoteSidebar(current.fetchLike);
-          if (!alive) return;
-          setSettled((prev) => ({ ...prev, [machineId]: settle(prev[machineId], result) }));
-        } while (again);
-        inFlight = false;
+        try {
+          do {
+            again = false;
+            const current = machinesRef.current.find((m) => m.machineId === machineId) ?? machine;
+            let result: RemoteSidebarResult;
+            try {
+              result = await loadRemoteSidebar(current.fetchLike);
+            } catch (err) {
+              // A bug in the builder must not wedge this machine: the next change event retries.
+              result = { kind: "error", code: "LOAD_FAILED", message: err instanceof Error ? err.message : String(err) };
+            }
+            if (!alive) return;
+            setSettled((prev) => ({ ...prev, [machineId]: settle(prev[machineId], result) }));
+          } while (again);
+        } finally {
+          inFlight = false;
+        }
       };
       const unsubscribe = machine.subscribe((frame) => {
         if (wantsRefetch(frame, settledRef.current[machineId]?.model?.source ?? null)) void refetch();

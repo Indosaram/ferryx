@@ -58,10 +58,40 @@ async function requireOk(fetchLike: SidebarFetch, path: string): Promise<Unknown
   return data;
 }
 
+const isString = (value: unknown): value is string => typeof value === "string";
+const isNullableString = (value: unknown) => value === null || isString(value);
+const isStringList = (value: unknown) => Array.isArray(value) && value.every(isString);
+const MEMBER_KINDS: readonly unknown[] = ["local", "ssh", "paired"];
+const STATUS_KINDS: readonly unknown[] = ["online", "offline", "checking", "relay", "failure"];
+
+function isMemberNode(value: unknown): boolean {
+  const m = objectOf(value);
+  return m !== null && isString(m.workspaceId) && MEMBER_KINDS.includes(m.kind) && isNullableString(m.machineId);
+}
+
+function isWorktreeNode(value: unknown): boolean {
+  const w = objectOf(value);
+  return w !== null && isString(w.key) && isString(w.workspaceId) && isString(w.path) && isNullableString(w.worktreeSlug) &&
+    isString(w.label) && isNullableString(w.hostLabel) && typeof w.stale === "boolean" && isNullableString(w.listingFailure);
+}
+
+function isProjectNode(value: unknown): boolean {
+  const p = objectOf(value);
+  if (!p) return false;
+  const status = p.status === null ? null : objectOf(p.status);
+  return isString(p.groupId) && isString(p.label) && isNullableString(p.hostLabel) && isString(p.primaryWorkspaceId) &&
+    (p.status === null || (status !== null && STATUS_KINDS.includes(status.kind) && isString(status.label))) &&
+    Array.isArray(p.members) && p.members.every(isMemberNode) && isStringList(p.filterLabels) &&
+    Array.isArray(p.worktrees) && p.worktrees.every(isWorktreeNode) && isNullableString(p.worktreesEmptyHint);
+}
+
+/** Structural guard for the wire model: one malformed node rejects the whole snapshot. */
 function isSidebarModel(value: unknown): value is SidebarModel {
-  const model = objectOf(value);
-  return model !== null && model.schemaVersion === 1 && Array.isArray(model.projects) &&
-    Array.isArray(model.collapsedGroupIds) && model.projects.every((node) => Array.isArray(objectOf(node)?.worktrees));
+  const m = objectOf(value);
+  return m !== null && m.schemaVersion === 1 && typeof m.revision === "number" && isString(m.generatedAt) &&
+    (m.source === "desktop" || m.source === "inventory") && isStringList(m.collapsedGroupIds) &&
+    typeof m.advancedFeatures === "boolean" && (m.emptyState === null || m.emptyState === "noProjects") &&
+    Array.isArray(m.projects) && m.projects.every(isProjectNode);
 }
 
 function projectOf(raw: unknown): { project: RegisteredProject; ready: boolean } | null {

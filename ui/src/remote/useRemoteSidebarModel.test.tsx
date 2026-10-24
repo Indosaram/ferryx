@@ -6,6 +6,22 @@ import type { SupervisorHttpResponse } from "./remoteSupervisor";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
 import { useRemoteSidebarModel, type RemoteSidebarMachine } from "./useRemoteSidebarModel";
 
+/** The real builder, with a switch that makes its next call throw like a builder bug would. */
+const builder = vi.hoisted(() => ({ throwNext: false }));
+vi.mock("../components/sidebar/sidebarModel", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../components/sidebar/sidebarModel")>();
+  return {
+    ...actual,
+    buildSidebarModel: (input: Parameters<typeof actual.buildSidebarModel>[0]) => {
+      if (builder.throwNext) {
+        builder.throwNext = false;
+        throw new TypeError("builder bug");
+      }
+      return actual.buildSidebarModel(input);
+    },
+  };
+});
+
 const json = (status: number, body: unknown): SupervisorHttpResponse => ({ status, body: new TextEncoder().encode(JSON.stringify(body)) });
 
 const published = (revision: number, label: string): SidebarModel => ({
@@ -61,6 +77,7 @@ function fakeMachine(routes: () => Record<string, SupervisorHttpResponse>, over:
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  builder.throwNext = false;
 });
 
 describe("useRemoteSidebarModel", () => {
@@ -99,6 +116,33 @@ describe("useRemoteSidebarModel", () => {
 
     expect(result.current[0]?.model?.source).toBe("inventory");
     expect(result.current[0]?.model?.projects[0]?.worktrees.map((w) => w.worktreeSlug)).toEqual([null, "relay"]);
+  });
+
+  it("falls back to the inventory when a published model has malformed nested nodes", async () => {
+    const broken = published(5, "ferryx");
+    const malformed = { ...broken, projects: [{ ...broken.projects[0], members: [{ workspaceId: 7, kind: "cloud" }],
+      worktrees: [{ key: "k", label: null }] }] };
+    const m = fakeMachine(() => ({ ...inventoryRoutes, "/api/v1/workspace/sidebar": json(200, { model: malformed }) }));
+    const { result } = renderHook(() => useRemoteSidebarModel({ machines: [m.machine] }));
+
+    await waitFor(() => expect(result.current[0]?.state).toBe("ok"));
+
+    expect(result.current[0]?.model?.source).toBe("inventory");
+    expect(result.current[0]?.model?.projects[0]?.worktrees.map((w) => w.label)).toEqual(["main", "relay"]);
+  });
+
+  it("settles as error when the fallback builder throws, and recovers on the next sidebarChanged", async () => {
+    builder.throwNext = true;
+    const m = fakeMachine(() => inventoryRoutes);
+    const { result } = renderHook(() => useRemoteSidebarModel({ machines: [m.machine] }));
+    await waitFor(() => expect(result.current[0]?.state).toBe("error"));
+    expect(result.current[0]?.error?.code).toBe("LOAD_FAILED");
+
+    m.emit({ type: "sidebarChanged", payload: { revision: 2 } });
+
+    await waitFor(() => expect(result.current[0]?.state).toBe("ok"));
+    expect(result.current[0]?.model?.source).toBe("inventory");
+    expect(m.sidebarFetches()).toBe(2);
   });
 
   it("refetches once per sidebarChanged frame", async () => {
