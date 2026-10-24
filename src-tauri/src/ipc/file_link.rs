@@ -567,6 +567,7 @@ pub fn prepare_launch(
     plan_launch(editor, &candidate, position, cli_lookup(editor))
 }
 
+#[cfg(feature = "desktop")]
 /// Executes a plan. This is the only function with desktop side effects.
 pub fn execute(plan: LaunchPlan) -> Result<(), IpcError> {
     match plan {
@@ -608,6 +609,7 @@ pub fn execute(plan: LaunchPlan) -> Result<(), IpcError> {
     }
 }
 
+#[cfg(feature = "desktop")]
 /// Blocking core of `cmd_open_file_path`: resolve, then launch.
 pub fn open_file_link_blocking(
     path: &str,

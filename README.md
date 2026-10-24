@@ -100,7 +100,7 @@ To operate your own relay instead of the default service, follow the
 [self-hosted relay guide](https://ferryx.dev/docs/self-hosted-relay/) for TLS, mail delivery,
 machine enrollment, and the separate desktop account and gateway settings.
 
-- Headless `ferryx-cli` needs no display server; on Linux its shared crate still links GTK 3 and WebKitGTK 4.1
+- Headless `ferryx-cli` needs no display server and links no GTK, WebKitGTK, or JavaScriptCore; on Linux it needs only glibc (`libc`, `libm`, `libgcc_s`)
 - Outbound encrypted relay tunnel: no inbound SSH, open ports, or public IP needed
 - Native terminal split-panes and remote Git worktrees run directly on the machine
 
@@ -181,7 +181,9 @@ unmeasured performance claims:
 - [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
 
 On Linux, install the GTK 3, WebKitGTK 4.1, and other system libraries required by
-[Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop or CLI binary.
+[Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop app. The
+headless CLI builds without them:
+`cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin ferryx-cli`.
 
 ### Clone and install
 

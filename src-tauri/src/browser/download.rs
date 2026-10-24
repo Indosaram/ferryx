@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, Notify};
@@ -356,6 +357,7 @@ pub fn subscribe_download_updates() -> broadcast::Receiver<DownloadRecord> {
     DOWNLOAD_REGISTRY.subscribe()
 }
 
+#[cfg(feature = "desktop")]
 pub fn register_download_event_forwarder<R: tauri::Runtime>(app: &AppHandle<R>) {
     let app_handle = app.clone();
     let mut rx = subscribe_download_updates();

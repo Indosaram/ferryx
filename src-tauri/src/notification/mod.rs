@@ -5,6 +5,7 @@
 //! user-event dedupe deliberately stay out of this module.
 
 pub mod activation;
+#[cfg(feature = "desktop")]
 pub mod audio;
 pub mod badge;
 #[cfg(target_os = "macos")]
@@ -18,6 +19,7 @@ pub mod permission;
 pub mod service;
 
 pub use activation::*;
+#[cfg(feature = "desktop")]
 pub use audio::*;
 pub use badge::*;
 pub use model::*;

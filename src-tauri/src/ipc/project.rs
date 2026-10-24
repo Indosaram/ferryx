@@ -4,6 +4,7 @@ use crate::worktree::{run_git, WorkspaceRegistry, WorktreeError, WorktreeManager
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(feature = "desktop")]
 use tauri::State;
 
 /// Workspace ID that shipped as a hard-coded alias for the startup repository.
@@ -234,6 +235,7 @@ pub struct LocalBranch {
     pub is_current: bool,
 }
 
+#[cfg(feature = "desktop")]
 /// Registers a project, enforcing one workspace ID per canonical repository
 /// root. Requesting a new ID for an already-registered root is not an error:
 /// the existing project is returned, so a client holding a stale ID (such as
@@ -266,6 +268,7 @@ pub async fn cmd_project_register(
     Ok(registered)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_project_initial(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -285,6 +288,7 @@ pub async fn cmd_project_initial(
     Ok(registered)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_sync_desktop_local_projects(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -293,6 +297,7 @@ pub async fn cmd_sync_desktop_local_projects(
     daemon_client.sync_desktop_local_projects(projects).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_project_branches(
     registry: State<'_, WorkspaceRegistry>,
@@ -341,6 +346,7 @@ pub struct UnregisterProjectRequest {
     pub workspace_id: String,
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_project_unregister<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -365,6 +371,7 @@ pub async fn cmd_project_unregister<R: tauri::Runtime>(
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_path_reveal<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,

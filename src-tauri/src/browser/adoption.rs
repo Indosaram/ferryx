@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
+#[cfg(feature = "desktop")]
 use crate::ipc::error::IpcError;
 
 /// How long the CLI waits for the GUI to report whether the tab was shown.
@@ -98,6 +99,7 @@ pub async fn await_ack(
     }
 }
 
+#[cfg(feature = "desktop")]
 /// Reports whether the GUI showed the tab for a CLI-opened browser session.
 ///
 /// Returns `false` when no waiter was registered, so the GUI cannot claim credit for a

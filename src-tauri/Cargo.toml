@@ -17,18 +17,22 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [[bin]]
 name = "ferryx"
 path = "src/main.rs"
+required-features = ["desktop"]
 
 [[bin]]
 name = "ferryx-cli"
 path = "src/bin/cli.rs"
+required-features = []
 
 [[bin]]
 name = "ferryx-account"
 path = "src/bin/account.rs"
+required-features = []
 
 [[bin]]
 name = "ferryx-relay"
 path = "src/bin/relay.rs"
+required-features = []
 
 [[example]]
 name = "native_terminal_renderer_poc"
@@ -51,7 +55,24 @@ required-features = ["native-terminal"]
 tauri-build = { version = "2", features = [] }
 
 [features]
-default = ["native-terminal", "hub-slack", "hub-discord", "hub-voice"]
+default = ["desktop", "hub-slack", "hub-discord", "hub-voice"]
+# The Tauri GUI stack: tauri and its plugins, rodio playback, and on Linux GTK, WebKitGTK and
+# JavaScriptCore. `ferryx-cli`, `ferryx-relay` and `ferryx-account` build without it
+# (`--no-default-features`), so the Linux CLI links none of the desktop libraries.
+# `desktop` and `native-terminal` imply each other: the native surface host is a Tauri module.
+desktop = [
+    "native-terminal",
+    "dep:tauri",
+    "dep:tauri-plugin-notification",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-process",
+    "dep:tauri-plugin-window-state",
+    "dep:tauri-plugin-updater",
+    "dep:rodio",
+    "dep:gtk",
+    "dep:webkit2gtk",
+    "dep:javascriptcore",
+]
 # Task 3 private QA barrier channel for the pane-liveness diagnostic
 # classifier headless harness. Compile-time gated; never enabled in release
 # builds. No code outside #[cfg(feature = "local-split-qa")] is reachable.
@@ -61,6 +82,7 @@ local-split-qa = []
 qa-protocol-bump = ["local-split-qa"]
 # Native GPU presentation is optional; real libghostty-vt parsing is always built.
 native-terminal = [
+    "desktop",
     "dep:wgpu",
     "dep:raw-window-handle",
     "dep:winit",
@@ -76,7 +98,7 @@ hub-voice = ["ferryx-hub/hub-voice"]
 [dependencies]
 ferryx-hub = { path = "../crates/ferryx-hub" }
 async-trait = "0.1"
-tauri = { version = "2", features = ["macos-private-api", "test", "unstable", "image-png", "devtools"] }
+tauri = { version = "2", features = ["macos-private-api", "test", "unstable", "image-png", "devtools"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 regex = "1"
@@ -121,12 +143,12 @@ winit = { version = "0.30", optional = true }
 png = "0.18"
 bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "1", optional = true }
-tauri-plugin-notification = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-process = "2"
+tauri-plugin-notification = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-process = { version = "2", optional = true }
 # 2.5 requires tauri ^2.12; stay on 2.4.x until tauri itself is bumped.
-tauri-plugin-window-state = "~2.4"
-rodio = { version = "0.22", default-features = false, features = [
+tauri-plugin-window-state = { version = "~2.4", optional = true }
+rodio = { version = "0.22", default-features = false, optional = true, features = [
     "playback",
     "wav",
     "mp3",
@@ -152,7 +174,7 @@ rustls-acme = { version = "=0.15.4", default-features = false, features = ["ring
 
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
-tauri-plugin-updater = "2"
+tauri-plugin-updater = { version = "2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7.0"
@@ -245,10 +267,10 @@ webview2-com = "0.38"
 windows = { version = "0.61", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = { version = "0.18", default-features = false }
-webkit2gtk = { version = "2.0.2", default-features = false }
+gtk = { version = "0.18", default-features = false, optional = true }
+webkit2gtk = { version = "2.0.2", default-features = false, optional = true }
 # Reads the trusted bridge's JavaScriptCore values (browser/bridge/linux.rs); same pin as wry.
-javascriptcore = { package = "javascriptcore-rs", version = "=1.1.2", default-features = false }
+javascriptcore = { package = "javascriptcore-rs", version = "=1.1.2", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3.17"

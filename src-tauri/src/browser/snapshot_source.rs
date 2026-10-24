@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager};
 
 #[cfg(target_os = "macos")]
@@ -337,12 +338,14 @@ pub async fn await_coordinator_completion(
     }
 }
 
+#[cfg(feature = "desktop")]
 /// Production snapshot source backed by Tauri's AppHandle and webviews.
 pub struct TauriBrowserSnapshotSource<R: tauri::Runtime> {
     app: AppHandle<R>,
     timeout: Duration,
 }
 
+#[cfg(feature = "desktop")]
 impl<R: tauri::Runtime> TauriBrowserSnapshotSource<R> {
     pub fn new(app: AppHandle<R>) -> Self {
         Self {
@@ -356,6 +359,7 @@ impl<R: tauri::Runtime> TauriBrowserSnapshotSource<R> {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> {
     fn capture_snapshot<'a>(
@@ -411,6 +415,7 @@ impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> 
     }
 }
 
+#[cfg(feature = "desktop")]
 /// Standalone capture helper delegating to `TauriBrowserSnapshotSource`.
 pub async fn capture_browser_snapshot<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -422,6 +427,7 @@ pub async fn capture_browser_snapshot<R: tauri::Runtime>(
         .await
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 pub async fn capture_webview_snapshot<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -432,6 +438,7 @@ pub async fn capture_webview_snapshot<R: tauri::Runtime>(
     capture_webview_snapshot_with_coordinator(app, webview_label, options, timeout, None).await
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 pub async fn capture_webview_snapshot_with_coordinator<R: tauri::Runtime>(
     app: &AppHandle<R>,

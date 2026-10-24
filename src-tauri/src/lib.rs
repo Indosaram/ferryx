@@ -23,7 +23,7 @@ pub mod hub_runtime;
 pub mod dag;
 pub mod host_boot;
 pub mod ipc;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "desktop", target_os = "macos"))]
 pub mod macos_file_drop;
 pub mod native_terminal;
 pub mod notification;
@@ -37,14 +37,16 @@ pub(crate) mod test_support;
 pub mod agent_history;
 pub mod scoped_contracts;
 pub mod session;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(all(feature = "desktop", any(target_os = "macos", test)))]
 mod shortcut_dispatch;
 pub mod ssh;
 pub mod terminal;
 pub mod util;
 pub mod worktree;
+#[cfg(feature = "desktop")]
 pub mod watchdog;
 
+#[cfg(feature = "desktop")]
 use crate::daemon::DaemonClient;
 #[cfg(all(target_os = "windows", feature = "native-terminal"))]
 use crate::native_terminal::platform::windows_focus::install_windows_terminal_focus_monitor;
@@ -52,11 +54,17 @@ use crate::native_terminal::platform::windows_focus::install_windows_terminal_fo
 use crate::native_terminal::surface_host::NativeTerminalSurfaceHostState;
 #[cfg(all(target_os = "macos", feature = "native-terminal"))]
 use crate::native_terminal::surface_host::NATIVE_TERMINAL_FOCUS_EVENT;
+#[cfg(feature = "desktop")]
 use ipc::*;
+#[cfg(feature = "desktop")]
 use notification::activation::{NotificationActivations, NOTIFICATION_ACTIVATED_EVENT};
+#[cfg(feature = "desktop")]
 use notification::audio::NotificationAudioPlayer;
+#[cfg(feature = "desktop")]
 use std::sync::Arc;
+#[cfg(feature = "desktop")]
 use tauri::{Emitter, Manager};
+#[cfg(feature = "desktop")]
 use worktree::WorkspaceRegistry;
 
 /// Ceiling for the raised soft `RLIMIT_NOFILE`. macOS reports the hard limit as
@@ -163,6 +171,7 @@ mod file_descriptor_limit_tests {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
@@ -275,6 +284,7 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 /// Menu items whose accelerators follow the user's bindings (todo 18). "Close Window" has no
 /// TS shortcut action, so it keeps its fixed accelerator.
 #[cfg(target_os = "macos")]
@@ -283,6 +293,7 @@ struct NativeMenuItems<R: tauri::Runtime> {
     close_tab: tauri::menu::MenuItem<R>,
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 fn rebind_menu_accelerators<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use browser::bridge::keys::menu_accelerator;
@@ -299,6 +310,7 @@ fn rebind_menu_accelerators<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+#[cfg(feature = "desktop")]
 /// Pushes the user's shortcut overrides (sparse, keyed by TS action id; `null` unbinds) to
 /// every native key source: the macOS key monitor and menu, and the guest browser key
 /// sources on all platforms. An empty table restores the built-in defaults.
@@ -708,6 +720,7 @@ fn macos_first_responder_has_marked_text(event: &objc2_app_kit::NSEvent) -> bool
     composing
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     use block2::RcBlock;
@@ -908,6 +921,7 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 fn install_macos_file_drop_destination<R: tauri::Runtime>(
     app: &tauri::App<R>,
@@ -931,6 +945,7 @@ fn install_macos_file_drop_destination<R: tauri::Runtime>(
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 fn release_macos_window_drag_destination<R: tauri::Runtime>(
     app: &tauri::App<R>,
@@ -1156,6 +1171,7 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 /// Relays desktop-directed remote gateway events from the daemon (which owns the
 /// gateway) into Tauri events the frontend already listens for. Without this the
 /// remote client's selection requests never reach the desktop.
@@ -1185,6 +1201,7 @@ fn start_remote_event_bridge<R: tauri::Runtime>(
     });
 }
 
+#[cfg(feature = "desktop")]
 /// Wire notification-click routing at app setup.
 ///
 /// Installs the app-wide wake sink (emitting [`NOTIFICATION_ACTIVATED_EVENT`]
@@ -1269,6 +1286,7 @@ thread_local! {
     static QA_PRIMARY_WINDOW_PROFILE: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(feature = "desktop")]
 pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     let daemon_client = Arc::new(DaemonClient::new());
     let bridge_daemon_client = Arc::clone(&daemon_client);
@@ -2657,6 +2675,7 @@ mod tests {
     }
 }
 
+#[cfg(feature = "desktop")]
 /// Window-destroy hook. Closing a window releases only GUI-side resources; it never stops,
 /// unloads or signals the daemon, which owns every PTY (pinned by `quit_path_tests`).
 fn handle_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) {
@@ -2684,6 +2703,7 @@ fn handle_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) {
     }
 }
 
+#[cfg(feature = "desktop")]
 /// App run-loop hook. Quitting the GUI stops only the GUI's own watchdog; it never stops,
 /// unloads or signals the daemon, which owns every PTY (pinned by `quit_path_tests`).
 fn handle_run_event<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, event: &tauri::RunEvent) {
@@ -2694,6 +2714,7 @@ fn handle_run_event<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, event: 
     }
 }
 
+#[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = tracing_subscriber::fmt()
