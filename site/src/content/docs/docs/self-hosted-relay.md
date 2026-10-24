@@ -123,6 +123,7 @@ sudo install -m 755 src-tauri/target/release/ferryx-relay /usr/local/bin/ferryx-
 | `FERRYX_RELAY_ACCOUNT_PUBLIC_KEY` | `--account-public-key <key>` | unset | Base64-encoded public key of the embedded account authority to enable signed grant submission; unset leaves that route closed. |
 | `FERRYX_RELAY_DATA_DIR` | none | `~/.ferryx/relay` | Durable machine key registry; override for a dedicated service user. |
 | `FERRYX_UI_DIST_DIR` | none | packaged/build-dependent | Directory containing the built remote web app (`ui/dist`); required when the server binary has no bundled UI assets. |
+| `FERRYX_RELAY_FALLBACK_URLS` | none | unset | Set on a **daemon**, not the relay: comma-separated HTTPS relay origins to try when the configured relay refuses or drops the control channel. |
 
 ### Deployment Mode Requirement (`FERRYX_DEPLOYMENT_MODE=selfhost`)
 
@@ -482,6 +483,17 @@ The web client connects to `GET /tunnel/client/:session_id` using the negotiated
 ## Health Checks and Authentication Probes
 
 You can monitor the operational health of your self-hosted relay using standard HTTP tools:
+
+### Relay Liveness Probe
+```bash
+curl -f -s https://relay.example.com/healthz
+# Expected response: {"ok":true,"role":"primary"}
+```
+`role` is `primary` for a relay with a writable account store, `standby` when the account data
+directory contains a `standby.readonly` marker (a read-only replica that refuses account writes
+with `ACCOUNT_STORE_READ_ONLY`), and `relay` without an account service. Point load balancer
+health checks here. The hosted relay's measured uptime is public at
+[status.ferryx.dev](https://status.ferryx.dev/).
 
 ### Account Service Health Probe
 ```bash

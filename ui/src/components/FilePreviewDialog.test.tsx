@@ -17,6 +17,12 @@ import { FilePreviewDialog } from "./FilePreviewDialog";
 import { FilePreviewPdf } from "./FilePreviewPdf";
 import { FilePreviewVideo } from "./FilePreviewVideo";
 
+const openPermissionsSystemSettings = vi.hoisted(() => vi.fn(async () => ({ opened: true, target: "full_disk_access" })));
+vi.mock("../lib/tauri", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/tauri")>()),
+  openPermissionsSystemSettings,
+}));
+
 type Deferred<T> = {
   readonly promise: Promise<T>;
   readonly resolve: (value: T) => void;
@@ -320,6 +326,43 @@ describe("FilePreviewDialog", () => {
     fireEvent.click(screen.getByTestId("file-preview-reload"));
     await vi.waitFor(() => expect(screen.getByTestId("stub-text")).toBeInTheDocument());
     expect(attempt).toBe(2);
+  });
+
+  it("explains Full Disk Access with an Open System Settings action when a read hits EPERM in a protected folder", async () => {
+    const controller = makeController({
+      open: async () => {
+        throw {
+          code: "IO_ERROR",
+          message: "cannot open this file (Operation not permitted (os error 1))",
+          details: { reason: "PermissionDenied", displayName: "notes.md", fullDiskAccessRequired: true },
+        };
+      },
+    });
+    render(<FilePreviewDialog controller={controller} renderers={{ text: StubTextRenderer }} />);
+    await openPreview(controller, SOURCE, { ...REQUEST, path: "~/Documents/notes.md" });
+
+    expect(screen.getByTestId("file-preview-failure")).toHaveAttribute("data-reason", "PermissionDenied");
+    expect(screen.getByTestId("file-preview-fda-explainer")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("file-preview-open-fda-settings"));
+    expect(openPermissionsSystemSettings).toHaveBeenCalledWith("full_disk_access");
+  });
+
+  it("keeps a plain permission refusal free of the Full Disk Access explainer", async () => {
+    const controller = makeController({
+      open: async () => {
+        throw {
+          code: "IO_ERROR",
+          message: "cannot open this file (Permission denied (os error 13))",
+          details: { reason: "PermissionDenied", displayName: "locked.txt", fullDiskAccessRequired: false },
+        };
+      },
+    });
+    render(<FilePreviewDialog controller={controller} renderers={{ text: StubTextRenderer }} />);
+    await openPreview(controller, SOURCE, REQUEST);
+
+    expect(screen.getByTestId("file-preview-failure")).toHaveAttribute("data-reason", "PermissionDenied");
+    expect(screen.queryByTestId("file-preview-fda-explainer")).toBeNull();
+    expect(openPermissionsSystemSettings).not.toHaveBeenCalled();
   });
 
   it("surfaces a renderer-reported failure for the live generation", async () => {

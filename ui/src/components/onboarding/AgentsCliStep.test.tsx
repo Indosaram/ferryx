@@ -128,7 +128,6 @@ describe("AgentsCliStep", () => {
     render(
       <WelcomeWizard
         steps={["agents"]}
-        permissionsStatus={null}
         agents={[agent("claude", true), agent("codex", false)]}
         isMac
         onAddProject={vi.fn()}

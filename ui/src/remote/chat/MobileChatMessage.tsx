@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import { AlertCircle, Check, ChevronRight, Copy } from "lucide-react";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
+import { handleExternalLinkClick } from "../../lib/externalLinks";
 import {
   ActivityIndicator,
   ActivityState,
@@ -192,6 +193,7 @@ const ASSISTANT_MARKDOWN_COMPONENTS = {
     <a
       href={href}
       target="_blank"
+      onClick={handleExternalLinkClick}
       rel="noopener noreferrer"
       className="text-chat-link decoration-chat-link/60 hover:decoration-chat-link underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
     >

@@ -1,4 +1,6 @@
 id = "omo"
+display_name = "OmO"
+homepage = "https://github.com/code-yeongyu/oh-my-openagent"
 version = "2026.08.27.1"
 min_engine_version = 1
 aliases = ["herdr:pi", "pi", "omo-agent"]

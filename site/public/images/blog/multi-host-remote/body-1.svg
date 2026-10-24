@@ -198,7 +198,7 @@
         <rect x="0" y="24" width="292" height="26" rx="4" fill="#07121f" stroke="#162c47" stroke-width="1" />
         <text x="8" y="41" fill="#00f2fe" font-size="9.5" font-family="'JetBrains Mono', monospace">Grant: ed25519:7f9c..e3b1</text>
 
-        <text x="0" y="72" fill="#94a3b8" font-size="10.5">Authenticated 6-digit PIN / QR</text>
+        <text x="0" y="72" fill="#94a3b8" font-size="10.5">Authenticated 6-digit PIN</text>
         <text x="0" y="88" fill="#64748b" font-size="10">Explicit device grant per target machine</text>
       </g>
     </g>

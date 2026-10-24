@@ -1349,13 +1349,13 @@ mod tests {
         let email = "state-stopped@example.com";
         seed_user(&state, user_id, email);
 
-        // Two machines on a Free plan put the owner over the limit, so the evaluation stops the
+        // One machine past the Free limit puts the owner over it, so the evaluation stops the
         // owner once the grace deadline has passed. The state below is what the admission and
         // suspension paths persist for such an owner.
         let t0 = 7_000_000u64;
         state
             .mutate(|store| {
-                for index in 0..2 {
+                for index in 0..crate::account::billing::entitlement::FREE_HOSTS + 1 {
                     let machine_id = format!("state-stop-machine-{index}");
                     store.machines.insert(
                         machine_id.clone(),

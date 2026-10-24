@@ -1,0 +1,26 @@
+# Same unit name as the primary on omarchy (`ferryx-relay.service`). The deploy plan installs it
+# on the warm standby together with the `standby.conf` drop-in; environment that differs per host
+# lives in drop-ins and private EnvironmentFiles, never in this file.
+[Unit]
+Description=Ferryx Relay & Account Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=/
+Environment=FERRYX_DEPLOYMENT_MODE=@DEPLOYMENT_MODE@
+Environment=FERRYX_ACCOUNT_ORIGIN=https://@PUBLIC_HOSTNAME@
+Environment=FERRYX_ACCOUNT_RELAY_ORIGIN=https://@PUBLIC_HOSTNAME@
+Environment=FERRYX_ACCOUNT_DATA_DIR=@DATA_DIR@
+Environment=FERRYX_RELAY_DATA_DIR=@RELAY_DATA_DIR@
+Environment=FERRYX_UI_DIST_DIR=@UI_DIST_DIR@
+EnvironmentFile=-/etc/ferryx/relay.env
+ExecStart=@BINARY@ --port @PORT@
+Restart=always
+RestartSec=3s
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

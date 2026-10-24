@@ -153,7 +153,7 @@ function AttentionInboxRow({
   onDismiss?: (row: AttentionRow) => void;
 }) {
   const when = row.at !== undefined ? formatAttentionTime(row.at, now) : undefined;
-  const summary = [row.who, ATTENTION_STATE_LABEL[row.state], row.location, row.text].filter(Boolean).join(", ");
+  const summary = [row.who, row.supervisorLabel ?? ATTENTION_STATE_LABEL[row.state], row.location, row.text].filter(Boolean).join(", ");
   return (
     <li className="group relative">
       <button
@@ -183,8 +183,11 @@ function AttentionInboxRow({
           <span className="mt-0.5 min-w-0 truncate text-[11px] text-muted-foreground">{row.location}</span>
         ) : null}
         <span className="mt-1 flex min-w-0 items-center gap-1.5">
-          <span className={cn("shrink-0 rounded px-1.5 py-px text-[10.5px] font-semibold", KIND[row.state])}>
-            {ATTENTION_KIND_LABEL[row.state]}
+          <span
+            data-testid={row.supervisorLabel ? "attention-row-supervisor" : undefined}
+            className={cn("min-w-0 truncate rounded px-1.5 py-px text-[10.5px] font-semibold", row.supervisorLabel ? "" : "shrink-0", KIND[row.state])}
+          >
+            {row.supervisorLabel ?? ATTENTION_KIND_LABEL[row.state]}
           </span>
         </span>
         {row.text ? (

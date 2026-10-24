@@ -207,10 +207,10 @@ export function artifactPaths({ platform, targetDir, productName, name }) {
 
 /**
  * The owner record a release daemon writes: server.rs get_runtime_dir() of a release build
- * (/tmp/rorca-<uid>, or %LOCALAPPDATA%\Ferryx\runtime with the product's TEMP fallback) + owner.json.
+ * (/tmp/ferryx-<uid>, or %LOCALAPPDATA%\Ferryx\runtime with the product's TEMP fallback) + owner.json.
  */
 export function releaseOwnerFile(platform, { uid, localAppData }) {
-  if (platform !== 'windows') return `/tmp/rorca-${uid}/owner.json`;
+  if (platform !== 'windows') return `/tmp/ferryx-${uid}/owner.json`;
   if (!localAppData) throw new GuardError('RELEASE_OWNER_PATH', 'the host reported no LOCALAPPDATA/TEMP directory');
   return path.win32.join(localAppData, 'Ferryx', 'runtime', 'owner.json');
 }
