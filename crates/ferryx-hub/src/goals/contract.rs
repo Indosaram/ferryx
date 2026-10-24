@@ -406,6 +406,22 @@ pub async fn set_proposal_state(
     Ok(updated.rows_affected() == 1)
 }
 
+/// Changes how the loop treats the lane's proposals. The requirement set is untouched.
+pub async fn set_mode(pool: &SqlitePool, lane_key: &str, mode: GoalMode) -> Result<Contract, GoalError> {
+    let updated = sqlx::query("UPDATE lane_goal SET mode = ?, updated_at = ? WHERE lane_key = ?")
+        .bind(mode.as_str())
+        .bind(now_rfc3339())
+        .bind(lane_key)
+        .execute(pool)
+        .await?;
+    if updated.rows_affected() == 0 {
+        return Err(GoalError::NoContract(lane_key.to_owned()));
+    }
+    contract_of(pool, lane_key)
+        .await?
+        .ok_or_else(|| GoalError::NoContract(lane_key.to_owned()))
+}
+
 /// Counts one more supervisor turn. Refuses once `turn_limit` turns were used.
 pub async fn bump_turns(pool: &SqlitePool, lane_key: &str) -> Result<u32, GoalError> {
     let used: Option<i64> = sqlx::query_scalar(
@@ -489,6 +505,21 @@ mod tests {
             .await
             .unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn set_mode_changes_only_the_mode() {
+        let pool = lane_pool().await;
+        set_contract(&pool, "lane-a", &[spec("r1")], GoalMode::Supervised, 7)
+            .await
+            .unwrap();
+        let changed = set_mode(&pool, "lane-a", GoalMode::Full).await.unwrap();
+        assert_eq!(changed.mode, GoalMode::Full);
+        assert_eq!(changed.revision, 1);
+        assert!(matches!(
+            set_mode(&pool, "missing", GoalMode::Off).await,
+            Err(GoalError::NoContract(_))
+        ));
     }
 
     #[tokio::test]

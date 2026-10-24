@@ -177,6 +177,29 @@ pub(crate) fn tool_list() -> Vec<Value> {
                 &[],
             ),
         ),
+        (
+            "lane_goal_show",
+            "Show a lane's goal contract: requirements, mode, turns, stop reason, proposal and pending revisions.",
+            schema(json!({"key": {"type": "string"}}), &["key"]),
+        ),
+        (
+            "lane_goal_set",
+            "Set or replace a lane's goal contract. Refused while a supervisor turn is in flight.",
+            schema(
+                json!({"key": {"type": "string"},
+                "requirements": {"type": "array", "items": {"type": "object",
+                    "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "verifier": {"type": "string"}},
+                    "required": ["id", "text", "verifier"]}},
+                "mode": {"type": "string", "enum": ["off", "supervised", "full"]},
+                "turnLimit": {"type": "integer", "minimum": 1}}),
+                &["key", "requirements"],
+            ),
+        ),
+        (
+            "lane_goal_approve",
+            "Approve and send the lane's proposal awaiting approval, once.",
+            schema(json!({"key": {"type": "string"}}), &["key"]),
+        ),
         ("cron.list", "List scheduled jobs.", schema(json!({}), &[])),
         (
             "cron.run",
@@ -204,6 +227,9 @@ pub(crate) fn tool_list() -> Vec<Value> {
         })
         .collect()
 }
+
+/// Turn limit of a new goal contract when the caller names none (the storage default).
+pub const GOAL_DEFAULT_TURN_LIMIT: u32 = 20;
 
 /// The code a supervisor input tool returns when a person paused the lane that owns the pane.
 pub const LANE_PAUSED: &str = "LANE_PAUSED";
@@ -431,6 +457,54 @@ async fn call_tool(
                 .map_err(|error| error.to_string())?;
             Ok(json!({"sessionId": report.session_id, "status": report.status.as_str()}))
         }
+        "lane_goal_show" => {
+            let key = required(args, "key")?;
+            let view = crate::lanes::supervised::goal_view(&context.pool, &key)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(json!({"key": key, "goalContract": view}))
+        }
+        "lane_goal_set" => {
+            let key = required(args, "key")?;
+            let requirements: Vec<crate::goals::contract::RequirementSpec> = serde_json::from_value(
+                args.get("requirements").cloned().unwrap_or(Value::Null),
+            )
+            .map_err(|error| format!("requirements: {error}"))?;
+            let existing = crate::goals::contract::contract_of(&context.pool, &key)
+                .await
+                .map_err(|error| error.to_string())?;
+            let mode = match args.get("mode").and_then(Value::as_str) {
+                Some(mode) => mode
+                    .parse::<crate::goals::GoalMode>()
+                    .map_err(|error| error.to_string())?,
+                None => existing
+                    .as_ref()
+                    .map(|contract| contract.mode)
+                    .unwrap_or(crate::goals::GoalMode::Supervised),
+            };
+            let turn_limit = match args.get("turnLimit").and_then(Value::as_u64) {
+                Some(limit) => u32::try_from(limit).map_err(|_| "turnLimit is too large".to_string())?,
+                None => existing
+                    .as_ref()
+                    .map(|contract| contract.turn_limit)
+                    .unwrap_or(GOAL_DEFAULT_TURN_LIMIT),
+            };
+            crate::goals::contract::set_contract(&context.pool, &key, &requirements, mode, turn_limit)
+                .await
+                .map_err(|error| error.to_string())?;
+            let view = crate::lanes::supervised::goal_view(&context.pool, &key)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(json!({"key": key, "goalContract": view}))
+        }
+        "lane_goal_approve" => {
+            let key = required(args, "key")?;
+            let outcome =
+                crate::goals::r#loop::approve_proposal(&context.pool, context.control.as_ref(), &key)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            Ok(json!(outcome))
+        }
         "tracker.issues" => {
             let tracker = Tracker::new(context.pool.clone(), context.tracker_token.clone());
             if let Some(title) = args.get("title").and_then(Value::as_str) {
@@ -599,5 +673,49 @@ mod tests {
         let tools = names["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().any(|tool| tool["name"] == "lane.drive"));
         assert!(tools.iter().any(|tool| tool["name"] == "agents.stop"));
+    }
+
+    #[test]
+    fn tool_list_names_the_lane_goal_tools() {
+        let names: Vec<String> = tool_list()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect();
+        for name in ["lane_goal_show", "lane_goal_set", "lane_goal_approve"] {
+            assert!(names.iter().any(|known| known == name), "{name} missing from {names:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn lane_goal_tools_set_show_and_refuse_an_approval_with_nothing_awaiting() {
+        let pool = crate::storage::memory().await.unwrap();
+        crate::lanes::state::insert_lane(&pool, "ledger", "Ledger", "lead", "/repo", "file marker")
+            .await
+            .unwrap();
+        let context = McpContext {
+            control: Arc::new(RecordingControl::default()),
+            launcher: Arc::new(FixedLauncher::new("pane")),
+            pool,
+            meta_session_id: "meta".into(),
+            tracker_token: "t".into(),
+        };
+        let call = |name: &str, arguments: Value| {
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": name, "arguments": arguments}})
+        };
+        let set = dispatch(
+            &context,
+            &call("lane_goal_set", json!({"key": "ledger", "mode": "full", "turnLimit": 3,
+                "requirements": [{"id": "r1", "text": "tests pass", "verifier": "cargo test"}]})),
+        )
+        .await;
+        assert!(set.get("error").is_none(), "{set}");
+        let shown = dispatch(&context, &call("lane_goal_show", json!({"key": "ledger"}))).await;
+        let text = shown["result"]["content"][0]["text"].as_str().unwrap();
+        let body: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(body["goalContract"]["mode"], "full");
+        assert_eq!(body["goalContract"]["turnLimit"], 3);
+        assert_eq!(body["goalContract"]["requirements"][0]["id"], "r1");
+        let approve = dispatch(&context, &call("lane_goal_approve", json!({"key": "ledger"}))).await;
+        assert!(approve.get("error").is_some(), "{approve}");
     }
 }

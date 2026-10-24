@@ -637,6 +637,176 @@ pub async fn set_lane_paused(
     Ok(changed)
 }
 
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorGoal`.
+pub const SUPERVISOR_GOAL_CAPABILITY: &str = "supervisorGoalV1";
+
+/// Why a goal action was refused. Each maps to one wire code the CLI turns into an exit code.
+#[derive(Debug, thiserror::Error)]
+pub enum SupervisorGoalError {
+    #[error("the supervisor hub is not open in this daemon")]
+    Unavailable,
+    #[error("{0}")]
+    NotFound(String),
+    /// The state moved under the request: nothing awaits approval, a turn is in flight, the
+    /// contract revision changed, or the revision was already decided.
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
+    Invalid(String),
+    #[error("{0}")]
+    Storage(String),
+}
+
+impl SupervisorGoalError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "SUPERVISOR_UNAVAILABLE",
+            Self::NotFound(_) => "NOT_FOUND",
+            Self::Conflict(_) => "REQUEST_CONFLICT",
+            Self::Invalid(_) => "INVALID_REQUEST",
+            Self::Storage(_) => "INTERNAL",
+        }
+    }
+}
+
+impl From<ferryx_hub::goals::GoalError> for SupervisorGoalError {
+    fn from(error: ferryx_hub::goals::GoalError) -> Self {
+        use ferryx_hub::goals::GoalError;
+        let message = error.to_string();
+        match error {
+            GoalError::NoContract(_) | GoalError::UnknownRequirement { .. } => Self::NotFound(message),
+            GoalError::TurnInFlight(_) | GoalError::RevisionChanged { .. } | GoalError::TurnLimit { .. } => {
+                Self::Conflict(message)
+            }
+            GoalError::EmptyContract
+            | GoalError::InvalidContract(_)
+            | GoalError::Unknown { .. }
+            | GoalError::EvidenceRequired { .. }
+            | GoalError::QuoteNotFound
+            | GoalError::InvalidDecision(_) => Self::Invalid(message),
+            GoalError::JudgeUnavailable | GoalError::Sql(_) | GoalError::Hub(_) => Self::Storage(message),
+        }
+    }
+}
+
+/// A revision accept/reject the store refused as invalid means the revision is missing or
+/// already decided: the request raced the state, not a malformed request.
+fn revision_refusal(error: ferryx_hub::goals::GoalError) -> SupervisorGoalError {
+    match error {
+        ferryx_hub::goals::GoalError::InvalidContract(message) => SupervisorGoalError::Conflict(message),
+        other => other.into(),
+    }
+}
+
+/// Turn limit of a new contract when the caller names none (the storage default).
+const GOAL_DEFAULT_TURN_LIMIT: u32 = 20;
+
+/// Shows or steers one lane's goal contract and returns the supervisor snapshot afterwards,
+/// with a `goal` entry `{laneKey, goalContract}` for the lane the action named (present even
+/// when the lane has ended and so left the snapshot's lane list). Every change tells the
+/// Supervisor views to refetch.
+pub async fn supervisor_goal(
+    state: &RemoteGatewayState,
+    action: crate::daemon::protocol::SupervisorGoalAction,
+) -> Result<Value, SupervisorGoalError> {
+    use crate::daemon::protocol::SupervisorGoalAction as Action;
+    use ferryx_hub::goals::{contract, revision, GoalMode, ProposalState};
+    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+        return Err(SupervisorGoalError::Unavailable);
+    };
+    let pool = &hub.pool;
+    if let Some(lane_key) = action.lane_key() {
+        if ferryx_hub::lanes::state::status_of(pool, lane_key)
+            .await
+            .map_err(|error| SupervisorGoalError::Storage(error.to_string()))?
+            .is_none()
+        {
+            return Err(SupervisorGoalError::NotFound(format!("lane not found: {lane_key}")));
+        }
+    }
+    let mutates = action.mutates();
+    let mut changed = json!({});
+    let lane_key: String = match action {
+        Action::Show { lane_key } => lane_key,
+        Action::Set { lane_key, requirements, mode, turn_limit } => {
+            let existing = contract::contract_of(pool, &lane_key).await?;
+            let mode = mode
+                .or(existing.as_ref().map(|contract| contract.mode))
+                .unwrap_or(GoalMode::Supervised);
+            let turn_limit = turn_limit
+                .or(existing.as_ref().map(|contract| contract.turn_limit))
+                .unwrap_or(GOAL_DEFAULT_TURN_LIMIT);
+            contract::set_contract(pool, &lane_key, &requirements, mode, turn_limit).await?;
+            lane_key
+        }
+        Action::Mode { lane_key, mode } => {
+            contract::set_mode(pool, &lane_key, mode).await?;
+            lane_key
+        }
+        Action::Approve { lane_key } => {
+            let awaiting = contract::contract_of(pool, &lane_key)
+                .await?
+                .ok_or_else(|| SupervisorGoalError::NotFound(format!("lane {lane_key} has no goal contract")))?
+                .proposal
+                .is_some_and(|proposal| proposal.state == ProposalState::AwaitingApproval);
+            if !awaiting {
+                return Err(SupervisorGoalError::Conflict(format!(
+                    "lane {lane_key} has no proposal awaiting approval"
+                )));
+            }
+            let outcome = ferryx_hub::goals::r#loop::approve_proposal(pool, hub.control.as_ref(), &lane_key)
+                .await
+                // The proposal moved between the check and the send (a person spoke, a pass ran).
+                .map_err(|error| match error {
+                    ferryx_hub::goals::GoalError::InvalidContract(message) => SupervisorGoalError::Conflict(message),
+                    other => other.into(),
+                })?;
+            changed = json!({ "stopReason": outcome.stop_reason, "sent": outcome.sent });
+            lane_key
+        }
+        Action::Discard { lane_key } => {
+            if contract::contract_of(pool, &lane_key).await?.is_none() {
+                return Err(SupervisorGoalError::NotFound(format!("lane {lane_key} has no goal contract")));
+            }
+            let moved = contract::set_proposal_state(
+                pool,
+                &lane_key,
+                ProposalState::Discarded,
+                Some(&[ProposalState::AwaitingApproval]),
+            )
+            .await?;
+            if !moved {
+                return Err(SupervisorGoalError::Conflict(format!(
+                    "lane {lane_key} has no proposal awaiting approval"
+                )));
+            }
+            lane_key
+        }
+        Action::AcceptRevision { id } => revision::accept(pool, id).await.map_err(revision_refusal)?.lane_key,
+        Action::RejectRevision { id } => {
+            // Read before the reject, which returns nothing.
+            let lane_key = revision::lane_of(pool, id).await?;
+            revision::reject(pool, id).await.map_err(revision_refusal)?;
+            lane_key.ok_or_else(|| SupervisorGoalError::Conflict(format!("no revision {id}")))?
+        }
+    };
+    if mutates {
+        let mut payload = json!({ "laneKey": lane_key });
+        if let (Some(payload), Value::Object(extra)) = (payload.as_object_mut(), changed) {
+            payload.extend(extra);
+        }
+        crate::remote::server::agent_control_service::publish_supervisor_changed(state, payload);
+    }
+    let view = ferryx_hub::lanes::supervised::goal_view(pool, &lane_key)
+        .await
+        .map_err(|error| SupervisorGoalError::Storage(error.to_string()))?;
+    let mut snapshot = supervisor_snapshot(state).await;
+    if let Some(fields) = snapshot.as_object_mut() {
+        fields.insert("goal".into(), json!({ "laneKey": lane_key, "goalContract": view }));
+    }
+    Ok(snapshot)
+}
+
 /// Handover commit: this daemon keeps serving retained sessions but no longer owns the hub.
 /// Slack, the cron scheduler and sockets, `:9119`, the watchers and the control listener end
 /// here, before the successor's hub starts, so there is never a second Socket Mode connection
@@ -1504,6 +1674,22 @@ mod tests {
         assert!(!relayed_from_a_person(Some("hub-auto-prompt-3")));
         assert!(!relayed_from_a_person(Some("lane-ledger-drive-2")));
         assert!(!relayed_from_a_person(None));
+    }
+
+    #[test]
+    fn goal_refusals_map_to_the_cli_exit_codes() {
+        use crate::agent_control::{exit_code_for, EXIT_INVALID, EXIT_NOT_FOUND, EXIT_REFUSED};
+        use ferryx_hub::goals::GoalError;
+        let conflict = SupervisorGoalError::from(GoalError::TurnInFlight("ledger".into()));
+        assert_eq!(conflict.code(), "REQUEST_CONFLICT");
+        assert_eq!(exit_code_for(conflict.code()), EXIT_REFUSED);
+        let missing = SupervisorGoalError::from(GoalError::NoContract("ledger".into()));
+        assert_eq!(exit_code_for(missing.code()), EXIT_NOT_FOUND);
+        let invalid = SupervisorGoalError::from(GoalError::EmptyContract);
+        assert_eq!(exit_code_for(invalid.code()), EXIT_INVALID);
+        let decided = revision_refusal(GoalError::InvalidContract("revision 3 is already accepted".into()));
+        assert_eq!(decided.code(), "REQUEST_CONFLICT");
+        assert_eq!(SupervisorGoalError::Unavailable.code(), "SUPERVISOR_UNAVAILABLE");
     }
 
     #[test]

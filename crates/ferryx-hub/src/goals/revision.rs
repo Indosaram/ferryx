@@ -353,6 +353,16 @@ pub async fn reject(pool: &SqlitePool, id: i64) -> Result<(), GoalError> {
     Ok(())
 }
 
+/// The lane a stored revision belongs to, or `None` when there is no such revision.
+pub async fn lane_of(pool: &SqlitePool, id: i64) -> Result<Option<String>, GoalError> {
+    Ok(
+        sqlx::query_scalar("SELECT lane_key FROM lane_goal_revisions WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
 /// The lane's revisions still awaiting a decision, oldest first.
 pub async fn list_pending(
     pool: &SqlitePool,

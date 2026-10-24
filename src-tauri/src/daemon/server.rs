@@ -6828,6 +6828,7 @@ impl DaemonServer {
                     capabilities.push("sessionOwnershipTransferV1".into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
@@ -6842,6 +6843,16 @@ impl DaemonServer {
                         Err(error) => DaemonResponse::Error {
                             message: error.to_string(),
                             code: Some("SUPERVISOR_UNAVAILABLE".into()),
+                            details: None,
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorGoal { request }) => {
+                    match crate::hub_runtime::supervisor_goal(self.remote_state(), request).await {
+                        Ok(snapshot) => DaemonResponse::SupervisorGoalOk { snapshot },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
                             details: None,
                         },
                     }
