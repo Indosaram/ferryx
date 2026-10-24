@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS lane_goal (
     proposal_request_id TEXT,
     -- When the current proposal was made; a human turn after it supersedes the proposal.
     proposal_at TEXT,
+    -- Consecutive `complete` decisions the blind convergence check refused. Two in a row stop
+    -- the lane with completion_evidence_missing.
+    converge_misses INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
 

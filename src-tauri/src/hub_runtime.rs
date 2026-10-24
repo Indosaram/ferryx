@@ -89,6 +89,19 @@ fn lines_of(turns: &[ReferenceTurn]) -> Vec<String> {
 
 struct DaemonBridge {
     client: DaemonClient,
+    /// The in-process gateway, when the bridge runs inside the daemon. A confirmed send needs
+    /// it to watch the observer log; without it a send counts as started once accepted.
+    gateway: Option<Arc<crate::remote::RemoteGatewayState>>,
+}
+
+fn hub_send_outcome(outcome: crate::agent_control::delivery::SendOutcome) -> ferryx_hub::goals::SendOutcome {
+    use crate::agent_control::delivery::SendOutcome as Daemon;
+    use ferryx_hub::goals::SendOutcome as Hub;
+    match outcome {
+        Daemon::Started => Hub::Started,
+        Daemon::Uncertain { code } => Hub::Uncertain { code },
+        Daemon::Refused { code } => Hub::Refused { code },
+    }
 }
 
 #[async_trait]
@@ -108,6 +121,37 @@ impl AgentControl for DaemonBridge {
             }
             _ => Err(HubError::message("the daemon returned an unexpected agent-control response")),
         }
+    }
+
+    async fn send_confirmed(
+        &self,
+        host_id: Option<&str>,
+        session_id: &str,
+        text: &str,
+        request_id: &str,
+    ) -> ferryx_hub::goals::SendOutcome {
+        let local = host_id.is_none_or(|host| host.is_empty() || host == "local");
+        let Some(gateway) = self.gateway.as_ref().filter(|_| local) else {
+            let op = AgentOp::Send {
+                session_id: session_id.to_owned(),
+                text: text.to_owned(),
+                request_id: request_id.to_owned(),
+            };
+            return match self.execute(host_id, op).await {
+                Ok(_) => ferryx_hub::goals::SendOutcome::Started,
+                Err(error) => ferryx_hub::agent_control::send_error_outcome(&error.to_string()),
+            };
+        };
+        hub_send_outcome(
+            crate::agent_control::delivery::send_confirmed(
+                gateway,
+                session_id,
+                text.to_owned(),
+                request_id.to_owned(),
+                crate::agent_control::delivery::turn_start_deadline(),
+            )
+            .await,
+        )
     }
 }
 
@@ -498,13 +542,30 @@ async fn record_control_turn(pool: &ferryx_hub::goals::SqlitePool, op: &AgentCon
         }
         _ => return Ok(false),
     };
-    let text = crate::agent_control::policy::audit_text(op).unwrap_or_default();
+    // The raw words: `turns::excerpt` redacts secrets before it caps the length. The audit
+    // line is already cut, so a secret straddling its cut would slip past redaction.
+    let text = match op {
+        AgentControlOp::Send { text, .. } => text.clone(),
+        AgentControlOp::Answer { answer, .. } => match &answer.custom_text {
+            Some(text) => text.clone(),
+            None => crate::agent_control::policy::audit_text(op).unwrap_or_default(),
+        },
+        _ => String::new(),
+    };
     Ok(ferryx_hub::goals::turns::record_send_turn(pool, session_id, request_id, &text).await?.is_some())
 }
 
 /// Called after an agent-control mutation succeeded. Records the lane turn it drove, if any.
 pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
-    if ferryx_hub::goals::turns::origin_for_request_id(op.mutation_request_id().as_deref()).is_none() {
+    let request_id = op.mutation_request_id();
+    if ferryx_hub::goals::turns::origin_for_request_id(request_id.as_deref()).is_none() {
+        return;
+    }
+    // The goal loop records its own `hub-goal-*` turn once the pane is seen starting it.
+    if request_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with(ferryx_hub::goals::turns::SUPERVISOR_REQUEST_PREFIX))
+    {
         return;
     }
     let Some((hub, _)) = SUPERVISOR_VIEW.get() else { return };
@@ -603,7 +664,10 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     let profiles = ferryx_hub::chat::router::ProfileRouter::new(config.profile_routes.clone());
     #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
     let meta_session_id = config.meta_session_id.clone().unwrap_or_else(|| "meta".into());
-    let bridge = Arc::new(DaemonBridge { client: DaemonClient::new() });
+    let bridge = Arc::new(DaemonBridge {
+        client: DaemonClient::new(),
+        gateway: Some(Arc::clone(server.remote_state())),
+    });
     let hub = Hub::open(config.clone(), bridge.clone()).await.map_err(|error| error.to_string())?;
     if let Err(error) = ferryx_hub::chat::reply::flush_pending(&hub.pool).await {
         tracing::warn!(%error, "stored chat replies were not flushed");
@@ -741,15 +805,27 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     let mut events = launch.server.remote_state().agent_events.subscribe();
     let watch_hub = Arc::clone(&launch.hub);
     let watch_bridge = launch.bridge.clone();
+    let watch_server = Arc::clone(&launch.server);
     let model_url = launch.config.supervisor_listen_url.clone();
     let lead = launch.config.meta_session_id.clone().unwrap_or_else(|| "meta".into());
     tasks.push(tokio::spawn(async move {
         let mut answered = std::collections::HashSet::new();
         let mut runs = std::collections::HashMap::new();
+        let mut worked = std::collections::HashSet::new();
         loop {
             match events.recv().await {
                 Ok(observation) => {
                     let idle = matches!(observation.state, AgentControlState::Idle);
+                    if matches!(observation.state, AgentControlState::Working | AgentControlState::Blocked) {
+                        worked.insert(observation.session_id.clone());
+                    } else if idle && observation.prompt_id.is_none() && worked.remove(&observation.session_id) {
+                        settle_goal_turn(
+                            Arc::clone(&watch_server),
+                            Arc::clone(&watch_hub),
+                            watch_bridge.clone(),
+                            observation.session_id.clone(),
+                        );
+                    }
                     let run = state_run(&mut runs, &observation);
                     if let Err(error) = on_agent_event(&watch_hub, watch_bridge.as_ref(), &mut answered, run, observation).await {
                         tracing::debug!(%error, "hub observer event was not applied");
@@ -1219,6 +1295,35 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
     }
 }
 
+/// A lane pane went Idle after a Working run: one turn settled. Lanes with a goal contract get
+/// one supervisor goal-loop pass, off the event loop because a confirmed send waits on the
+/// observer. The desktop refetches when the pass changed the lane's goal state.
+fn settle_goal_turn(server: Arc<DaemonServer>, hub: Arc<Hub>, bridge: Arc<DaemonBridge>, session_id: String) {
+    tokio::spawn(async move {
+        let lane_key = match ferryx_hub::goals::turns::lane_of_session(&hub.pool, &session_id).await {
+            Ok(Some(lane_key)) => lane_key,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, session_id = %session_id, "the settled pane's lane was not found");
+                return;
+            }
+        };
+        let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
+        match ferryx_hub::goals::r#loop::on_turn_settled(&hub.pool, &judge, bridge.as_ref(), &lane_key, true).await {
+            Ok(Some(outcome)) => server.remote_state().emit_desktop_event(
+                crate::remote::server::agent_control_service::SUPERVISOR_CHANGED_EVENT,
+                json!({
+                    "laneKey": outcome.lane_key,
+                    "stopReason": outcome.stop_reason,
+                    "awaitingApproval": outcome.awaiting_approval,
+                }),
+            ),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, lane = %lane_key, "the supervisor goal loop did not run"),
+        }
+    });
+}
+
 /// Sequence of the first observation in this session's current state run. A blocked pane
 /// re-observed while its screen redraws is the same run, so its notice keeps one dedupe key;
 /// each new run (a new turn, a new block) gets a new key.
@@ -1357,7 +1462,7 @@ pub fn run_mcp() -> i32 {
         }
     };
     runtime.block_on(async {
-        let bridge = Arc::new(DaemonBridge { client: DaemonClient::new() });
+        let bridge = Arc::new(DaemonBridge { client: DaemonClient::new(), gateway: None });
         let config = HubConfig::load().unwrap_or_default();
         // The same database the daemon's hub opened: the config file path wins, then
         // FERRYX_HUB_DB, then the default.

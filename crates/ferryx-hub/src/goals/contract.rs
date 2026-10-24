@@ -118,6 +118,7 @@ pub async fn set_contract(
             revision = lane_goal.revision + 1,
             stop_reason = NULL,
             stop_detail = NULL,
+            converge_misses = 0,
             proposal_state = CASE WHEN lane_goal.proposal_state IN ('pending','awaiting_approval')
                 THEN 'discarded' ELSE lane_goal.proposal_state END,
             updated_at = excluded.updated_at
@@ -429,6 +430,44 @@ pub async fn bump_turns(pool: &SqlitePool, lane_key: &str) -> Result<u32, GoalEr
         }),
         None => Err(GoalError::NoContract(lane_key.to_owned())),
     }
+}
+
+/// Forgets the lane's proposal: its turn settled, or the goal converged.
+pub async fn clear_proposal(pool: &SqlitePool, lane_key: &str) -> Result<(), GoalError> {
+    let updated = sqlx::query(
+        "UPDATE lane_goal SET proposal_text = NULL, proposal_gap_ids = NULL, proposal_state = NULL,
+                proposal_request_id = NULL, proposal_at = NULL, updated_at = ?
+         WHERE lane_key = ?",
+    )
+    .bind(now_rfc3339())
+    .bind(lane_key)
+    .execute(pool)
+    .await?;
+    require_written(pool, lane_key, updated.rows_affected()).await
+}
+
+/// Counts one more `complete` the convergence check refused and returns the streak.
+pub async fn note_divergence(pool: &SqlitePool, lane_key: &str) -> Result<u32, GoalError> {
+    let misses: Option<i64> = sqlx::query_scalar(
+        "UPDATE lane_goal SET converge_misses = converge_misses + 1, updated_at = ?
+         WHERE lane_key = ? RETURNING converge_misses",
+    )
+    .bind(now_rfc3339())
+    .bind(lane_key)
+    .fetch_optional(pool)
+    .await?;
+    misses
+        .map(|misses| u32::try_from(misses).unwrap_or(u32::MAX))
+        .ok_or_else(|| GoalError::NoContract(lane_key.to_owned()))
+}
+
+/// Ends a refused-`complete` streak: the lane made any other decision.
+pub async fn reset_divergence(pool: &SqlitePool, lane_key: &str) -> Result<(), GoalError> {
+    sqlx::query("UPDATE lane_goal SET converge_misses = 0 WHERE lane_key = ? AND converge_misses <> 0")
+        .bind(lane_key)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
