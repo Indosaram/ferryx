@@ -1,5 +1,5 @@
 import { Loader2, RefreshCw, TerminalSquare } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import type { TerminalActivity } from "../lib/activity";
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../lib/agentIcon";
 import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
@@ -23,6 +23,8 @@ import { toIpcError } from "../lib/tauri";
 import type { TerminalSession } from "../lib/types";
 import type { LocalRecoveryAdmissionResult } from "../state/workspaceStore";
 import { NativeTerminalPane } from "./NativeTerminalPane";
+import { CompatibilityTerminal } from "./CompatibilityTerminal";
+import { isNativeRendererUnavailable, subscribeNativeRendererAvailability } from "../lib/nativeTerminalLifecycle";
 import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
 import { DagPaneBadge } from "./dag/DagPaneBadge";
 import { remoteHostStore } from "../state/remoteHostStore";
@@ -108,6 +110,10 @@ export function TerminalPane({
   const descId = useId();
   const autoResumeKeyRef = useRef<string | null>(null);
   const admissionDisposeRef = useRef<(() => void) | null>(null);
+  const nativeRendererUnavailable = useSyncExternalStore(
+    subscribeNativeRendererAvailability,
+    isNativeRendererUnavailable,
+  );
 
   useEffect(() => {
     return () => {
@@ -349,7 +355,9 @@ export function TerminalPane({
         agentPresent={activity?.isAgent === true}
         agentWorking={activity?.isAgent === true && activity.state === "working"}
       />
-      <NativeTerminalPane
+      {nativeRendererUnavailable && session.backendSessionId && !isStandbyBackendSessionId(session.backendSessionId) ? (
+        <CompatibilityTerminal backendSessionId={session.backendSessionId} />
+      ) : <NativeTerminalPane
         sessionId={session.id}
         session={session}
         splitAttempt={splitIntent ? { frontendSessionId: session.id, generation: splitIntent.generation } : undefined}
@@ -360,7 +368,7 @@ export function TerminalPane({
         onBackendSessionUnavailable={(backendSessionId, reason, bindingKey) => {
           onBackendSessionUnavailable?.(session.id, backendSessionId, reason, bindingKey);
         }}
-      />
+      />}
       {splitIntent && session.reconnectLifecycle !== "idle" ? (
         <div
           role={splitPending ? "status" : "alert"}

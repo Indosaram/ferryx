@@ -4,6 +4,30 @@ import { createAttemptBudget, matchesAttachTuple, type AttemptBudget } from "./l
 
 const durableBindings = new Map<string, { tuple: PaneAttachTuple; budget: AttemptBudget | null }>();
 
+// Set once the native renderer reports NATIVE_RENDERER_UNAVAILABLE (no GPU adapter or device).
+// Held for this launch only: panes then mount the DOM compatibility renderer, and a restart
+// retries the GPU path.
+let nativeRendererUnavailable = false;
+const nativeRendererListeners = new Set<() => void>();
+
+export const NATIVE_RENDERER_UNAVAILABLE = "NATIVE_RENDERER_UNAVAILABLE";
+
+export function markNativeRendererUnavailable(): void {
+  if (nativeRendererUnavailable) return;
+  nativeRendererUnavailable = true;
+  switchDebug("terminal.renderer.native_unavailable", {});
+  for (const listener of [...nativeRendererListeners]) listener();
+}
+
+export function isNativeRendererUnavailable(): boolean {
+  return nativeRendererUnavailable;
+}
+
+export function subscribeNativeRendererAvailability(listener: () => void): () => void {
+  nativeRendererListeners.add(listener);
+  return () => nativeRendererListeners.delete(listener);
+}
+
 export function registerDurableNativeBinding(tuple: PaneAttachTuple, startTimeMs = performance.now(), expectedPrevious?: PaneAttachTuple): boolean {
   const current = durableBindings.get(tuple.backendSessionId);
   if (expectedPrevious && (!current || !matchesAttachTuple(current.tuple, expectedPrevious) ||
@@ -608,6 +632,8 @@ function enqueueNativeTerminalLifecycle<T>(
 }
 
 export function resetNativeTerminalLifecycleForTest(): void {
+  nativeRendererUnavailable = false;
+  nativeRendererListeners.clear();
   durableBindings.clear();
   lifecycleTails.clear();
   inFlightAttachIpcs.clear();

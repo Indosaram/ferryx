@@ -975,6 +975,9 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
 ) -> Result<NativeTerminalAttachReceipt, IpcError> {
     let receipt_state = state.inner().clone();
     let expected_tuple = attach_tuple.clone();
+    // Without a GPU adapter the surface would attach and then never present: a blank pane.
+    // Report a typed error so the UI mounts the DOM grid renderer instead.
+    probe_native_renderer(&receipt_state).await?;
     let deadline = tokio::time::Instant::now()
         + std::time::Duration::from_millis(remaining_ms.unwrap_or(4_000).min(4_000));
     native_terminal_attach(app, daemon_client, state, session_id.clone(), bounds,
@@ -984,6 +987,29 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
         return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
     }
     Ok(NativeTerminalAttachReceipt { session_id, attach_tuple: active, presented: false })
+}
+
+/// Resolves the shared surface GPU context on the GPU worker, the thread that would otherwise
+/// create it lazily at the first frame, so an adapter that exists is initialized exactly as
+/// before. The result is cached for the process lifetime, so the fallback holds for this launch.
+async fn probe_native_renderer(state: &NativeTerminalSurfaceHostState) -> Result<(), IpcError> {
+    use crate::native_terminal::renderer::gpu_context::GpuContext;
+    GpuContext::check_forced_adapter_failure().map_err(IpcError::from)?;
+    // Unit tests drive attach against fake daemons; only the seam above may fail them here,
+    // so their outcome never depends on the test host's GPU.
+    if cfg!(test) {
+        return Ok(());
+    }
+    let (sender, receiver) = oneshot::channel();
+    if !state.gpu_worker().enqueue(move |_gpu| {
+        let _ = sender.send(GpuContext::shared_surface_context().map(|_| ()));
+    }) {
+        return Ok(());
+    }
+    match receiver.await {
+        Ok(Err(error)) => Err(IpcError::from(error)),
+        _ => Ok(()),
+    }
 }
 
 async fn native_terminal_attach<R: Runtime>(
@@ -2749,6 +2775,57 @@ fn into_bound_ipc_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_attach_reports_renderer_unavailable_when_no_gpu_adapter_exists() {
+        // Given a host where every GPU adapter request fails.
+        let _no_gpu = crate::native_terminal::renderer::gpu_context::GpuContext::force_adapter_unavailable_for_test();
+        let root = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .manage(Arc::new(DaemonClient::new_with_socket(root.path().join("no-gpu-daemon"))))
+            .manage(NativeTerminalSurfaceHostState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+
+        // When the pane attaches its native surface.
+        let error = cmd_native_terminal_attach(
+            app.handle().clone(),
+            app.state::<Arc<DaemonClient>>(),
+            app.state::<NativeTerminalSurfaceHostState>(),
+            "no-gpu-session".into(), None, None, None, None, None,
+        )
+        .await
+        .expect_err("attach must not succeed into a surface that can never present");
+
+        // Then the UI receives the typed fallback code and no blank surface was reserved.
+        assert_eq!(error.code, IpcErrorCode::NativeRendererUnavailable);
+        assert_eq!(
+            serde_json::to_value(&error.code).unwrap(),
+            serde_json::json!("NATIVE_RENDERER_UNAVAILABLE")
+        );
+        let state = app.state::<NativeTerminalSurfaceHostState>();
+        assert!(!state.has_session("no-gpu-session"));
+        state.teardown();
+    }
+
+    #[test]
+    fn gpu_adapter_and_device_failures_map_to_renderer_unavailable() {
+        for error in [
+            NativeTerminalError::GpuAdapterUnavailable("none".into()),
+            NativeTerminalError::GpuDeviceUnavailable("none".into()),
+        ] {
+            assert_eq!(IpcError::from(error).code, IpcErrorCode::NativeRendererUnavailable);
+        }
+        assert_eq!(
+            IpcError::from(NativeTerminalError::GpuPipelineError("x".into())).code,
+            IpcErrorCode::InternalError
+        );
+        let _no_gpu = crate::native_terminal::renderer::gpu_context::GpuContext::force_adapter_unavailable_for_test();
+        assert!(matches!(
+            crate::native_terminal::renderer::gpu_context::GpuContext::new(),
+            Err(NativeTerminalError::GpuAdapterUnavailable(_))
+        ));
+    }
 
     #[test]
     fn select_range_mode_returns_the_selected_text() {

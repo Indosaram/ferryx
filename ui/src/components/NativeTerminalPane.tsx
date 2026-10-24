@@ -21,6 +21,8 @@ import {
   reattachNativeTerminalLifecycle,
   getDurableNativeBinding,
   holdNativeTerminalAttachIpc,
+  markNativeRendererUnavailable,
+  NATIVE_RENDERER_UNAVAILABLE,
   nativeTerminalAttachIpcSettled,
   nativeBindingRemainingMs,
   registerDurableNativeBinding,
@@ -3365,6 +3367,13 @@ export function NativeTerminalPane({
             attachmentOwnerRef.current.sessionId !== targetSessionId ||
             attachmentOwnerRef.current.bindingKey !== currentOwner.bindingKey
           ) {
+            return;
+          }
+
+          // No GPU adapter: retrying can never present. Hand the pane to the DOM renderer.
+          if (isStructuredIpcError(error) && error.code === NATIVE_RENDERER_UNAVAILABLE) {
+            cancelRetry();
+            markNativeRendererUnavailable();
             return;
           }
 

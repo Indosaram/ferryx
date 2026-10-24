@@ -8,6 +8,39 @@ use crate::native_terminal::error::NativeTerminalError;
 // Serialize independent instance initialization and final release, not GPU work.
 static INSTANCE_LIFECYCLE: Mutex<()> = Mutex::new(());
 
+#[cfg(test)]
+thread_local! {
+    static FORCE_ADAPTER_UNAVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: while the returned guard lives, adapter requests on this thread fail as if the
+/// machine had no GPU adapter.
+#[cfg(test)]
+pub(crate) struct ForcedAdapterFailure(());
+
+#[cfg(test)]
+impl Drop for ForcedAdapterFailure {
+    fn drop(&mut self) {
+        FORCE_ADAPTER_UNAVAILABLE.with(|forced| forced.set(false));
+    }
+}
+
+/// Debug builds honor `FERRYX_FORCE_NO_GPU_ADAPTER` so the DOM fallback can be exercised on a
+/// machine that does have a GPU. Release builds ignore it.
+fn adapter_forced_unavailable() -> bool {
+    #[cfg(test)]
+    if FORCE_ADAPTER_UNAVAILABLE.with(|forced| forced.get()) {
+        return true;
+    }
+    cfg!(debug_assertions) && std::env::var_os("FERRYX_FORCE_NO_GPU_ADAPTER").is_some()
+}
+
+fn forced_adapter_error() -> NativeTerminalError {
+    NativeTerminalError::GpuAdapterUnavailable(
+        "GPU adapter disabled by FERRYX_FORCE_NO_GPU_ADAPTER or the test seam".into(),
+    )
+}
+
 struct OwnedInstance(Option<wgpu::Instance>);
 
 impl Drop for OwnedInstance {
@@ -62,6 +95,21 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
+    #[cfg(test)]
+    pub(crate) fn force_adapter_unavailable_for_test() -> ForcedAdapterFailure {
+        FORCE_ADAPTER_UNAVAILABLE.with(|forced| forced.set(true));
+        ForcedAdapterFailure(())
+    }
+
+    /// Reports a forced adapter failure (test seam or debug env override) on the calling thread.
+    pub(crate) fn check_forced_adapter_failure() -> Result<(), NativeTerminalError> {
+        if adapter_forced_unavailable() {
+            Err(forced_adapter_error())
+        } else {
+            Ok(())
+        }
+    }
+
     // Share one process-lifetime instance across production surfaces only.
     // Independent contexts use separate instances so they do not share one EGL context.
     pub(crate) fn shared_surface_instance() -> wgpu::Instance {
@@ -75,6 +123,9 @@ impl GpuContext {
     }
 
     pub(crate) fn shared_surface_context() -> Result<Self, NativeTerminalError> {
+        if adapter_forced_unavailable() {
+            return Err(forced_adapter_error());
+        }
         static CONTEXT: OnceLock<Result<GpuContext, NativeTerminalError>> = OnceLock::new();
         CONTEXT.get_or_init(|| Self::with_instance(Self::shared_surface_instance())).clone()
     }
@@ -104,6 +155,9 @@ impl GpuContext {
         owned_instance: Option<Arc<OwnedInstance>>,
         instance: wgpu::Instance,
     ) -> Result<Self, NativeTerminalError> {
+        if adapter_forced_unavailable() {
+            return Err(forced_adapter_error());
+        }
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,

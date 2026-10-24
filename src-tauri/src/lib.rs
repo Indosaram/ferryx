@@ -1550,6 +1550,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(remote_manager)
         .manage(workspace_registry)
         .manage(ipc::worktree_disk::WorktreeDiskScans::default())
+        .manage(ipc::terminal_grid::TerminalGridStreams::default())
         .manage(notification_audio)
         .manage(notification_activations)
         .manage(driver_broker)
@@ -1633,6 +1634,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_terminal_suspend,
         cmd_terminal_resume,
         cmd_terminal_list,
+        cmd_terminal_grid_attach,
+        cmd_terminal_grid_resize,
+        cmd_terminal_grid_detach,
         cmd_terminal_preferences,
         cmd_terminal_apply_overrides,
         cmd_terminal_set_appearance,
