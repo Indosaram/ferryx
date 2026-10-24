@@ -172,13 +172,15 @@ if (root && parity) {
         activeProjectId={fixture.activeProjectId}
         worktrees={fixture.worktrees}
         inactiveProjectWorktrees={fixture.inactiveProjectWorktrees}
-        agents={[]}
+        agents={[...sidebarParityFixture.desktopAgents]}
         activePath={fixture.active.path}
+        unreadWorktreePaths={sidebarParityFixture.desktopUnread}
+        activityByWorktreePath={sidebarParityFixture.desktopActivity}
         onSelectProject={markFixture("fixtureSelectedProject")}
         onSelectWorktree={markFixture("fixtureSelectedWorktree")}
         onCreateWorktree={markFixture("fixtureCreateWorktree")}
         onOpenSettings={() => markFixture("fixtureOpenSettings")()}
-        attention={{ ...attention, rows: [] }}
+        attention={{ ...attention, rows: [...sidebarParityFixture.desktopAttention] }}
       />
     </div>,
   );

@@ -1,17 +1,34 @@
 // Remote half of the sidebar parity QA: the parity fixture published as a desktop (or an
-// inventory fallback) model, drawn by the real remote workspace mirror. No network.
+// inventory fallback) model, drawn by the real remote workspace mirror. No network. A desktop
+// snapshot carries the fixture's live signals exactly as the desktop publisher reduces them, so the
+// captures show the same state dots, slots, footer and Inbox count as the desktop harness.
 import React from "react";
 
 import { buildSidebarModel } from "../components/sidebar/sidebarModel";
 import { sidebarParityFixture as fixture } from "../components/sidebar/sidebarParityFixture";
+import { sidebarSessionSignals } from "../components/sidebar/sidebarSessionSignals";
+import { agentStatesByPath } from "../components/sidebar/useSidebarModel";
 import { remoteSidebarSignals } from "../remote/remoteSidebarLive";
 import { RemoteWorkspaceMirror, type RemoteWorkspaceModel } from "../remote/RemoteSessionList";
 import type { RemoteSidebarSection } from "../remote/useRemoteSidebarModel";
 
 export const SIDEBAR_PARITY_QA_STATES = ["sidebar-parity", "sidebar-parity-inventory"] as const;
 
-export function sidebarParitySections(source: "desktop" | "inventory"): RemoteSidebarSection[] {
-  const model = buildSidebarModel({
+/** A second account machine that is offline and never loaded a list. */
+const OFFLINE_MACHINE: RemoteSidebarSection = {
+  machineId: "machine-offline",
+  label: "Studio Mac",
+  state: "offline",
+  model: null,
+  signals: null,
+  error: { code: "OFFLINE", message: "This computer is not reachable" },
+};
+
+export function sidebarParitySections(
+  source: "desktop" | "inventory",
+  options: { readonly offlineMachine?: boolean } = {},
+): RemoteSidebarSection[] {
+  const built = buildSidebarModel({
     source,
     generatedAt: "2026-10-24T00:00:00.000Z",
     revision: 1,
@@ -27,14 +44,27 @@ export function sidebarParitySections(source: "desktop" | "inventory"): RemoteSi
     advancedFeatures: false,
     listingFailures: fixture.listingFailures,
   });
-  return [{
+  // Only a desktop publishes signals; the inventory fallback has none.
+  const model = source === "desktop"
+    ? {
+        ...built,
+        signals: sidebarSessionSignals(built, {
+          activityByWorktreePath: fixture.desktopActivity,
+          unreadWorktreePaths: fixture.desktopUnread,
+          agentStateByPath: agentStatesByPath(fixture.desktopAgents.map((agent) => [agent.worktreePath, agent] as const)),
+          attentionCount: fixture.desktopAttention.length,
+        }),
+      }
+    : built;
+  const connected: RemoteSidebarSection = {
     machineId: "machine-fixture",
     label: "Fixture Mac",
     state: "ok",
     model,
     signals: remoteSidebarSignals(model, null, fixture.active),
     error: null,
-  }];
+  };
+  return options.offlineMachine ? [connected, OFFLINE_MACHINE] : [connected];
 }
 
 export const SidebarParityQaState: React.FC<{ state: string; model: RemoteWorkspaceModel }> = ({ state, model }) => {

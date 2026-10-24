@@ -100,7 +100,16 @@ const STRUCTURE_PROBE = (rootSelector) => {
     }
   }
   const empties = [...root.querySelectorAll('[role="status"]')].map(text);
-  return { entries, empties };
+  // Live state as drawn: every state dot in document order, and the Inbox tab's accessible name.
+  const dots = [...root.querySelectorAll("[data-slot-state]")].map((el) => el.getAttribute("data-slot-state"));
+  const scope = root.closest('[data-testid="remote-sidebar-section"]') ?? root.parentElement ?? root;
+  const inboxTab = [...scope.querySelectorAll('[role="tab"]')].find((tab) => /^Inbox\b/.test(tab.getAttribute("aria-label") ?? tab.textContent ?? ""));
+  const inbox = inboxTab ? (inboxTab.getAttribute("aria-label") ?? text(inboxTab)) : null;
+  const sections = [...document.querySelectorAll('[data-testid="remote-sidebar-section"]')].map((section) => ({
+    machine: section.getAttribute("aria-label"),
+    status: [...section.querySelectorAll('[role="status"]')].map(text),
+  }));
+  return { entries, empties, dots, inbox, sections };
 };
 
 async function settle(page) {
@@ -188,13 +197,30 @@ async function main() {
   }
 
   const { captures, failures } = report;
-  report.parityDiff = diffStructures(captures["desktop-1280x800"].structure, captures["remote-1280x800"].structure);
+  // `sections` lists the remote's machine sections, which the desktop has no counterpart for.
+  const comparable = ({ sections: _sections, ...structure }) => structure;
+  report.parityDiff = diffStructures(comparable(captures["desktop-1280x800"].structure), comparable(captures["remote-1280x800"].structure));
   if (report.parityDiff.length > 0) failures.push(`desktop vs remote 1280 text structure differs (${report.parityDiff.length} lines)`);
   if ((captures["desktop-1280x800"].structure.entries ?? []).length === 0) failures.push("desktop capture has no sidebar entries");
   for (const name of ["remote-768x1024", "remote-390x844-drawer", "phone-home-worktrees-390x844"]) {
     const labels = (captures[name].structure.entries ?? []).map((entry) => `${entry.kind}:${entry.label}`);
     const expected = (captures["desktop-1280x800"].structure.entries ?? []).map((entry) => `${entry.kind}:${entry.label}`);
     if (JSON.stringify(labels) !== JSON.stringify(expected)) failures.push(`${name}: labels differ from the desktop: ${JSON.stringify(labels)}`);
+  }
+  const desktopStructure = captures["desktop-1280x800"].structure;
+  // The harnesses must carry the fixture's live signals: a capture without dots compares nothing.
+  for (const state of ["working", "waiting", "done", "unread"]) {
+    if (!(desktopStructure.dots ?? []).includes(state)) failures.push(`desktop capture shows no ${state} dot`);
+  }
+  for (const name of ["remote-1280x800", "remote-768x1024", "remote-390x844-drawer", "phone-home-worktrees-390x844"]) {
+    const { dots, inbox } = captures[name].structure;
+    if (JSON.stringify(dots) !== JSON.stringify(desktopStructure.dots)) failures.push(`${name}: state dots differ from the desktop: ${JSON.stringify(dots)} vs ${JSON.stringify(desktopStructure.dots)}`);
+    if (name !== "phone-home-worktrees-390x844" && inbox !== desktopStructure.inbox) failures.push(`${name}: Inbox tab ${JSON.stringify(inbox)} differs from the desktop's ${JSON.stringify(desktopStructure.inbox)}`);
+  }
+  if (!desktopStructure.inbox || !/\(\d+\)/.test(desktopStructure.inbox)) failures.push(`desktop Inbox tab carries no count: ${JSON.stringify(desktopStructure.inbox)}`);
+  const phoneSections = captures["phone-home-worktrees-390x844"].structure.sections ?? [];
+  if (!phoneSections.some((section) => section.status.some((line) => /Can't reach this computer/.test(line)))) {
+    failures.push(`phone capture lacks the offline second machine: ${JSON.stringify(phoneSections)}`);
   }
   if (captures["remote-1280x800"].notSynced !== null) failures.push("desktop-sourced remote shows the not-synced caption");
   const inventory = captures["remote-1280x800-inventory"].notSynced;

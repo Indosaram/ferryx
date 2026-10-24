@@ -127,7 +127,8 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
   const [accountOpen, setAccountOpen] = useState(state === "account-delete");
   const machines = useMemo(() => machinesFor(state), [state]);
   const rows = useMemo(() => inboxRows(), []);
-  const sidebarSections = useMemo(() => sidebarParitySections("desktop"), []);
+  // The connected desktop's list plus an offline second machine, as an account phone sees them.
+  const sidebarSections = useMemo(() => sidebarParitySections("desktop", { offlineMachine: true }), []);
   return (
     <div className="remote-app-root flex h-[100dvh] w-full flex-col bg-chat-screen">
       <PhoneHomeView
