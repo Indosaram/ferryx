@@ -17,10 +17,11 @@ import { fileURLToPath } from "node:url";
 import { inflateRawSync } from "node:zlib";
 
 import { assembleRelease } from "./build-latest-json.mjs";
-import { generateChangelog } from "./lib/release-changelog.mjs";
+import { appendSurvivalReport, generateChangelog } from "./lib/release-changelog.mjs";
 import { parsePlan, parseReceipt } from "./lib/release-contract.mjs";
 import { loadHostConfig, redactProcessOutput } from "./lib/release-hosts.mjs";
 import { buildHost, preflightAll } from "./lib/release-platforms.mjs";
+import { assertSurvivalGate } from "./lib/release-survival.mjs";
 import { writeHomebrewPackages } from "./release-packaging.mjs";
 import {
   attachReleaseProvenance,
@@ -668,11 +669,25 @@ export async function verifyReleaseRun({ runDir, pubkey = null }) {
 }
 
 /**
- * Publishes release assets to GitHub Release as draft, verifies bytes, and undrafts.
+ * Session survival gate (runbook section 4b): survival/<platform>/summary.json for mac, linux and
+ * windows at the plan commit with zero FAIL, plus survival/footprint.json. Writes
+ * survival/survival-report.md and throws SurvivalGateError when the release must not be drafted.
+ */
+export function survivalGateRelease({ runDir, survivalWaiver = null }) {
+  if (!runDir) throw new Error("Missing required argument: --run");
+  const resolvedRunDir = resolve(runDir);
+  const plan = validateAssemblyState(resolvedRunDir);
+  return assertSurvivalGate({ releaseDir: resolvedRunDir, commitSha: plan.commitSha, waiver: survivalWaiver });
+}
+
+/**
+ * Publishes release assets to GitHub Release as draft, verifies bytes, and undrafts. Refuses to
+ * draft unless the session survival gate passes (or the owner waived unreachable evidence).
  */
 export async function publishRelease({
   runDir,
   approvePublish = false,
+  survivalWaiver = null,
   ghCommand = "gh",
   lsRemoteFn = null,
   env = process.env,
@@ -692,6 +707,9 @@ export async function publishRelease({
   if (!existsSync(publishDir)) {
     throw new Error(`publish directory not found in run directory: ${runDir}`);
   }
+
+  // 0. Session survival gate, before any network call.
+  const survival = assertSurvivalGate({ releaseDir: resolvedRunDir, commitSha: plan.commitSha, waiver: survivalWaiver });
 
   // 1. Verify remote tag matches plan commitSha
   let lsRemoteOut = "";
@@ -759,6 +777,7 @@ export async function publishRelease({
       writeFileSync(notesPath, `Ferryx release ${plan.tag}\n`, "utf8");
     }
   }
+  writeFileSync(notesPath, appendSurvivalReport(readFileSync(notesPath, "utf8"), survival.report), "utf8");
 
   // 3. Create Draft Release
   const createArgs = [
@@ -771,11 +790,7 @@ export async function publishRelease({
     "--title",
     plan.tag,
   ];
-  if (existsSync(notesPath)) {
-    createArgs.push("--notes-file", notesPath);
-  } else {
-    createArgs.push("--notes", `Ferryx release ${plan.tag}`);
-  }
+  createArgs.push("--notes-file", notesPath);
 
   const createRes = spawnSync(
     ghCommand,
@@ -840,7 +855,13 @@ export async function publishRelease({
     throw new Error(`Failed to undraft release: ${editRes.stderr || editRes.stdout}`);
   }
 
-  return { published: true, tag: plan.tag, runId: plan.runId, storeSubmission: storeSubmissionLine(plan) };
+  return {
+    published: true,
+    tag: plan.tag,
+    runId: plan.runId,
+    storeSubmission: storeSubmissionLine(plan),
+    survivalWaiver: survival.result.waiver,
+  };
 }
 
 /**
@@ -889,7 +910,8 @@ Subcommands:
   build --config <json> --run <dir> --host macbook|omaki|maho-win [--approve-notarization]
   assemble --run <dir> [--pubkey <fixture-key>]
   verify --run <dir> [--pubkey <fixture-key>]
-  publish --run <dir> --approve-publish
+  survival-gate --run <dir> [--survival-waiver "<reason>"]
+  publish --run <dir> --approve-publish [--survival-waiver "<reason>"]
   verify-remote --run <dir>
 `);
     process.exit(0);
@@ -949,11 +971,21 @@ Subcommands:
         console.log(`Release verified successfully against ${result.files.length} files`);
         break;
       }
+      case "survival-gate": {
+        const runDir = options.get("run");
+        const survivalWaiver = options.get("survival-waiver") || null;
+        const { result, reportPath } = survivalGateRelease({ runDir, survivalWaiver });
+        console.log(`Session survival gate passed; report at ${reportPath}`);
+        if (result.waiver) console.log(`Survival waiver: ${result.waiver}`);
+        break;
+      }
       case "publish": {
         const runDir = options.get("run");
         const approvePublish = flags.has("approve-publish");
-        const result = await publishRelease({ runDir, approvePublish });
+        const survivalWaiver = options.get("survival-waiver") || null;
+        const result = await publishRelease({ runDir, approvePublish, survivalWaiver });
         console.log(`Release published successfully: ${result.tag}`);
+        if (result.survivalWaiver) console.log(`Survival waiver: ${result.survivalWaiver}`);
         console.log(result.storeSubmission);
         console.log(`Submit via docs/releases/MS_STORE_RESUBMISSION_RECOVERY.md (product ${STORE_PRODUCT_ID})`);
         break;

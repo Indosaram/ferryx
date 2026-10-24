@@ -277,6 +277,22 @@ export function generateChangelog({
 }
 
 // Current vYYYY.MMDD.N tags plus the legacy vYYYY.MM.DD.N form (scripts/release-tag-policy.mjs).
+/**
+ * Appends the session survival report (scripts/lib/release-survival.mjs) to release notes, so
+ * the GitHub release body carries the scenario x platform table and any owner waiver. Any
+ * previously appended survival section is replaced.
+ *
+ * @param {string} notes - Release notes markdown
+ * @param {string} report - survival-report.md content (starts with "## Session survival")
+ * @returns {string}
+ */
+export function appendSurvivalReport(notes, report) {
+  const marker = "## Session survival";
+  const start = notes.indexOf(marker);
+  const base = (start >= 0 ? notes.slice(0, start) : notes).replace(/\s+$/, "");
+  return `${base}\n\n${report.trim()}\n`;
+}
+
 const RELEASE_TAG_PATTERN = /^v\d{4}\.(?:\d{4}|\d{2}\.\d{2})\.\d+$/;
 
 export const CHANGELOG_HEADER = [

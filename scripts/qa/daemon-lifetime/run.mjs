@@ -449,6 +449,7 @@ async function main() {
   const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }));
 
   summary.revisions.head = (await run('git', ['-C', REPO, 'rev-parse', 'HEAD'])).stdout.trim();
+  summary.commit = summary.revisions.head;
   summary.revisions.tree = (await run('git', ['-C', REPO, 'rev-parse', 'HEAD^{tree}'])).stdout.trim();
   summary.revisions.dirty = (await run('git', ['-C', REPO, 'status', '--porcelain', '--untracked-files=no'])).stdout.trim().split('\n').filter(Boolean);
   summary.hooks = probeHooks(REPO, host.platform);

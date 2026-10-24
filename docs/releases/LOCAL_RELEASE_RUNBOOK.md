@@ -280,6 +280,51 @@ shasum -a 256 -c SHA256SUMS
 `bun scripts/release-provenance.mjs verify --dir ferryx-release` runs both checks. Every check
 must exit 0; a single changed byte fails `shasum -c`.
 
+### 4b. Session survival gate
+
+A release is not drafted until session survival is proven on all three platforms for the exact
+release commit. Run the daemon-lifetime QA harness from a worktree checked out at
+`plan.json.commitSha` on each QA host. It runs against isolated QA OS jobs and a QA bundle only;
+never point it at the live daemon:
+
+```bash
+# mac (isolated QA jobs on this Mac), linux (omarchy), windows (maho-win)
+node scripts/qa/daemon-lifetime/run.mjs --platform mac     --only Q01,Q02,Q03,Q03b,Q07,Q08,Q08b,Q11,Q14
+node scripts/qa/daemon-lifetime/run.mjs --platform linux   --only Q01,Q02,Q03,Q03b,Q07,Q08,Q08b,Q11,Q14
+node scripts/qa/daemon-lifetime/run.mjs --platform windows --only Q01,Q02,Q03,Q07,Q08b,Q11,Q14
+```
+
+Windows skips the ids that `scripts/qa/daemon-lifetime/lib/summary.mjs` does not list for it
+(`Q03b`, `Q08`). Copy each run's `summary.json` (its path is the last line the harness logs) to
+`$RUN/survival/<platform>/summary.json`, and the footprint benchmark result from
+`bench/footprint/run.mjs` (todo 17, IS-8 per release) to `$RUN/survival/footprint.json`. Then:
+
+```bash
+bun scripts/release-local.mjs survival-gate --run "$RUN"
+```
+
+The gate (`scripts/lib/release-survival.mjs`) writes `$RUN/survival/survival-report.md`: a
+scenario x platform table of PASS/FAIL with kept/before live session counts. It refuses with a
+typed code when:
+
+| Code | Cause |
+| --- | --- |
+| `SURVIVAL_SUMMARY_MISSING` | a platform has no `survival/<platform>/summary.json` |
+| `SURVIVAL_SUMMARY_INVALID` | the file is not a daemon-lifetime summary for that platform |
+| `SURVIVAL_STALE_COMMIT` | the summary `commit` field is not `plan.json.commitSha` |
+| `SURVIVAL_FAIL` | any gate scenario is FAIL on any platform |
+| `SURVIVAL_SCENARIO_NOT_PASSED` | a gate scenario is BLOCKED, NOT_RUN or absent |
+| `SURVIVAL_FOOTPRINT_MISSING` | `survival/footprint.json` is missing or not JSON |
+
+Any FAIL blocks the release. `publish` runs the same gate before its first network call, so a
+failing gate never creates a draft. Owner override: when a QA host is unreachable, the owner may
+pass `--survival-waiver "<reason>"` to both `survival-gate` and `publish`. A waiver covers only
+evidence that could not be produced (missing summary, a not-run scenario, missing footprint);
+it never covers a FAIL, a stale commit or an invalid summary. The waiver and its reason are
+printed in `survival-report.md`, and `publish` appends the report to `RELEASE_NOTES.md`, so both
+appear in the GitHub release body. Until todo 17 lands `footprint.json`, use
+`--survival-waiver "footprint pending todo 17"`.
+
 ### 5. Draft review, publication approval, and remote verification
 
 Before any network mutation, create and push the reviewed tag by an explicit operator action and
@@ -297,7 +342,7 @@ The current parser exposes the following publish command and requires both appro
 
 ```bash
 FERRYX_APPROVE_PUBLISH=1 \
-  bun scripts/release-local.mjs publish --run "$RUN" --approve-publish
+  bun scripts/release-local.mjs publish --run "$RUN" --approve-publish [--survival-waiver "<reason>"]
 ```
 
 The coordinator validates remote tag closure, creates a draft release on GitHub, uploads the
@@ -387,6 +432,12 @@ Install safety rules enforced by the script:
   `{"type":"upgradeBinary","newBinaryPath":"/Applications/Ferryx.app/Contents/MacOS/ferryx"}`
   before launching the GUI, then confirm `initial.ok` in
   `/tmp/rorca-<uid>/boot-trace.log`.
+- Confirm the handover moved every session: the predecessor logs
+  `Transferred sessions to the successor over the handover socket` with `requested=<N>
+  transferred=<M>` (`transfer_sessions_reply` in `src-tauri/src/daemon/server.rs`) in
+  `~/.ferryx/logs/daemon.log`. Require `requested == transferred`. A shortfall (for example
+  `requested=20 transferred=18`) means sessions were lost in the handover: stop and record it
+  before launching the GUI.
 - Never `kill` a draining daemon: it retires itself when its sessions end.
   The first launch after a notarized install may take several extra seconds
   (Gatekeeper validation) - the readiness budget widening on main covers this.
@@ -543,6 +594,7 @@ updater manifest; stores update the app.
 - [ ] Developer ID signing, notarization/stapling, updater signatures, package metadata, and hashes pass.
 - [ ] The macOS post-build release check passes on `Ferryx.app` and `Contents/Helpers/Ferryx Daemon.app`.
 - [ ] `assemble` and `verify` pass against the production updater public key.
+- [ ] The section 4b session survival gate passed for `plan.json.commitSha` on mac, linux and windows with zero FAIL and `footprint.json` present, or any `--survival-waiver` reason is printed in `survival-report.md` and the release notes.
 - [ ] `SHA256SUMS`, `SHA256SUMS.minisig`, both `*.cdx.json` SBOMs and `provenance.json` are in `$RUN/publish`, and `minisign -Vm SHA256SUMS -P <pubkey>` plus `shasum -a 256 -c SHA256SUMS` pass there.
 - [ ] Draft bytes and inventory are reviewed before the separate publication approval.
 - [ ] `verify-remote` passes after publication.
