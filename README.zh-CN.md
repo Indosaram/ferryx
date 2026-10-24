@@ -6,10 +6,10 @@
 
 # Ferryx
 
-### 并行智能体开发，零冗余。
+### 在同一个仓库中并行运行 Claude Code、Codex 以及任意 CLI 智能体——每个都在独立的 worktree 中，关闭应用后继续运行，还能用手机操控。
 
-原生 Ghostty 终端引擎、wgpu GPU 渲染，以及无头 Rust PTY 守护进程。
-完全不使用 Electron。
+内置的监督者会按你的方式回答常规提示，只把有风险的操作交给你。
+原生 Rust 与 Tauri v2，libghostty 终端核心，不使用 Electron。
 
 [**下载**](https://github.com/Indosaram/ferryx/releases/latest) &nbsp;·&nbsp;
 [**网站**](https://ferryx.dev/) &nbsp;·&nbsp;
