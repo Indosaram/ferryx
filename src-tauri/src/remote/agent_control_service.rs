@@ -1174,6 +1174,60 @@ mod tests {
         assert_eq!(record.code, "UNAUTHORIZED");
     }
 
+    /// A device holding a machine Control grant is refused until the owner turns agent control on.
+    #[tokio::test]
+    async fn a_disabled_policy_refuses_injection() {
+        let session_id = "agent-control-disabled-policy";
+        let (backend, state) = pane(session_id, "$ ");
+        let pin = state
+            .auth_manager
+            .create_scoped_pairing_code(
+                crate::remote::auth::DevicePermission::Control,
+                crate::remote::auth::DeviceAccessScope::Machine,
+            )
+            .expect("machine control pin");
+        let (token, _device) = state.auth_manager.exchange_pairing_code(&pin, "hub").expect("exchange");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().expect("header"),
+        );
+        let send = |request_id: &str| {
+            Ok(Json(SendBody {
+                text: "echo hi".into(),
+                request_id: Some(request_id.into()),
+            }))
+        };
+
+        assert!(!state.agent_control_policy.enabled(), "agent control is off on a fresh state");
+        let refused = http_send(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            AxumPath(session_id.to_string()),
+            send("disabled-1"),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(refused.into_body(), 64 * 1024).await.expect("body"),
+        )
+        .expect("json");
+        assert_eq!(body["error"]["code"], "FORBIDDEN", "{body}");
+        assert_eq!(backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(backend.writes.lock().expect("writes").is_empty());
+
+        state.set_agent_control(true, Vec::new()).expect("enable in memory");
+        let accepted = http_send(
+            State(Arc::clone(&state)),
+            headers,
+            AxumPath(session_id.to_string()),
+            send("enabled-1"),
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert!(!backend.writes.lock().expect("writes").is_empty(), "the enabled send typed its keys");
+    }
+
     #[tokio::test]
     async fn events_and_wait_replay_a_gap_and_a_matching_reading() {
         let session_id = "agent-control-gap";

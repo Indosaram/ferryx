@@ -567,6 +567,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::RemoteSessionDetails { .. }
             | DaemonRequest::RetryRemoteSession { .. }
             | DaemonRequest::SupervisorSnapshot
+            | DaemonRequest::AgentControlSettingsGet
     )
 }
 
@@ -680,6 +681,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::UnsubscribeDag { .. } => "unsubscribeDag",
         DaemonRequest::Shutdown => "shutdown",
         DaemonRequest::AgentControl { .. } => "agentControl",
+        DaemonRequest::AgentControlSettingsGet => "agentControlSettingsGet",
+        DaemonRequest::AgentControlSettingsSet { .. } => "agentControlSettingsSet",
         DaemonRequest::GetAgentIntegration => "getAgentIntegration",
         DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
         DaemonRequest::SupervisorSnapshot => "supervisorSnapshot",

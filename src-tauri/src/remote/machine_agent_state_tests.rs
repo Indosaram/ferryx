@@ -89,6 +89,8 @@ impl Fixture {
         .await
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let host_state = host.remote_state().clone();
+        // Agent control is off on a fresh host; these round trips drive it, so the owner turns it on.
+        host_state.agent_control_policy.set_enabled(true);
         host.configure_gateway(crate::remote::state::RemoteGatewayConfig {
             mode: crate::remote::state::RemoteNetworkMode::Relay,
             port: 0,

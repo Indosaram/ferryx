@@ -1238,6 +1238,37 @@ export async function revokeRemoteDevice(deviceId: string): Promise<boolean> {
   return invokeCommand<boolean>("cmd_remote_device_revoke", { deviceId });
 }
 
+/** One agent-control call a paired device or the owner made, as the daemon audited it. */
+export type AgentControlAuditRecord = {
+  deviceId: string;
+  op: string;
+  sessionId: string | null;
+  requestId: string | null;
+  code: string;
+  atMs: number;
+  text: string | null;
+};
+
+export type AgentControlSettings = {
+  enabled: boolean;
+  excludedDeviceIds: string[];
+  /** Newest first, at most 50. */
+  audit: AgentControlAuditRecord[];
+};
+
+/** Null outside the desktop shell, where there is no gateway to configure. */
+export async function getAgentControlSettings(): Promise<AgentControlSettings | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<AgentControlSettings>("cmd_agent_control_get");
+}
+
+export async function setAgentControlSettings(request: {
+  enabled: boolean;
+  excludedDeviceIds: string[];
+}): Promise<AgentControlSettings> {
+  return invokeCommand<AgentControlSettings>("cmd_agent_control_set", request);
+}
+
 
 export async function dispatchNotification(req: import('./types').DispatchNotificationArgs): Promise<import('./types').DispatchNotificationResult> {
   return invokeCommand<import('./types').DispatchNotificationResult>('cmd_notification_dispatch', { request: req });

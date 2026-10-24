@@ -1744,6 +1744,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::agent_integration::cmd_agent_integration_remove_local,
         ipc::supervisor::cmd_supervisor_snapshot,
         ipc::supervisor::cmd_supervisor_set_paused,
+        ipc::agent_control_settings::cmd_agent_control_get,
+        ipc::agent_control_settings::cmd_agent_control_set,
         cmd_browser_create,
         cmd_browser_open_devtools,
         cmd_browser_inject_element_picker,

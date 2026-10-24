@@ -6836,6 +6836,25 @@ impl DaemonServer {
                 Ok(DaemonRequest::SupervisorSnapshot) => DaemonResponse::SupervisorSnapshotOk {
                     snapshot: crate::hub_runtime::supervisor_snapshot(&self).await,
                 },
+                Ok(DaemonRequest::AgentControlSettingsGet) => DaemonResponse::AgentControlSettingsOk {
+                    settings: self.remote_state.agent_control_settings(),
+                },
+                Ok(DaemonRequest::AgentControlSettingsSet { enabled, excluded_device_ids }) => {
+                    let state = Arc::clone(&self.remote_state);
+                    match tokio::task::spawn_blocking(move || state.set_agent_control(enabled, excluded_device_ids)).await {
+                        Ok(Ok(settings)) => DaemonResponse::AgentControlSettingsOk { settings },
+                        Ok(Err(error)) => DaemonResponse::Error {
+                            message: format!("Failed to save the agent control setting: {error}"),
+                            code: Some("IO_ERROR".into()),
+                            details: None,
+                        },
+                        Err(error) => DaemonResponse::Error {
+                            message: format!("Agent control setting task failed: {error}"),
+                            code: Some("INTERNAL_ERROR".into()),
+                            details: None,
+                        },
+                    }
+                }
                 Ok(DaemonRequest::SupervisorSetPaused { lane_key, paused }) => {
                     match crate::hub_runtime::set_lane_paused(&self, &lane_key, paused).await {
                         Ok(paused) => DaemonResponse::SupervisorSetPausedOk { paused },

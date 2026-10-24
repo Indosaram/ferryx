@@ -808,8 +808,11 @@ pub struct RemoteGatewayState {
     pub agent_events: Arc<crate::agent_control::events::AgentEventBus>,
     /// Output-driven per-session observer. Installed by the daemon after the gateway exists.
     pub agent_observers: Arc<crate::daemon::agent_observer::AgentObserverHub>,
-    /// Per-device switch on top of the machine Control grant. Defaults to allowing every such device.
+    /// Machine switch on top of the machine Control grant, plus excluded devices. Off on a fresh
+    /// install; loaded from and saved to `agent-control.json` beside the auth store.
     pub agent_control_policy: Arc<crate::agent_control::policy::AgentControlPolicy>,
+    /// Where `agent_control_policy` is saved. `None` keeps the setting in memory only.
+    agent_control_path: Option<PathBuf>,
     /// Bounded audit of agent-control calls, including the device id. Not the workspace journal.
     pub agent_control_audit: Arc<crate::agent_control::policy::AgentControlAudit>,
     pub workspace_registry: WorkspaceRegistry,
@@ -1002,16 +1005,28 @@ impl RemoteGatewayState {
             Arc::clone(&terminal_service),
             Arc::clone(&agent_events),
         ));
-        let agent_control_policy =
-            Arc::new(crate::agent_control::policy::AgentControlPolicy::default());
+        let identity_dir = auth_path
+            .as_deref()
+            .and_then(|path| path.parent())
+            .map(PathBuf::from);
+        let auth_manager = Arc::new(AuthManager::with_persistence(auth_path));
+        let agent_control_path = identity_dir
+            .as_ref()
+            .map(|dir| dir.join(crate::agent_control::policy::AGENT_CONTROL_FILE));
+        let agent_control_policy = Arc::new(crate::agent_control::policy::AgentControlPolicy::load(
+            agent_control_path.as_deref(),
+            || {
+                auth_manager.list_devices().iter().any(|device| {
+                    device.access_scope == crate::remote::auth::DeviceAccessScope::Machine
+                        && device.permission == crate::remote::auth::DevicePermission::Control
+                })
+            },
+        ));
         let agent_control_audit =
             Arc::new(crate::agent_control::policy::AgentControlAudit::default());
         Self {
             config: RwLock::new(config),
-            identity_dir: auth_path
-                .as_deref()
-                .and_then(|path| path.parent())
-                .map(PathBuf::from),
+            identity_dir,
             #[cfg(test)]
             identity_probe: RwLock::new(None),
             #[cfg(test)]
@@ -1020,7 +1035,7 @@ impl RemoteGatewayState {
             browse_probe: RwLock::new(None),
             #[cfg(test)]
             agent_history_home: RwLock::new(None),
-            auth_manager: Arc::new(AuthManager::with_persistence(auth_path)),
+            auth_manager,
             terminal_service,
             daemon_epoch: AtomicU64::new(0),
             reference_owner_id: uuid::Uuid::new_v4().to_string(),
@@ -1030,6 +1045,7 @@ impl RemoteGatewayState {
             agent_events,
             agent_observers,
             agent_control_policy,
+            agent_control_path,
             agent_control_audit,
             active_selection: RwLock::new(None),
             active_selection_tx,
@@ -1385,6 +1401,46 @@ impl RemoteGatewayState {
         };
         write_private_json(path, &self.config.read().persisted_snapshot())
     }
+
+    /// The agent-control switch, the excluded devices and the newest audit records.
+    pub fn agent_control_settings(&self) -> crate::agent_control::policy::AgentControlSettings {
+        let saved = self.agent_control_policy.snapshot();
+        crate::agent_control::policy::AgentControlSettings {
+            enabled: saved.enabled,
+            excluded_device_ids: saved.excluded_device_ids,
+            audit: self
+                .agent_control_audit
+                .latest(crate::agent_control::policy::AGENT_CONTROL_SETTINGS_AUDIT_LIMIT),
+        }
+    }
+
+    /// Save the switch and the excluded devices, then apply them. A failed save changes nothing.
+    /// Blocking file I/O: async callers run it off the runtime.
+    pub fn set_agent_control(
+        &self,
+        enabled: bool,
+        excluded_device_ids: Vec<String>,
+    ) -> std::io::Result<crate::agent_control::policy::AgentControlSettings> {
+        let mut next = self.agent_control_policy.snapshot();
+        next.enabled = enabled;
+        next.excluded_device_ids = excluded_device_ids
+            .into_iter()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if let Some(path) = self.agent_control_path.as_deref() {
+            write_private_json(path, &next)?;
+        }
+        self.agent_control_policy.apply(&next);
+        tracing::info!(
+            enabled,
+            excluded = next.excluded_device_ids.len(),
+            "agent control setting changed"
+        );
+        Ok(self.agent_control_settings())
+    }
 }
 
 /// Per-user directory sources consulted in order, as `(environment variable, subdirectory)`.
@@ -1642,6 +1698,78 @@ mod tests {
         fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String> {
             self.tailscale.clone()
         }
+    }
+
+    #[test]
+    fn agent_control_setting_survives_a_restart() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.json");
+        let auth_path = dir.path().join("auth.json");
+        let (state, registry, terminal) = test_state(config_path.clone(), auth_path.clone());
+        assert!(!state.agent_control_settings().enabled, "a fresh state starts off");
+
+        let saved = state
+            .set_agent_control(true, vec!["dev-b".into(), " dev-a ".into(), "dev-b".into()])
+            .expect("save the agent control setting");
+        assert!(saved.enabled);
+        assert_eq!(saved.excluded_device_ids, vec!["dev-a".to_string(), "dev-b".to_string()]);
+        let file = dir.path().join(crate::agent_control::policy::AGENT_CONTROL_FILE);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&file).expect("setting file").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        drop(state);
+
+        let reopened =
+            RemoteGatewayState::new_with_paths(terminal, registry, Some(config_path), Some(auth_path));
+        let settings = reopened.agent_control_settings();
+        assert!(settings.enabled, "the switch is read back from {}", file.display());
+        assert_eq!(settings.excluded_device_ids, vec!["dev-a".to_string(), "dev-b".to_string()]);
+        assert!(reopened.agent_control_policy.permits("dev-c"));
+        assert!(!reopened.agent_control_policy.permits("dev-a"));
+    }
+
+    #[test]
+    fn an_upgraded_install_with_a_control_grant_stays_enabled() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.json");
+        let auth_path = dir.path().join("auth.json");
+        let file = dir.path().join(crate::agent_control::policy::AGENT_CONTROL_FILE);
+        let device_id = {
+            let auth = AuthManager::with_persistence(Some(auth_path.clone()));
+            let pin = auth
+                .create_scoped_pairing_code(
+                    DevicePermission::Control,
+                    crate::remote::auth::DeviceAccessScope::Machine,
+                )
+                .expect("machine control pin");
+            let (_token, device) = auth.exchange_pairing_code(&pin, "hub").expect("exchange");
+            device.id
+        };
+        assert!(!file.exists(), "a build before this one never wrote the setting");
+
+        let (state, registry, terminal) = test_state(config_path.clone(), auth_path.clone());
+        assert!(state.agent_control_policy.permits(&device_id), "an existing Control grant keeps working");
+        let written: crate::agent_control::policy::PersistedAgentControl =
+            serde_json::from_slice(&std::fs::read(&file).expect("the kept setting is written once"))
+                .expect("parse the kept setting");
+        assert!(written.enabled);
+
+        state.set_agent_control(false, Vec::new()).expect("turn it off");
+        drop(state);
+        let reopened =
+            RemoteGatewayState::new_with_paths(terminal, registry, Some(config_path), Some(auth_path));
+        assert!(
+            !reopened.agent_control_policy.permits(&device_id),
+            "the upgrade rule runs only while the file is missing"
+        );
+
+        let fresh = tempfile::TempDir::new().expect("tempdir");
+        let (fresh_state, _, _) =
+            test_state(fresh.path().join("config.json"), fresh.path().join("auth.json"));
+        assert!(!fresh_state.agent_control_settings().enabled, "no grant, no file: off");
     }
 
     #[test]
