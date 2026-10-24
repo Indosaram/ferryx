@@ -11,8 +11,8 @@ import { useSupervisor } from "../lib/supervisor";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { worktreeRowLive, type SidebarRowLive } from "./sidebar/sidebarModel";
-import { SidebarEmptyStatus, SidebarWorktreeRow, SidebarWorktreesEmpty } from "./sidebar/SidebarWorktreeRow";
-import { SIDEBAR_EMPTY_TEXT, worktreeLabel, worktreeRowHost } from "./sidebar/sidebarLabels";
+import { SidebarEmptyStatus, SidebarWorktreeRow } from "./sidebar/SidebarWorktreeRow";
+import { worktreeLabel, worktreeRowHost } from "./sidebar/sidebarLabels";
 import { worktreeSortableId } from "./sidebar/sidebarRows";
 import { isSameWorktreePath, normalizeWorktreePath, supervisorTypingIn } from "./sidebar/sidebarSupervisor";
 import { IconButton } from "./ui/IconButton";
@@ -339,9 +339,4 @@ export function WorktreeList({
       })}
     </div>
   );
-}
-
-/** Default empty-state hint for a project section: says what is going on and offers the one action. */
-export function EmptyWorktreesHint({ onCreateWorktree }: { readonly onCreateWorktree?: () => void }) {
-  return <SidebarWorktreesEmpty text={SIDEBAR_EMPTY_TEXT.noWorktrees} onCreateWorktree={onCreateWorktree} />;
 }

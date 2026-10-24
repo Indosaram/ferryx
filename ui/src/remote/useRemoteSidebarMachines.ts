@@ -91,7 +91,7 @@ export function useRemoteSidebarMachines(input: RemoteSidebarMachinesInput): Rem
       break;
     default: {
       const unreachable: never = input;
-      return unreachable;
+      throw new Error(`unknown sidebar input: ${String((unreachable as { kind?: unknown }).kind)}`);
     }
   }
   // The model hook keys subscriptions by id and connection; live state follows the inventories.
