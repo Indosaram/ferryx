@@ -9,13 +9,21 @@ import {
   type ShortcutActionId,
   type ShortcutBinding,
   type ShortcutConflict,
+  type ShortcutPreset,
 } from "../../lib/shortcuts";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Label } from "../ui/label";
 import { SettingsHeading } from "./primitives";
 import type { ShortcutsSectionProps } from "./types";
 
 const GROUPS = ["all", "Tabs", "Workspaces", "Terminal Panes", "Global", "View"] as const;
+
+const PRESET_DESCRIPTIONS: Record<ShortcutPreset, string> = {
+  default: "Ctrl+1-9, Ctrl+Tab and Ctrl+PgUp/PgDn switch tabs; Alt+1-9 switches workspaces.",
+  "terminal-first":
+    "Ctrl+1-9, Ctrl+Tab and Ctrl+PgUp/PgDn go to the terminal. Alt+1-9 and Alt+PgUp/PgDn switch tabs; Alt+Shift+1-9 switches workspaces.",
+};
 
 const MODIFIER_KEYS = new Set(["Meta", "Control", "Alt", "Shift", "OS", "AltGraph", "Hyper", "Super", "Fn", "CapsLock"]);
 
@@ -31,6 +39,7 @@ const CODE_KEYS: Record<string, string> = {
   Quote: "'",
   Backquote: "`",
   Backslash: "\\",
+  Space: "Space",
 };
 
 /**
@@ -80,7 +89,14 @@ function conflictOwner(conflict: ShortcutConflict): string {
 
 type RowNotice = { readonly id: ShortcutActionId; readonly kind: "conflict" | "warning"; readonly message: string };
 
-export function ShortcutsSection({ isMac, overrides, onChangeOverride, onResetAll }: ShortcutsSectionProps) {
+export function ShortcutsSection({
+  isMac,
+  overrides,
+  preset = "default",
+  onChangePreset,
+  onChangeOverride,
+  onResetAll,
+}: ShortcutsSectionProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedGroup, setSelectedGroup] = useState<string>("all");
   const [recordingId, setRecordingId] = useState<ShortcutActionId | null>(null);
@@ -117,7 +133,7 @@ export function ShortcutsSection({ isMac, overrides, onChangeOverride, onResetAl
     const binding = chordFromEvent(native, isMac);
     if (!binding) return;
 
-    const conflict = findConflict(id, binding, overrides, isMac);
+    const conflict = findConflict(id, binding, overrides, isMac, preset);
     if (conflict) {
       setNotice({
         id,
@@ -147,6 +163,31 @@ export function ShortcutsSection({ isMac, overrides, onChangeOverride, onResetAl
         description="Only registered modifier chords are intercepted by the shell. Ordinary terminal typing and Ctrl-C remain with the terminal."
       />
       <h2 id="settings-shortcuts-heading" className="sr-only">Keyboard Shortcuts</h2>
+
+      {!isMac && onChangePreset ? (
+        <div className="mb-3">
+          <Label htmlFor="shortcut-preset" className="mb-1.5 block text-[11px] font-medium">
+            Shortcut preset
+          </Label>
+          <select
+            id="shortcut-preset"
+            value={preset}
+            onChange={(event) => {
+              const next = event.target.value === "terminal-first" ? "terminal-first" : "default";
+              setRecordingId(null);
+              setNotice(null);
+              onChangePreset(next);
+            }}
+            className="h-8 w-full rounded-md border border-input bg-background px-3 text-[11px] focus:outline-none focus:ring-1 focus:ring-ring"
+          >
+            <option value="default">Default</option>
+            <option value="terminal-first">Terminal first</option>
+          </select>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            {PRESET_DESCRIPTIONS[preset]} Your custom bindings apply on top of either preset.
+          </p>
+        </div>
+      ) : null}
 
       <div className="mb-3 space-y-2">
         <div className="flex items-center gap-2">
@@ -202,8 +243,8 @@ export function ShortcutsSection({ isMac, overrides, onChangeOverride, onResetAl
       <div className="border-y border-border">
         {filteredShortcuts.length > 0 ? (
           filteredShortcuts.map((shortcut) => {
-            const label = shortcutLabel(shortcut.id, isMac, overrides);
-            const aliases = shortcutAliasesLabels(shortcut.id, isMac, overrides);
+            const label = shortcutLabel(shortcut.id, isMac, overrides, preset);
+            const aliases = shortcutAliasesLabels(shortcut.id, isMac, overrides, preset);
             const overridden = Object.prototype.hasOwnProperty.call(overrides, shortcut.id);
             const recording = recordingId === shortcut.id;
             const rowNotice = notice?.id === shortcut.id ? notice : null;

@@ -14,12 +14,22 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inflateRawSync } from "node:zlib";
 
 import { assembleRelease } from "./build-latest-json.mjs";
 import { generateChangelog } from "./lib/release-changelog.mjs";
 import { parsePlan, parseReceipt } from "./lib/release-contract.mjs";
 import { loadHostConfig, redactProcessOutput } from "./lib/release-hosts.mjs";
 import { buildHost, preflightAll } from "./lib/release-platforms.mjs";
+import { writeHomebrewPackages } from "./release-packaging.mjs";
+import {
+  attachReleaseProvenance,
+  generateSboms,
+  PROVENANCE_ASSET_NAMES,
+  PROVENANCE_NAME,
+  verifyChecksums,
+} from "./release-provenance.mjs";
+import { assertReleaseTag } from "./release-tag-policy.mjs";
 import { parseReleaseTag, toAppVersion, toMsixVersion } from "./sync-version.mjs";
 
 function assertNotInCI(stageName) {
@@ -32,6 +42,145 @@ function assertNotInCI(stageName) {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export const STORE_MSIX_NAME = "Ferryx_x64.msix";
+export const STORE_PRODUCT_ID = "9NLHQL5JNLM4";
+
+/** Typed refusal raised when a Windows build lacks the Store-ingestion MSIX at the plan version. */
+export class StoreMsixError extends Error {
+  constructor(code, message) {
+    super(`${code}: ${message}`);
+    this.name = "StoreMsixError";
+    this.code = code;
+  }
+}
+
+const ZIP_U16_MAX = 0xffff;
+const ZIP_U32_MAX = 0xffffffff;
+
+/**
+ * Reads one entry from a zip (MSIX) archive; supports stored and deflated entries and ZIP64
+ * archives (MakeAppx always writes MSIX packages as ZIP64: saturated EOCD fields, a ZIP64 EOCD
+ * locator/record, and 0x0001 extended-information extra fields on central directory entries).
+ */
+function readZipEntry(buffer, entryName) {
+  const eocdMin = buffer.length - 22;
+  let eocd = -1;
+  for (let i = eocdMin; i >= Math.max(0, eocdMin - 0xffff); i -= 1) {
+    if (buffer.readUInt32LE(i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) return null;
+  let entries = buffer.readUInt16LE(eocd + 10);
+  let offset = buffer.readUInt32LE(eocd + 16);
+  if (entries === ZIP_U16_MAX || offset === ZIP_U32_MAX) {
+    const locator = eocd - 20;
+    if (locator < 0 || buffer.readUInt32LE(locator) !== 0x07064b50) return null;
+    const record = Number(buffer.readBigUInt64LE(locator + 8));
+    if (buffer.readUInt32LE(record) !== 0x06064b50) return null;
+    entries = Number(buffer.readBigUInt64LE(record + 32));
+    offset = Number(buffer.readBigUInt64LE(record + 48));
+  }
+  for (let n = 0; n < entries; n += 1) {
+    if (buffer.readUInt32LE(offset) !== 0x02014b50) return null;
+    const method = buffer.readUInt16LE(offset + 10);
+    let compressedSize = buffer.readUInt32LE(offset + 20);
+    const uncompressedSize = buffer.readUInt32LE(offset + 24);
+    const nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    let localOffset = buffer.readUInt32LE(offset + 42);
+    const name = buffer.toString("utf8", offset + 46, offset + 46 + nameLength);
+    // ZIP64 extended information: 8-byte values present only for saturated fields, in the
+    // order uncompressed size, compressed size, local header offset.
+    let extra = offset + 46 + nameLength;
+    const extraEnd = extra + extraLength;
+    while (extra + 4 <= extraEnd) {
+      const id = buffer.readUInt16LE(extra);
+      const size = buffer.readUInt16LE(extra + 2);
+      if (id === 0x0001) {
+        let field = extra + 4;
+        if (uncompressedSize === ZIP_U32_MAX) field += 8;
+        if (compressedSize === ZIP_U32_MAX) {
+          compressedSize = Number(buffer.readBigUInt64LE(field));
+          field += 8;
+        }
+        if (localOffset === ZIP_U32_MAX) localOffset = Number(buffer.readBigUInt64LE(field));
+        break;
+      }
+      extra += 4 + size;
+    }
+    if (name === entryName) {
+      const localNameLength = buffer.readUInt16LE(localOffset + 26);
+      const localExtraLength = buffer.readUInt16LE(localOffset + 28);
+      const start = localOffset + 30 + localNameLength + localExtraLength;
+      const data = buffer.subarray(start, start + compressedSize);
+      if (method === 0) return data;
+      if (method === 8) return inflateRawSync(data);
+      return null;
+    }
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  return null;
+}
+
+export function storeSubmissionLine(plan) {
+  return `Store submission pending: ${plan.msixVersion}`;
+}
+
+/**
+ * Store gate: a run with a Windows build must carry the Store-ingestion MSIX (published as
+ * Ferryx_x64.msix) whose package Identity version is the plan's canonical quad version. The
+ * MSIX is located through the maho-win receipt, else at artifacts/windows/Ferryx_x64.msix.
+ * Returns the release-summary line.
+ */
+export function assertStoreMsix({ runDir, plan }) {
+  let msixPath = join(runDir, "artifacts", "windows", STORE_MSIX_NAME);
+  const receiptPath = join(runDir, "receipts", "build-receipt-maho-win.json");
+  if (existsSync(receiptPath)) {
+    let artifact = null;
+    try {
+      artifact = JSON.parse(readFileSync(receiptPath, "utf8")).artifacts?.find((entry) => entry?.kind === "msix") ?? null;
+    } catch {
+      artifact = null;
+    }
+    msixPath = artifact && typeof artifact.relPath === "string" ? join(runDir, "artifacts", artifact.relPath) : null;
+  }
+  if (!msixPath || !existsSync(msixPath) || statSync(msixPath).size === 0) {
+    throw new StoreMsixError(
+      "STORE_MSIX_MISSING",
+      `Windows build has no ${STORE_MSIX_NAME}${msixPath ? ` at ${msixPath}` : " in the maho-win receipt"}; every Windows release must produce the Store-ingestion MSIX (scripts/build-msix.ps1)`,
+    );
+  }
+  let manifest = null;
+  try {
+    manifest = readZipEntry(readFileSync(msixPath), "AppxManifest.xml");
+  } catch {
+    manifest = null;
+  }
+  if (!manifest) {
+    throw new StoreMsixError("STORE_MSIX_INVALID", `${STORE_MSIX_NAME} has no readable AppxManifest.xml`);
+  }
+  const identity = manifest.toString("utf8").match(/<Identity\b[^>]*>/);
+  const version = identity?.[0].match(/\bVersion="([^"]*)"/)?.[1] ?? null;
+  if (version !== plan.msixVersion) {
+    throw new StoreMsixError(
+      "STORE_MSIX_VERSION_MISMATCH",
+      `${STORE_MSIX_NAME} Identity version is ${JSON.stringify(version)}, expected canonical quad ${plan.msixVersion}`,
+    );
+  }
+  return storeSubmissionLine(plan);
+}
+
+function hasWindowsBuild(runDir) {
+  const windowsDir = join(runDir, "artifacts", "windows");
+  return (
+    existsSync(join(runDir, "receipts", "build-receipt-maho-win.json")) ||
+    (existsSync(windowsDir) && readdirSync(windowsDir).length > 0)
+  );
 }
 
 function directoryDigest(directory) {
@@ -139,6 +288,10 @@ export function prepareRelease({
   if (!tag) throw new Error("Missing required argument: --tag");
   if (!commit) throw new Error("Missing required argument: --commit");
   if (!outDir) throw new Error("Missing required argument: --out");
+
+  // New releases must use vYYYY.MMDD.N (scripts/release-tag-policy.mjs); checked before any
+  // config, git, or build work so a malformed tag stops the run immediately.
+  assertReleaseTag(tag);
 
   const resolvedOutDir = resolve(outDir);
   if (existsSync(resolvedOutDir)) {
@@ -337,21 +490,55 @@ export async function buildRelease({
 }
 
 /**
- * Assembles and verifies release manifest, deterministic aliases, and SHA256SUMS.txt.
+ * Assembles and verifies release manifest, deterministic aliases, and SHA256SUMS.txt, then
+ * renders the Homebrew cask and formula from SHA256SUMS.txt, then attaches provenance:
+ * CycloneDX SBOMs, provenance.json, SHA256SUMS and SHA256SUMS.minisig (signed with the
+ * updater key from TAURI_SIGNING_PRIVATE_KEY[_PATH]), so the Homebrew files are signed too.
  */
-export function assembleReleaseRun({ runDir, pubkey = null }) {
+export function assembleReleaseRun({
+  runDir,
+  pubkey = null,
+  env = process.env,
+  minisignBin,
+  sbomGenerator = generateSboms,
+  sourceRepo = null,
+}) {
   assertNotInCI("assemble");
 
   if (!runDir) throw new Error("Missing required argument: --run");
   const resolvedRunDir = resolve(runDir);
 
-  const { state } = validatePreparedRun(resolvedRunDir);
+  const { plan, state, configPath } = validatePreparedRun(resolvedRunDir);
+  // Store gate runs before assembly so a Windows build without the MSIX fails with a typed error.
+  const storeSubmission = hasWindowsBuild(resolvedRunDir)
+    ? assertStoreMsix({ runDir: resolvedRunDir, plan })
+    : null;
   const planPath = join(resolvedRunDir, "plan.json");
   const receiptsDir = join(resolvedRunDir, "receipts");
   const artifactsDir = join(resolvedRunDir, "artifacts");
   const outDir = join(resolvedRunDir, "publish");
 
   const result = assembleRelease({ planPath, receiptsDir, artifactsDir, outDir, publicKey: pubkey });
+  try {
+    writeHomebrewPackages({ sumsPath: join(outDir, "SHA256SUMS.txt"), outDir, tag: plan.tag, repo: plan.repo });
+    attachReleaseProvenance({
+      publishDir: outDir,
+      plan,
+      state,
+      receipts: result.receipts,
+      sourceRepo: sourceRepo ?? loadHostConfig(configPath).repository,
+      publicKey: pubkey || state.updaterPublicKey,
+      env,
+      minisignBin,
+      sbomGenerator,
+    });
+  } catch (err) {
+    // assembleRelease created outDir in this call; never leave a half-sealed publish directory.
+    rmSync(outDir, { recursive: true, force: true });
+    throw err;
+  }
+  result.files = readdirSync(outDir).sort();
+  result.storeSubmission = storeSubmission;
   writeFileSync(join(resolvedRunDir, "assembly-state.json"), JSON.stringify({
     schemaVersion: 1,
     planDigest: state.planDigest,
@@ -370,6 +557,7 @@ export async function verifyReleaseRun({ runDir, pubkey = null }) {
   const resolvedRunDir = resolve(runDir);
   const planPath = join(resolvedRunDir, "plan.json");
   const plan = validateAssemblyState(resolvedRunDir);
+  const { state } = validatePreparedRun(resolvedRunDir);
 
   const publishDir = join(resolvedRunDir, "publish");
   if (!existsSync(publishDir)) {
@@ -407,6 +595,13 @@ export async function verifyReleaseRun({ runDir, pubkey = null }) {
     }
   }
 
+  // Signed SHA256SUMS must verify against the updater key and cover every published file.
+  verifyChecksums({ dir: publishDir, publicKey: pubkey || state.updaterPublicKey });
+  const provenance = JSON.parse(readFileSync(join(publishDir, PROVENANCE_NAME), "utf8"));
+  if (provenance.commitSha !== plan.commitSha || provenance.tag !== plan.tag) {
+    throw new Error(`${PROVENANCE_NAME} does not match the release plan commit/tag`);
+  }
+
   // Re-derive output in private temp directory to verify repeatability
   const tempDir = mkdtempSync(join(tmpdir(), "ferryx-verify-repeatability-"));
   try {
@@ -418,8 +613,20 @@ export async function verifyReleaseRun({ runDir, pubkey = null }) {
       outDir: tempPublish,
       publicKey: pubkey,
     });
+    writeHomebrewPackages({
+      sumsPath: join(tempPublish, "SHA256SUMS.txt"),
+      outDir: tempPublish,
+      tag: plan.tag,
+      repo: plan.repo,
+    });
 
-    const origFiles = readdirSync(publishDir).sort();
+    // Provenance assets (SBOMs, provenance.json, SHA256SUMS[.minisig]) are covered by the
+    // signature check above; everything else must re-derive byte-for-byte.
+    const allPublished = readdirSync(publishDir).sort();
+    for (const name of PROVENANCE_ASSET_NAMES) {
+      if (!allPublished.includes(name)) throw new Error(`Provenance asset missing from publish directory: ${name}`);
+    }
+    const origFiles = allPublished.filter((name) => !PROVENANCE_ASSET_NAMES.includes(name));
     const tempFiles = readdirSync(tempPublish).sort();
     if (origFiles.length !== tempFiles.length) {
       throw new Error(
@@ -633,7 +840,7 @@ export async function publishRelease({
     throw new Error(`Failed to undraft release: ${editRes.stderr || editRes.stdout}`);
   }
 
-  return { published: true, tag: plan.tag, runId: plan.runId };
+  return { published: true, tag: plan.tag, runId: plan.runId, storeSubmission: storeSubmissionLine(plan) };
 }
 
 /**
@@ -732,6 +939,7 @@ Subcommands:
         const pubkey = options.get("pubkey") || null;
         const result = assembleReleaseRun({ runDir, pubkey });
         console.log(`Release assembled successfully with ${result.files.length} files`);
+        if (result.storeSubmission) console.log(result.storeSubmission);
         break;
       }
       case "verify": {
@@ -746,6 +954,8 @@ Subcommands:
         const approvePublish = flags.has("approve-publish");
         const result = await publishRelease({ runDir, approvePublish });
         console.log(`Release published successfully: ${result.tag}`);
+        console.log(result.storeSubmission);
+        console.log(`Submit via docs/releases/MS_STORE_RESUBMISSION_RECOVERY.md (product ${STORE_PRODUCT_ID})`);
         break;
       }
       case "verify-remote": {

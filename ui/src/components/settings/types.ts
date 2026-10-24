@@ -1,5 +1,5 @@
 import type { ShortcutOverrides } from "../../lib/shortcutOverrides";
-import type { ShortcutActionId, ShortcutBinding } from "../../lib/shortcuts";
+import type { ShortcutActionId, ShortcutBinding, ShortcutPreset } from "../../lib/shortcuts";
 
 export type SectionId =
   | "general"
@@ -34,6 +34,10 @@ export interface ShortcutsSectionProps {
   isMac: boolean;
   /** Current sparse user remaps; rows render the resolved registry. */
   overrides: ShortcutOverrides;
+  /** Active binding preset; omitted means `default`. Overrides apply on top of it. */
+  preset?: ShortcutPreset;
+  /** Present when the preset can be switched; the selector is hidden on macOS regardless. */
+  onChangePreset?: (preset: ShortcutPreset) => void;
   /** A binding remaps the action, `null` unbinds it, `undefined` restores its default. */
   onChangeOverride: (id: ShortcutActionId, binding: ShortcutBinding | null | undefined) => void;
   onResetAll: () => void;

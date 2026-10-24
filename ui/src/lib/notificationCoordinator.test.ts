@@ -534,6 +534,29 @@ describe("reset", () => {
     expect(String(errorSpy.mock.calls[0]?.[0])).toContain("backend-error");
   });
 
+  it("never requests notification permission before the first notify call", () => {
+    const { instance } = coordinator({ getSettings: () => settings({ agentTaskComplete: true }) });
+    expect(requestMock).not.toHaveBeenCalled();
+    expect(statusMock).not.toHaveBeenCalled();
+    instance.dispose();
+  });
+
+  it("requests notification permission on the first notify call that needs it", async () => {
+    dispatchMock
+      .mockResolvedValueOnce({ submitted: false, reason: "permission-required" })
+      .mockResolvedValueOnce({ submitted: true });
+    requestMock.mockResolvedValueOnce({ granted: true });
+    const { instance } = coordinator({ getSettings: () => settings({ agentTaskComplete: true }) });
+
+    instance.handleAgentStateChange({ sessionId: "s1", previousState: "running", nextState: "done" });
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    expect(dispatchMock).toHaveBeenCalledTimes(2);
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(requestMock.mock.invocationCallOrder[0]).toBeGreaterThan(dispatchMock.mock.invocationCallOrder[0]!);
+    instance.dispose();
+  });
+
   it("requests permission once and retries dispatch instead of reporting a runtime error", async () => {
     const errorSpy = vi.fn();
     dispatchMock

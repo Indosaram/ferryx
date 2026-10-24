@@ -51,6 +51,8 @@ pub mod project;
 pub mod project_remote;
 pub mod remote;
 #[cfg(feature = "desktop")]
+pub mod remote_auto_trust;
+#[cfg(feature = "desktop")]
 pub mod remote_drop;
 pub mod remote_file;
 #[cfg(feature = "desktop")]
@@ -116,6 +118,8 @@ pub use permissions::*;
 pub use preferences::*;
 pub use project::*;
 pub use remote::*;
+#[cfg(feature = "desktop")]
+pub use remote_auto_trust::*;
 #[cfg(feature = "desktop")]
 pub use session::*;
 pub use terminal::*;

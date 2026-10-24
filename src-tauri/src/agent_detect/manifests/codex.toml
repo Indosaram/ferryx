@@ -1,4 +1,6 @@
 id = "codex"
+display_name = "Codex"
+homepage = "https://github.com/openai/codex"
 version = "2026.08.27.1"
 min_engine_version = 1
 aliases = ["codex-cli"]

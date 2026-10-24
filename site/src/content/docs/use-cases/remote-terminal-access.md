@@ -21,11 +21,11 @@ Both carry boundaries their own docs state.
 
 Claude Code Remote Control needs a claude.ai subscription on a Pro, Max, Team, or Enterprise plan; API keys aren't supported. It's unavailable on Amazon Bedrock, Google Cloud's Agent Platform, and Microsoft Foundry, and unavailable when `ANTHROPIC_BASE_URL` points anywhere other than `api.anthropic.com`, which rules out an LLM gateway or proxy. While the session is connected, the transcript is stored on Anthropic's servers, so organisations with Zero Data Retention requirements can't enable it. The local `claude` process also has to keep running: quit the terminal and the session goes offline, which is why Anthropic's docs suggest starting it inside tmux or screen on a remote machine. And it drives Claude Code, not the build script or the database shell in the next pane.
 
-Warp's version publishes session state to Warp's cloud and stops syncing when you stop publishing. Warp's client is open source under AGPL-3.0, but the infrastructure the session publishes to isn't, so the session lives on Warp's servers while it's shared.
+Warp's version publishes session state to Warp's cloud and stops syncing when you stop publishing. Warp's client is open source under AGPL-3.0 (Ferryx is source-available under the Ferryx License), but the infrastructure the session publishes to isn't, so the session lives on Warp's servers while it's shared.
 
 ## What Ferryx does instead
 
-Ferryx (SUL-1.0, Rust and Tauri v2) takes the same problem from the other end: it exposes the terminal itself, not one vendor's agent, and the gateway is yours.
+Ferryx (Ferryx License, Rust and Tauri v2) takes the same problem from the other end: it exposes the terminal itself, not one vendor's agent, and the gateway is yours.
 
 - **Sessions outlive the GUI.** A headless Rust daemon owns the pseudoterminals instead of the desktop window, so closing or reloading the app doesn't kill running processes. There's no separate multiplexer to remember.
 - **Reconnects replay what you missed.** Output lives in a 512 KiB ring buffer per session with monotonic sequence numbers. A reconnecting client receives the output it missed, and if the buffer overflowed it's told there's a gap rather than shown a silently corrupted transcript.
@@ -44,4 +44,4 @@ The verifiable parts are the ones listed above: the gateway requires authenticat
 
 ## Trying it
 
-Ferryx ships as a macOS universal DMG, an x64 Windows installer, and Linux AppImage and .deb packages; a standalone `ferryx-cli` binary runs the same headless daemon on a Linux server with no GUI dependencies, though it isn't published by every release and can be built from source. The project is SUL-1.0 licensed and still early software. For the rest of the workspace, including split panes, embedded browser tabs, and managed git worktrees, see the [introduction](/docs/introduction/) and [git worktree workflow](/use-cases/git-worktree-workflow/); the [product facts](/docs/facts/) page lists the pairing, relay, and packaging details with their sources.
+Ferryx ships as a macOS universal DMG, an x64 Windows installer, and Linux AppImage and .deb packages; a standalone `ferryx-cli` binary runs the same headless daemon on a Linux server with no GUI dependencies, though it isn't published by every release and can be built from source. The project is source-available under the Ferryx License and still early software. For the rest of the workspace, including split panes, embedded browser tabs, and managed git worktrees, see the [introduction](/docs/introduction/) and [git worktree workflow](/use-cases/git-worktree-workflow/); the [product facts](/docs/facts/) page lists the pairing, relay, and packaging details with their sources.

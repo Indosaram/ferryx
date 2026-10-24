@@ -1,19 +1,19 @@
 ---
-title: "SUL, MIT, AGPL: Terminal Licenses Explained"
-description: "What Ferryx SUL-1.0, Warp AGPL client, and classic OSS licenses mean for commercial use and contributions. Claims map to Ferryx docs and cited sources only."
+title: "SUL (source-available), MIT, AGPL: Terminal Licenses Explained"
+description: "What the Ferryx License, Warp AGPL client, and classic OSS licenses mean for commercial use and contributions. Claims map to Ferryx docs and cited sources only."
 ---
 
-**SUL, MIT, AGPL: Terminal Licenses Explained.** What Ferryx SUL-1.0, Warp AGPL client, and classic OSS licenses mean for commercial use and contributions. Claims map to Ferryx docs and cited sources only.
+**SUL (source-available), MIT, AGPL: Terminal Licenses Explained.** What the Ferryx License, Warp AGPL client, and classic OSS licenses mean for commercial use and contributions. Claims map to Ferryx docs and cited sources only.
 
-![sul-vs-open-source-licenses cover](/images/blog/sul-vs-open-source-licenses/cover.png)
+![SUL source-available vs open-source licenses cover](/images/blog/sul-vs-open-source-licenses/cover.png)
 
 ## License types in plain language
 
-Choosing a terminal for agent-heavy work is less about ANSI rendering and more about process lifetime, isolation, licensing, and remote access. Different tools optimise for different constraints; an honest comparison states what each does well and where the other wins. In the specific case of “SUL, MIT, AGPL: Terminal Licenses Explained”, the Ferryx angle is straightforward: what ferryx sul-1.0, warp agpl client, and classic oss licenses mean for commercial use and contributions. claims map to ferryx docs and cited sources only. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
+Choosing a terminal for agent-heavy work is less about ANSI rendering and more about process lifetime, isolation, licensing, and remote access. Different tools optimise for different constraints; an honest comparison states what each does well and where the other wins. In the specific case of “SUL (source-available), MIT, AGPL: Terminal Licenses Explained”, the Ferryx angle is straightforward: what ferryx sul-1.0, warp agpl client, and classic oss licenses mean for commercial use and contributions. claims map to ferryx docs and cited sources only. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
 
-## Ferryx SUL terms
+## Ferryx license terms
 
-Ferryx is a source-available desktop terminal under the Sustainable Use License (SUL-1.0), free for personal and non-commercial use, written in Rust on Tauri v2 with a headless daemon. Comparisons on this site stick to licensing, architecture, and workflow facts rather than unmeasured performance claims. Applied to “sul vs agpl terminal license”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
+Ferryx is a source-available desktop terminal under the Ferryx License, free for individuals and small companies, written in Rust on Tauri v2 with a headless daemon. Comparisons on this site stick to licensing, architecture, and workflow facts rather than unmeasured performance claims. Applied to “sul vs agpl terminal license”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
 
 ## Practical steps
 
@@ -34,7 +34,7 @@ Ferryx is a source-available desktop terminal under the Sustainable Use License 
 
 Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64 installer), and Linux (AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
 
-![SUL, MIT, AGPL: Terminal Licenses Explained illustration](/images/blog/sul-vs-open-source-licenses/body-1.png)
+![SUL (source-available), MIT, AGPL: Terminal Licenses Explained illustration](/images/blog/sul-vs-open-source-licenses/body-1.png)
 
 Related reading:
 - [/compare/warp/](/compare/warp/)
@@ -46,13 +46,13 @@ Related reading:
 
 Editorial policy: unmeasured numbers go stale and mislead. Claims here map to sources on the product facts page instead.
 
-### Is Ferryx open source?
+### Is Ferryx open source or source-available?
 
-Source-available under SUL-1.0, which is not an OSI license. It permits your own internal business purposes, non-commercial, or personal use.
+Source-available under the Ferryx License, which is not an OSI license. It is free for individuals, education, open-source work, non-profits, and companies under 50 people and USD 5M revenue; larger companies need a Team subscription for work use. Releases before the change remain under SUL-1.0.
 
 ### Which tool should I pick?
 
-Write down your constraints first. If you need OSI copyleft, a tool with AGPL/MIT client code may fit better; if you need daemon-owned sessions and worktree isolation today, evaluate Ferryx against that checklist.
+Write down your constraints first. If you need OSI copyleft, a tool with AGPL/MIT client code may fit better than source-available Ferryx; if you need daemon-owned sessions and worktree isolation today, evaluate Ferryx against that checklist.
 
 ## Limits and non-goals
 

@@ -6,10 +6,10 @@
 
 # Ferryx
 
-### Parallel agentic development. Zero bloat.
+### Run Claude Code, Codex and any CLI agent side by side in one repo - each in its own worktree, alive when the app closes, steerable from your phone.
 
-Native Ghostty terminal engine, wgpu GPU rendering, and a headless Rust PTY daemon.
-No Electron anywhere.
+A built-in supervisor answers routine agent prompts the way you would and sends only the risky
+ones to you. Native Rust on Tauri v2 with a libghostty terminal core; no Electron.
 
 [**Download**](https://github.com/Indosaram/ferryx/releases/latest) &nbsp;·&nbsp;
 [**Website**](https://ferryx.dev/) &nbsp;·&nbsp;
@@ -31,7 +31,7 @@ No Electron anywhere.
 | Platform | Package | |
 | :--- | :--- | :--- |
 | **macOS** | Universal DMG (Apple Silicon & Intel) | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
-| **Windows** | Installer (x64, not code-signed yet) | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
+| **Windows** | Installer (x64), not code-signed; Store version pending certification | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
 | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
 | **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64) | [`install.sh`](https://relay.ferryx.dev/install.sh) (`curl -fsSL https://relay.ferryx.dev/install.sh \| bash`) |
@@ -58,7 +58,7 @@ pipeline, giving crisp font rasterization and low-latency throughput.
 
 - libghostty terminal core
 - wgpu GPU pipeline
-- Offscreen WGPU render benchmark: 50-frame p50 3.10 ms on Apple M4 Max
+- Measured render latency: see [Performance](#performance)
 
 ### Multi-agent workspaces
 
@@ -81,10 +81,10 @@ transitions.
 
 ### Mobile web pairing
 
-Authenticated remote access over QR or PIN. Stream terminal output to a dependency-free
+Authenticated remote access after you sign in to your Ferryx account. Stream terminal output to a dependency-free
 DOM terminal grid and steer agents from anywhere.
 
-- 6-digit PIN pairing
+- Account sign-in via email magic link
 - Streamed terminal grid
 - Steer agents from a phone
 
@@ -138,6 +138,45 @@ the host can still end live PTYs.
 - Daemon survives the GUI
 - Reattach with output replay
 
+## Is Ferryx for you?
+
+Ferryx is a good fit if you:
+
+- run more than one CLI coding agent (for example Claude Code and Codex) on the same repository and want one worktree convention for all of them;
+- want agent sessions to keep running after you close the window, and to replay missed output when you come back;
+- want to check on or steer a long agent run from your phone;
+- are an individual or a company small enough to use it free (see the [license FAQ](https://ferryx.dev/docs/license/)).
+
+Ferryx is probably not for you yet if you:
+
+- use a single agent vendor. `claude --worktree` or Codex's built-in worktrees already isolate that vendor's sessions, with less to install;
+- need SSO, centrally managed accounts, or a cloud-hosted service. Ferryx does not offer them today;
+- need prebuilt Linux or Windows ARM64 binaries, or run on a host without a GPU adapter. Those are not supported yet.
+
+## Performance
+
+The figure below is a single offscreen measurement, not a comparison with other terminals.
+
+- Offscreen WGPU render benchmark, 50 frames, 800x480 px: p50 3.10 ms, p95 4.34 ms.
+- Hardware: Apple M4 Max (Metal, integrated GPU), macOS.
+- Source: [`bench/terminal/evidence/native-wgpu-phase2-summary.md`](bench/terminal/evidence/native-wgpu-phase2-summary.md).
+
+Reproduce the render figure:
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml \
+  --bin native_terminal_renderer_poc -- \
+  --headless --output bench/terminal/evidence/native-wgpu-phase2-latest.png
+```
+
+Run the terminal parser and throughput baseline suite (writes `bench/terminal/evidence/baseline-*`):
+
+```bash
+bun run bench/terminal/runner.ts
+```
+
+Numbers depend on hardware; run both on your own machine before relying on them.
+
 ## Built different
 
 An architecture inventory of Ferryx's native Ghostty and Rust components. This is not a
@@ -149,7 +188,7 @@ performance benchmark against Electron-based AI IDEs or terminal emulators.
 | Desktop rendering | WGPU native child surfaces |
 | PTY lifecycle | Headless Rust daemon with output replay |
 | Embedded browser | Native WebView split-tabs |
-| Mobile pairing | PIN/QR gateway with a custom DOM terminal grid |
+| Mobile pairing | Account sign-in gateway with a custom DOM terminal grid |
 | Agent supervision | Manifest-driven status detection and notifications |
 
 ## Guides and comparisons
@@ -169,6 +208,17 @@ unmeasured performance claims:
 - [Ferryx vs Crystal / Nimbalyst](https://ferryx.dev/compare/crystal/)
 - [Ferryx vs tmux + git worktree](https://ferryx.dev/compare/tmux-git-worktree/)
 - [Ferryx and Ghostty](https://ferryx.dev/compare/ghostty/) — Ferryx embeds libghostty-vt; it is not a Ghostty competitor
+
+## Docs and support
+
+- [User guide](https://ferryx.dev/docs/guide/): first run, workspaces and worktrees, panes, remote access, and agents
+- [Troubleshooting](https://ferryx.dev/docs/troubleshooting/): guides indexed by symptom
+- [Privacy declaration](https://ferryx.dev/privacy/)
+- [Security policy](SECURITY.md): how to report a vulnerability privately, supported versions, threat model
+- [Contributing](CONTRIBUTING.md): build prerequisites, test commands, and the license for contributions
+- [Changelog](CHANGELOG.md): changes per release tag
+- [Roadmap](ROADMAP.md): what is being worked on now, next, and later
+- Questions: [Discord](https://discord.gg/Z2hBkQEHUG)
 
 ## Build from source
 
@@ -249,18 +299,16 @@ guides, and an embedded demo running the real product components.
 
 ## Contributing
 
-Contributions are welcome. Branch from `main`, run the validation commands above, and
-open a pull request describing the user-visible result.
+Contributions are welcome. Branch from `main`, run the validation commands above, sign the
+[CLA](CLA.md), and open a pull request describing the user-visible result.
 
 Questions and ideas are welcome in [Discord](https://discord.gg/Z2hBkQEHUG).
 
 ## License
 
-This project is licensed under the [Sustainable Use License (SUL-1.0)](LICENSE): it permits personal, non-commercial, and internal business use; distribution is subject to its non-commercial terms and required notices.
+This project is source-available under the [Ferryx License](LICENSE). It is free for personal use, education, open-source work, non-profits, and companies with fewer than 50 people and less than USD 5M in annual revenue. Larger companies need a Team subscription to use Ferryx for work, after a transition period that ends 90 days after the Team plan opens. Self-hosted relays stay free for everyone. Releases published before this change remain under the Sustainable Use License (SUL-1.0) they shipped with. The [license FAQ](https://ferryx.dev/docs/license/) lists common allowed and disallowed cases with the clauses that govern them. Contributions require signing the [CLA](CLA.md); see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Code Signing Policy
-
-Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
 
 - **Maintainer**: [@Indosaram](https://github.com/Indosaram)
 - **Privacy**: Ferryx stores workspace data locally. Remote access, embedded websites, external coding agents, and update services can exchange data over the network. See the [Ferryx Privacy Policy](https://ferryx.dev/privacy/) for data handling and deletion choices.

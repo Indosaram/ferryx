@@ -1,0 +1,51 @@
+{
+  "dryRun": true,
+  "command": "promote-standby",
+  "publicHostname": "relay.ferryx.dev",
+  "blockedOn": null,
+  "steps": [
+    {
+      "id": "fence-primary",
+      "host": "omarchy",
+      "kind": "run",
+      "description": "stop the old primary's relay and replicator; if it is unreachable, power it off in the provider console before continuing",
+      "command": "sudo systemctl disable --now ferryx-relay.service litestream.service",
+      "allowFailure": true
+    },
+    {
+      "id": "stop-restore-timer",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "stop refreshing from the replica",
+      "command": "sudo systemctl disable --now ferryx-standby-restore.timer"
+    },
+    {
+      "id": "final-restore",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "take the newest replicated state",
+      "command": "sudo systemctl start ferryx-standby-restore.service"
+    },
+    {
+      "id": "remove-marker",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "the standby becomes the only writable account database",
+      "command": "sudo rm -f '/var/lib/ferryx/account-data/standby.readonly'"
+    },
+    {
+      "id": "start-replication",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "the new primary replicates from now on",
+      "command": "sudo systemctl enable --now litestream.service && sudo systemctl restart ferryx-relay.service"
+    },
+    {
+      "id": "promoted-health",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "local /healthz answers role=primary",
+      "command": "curl -sf http://127.0.0.1:8787/healthz | grep -q '\"role\":\"primary\"'"
+    }
+  ]
+}

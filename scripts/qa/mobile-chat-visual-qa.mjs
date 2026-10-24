@@ -77,6 +77,80 @@ const UNNAMED_BUTTON_PROBE = () => {
   return { total: buttons.length, unnamed };
 };
 
+/** Waits for webfonts and the harness's own ready flag instead of a fixed delay. */
+async function waitForQaReady(page) {
+  await page.waitForSelector('html[data-qa-ready="true"]', { timeout: 15000 });
+  await page.evaluate(() => document.fonts.ready.then(() => undefined));
+  // Entrance animations (sheets sliding in) settle before anything is measured or captured;
+  // infinite ones (spinners, pulses) are skipped since they never finish.
+  await page.evaluate(() =>
+    Promise.all(
+      document
+        .getAnimations()
+        .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+        .map((animation) => animation.finished.catch(() => undefined)),
+    ).then(() => undefined),
+  );
+  // Two frames so the post-font layout is painted before the screenshot.
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(undefined)))));
+}
+
+const PHONE_HOME_PROBE = (state) => {
+  const nameOf = (el) =>
+    (
+      el.getAttribute("aria-label") ||
+      (el.getAttribute("aria-labelledby") ?? "")
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent ?? "")
+        .join(" ")
+        .trim() ||
+      (el.textContent ?? "").trim() ||
+      el.getAttribute("title") ||
+      ""
+    ).trim();
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && window.getComputedStyle(el).visibility !== "hidden";
+  };
+  const doc = document.documentElement;
+  const overflow = doc.scrollWidth > doc.clientWidth || document.body.scrollWidth > document.body.clientWidth;
+  const unnamed = Array.from(document.querySelectorAll("button"))
+    .filter(visible)
+    .filter((el) => nameOf(el).length === 0)
+    .map((el) => el.getAttribute("data-testid") ?? el.outerHTML.slice(0, 80));
+  const needsTabs = state.startsWith("home-") || state === "account-delete";
+  const tabs = document.querySelector('[data-testid="mobile-home-tabs"]');
+  const tabRect = tabs?.getBoundingClientRect() ?? null;
+  const tabsInViewport = tabRect
+    ? tabRect.height > 0 && tabRect.left >= -0.5 && tabRect.right <= window.innerWidth + 0.5 && tabRect.bottom <= window.innerHeight + 0.5
+    : false;
+  const targetSelectors = [
+    '[data-testid^="mobile-home-tab-"]',
+    '[data-testid="supervisor-lane-pause"]',
+    '[data-testid="supervisor-take-over"]',
+    '[data-testid="supervisor-resume"]',
+  ];
+  const smallTargets = Array.from(document.querySelectorAll(targetSelectors.join(",")))
+    .filter(visible)
+    .map((el) => ({ testid: el.getAttribute("data-testid"), r: el.getBoundingClientRect() }))
+    .filter(({ r }) => r.width < 43.5 || r.height < 43.5)
+    .map(({ testid, r }) => ({ testid, width: r.width, height: r.height }));
+  const stripExpected = state.startsWith("session-strip-");
+  const strip = document.querySelector('[data-testid="supervisor-session-strip"]');
+  return {
+    state,
+    overflow,
+    unnamed,
+    needsTabs,
+    tabsPresent: Boolean(tabs),
+    tabsInViewport,
+    smallTargets,
+    stripExpected,
+    stripState: strip?.getAttribute("data-state") ?? null,
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+  };
+};
+
 const LAYOUT_PROBE = (expectedWidth) => {
   const rect = (selector) => {
     const el = document.querySelector(selector);
@@ -277,6 +351,18 @@ const TOP_BAR_PROBE = (expectedWidth) => {
 };
 
 async function run() {
+  const PHONE_HOME_STATES = [
+    "home-supervisor",
+    "home-supervisor-acting",
+    "home-supervisor-off",
+    "home-supervisor-unsupported",
+    "home-supervisor-long",
+    "home-inbox",
+    "home-worktrees",
+    "account-delete",
+    "session-strip-acting",
+    "session-strip-paused",
+  ];
   const args = parseArgs(process.argv.slice(2));
   mkdirSync(args.evidenceDir, { recursive: true });
   const { chromium } = loadPlaywright();
@@ -295,6 +381,15 @@ async function run() {
         if (message.type() === "error") report.consoleErrors.push(`${label}: ${message.text()}`);
       });
       page.on("pageerror", (error) => report.consoleErrors.push(`${label}: pageerror ${error.message}`));
+
+      for (const state of PHONE_HOME_STATES) {
+        await page.goto(`${args.url}?state=${state}`, { waitUntil: "domcontentloaded" });
+        await waitForQaReady(page);
+        const shot = join(args.evidenceDir, `${state}-${label}.png`);
+        await page.screenshot({ path: shot });
+        report.shots.push(shot);
+        report.probes[`phonehome-${state}-${label}`] = await page.evaluate(PHONE_HOME_PROBE, state);
+      }
 
       for (const state of [
         "stream",
@@ -317,7 +412,7 @@ async function run() {
         } else {
           await page.waitForSelector('[data-testid="mobile-chat-workspace"]', { timeout: 15000 });
         }
-        await page.waitForTimeout(900);
+        await waitForQaReady(page);
         const shot = join(args.evidenceDir, `mobile-chat-${state}-${label}.png`);
         await page.screenshot({ path: shot });
         report.shots.push(shot);
@@ -475,6 +570,25 @@ async function run() {
 
       await context.close();
     }
+
+    // Desktop regression: at 768px the remote client is not on the phone layout; the harness
+    // still renders the home here, so this checks it does not overflow a tablet-width viewport.
+    {
+      const viewport = { width: 768, height: 1024 };
+      const context = await browser.newContext({ viewport, deviceScaleFactor: 2 });
+      const page = await context.newPage();
+      page.on("console", (message) => {
+        if (message.type() === "error") report.consoleErrors.push(`768x1024: ${message.text()}`);
+      });
+      page.on("pageerror", (error) => report.consoleErrors.push(`768x1024: pageerror ${error.message}`));
+      await page.goto(`${args.url}?state=home-supervisor`, { waitUntil: "domcontentloaded" });
+      await waitForQaReady(page);
+      const shot = join(args.evidenceDir, "home-supervisor-768x1024.png");
+      await page.screenshot({ path: shot });
+      report.shots.push(shot);
+      report.probes["phonehome-home-supervisor-768x1024"] = await page.evaluate(PHONE_HOME_PROBE, "home-supervisor");
+      await context.close();
+    }
   } finally {
     await browser.close();
   }
@@ -490,6 +604,13 @@ async function run() {
     if (!report.probes[`drawer-closed-inert-${label}`]) fail(`missing required probe: drawer-closed-inert-${label}`);
   }
   for (const [key, value] of Object.entries(report.probes)) {
+    if (key.startsWith("phonehome-")) {
+      if (value?.overflow) fail(`${key}: the document scrolls horizontally`);
+      if (value?.unnamed?.length > 0) fail(`${key}: unnamed buttons ${JSON.stringify(value.unnamed)}`);
+      if (value?.needsTabs && !(value.tabsPresent && value.tabsInViewport)) fail(`${key}: the home tab bar is missing or outside the viewport`);
+      if (value?.smallTargets?.length > 0) fail(`${key}: touch targets under 44px ${JSON.stringify(value.smallTargets)}`);
+      if (value?.stripExpected && !value.stripState) fail(`${key}: the supervisor session strip is not rendered`);
+    }
     if (key.startsWith("unnamed-buttons") && value?.unnamed?.length > 0) {
       fail(`${key}: ${value.unnamed.length} unnamed button(s) ${JSON.stringify(value.unnamed)}`);
     }

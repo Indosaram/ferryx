@@ -1,6 +1,6 @@
 ---
 title: "Managing a Coding Agent Fleet Across Providers"
-description: "A fleet that mixes Claude Code, Codex CLI, and Gemini CLI needs one status surface and per-agent isolation. Here is the operating model that holds up."
+description: "A fleet that mixes Claude Code, Codex CLI, and Antigravity (agy) needs one status surface and per-agent isolation. Here is the operating model that holds up."
 ---
 
 **Managing a Coding Agent Fleet Across Providers.** The operating model that holds: maintain a *fleet inventory* (every running agent with provider, task, worktree, and state on one register), route all status through *one surface* instead of each CLI's native UI, and define *escalation* — explicit rules for when a stalled agent gets unstuck, reassigned, or killed. Per-agent isolation (a worktree each) is the floor beneath all three; without it, no inventory stays accurate because agents overwrite each other's ground truth.
@@ -28,7 +28,7 @@ Three CLIs, three native presentations, one rule: *aggregation beats inspection*
 
 The surface itself can be a workspace dashboard, a terminal status line, a small TUI, or badges over panes — the architecture choice matters less than two properties: it reads *state* (not raw scrollback), and it is *the* surface (no second source of truth competing with it). If checking status means three CLI-specific commands, operators will pick one to trust and blind themselves to the rest; the aggregated view in [agent orchestration dashboards](/blog/agent-orchestration-dashboard/) shows one implementation of the pattern.
 
-Crucially, the surface must ingest **provider-diverse signals**: Claude Code's permission dialogs, Codex CLI's approval modes, Gemini CLI's confirmations — each needs a detector, because a fleet surface that only understands one dialect silently mislabels the others as `running` when they are actually parked awaiting a human.
+Crucially, the surface must ingest **provider-diverse signals**: Claude Code's permission dialogs, Codex CLI's approval modes, Antigravity's permission prompts — each needs a detector, because a fleet surface that only understands one dialect silently mislabels the others as `running` when they are actually parked awaiting a human.
 
 ## Escalation when an agent stalls
 
@@ -40,7 +40,7 @@ Stalls are not anomalies in fleets; they are scheduled traffic. Codify the respo
 - **Tier 3 — kill and hand off.** Unrecoverable (looping, corrupted its worktree, chasing a bad premise): kill it, record *why* in the inventory, and reassign the task — preferably to a fresh worktree so the damaged one can be inspected rather than repaired in place.
 - **Tier 4 — post-mortem into prevention.** If the same stall class repeats across the fleet, the fix is upstream: a context-file correction, a tool-permission default, a task-shape change (too big to complete without review), or an infrastructure issue (disk, network) visible in [host observability signals](/blog/daemon-observability/).
 
-Every tier writes back to the inventory — state changes and reasons are the fleet's memory. An operating model without recorded escalations re-teaches the same lessons every flight; with them, the fleet's history becomes the next operator's (and the next agent's) briefing. End-to-end mechanics of isolation underneath this model live in the [parallel agents use case](/use-cases/parallel-ai-agents/); provider-specific strengths for *assigning* tasks are mapped in [Claude Code vs Codex CLI vs Gemini CLI](/blog/compare-claude-code-codex-gemini-cli/).
+Every tier writes back to the inventory — state changes and reasons are the fleet's memory. An operating model without recorded escalations re-teaches the same lessons every flight; with them, the fleet's history becomes the next operator's (and the next agent's) briefing. End-to-end mechanics of isolation underneath this model live in the [parallel agents use case](/use-cases/parallel-ai-agents/); provider-specific strengths for *assigning* tasks are mapped in [Claude Code vs Codex CLI vs Antigravity](/blog/compare-claude-code-codex-gemini-cli/).
 
 ![Managing a Coding Agent Fleet Across Providers illustration](/images/blog/cross-provider-agent-fleet/body-1.png)
 

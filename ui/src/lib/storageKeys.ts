@@ -13,12 +13,16 @@ export const BROWSER_HISTORY_STORAGE_KEY = "ferryx.browser.history";
 export const BROWSER_HISTORY_ENABLED_STORAGE_KEY = "ferryx.browser.history.enabled";
 export const GENERAL_SETTINGS_STORAGE_KEY = "ferryx.settings.general";
 export const SHORTCUT_OVERRIDES_STORAGE_KEY = "ferryx.settings.shortcuts";
+export const SHORTCUT_PRESET_STORAGE_KEY = "ferryx.shortcuts.preset";
 export const DISMISSED_UPDATE_VERSION_STORAGE_KEY = "ferryx.update.dismissedVersion";
+export const UPDATE_CHANNEL_STORAGE_KEY = "ferryx.update.channel";
 export const PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY = "ferryx.permissions.onboarding-dismissed";
 export const SSH_CONFIG_PATH_STORAGE_KEY = "ferryx.ssh.configPath";
 export const REMOTE_INSTALLATION_ID_STORAGE_KEY = "ferryx.remote.installation-id";
 export const WORKTREE_DISK_UNUSED_DAYS_KEY = "ferryx.worktree-disk.unused-days";
 export const FILE_OPEN_TARGETS_STORAGE_KEY = "ferryx.fileOpen.targets";
+/** General > "Advanced features": shows the browser, DAG, supervisor and their settings. */
+export const ADVANCED_FEATURES_STORAGE_KEY = "ferryx.ui.advancedFeatures";
 
 export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [PROJECTS_STORAGE_KEY]: ["rorca.projects", "orca.projects"],

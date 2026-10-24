@@ -333,7 +333,13 @@ async fn main() {
         Some(account_state.clone()),
     );
 
-    if matches!(config.deployment_mode, DeploymentMode::Commercial) {
+    // A warm standby's account store is a read-only replica; the write-side sweepers start
+    // after a promotion, which removes the marker and restarts the unit.
+    let standby = account_state.is_read_only();
+    if standby {
+        tracing::info!("ferryx-relay running as a read-only warm standby: account writes are refused");
+    }
+    if matches!(config.deployment_mode, DeploymentMode::Commercial) && !standby {
         // Only a commercial relay enforces suspension. The task is detached on purpose: it
         // must outlive this scope for the whole process, like the session reaper above.
         let _suspension_sweeper = spawn_suspension_sweeper(state);

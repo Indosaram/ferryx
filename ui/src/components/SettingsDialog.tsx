@@ -14,7 +14,8 @@ import {
 } from "lucide-react";
 
 import { isMacShortcutPlatform } from "../lib/shortcuts";
-import { useShortcutOverrides } from "../lib/shortcutOverrides";
+import { useAdvancedFeatures } from "../lib/advancedFeatures";
+import { useShortcutOverrides, useShortcutPreset } from "../lib/shortcutOverrides";
 import { DEFAULT_TERMINAL_SETTINGS, useTerminalSettings } from "../lib/terminalSettings";
 import { getConfiguredAccountOrigin, getStoredAccountSessionToken } from "../remote/accountSession";
 import { AgentsSection } from "./settings/AgentsSection";
@@ -97,7 +98,9 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
     resolveInitialSection(initialSection, planAuth.token !== null),
   );
   const isMac = isMacShortcutPlatform();
+  const advancedFeatures = useAdvancedFeatures();
   const { overrides: shortcutOverrides, setOverride: setShortcutOverride, resetOverrides: resetShortcutOverrides } = useShortcutOverrides();
+  const { preset: shortcutPreset, setPreset: setShortcutPreset } = useShortcutPreset(isMac);
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const handleAccountSessionChange = useCallback((token: string | null, origin: string) => {
@@ -187,8 +190,12 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
             <NavButton active={section === "terminal"} icon={<TerminalSquare />} label="Terminal" onClick={() => setSection("terminal")} />
             <NavButton active={section === "shortcuts"} icon={<Keyboard />} label="Keyboard Shortcuts" onClick={() => setSection("shortcuts")} />
             <NavButton active={section === "agents"} icon={<Bot />} label="Agents" onClick={() => setSection("agents")} />
-            <NavButton active={section === "browser"} icon={<Globe />} label="Browser" onClick={() => setSection("browser")} />
-            <NavButton active={section === "notifications"} icon={<Bell />} label="Notifications" onClick={() => setSection("notifications")} />
+            {advancedFeatures ? (
+              <>
+                <NavButton active={section === "browser"} icon={<Globe />} label="Browser" onClick={() => setSection("browser")} />
+                <NavButton active={section === "notifications"} icon={<Bell />} label="Notifications" onClick={() => setSection("notifications")} />
+              </>
+            ) : null}
             <NavButton active={section === "permissions"} icon={<Shield />} label="Permissions" onClick={() => setSection("permissions")} />
             <NavButton active={section === "remote"} icon={<Radio />} label="Remote" onClick={() => setSection("remote")} />
             {planAvailable ? (
@@ -233,6 +240,8 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
             <ShortcutsSection
               isMac={isMac}
               overrides={shortcutOverrides}
+              preset={shortcutPreset}
+              onChangePreset={setShortcutPreset}
               onChangeOverride={setShortcutOverride}
               onResetAll={resetShortcutOverrides}
             />
