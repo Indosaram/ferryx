@@ -9,7 +9,7 @@ If you came here looking for Ghostty, you'll find it at [ghostty.org](https://gh
 
 ## What Ghostty is
 
-Ghostty describes itself as "a fast, feature-rich, and cross-platform terminal emulator that uses platform-native UI and GPU acceleration." It's MIT licensed and written in Zig; Ferryx, by contrast, is source-available under SUL-1.0. The repository had 60,989 GitHub stars as of September 2026; counts and feature sets change over time, so treat that number as a snapshot. What it does show is that a substantial community has formed around the project.
+Ghostty describes itself as "a fast, feature-rich, and cross-platform terminal emulator that uses platform-native UI and GPU acceleration." It's MIT licensed and written in Zig; Ferryx, by contrast, is source-available under the Ferryx License. The repository had 60,989 GitHub stars as of September 2026; counts and feature sets change over time, so treat that number as a snapshot. What it does show is that a substantial community has formed around the project.
 
 ## How Ferryx uses libghostty-vt
 
@@ -39,6 +39,6 @@ A caveat belongs here: Ferryx is early software, with a narrow scope. It doesn't
 
 ## Credit
 
-Ferryx's terminal parsing rests on the Ghostty project's work through libghostty-vt. That's a real debt, worth stating plainly: thank you to the Ghostty maintainers and contributors for building it and releasing it under the MIT license. Ghostty ships under MIT; Ferryx ships under the source-available Sustainable Use License (SUL-1.0). If this page sends you to Ghostty instead of Ferryx, that's a good outcome, not a failure of the page.
+Ferryx's terminal parsing rests on the Ghostty project's work through libghostty-vt. That's a real debt, worth stating plainly: thank you to the Ghostty maintainers and contributors for building it and releasing it under the MIT license. Ghostty ships under MIT; Ferryx ships under the source-available Ferryx License. If this page sends you to Ghostty instead of Ferryx, that's a good outcome, not a failure of the page.
 
 Project links: [ghostty.org](https://ghostty.org/), [github.com/ghostty-org/ghostty](https://github.com/ghostty-org/ghostty), and Ferryx at [github.com/Indosaram/ferryx](https://github.com/Indosaram/ferryx).

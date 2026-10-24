@@ -1,9 +1,9 @@
 ---
 title: "Ferryx vs Warp: Two Open Codebases, Different Licenses"
-description: Warp open-sourced its client under AGPL-3.0 and sells cloud agent infrastructure. How that compares with Ferryx's source-available SUL-1.0 desktop workspace.
+description: Warp open-sourced its client under AGPL-3.0 and sells cloud agent infrastructure. How that compares with Ferryx's source-available local desktop workspace.
 ---
 
-Ferryx and Warp are both built for engineers who run coding agents in a terminal, and that's roughly where the overlap ends. Warp is a commercial platform from Denver Technologies with three products: the Warp Terminal, the Warp Agent CLI, and Warp Factories, cloud infrastructure for fleets of coding agents. [Ferryx](https://github.com/Indosaram/ferryx) is a source-available desktop application under the Sustainable Use License (SUL-1.0), still early software on calendar-versioned releases, that runs locally on macOS, Windows, and Linux.
+Ferryx and Warp are both built for engineers who run coding agents in a terminal, and that's roughly where the overlap ends. Warp is a commercial platform from Denver Technologies with three products: the Warp Terminal, the Warp Agent CLI, and Warp Factories, cloud infrastructure for fleets of coding agents. [Ferryx](https://github.com/Indosaram/ferryx) is a source-available desktop application under the Ferryx License, still early software on calendar-versioned releases, that runs locally on macOS, Windows, and Linux.
 
 This page compares the two on what can be verified: source availability, licensing, architecture, and process handling. No benchmarks; the site's editorial rules bar publishing unmeasured performance claims. Verified 2026-09-19 against Ferryx v2026.09.18.1 and Warp's public repository, docs, and pricing page. Details in this space change weekly, so confirm anything that matters at the source.
 
@@ -13,7 +13,7 @@ Both codebases are readable, under licenses that permit very different things.
 
 Warp's client is open source. The [`warpdotdev/warp`](https://github.com/warpdotdev/Warp) repository carries the client crates, and the README states that the `warpui_core` and `warpui` crates are MIT licensed while the rest of the repository is under AGPL v3. The server portion is not in that repository. So Warp is an open-source client talking to a closed, commercial backend, with community contributions accepted through a labelled issue-to-PR flow. Ferryx, by contrast, is source-available.
 
-Ferryx's source is public on GitHub under SUL-1.0, which permits use and modification for your own internal business purposes or for non-commercial or personal use. SUL-1.0 is a source-available license, not an OSI open-source one, and AGPL-3.0 is OSI-approved. If reciprocal-copyleft open source is what you need, Warp's client qualifies on that axis and Ferryx doesn't; say so plainly rather than around it.
+Ferryx's source is public on GitHub under the source-available Ferryx License, which is free for individuals, education, open-source work, non-profits, and companies under 50 people and USD 5M revenue; larger companies need a Team subscription for work use. The Ferryx License is not an OSI open-source license, and AGPL-3.0 is. If reciprocal-copyleft open source is what you need, Warp's client qualifies on that axis and Ferryx doesn't; say so plainly rather than around it.
 
 Ferryx's stack is Rust and Tauri v2, parsing terminal output with libghostty-vt and rendering through WGPU on a native child surface, with no Electron. The decision with the most practical weight is that a headless Rust PTY daemon owns the pseudoterminals and the GUI is just a client of it; close, reload, or crash the window, and running agent processes keep going. Output is buffered in a 512 KiB ring buffer per session with monotonic sequence numbers, so a reconnect replays exactly what was missed.
 
@@ -27,9 +27,9 @@ Ferryx approaches the same problem locally and without a cloud. The daemon owns 
 
 ## A plain-language rundown
 
-- **Source and license.** Warp's client is open source, AGPL-3.0 with MIT for its two UI crates; its server is not published. Ferryx is source-available under SUL-1.0, which isn't OSI open source.
+- **Source and license.** Warp's client is open source, AGPL-3.0 with MIT for its two UI crates; its server is not published. Ferryx is source-available under the Ferryx License, which isn't OSI open source.
 - **Products.** Ferryx is one desktop application. Warp sells a terminal, an agent CLI, and cloud infrastructure for agent fleets.
-- **Pricing.** Warp's free tier is $0, with paid tiers starting at $20 a month and a $200 tier, plus enterprise plans. Ferryx is free for personal and non-commercial use under SUL-1.0.
+- **Pricing.** Warp's free tier is $0, with paid tiers starting at $20 a month and a $200 tier, plus enterprise plans. Ferryx is free for individuals and companies under 50 people and USD 5M revenue; larger companies need a Team subscription (see [pricing](/docs/pricing/)).
 - **Where work runs.** Ferryx runs entirely locally. Warp runs locally too, and Warp Factories runs fleets of agents in cloud infrastructure.
 - **Process survival.** Closing or reloading the Ferryx GUI doesn't kill running agent processes, and reconnecting replays missed output from a ring buffer with monotonic sequence numbers.
 - **Remote viewing.** Warp publishes a session to its cloud and hands you a link. Ferryx pairs a device directly with your daemon over your own gateway or relay.
@@ -39,7 +39,7 @@ Ferryx approaches the same problem locally and without a cloud. The daemon owns 
 
 ## When Warp is the better choice
 
-Here's the other side stated plainly. Warp is a mature commercial product with enterprise support, a dedicated agent CLI, cloud infrastructure for agent fleets, and a client codebase under a recognised open-source license; Ferryx is an early source-available desktop app with none of that. If you need a vendor relationship, paid tiers, and documented industry solutions, particularly in financial services, insurance, or telecommunications, Warp covers that today. If AGPL matters to you more than SUL-1.0, that's a clean reason to pick Warp and it doesn't need qualifying.
+Here's the other side stated plainly. Warp is a mature commercial product with enterprise support, a dedicated agent CLI, cloud infrastructure for agent fleets, and a client codebase under a recognised open-source license; Ferryx is an early source-available desktop app with none of that. If you need a vendor relationship, paid tiers, and documented industry solutions, particularly in financial services, insurance, or telecommunications, Warp covers that today. If AGPL matters to you more than the Ferryx License, that's a clean reason to pick Warp and it doesn't need qualifying.
 
 What Ferryx offers instead is a workspace with no cloud in it: agents that survive a GUI restart, replay on reconnect, per-worktree git isolation, and a remote path that terminates on hardware you control. If those are the properties you care about, the trade makes sense; if they aren't, Warp's maturity wins.
 

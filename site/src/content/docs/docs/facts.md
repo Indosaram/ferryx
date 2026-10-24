@@ -1,6 +1,6 @@
 ---
 title: Ferryx product facts
-description: "Sourced Ferryx reference facts: SUL-1.0 license, platform packages, shipped agent status manifests, managed worktree paths, and PTY daemon replay behaviour."
+description: "Sourced Ferryx reference facts: Ferryx License, platform packages, shipped agent status manifests, managed worktree paths, and PTY daemon replay behaviour."
 ---
 
 A single reference page of concrete, checkable facts about Ferryx. Every row names the file in
@@ -21,15 +21,19 @@ pseudoterminals so sessions outlive the window.
 | :--- | :--- | :--- |
 | Project name | Ferryx | `src-tauri/tauri.conf.json` (`productName`) |
 | Bundle identifier | `com.ferryx.app` | `src-tauri/tauri.conf.json` |
-| License | Sustainable Use License 1.0 (SUL-1.0), source-available; permits your own internal business purposes, non-commercial use, or personal use | [`LICENSE`](https://github.com/Indosaram/ferryx/blob/main/LICENSE) |
+| License | Ferryx License 1.0, source-available; free for individuals, education, open-source work, non-profits, and companies under 50 people and USD 5M revenue | [`LICENSE`](https://github.com/Indosaram/ferryx/blob/main/LICENSE) |
 | Current release | Calendar-versioned (`vYYYY.MM.DD.N`); see the latest published release and its notes | [Releases](https://github.com/Indosaram/ferryx/releases/latest) |
 | Source repository | `github.com/Indosaram/ferryx` | GitHub |
-| Price | Free to download | [Releases](https://github.com/Indosaram/ferryx/releases/latest) |
+| Price | Free to download; larger companies need a Team subscription for work use ([pricing](/docs/pricing/)) | [Releases](https://github.com/Indosaram/ferryx/releases/latest) |
 
-SUL-1.0 is a source-available license, not an OSI open-source license. It permits use and modification for your own internal
-business purposes or for non-commercial or personal use. Distribution must be free of charge
-and for non-commercial purposes, with the required notices preserved. Read the license for its
-full terms.
+The Ferryx License is a source-available license, not an OSI open-source license.
+Use and modification of this source-available code are free for personal use, education, open-source work,
+non-profits, and companies with fewer than 50 employees and
+contractors and less than USD 5M in annual revenue. Larger companies need a Team subscription to
+use Ferryx for work, after a transition period that ends 90 days after the Team plan opens.
+Self-hosted relays are free for everyone. Distribution must be free of charge and for
+non-commercial purposes, with the required notices preserved. Releases published before the
+change remain under the Sustainable Use License (SUL-1.0). Read the license for its full terms.
 
 ## Platforms and packages
 

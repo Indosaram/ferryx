@@ -13,7 +13,7 @@ Choosing a terminal for agent-heavy work is less about ANSI rendering and more a
 
 ## Agent workflows compared
 
-Ferryx is a source-available desktop terminal under the Sustainable Use License (SUL-1.0), free for personal and non-commercial use, written in Rust on Tauri v2 with a headless daemon. Comparisons on this site stick to licensing, architecture, and workflow facts rather than unmeasured performance claims. Applied to “ferryx vs zellij”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
+Ferryx is a source-available desktop terminal under the Ferryx License, free for individuals and small companies, written in Rust on Tauri v2 with a headless daemon. Comparisons on this site stick to licensing, architecture, and workflow facts rather than unmeasured performance claims. Applied to “ferryx vs zellij”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
 
 ## Practical steps
 
@@ -48,7 +48,7 @@ Editorial policy: unmeasured numbers go stale and mislead. Claims here map to so
 
 ### Is Ferryx open source or source-available?
 
-Source-available under SUL-1.0, which is not an OSI license. It permits your own internal business purposes, non-commercial, or personal use.
+Source-available under the Ferryx License, which is not an OSI license. It is free for individuals, education, open-source work, non-profits, and companies under 50 people and USD 5M revenue; larger companies need a Team subscription for work use. Releases before the change remain under SUL-1.0.
 
 ### Which tool should I pick?
 
