@@ -82,6 +82,27 @@ pub struct Pairing {
     pub device_token: String,
 }
 
+/// What a client needs to end-to-end encrypt to this host through the relay: the
+/// machine's static attach key and the enrollment epoch bound into the handshake prologue.
+/// Public material only; the client's own private attach key never lives here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostAttach {
+    pub machine_attach_public_key: String,
+    pub enrollment_epoch: String,
+}
+impl HostAttach {
+    /// Non-empty, control-free, and the key is base64 of exactly 32 bytes.
+    pub fn is_valid(&self) -> bool {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        valid_text(&self.enrollment_epoch, 256)
+            && valid_text(&self.machine_attach_public_key, 256)
+            && STANDARD
+                .decode(&self.machine_attach_public_key)
+                .is_ok_and(|key| key.len() == 32)
+    }
+}
+
 /// Caller must supply the exact explicitly host-scoped legacy key. An origin-wide
 /// key or an absent machine association cannot be converted into this proof.
 pub struct LegacyCredential {
@@ -110,6 +131,10 @@ struct Record {
     ssh_host_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     device_id: Option<String>,
+    /// Present only for a host paired through an account grant with its attach key.
+    /// Absent on every older row, which keeps loading unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attach: Option<HostAttach>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +159,7 @@ pub struct CredentialLease {
     host_id: String,
     generation: Epoch,
     token: String,
+    attach: Option<HostAttach>,
     cancelled: watch::Receiver<bool>,
 }
 impl std::fmt::Debug for CredentialLease {
@@ -152,6 +178,10 @@ impl CredentialLease {
     }
     pub fn host_id(&self) -> &str {
         &self.host_id
+    }
+    /// The machine attach key and epoch this generation was paired with, if any.
+    pub fn attach(&self) -> Option<&HostAttach> {
+        self.attach.as_ref()
     }
     /// Native HTTP code alone receives the token. Never return it through IPC.
     pub fn token(&self) -> Result<&str> {
@@ -291,6 +321,7 @@ fn pairing_record(
             },
             ssh_host_id: None,
             device_id: None,
+            attach: None,
         },
     ))
 }
@@ -329,6 +360,9 @@ fn load(path: &Path, loopback_http: bool) -> Result<Disk> {
             if !valid_text(device_id, 256) {
                 return Err(InventoryError::Unavailable);
             }
+        }
+        if row.attach.as_ref().is_some_and(|attach| !attach.is_valid()) {
+            return Err(InventoryError::Unavailable);
         }
         match (&row.device_token, row.auth_status, row.grant_scope) {
             (Some(token), AuthStatus::Paired, GrantScope::Machine)
@@ -470,6 +504,7 @@ impl Inventory {
             host_id: id.to_owned(),
             generation,
             token,
+            attach: row.attach.clone(),
             cancelled: sender.subscribe(),
         })
     }
@@ -553,6 +588,27 @@ impl Inventory {
         pairing: &Pairing,
         device_id: Option<String>,
     ) -> Result<HostView> {
+        self.pair_record(pairing, device_id, None)
+    }
+    /// Like [`Self::pair_with_device`], also recording the machine attach key and epoch the
+    /// pairing was verified against, so relay traffic to this host can be end-to-end encrypted.
+    pub fn pair_attached(
+        &mut self,
+        pairing: &Pairing,
+        device_id: Option<String>,
+        attach: HostAttach,
+    ) -> Result<HostView> {
+        if !attach.is_valid() {
+            return Err(InventoryError::InvalidInput);
+        }
+        self.pair_record(pairing, device_id, Some(attach))
+    }
+    fn pair_record(
+        &mut self,
+        pairing: &Pairing,
+        device_id: Option<String>,
+        attach: Option<HostAttach>,
+    ) -> Result<HostView> {
         let (id, mut row) = pairing_record(pairing, Epoch(1), self.loopback_http)?;
         if let Some(dev_id) = &device_id {
             if !valid_text(dev_id, 256) {
@@ -561,6 +617,7 @@ impl Inventory {
         }
         row.generation = self.next_generation(&id)?;
         row.device_id = device_id;
+        row.attach = attach;
         let mut candidate = self.disk.clone();
         candidate.generations.insert(id.clone(), row.generation);
         candidate.hosts.insert(id.clone(), row);
@@ -621,6 +678,8 @@ impl Inventory {
             // A legacy credential carries no device identity; compare authority fields only,
             // keeping the authenticated device id recorded by the native pairing.
             record.device_id = existing.device_id.clone();
+            // Likewise the attach key recorded by an account-grant pairing.
+            record.attach = existing.attach.clone();
             if existing != &record {
                 return Err(InventoryError::MigrationPending);
             }

@@ -17,7 +17,7 @@ import type {
   BrowserStateMessage,
   BrowserSubscribeOptions,
 } from "./browserProtocol";
-import { remoteSocketUrl } from "./remoteClient";
+import { remoteSocketTarget } from "./remoteClient";
 
 export type RemoteBrowserStatus =
   | "opening"
@@ -180,11 +180,15 @@ export function useRemoteBrowser({
     async function init() {
       try {
         const target = `/api/v1/browser/${encodeURIComponent(browserId!)}`;
-        // Obtain target-bound single-use socket ticket
-        const wsUrl = await remoteSocketUrl(baseUrl, target, deviceToken, abortController.signal);
-        if (cancelled) return;
+        // Inside the encrypted tunnel when the base has one, else a target-bound single-use ticket.
+        // A ticketed URL is dialed by BrowserClient itself so its handlers attach before any frame.
+        const socket = await remoteSocketTarget(baseUrl, target, deviceToken, abortController.signal);
+        if (cancelled) {
+          if (typeof socket !== "string") socket.close();
+          return;
+        }
 
-        const client = new BrowserClient(wsUrl);
+        const client = new BrowserClient(socket);
         clientRef.current = client;
         setClient(client);
 

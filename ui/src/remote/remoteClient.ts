@@ -1,5 +1,8 @@
 import type { HostEndpoint } from "../state/remoteHostStore";
 
+// Host API calls go through these: a relay base with an encrypted session never sees plaintext.
+export { remoteFetch, remoteOpenSocket, remoteSocketTarget } from "./relayE2E";
+
 export function hostTransportUrl(host: HostEndpoint | null, transportUrl: string): string {
   return host?.relayOrigin && host.machineId && new URL(transportUrl).origin === host.relayOrigin
     ? `${host.relayOrigin}/host/${encodeURIComponent(host.machineId)}`

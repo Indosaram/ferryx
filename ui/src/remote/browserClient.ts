@@ -27,6 +27,10 @@ import {
   type ServerBrowserDriverRevoked,
   type ServerMessage,
 } from "./browserProtocol";
+import type { TunnelWebSocket } from "./attachTunnel";
+
+/** A native WebSocket, or one carried inside an encrypted attach tunnel. */
+type BrowserSocket = WebSocket | TunnelWebSocket;
 
 export interface BrowserCommandRequest {
   browserId: string;
@@ -92,7 +96,7 @@ function redactSocketUrl(url: string): string {
 type PendingResponseType = ServerMessage["type"];
 
 export class BrowserClient {
-  private ws: WebSocket;
+  private ws: BrowserSocket;
   private requestCounter = 0;
   private pendingRequests = new Map<
     string,
@@ -126,12 +130,16 @@ export class BrowserClient {
     return this.currentDriverState;
   }
 
-  constructor(readonly url: string) {
-    this.ws = new WebSocket(url);
+  /** Label used in error messages; the redacted URL, or "tunnel" for an already-open socket. */
+  readonly url: string;
+
+  constructor(urlOrSocket: string | BrowserSocket) {
+    this.url = typeof urlOrSocket === "string" ? urlOrSocket : "tunnel";
+    this.ws = typeof urlOrSocket === "string" ? new WebSocket(urlOrSocket) : urlOrSocket;
     this.ws.binaryType = "arraybuffer";
 
-    this.ws.onmessage = (event) => {
-      this.handleIncomingMessage(event.data);
+    this.ws.onmessage = (event: { data: unknown }) => {
+      this.handleIncomingMessage(event.data as string | ArrayBuffer | Uint8Array);
     };
 
     this.ws.onopen = () => {
@@ -141,7 +149,7 @@ export class BrowserClient {
       for (const waiter of waiters) waiter.resolve();
     };
 
-    this.ws.onerror = (_err) => {
+    this.ws.onerror = () => {
       const waiters = this.openWaiters;
       this.openWaiters = [];
       for (const waiter of waiters) waiter.reject(new Error("WebSocket error before opening"));
@@ -173,6 +181,12 @@ export class BrowserClient {
     );
   }
 
+  /** Bytes the native socket still holds; a tunnel socket reports none. */
+  private bufferedAmount(): number {
+    const amount = (this.ws as { bufferedAmount?: unknown }).bufferedAmount;
+    return typeof amount === "number" ? amount : 0;
+  }
+
   private async ensureOpen(): Promise<void> {
     if (this.isClosed) throw new Error("WebSocket is closed");
     if (this.isSocketOpen()) return;
@@ -197,8 +211,8 @@ export class BrowserClient {
     return `req-${Date.now().toString(36)}-${this.requestCounter}`;
   }
 
-  private handleIncomingMessage(data: string | ArrayBuffer) {
-    if (data instanceof ArrayBuffer) {
+  private handleIncomingMessage(data: string | ArrayBuffer | Uint8Array) {
+    if (data instanceof ArrayBuffer || data instanceof Uint8Array) {
       try {
         const frame = decodeFrame(data);
         if (
@@ -360,7 +374,7 @@ export class BrowserClient {
     const currentQueueBytes = this.writerQueue.reduce((acc, m) => acc + (m.byteLength ?? 0), 0);
     const msgBytes = msg.byteLength ?? getUtf8ByteLength(msg.text);
     msg.byteLength = msgBytes;
-    const nativeBuffered = (this.ws && typeof this.ws.bufferedAmount === "number") ? this.ws.bufferedAmount : 0;
+    const nativeBuffered = this.bufferedAmount();
     const MAX_QUEUE_BYTES = 1024 * 1024; // 1 MiB
 
     if (
@@ -392,7 +406,7 @@ export class BrowserClient {
     this.isPumping = true;
     try {
       while (this.writerQueue.length > 0 && this.isSocketOpen() && !this.isClosed) {
-        const nativeBuffered = (this.ws && typeof this.ws.bufferedAmount === "number") ? this.ws.bufferedAmount : 0;
+        const nativeBuffered = this.bufferedAmount();
         const MAX_QUEUE_BYTES = 1024 * 1024; // 1 MiB
 
         // Find highest-priority message eligible to send:

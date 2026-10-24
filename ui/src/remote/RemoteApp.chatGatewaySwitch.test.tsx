@@ -123,7 +123,18 @@ function machineTransport(machine: MachineFixture, historyPaths: string[]): Tunn
         unavailableReason: null,
       });
     }
-    return { status: 404, headers: {}, body: new Uint8Array(0) };
+    // Every other host route rides the encrypted tunnel too (account mode registers it for the
+    // relay base): answer it from the test's relay fixture at the same `/host/<machine>` URL.
+    const relayed = await fetch(`${window.location.origin}/host/${machine.machineId}${path}`, {
+      method: init?.method,
+      headers: init?.headers,
+      body: init?.body as BodyInit | undefined,
+    });
+    const responseHeaders: Record<string, string> = {};
+    relayed.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
+    });
+    return { status: relayed.status, headers: responseHeaders, body: new Uint8Array(await relayed.arrayBuffer()) };
   });
   return {
     fetchLike,

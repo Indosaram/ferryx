@@ -3,7 +3,7 @@ use crate::{
     daemon::client::DaemonClient,
     paired_host::{
         inventory::{HostView, MigrationReceipt},
-        service::{InventoryChangeEvent, MigrationRequest, PairRequest, Result},
+        service::{InventoryChangeEvent, MigrationRequest, PairRequest, RedeemGrantRequest, Result},
     },
 };
 use std::sync::Arc;
@@ -186,6 +186,35 @@ pub async fn paired_host_migrate_legacy<R: tauri::Runtime>(
 ) -> Result<MigrationReceipt> {
     let receipt = daemon.paired_host_migrate_legacy(request).await?;
     Ok(receipt)
+}
+
+/// Redeems an account grant end-to-end encrypted with this client's own attach key.
+#[tauri::command]
+pub async fn paired_host_redeem_grant<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    daemon: State<'_, Arc<DaemonClient>>,
+    request: RedeemGrantRequest,
+) -> Result<HostView> {
+    let host = daemon.paired_host_redeem_grant(request).await?;
+    let _ = emit_paired_host_inventory_changed(
+        &app,
+        &InventoryChangeEvent {
+            r#type: "pair".into(),
+            host: Some(host.clone()),
+            host_id: Some(host.host_id.clone()),
+            generation: Some(host.generation.0.to_string()),
+        },
+    );
+    Ok(host)
+}
+
+/// The public half of the key this client attaches with; the grant binds it. The private
+/// half never leaves the daemon.
+#[tauri::command]
+pub async fn paired_host_client_attach_public_key(
+    daemon: State<'_, Arc<DaemonClient>>,
+) -> Result<String> {
+    daemon.paired_host_client_attach_public_key().await
 }
 
 #[tauri::command]
