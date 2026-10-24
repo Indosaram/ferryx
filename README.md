@@ -6,10 +6,10 @@
 
 # Ferryx
 
-### Parallel agentic development. Zero bloat.
+### Run Claude Code, Codex and any CLI agent side by side in one repo - each in its own worktree, alive when the app closes, steerable from your phone.
 
-Native Ghostty terminal engine, wgpu GPU rendering, and a headless Rust PTY daemon.
-No Electron anywhere.
+A built-in supervisor answers routine agent prompts the way you would and sends only the risky
+ones to you. Native Rust on Tauri v2 with a libghostty terminal core; no Electron.
 
 [**Download**](https://github.com/Indosaram/ferryx/releases/latest) &nbsp;·&nbsp;
 [**Website**](https://ferryx.dev/) &nbsp;·&nbsp;
@@ -58,7 +58,7 @@ pipeline, giving crisp font rasterization and low-latency throughput.
 
 - libghostty terminal core
 - wgpu GPU pipeline
-- Offscreen WGPU render benchmark: 50-frame p50 3.10 ms on Apple M4 Max
+- Measured render latency: see [Performance](#performance)
 
 ### Multi-agent workspaces
 
@@ -137,6 +137,45 @@ the host can still end live PTYs.
 - Layout snapshots
 - Daemon survives the GUI
 - Reattach with output replay
+
+## Is Ferryx for you?
+
+Ferryx is a good fit if you:
+
+- run more than one CLI coding agent (for example Claude Code and Codex) on the same repository and want one worktree convention for all of them;
+- want agent sessions to keep running after you close the window, and to replay missed output when you come back;
+- want to check on or steer a long agent run from your phone;
+- are an individual or a company small enough to use it free (see the [license FAQ](https://ferryx.dev/docs/license/)).
+
+Ferryx is probably not for you yet if you:
+
+- use a single agent vendor. `claude --worktree` or Codex's built-in worktrees already isolate that vendor's sessions, with less to install;
+- need SSO, centrally managed accounts, or a cloud-hosted service. Ferryx does not offer them today;
+- need prebuilt Linux or Windows ARM64 binaries, or run on a host without a GPU adapter. Those are not supported yet.
+
+## Performance
+
+The figure below is a single offscreen measurement, not a comparison with other terminals.
+
+- Offscreen WGPU render benchmark, 50 frames, 800x480 px: p50 3.10 ms, p95 4.34 ms.
+- Hardware: Apple M4 Max (Metal, integrated GPU), macOS.
+- Source: [`bench/terminal/evidence/native-wgpu-phase2-summary.md`](bench/terminal/evidence/native-wgpu-phase2-summary.md).
+
+Reproduce the render figure:
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml \
+  --bin native_terminal_renderer_poc -- \
+  --headless --output bench/terminal/evidence/native-wgpu-phase2-latest.png
+```
+
+Run the terminal parser and throughput baseline suite (writes `bench/terminal/evidence/baseline-*`):
+
+```bash
+bun run bench/terminal/runner.ts
+```
+
+Numbers depend on hardware; run both on your own machine before relying on them.
 
 ## Built different
 
@@ -265,7 +304,7 @@ Questions and ideas are welcome in [Discord](https://discord.gg/Z2hBkQEHUG).
 
 ## License
 
-This project is source-available under the [Ferryx License](LICENSE). It is free for personal use, education, open-source work, non-profits, and companies with fewer than 50 people and less than USD 5M in annual revenue. Larger companies need a Team subscription to use Ferryx for work, after a transition period that ends 90 days after the Team plan opens. Self-hosted relays stay free for everyone. Releases published before this change remain under the Sustainable Use License (SUL-1.0) they shipped with. Contributions require signing the [CLA](CLA.md); see [CONTRIBUTING.md](CONTRIBUTING.md).
+This project is source-available under the [Ferryx License](LICENSE). It is free for personal use, education, open-source work, non-profits, and companies with fewer than 50 people and less than USD 5M in annual revenue. Larger companies need a Team subscription to use Ferryx for work, after a transition period that ends 90 days after the Team plan opens. Self-hosted relays stay free for everyone. Releases published before this change remain under the Sustainable Use License (SUL-1.0) they shipped with. The [license FAQ](https://ferryx.dev/docs/license/) lists common allowed and disallowed cases with the clauses that govern them. Contributions require signing the [CLA](CLA.md); see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Code Signing Policy
 

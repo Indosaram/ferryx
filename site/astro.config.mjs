@@ -70,6 +70,7 @@ export default defineConfig({
             { label: 'User Guide', slug: 'docs/guide' },
             { label: 'Troubleshooting', slug: 'docs/troubleshooting' },
             { label: 'Pricing & Plans', slug: 'docs/pricing' },
+            { label: 'License FAQ', slug: 'docs/license' },
             { label: 'Self-hosted relay', slug: 'docs/self-hosted-relay' },
             { label: 'Privacy', slug: 'privacy' },
             {

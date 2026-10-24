@@ -11,6 +11,21 @@ Run two coding agents in one working directory and they get in each other's way.
 
 Ferryx turns that workaround into a managed feature: each agent gets its own Git worktree, created for you and kept inside the repository. Two agents can edit one repository in parallel without touching each other's files, and you watch every session from a single window. A status indicator shows when an agent needs attention, and on macOS the Dock icon carries a live attention counter.
 
+## Is Ferryx for you?
+
+Ferryx is a good fit if you:
+
+- run more than one CLI coding agent (for example Claude Code and Codex) on the same repository and want one worktree convention for all of them;
+- want agent sessions to keep running after you close the window, and to replay missed output when you come back;
+- want to check on or steer a long agent run from your phone;
+- are an individual or a company small enough to use it free (see the [license FAQ](/docs/license/)).
+
+Ferryx is probably not for you yet if you:
+
+- use a single agent vendor. `claude --worktree` or Codex's built-in worktrees already isolate that vendor's sessions, with less to install; see [running coding agents in parallel](/use-cases/parallel-ai-agents/).
+- need SSO, centrally managed accounts, or a cloud-hosted service. Ferryx does not offer them today.
+- need prebuilt Linux or Windows ARM64 binaries, or run on a host without a GPU adapter. Those are not supported yet.
+
 ## The main concepts
 
 Most of Ferryx reduces to six concepts.
