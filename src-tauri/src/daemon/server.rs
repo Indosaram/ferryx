@@ -6839,13 +6839,13 @@ impl DaemonServer {
                     enabled: self.agent_integration.enabled(),
                 },
                 Ok(DaemonRequest::SupervisorSnapshot) => DaemonResponse::SupervisorSnapshotOk {
-                    snapshot: crate::hub_runtime::supervisor_snapshot(&self).await,
+                    snapshot: crate::hub_runtime::supervisor_snapshot(self.remote_state()).await,
                 },
                 Ok(DaemonRequest::SupervisorSetPaused { lane_key, paused }) => {
-                    match crate::hub_runtime::set_lane_paused(&self, &lane_key, paused).await {
-                        Ok(paused) => DaemonResponse::SupervisorSetPausedOk { paused },
-                        Err(message) => DaemonResponse::Error {
-                            message,
+                    match crate::hub_runtime::set_lane_paused(self.remote_state(), &lane_key, paused, "desktop").await {
+                        Ok(_) => DaemonResponse::SupervisorSetPausedOk { paused },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
                             code: Some("SUPERVISOR_UNAVAILABLE".into()),
                             details: None,
                         },

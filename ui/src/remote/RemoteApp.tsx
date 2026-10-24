@@ -147,6 +147,17 @@ import {
   type PlanLimitState,
 } from "./accountSession";
 import { PlanLimitNotice } from "./PlanLimitNotice";
+import { deleteAccount } from "./accountSession";
+import { paneSupervision } from "../lib/supervisorModel";
+import { toast } from "sonner";
+import { AccountSheet, getStoredAccountEmail, storeAccountEmail } from "./home/AccountSheet";
+import { createSupervisorFrameBus } from "./home/machineSupervisorSources";
+import { buildInboxRows, optionForSession, type InboxRow } from "./home/phoneHomeModel";
+import { PhoneHomeView } from "./home/PhoneHomeView";
+import { SupervisorSessionStrip } from "./home/SupervisorSessionStrip";
+import { usePhoneNavigation } from "./home/usePhoneNavigation";
+import { usePhoneSupervisor } from "./home/usePhoneSupervisor";
+import { WorktreesHome } from "./home/WorktreesHome";
 import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 
 const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT = "remote_active_selection_changed";
@@ -1371,6 +1382,8 @@ export const RemoteHostConnection: React.FC<{
     clearAccountLastSelectedTarget();
     clearStoredAccountEntitlementSnapshot(relayUrl);
     setAccountSessionToken(null);
+    storeAccountEmail(null);
+    setAccountEmail(null);
     setPlanLimitNotice(null);
     disconnect();
   }, [disconnect, relayUrl]);
@@ -1397,6 +1410,11 @@ export const RemoteHostConnection: React.FC<{
   } = accountDiscovery;
   const accountDiscoveryRef = useRef(accountDiscovery);
   accountDiscoveryRef.current = accountDiscovery;
+  // Phone home: the signed-in account email (Account sheet) and the per-machine fan-out of
+  // `/api/v1/events` frames the supervisor feed listens to.
+  const [accountEmail, setAccountEmail] = useState<string | null>(() => getStoredAccountEmail());
+  const [accountSheetOpen, setAccountSheetOpen] = useState(false);
+  const [supervisorBus] = useState(createSupervisorFrameBus);
 
   /* The machine inventory is read from effects and socket callbacks that are declared
      before the derived model below, so it is mirrored into a ref every render. */
@@ -2088,6 +2106,7 @@ export const RemoteHostConnection: React.FC<{
         : String(raw ?? "");
 
       if (activeTunnelConnection) {
+        supervisorBus.emit(activeTunnelConnection.machine.machineId, text);
         const inventoryEvent = parseInventoryEvent(activeTunnelConnection.machine.machineId, text);
         if (inventoryEvent.kind === "inventory") {
           applyParsedInventoryEvent(activeTunnelConnection.machine.machineId, inventoryEvent);
@@ -2672,6 +2691,22 @@ export const RemoteHostConnection: React.FC<{
   /* Declared above the auth early return so the hook count is identical on the
      login screen and after pairing; a hook below the guard changes the order. */
   const isAccountMode = Boolean(accountSessionToken);
+  // The supervisor-first phone home exists only for a signed-in account on a narrow layout.
+  const phoneHome = !desktopSidebar && isAccountMode && planLimitNotice === null;
+  const phoneNav = usePhoneNavigation(phoneHome);
+  const phoneSupervisor = usePhoneSupervisor({
+    enabled: phoneHome,
+    discovery: accountDiscovery,
+    active: activeTunnelConnection,
+    bus: supervisorBus,
+  });
+  const phoneBack = phoneNav.back;
+  // A selection backed out of on the Session screen ("Back to Worktrees") leaves no session to
+  // show, so the screen returns to the home it came from.
+  const phoneSessionLost = phoneHome && phoneNav.screen.kind === "session" && !token && !initialAccountTarget;
+  useEffect(() => {
+    if (phoneSessionLost) phoneBack();
+  }, [phoneBack, phoneSessionLost]);
   const activeMachineInventory = activeTunnelConnection
     ? accountDiscovery.sessionInventories[activeTunnelConnection.machine.machineId] ?? null
     : null;
@@ -4097,7 +4132,9 @@ export const RemoteHostConnection: React.FC<{
     return (
       <AccountLoginPage
         relayUrl={relayUrl}
-        onLoginSuccess={(tok) => {
+        onLoginSuccess={(tok, email) => {
+          storeAccountEmail(email);
+          setAccountEmail(email || null);
           setAccountSessionToken(tok);
           setMagicLinkActive(false);
           onMagicLinkConsumed?.();
@@ -4342,9 +4379,113 @@ export const RemoteHostConnection: React.FC<{
       }
     : null;
 
+  /* Phone home wiring. Every destination opens a session through the same account selection
+     the worktree picker uses, then pushes the Session screen once the selection is under way. */
+  const showPhoneHome = phoneHome && (phoneNav.screen.kind === "home" || (!token && !initialAccountTarget));
+  const openPhoneSession = (option: AccountWorktreeOption) => {
+    void selectAccountOption(option).then((ok) => {
+      if (ok) phoneNav.openSession();
+    });
+  };
+  const phoneNeedsYou = new Set(
+    accountDiscovery.accountOptions
+      .filter((option) => option.sessionId && option.inventoryActivityState === "waiting")
+      .map((option) => `${option.machineId}\u0000${option.sessionId}`),
+  );
+  const phoneInboxRows: InboxRow[] = phoneHome
+    ? buildInboxRows({
+        options: accountDiscovery.accountOptions,
+        inventories: accountDiscovery.sessionInventories,
+        lanes: phoneSupervisor.lanes,
+      })
+    : [];
+  const activeSupervisorSnapshot = phoneHome && activeMachineId
+    ? phoneSupervisor.machines.find((machine) => machine.machineId === activeMachineId)?.snapshot ?? null
+    : null;
+  const sessionSupervision = activeSupervisorSnapshot
+    ? paneSupervision(activeSupervisorSnapshot, effectiveSessionId, phoneSupervisor.now, chatActivity === "waiting")
+    : null;
+  const focusSessionInput = () => {
+    if (viewMode === "chat" && chatComposerRef.current) {
+      chatComposerRef.current.focus();
+      return;
+    }
+    document
+      .querySelector<HTMLTextAreaElement>('textarea[data-testid="remote-terminal-input-sink"]')
+      ?.focus({ preventScroll: true });
+  };
+  const phoneWorktrees = (
+    <WorktreesHome onOpenAccount={() => setAccountSheetOpen(true)}>
+      <RemoteWorkspaceMirror
+        inline
+        model={effectiveModel}
+        pending={pending}
+        selectorOpen
+        onSelectorOpenChange={() => {}}
+        onSignOut={handleSignOut}
+        activeMachineId={activeMachineId}
+        pickerStatus={accountPickerStatus}
+        onSelect={(option) => {
+          const accountOpt = (option as Partial<AccountWorktreeOption>).machineId
+            ? (option as AccountWorktreeOption)
+            : null;
+          if (accountOpt) {
+            openPhoneSession(accountOpt);
+            return;
+          }
+          void selectContext(option).then((ok) => {
+            if (ok) phoneNav.openSession();
+          });
+        }}
+        onCreateTerminal={() => {
+          if (!model.context.workspaceId) return;
+          void selectContext({ workspaceId: model.context.workspaceId, worktreeSlug: model.context.worktreeSlug, worktreeLabel: model.context.worktreeLabel }, true).then((ok) => {
+            if (ok) phoneNav.openSession();
+          });
+        }}
+        onCreateWorktree={createWorktree}
+        creationError={creationError}
+      />
+    </WorktreesHome>
+  );
+
   return (
     <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden remote-app-root bg-background text-foreground" style={viewportHeight ? { height: viewportHeight } : undefined}>
       <Toaster />
+      {showPhoneHome ? (
+        <PhoneHomeView
+          destination={phoneNav.destination}
+          onSelectTab={phoneNav.selectTab}
+          supervisor={{
+            machines: phoneSupervisor.machines,
+            now: phoneSupervisor.now,
+            needsYou: phoneNeedsYou,
+            onSetPaused: phoneSupervisor.setPaused,
+            onOpenLane: (machineId, sessionId) => {
+              const option = optionForSession(accountDiscovery.accountOptions, machineId, sessionId);
+              if (!option) {
+                toast.error("This session is not available right now", {
+                  description: "Its computer is offline or has not listed it yet.",
+                });
+                return;
+              }
+              openPhoneSession(option);
+            },
+          }}
+          inbox={{
+            rows: phoneInboxRows,
+            loading: accountInventoryLoading,
+            onOpen: (row) => openPhoneSession(row.option),
+          }}
+          worktrees={phoneWorktrees}
+          resume={
+            token && model.context.workspaceId
+              ? { title: mobileTitle, subtitle: contextName(model.context), onOpen: phoneNav.openSession }
+              : null
+          }
+        />
+      ) : (
+      <>
       {desktopSidebar ? (
       <header className="flex h-7 shrink-0 items-center justify-between border-b border-chat-border bg-chat-surface px-2.5">
         <button
@@ -4460,8 +4601,17 @@ export const RemoteHostConnection: React.FC<{
           menuOpen={menuOpen}
           onOpenMenu={() => setMenuOpen(true)}
           hideControls={accountPreselection}
+          onBack={phoneHome ? phoneNav.back : undefined}
         />
       )}
+      {phoneHome && sessionSupervision && activeMachineId ? (
+        <SupervisorSessionStrip
+          state={sessionSupervision}
+          now={phoneSupervisor.now}
+          onSetPaused={(laneKey, paused) => phoneSupervisor.setPaused(activeMachineId, laneKey, paused)}
+          onFocusInput={focusSessionInput}
+        />
+      ) : null}
 
       <RemoteWorkspaceMirror
         model={effectiveModel}
@@ -4708,6 +4858,8 @@ export const RemoteHostConnection: React.FC<{
             />
           ) : null}
       </RemoteWorkspaceMirror>
+      </>
+      )}
 
       <MobileHostDrawer
         open={hostDrawerOpen}
@@ -4774,6 +4926,19 @@ export const RemoteHostConnection: React.FC<{
         buildStamp={BUILD_STAMP}
         disabled={pending !== null || !model.context.workspaceId}
       />
+
+      {isAccountMode ? (
+        <AccountSheet
+          open={accountSheetOpen}
+          onOpenChange={setAccountSheetOpen}
+          email={accountEmail}
+          onSignOut={handleSignOut}
+          onDelete={(confirmEmail) =>
+            deleteAccount(getStoredAccountTokenOrigin() || relayUrl, accountSessionToken ?? "", confirmEmail)
+          }
+          onDeleted={handleLogout}
+        />
+      ) : null}
     </div>
   );
 };

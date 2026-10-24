@@ -99,3 +99,20 @@ describe("PlanLimitNotice", () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("PlanLimitNotice on the iOS companion", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the plan-limit text but shows no pricing link", () => {
+    vi.stubEnv("VITE_FERRYX_MOBILE", "1");
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)");
+    render(<PlanLimitNotice state={{ code: PLAN_LIMIT_REACHED, plan: "free", limit: 1, used: 2 }} />);
+    expect(screen.getByTestId("remote-plan-limit-coming-soon")).toBeTruthy();
+    expect(screen.getByTestId("remote-plan-limit-usage").getAttribute("data-used")).toBe("2");
+    expect(screen.queryByTestId("remote-plan-limit-pricing")).toBeNull();
+  });
+});

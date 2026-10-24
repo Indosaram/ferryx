@@ -5,6 +5,7 @@ import React, { type ReactNode, useCallback, useEffect, useMemo, useRef, useStat
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import type { ActivitySummary } from "../lib/activity";
+import { useAdvancedFeatures } from "../lib/advancedFeatures";
 import {
   newBrowserTabUrl,
   resolveSupportedBrowserProfileId,
@@ -127,6 +128,9 @@ export function TabBar({
   // the browser OS: the remote web client can drive a host of a different platform.
   const isWindows = hostPlatform === "windows";
   const { settings: browserSettings } = useBrowserSettings();
+  const advancedFeatures = useAdvancedFeatures();
+  // Hidden entry point only: the tab.newBrowser shortcut stays bound in App.
+  const offerBrowser = Boolean(onAddBrowser) && advancedFeatures;
   const sleepingSessionIds = useSleepingSessionIds();
 
   useEffect(() => {
@@ -200,12 +204,14 @@ export function TabBar({
         })),
       });
     }
-    items.push({
-      kind: "item",
-      id: "new-browser",
-      label: "New Browser Tab",
-      shortcut: shortcutLabel("tab.newBrowser", isMac, shortcutOverrides),
-    });
+    if (advancedFeatures) {
+      items.push({
+        kind: "item",
+        id: "new-browser",
+        label: "New Browser Tab",
+        shortcut: shortcutLabel("tab.newBrowser", isMac, shortcutOverrides),
+      });
+    }
     if (onAddMarkdown) {
       items.push({
         kind: "item",
@@ -516,7 +522,7 @@ export function TabBar({
             <IconButton
               label="New tab"
               title={newTerminalChord ? `New tab (${newTerminalChord})` : "New tab"}
-              data-shortcut={onAddBrowser ? "tab.newTerminal tab.newBrowser" : "tab.newTerminal"}
+              data-shortcut={offerBrowser ? "tab.newTerminal tab.newBrowser" : "tab.newTerminal"}
               size="sm"
               className="no-drag my-auto ml-1"
               onClick={handleNewTabClick}

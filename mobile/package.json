@@ -1,14 +1,16 @@
 {
   "name": "ferryx-mobile",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "tauri": "bun scripts/tauri.mjs",
     "android:init": "bun scripts/init-android.mjs",
     "android:dev": "bun scripts/tauri.mjs android dev",
     "android:build": "bun scripts/tauri.mjs android build",
-    "ios:init": "bun scripts/tauri.mjs ios init",
+    "ios:init": "bun scripts/init-ios.mjs",
     "ios:dev": "bun scripts/tauri.mjs ios dev",
-    "ios:build": "bun scripts/tauri.mjs ios build"
+    "ios:build": "bun scripts/tauri.mjs ios build",
+    "icons": "bun scripts/icons.mjs",
+    "test": "bun test scripts"
   }
 }

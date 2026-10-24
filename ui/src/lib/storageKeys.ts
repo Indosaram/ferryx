@@ -19,6 +19,8 @@ export const SSH_CONFIG_PATH_STORAGE_KEY = "ferryx.ssh.configPath";
 export const REMOTE_INSTALLATION_ID_STORAGE_KEY = "ferryx.remote.installation-id";
 export const WORKTREE_DISK_UNUSED_DAYS_KEY = "ferryx.worktree-disk.unused-days";
 export const FILE_OPEN_TARGETS_STORAGE_KEY = "ferryx.fileOpen.targets";
+/** General > "Advanced features": shows the browser, DAG, supervisor and their settings. */
+export const ADVANCED_FEATURES_STORAGE_KEY = "ferryx.ui.advancedFeatures";
 
 export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [PROJECTS_STORAGE_KEY]: ["rorca.projects", "orca.projects"],

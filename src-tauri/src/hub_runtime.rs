@@ -16,6 +16,7 @@ use crate::agent_control::{AgentControlOp, AgentControlState, AgentStateSource};
 use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
 use crate::daemon::server::DaemonServer;
+use crate::remote::state::RemoteGatewayState;
 use crate::remote::reference_chat::types::{ReferencePart, ReferencePromptAnswer, ReferenceTurn};
 
 /// Maps a hub operation onto the daemon's agent-control request.
@@ -400,9 +401,8 @@ const SUPERVISOR_ACTIONS_MAX: usize = 50;
 /// panes it watches, and the recent input it typed (or was refused). Only owner-socket input
 /// counts: the hub and agents on this machine's control socket. A phone or browser device
 /// typing over the gateway is a person, not the supervisor.
-pub async fn supervisor_snapshot(server: &DaemonServer) -> Value {
-    let actions: Vec<_> = server
-        .remote_state()
+pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
+    let actions: Vec<_> = state
         .agent_control_audit
         .recent()
         .into_iter()
@@ -415,7 +415,7 @@ pub async fn supervisor_snapshot(server: &DaemonServer) -> Value {
         .take(SUPERVISOR_ACTIONS_MAX)
         .collect();
     let Some((hub, running)) = SUPERVISOR_VIEW.get() else {
-        return json!({ "hub": { "available": false, "running": false }, "lanes": [], "watched": [], "actions": actions });
+        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions });
     };
     // A daemon that handed the hub to its successor no longer drives anything.
     let running = running.lock().await.is_some() && !HUB_TASKS.is_retired();
@@ -439,22 +439,62 @@ fn relayed_from_a_person(request_id: Option<&str>) -> bool {
         || (id.starts_with("lane-") && id.contains("-owner-"))
 }
 
-/// A person pauses or resumes one lane from the desktop. Returns whether the lane is now paused.
-pub async fn set_lane_paused(server: &DaemonServer, lane_key: &str, paused: bool) -> Result<bool, String> {
+/// True once this daemon opened the hub, so the Supervisor view has lanes to show.
+pub fn supervisor_available() -> bool {
+    SUPERVISOR_VIEW.get().is_some()
+}
+
+/// Why a lane was not paused or resumed.
+#[derive(Debug, thiserror::Error)]
+pub enum LanePauseError {
+    #[error("the supervisor hub is not open in this daemon")]
+    Unavailable,
+    #[error("lane not found: {0}")]
+    NotFound(String),
+    /// The lane is closed, failed or verified done; its pause no longer means anything.
+    #[error("cannot pause or resume a {0} lane")]
+    Ended(&'static str),
+    #[error("{0}")]
+    Storage(String),
+}
+
+/// A person pauses or resumes one lane. `by` names who: `desktop`, or `remote:<deviceId>` for
+/// a paired phone. Returns whether the call changed the lane (false when it already was so).
+pub async fn set_lane_paused(
+    state: &RemoteGatewayState,
+    lane_key: &str,
+    paused: bool,
+    by: &str,
+) -> Result<bool, LanePauseError> {
+    use ferryx_hub::lanes::state::LaneStatus;
     let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
-        return Err("the supervisor hub is not open in this daemon".into());
+        return Err(LanePauseError::Unavailable);
     };
+    let status = ferryx_hub::lanes::state::status_of(&hub.pool, lane_key)
+        .await
+        .map_err(|error| LanePauseError::Storage(error.to_string()))?
+        .ok_or_else(|| LanePauseError::NotFound(lane_key.to_owned()))?;
+    match status {
+        LaneStatus::Closed | LaneStatus::Failed | LaneStatus::VerifiedDone => {
+            return Err(LanePauseError::Ended(status.as_str()));
+        }
+        LaneStatus::Queued
+        | LaneStatus::Working
+        | LaneStatus::Blocked
+        | LaneStatus::DoneClaimed
+        | LaneStatus::NotDone => {}
+    }
     let changed = if paused {
-        ferryx_hub::lanes::pause::pause(&hub.pool, lane_key, "desktop").await
+        ferryx_hub::lanes::pause::pause(&hub.pool, lane_key, by).await
     } else {
         ferryx_hub::lanes::pause::resume(&hub.pool, lane_key).await
-    };
-    changed.map_err(|error| error.to_string())?;
-    server.remote_state().emit_desktop_event(
-        crate::remote::server::agent_control_service::SUPERVISOR_CHANGED_EVENT,
+    }
+    .map_err(|error| LanePauseError::Storage(error.to_string()))?;
+    crate::remote::server::agent_control_service::publish_supervisor_changed(
+        state,
         json!({ "laneKey": lane_key }),
     );
-    Ok(paused)
+    Ok(changed)
 }
 
 /// Handover commit: this daemon keeps serving retained sessions but no longer owns the hub.

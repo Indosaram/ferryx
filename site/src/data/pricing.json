@@ -12,16 +12,16 @@
       "annual_num": 0,
       "machine_limit": 1,
       "extra_host_pack": null,
-      "description": "Essential remote terminal for personal use on 1 connected computer. Local terminal multiplexing and self-hosted relays remain completely free and open."
+      "description": "Every local feature, plus remote access to 1 connected computer through the managed relay. Local terminal multiplexing and self-hosted relays remain completely free and open."
     },
     "pro": {
       "name": "Pro",
       "availability": "coming_soon",
       "price_status": "planned",
-      "monthly": "$5",
-      "annual": "$50",
-      "monthly_num": 5,
-      "annual_num": 50,
+      "monthly": "$8",
+      "annual": "$80",
+      "monthly_num": 8,
+      "annual_num": 80,
       "machine_limit": 10,
       "extra_host_pack": {
         "hosts": 5,
@@ -36,11 +36,16 @@
       "name": "Team",
       "availability": "coming_soon",
       "price_status": "planned",
-      "monthly": "$7",
-      "annual": "$70",
-      "monthly_num": 7,
-      "annual_num": 70,
-      "min_seats": 2,
+      "monthly": "$12",
+      "annual": "$120",
+      "monthly_num": 12,
+      "annual_num": 120,
+      "list_monthly": "$16",
+      "list_annual": "$160",
+      "list_monthly_num": 16,
+      "list_annual_num": 160,
+      "launch_price_note": "Launch price. It moves to the list price once team administration features ship; teams that subscribe at the launch price are told in advance.",
+      "min_seats": 3,
       "hosts_per_seat": 10,
       "machine_limit": "10 per seat (pooled across team)",
       "extra_host_pack": {
@@ -50,16 +55,35 @@
         "annual_num": 20,
         "note": "Annual only ($20/year per 5-host pack)"
       },
-      "description": "For organizations and teams collaborating across fleets of development servers and build runners with unified pooled capacity."
+      "description": "For companies and teams collaborating across fleets of development servers and build runners with unified pooled capacity."
+    },
+    "business": {
+      "name": "Business",
+      "availability": "waitlist",
+      "price_status": "contact",
+      "monthly": null,
+      "annual": null,
+      "min_seats": 10,
+      "description": "For organizations that need SSO, audit logs, and agent policy controls. Not priced yet: join the waitlist to become a design partner."
+    },
+    "enterprise": {
+      "name": "Enterprise",
+      "availability": "contact",
+      "price_status": "quote",
+      "monthly": null,
+      "annual": null,
+      "description": "On-premises account and hub servers, SCIM, invoicing, and an SLA. Priced by quote."
     }
   },
   "raw_variants": {
-    "pro_monthly": "$5",
-    "pro_annual": "$50",
+    "pro_monthly": "$8",
+    "pro_annual": "$80",
     "pro_hostpack_monthly": "$2",
     "pro_hostpack_annual": "$20",
-    "team_monthly": "$7",
-    "team_annual": "$70",
+    "team_monthly": "$12",
+    "team_annual": "$120",
+    "team_list_monthly": "$16",
+    "team_list_annual": "$160",
     "team_hostpack_annual": "$20"
   },
   "policies": {
