@@ -1,14 +1,29 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { useShortcutOverrides } from "../../lib/shortcutOverrides";
-import { SHORTCUT_OVERRIDES_STORAGE_KEY } from "../../lib/storageKeys";
+import { useShortcutOverrides, useShortcutPreset } from "../../lib/shortcutOverrides";
+import { SHORTCUT_OVERRIDES_STORAGE_KEY, SHORTCUT_PRESET_STORAGE_KEY } from "../../lib/storageKeys";
 import { ShortcutsSection } from "./ShortcutsSection";
 
 function Harness({ isMac }: { isMac: boolean }) {
   const { overrides, setOverride, resetOverrides } = useShortcutOverrides();
   return (
     <ShortcutsSection isMac={isMac} overrides={overrides} onChangeOverride={setOverride} onResetAll={resetOverrides} />
+  );
+}
+
+function PresetHarness({ isMac }: { isMac: boolean }) {
+  const { overrides, setOverride, resetOverrides } = useShortcutOverrides();
+  const { preset, setPreset } = useShortcutPreset(isMac);
+  return (
+    <ShortcutsSection
+      isMac={isMac}
+      overrides={overrides}
+      preset={preset}
+      onChangePreset={setPreset}
+      onChangeOverride={setOverride}
+      onResetAll={resetOverrides}
+    />
   );
 }
 
@@ -136,5 +151,34 @@ describe("ShortcutsSection recorder", () => {
       fireEvent.keyDown(recorder, { key: "ㅛ", code: "KeyY", metaKey: true });
     });
     expect(storedOverrides()).toEqual({ "tab.close": { key: "y", mod: true } });
+  });
+});
+
+describe("ShortcutsSection preset selector", () => {
+  it("switches presets off macOS without discarding overrides", () => {
+    localStorage.setItem(SHORTCUT_OVERRIDES_STORAGE_KEY, JSON.stringify({ "tab.close": { key: "e", mod: true } }));
+    render(<PresetHarness isMac={false} />);
+    const select = screen.getByLabelText("Shortcut preset") as HTMLSelectElement;
+    // Stored overrides mark an existing install, which keeps the default preset.
+    expect(select.value).toBe("default");
+    expect(within(row("tab.select1")).getByText("Ctrl+1")).toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: "terminal-first" } });
+    expect(localStorage.getItem(SHORTCUT_PRESET_STORAGE_KEY)).toBe("terminal-first");
+    expect(within(row("tab.select1")).getByText("Alt+1")).toBeInTheDocument();
+    expect(within(row("workspace.select1")).getByText("Alt+Shift+1")).toBeInTheDocument();
+    expect(within(row("tab.next")).getByText("Alt+PgDn")).toBeInTheDocument();
+    expect(storedOverrides()).toEqual({ "tab.close": { key: "e", mod: true } });
+    expect(within(row("tab.close")).getByText("Ctrl+E")).toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: "default" } });
+    expect(within(row("tab.select1")).getByText("Ctrl+1")).toBeInTheDocument();
+    expect(storedOverrides()).toEqual({ "tab.close": { key: "e", mod: true } });
+  });
+
+  it("hides the selector on macOS", () => {
+    render(<PresetHarness isMac />);
+    expect(screen.queryByLabelText("Shortcut preset")).toBeNull();
+    expect(within(row("tab.select1")).getByText("⌃1")).toBeInTheDocument();
   });
 });

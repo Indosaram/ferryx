@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { formatBindingLabel, isMacShortcutPlatform, matchesBinding, resolveBinding, resolvedShortcuts, type ShortcutActionId } from "../lib/shortcuts";
+import { formatBindingLabel, isMacShortcutPlatform, matchesBinding, resolveBinding, resolvedShortcuts, type ShortcutActionId, type ShortcutPreset } from "../lib/shortcuts";
 import { useShortcutOverrides } from "../lib/shortcutOverrides";
 
 export type ShortcutHintContext = {
@@ -13,6 +13,8 @@ export type ShortcutHintsProps = {
   readonly getContext: () => ShortcutHintContext;
   readonly enabledActions: readonly ShortcutActionId[];
   readonly isMac?: boolean;
+  /** The active binding preset (App owns it); omitted means `default`. */
+  readonly preset?: ShortcutPreset;
 };
 
 type Hint = {
@@ -52,7 +54,7 @@ export function ShortcutHints(props: ShortcutHintsProps) {
     };
     const show = (event: KeyboardEvent) => {
       const { getContext, enabledActions, isMac = isMacShortcutPlatform() } = latest.current;
-      const shortcuts = resolvedShortcuts(latestOverrides.current);
+      const shortcuts = resolvedShortcuts(latestOverrides.current, latest.current.preset ?? "default", isMac);
       const context = getContext();
       const enabled = new Set(enabledActions);
       const focus = document.activeElement;
