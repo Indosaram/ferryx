@@ -975,6 +975,9 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
 ) -> Result<NativeTerminalAttachReceipt, IpcError> {
     let receipt_state = state.inner().clone();
     let expected_tuple = attach_tuple.clone();
+    // Without a GPU adapter the surface would attach and then never present: a blank pane.
+    // Report a typed error so the UI mounts the DOM grid renderer instead.
+    probe_native_renderer(&receipt_state).await?;
     let deadline = tokio::time::Instant::now()
         + std::time::Duration::from_millis(remaining_ms.unwrap_or(4_000).min(4_000));
     native_terminal_attach(app, daemon_client, state, session_id.clone(), bounds,
@@ -984,6 +987,40 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
         return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
     }
     Ok(NativeTerminalAttachReceipt { session_id, attach_tuple: active, presented: false })
+}
+
+/// Resolves the shared surface GPU context on the GPU worker, the thread that would otherwise
+/// create it lazily at the first frame, so an adapter that exists is initialized exactly as
+/// before. The result is cached for the process lifetime, so the fallback holds for this launch.
+async fn probe_native_renderer(state: &NativeTerminalSurfaceHostState) -> Result<(), IpcError> {
+    use crate::native_terminal::renderer::gpu_context::GpuContext;
+    GpuContext::check_forced_adapter_failure().map_err(IpcError::from)?;
+    // An adapter can exist yet be unable to present (software fallback with no surface
+    // formats on a driverless host). Once any window surface proved that, refuse the attach.
+    GpuContext::check_surface_presentation().map_err(IpcError::from)?;
+    // Unit tests drive attach against fake daemons; only the seam above may fail them here,
+    // so their outcome never depends on the test host's GPU.
+    if cfg!(test) {
+        return Ok(());
+    }
+    let (sender, receiver) = oneshot::channel();
+    if !state.gpu_worker().enqueue(move |_gpu| {
+        let _ = sender.send(GpuContext::shared_surface_context().map(|_| ()));
+    }) {
+        return Ok(());
+    }
+    match receiver.await {
+        Ok(Err(error)) => Err(IpcError::from(error)),
+        _ => Ok(()),
+    }
+}
+
+/// Surfaces a presentation failure discovered by a GPU frame after the pane already attached:
+/// the first pane on a driverless host attaches before any surface was configured, so its
+/// bounds update is where it learns the native renderer can never present.
+fn check_native_surface_presentation() -> Result<(), IpcError> {
+    crate::native_terminal::renderer::gpu_context::GpuContext::check_surface_presentation()
+        .map_err(IpcError::from)
 }
 
 async fn native_terminal_attach<R: Runtime>(
@@ -1184,6 +1221,7 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
     let expected_tuple = attach_tuple.or_else(|| state.session_attach_tuple(&session_id));
     let mut initial_request = Some(request);
     loop {
+        check_native_surface_presentation()?;
         let state_inner = state.inner().clone();
         let surface_window = window.clone();
         let (sender, receiver) = oneshot::channel();
@@ -1248,6 +1286,7 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
                 }
                 // The geometry is already applied; stop holding the caller's newer bounds back.
                 _ = tokio::time::sleep_until(presentation_deadline) => {
+                    check_native_surface_presentation()?;
                     return Ok(receipt);
                 }
                 // Terminal state moved on without a presentation (a suspended surface stops
@@ -2749,6 +2788,114 @@ fn into_bound_ipc_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_attach_reports_renderer_unavailable_when_no_gpu_adapter_exists() {
+        // Given a host where every GPU adapter request fails.
+        let _no_gpu = crate::native_terminal::renderer::gpu_context::GpuContext::force_adapter_unavailable_for_test();
+        let root = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .manage(Arc::new(DaemonClient::new_with_socket(root.path().join("no-gpu-daemon"))))
+            .manage(NativeTerminalSurfaceHostState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+
+        // When the pane attaches its native surface.
+        let error = cmd_native_terminal_attach(
+            app.handle().clone(),
+            app.state::<Arc<DaemonClient>>(),
+            app.state::<NativeTerminalSurfaceHostState>(),
+            "no-gpu-session".into(), None, None, None, None, None,
+        )
+        .await
+        .expect_err("attach must not succeed into a surface that can never present");
+
+        // Then the UI receives the typed fallback code and no blank surface was reserved.
+        assert_eq!(error.code, IpcErrorCode::NativeRendererUnavailable);
+        assert_eq!(
+            serde_json::to_value(&error.code).unwrap(),
+            serde_json::json!("NATIVE_RENDERER_UNAVAILABLE")
+        );
+        let state = app.state::<NativeTerminalSurfaceHostState>();
+        assert!(!state.has_session("no-gpu-session"));
+        state.teardown();
+    }
+
+    #[test]
+    fn gpu_adapter_and_device_failures_map_to_renderer_unavailable() {
+        for error in [
+            NativeTerminalError::GpuAdapterUnavailable("none".into()),
+            NativeTerminalError::GpuDeviceUnavailable("none".into()),
+        ] {
+            assert_eq!(IpcError::from(error).code, IpcErrorCode::NativeRendererUnavailable);
+        }
+        assert_eq!(
+            IpcError::from(NativeTerminalError::GpuPipelineError("x".into())).code,
+            IpcErrorCode::InternalError
+        );
+        let _no_gpu = crate::native_terminal::renderer::gpu_context::GpuContext::force_adapter_unavailable_for_test();
+        assert!(matches!(
+            crate::native_terminal::renderer::gpu_context::GpuContext::new(),
+            Err(NativeTerminalError::GpuAdapterUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn surface_without_standard_formats_maps_to_renderer_unavailable() {
+        // Given a software fallback adapter whose window surface lists no 8-bit RGBA/BGRA format.
+        let adapter_info = wgpu::AdapterInfo {
+            name: "llvmpipe".into(),
+            ..wgpu::AdapterInfo::new(wgpu::DeviceType::Cpu, wgpu::Backend::Gl)
+        };
+        let (error, _reset) = crate::native_terminal::renderer::gpu_context::GpuContext::latch_surface_unsupported_for_test(
+            &[], &adapter_info,
+        );
+
+        // Then the frame error itself is the typed fallback code, not an internal error.
+        assert!(error.to_string().contains("Surface does not support standard 8-bit RGBA/BGRA formats"));
+        let ipc = IpcError::from(error);
+        assert_eq!(ipc.code, IpcErrorCode::NativeRendererUnavailable);
+        assert_eq!(
+            serde_json::to_value(&ipc.code).unwrap(),
+            serde_json::json!("NATIVE_RENDERER_UNAVAILABLE")
+        );
+        // And bounds updates for the already-attached pane report it too.
+        assert_eq!(
+            check_native_surface_presentation().unwrap_err().code,
+            IpcErrorCode::NativeRendererUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn native_attach_reports_renderer_unavailable_when_surface_cannot_present() {
+        // Given an adapter that exists but whose window surface proved it cannot present.
+        let adapter_info = wgpu::AdapterInfo::new(wgpu::DeviceType::Cpu, wgpu::Backend::Vulkan);
+        let (_error, _reset) = crate::native_terminal::renderer::gpu_context::GpuContext::latch_surface_unsupported_for_test(
+            &[wgpu::TextureFormat::Rgba16Float], &adapter_info,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .manage(Arc::new(DaemonClient::new_with_socket(root.path().join("no-surface-daemon"))))
+            .manage(NativeTerminalSurfaceHostState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+
+        // When another pane attaches its native surface.
+        let error = cmd_native_terminal_attach(
+            app.handle().clone(),
+            app.state::<Arc<DaemonClient>>(),
+            app.state::<NativeTerminalSurfaceHostState>(),
+            "no-surface-session".into(), None, None, None, None, None,
+        )
+        .await
+        .expect_err("attach must not succeed into a surface that can never present");
+
+        // Then the UI receives the typed fallback code and no blank surface was reserved.
+        assert_eq!(error.code, IpcErrorCode::NativeRendererUnavailable);
+        let state = app.state::<NativeTerminalSurfaceHostState>();
+        assert!(!state.has_session("no-surface-session"));
+        state.teardown();
+    }
 
     #[test]
     fn select_range_mode_returns_the_selected_text() {

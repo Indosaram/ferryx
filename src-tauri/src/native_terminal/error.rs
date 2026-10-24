@@ -51,6 +51,11 @@ pub enum NativeTerminalError {
     #[error("GPU device request failed: {0}")]
     GpuDeviceUnavailable(String),
 
+    /// The adapter exists but cannot present to a window surface (e.g. a software fallback
+    /// adapter on a driverless Linux host reports no usable surface formats).
+    #[error("GPU surface presentation unsupported: {0}")]
+    GpuSurfaceUnsupported(String),
+
     #[error("GPU render pipeline error: {0}")]
     GpuPipelineError(String),
 

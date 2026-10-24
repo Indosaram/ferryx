@@ -2,6 +2,8 @@
 pub mod account;
 pub mod agent_history;
 #[cfg(feature = "desktop")]
+pub mod agent_control_settings;
+#[cfg(feature = "desktop")]
 pub mod agent_integration;
 pub mod agents;
 #[cfg(feature = "desktop")]
@@ -63,6 +65,7 @@ pub mod supervisor;
 #[cfg(feature = "desktop")]
 pub mod system_resources;
 pub mod terminal;
+pub mod terminal_grid;
 #[cfg(test)]
 pub mod pane_liveness_contract;
 #[cfg(feature = "desktop")]
@@ -123,6 +126,7 @@ pub use remote_auto_trust::*;
 #[cfg(feature = "desktop")]
 pub use session::*;
 pub use terminal::*;
+pub use terminal_grid::*;
 pub use worktree::*;
 #[cfg(feature = "desktop")]
 pub use worktree_disk::*;

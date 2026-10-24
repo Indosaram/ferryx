@@ -14,6 +14,13 @@ fn main() {
         std::process::exit(code);
     }
     let args: Vec<String> = std::env::args().collect();
+    if args
+        .get(1)
+        .is_some_and(|arg| matches!(arg.as_str(), "--version" | "-V" | "version"))
+    {
+        println!("{}", ferryx_lib::cli::cli_version_line());
+        return;
+    }
     if args.get(1).is_some_and(|arg| arg == "agents") {
         std::process::exit(ferryx_lib::agent_control::run_agents_cli(&args));
     }

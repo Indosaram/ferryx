@@ -8,6 +8,105 @@ use crate::native_terminal::error::NativeTerminalError;
 // Serialize independent instance initialization and final release, not GPU work.
 static INSTANCE_LIFECYCLE: Mutex<()> = Mutex::new(());
 
+#[cfg(test)]
+thread_local! {
+    static FORCE_ADAPTER_UNAVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: while the returned guard lives, adapter requests on this thread fail as if the
+/// machine had no GPU adapter.
+#[cfg(test)]
+pub(crate) struct ForcedAdapterFailure(());
+
+#[cfg(test)]
+impl Drop for ForcedAdapterFailure {
+    fn drop(&mut self) {
+        FORCE_ADAPTER_UNAVAILABLE.with(|forced| forced.set(false));
+    }
+}
+
+/// Debug builds honor `FERRYX_FORCE_NO_GPU_ADAPTER` so the DOM fallback can be exercised on a
+/// machine that does have a GPU. Release builds ignore it.
+fn adapter_forced_unavailable() -> bool {
+    #[cfg(test)]
+    if FORCE_ADAPTER_UNAVAILABLE.with(|forced| forced.get()) {
+        return true;
+    }
+    cfg!(debug_assertions) && std::env::var_os("FERRYX_FORCE_NO_GPU_ADAPTER").is_some()
+}
+
+fn forced_adapter_error() -> NativeTerminalError {
+    NativeTerminalError::GpuAdapterUnavailable(
+        "GPU adapter disabled by FERRYX_FORCE_NO_GPU_ADAPTER or the test seam".into(),
+    )
+}
+
+// Latched the first time a window surface reports no usable format for the shared adapter.
+// The shared adapter is cached for the process lifetime, so the result holds for this launch.
+// Tests keep the latch per thread, cleared by a guard, so one test cannot affect another.
+#[cfg(not(test))]
+static SURFACE_PRESENTATION_UNSUPPORTED: OnceLock<String> = OnceLock::new();
+
+#[cfg(test)]
+thread_local! {
+    static SURFACE_PRESENTATION_UNSUPPORTED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: clears this thread's surface-presentation latch when dropped.
+#[cfg(test)]
+pub(crate) struct SurfacePresentationLatchReset(());
+
+#[cfg(test)]
+impl Drop for SurfacePresentationLatchReset {
+    fn drop(&mut self) {
+        SURFACE_PRESENTATION_UNSUPPORTED.with(|latch| latch.borrow_mut().take());
+    }
+}
+
+#[cfg(not(test))]
+fn latch_surface_presentation_unsupported(message: &str) {
+    let _ = SURFACE_PRESENTATION_UNSUPPORTED.set(message.to_owned());
+}
+
+#[cfg(test)]
+fn latch_surface_presentation_unsupported(message: &str) {
+    SURFACE_PRESENTATION_UNSUPPORTED.with(|latch| {
+        latch.borrow_mut().get_or_insert_with(|| message.to_owned());
+    });
+}
+
+#[cfg(not(test))]
+fn surface_presentation_unsupported() -> Option<String> {
+    SURFACE_PRESENTATION_UNSUPPORTED.get().cloned()
+}
+
+#[cfg(test)]
+fn surface_presentation_unsupported() -> Option<String> {
+    SURFACE_PRESENTATION_UNSUPPORTED.with(|latch| latch.borrow().clone())
+}
+
+/// Picks the terminal surface format, or reports that this adapter cannot present to a window.
+///
+/// A driverless host can still hand out a software fallback adapter whose surface capabilities
+/// list no formats. Every frame would then fail, leaving a blank pane, so the failure is typed
+/// as renderer-unavailable and latched for the probe that gates new attaches.
+fn presentable_surface_format(
+    formats: &[wgpu::TextureFormat],
+    adapter_info: &wgpu::AdapterInfo,
+) -> Result<wgpu::TextureFormat, NativeTerminalError> {
+    preferred_terminal_surface_format(formats).ok_or_else(|| {
+        let message = format!(
+            "Surface does not support standard 8-bit RGBA/BGRA formats (adapter {:?}, {:?} on {:?}, {} surface formats)",
+            adapter_info.name,
+            adapter_info.device_type,
+            adapter_info.backend,
+            formats.len(),
+        );
+        latch_surface_presentation_unsupported(&message);
+        NativeTerminalError::GpuSurfaceUnsupported(message)
+    })
+}
+
 struct OwnedInstance(Option<wgpu::Instance>);
 
 impl Drop for OwnedInstance {
@@ -62,6 +161,45 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
+    #[cfg(test)]
+    pub(crate) fn force_adapter_unavailable_for_test() -> ForcedAdapterFailure {
+        FORCE_ADAPTER_UNAVAILABLE.with(|forced| forced.set(true));
+        ForcedAdapterFailure(())
+    }
+
+    /// Reports a forced adapter failure (test seam or debug env override) on the calling thread.
+    pub(crate) fn check_forced_adapter_failure() -> Result<(), NativeTerminalError> {
+        if adapter_forced_unavailable() {
+            Err(forced_adapter_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Reports that a window surface already proved the shared adapter cannot present.
+    ///
+    /// Checked by the attach probe and by bounds updates, so the pane that hit the failure and
+    /// every later pane receive `NATIVE_RENDERER_UNAVAILABLE` instead of a blank surface.
+    pub(crate) fn check_surface_presentation() -> Result<(), NativeTerminalError> {
+        match surface_presentation_unsupported() {
+            Some(message) => Err(NativeTerminalError::GpuSurfaceUnsupported(message)),
+            None => Ok(()),
+        }
+    }
+
+    /// Test seam: latches "surface cannot present" on this thread, as a format-less surface
+    /// would, until the returned guard drops.
+    #[cfg(test)]
+    pub(crate) fn latch_surface_unsupported_for_test(
+        formats: &[wgpu::TextureFormat],
+        adapter_info: &wgpu::AdapterInfo,
+    ) -> (NativeTerminalError, SurfacePresentationLatchReset) {
+        let reset = SurfacePresentationLatchReset(());
+        let error = presentable_surface_format(formats, adapter_info)
+            .expect_err("test seam expects a surface without standard formats");
+        (error, reset)
+    }
+
     // Share one process-lifetime instance across production surfaces only.
     // Independent contexts use separate instances so they do not share one EGL context.
     pub(crate) fn shared_surface_instance() -> wgpu::Instance {
@@ -75,6 +213,9 @@ impl GpuContext {
     }
 
     pub(crate) fn shared_surface_context() -> Result<Self, NativeTerminalError> {
+        if adapter_forced_unavailable() {
+            return Err(forced_adapter_error());
+        }
         static CONTEXT: OnceLock<Result<GpuContext, NativeTerminalError>> = OnceLock::new();
         CONTEXT.get_or_init(|| Self::with_instance(Self::shared_surface_instance())).clone()
     }
@@ -104,6 +245,9 @@ impl GpuContext {
         owned_instance: Option<Arc<OwnedInstance>>,
         instance: wgpu::Instance,
     ) -> Result<Self, NativeTerminalError> {
+        if adapter_forced_unavailable() {
+            return Err(forced_adapter_error());
+        }
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
@@ -171,11 +315,7 @@ impl GpuContext {
         height: u32,
     ) -> Result<wgpu::TextureFormat, NativeTerminalError> {
         let cap = surface.get_capabilities(&self.adapter);
-        let format = preferred_terminal_surface_format(&cap.formats).ok_or_else(|| {
-            NativeTerminalError::GpuPipelineError(
-                "Surface does not support standard 8-bit RGBA/BGRA formats".into(),
-            )
-        })?;
+        let format = presentable_surface_format(&cap.formats, &self.adapter_info)?;
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -242,5 +382,43 @@ mod tests {
         ]);
 
         assert_eq!(format, Some(wgpu::TextureFormat::Bgra8UnormSrgb));
+    }
+
+    fn software_adapter_info() -> wgpu::AdapterInfo {
+        wgpu::AdapterInfo {
+            name: "llvmpipe".into(),
+            ..wgpu::AdapterInfo::new(wgpu::DeviceType::Cpu, wgpu::Backend::Gl)
+        }
+    }
+
+    #[test]
+    fn surface_without_standard_formats_is_renderer_unavailable_and_latched() {
+        let _reset = SurfacePresentationLatchReset(());
+        assert!(GpuContext::check_surface_presentation().is_ok());
+
+        let error = presentable_surface_format(&[], &software_adapter_info())
+            .expect_err("a surface with no formats can never present");
+
+        assert!(matches!(error, NativeTerminalError::GpuSurfaceUnsupported(_)));
+        assert!(error
+            .to_string()
+            .contains("Surface does not support standard 8-bit RGBA/BGRA formats"));
+        assert!(matches!(
+            GpuContext::check_surface_presentation(),
+            Err(NativeTerminalError::GpuSurfaceUnsupported(_))
+        ));
+    }
+
+    #[test]
+    fn surface_with_a_standard_format_does_not_latch() {
+        let _reset = SurfacePresentationLatchReset(());
+        let format = presentable_surface_format(
+            &[wgpu::TextureFormat::Rgba8Unorm],
+            &software_adapter_info(),
+        )
+        .unwrap();
+
+        assert_eq!(format, wgpu::TextureFormat::Rgba8Unorm);
+        assert!(GpuContext::check_surface_presentation().is_ok());
     }
 }
