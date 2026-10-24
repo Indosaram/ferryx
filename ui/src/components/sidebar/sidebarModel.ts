@@ -103,6 +103,11 @@ function worktreeNode(groupId: string, row: Worktree, input: SidebarModelInput, 
   };
 }
 
+function statusNode(slot: ReturnType<typeof projectStatus>): SidebarStatus | null {
+  if (!slot) return null;
+  return slot.title === undefined ? slot.status : { ...slot.status, title: slot.title };
+}
+
 function projectNode(group: ProjectGroup, rows: readonly Worktree[], input: SidebarModelInput): SidebarProjectNode {
   const project = group.primaryProject;
   const hostLabel = projectHostLabel(project, input);
@@ -129,7 +134,7 @@ function projectNode(group: ProjectGroup, rows: readonly Worktree[], input: Side
       machineId: member.target?.kind === "pairedDaemon" ? (input.remoteState.hosts[member.target.hostId]?.machineId ?? null) : null,
     })),
     primaryWorkspaceId: project.workspaceId,
-    status: projectStatus({ listingFailure: input.listingFailures[project.workspaceId], paired })?.status ?? null,
+    status: statusNode(projectStatus({ listingFailure: input.listingFailures[project.workspaceId], paired })),
     filterLabels: projectFilterLabels(group, input),
     worktrees,
     worktreesEmptyHint: worktrees.length === 0 ? SIDEBAR_EMPTY_TEXT.noWorktrees : null,
@@ -179,31 +184,52 @@ export type SidebarLive = {
   footer: string;
 };
 
-/** Per-row and per-project live state derived from session signals both apps already receive. */
-export function sidebarLiveState(model: SidebarModel, signals: SidebarLiveSignals): SidebarLive {
+const isPairedNode = (node: { readonly workspaceId?: string | undefined }) => Boolean(node.workspaceId?.startsWith("daemon:"));
+
+/**
+ * One worktree row's live state. Paired rows ignore local signals: path-only local terminal data
+ * must never light up a machine row with the same absolute path.
+ */
+export function worktreeRowLive(
+  node: { readonly path: string; readonly workspaceId?: string | undefined },
+  active: boolean,
+  signals: SidebarLiveSignals,
+): SidebarRowLive {
+  const paired = isPairedNode(node);
+  const summary = paired ? undefined : signals.activityByWorktreePath?.[node.path];
+  const unread = !paired && !active && Boolean(summary?.hasUnread || signals.unreadWorktreePaths?.[node.path]);
+  const slot = worktreeRowSlot({ activitySummary: summary, unread, agentState: paired ? undefined : signals.agentStateByPath?.[node.path] });
+  const typing = signals.isSupervisorTyping?.(node.path) ?? false;
+  return { active, slot, supervisorTyping: supervisorSlotWins(slot, isRemoteWorktreeRow(node), typing) };
+}
+
+/**
+ * The sidebar's live state, the only place either app derives it: per-row state, per-project slot
+ * and the footer. Project slots and the footer count only what the filter box leaves visible.
+ */
+export function sidebarLiveState(model: SidebarModel, signals: SidebarLiveSignals, filterQuery: string): SidebarLive {
   const rows: Record<string, SidebarRowLive> = {};
   const projects: Record<string, ProjectSlot> = {};
-  const seen = new Set<string>();
-  const footerActivities: (ActivitySummary | undefined)[] = [];
   for (const project of model.projects) {
     const activeGroup = project.members.some((member) => member.workspaceId === signals.activeWorkspaceId);
     for (const node of project.worktrees) {
-      const paired = node.workspaceId.startsWith("daemon:");
       const active = activeGroup && node.path === signals.activePath && node.workspaceId === signals.activeWorkspaceId;
-      const summary = paired ? undefined : signals.activityByWorktreePath?.[node.path];
-      const unread = !paired && !active && Boolean(summary?.hasUnread || signals.unreadWorktreePaths?.[node.path]);
-      const slot = worktreeRowSlot({ activitySummary: summary, unread, agentState: paired ? undefined : signals.agentStateByPath?.[node.path] });
-      const typing = signals.isSupervisorTyping?.(node.path) ?? false;
-      rows[node.key] = { active, slot, supervisorTyping: supervisorSlotWins(slot, isRemoteWorktreeRow(node), typing) };
-      const footerKey = `${node.workspaceId}:${node.path}`;
-      if (!paired && !seen.has(footerKey)) {
-        seen.add(footerKey);
-        footerActivities.push(summary);
-      }
+      rows[node.key] = worktreeRowLive(node, active, signals);
     }
-    const activity = summarizeProjectActivity(project.worktrees, signals.activityByWorktreePath, signals.unreadWorktreePaths);
-    const status = project.status ? { status: project.status, connected: project.status.kind === "online" } : null;
-    projects[project.groupId] = projectSlot({ status, activity, attentionState: projectAttentionState(activity) });
+  }
+  const seen = new Set<string>();
+  const footerActivities: (ActivitySummary | undefined)[] = [];
+  for (const { group: project, rows: visible } of filterSidebarModel(model, filterQuery)) {
+    for (const node of visible) {
+      const footerKey = `${node.workspaceId}:${node.path}`;
+      if (isPairedNode(node) || seen.has(footerKey)) continue;
+      seen.add(footerKey);
+      footerActivities.push(signals.activityByWorktreePath?.[node.path]);
+    }
+    const activity = summarizeProjectActivity(visible, signals.activityByWorktreePath, signals.unreadWorktreePaths);
+    const { status } = project;
+    const statusSlot = status ? { status: { kind: status.kind, label: status.label }, title: status.title, connected: status.kind === "online" } : null;
+    projects[project.groupId] = projectSlot({ status: statusSlot, activity, attentionState: projectAttentionState(activity) });
   }
   return { rows, projects, footer: sidebarFooterSummary(footerActivities) };
 }

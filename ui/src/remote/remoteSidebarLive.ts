@@ -33,5 +33,5 @@ export function remoteSidebarLive(
     activityByWorktreePath,
     ...(activeWorkspaceId === undefined ? {} : { activeWorkspaceId }),
     ...(activePath === undefined ? {} : { activePath }),
-  });
+  }, "");
 }

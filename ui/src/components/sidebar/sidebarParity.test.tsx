@@ -69,7 +69,7 @@ const DESKTOP_ONLY_CONTROLS: readonly { readonly role: string; readonly name: Re
 const CONTAINER_TEST_IDS: ReadonlySet<string> = new Set(["sidebar-drag-region", "remote-sidebar-section", "remote-sidebar-row"]);
 
 const ROLES: ReadonlySet<string> = new Set(["button", "list", "listitem", "status", "tab", "tablist", "searchbox", "separator"]);
-const STATE_ATTRIBUTES = ["aria-expanded", "aria-current", "aria-selected", "aria-disabled", "data-stale"] as const;
+const STATE_ATTRIBUTES = ["aria-expanded", "aria-current", "aria-selected", "aria-disabled", "data-stale", "data-slot-state"] as const;
 
 function desktopOnly(element: Element) {
   const role = getRole(element);

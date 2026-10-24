@@ -7,7 +7,8 @@ import type { StatusDotState } from "../ui/StatusDot";
 import type { SidebarSlotState } from "./SidebarStateSlot";
 
 export type SidebarStatusKind = "online" | "offline" | "checking" | "relay" | "failure";
-export type SidebarStatus = { kind: SidebarStatusKind; label: string };
+/** `title` explains the status (listing error, why a machine is offline). */
+export type SidebarStatus = { kind: SidebarStatusKind; label: string; title?: string };
 
 export type AttentionState = "waiting" | "done" | "unread" | null;
 
@@ -156,21 +157,4 @@ export function sidebarFooterSummary(activities: Iterable<ActivitySummary | unde
     running > 0 ? `${running} running` : null,
     waiting > 0 ? `${waiting} needs input` : null,
   ].filter(Boolean).join(" · ");
-}
-
-/** Footer text for desktop rows: paired rows carry no local activity and duplicate rows count once. */
-export function worktreesFooterSummary(
-  worktrees: readonly Worktree[],
-  activityByWorktreePath: Readonly<Record<string, ActivitySummary | undefined>> | undefined,
-): string {
-  const seen = new Set<string>();
-  const activities: (ActivitySummary | undefined)[] = [];
-  for (const worktree of worktrees) {
-    if (isPairedRow(worktree)) continue;
-    const key = `${worktree.workspaceId ?? ""}:${worktree.path}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    activities.push(activityByWorktreePath?.[worktree.path]);
-  }
-  return sidebarFooterSummary(activities);
 }

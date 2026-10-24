@@ -453,7 +453,7 @@ describe("account worktree picker", () => {
     ];
     const sectionFor = (machineId: string, label: string, rows: FixtureWorktree[]): RemoteSidebarSection => {
       const model = sidebarModelFixture(rows);
-      return { machineId, label, state: "ok", model, live: sidebarLiveState(model, {}), error: null };
+      return { machineId, label, state: "ok", model, live: sidebarLiveState(model, {}, ""), error: null };
     };
     const onSelect = vi.fn();
     render(

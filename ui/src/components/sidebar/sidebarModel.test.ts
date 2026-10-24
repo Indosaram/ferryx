@@ -96,7 +96,7 @@ describe("buildSidebarModel", () => {
       projects: [paired], activeProjectId: undefined, inactiveProjectWorktrees: {}, listingFailures: { "daemon:site": "reset by peer" },
     }));
 
-    expect(model.projects[0]?.status).toEqual({ kind: "failure", label: "Unavailable" });
+    expect(model.projects[0]?.status).toEqual({ kind: "failure", label: "Unavailable", title: "Couldn't load worktrees: reset by peer" });
     expect(buildSidebarModel(fixture({ projects: [] }))).toMatchObject({ projects: [], emptyState: "noProjects" });
   });
 
@@ -162,7 +162,7 @@ describe("sidebarLiveState", () => {
       },
       activeWorkspaceId: "ferryx",
       activePath: "/code/ferryx",
-    });
+    }, "");
 
     expect(live.footer).toBe("1 running · 1 needs input");
     expect(live.projects.ferryx).toMatchObject({ kind: "attention", state: "waiting" });
@@ -178,7 +178,7 @@ describe("sidebarLiveState", () => {
       activeWorkspaceId: "ferryx",
       activePath: "/code/ferryx",
       isSupervisorTyping: () => true,
-    });
+    }, "");
 
     expect(root && live.rows[root.key]).toEqual({ active: true, slot: null, supervisorTyping: true });
     expect(relay && live.rows[relay.key]).toEqual({ active: false, slot: "waiting", supervisorTyping: false });

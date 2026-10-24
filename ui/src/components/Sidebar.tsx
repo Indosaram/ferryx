@@ -16,9 +16,9 @@ import {
 } from "@dnd-kit/sortable";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, type MouseEvent } from "react";
 
-import { resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
+import type { ActivitySummary } from "../lib/activity";
 import { projectRootWorktree } from "../lib/projectIdentity";
-import { groupProjects, isProjectGroupActive } from "../lib/projectGrouping";
+import { groupProjects } from "../lib/projectGrouping";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import { useSshHosts } from "../lib/sshHosts";
 import type { RemoteContext } from "../lib/machineNavigation";
@@ -51,17 +51,17 @@ import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { pruneWorktreeOrder, readSidebarDragData, worktreeOrdersEqual, type SidebarDragData } from "./sidebar-dnd/sidebarDragData";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
 import { SupervisorPanel, useSupervisorTyping } from "./supervisor/SupervisorPanel";
-import { filterSidebarEntries, isStandaloneRemoteGroup, projectDisplayLabel, projectFilterLabels, projectHostLabel, worktreeLabel } from "./sidebar/sidebarLabels";
-import { buildSidebarModel, type SidebarLive, type SidebarProjectNode } from "./sidebar/sidebarModel";
+import { isStandaloneRemoteGroup, projectDisplayLabel, projectHostLabel } from "./sidebar/sidebarLabels";
+import { buildSidebarModel, sidebarLiveState, type SidebarProjectNode, type SidebarRowLive, type SidebarWorktreeNode } from "./sidebar/sidebarModel";
 import { applyWorktreeOrder, emptyProjectGroupIds, groupWorktreesByProject, initialCollapsedProjects, seedCollapsedProjects } from "./sidebar/sidebarRows";
-import { pairedSlotStatus, projectAttentionState, projectSlot, projectStatus, summarizeProjectActivity, worktreesFooterSummary, type ProjectSlot } from "./sidebar/sidebarSlots";
 import { SidebarProjectHeader } from "./sidebar/SidebarProjectHeader";
 import { SidebarView, type SidebarReorder } from "./sidebar/SidebarView";
 import type { SidebarViewId } from "./sidebar/SidebarViewTabs";
 import { SidebarWorktreeRow } from "./sidebar/SidebarWorktreeRow";
 import type { SectionId } from "./settings/types";
 import { openProjectMenu } from "./sidebarProjectMenu";
-import { agentsByWorktreePath, SortableWorktreeRow, WorktreeRow, worktreeListRowProps, worktreeSortableId } from "./WorktreeList";
+import { agentsByWorktreePath, SortableWorktreeRow, supervisorTypingIn, WorktreeRow, worktreeListRowProps, worktreeSortableId } from "./WorktreeList";
+import { useSupervisor } from "../lib/supervisor";
 
 export {
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
@@ -265,65 +265,22 @@ export function Sidebar({
 
   // The filter is session-only UI state: never persisted.
   const [filterQuery, setFilterQuery] = useState("");
-  const statusFooterText = useMemo(() => {
-    const visible = filterSidebarEntries(
-      projectGroups.map((group) => ({ group, rows: worktreesByProject.get(group.primaryProject.workspaceId) ?? [] })),
-      filterQuery,
-      { project: (group) => projectFilterLabels(group, { hosts, remoteState }), row: worktreeLabel },
-    );
-    return worktreesFooterSummary(visible.flatMap((entry) => entry.rows), activityByWorktreePath);
-  }, [activityByWorktreePath, filterQuery, hosts, projectGroups, remoteState, worktreesByProject]);
-
-  // Only the active project can own the active row; matching by path alone lit up an inactive
-  // project (or a nested one sharing the path prefix) whose list still contained that path.
-  const activeWorktreeOwnerId = useMemo(() => {
-    if (!activePath || !activeProjectId) return undefined;
-    const activeGroup = projectGroups.find((g) => isProjectGroupActive(g, activeProjectId));
-    if (!activeGroup) return undefined;
-    const activeRows = worktreesByProject.get(activeGroup.primaryProject.workspaceId);
-    return activeRows?.some((row) => row.path === activePath && (row.workspaceId ? row.workspaceId === activeProjectId : true))
-      ? activeGroup.primaryProject.workspaceId
-      : undefined;
-  }, [activePath, activeProjectId, projectGroups, worktreesByProject]);
-
-  const naturalRows = (project: RegisteredProject) => worktreesByProject.get(project.workspaceId) ?? [];
-  const projectActivity = (rows: readonly Worktree[]) => summarizeProjectActivity(rows, activityByWorktreePath, unreadWorktreePaths);
-  const desktopProjectSlot = (project: RegisteredProject, rows: readonly Worktree[]): ProjectSlot => {
-    const activity = projectActivity(rows);
-    const target = project.target;
-    return projectSlot({
-      status: projectStatus({
-        listingFailure: listingFailures[project.workspaceId],
-        paired: target?.kind === "pairedDaemon"
-          ? {
-              staleSummary: rows.find((w) => w.stale || w.freshness?.stale)?.hostSummary,
-              ...pairedSlotStatus(target.hostId, remoteState, getPairedHostReachability(target.hostId)),
-            }
-          : null,
-      }),
-      activity,
-      attentionState: projectAttentionState(activity),
-    });
-  };
-  const live: SidebarLive = {
-    rows: {},
-    projects: Object.fromEntries(model.projects.flatMap((node) => {
-      const project = projectById.get(node.primaryWorkspaceId);
-      return project ? [[node.groupId, desktopProjectSlot(project, naturalRows(project))]] : [];
-    })),
-    footer: statusFooterText,
-  };
+  const { snapshot: supervisorSnapshot, now: supervisorNow } = useSupervisor();
+  const live = useMemo(() => sidebarLiveState(model, {
+    activityByWorktreePath,
+    unreadWorktreePaths,
+    agentStateByPath: Object.fromEntries([...agentsByPath].map(([path, agent]) => [path, agent.state])),
+    activeWorkspaceId: activeProjectId,
+    activePath,
+    isSupervisorTyping: (path) => supervisorTypingIn(supervisorSnapshot, supervisorNow, path),
+  }, filterQuery), [activePath, activeProjectId, activityByWorktreePath, agentsByPath, filterQuery, model, supervisorNow, supervisorSnapshot, unreadWorktreePaths]);
   const canCreateWorktree = (project: RegisteredProject) => project.gitRoot !== null && project.target?.kind !== "ssh";
 
-  const projectChrome = (node: SidebarProjectNode, rows: readonly { key: string }[]) => {
+  const projectChrome = (node: SidebarProjectNode) => {
     const project = projectById.get(node.primaryWorkspaceId);
-    const group = groupById.get(node.groupId);
-    if (!project || !group) return {};
+    if (!project) return {};
     const remote = project.target && project.target.kind !== "local" ? project.target : null;
-    const visibleRows = isStandaloneRemoteGroup(group)
-      ? naturalRows(project)
-      : rows.flatMap((row) => worktreeByKey.get(row.key) ?? []);
-    const slot = desktopProjectSlot(project, visibleRows);
+    const slot = live.projects[node.groupId] ?? { kind: "none" as const };
     const pairedHostId = remote?.kind === "pairedDaemon" ? remote.hostId : null;
     const onActivateSlot = slot.kind === "paired" && !slot.connected && pairedHostId && onOpenSettings
       ? () => onOpenSettings("remote", {
@@ -345,7 +302,6 @@ export function Sidebar({
       }, controller.signal);
     };
     return {
-      slot,
       title: remote ? `SSH: ${node.hostLabel} - ${project.repoRoot}` : project.repoRoot,
       addWorktreeLabel: `Add worktree to ${project.workspaceId}`,
       onAddWorktree: project.gitRoot !== null ? () => onCreateWorktree(project) : undefined,
@@ -365,21 +321,19 @@ export function Sidebar({
     };
   };
 
-  const renderRow = (node: SidebarProjectNode, row: { key: string; path: string; label: string; hostLabel: string | null; stale: boolean }) => {
+  const renderRow = (node: SidebarProjectNode, row: SidebarWorktreeNode, rowLive: SidebarRowLive) => {
     const project = projectById.get(node.primaryWorkspaceId);
     const group = groupById.get(node.groupId);
     if (!project || !group) return null;
-    const ownsActive = activeWorktreeOwnerId === project.workspaceId;
     if (isStandaloneRemoteGroup(group)) {
-      const indicator = resolveActivityIndicator(projectActivity(naturalRows(project)));
       const root = projectRootWorktree(project, node.hostLabel ?? undefined);
       return (
         <div role="listitem">
           <SidebarWorktreeRow
             node={row}
-            live={{ active: ownsActive, slot: indicator, supervisorTyping: false }}
+            live={rowLive}
             title={`Remote worktree: ${project.repoRoot}${node.hostLabel ? ` (${node.hostLabel})` : ""}`}
-            slotTitle={indicator ? undefined : node.hostLabel ?? undefined}
+            slotTitle={rowLive.slot ? undefined : node.hostLabel ?? undefined}
             shortcutWorkspaceId={project.workspaceId}
             onSelect={() => onSelectWorktree(root)}
           />
@@ -393,7 +347,7 @@ export function Sidebar({
         workspaceId={node.groupId}
         {...worktreeListRowProps(worktree, {
           repoRoot: project.repoRoot,
-          activePath: ownsActive ? activePath : "",
+          activePath: rowLive.active ? activePath : "",
           activeWorkspaceId: activeProjectId,
           statuses,
           unreadWorktreePaths,
@@ -405,6 +359,7 @@ export function Sidebar({
           sortableWorkspaceId: node.groupId,
           agentsByPath,
         })}
+        live={rowLive}
       />
     );
   };
@@ -613,7 +568,7 @@ export function Sidebar({
                 label={projectDisplayLabel(activeProjectOverlay, projectHostLabel(activeProjectOverlay, { hosts, remoteState }), true)}
                 active={activeProjectOverlay.workspaceId === activeProjectId}
                 expanded={!collapsedProjects.has(activeProjectOverlay.workspaceId)}
-                slot={desktopProjectSlot(activeProjectOverlay, naturalRows(activeProjectOverlay))}
+                slot={live.projects[activeProjectOverlay.workspaceId] ?? { kind: "none" }}
                 onAddWorktree={activeProjectOverlay.gitRoot !== null ? noop : undefined}
                 addWorktreeLabel={`Add worktree to ${activeProjectOverlay.workspaceId}`}
                 onMoreActions={noop}
@@ -627,7 +582,7 @@ export function Sidebar({
               <WorktreeRow
                 worktree={activeWorktreeOverlay}
                 repoRoot={projectById.get(activeDrag.workspaceId)?.repoRoot}
-                active={activeWorktreeOwnerId === activeDrag.workspaceId && activeWorktreeOverlay.path === activePath}
+                active={live.rows[worktreeSortableId(activeDrag.workspaceId, activeWorktreeOverlay.path, activeWorktreeOverlay.workspaceId)]?.active ?? false}
                 agent={agents.find((agent) => agent.worktreePath === activeWorktreeOverlay.path)}
                 status={statuses[activeWorktreeOverlay.path]}
                 unread={Boolean(unreadWorktreePaths?.[activeWorktreeOverlay.path])}

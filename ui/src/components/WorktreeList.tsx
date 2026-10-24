@@ -10,11 +10,10 @@ import { revealPath } from "../lib/tauri";
 import { actingSessionIds, useSupervisor, type SupervisorSnapshot } from "../lib/supervisor";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
-import type { SidebarRowLive } from "./sidebar/sidebarModel";
+import { worktreeRowLive, type SidebarRowLive } from "./sidebar/sidebarModel";
 import { SidebarEmptyStatus, SidebarWorktreeRow, SidebarWorktreesEmpty } from "./sidebar/SidebarWorktreeRow";
 import { SIDEBAR_EMPTY_TEXT, worktreeLabel, worktreeRowHost } from "./sidebar/sidebarLabels";
 import { worktreeSortableId } from "./sidebar/sidebarRows";
-import { supervisorSlotWins, worktreeRowSlot } from "./sidebar/sidebarSlots";
 import { IconButton } from "./ui/IconButton";
 
 export { worktreeSortableId };
@@ -44,6 +43,7 @@ export type WorktreeRowProps = {
   readonly active: boolean;
   readonly agent: ActiveAgent | undefined;
   readonly status: DirtyState | undefined;
+  /** The raw unread mark; worktreeRowLive decides whether the row shows it. */
   readonly unread: boolean;
   readonly activitySummary: ActivitySummary | undefined;
   readonly onSelect: (worktree: Worktree) => void;
@@ -70,15 +70,14 @@ export function worktreeListRowProps(worktree: Worktree, context: WorktreeListRo
   // Paired terminal proxy is unavailable: path-only local terminal data
   // must never light up a machine row with the same absolute path.
   const paired = worktree.workspaceId?.startsWith("daemon:");
-  const summary = paired ? undefined : context.activityByWorktreePath?.[worktree.path];
   return {
     worktree,
     repoRoot: context.repoRoot,
     active,
     agent: paired ? undefined : context.agentsByPath.get(worktree.path),
     status: paired ? undefined : context.statuses[worktree.path],
-    unread: !paired && !active && Boolean(summary?.hasUnread || context.unreadWorktreePaths?.[worktree.path]),
-    activitySummary: summary,
+    unread: Boolean(context.unreadWorktreePaths?.[worktree.path]),
+    activitySummary: context.activityByWorktreePath?.[worktree.path],
     onSelect: context.onSelect,
     onCreateWorktree: context.onCreateWorktree,
     onDelete: context.onDelete,
@@ -167,11 +166,14 @@ export const WorktreeRow = memo(function WorktreeRow({
   const deleteActionLabel = isRemotePrimary ? "Remove Project" : "Delete Worktree";
   const deleteButtonLabel = isRemotePrimary ? "Remove project" : "Delete worktree";
   const displayName = worktreeLabel(worktree);
-  const slotState = worktreeRowSlot({ activitySummary, unread, agentState: agent?.state });
   const { snapshot: supervisor, now: supervisorNow } = useSupervisor();
-  const supervisorTyping = supervisorSlotWins(slotState, isRemote, supervisorTypingIn(supervisor, supervisorNow, worktree.path));
   const hostName = worktreeRowHost(worktree);
-  const rowLive: SidebarRowLive = live ?? { active, slot: slotState, supervisorTyping };
+  const rowLive: SidebarRowLive = live ?? worktreeRowLive(worktree, active, {
+    activityByWorktreePath: { [worktree.path]: activitySummary },
+    unreadWorktreePaths: { [worktree.path]: unread },
+    agentStateByPath: { [worktree.path]: agent?.state },
+    isSupervisorTyping: (path) => supervisorTypingIn(supervisor, supervisorNow, path),
+  });
 
   const handleContextMenu = (event: React.MouseEvent) => {
     event.preventDefault();

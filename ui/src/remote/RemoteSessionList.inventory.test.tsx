@@ -272,7 +272,7 @@ describe("remote sidebar drawn by the desktop sidebar view", () => {
 
   it("seeds folds from the desktop and keeps this browser's folds in session storage only", () => {
     const model = sidebarModelFixture(ROWS_A, { collapsedGroupIds: ["ws-docs"] });
-    const list = [{ machineId: MACHINE_A, label: "Studio", state: "ok" as const, model, live: sidebarLiveState(model, {}), error: null }];
+    const list = [{ machineId: MACHINE_A, label: "Studio", state: "ok" as const, model, live: sidebarLiveState(model, {}, ""), error: null }];
     renderMirrorWith({ sections: list });
     const a = machineSection(MACHINE_A);
     expect(within(a).getByRole("button", { name: "Expand docs" })).toHaveAttribute("aria-expanded", "false");

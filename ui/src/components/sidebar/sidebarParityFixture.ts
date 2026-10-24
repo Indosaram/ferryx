@@ -33,7 +33,7 @@ export type SidebarParityFixture = {
   /** One running agent as the desktop sees it (by worktree path). */
   readonly desktopActivity: Readonly<Record<string, ActivitySummary>>;
   /** The same agent as the remote session inventory reports it. */
-  readonly remoteActivity: readonly { readonly workspaceId: string; readonly worktreeSlug: string; readonly activityState: "working" }[];
+  readonly remoteActivity: readonly { readonly workspaceId: string; readonly worktreeSlug: string | null; readonly activityState: "working" | "done" }[];
 };
 
 /**
@@ -83,6 +83,14 @@ export const sidebarParityFixture: SidebarParityFixture = {
       workingCount: 1, waitingCount: 0, doneCount: 0, runningCount: 1,
       hasWorking: true, hasWaiting: false, hasDone: false, hasUnread: false,
     },
+    // A finished agent the user has not looked at yet.
+    [FERRYX]: {
+      workingCount: 0, waitingCount: 0, doneCount: 1, runningCount: 0,
+      hasWorking: false, hasWaiting: false, hasDone: true, hasUnread: false,
+    },
   },
-  remoteActivity: [{ workspaceId: "ferryx", worktreeSlug: "sidebar-polish", activityState: "working" }],
+  remoteActivity: [
+    { workspaceId: "ferryx", worktreeSlug: "sidebar-polish", activityState: "working" },
+    { workspaceId: "ferryx", worktreeSlug: null, activityState: "done" },
+  ],
 };
