@@ -222,6 +222,14 @@ impl Decision {
     }
 }
 
+/// One gap assessment: the gaps found and the single decision that follows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Assessment {
+    pub gaps: Vec<Gap>,
+    pub decision: Decision,
+}
+
 /// Parses one model decision as strict JSON and applies [`Decision::validate_from_model`].
 pub fn parse_model_decision(text: &str) -> Result<Decision, GoalError> {
     let decision: Decision = serde_json::from_str(text.trim())
