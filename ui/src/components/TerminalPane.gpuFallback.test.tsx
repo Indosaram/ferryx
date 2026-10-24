@@ -160,4 +160,34 @@ describe("TerminalPane GPU fallback", () => {
     expect(screen.queryByTestId("terminal-gpu-fallback-banner")).not.toBeInTheDocument();
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_terminal_grid_attach", expect.anything());
   });
+
+  it("falls back when the attached surface reports it cannot present", async () => {
+    // Driverless host: a software adapter exists, attach succeeds, then the window surface
+    // has no 8-bit RGBA/BGRA format and bounds updates report the renderer unavailable.
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_attach") return { sessionId: "backend-no-gpu", attachTuple, presented: false };
+      if (cmd === "cmd_native_terminal_set_bounds") {
+        throw {
+          code: "NATIVE_RENDERER_UNAVAILABLE",
+          message: "GPU surface presentation unsupported: Surface does not support standard 8-bit RGBA/BGRA formats",
+          details: { source: "wgpu", kind: "renderer_unavailable" },
+        };
+      }
+      if (cmd === "cmd_terminal_preferences") return FALLBACK_PREFERENCES;
+      if (cmd === "cmd_terminal_grid_attach") return "grid-stream-1";
+      return undefined;
+    });
+
+    render(<TerminalPane session={session} active={true} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", expect.anything());
+    expect(screen.getByTestId("terminal-gpu-fallback-banner")).toHaveTextContent(BANNER);
+    expect(screen.getByTestId("remote-terminal-grid")).toBeInTheDocument();
+    expect(screen.queryByTestId("native-terminal-pane")).not.toBeInTheDocument();
+    const commands = tauriCoreMocks.invoke.mock.calls.map(([cmd]) => cmd);
+    expect(commands).not.toContain("cmd_terminal_close");
+  });
 });

@@ -471,7 +471,8 @@ impl From<crate::native_terminal::NativeTerminalError> for IpcError {
                 IpcErrorCode::SessionNotFound
             }
             crate::native_terminal::NativeTerminalError::GpuAdapterUnavailable(_)
-            | crate::native_terminal::NativeTerminalError::GpuDeviceUnavailable(_) => {
+            | crate::native_terminal::NativeTerminalError::GpuDeviceUnavailable(_)
+            | crate::native_terminal::NativeTerminalError::GpuSurfaceUnsupported(_) => {
                 return Self::new(IpcErrorCode::NativeRendererUnavailable, message).with_details(
                     json!({ "source": "wgpu", "kind": "renderer_unavailable" }),
                 );

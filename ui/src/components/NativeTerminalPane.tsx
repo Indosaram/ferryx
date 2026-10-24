@@ -3084,6 +3084,12 @@ export function NativeTerminalPane({
             });
             return;
           }
+          // The adapter attached but its window surface can never present (e.g. a software
+          // adapter without surface formats). Hand the pane to the DOM renderer.
+          if (isStructuredIpcError(error) && error.code === NATIVE_RENDERER_UNAVAILABLE) {
+            markNativeRendererUnavailable();
+            return;
+          }
           switchDebug("terminal.surface.bounds.error", {
             localSessionId: sessionId,
             backendSessionId: targetSessionId,
