@@ -1,11 +1,10 @@
 # Draft Comparison Pages (Unpublished)
 
-This directory contains draft comparison pages evaluating Ferryx against four agent-orchestration and terminal tools:
+This directory contains draft comparison pages evaluating Ferryx against agent-orchestration and terminal tools:
 
-1. `herdr.md` — Ferryx vs Herdr
-2. `cmux.md` — Ferryx vs cmux
-3. `orca.md` — Ferryx vs Orca
-4. `vibe-kanban.md` — Ferryx vs Vibe Kanban
+1. `vibe-kanban.md` — Ferryx vs Vibe Kanban
+
+The cmux, Orca and Herdr drafts were refreshed against public sources (as of 2026-10) and published under `site/src/content/docs/compare/`.
 
 ## Status and Publishing Warning
 

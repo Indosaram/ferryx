@@ -1,6 +1,6 @@
 ---
 title: "Ferryx Alternatives: AI Terminals Compared"
-description: Compare Ferryx with Warp, Wave Terminal, Conductor, Crystal, tmux plus git worktree, and Ghostty. What each tool is, who it suits, and where to read next.
+description: "Compare Ferryx with Warp, Wave Terminal, Conductor, Crystal, cmux, Orca, Herdr, tmux plus worktrees, and Ghostty: what each is and who it suits."
 ---
 
 Ferryx is a source-available desktop terminal built for engineers who run AI coding agents. It's source-available under the Ferryx License, free for individuals and small companies, written in Rust on Tauri v2, and still early software on calendar-versioned releases. If you're weighing it against the alternatives, each link below goes to a standalone comparison page. Every page states its facts plainly, marks when they were verified, and includes an honest section on what the other tool does better.
@@ -17,6 +17,9 @@ Verified September 2026 against the latest release (v2026.09.18.1). These detail
 - [Ferryx vs Wave Terminal](/compare/wave-terminal/). A side-by-side of two desktop terminals: where they overlap, what only one of them does, and who each one suits.
 - [Ferryx vs Conductor](/compare/conductor/). Conductor's own install doc says it isn't available for Windows or Linux yet, so this page leads with platform availability, then covers local worktrees, session survival, agent support, and Conductor Cloud's paid sandboxes.
 - [Ferryx vs Crystal](/compare/crystal/). Crystal, also known as Nimbalyst, compared on the same axes: source availability, architecture, and how each tool handles running agents.
+- [Ferryx vs cmux](/compare/cmux/). cmux is a native macOS agent terminal on libghostty with notification rings and an agent-scriptable browser. The page covers platforms, session survival, and when a Mac-only tool is the right call.
+- [Ferryx vs Orca](/compare/orca/). Orca is an Electron agent IDE with an editor, diff review, and design mode. The page weighs how much IDE you want around your agents against a lighter daemon-backed terminal workspace.
+- [Ferryx vs Herdr](/compare/herdr/). Herdr is a Rust TUI multiplexer that runs inside your existing terminal. The page compares a terminal multiplexer with a desktop window on sessions, remote machines, and worktrees.
 - [Ferryx vs tmux and git worktree](/compare/tmux-git-worktree/). The do-it-yourself route of tmux sessions across git worktrees, plus the CLIs that already automate it (workmux, worktrunk, lazyworktree, tmux-worktree), weighed against what a desktop workspace handles for you.
 - [Ferryx and Ghostty](/compare/ghostty/). Not a competition. Ferryx parses terminal output with libghostty-vt, so this page explains how the two projects relate rather than picking a winner.
 
