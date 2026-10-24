@@ -291,20 +291,28 @@ const ROW_OWNER = "../../remote/RemoteSidebar.tsx";
 
 /**
  * What a hand-drawn sidebar row looks like whatever it is named: list rows, the shared row's
- * shortcut hook and state-slot test ids, or the shared sidebar pieces rendered from another file.
+ * shortcut hook and state-slot test ids, the shared sidebar pieces rendered from another file, or
+ * plain list markup carrying a selection mark and a status dot. A marker's `test` sees the whole file.
  */
-const ROW_MARKERS: readonly { readonly name: string; readonly pattern: RegExp }[] = [
-  { name: 'role="listitem"', pattern: /role=["']listitem["']/ },
-  { name: "worktree shortcut hook", pattern: /data-shortcut-worktree-path/ },
-  { name: "sidebar state slot test id", pattern: /["'](?:worktree-status-dot|remote-machine-badge|worktree-supervisor-slot|worktree-rail-active|project-attention-indicator|project-running-badge)["']/ },
-  { name: "shared sidebar row piece", pattern: /\bimport\b[^;]*\b(?:SidebarView|SidebarWorktreeRow|SidebarProjectHeader|SidebarStateSlot)\b[^;]*from\s+["'][^"']*components\/sidebar\//s },
+const LIST_ROW = /<li\b|role=["']listitem["']|aria-current/;
+/** The sidebar model or its live state: only a sidebar row consumes these. */
+const SIDEBAR_DATA = /\b(?:SidebarWorktreeNode|SidebarProjectNode|SidebarRowLive|SidebarLive|SidebarSlotState|sidebarLiveState|worktreeRowLive|filterSidebarModel)\b|\blive\.rows\b/;
+/** A state dot drawn inline: the shared StatusDot, or a round status-coloured span. */
+const STATUS_DOT = /\bStatusDot\b|rounded-full[^"'`]*bg-status-|bg-status-[^"'`]*rounded-full/;
+const ROW_MARKERS: readonly { readonly name: string; readonly test: (source: string) => boolean }[] = [
+  { name: 'role="listitem"', test: (source) => /role=["']listitem["']/.test(source) },
+  { name: "worktree shortcut hook", test: (source) => /data-shortcut-worktree-path/.test(source) },
+  { name: "sidebar state slot test id", test: (source) => /["'](?:worktree-status-dot|remote-machine-badge|worktree-supervisor-slot|worktree-rail-active|project-attention-indicator|project-running-badge)["']/.test(source) },
+  { name: "shared sidebar row piece", test: (source) => /\bimport\b[^;]*\b(?:SidebarView|SidebarWorktreeRow|SidebarProjectHeader|SidebarStateSlot)\b[^;]*from\s+["'][^"']*components\/sidebar\//s.test(source) },
+  { name: "list row over sidebar model data", test: (source) => LIST_ROW.test(source) && SIDEBAR_DATA.test(source) },
+  { name: "current list row with an inline status dot", test: (source) => /<li\b/.test(source) && /aria-current/.test(source) && STATUS_DOT.test(source) },
 ];
 
 /** Every row-ownership violation in a set of remote sources. */
 function rowOwnershipViolations(sources: Readonly<Record<string, string>>): string[] {
   return Object.entries(sources).flatMap(([file, source]) => {
     const named = [...source.replace(IMPORT_STATEMENT, "").matchAll(ROW_DEFINITION)].map((match) => `${file}: ${match[1]}`);
-    const structural = file === ROW_OWNER ? [] : ROW_MARKERS.filter((marker) => marker.pattern.test(source)).map((marker) => `${file}: ${marker.name}`);
+    const structural = file === ROW_OWNER ? [] : ROW_MARKERS.filter((marker) => marker.test(source)).map((marker) => `${file}: ${marker.name}`);
     return [...named, ...structural];
   });
 }
@@ -329,5 +337,36 @@ describe("remote sidebar row ownership", () => {
       '../../remote/RemoteMachineList.tsx: role="listitem"',
       "../../remote/RemoteMachineList.tsx: sidebar state slot test id",
     ]);
+  });
+
+  it("flags a plain <li> row with aria-current and an inline status dot outside RemoteSidebar.tsx", () => {
+    // The F4 round-2 M6b copy: no shared test ids, no listitem role, no sidebar names.
+    const planted = {
+      "../../remote/RemoteMachineList.tsx": [
+        "export function MachineEntry({ label, active, busy }: { label: string; active: boolean; busy: boolean }) {",
+        "  return (",
+        "    <ul>",
+        "      <li><button aria-current={active || undefined}>{label}",
+        '        {busy ? <span className="size-1.5 rounded-full bg-status-working" /> : null}</button></li>',
+        "    </ul>",
+        "  );",
+        "}",
+      ].join("\n"),
+    };
+
+    expect(rowOwnershipViolations(planted)).toEqual(["../../remote/RemoteMachineList.tsx: current list row with an inline status dot"]);
+  });
+
+  it("flags list markup drawn over the sidebar model outside RemoteSidebar.tsx", () => {
+    const planted = {
+      "../../remote/RemoteMachineList.tsx": [
+        'import type { SidebarWorktreeNode } from "../components/sidebar/sidebarModel";',
+        "export function Rows({ nodes }: { nodes: SidebarWorktreeNode[] }) {",
+        "  return <ul>{nodes.map((node) => <li key={node.key}>{node.label}</li>)}</ul>;",
+        "}",
+      ].join("\n"),
+    };
+
+    expect(rowOwnershipViolations(planted)).toEqual(["../../remote/RemoteMachineList.tsx: list row over sidebar model data"]);
   });
 });
