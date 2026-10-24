@@ -5,7 +5,7 @@ description: "What account sign-in and a pairing PIN actually grant, expiry beha
 
 **Pairing Security: What Signing In Grants.** What account sign-in and a pairing PIN actually grant, expiry behavior, and how to revoke a paired device when a phone is lost. Claims map to Ferryx docs and cited sources only.
 
-![qr-pairing-security cover](/images/blog/qr-pairing-security/cover.png)
+![Pairing security cover](/images/blog/qr-pairing-security/cover.svg)
 
 ## What pairing grants
 
@@ -34,7 +34,7 @@ Ferryx pairs a mobile or browser client to your daemon through an authenticated 
 
 Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64 installer), and Linux (AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
 
-![Pairing Security: What Signing In Grants illustration](/images/blog/qr-pairing-security/body-1.png)
+![Pairing Security: What Signing In Grants illustration](/images/blog/qr-pairing-security/body-1.svg)
 
 Related reading:
 - [/privacy/](/privacy/)
