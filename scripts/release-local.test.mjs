@@ -17,7 +17,28 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { msixWithVersion } from "./fixtures/msix-fixture.mjs";
+
 const SCRIPT_PATH = join(process.cwd(), "scripts", "release-local.mjs");
+
+function writeMsix(path, version) {
+  writeFileSync(path, msixWithVersion(version));
+}
+
+const STORE_PLAN = {
+  schemaVersion: 1,
+  runId: "rel-run-store-1",
+  repo: "Indosaram/ferryx",
+  commitSha: "5d5499806a1b207849778f488b4e3e7b821a751b",
+  tag: "v2026.09.08.1",
+  appVersion: "2026.908.1",
+  msixVersion: "2026.908.1.0",
+  channels: { store: true, nsisMigration: false },
+  requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+  toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+  sourceDateEpoch: 1788868800,
+  createdAt: "2026-09-08T12:00:00.000Z",
+};
 
 function digestDirectory(directory) {
   const hash = createHash("sha256");
@@ -498,6 +519,7 @@ process.exit(1);
 
     assert.equal(result.published, true);
     assert.equal(result.tag, plan.tag);
+    assert.equal(result.storeSubmission, "Store submission pending: 2026.908.1.0");
 
     // Verify storage state is undrafted
     const finalState = JSON.parse(readFileSync(join(storageDir, `${plan.tag}.json`), "utf8"));
@@ -565,6 +587,64 @@ test("verify-remote: verifies release availability against local HTTP server", a
     assert.equal(result.tag, plan.tag);
   } finally {
     await new Promise((resolve) => mockServer.close(resolve));
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("store gate: MSIX at the canonical quad version yields the 'Store submission pending' line", async () => {
+  const { assertStoreMsix } = await import("./release-local.mjs");
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-store-gate-ok-"));
+  try {
+    mkdirSync(join(tmp, "artifacts", "windows"), { recursive: true });
+    writeMsix(join(tmp, "artifacts", "windows", "Ferryx_x64.msix"), STORE_PLAN.msixVersion);
+    assert.equal(assertStoreMsix({ runDir: tmp, plan: STORE_PLAN }), "Store submission pending: 2026.908.1.0");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("store gate: refuses a missing MSIX and a non-canonical MSIX version with typed errors", async () => {
+  const { assertStoreMsix, StoreMsixError } = await import("./release-local.mjs");
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-store-gate-fail-"));
+  try {
+    mkdirSync(join(tmp, "artifacts", "windows"), { recursive: true });
+    assert.throws(
+      () => assertStoreMsix({ runDir: tmp, plan: STORE_PLAN }),
+      (err) => err instanceof StoreMsixError && err.code === "STORE_MSIX_MISSING",
+    );
+    writeMsix(join(tmp, "artifacts", "windows", "Ferryx_x64.msix"), "2026.908.1.1");
+    assert.throws(
+      () => assertStoreMsix({ runDir: tmp, plan: STORE_PLAN }),
+      (err) => err instanceof StoreMsixError && err.code === "STORE_MSIX_VERSION_MISMATCH",
+    );
+    writeFileSync(join(tmp, "artifacts", "windows", "Ferryx_x64.msix"), "not a zip");
+    assert.throws(
+      () => assertStoreMsix({ runDir: tmp, plan: STORE_PLAN }),
+      (err) => err instanceof StoreMsixError && err.code === "STORE_MSIX_INVALID",
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("assemble CLI: a Windows build without the MSIX exits non-zero with STORE_MSIX_MISSING", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-store-gate-cli-"));
+  try {
+    const runDir = join(tmp, "run");
+    const publishDir = join(runDir, "publish");
+    mkdirSync(publishDir, { recursive: true });
+    writeFileSync(join(runDir, "plan.json"), JSON.stringify(STORE_PLAN));
+    writeIntegrityState(runDir, STORE_PLAN, publishDir);
+    rmSync(publishDir, { recursive: true, force: true });
+    writeFileSync(join(runDir, "receipts", "build-receipt-maho-win.json"), "{}\n");
+    const env = { ...process.env };
+    delete env.CI;
+    delete env.GITHUB_ACTIONS;
+    const res = spawnSync("node", [SCRIPT_PATH, "assemble", "--run", runDir], { encoding: "utf8", env });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /STORE_MSIX_MISSING: Windows build has no Ferryx_x64\.msix/);
+    assert.equal(existsSync(publishDir), false, "assemble must refuse before creating the publish directory");
+  } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
