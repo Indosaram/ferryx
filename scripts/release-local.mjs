@@ -20,6 +20,7 @@ import { generateChangelog } from "./lib/release-changelog.mjs";
 import { parsePlan, parseReceipt } from "./lib/release-contract.mjs";
 import { loadHostConfig, redactProcessOutput } from "./lib/release-hosts.mjs";
 import { buildHost, preflightAll } from "./lib/release-platforms.mjs";
+import { assertReleaseTag } from "./release-tag-policy.mjs";
 import { parseReleaseTag, toAppVersion, toMsixVersion } from "./sync-version.mjs";
 
 function assertNotInCI(stageName) {
@@ -139,6 +140,10 @@ export function prepareRelease({
   if (!tag) throw new Error("Missing required argument: --tag");
   if (!commit) throw new Error("Missing required argument: --commit");
   if (!outDir) throw new Error("Missing required argument: --out");
+
+  // New releases must use vYYYY.MMDD.N (scripts/release-tag-policy.mjs); checked before any
+  // config, git, or build work so a malformed tag stops the run immediately.
+  assertReleaseTag(tag);
 
   const resolvedOutDir = resolve(outDir);
   if (existsSync(resolvedOutDir)) {

@@ -22,8 +22,11 @@ import {
   getCurrentVersion,
   getUpdateStatus,
   relaunchApp,
+  getUpdateChannel,
+  setUpdateChannel,
   subscribeUpdateStatus,
   updatesManagedExternally,
+  type UpdateChannel,
   type UpdateStatus,
 } from "../../lib/updater";
 import {
@@ -92,6 +95,7 @@ function externallyManagedUpdateMessage(host: ExternallyManagedHost): string {
 
 export function SoftwareUpdateCard() {
   const [status, setStatus] = useState<UpdateStatus>(() => getUpdateStatus());
+  const [channel, setChannel] = useState<UpdateChannel>(() => getUpdateChannel());
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [managedExternally, setManagedExternally] = useState<boolean>(false);
 
@@ -154,6 +158,31 @@ export function SoftwareUpdateCard() {
       <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
         Ferryx restarts, but active agents and terminal sessions continue in the background.
       </p>
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <div>
+          <p className="text-[12px] font-medium">Update channel</p>
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            Beta gets pre-release builds first. Switching back to Stable waits for the next stable release.
+          </p>
+        </div>
+        <Select
+          value={channel}
+          disabled={busy || isDownloaded}
+          onValueChange={(value) => {
+            const next: UpdateChannel = value === "beta" ? "beta" : "stable";
+            setChannel(next);
+            void setUpdateChannel(next);
+          }}
+        >
+          <SelectTrigger aria-label="Update channel" className="h-8 w-[140px] text-[12px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="stable">Stable</SelectItem>
+            <SelectItem value="beta">Beta</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
       <p
         data-testid="settings-update-status"
         aria-live="polite"

@@ -177,7 +177,7 @@ test("prepare: creates deterministic plan, prepare-state, and fails closed on cl
         "--config",
         configPath,
         "--tag",
-        "v2026.09.08.1",
+        "v2026.0908.1",
         "--commit",
         "HEAD",
         "--out",
@@ -197,7 +197,7 @@ test("prepare: creates deterministic plan, prepare-state, and fails closed on cl
 
     const plan = JSON.parse(readFileSync(join(outDir, "plan.json"), "utf8"));
     assert.equal(plan.schemaVersion, 1);
-    assert.equal(plan.tag, "v2026.09.08.1");
+    assert.equal(plan.tag, "v2026.0908.1");
     assert.equal(plan.appVersion, "2026.908.1");
     assert.equal(plan.msixVersion, "2026.908.1.0");
     assert.equal(plan.channels.store, true);
@@ -218,7 +218,7 @@ test("prepare: creates deterministic plan, prepare-state, and fails closed on cl
         "--config",
         configPath,
         "--tag",
-        "v2026.09.08.1",
+        "v2026.0908.1",
         "--commit",
         "HEAD",
         "--out",
@@ -241,7 +241,7 @@ test("build: accepts an untouched prepared plan digest", async () => {
     const configPath = writeCheckoutHostConfig(tmp);
     prepareRelease({
       configPath,
-      tag: "v2026.09.08.1",
+      tag: "v2026.0908.1",
       commit: "HEAD",
       outDir,
       changelog: () => "fixture release notes",

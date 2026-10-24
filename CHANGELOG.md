@@ -1714,3 +1714,15 @@ Generated from Conventional Commit subjects by
 ### Other Changes
 
 - **ui**: add semantic design tokens (3c2bafa7)
+
+## Legacy tags
+
+These published tags predate the release tag policy `vYYYY.MMDD.N`
+(`scripts/release-tag-policy.mjs`, `docs/releases/LOCAL_RELEASE_RUNBOOK.md`). They stay in place and
+are never deleted or moved; no new release uses their form.
+
+- `0.1.0` and `v0.1.0`: pre-calendar-version tags, not part of the date-based series.
+- `v2026.08.26.1` through `v2026.08.26.11`: eleven same-day tags in the old `vYYYY.MM.DD.N` form.
+- Every other `vYYYY.MM.DD.N` tag above, from `v2026.08.30.1` through `v2026.10.11.1`, also uses the
+  old form. Their app versions equal those of the new scheme (`v2026.10.11.1` and `v2026.1011.1` both
+  ship `2026.1011.1`), so update ordering is unchanged.
