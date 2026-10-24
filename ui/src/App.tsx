@@ -46,7 +46,7 @@ import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/na
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
 import { isMacShortcutPlatform, resolvedShortcuts, useShortcuts } from "./lib/shortcuts";
-import { useShortcutOverrides } from "./lib/shortcutOverrides";
+import { useShortcutOverrides, useShortcutPreset } from "./lib/shortcutOverrides";
 import { initUpdateToasts } from "./lib/updateToast";
 // Wave 3a cross-platform onboarding, release notes, and getting started checklist
 import {
@@ -3794,7 +3794,8 @@ function WorkspaceApp({
     ],
   );
   const { overrides: shortcutOverrides } = useShortcutOverrides();
-  useShortcuts(shortcutHandlers, { overrides: shortcutOverrides });
+  const { preset: shortcutPreset } = useShortcutPreset();
+  useShortcuts(shortcutHandlers, { overrides: shortcutOverrides, preset: shortcutPreset });
 
   const sshHostId = activeProject.target?.kind === "ssh" ? activeProject.target.hostId : null;
   const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId
@@ -3820,7 +3821,8 @@ function WorkspaceApp({
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
       <ShortcutHints
-        enabledActions={resolvedShortcuts(shortcutOverrides).filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
+        preset={shortcutPreset}
+        enabledActions={resolvedShortcuts(shortcutOverrides, shortcutPreset).filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
         getContext={() => {
           const current = stateRef.current;
           const group = current.layout.focusedGroupId ? current.layout.tabGroups?.[current.layout.focusedGroupId] : undefined;

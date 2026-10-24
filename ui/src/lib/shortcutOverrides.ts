@@ -1,7 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { SHORTCUTS, type ShortcutActionId, type ShortcutBinding } from "./shortcuts";
-import { SHORTCUT_OVERRIDES_STORAGE_KEY, getMigratedItem } from "./storageKeys";
+import {
+  SHORTCUTS,
+  SHORTCUT_PRESETS,
+  isMacShortcutPlatform,
+  shortcutPresetLayer,
+  type ShortcutActionId,
+  type ShortcutBinding,
+  type ShortcutPreset,
+} from "./shortcuts";
+import {
+  GENERAL_SETTINGS_STORAGE_KEY,
+  LEGACY_STORAGE_KEY_MAP,
+  ONBOARDING_STORAGE_KEY,
+  PROJECTS_STORAGE_KEY,
+  SHORTCUT_OVERRIDES_STORAGE_KEY,
+  SHORTCUT_PRESET_STORAGE_KEY,
+  TERMINAL_SETTINGS_STORAGE_KEY,
+  getMigratedItem,
+} from "./storageKeys";
 
 /**
  * Sparse user remaps of the shortcut registry. An entry replaces the action's primary binding
@@ -129,4 +146,102 @@ export function useShortcutOverrides() {
   }, []);
 
   return { overrides, setOverride, resetOverrides };
+}
+
+export const SHORTCUT_PRESET_EVENT = "ferryx:shortcut-preset";
+
+export function isShortcutPreset(value: unknown): value is ShortcutPreset {
+  return typeof value === "string" && (SHORTCUT_PRESETS as readonly string[]).includes(value);
+}
+
+/** Keys any earlier Ferryx run writes; their presence marks an existing install. */
+const EXISTING_INSTALL_KEYS = [
+  PROJECTS_STORAGE_KEY,
+  ONBOARDING_STORAGE_KEY,
+  TERMINAL_SETTINGS_STORAGE_KEY,
+  GENERAL_SETTINGS_STORAGE_KEY,
+] as const;
+
+function isExistingInstall(storage: Storage): boolean {
+  if (storage.getItem(SHORTCUT_OVERRIDES_STORAGE_KEY) !== null) return true;
+  return EXISTING_INSTALL_KEYS.some((key) =>
+    [key, ...(LEGACY_STORAGE_KEY_MAP[key] ?? [])].some((candidate) => storage.getItem(candidate) !== null));
+}
+
+/**
+ * The active preset. A stored choice wins. Otherwise a new non-Mac install (no stored overrides
+ * and no earlier app state) starts on `terminal-first`; existing users and macOS keep `default`.
+ * The first resolution is persisted so the choice does not flip once the install gains state.
+ */
+export function loadShortcutPreset(
+  storage: Storage | null = browserStorage(),
+  isMac: boolean = isMacShortcutPlatform(),
+): ShortcutPreset {
+  if (!storage) return "default";
+  try {
+    const stored = storage.getItem(SHORTCUT_PRESET_STORAGE_KEY);
+    if (isShortcutPreset(stored)) return stored;
+    const initial: ShortcutPreset = !isMac && !isExistingInstall(storage) ? "terminal-first" : "default";
+    storage.setItem(SHORTCUT_PRESET_STORAGE_KEY, initial);
+    return initial;
+  } catch {
+    return "default";
+  }
+}
+
+/** Switches the preset only; the sparse overrides are stored separately and stay untouched. */
+export function saveShortcutPreset(preset: ShortcutPreset, storage: Storage | null = browserStorage()): ShortcutPreset {
+  try {
+    storage?.setItem(SHORTCUT_PRESET_STORAGE_KEY, preset);
+  } catch (error) {
+    console.warn("Failed to persist shortcut preset", error);
+  }
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent<ShortcutPreset>(SHORTCUT_PRESET_EVENT, { detail: preset }));
+  }
+  return preset;
+}
+
+export function useShortcutPreset(isMac: boolean = isMacShortcutPlatform()) {
+  const [preset, setPresetState] = useState<ShortcutPreset>(() => loadShortcutPreset(browserStorage(), isMac));
+
+  useEffect(() => {
+    const sync = (event: Event) => {
+      const detail = event instanceof CustomEvent ? event.detail : undefined;
+      if (isShortcutPreset(detail)) setPresetState(detail);
+    };
+    const syncStorage = (event: StorageEvent) => {
+      if (event.key === SHORTCUT_PRESET_STORAGE_KEY || event.key === null) setPresetState(loadShortcutPreset(browserStorage(), isMac));
+    };
+    window.addEventListener(SHORTCUT_PRESET_EVENT, sync);
+    window.addEventListener("storage", syncStorage);
+    return () => {
+      window.removeEventListener(SHORTCUT_PRESET_EVENT, sync);
+      window.removeEventListener("storage", syncStorage);
+    };
+  }, [isMac]);
+
+  const setPreset = useCallback((next: ShortcutPreset) => {
+    setPresetState(saveShortcutPreset(next));
+  }, []);
+
+  return { preset, setPreset };
+}
+
+/**
+ * The table native key sources receive: the preset's primary bindings as overrides, with the
+ * user's sparse overrides on top. On macOS, or with the `default` preset, it is the overrides alone.
+ */
+export function nativeShortcutTableFor(
+  overrides: ShortcutOverrides,
+  preset: ShortcutPreset,
+  isMac: boolean = isMacShortcutPlatform(),
+): ShortcutOverrides {
+  const layer = shortcutPresetLayer(preset, isMac);
+  if (!layer) return overrides;
+  const table: ShortcutOverrides = {};
+  for (const [id, entry] of Object.entries(layer)) {
+    if (entry) table[id as ShortcutActionId] = entry.binding;
+  }
+  return { ...table, ...overrides };
 }
