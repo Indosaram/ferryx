@@ -3,8 +3,7 @@ import { Eye, LockKeyhole, Plus, Trash2 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
-import { workspaceName } from "../lib/branchFilter";
+import type { ActivitySummary } from "../lib/activity";
 import { cn } from "../lib/cn";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
 import { getHostPlatform } from "../lib/platform";
@@ -12,9 +11,13 @@ import { revealPath } from "../lib/tauri";
 import { actingSessionIds, useSupervisor, type SupervisorSnapshot } from "../lib/supervisor";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
-import { SidebarStateSlot, type SidebarSlotState } from "./sidebar/SidebarStateSlot";
+import { SidebarStateSlot } from "./sidebar/SidebarStateSlot";
+import { SIDEBAR_EMPTY_TEXT, worktreeLabel, worktreeRowHost } from "./sidebar/sidebarLabels";
+import { worktreeSortableId } from "./sidebar/sidebarRows";
+import { supervisorSlotWins, worktreeRowSlot } from "./sidebar/sidebarSlots";
 import { IconButton } from "./ui/IconButton";
-import type { StatusDotState } from "./ui/StatusDot";
+
+export { worktreeSortableId };
 
 type WorktreeListProps = {
   readonly worktrees: readonly Worktree[];
@@ -95,14 +98,6 @@ export function supervisorTypingIn(snapshot: SupervisorSnapshot, now: number, wo
   return snapshot.lanes.some((lane) => lane.sessionId !== null && acting.has(lane.sessionId) && isSameWorktreePath(lane.cwd, worktreePath));
 }
 
-/** Maps a row's activity to its slot state; idle and failed rows show nothing (ui/DESIGN.md section 4 rule 7). */
-function slotStateFor(indicator: StatusDotState | null): SidebarSlotState {
-  if (indicator === "working" || indicator === "starting") return "working";
-  if (indicator === "waiting" || indicator === "unread") return indicator;
-  if (indicator === "done" || indicator === "exited") return "done";
-  return null;
-}
-
 export const WorktreeRow = memo(function WorktreeRow({
   worktree,
   repoRoot,
@@ -132,21 +127,11 @@ export const WorktreeRow = memo(function WorktreeRow({
   const canDelete = !primary && !isPaired;
   const deleteActionLabel = isRemotePrimary ? "Remove Project" : "Delete Worktree";
   const deleteButtonLabel = isRemotePrimary ? "Remove project" : "Delete worktree";
-  const managedSlug = worktreeIdentity(worktree)?.slug;
-  const displayName = managedSlug ?? workspaceName(worktree);
-  const displaySummary = activitySummary
-    ? activitySummary.hasUnread === unread
-      ? activitySummary
-      : { ...activitySummary, hasUnread: unread }
-    : undefined;
-  const aggregateIndicator = resolveActivityIndicator(displaySummary);
-  const indicator: StatusDotState | null =
-    aggregateIndicator ?? (activitySummary === undefined && agent ? agent.state : null);
-  const slotState = slotStateFor(indicator);
-  // Needs input outranks the supervisor; the supervisor typing outranks running and unread.
+  const displayName = worktreeLabel(worktree);
+  const slotState = worktreeRowSlot({ activitySummary, unread, agentState: agent?.state });
   const { snapshot: supervisor, now: supervisorNow } = useSupervisor();
-  const supervisorTyping = slotState !== "waiting" && !isRemote && supervisorTypingIn(supervisor, supervisorNow, worktree.path);
-  const hostName = isRemote ? (worktree.hostLabel ?? worktree.hostSummary ?? "Remote") : undefined;
+  const supervisorTyping = supervisorSlotWins(slotState, isRemote, supervisorTypingIn(supervisor, supervisorNow, worktree.path));
+  const hostName = worktreeRowHost(worktree);
 
   const handleContextMenu = (event: React.MouseEvent) => {
     event.preventDefault();
@@ -423,7 +408,7 @@ export function WorktreeList({
 export function EmptyWorktreesHint({ onCreateWorktree }: { readonly onCreateWorktree?: () => void }) {
   return (
     <span className="flex items-center justify-between gap-2">
-      <span>No worktrees listed yet.</span>
+      <span>{SIDEBAR_EMPTY_TEXT.noWorktrees}</span>
       {onCreateWorktree ? (
         <button
           type="button"
@@ -435,10 +420,4 @@ export function EmptyWorktreesHint({ onCreateWorktree }: { readonly onCreateWork
       ) : null}
     </span>
   );
-}
-
-export function worktreeSortableId(workspaceId: string, worktreePath: string, rowWorkspaceId?: string) {
-  return rowWorkspaceId
-    ? `sidebar-worktree:${workspaceId}:${rowWorkspaceId}:${worktreePath}`
-    : `sidebar-worktree:${workspaceId}:${worktreePath}`;
 }

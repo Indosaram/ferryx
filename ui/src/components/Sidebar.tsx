@@ -29,24 +29,21 @@ import {
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 
-import { combineActivitySummaries, resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
+import { resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
 import { cn } from "../lib/cn";
 import { workspaceName } from "../lib/branchFilter";
 import { projectRootWorktree } from "../lib/projectIdentity";
 import { groupProjects, isProjectGroupActive } from "../lib/projectGrouping";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import { useSshHosts } from "../lib/sshHosts";
-import { MACHINE_STATE_LABELS, pairedMachineStatus } from "../lib/machineStatus";
 import type { RemoteContext } from "../lib/machineNavigation";
 import {
   getPairedHostReachability,
   subscribePairedHostReachability,
   usePairedHostReachability,
-  type PairedHostReachabilityView,
 } from "../lib/pairedHostReachability";
-import { remoteHostStore, type RemoteHostState } from "../state/remoteHostStore";
+import { remoteHostStore } from "../state/remoteHostStore";
 import { worktreeListingFailureStore } from "../state/worktreeListingFailures";
-import { resolveWorktreeOwnerId } from "../lib/worktreeOwnership";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import {
   clampSidebarWidth,
@@ -68,7 +65,7 @@ import {
 import { revealPath, type RegisteredProject } from "../lib/tauri";
 import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
 import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
-import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
+import type { ActiveAgent, DirtyState, Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
@@ -78,7 +75,32 @@ import { SectionHeader } from "./ui/SectionHeader";
 import { SegmentedControl } from "./ui/SegmentedControl";
 import { SupervisorPanel, useSupervisorTyping } from "./supervisor/SupervisorPanel";
 import { useAdvancedFeatures } from "../lib/advancedFeatures";
-import { SidebarStateSlot, type SidebarSlotState } from "./sidebar/SidebarStateSlot";
+import { SidebarStateSlot } from "./sidebar/SidebarStateSlot";
+import {
+  filterSidebarEntries,
+  groupHeaderShowsHost,
+  isStandaloneRemoteGroup,
+  projectDisplayLabel,
+  projectFilterLabels,
+  projectHostLabel,
+  SIDEBAR_EMPTY_TEXT,
+  worktreeLabel,
+} from "./sidebar/sidebarLabels";
+import {
+  applyWorktreeOrder,
+  emptyProjectGroupIds,
+  groupWorktreesByProject,
+  initialCollapsedProjects,
+  seedCollapsedProjects,
+} from "./sidebar/sidebarRows";
+import {
+  pairedSlotStatus,
+  projectAttentionState,
+  projectSlot,
+  projectStatus,
+  summarizeProjectActivity,
+  worktreesFooterSummary,
+} from "./sidebar/sidebarSlots";
 import type { SectionId } from "./settings/types";
 import { EmptyWorktreesHint, fileManagerActionLabel, WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
 
@@ -197,24 +219,15 @@ export function Sidebar({
 
   const projectGroups = useMemo(() => groupProjects(projects), [projects]);
   const emptyGroupIds = useMemo(
-    () => new Set(projectGroups
-      .filter((group) => group.memberProjects.every((member) => emptyWorkspaceIds?.includes(member.workspaceId)))
-      .map((group) => group.groupId)),
+    () => emptyProjectGroupIds(projectGroups, emptyWorkspaceIds),
     [emptyWorkspaceIds, projectGroups],
   );
 
   // Accordion state is stored as the set of *collapsed* projects, so each project keeps its own
   // open/closed state and toggling one never disturbs another. Projects the user has never
   // toggled default to collapsed unless they are the active project.
-  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => {
-    const stored = loadCollapsedProjects();
-    // Once the user has toggled anything the persisted set is authoritative; only a first run
-    // (nothing persisted) falls back to "everything but the active project starts collapsed".
-    return new Set([
-      ...(stored ?? seedCollapsedProjects(new Set<string>(), projects, activeProjectId)),
-      ...emptyGroupIds,
-    ]);
-  });
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() =>
+    initialCollapsedProjects({ stored: loadCollapsedProjects(), projects, activeProjectId, emptyGroupIds }));
   const previousEmptyGroupIds = useRef(emptyGroupIds);
   useEffect(() => {
     const newlyEmpty = [...emptyGroupIds].filter((id) => !previousEmptyGroupIds.current.has(id));
@@ -265,14 +278,15 @@ export function Sidebar({
     return () => { unsubscribe(); };
   }, []);
   const naturalWorktreesByProject = useMemo(
-    () => groupWorktreesByProject(
+    () => groupWorktreesByProject({
       worktrees,
       projects,
       activeProjectId,
       inactiveProjectWorktrees,
       hosts,
       remoteState,
-    ),
+      reachability: getPairedHostReachability,
+    }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reachabilityVersion invalidates the store read inside
     [activeProjectId, hosts, inactiveProjectWorktrees, projects, worktrees, remoteState, reachabilityVersion],
   );
@@ -288,11 +302,15 @@ export function Sidebar({
   // The filter is session-only UI state: never persisted.
   const [filterQuery, setFilterQuery] = useState("");
   const visibleProjectGroups = useMemo(
-    () => filterProjectGroups(projectGroups, worktreesByProject, filterQuery, hosts, remoteState),
+    () => filterSidebarEntries(
+      projectGroups.map((group) => ({ group, rows: worktreesByProject.get(group.primaryProject.workspaceId) ?? [] })),
+      filterQuery,
+      { project: (group) => projectFilterLabels(group, { hosts, remoteState }), row: worktreeLabel },
+    ),
     [filterQuery, hosts, projectGroups, remoteState, worktreesByProject],
   );
   const statusFooterText = useMemo(
-    () => sidebarStatusFooterText(visibleProjectGroups.flatMap((entry) => entry.rows), activityByWorktreePath),
+    () => worktreesFooterSummary(visibleProjectGroups.flatMap((entry) => entry.rows), activityByWorktreePath),
     [activityByWorktreePath, visibleProjectGroups],
   );
 
@@ -559,7 +577,7 @@ export function Sidebar({
           <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2 scrollbar-sleek">
             {projects.length === 0 ? (
               <p className="px-2 py-3 text-[11px] leading-relaxed text-muted-foreground">
-                No projects registered yet.
+                {SIDEBAR_EMPTY_TEXT.noProjects}
               </p>
             ) : null}
 
@@ -576,15 +594,10 @@ export function Sidebar({
                 );
                 const attentionState = projectAttentionState(projectActivity);
                 const activityIndicator = resolveActivityIndicator(projectActivity);
-                const isStandaloneRemote =
-                  project.target?.kind === "ssh" &&
-                  group.memberProjects.length === 1 &&
-                  !group.memberProjects.some((p) => p.target?.kind !== "ssh");
-                const standaloneRemote = project.target?.kind === "ssh" ? project.target : null;
-                const standaloneHost = standaloneRemote
-                  ? hosts.find((h) => h.id === standaloneRemote.hostId)
-                  : null;
-                const standaloneHostLabel = standaloneHost?.label ?? project.hostLabel ?? standaloneRemote?.hostId;
+                const isStandaloneRemote = isStandaloneRemoteGroup(group);
+                const standaloneHostLabel = project.target?.kind === "ssh"
+                  ? (projectHostLabel(project, { hosts, remoteState }) ?? undefined)
+                  : undefined;
                 const standaloneRootWorktree = projectRootWorktree(project, standaloneHostLabel);
                 const standaloneDisplayName = workspaceName(standaloneRootWorktree);
                 const isLocal =
@@ -606,7 +619,7 @@ export function Sidebar({
                     onRemoveProject={onRemoveProject ? () => onRemoveProject(project) : undefined}
                     onManageDisk={onManageDisk ? () => onManageDisk(project) : undefined}
                     onOpenHistory={onOpenHistory && isLocal ? () => onOpenHistory(project) : undefined}
-                    isStandaloneRemote={isStandaloneRemote || (project.target?.kind === "pairedDaemon" && group.memberProjects.length === 1)}
+                    isStandaloneRemote={groupHeaderShowsHost(group)}
                     staleSummary={staleSummary}
                     onOpenRemoteSettings={onOpenSettings ? (context) => onOpenSettings("remote", context) : undefined}
                   />
@@ -819,23 +832,18 @@ function ProjectHeader({
     worktreeListingFailureStore.getState,
   )[project.workspaceId];
   const remote = project.target && project.target.kind !== "local" ? project.target : null;
-  const hostLabel = remote?.kind === "pairedDaemon"
-    ? (remoteState.hosts[remote.hostId]?.name ?? project.hostLabel ?? remote.hostId)
-    : remote ? (hosts.find((host) => host.id === remote.hostId)?.label ?? project.hostLabel ?? remote.hostId) : null;
-  const folderName = remote
-    ? (project.repoRoot.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) ?? "/")
-    : project.workspaceId;
-  const projectLabel = remote
-    ? (isStandaloneRemote && hostLabel ? `${folderName} (${hostLabel})` : folderName)
-    : project.workspaceId;
+  const hostLabel = projectHostLabel(project, { hosts, remoteState });
+  const projectLabel = projectDisplayLabel(project, hostLabel, isStandaloneRemote);
   const menuUnlistenRef = useRef<(() => void) | null>(null);
   const slot = projectSlot({
-    listingFailure,
+    status: projectStatus({
+      listingFailure,
+      paired: remote?.kind === "pairedDaemon"
+        ? { staleSummary, ...pairedSlotStatus(remote.hostId, remoteState, reachability) }
+        : null,
+    }),
     activity,
     attentionState,
-    paired: remote?.kind === "pairedDaemon"
-      ? { staleSummary, ...pairedSlotStatus(remote.hostId, remoteState, reachability) }
-      : null,
   });
   const pairedHostId = remote?.kind === "pairedDaemon" ? remote.hostId : null;
   const activateSlot = slot.kind === "paired" && !slot.connected && pairedHostId && onOpenRemoteSettings && !inert
@@ -983,269 +991,6 @@ function ProjectHeader({
   );
 }
 
-type ProjectSlot =
-  | { kind: "none" }
-  | { kind: "failure" | "attention" | "working" | "paired"; state: SidebarSlotState; label?: string; title?: string; testId?: string; connected?: boolean };
-
-/**
- * One status slot per project row (ui/DESIGN.md section 4 rule 7): listing failure > needs input >
- * unseen completion > running > unread > paired machine state. An unseen completion outranks live
- * work, as in resolveActivityIndicator, so a finished agent is never hidden behind a spinner.
- */
-function projectSlot({ listingFailure, activity, attentionState, paired }: {
-  listingFailure: string | undefined;
-  activity: ActivitySummary;
-  attentionState: "waiting" | "done" | "unread" | null;
-  paired: { staleSummary?: string; label: string; connected: boolean; reason: string | null } | null;
-}): ProjectSlot {
-  if (listingFailure) {
-    return { kind: "failure", state: null, label: "Unavailable", title: `Couldn't load worktrees: ${listingFailure}`, testId: "project-worktrees-unavailable" };
-  }
-  if (attentionState && (attentionState === "waiting" || activity.hasDone || !activity.hasWorking)) {
-    return {
-      kind: "attention",
-      state: attentionState,
-      title: attentionState === "waiting" ? "Agent needs attention" : "Unread activity",
-      testId: "project-attention-indicator",
-    };
-  }
-  if (activity.hasWorking) {
-    return {
-      kind: "working",
-      state: "working",
-      label: activity.runningCount > 1 ? `${activity.runningCount} running` : undefined,
-      testId: "project-running-badge",
-    };
-  }
-  if (paired) {
-    const connected = paired.connected && !paired.staleSummary;
-    return {
-      kind: "paired",
-      state: null,
-      label: paired.staleSummary ?? paired.label,
-      title: connected ? undefined : paired.reason ?? undefined,
-      connected,
-    };
-  }
-  return { kind: "none" };
-}
-
-/**
- * Paired machine text for the project slot and its worktree rows, from the shared remote status
- * vocabulary, so the header and the rows never disagree.
- */
-function pairedSlotStatus(
-  hostId: string,
-  state: RemoteHostState,
-  reachability: PairedHostReachabilityView,
-): { label: string; connected: boolean; reason: string | null } {
-  const host = state.hosts[hostId];
-  if (state.machineFeaturesEnabled === false) return { label: MACHINE_STATE_LABELS.disabled, connected: false, reason: null };
-  // Native inventory still booting: not an error yet.
-  if (state.nativeStatus !== "ready") return { label: MACHINE_STATE_LABELS.checking, connected: false, reason: null };
-  if (!host) return { label: "Unavailable", connected: false, reason: null };
-  const status = pairedMachineStatus({
-    host,
-    nativeReady: true,
-    accountEnrolled: false,
-    reachability,
-  });
-  return { label: status.label, connected: status.state === "connected", reason: status.reason };
-}
-
-function pairedRowSummary(hostId: string, state: RemoteHostState | undefined): string {
-  return state ? pairedSlotStatus(hostId, state, getPairedHostReachability(hostId)).label : "Unavailable";
-}
-
-function projectAttentionState(activity: ActivitySummary): "waiting" | "done" | "unread" | null {
-  if (activity.hasWaiting) return "waiting";
-  if (activity.hasUnread) return "unread";
-  return activity.hasDone ? "done" : null;
-}
-
-function summarizeProjectActivity(
-  worktrees: Worktree[],
-  activityByWorktreePath: Record<string, ActivitySummary | undefined> | undefined,
-  unreadWorktreePaths: Record<string, boolean> | undefined,
-): ActivitySummary {
-  const summaries = worktrees
-    .map((worktree) => worktree.workspaceId?.startsWith("daemon:") ? undefined : activityByWorktreePath?.[worktree.path])
-    .filter((summary): summary is ActivitySummary => Boolean(summary));
-  const hasUnread = worktrees.some((worktree) => !worktree.workspaceId?.startsWith("daemon:") && Boolean(unreadWorktreePaths?.[worktree.path]));
-  return combineActivitySummaries(summaries, hasUnread);
-}
-
-/**
- * Worktrees carry their owning project inside their `orca/<wsId>/<slug>` branch name. Anything
- * without that identity is attributed by path — a project root, or a path nested under one — so a
- * plain-folder project's root row never lands under whichever project happens to be active.
- */
-function groupWorktreesByProject(
-  worktrees: Worktree[],
-  projects: RegisteredProject[],
-  activeProjectId: string | undefined,
-  inactiveProjectWorktrees?: Record<string, Worktree[]>,
-  hosts?: Array<{ id: string; label: string }>,
-  remoteState?: RemoteHostState,
-) {
-  const groups = groupProjects(projects);
-  const grouped = new Map<string, Worktree[]>();
-  for (const group of groups) {
-    const primaryId = group.primaryProject.workspaceId;
-    const listed = group.memberProjects.flatMap((member) => {
-      const hasActiveWorktrees = worktrees.some(
-        (w) => resolveWorktreeOwnerId(w, projects, activeProjectId) === member.workspaceId,
-      );
-      if (member.workspaceId === activeProjectId && hasActiveWorktrees) return [];
-      return (inactiveProjectWorktrees?.[member.workspaceId] ?? []).map((row) =>
-        (member.workspaceId === primaryId && member.target?.kind !== "pairedDaemon") || row.workspaceId
-          ? row
-          : { ...row, workspaceId: member.workspaceId });
-    });
-    grouped.set(primaryId, listed);
-  }
-
-  for (const worktree of worktrees) {
-    const owner = resolveWorktreeOwnerId(worktree, projects, activeProjectId);
-    if (!owner) continue;
-    const targetGroup = groups.find((g) => g.memberProjects.some((m) => m.workspaceId === owner));
-    const targetId = targetGroup ? targetGroup.primaryProject.workspaceId : owner;
-    const bucket = grouped.get(targetId);
-    const resolvedWorkspaceId = worktree.workspaceId ?? owner;
-    if (
-      !bucket ||
-      bucket.some(
-        (candidate) =>
-          candidate.path === worktree.path &&
-          (candidate.workspaceId ?? targetId) === resolvedWorkspaceId,
-      )
-    ) {
-      continue;
-    }
-    const member = targetGroup?.memberProjects.find((m) => m.workspaceId === resolvedWorkspaceId);
-    let resolvedWorktree = owner !== targetId && !worktree.workspaceId
-      ? { ...worktree, workspaceId: owner }
-      : worktree;
-    const memberTarget = member?.target;
-    if (!resolvedWorktree.hostLabel && memberTarget?.kind === "ssh") {
-      const hostLabel = hosts?.find((h) => h.id === memberTarget.hostId)?.label ?? memberTarget.hostId;
-      resolvedWorktree = { ...resolvedWorktree, hostLabel, ...(worktree.workspaceId ? {} : { workspaceId: owner }) };
-    }
-    bucket.push(resolvedWorktree);
-  }
-
-  if (activeProjectId) {
-    const activeGroup = groups.find((g) => g.memberProjects.some((m) => m.workspaceId === activeProjectId));
-    const activePrimaryId = activeGroup ? activeGroup.primaryProject.workspaceId : activeProjectId;
-    const activeBucket = grouped.get(activePrimaryId);
-    if (activeBucket) {
-      const activeProj = projects.find((p) => p.workspaceId === activeProjectId);
-      const isLocalActive = activeProj?.target?.kind !== "ssh";
-      const hasLocalActiveWorktree = activeBucket.some(
-        (candidate) => (candidate.workspaceId ?? activePrimaryId) === activeProjectId && !candidate.hostLabel,
-      );
-      if (isLocalActive && !hasLocalActiveWorktree) {
-        const cached = inactiveProjectWorktrees?.[activeProjectId] ?? inactiveProjectWorktrees?.[activePrimaryId];
-        if (cached && cached.length > 0) {
-          for (const row of cached) {
-            if (
-              !activeBucket.some(
-                (candidate) =>
-                  candidate.path === row.path &&
-                  (candidate.workspaceId ?? activePrimaryId) === (row.workspaceId ?? activePrimaryId),
-              )
-            ) {
-              activeBucket.push(row);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // A non-Git project has no git worktrees at all, so without a synthesized
-  // folder row its group would render empty and the folder would be
-  // unselectable - including while it is the active project.
-  for (const group of groups) {
-    const project = group.primaryProject;
-    const bucket = grouped.get(project.workspaceId);
-    if (!bucket) continue;
-    if (project.gitRoot === null && project.target?.kind !== "ssh" && bucket.length === 0) {
-      bucket.push(projectRootWorktree(project));
-    }
-
-    for (const member of group.memberProjects) {
-      const target = member.target;
-      if (target?.kind === "ssh" || target?.kind === "pairedDaemon") {
-        const existingIndex = bucket.findIndex(
-          (candidate) =>
-            candidate.path === member.repoRoot &&
-            (candidate.workspaceId ?? project.workspaceId) === member.workspaceId,
-        );
-        const hostLabel = (target.kind === "pairedDaemon" ? remoteState?.hosts[target.hostId]?.name : hosts?.find((h) => h.id === target.hostId)?.label) ?? member.hostLabel ?? target.hostId;
-        if (target.kind === "pairedDaemon") {
-          for (let i = 0; i < bucket.length; i++) {
-            if ((bucket[i].workspaceId ?? project.workspaceId) === member.workspaceId) {
-              const row = bucket[i];
-              const isStale = Boolean(row.stale || row.freshness?.stale);
-              const summary = isStale && row.hostSummary
-                ? row.hostSummary
-                : pairedRowSummary(target.hostId, remoteState);
-              bucket[i] = { ...row, workspaceId: member.workspaceId, hostLabel, hostSummary: summary };
-            }
-          }
-        }
-        if (existingIndex === -1) {
-          bucket.push({ ...projectRootWorktree(member, hostLabel), ...(target.kind === "pairedDaemon" ? { hostSummary: pairedRowSummary(target.hostId, remoteState) } : {}) });
-        } else {
-          const row = bucket[existingIndex];
-          const remoteFolder = target.kind === "ssh" && member.gitRoot !== null && member.gitRoot !== undefined &&
-            member.gitRoot.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() !==
-              member.repoRoot.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-          const newBranch = remoteFolder ? null : member.gitBranch !== undefined ? member.gitBranch : row.branch;
-          const newHead = remoteFolder ? "" : member.gitHead !== undefined ? (member.gitHead ?? "") : row.head;
-          const newDetached = Boolean(newHead && !newBranch);
-          bucket[existingIndex] = {
-            ...row,
-            hostLabel: hostLabel ?? row.hostLabel,
-            branch: newBranch,
-            head: newHead,
-            detached: newDetached,
-          };
-        }
-      }
-    }
-  }
-
-  return grouped;
-}
-
-function applyWorktreeOrder(grouped: Map<string, Worktree[]>, order: WorktreeOrder) {
-  const ordered = new Map<string, Worktree[]>();
-  for (const [workspaceId, rows] of grouped) {
-    const rowKey = (r: Worktree) => worktreeSortableId(workspaceId, r.path, r.workspaceId);
-    const byKey = new Map(rows.map((row) => [rowKey(row), row]));
-    const seen = new Set<string>();
-    const next: Worktree[] = [];
-    for (const path of order[workspaceId] ?? []) {
-      // Prefer the qualified ID, then accept previously stored member keys or paths.
-      const row = byKey.get(path) ?? rows.find((r) =>
-        (r.path === path || (r.workspaceId && `${r.workspaceId}:${r.path}` === path)) && !seen.has(rowKey(r)));
-      if (!row || seen.has(rowKey(row))) continue;
-      seen.add(rowKey(row));
-      next.push(row);
-    }
-    for (const row of rows) {
-      const key = rowKey(row);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      next.push(row);
-    }
-    ordered.set(workspaceId, next);
-  }
-  return ordered;
-}
-
 function pruneWorktreeOrder(order: WorktreeOrder, grouped: Map<string, Worktree[]>) {
   const pruned: WorktreeOrder = {};
   for (const [workspaceId, storedPaths] of Object.entries(order)) {
@@ -1294,105 +1039,3 @@ function readSidebarDragData(value: unknown): SidebarDragData | null {
   }
   return null;
 }
-
-function seedCollapsedProjects(
-  collapsed: Set<string>,
-  projects: RegisteredProject[],
-  activeProjectId: string | undefined,
-) {
-  const groups = groupProjects(projects);
-  const activeGroup = groups.find((g) => isProjectGroupActive(g, activeProjectId));
-  const seeded = groups.filter(
-    (group) => group.groupId !== activeGroup?.groupId && !collapsed.has(group.groupId),
-  );
-  if (seeded.length === 0) return collapsed;
-  const next = new Set(collapsed);
-  for (const group of seeded) next.add(group.groupId);
-  return next;
-}
-
-type ProjectGroup = ReturnType<typeof groupProjects>[number];
-
-type VisibleProjectGroup = {
-  group: ProjectGroup;
-  rows: Worktree[];
-  /** True while a non-empty filter matched one of this project's worktrees. */
-  forceExpanded: boolean;
-};
-
-/** Mirrors ProjectHeader's visible label so the filter matches what the user reads. */
-function projectFilterLabels(
-  group: ProjectGroup,
-  hosts: Array<{ id: string; label: string }>,
-  remoteState: RemoteHostState,
-): string[] {
-  return group.memberProjects.flatMap((project) => {
-    const remote = project.target && project.target.kind !== "local" ? project.target : null;
-    if (!remote) return [project.workspaceId];
-    const hostLabel = remote.kind === "pairedDaemon"
-      ? (remoteState.hosts[remote.hostId]?.name ?? project.hostLabel ?? remote.hostId)
-      : (hosts.find((host) => host.id === remote.hostId)?.label ?? project.hostLabel ?? remote.hostId);
-    const folderName = project.repoRoot.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) ?? "/";
-    return [folderName, hostLabel];
-  });
-}
-
-function worktreeFilterLabel(worktree: Worktree): string {
-  return worktreeIdentity(worktree)?.slug ?? workspaceName(worktree);
-}
-
-/**
- * Case-insensitive substring filter over project labels and worktree display names. A project
- * whose label matches keeps all its rows; otherwise only matching rows stay and the project is
- * forced open so they are visible.
- */
-function filterProjectGroups(
-  groups: ProjectGroup[],
-  worktreesByProject: Map<string, Worktree[]>,
-  query: string,
-  hosts: Array<{ id: string; label: string }>,
-  remoteState: RemoteHostState,
-): VisibleProjectGroup[] {
-  const needle = query.trim().toLowerCase();
-  const entries = groups.map((group) => ({
-    group,
-    rows: worktreesByProject.get(group.primaryProject.workspaceId) ?? [],
-    forceExpanded: false,
-  }));
-  if (!needle) return entries;
-  return entries.flatMap((entry) => {
-    const matchingRows = entry.rows.filter((row) => worktreeFilterLabel(row).toLowerCase().includes(needle));
-    const projectMatches = projectFilterLabels(entry.group, hosts, remoteState)
-      .some((label) => label.toLowerCase().includes(needle));
-    if (projectMatches) return [{ ...entry, forceExpanded: matchingRows.length > 0 }];
-    if (matchingRows.length === 0) return [];
-    return [{ ...entry, rows: matchingRows, forceExpanded: true }];
-  });
-}
-
-/**
- * Footer aggregate (ui/DESIGN.md section 4 rule 10): each worktree counts once, needs input
- * outranking running as in the row state slot. Zero parts are omitted; both zero is empty.
- */
-export function sidebarStatusFooterText(
-  worktrees: readonly Worktree[],
-  activityByWorktreePath: Record<string, ActivitySummary | undefined> | undefined,
-): string {
-  let running = 0;
-  let waiting = 0;
-  const seen = new Set<string>();
-  for (const worktree of worktrees) {
-    if (worktree.workspaceId?.startsWith("daemon:")) continue;
-    const key = `${worktree.workspaceId ?? ""}:${worktree.path}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const activity = activityByWorktreePath?.[worktree.path];
-    if (activity?.hasWaiting) waiting += 1;
-    else if (activity?.hasWorking) running += 1;
-  }
-  return [
-    running > 0 ? `${running} running` : null,
-    waiting > 0 ? `${waiting} needs input` : null,
-  ].filter(Boolean).join(" · ");
-}
-
