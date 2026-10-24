@@ -453,7 +453,7 @@ impl MachineViewResponse {
     }
 }
 
-fn bearer(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<String> {
     let value = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
@@ -1777,6 +1777,10 @@ pub fn router(state: Arc<AccountState>) -> Router {
         .route("/api/account/v1/device/poll", post(device_poll))
         .route("/api/account/v1/device/approve", get(device_approve_get))
         .route("/api/account/v1/logout", post(logout))
+        .route(
+            "/api/account/v1/account/delete",
+            post(super::deletion::delete_account),
+        )
         .route(
             "/api/account/v1/enrollment-codes",
             post(create_enrollment_code),

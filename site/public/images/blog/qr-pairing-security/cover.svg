@@ -32,12 +32,12 @@
       <stop offset="100%" stop-color="#2dd4bf"/>
     </linearGradient>
 
-    <linearGradient id="qrBitGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+    <linearGradient id="bitGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#00f2fe"/>
       <stop offset="100%" stop-color="#0ea5e9"/>
     </linearGradient>
 
-    <linearGradient id="qrBitGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+    <linearGradient id="bitGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#2dd4bf"/>
       <stop offset="100%" stop-color="#0d9488"/>
     </linearGradient>
@@ -100,7 +100,7 @@
     <path d="M 1150 565 L 1150 580 L 1135 580" fill="none" stroke="#00f2fe" stroke-width="1.5" opacity="0.6"/>
   </g>
 
-  <!-- ==================== CENTRAL VISUAL: QR WITH SHIELD ==================== -->
+  <!-- ==================== CENTRAL VISUAL: SHIELD ==================== -->
   <g transform="translate(600, 260)">
     <!-- Outer Decorative Concentric Rings & Target Reticles -->
     <circle cx="0" cy="0" r="230" fill="none" stroke="#0e2a42" stroke-width="1.5"/>
@@ -123,46 +123,8 @@
     <path d="M 0 -142 L 118 -82 L 118 40 C 118 102 59 144 0 168 C -59 144 -118 102 -118 40 L -118 -82 Z" 
           fill="none" stroke="#00f2fe" stroke-width="1.2" opacity="0.45" stroke-dasharray="10 5"/>
 
-    <!-- ==================== QR CODE INTEGRATION ==================== -->
-    <!-- Stylized, Crisp QR Matrix centered in the Shield -->
+    <!-- ==================== SIGNAL CLUSTER ==================== -->
     <g transform="translate(0, 0)">
-      <!-- QR Finder Pattern: TOP-LEFT (-75, -95) -->
-      <g transform="translate(-75, -95)">
-        <rect x="-24" y="-24" width="48" height="48" rx="6" fill="#08182b" stroke="#00f2fe" stroke-width="3" filter="url(#glow)"/>
-        <rect x="-14" y="-14" width="28" height="28" rx="3" fill="none" stroke="#0b243e" stroke-width="2"/>
-        <rect x="-8" y="-8" width="16" height="16" rx="2" fill="#2dd4bf" filter="url(#glow)"/>
-      </g>
-
-      <!-- QR Finder Pattern: TOP-RIGHT (75, -95) -->
-      <g transform="translate(75, -95)">
-        <rect x="-24" y="-24" width="48" height="48" rx="6" fill="#08182b" stroke="#00f2fe" stroke-width="3" filter="url(#glow)"/>
-        <rect x="-14" y="-14" width="28" height="28" rx="3" fill="none" stroke="#0b243e" stroke-width="2"/>
-        <rect x="-8" y="-8" width="16" height="16" rx="2" fill="#2dd4bf" filter="url(#glow)"/>
-      </g>
-
-      <!-- QR Finder Pattern: BOTTOM-LEFT (-75, 55) -->
-      <g transform="translate(-75, 55)">
-        <rect x="-24" y="-24" width="48" height="48" rx="6" fill="#08182b" stroke="#00f2fe" stroke-width="3" filter="url(#glow)"/>
-        <rect x="-14" y="-14" width="28" height="28" rx="3" fill="none" stroke="#0b243e" stroke-width="2"/>
-        <rect x="-8" y="-8" width="16" height="16" rx="2" fill="#2dd4bf" filter="url(#glow)"/>
-      </g>
-
-      <!-- Timing Strips (connecting patterns) -->
-      <g fill="#00f2fe" opacity="0.6">
-        <!-- Horizontal timing line -->
-        <rect x="-40" y="-99" width="8" height="8" rx="2"/>
-        <rect x="-20" y="-99" width="8" height="8" rx="2"/>
-        <rect x="0" y="-99" width="8" height="8" rx="2"/>
-        <rect x="20" y="-99" width="8" height="8" rx="2"/>
-        <rect x="40" y="-99" width="8" height="8" rx="2"/>
-
-        <!-- Vertical timing line -->
-        <rect x="-79" y="-60" width="8" height="8" rx="2"/>
-        <rect x="-79" y="-40" width="8" height="8" rx="2"/>
-        <rect x="-79" y="-20" width="8" height="8" rx="2"/>
-        <rect x="-79" y="0" width="8" height="8" rx="2"/>
-        <rect x="-79" y="20" width="8" height="8" rx="2"/>
-      </g>
 
       <!-- Data Bits / Modules in Grid -->
       <!-- Top Center Data Cluster -->
@@ -226,7 +188,7 @@
       <circle cx="0" cy="140" r="1.5" fill="#ffffff"/>
     </g>
 
-    <!-- Scanning Laser Line across QR / Shield -->
+    <!-- Scanning Laser Line across Shield -->
     <line x1="-130" y1="-20" x2="130" y2="-20" stroke="#00f2fe" stroke-width="2.5" opacity="0.85" filter="url(#glow)"/>
     <line x1="-120" y1="-20" x2="120" y2="-20" stroke="#ffffff" stroke-width="1" opacity="0.9"/>
     <!-- Laser Edge Indicators -->
@@ -240,9 +202,9 @@
     <rect x="-65" y="-52" width="130" height="22" rx="11" fill="#082035" stroke="#00f2fe" stroke-width="1.2" opacity="0.9"/>
     <text y="-37" font-family="'SF Mono', 'JetBrains Mono', Menlo, monospace" font-size="11" font-weight="600" fill="#2dd4bf" letter-spacing="1.5">SECURITY</text>
 
-    <!-- Main Title: Max 3 words -> "QR PAIRING SECURITY" -->
+    <!-- Main Title: Max 3 words -> "PAIRING SECURITY" -->
     <text y="6" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" font-size="42" font-weight="800" letter-spacing="2.5" fill="#ffffff">
-      QR <tspan fill="#00f2fe">PAIRING</tspan> <tspan fill="#2dd4bf">SECURITY</tspan>
+      <tspan fill="#00f2fe">PAIRING</tspan> <tspan fill="#2dd4bf">SECURITY</tspan>
     </text>
 
     <!-- Glowing baseline accent line -->

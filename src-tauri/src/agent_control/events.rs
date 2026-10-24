@@ -148,9 +148,26 @@ impl AgentEventBus {
         self.log.lock().revision
     }
 
+    /// Newest sequence issued in the shared domain or logged, whichever is higher.
+    ///
+    /// An observation holds its sequence (`allocate_sequence`) before `publish` logs it, so the
+    /// log revision alone can sit below a reading already in flight. A cursor taken from `head`
+    /// is at or past every such reading. `replay(head())` stays an `Events` cursor: the domain
+    /// head and the revision only grow, so `after <= domain_head().max(revision)` still holds
+    /// when `replay` checks it (only an eviction past the cursor makes it a gap).
+    pub fn head(&self) -> u64 {
+        let domain = self.domain_head();
+        domain.max(self.log.lock().revision)
+    }
+
     /// Record one changed reading and wake waiters. Unchanged readings are the caller's to drop.
     pub fn publish(&self, draft: ObservationDraft) -> AgentObservation {
         let sequence = self.allocate_sequence(&draft);
+        self.record(sequence, draft)
+    }
+
+    /// Log a reading under a sequence `allocate_sequence` already issued and wake waiters.
+    fn record(&self, sequence: u64, draft: ObservationDraft) -> AgentObservation {
         let observation = AgentObservation {
             sequence,
             session_id: draft.session_id,
@@ -506,6 +523,38 @@ mod tests {
             AgentReplay::Events { events, .. } => assert_eq!(events.len(), 1),
             AgentReplay::Gap { .. } => panic!("a hole made by other machine events is not a gap"),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn head_covers_a_sequence_issued_before_its_reading_is_logged() {
+        let bus = AgentEventBus::new(8);
+        let logged = bus.publish(draft("s", AgentControlState::Idle));
+        // A reading took its sequence but `publish` has not logged it yet.
+        let in_flight = bus.allocate_sequence(&draft("s", AgentControlState::Working));
+        // The domain also moved ahead of the log for other machine events.
+        *bus.local_sequence.lock() = in_flight + 2;
+        let head = bus.head();
+        assert_eq!(bus.revision(), logged.sequence);
+        assert!(head > bus.revision());
+        assert!(in_flight <= head);
+
+        bus.record(in_flight, draft("s", AgentControlState::Working));
+        match bus.replay(head) {
+            AgentReplay::Events { events, .. } => {
+                assert!(events.is_empty(), "a reading at or before head is not newer: {events:?}")
+            }
+            AgentReplay::Gap { .. } => panic!("head is a valid cursor"),
+        }
+        let hit = wait_for(
+            &bus,
+            "s",
+            "working",
+            head,
+            None,
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(hit.is_none(), "the in-flight reading must not satisfy a wait from head");
     }
 
     #[test]

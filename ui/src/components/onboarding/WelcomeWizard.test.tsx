@@ -3,11 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ResolvedAgent } from "../../lib/agentsSettings";
 import type { OnboardingStepId } from "../../lib/onboarding";
-import type { SystemPermissionsStatus } from "../../lib/types";
 import { WelcomeWizard, type WelcomeWizardProps } from "./WelcomeWizard";
 
-vi.mock("./PermissionsStep", () => ({
-  PermissionsStep: () => <div data-testid="mock-permissions-step" />,
+vi.mock("./FeaturesStep", () => ({
+  FeaturesStep: () => <div data-testid="mock-features-step" />,
 }));
 
 vi.mock("./AgentsCliStep", () => ({
@@ -29,36 +28,9 @@ const mockAgents: readonly ResolvedAgent[] = [
   },
 ];
 
-const mockPermissions: SystemPermissionsStatus = {
-  platform: "macos",
-  allGranted: true,
-  fullDiskAccess: {
-    status: "granted",
-    granted: true,
-    canRequest: false,
-    canOpenSettings: true,
-    description: "Full disk access granted.",
-  },
-  accessibility: {
-    status: "granted",
-    granted: true,
-    canRequest: false,
-    canOpenSettings: true,
-    description: "Accessibility granted.",
-  },
-  notifications: {
-    status: "granted",
-    granted: true,
-    canRequest: false,
-    canOpenSettings: true,
-    description: "Notifications granted.",
-  },
-};
-
 function createDefaultProps(overrides?: Partial<WelcomeWizardProps>): WelcomeWizardProps {
   return {
-    steps: ["intro", "permissions", "project"] as readonly OnboardingStepId[],
-    permissionsStatus: mockPermissions,
+    steps: ["intro", "features", "project"] as readonly OnboardingStepId[],
     agents: mockAgents,
     isMac: true,
     onAddProject: vi.fn(),
@@ -76,9 +48,9 @@ describe("WelcomeWizard", () => {
     cleanup();
   });
 
-  it('indicator shows "Step 1 of 3" for steps ["intro","permissions","project"]', () => {
+  it('indicator shows "Step 1 of 3" for steps ["intro","features","project"]', () => {
     const props = createDefaultProps({
-      steps: ["intro", "permissions", "project"],
+      steps: ["intro", "features", "project"],
     });
     render(<WelcomeWizard {...props} />);
 
@@ -86,10 +58,10 @@ describe("WelcomeWizard", () => {
     expect(indicator.textContent).toBe("Step 1 of 3");
   });
 
-  it('Continue calls onStepCompleted("intro") and shows the permissions step', () => {
+  it('Continue calls onStepCompleted("intro") and shows the features step', () => {
     const onStepCompleted = vi.fn();
     const props = createDefaultProps({
-      steps: ["intro", "permissions", "project"],
+      steps: ["intro", "features", "project"],
       onStepCompleted,
     });
     render(<WelcomeWizard {...props} />);
@@ -99,13 +71,13 @@ describe("WelcomeWizard", () => {
 
     expect(onStepCompleted).toHaveBeenCalledTimes(1);
     expect(onStepCompleted).toHaveBeenCalledWith("intro");
-    expect(screen.getByTestId("mock-permissions-step")).toBeDefined();
+    expect(screen.getByTestId("mock-features-step")).toBeDefined();
     expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 2 of 3");
   });
 
   it("Back hidden on first step and returns to previous", () => {
     const props = createDefaultProps({
-      steps: ["intro", "permissions", "project"],
+      steps: ["intro", "features", "project"],
     });
     render(<WelcomeWizard {...props} />);
 
@@ -124,7 +96,7 @@ describe("WelcomeWizard", () => {
     const onStepCompleted = vi.fn();
     const onFinish = vi.fn();
     const props = createDefaultProps({
-      steps: ["intro", "permissions", "project"],
+      steps: ["intro", "features", "project"],
       onStepCompleted,
       onFinish,
       initialStepIndex: 2,
@@ -217,13 +189,13 @@ describe("WelcomeWizard", () => {
 
   it("initialStepIndex=1 starts on the second step", () => {
     const props = createDefaultProps({
-      steps: ["intro", "permissions", "project"],
+      steps: ["intro", "features", "project"],
       initialStepIndex: 1,
     });
     render(<WelcomeWizard {...props} />);
 
     expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 2 of 3");
-    expect(screen.getByTestId("mock-permissions-step")).toBeDefined();
+    expect(screen.getByTestId("mock-features-step")).toBeDefined();
     expect(screen.getByTestId("onboarding-back")).toBeDefined();
   });
 
@@ -239,7 +211,7 @@ describe("WelcomeWizard", () => {
 
   it("clamps initialStepIndex within step range", () => {
     const propsNegative = createDefaultProps({
-      steps: ["intro", "permissions", "project"],
+      steps: ["intro", "features", "project"],
       initialStepIndex: -5,
     });
     const { unmount } = render(<WelcomeWizard {...propsNegative} />);
@@ -247,7 +219,7 @@ describe("WelcomeWizard", () => {
     unmount();
 
     const propsOverflow = createDefaultProps({
-      steps: ["intro", "permissions", "project"],
+      steps: ["intro", "features", "project"],
       initialStepIndex: 99,
     });
     render(<WelcomeWizard {...propsOverflow} />);
@@ -265,19 +237,18 @@ describe("WelcomeWizard", () => {
     expect(screen.getByTestId("mock-agents-step")).toBeDefined();
   });
 
-  it("walks the six-step order with Continue and returns with Back", () => {
+  it("walks the five-step order with Continue and returns with Back", () => {
     const props = createDefaultProps({
-      steps: ["intro", "features", "permissions", "agents", "cli", "project"],
+      steps: ["intro", "features", "agents", "cli", "project"],
     });
     render(<WelcomeWizard {...props} />);
 
     const heading = () => screen.getByRole("heading", { level: 2 }).textContent;
-    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 1 of 6");
+    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 1 of 5");
     expect(heading()).toBe("Set up Ferryx");
 
     const expected = [
       "What Ferryx does",
-      "Grant system access",
       "Choose your default agent",
       "Install the command-line tool",
       "Open your first project",
@@ -286,7 +257,7 @@ describe("WelcomeWizard", () => {
       fireEvent.click(screen.getByTestId("onboarding-next"));
       expect(heading()).toBe(title);
       expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe(
-        `Step ${index + 2} of 6`,
+        `Step ${index + 2} of 5`,
       );
     });
     expect(screen.getByTestId("onboarding-finish")).toBeDefined();
@@ -294,12 +265,12 @@ describe("WelcomeWizard", () => {
     fireEvent.click(screen.getByTestId("onboarding-back"));
     expect(heading()).toBe("Install the command-line tool");
     expect(screen.getByTestId("mock-cli-step")).toBeDefined();
-    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 5 of 6");
+    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 4 of 5");
   });
 
   it("labels the agents and command-line steps separately in the rail", () => {
     const props = createDefaultProps({
-      steps: ["intro", "features", "permissions", "agents", "cli", "project"],
+      steps: ["intro", "features", "agents", "cli", "project"],
     });
     render(<WelcomeWizard {...props} />);
 
@@ -326,29 +297,29 @@ describe("WelcomeWizard", () => {
 
   it("marks already satisfied steps done in the rail but never the current step", () => {
     const props = createDefaultProps({
-      steps: ["intro", "features", "permissions", "agents", "project"],
-      doneSteps: ["permissions"],
+      steps: ["intro", "features", "agents", "project"],
+      doneSteps: ["agents"],
       initialStepIndex: 0,
     });
     render(<WelcomeWizard {...props} />);
 
-    const permissionsRow = screen.getByTestId("onboarding-rail-permissions");
+    const agentsRow = screen.getByTestId("onboarding-rail-agents");
     const introRow = screen.getByTestId("onboarding-rail-intro");
-    expect(permissionsRow.querySelector("svg")).not.toBeNull();
+    expect(agentsRow.querySelector("svg")).not.toBeNull();
     expect(introRow.querySelector("svg")).toBeNull();
     expect(introRow.getAttribute("aria-current")).toBe("step");
   });
 
-  it("initialStepIndex=2 opens on the permissions step of the five-step order", () => {
+  it("initialStepIndex=2 opens on the agents step of the four-step order", () => {
     const props = createDefaultProps({
-      steps: ["intro", "features", "permissions", "agents", "project"],
+      steps: ["intro", "features", "agents", "project"],
       initialStepIndex: 2,
     });
     render(<WelcomeWizard {...props} />);
 
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Grant system access");
-    expect(screen.getByTestId("mock-permissions-step")).toBeDefined();
-    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 3 of 5");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Choose your default agent");
+    expect(screen.getByTestId("mock-agents-step")).toBeDefined();
+    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 3 of 4");
   });
 
   it("returns null when steps is empty", () => {

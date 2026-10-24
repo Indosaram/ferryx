@@ -61,4 +61,4 @@ Client side, `ServerAliveInterval 30` with `ServerAliveCountMax 3` is a common s
 
 ### Can I check my home agents from a phone instead of a laptop?
 
-Yes, and it changes the requirements: a phone client favors a paired-app architecture (QR/PIN pairing, outbound relay, browser-or-app viewport) over raw SSH, because it wants the same session reachable without managing keys on the handset. The [phone pairing guide](/blog/pair-ferryx-with-phone/) documents that flow; the daemon keeps sessions alive regardless of which client is attached.
+Yes, and it changes the requirements: a phone client favors a paired-app architecture (account sign-in pairing, outbound relay, browser-or-app viewport) over raw SSH, because it wants the same session reachable without managing keys on the handset. The [phone pairing guide](/blog/pair-ferryx-with-phone/) documents that flow; the daemon keeps sessions alive regardless of which client is attached.

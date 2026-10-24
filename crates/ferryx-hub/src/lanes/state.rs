@@ -61,7 +61,19 @@ impl LaneStatus {
                 LaneStatus::NotDone,
             ],
             LaneStatus::NotDone => &[LaneStatus::DoneClaimed],
-            LaneStatus::VerifiedDone => &[LaneStatus::DoneClaimed],
+            LaneStatus::VerifiedDone => {
+                // A goal contract's blind convergence check is itself the verification.
+                if reason == Some(GOAL_CONVERGED_REASON) {
+                    &[
+                        LaneStatus::DoneClaimed,
+                        LaneStatus::Working,
+                        LaneStatus::Blocked,
+                        LaneStatus::NotDone,
+                    ]
+                } else {
+                    &[LaneStatus::DoneClaimed]
+                }
+            }
             LaneStatus::Closed => {
                 if reason.is_some_and(|reason| reason.starts_with("forced:")) {
                     &[LaneStatus::Working, LaneStatus::VerifiedDone]
@@ -87,6 +99,9 @@ impl std::fmt::Display for LaneStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("unknown lane status: {0}")]
 pub struct UnknownLaneStatus(pub String);
+
+/// Transition reason of a lane whose goal contract converged on Ferryx-attested evidence.
+pub const GOAL_CONVERGED_REASON: &str = "goal_converged";
 
 impl FromStr for LaneStatus {
     type Err = UnknownLaneStatus;

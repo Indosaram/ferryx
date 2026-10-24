@@ -180,12 +180,12 @@
       <rect x="0" y="0" width="314" height="175" rx="10" fill="url(#card-blue)" stroke="#1e3a5f" stroke-width="1.2" />
       <g transform="translate(16, 18)">
         <rect x="0" y="0" width="32" height="32" rx="7" fill="#0d283c" stroke="#00f2fe" stroke-width="1" />
-        <!-- Key / QR Icon -->
+        <!-- Key Icon -->
         <path d="M 8 16 L 16 8 L 24 16 L 16 24 Z" fill="none" stroke="#00f2fe" stroke-width="1.6" />
         <circle cx="16" cy="16" r="2" fill="#00f2fe" />
 
         <text x="44" y="14" fill="#f1f5f9" font-size="13.5" font-weight="700">Pairing Handshake</text>
-        <text x="44" y="30" fill="#00f2fe" font-size="11" font-family="'JetBrains Mono', monospace">6-Digit PIN or QR Code</text>
+        <text x="44" y="30" fill="#00f2fe" font-size="11" font-family="'JetBrains Mono', monospace">6-Digit PIN</text>
 
         <rect x="0" y="44" width="282" height="26" rx="4" fill="#071322" stroke="#162e4a" stroke-width="1" />
         <text x="8" y="61" fill="#38bdf8" font-size="10.5" font-family="'JetBrains Mono', monospace">Grant: dev-macbook-host</text>

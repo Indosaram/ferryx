@@ -95,6 +95,11 @@ export interface UseAccountWorktreesResult {
    */
   acquireConnection: (machineId: string) => Promise<ActiveMachineConnection | null>;
   closeAllExcept: (machineId: string | null) => void;
+  /**
+   * The pooled discovery tunnel to a machine without taking ownership, for read-only side
+   * requests (the phone's supervisor feed). Null when none is pooled or it has closed.
+   */
+  peekConnection: (machineId: string) => { transport: TunnelTransport; deviceToken: string } | null;
 }
 
 interface StoredTunnelState {
@@ -767,6 +772,12 @@ export function useAccountWorktrees(
     [accountSessionToken, linkMachine],
   );
 
+  const peekConnection = useCallback((machineId: string) => {
+    const pooled = tunnelsRef.current.get(machineId);
+    if (!pooled || pooled.transport.isClosed === true) return null;
+    return { transport: pooled.transport, deviceToken: pooled.deviceToken };
+  }, []);
+
   const accountOptions: AccountWorktreeOption[] = [];
   for (const machine of machines) {
     const status = machineStatuses[machine.machineId];
@@ -850,5 +861,6 @@ export function useAccountWorktrees(
     retryMachine,
     acquireConnection,
     closeAllExcept,
+    peekConnection,
   };
 }

@@ -1,8 +1,15 @@
-import { Eye, Keyboard, Pause, Play } from "lucide-react";
+import { Check, Eye, Keyboard, Pause, Play, X } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import { cn } from "../../lib/cn";
-import { setSupervisorLanePaused, type PaneSupervision } from "../../lib/supervisor";
+import {
+  setSupervisorLanePaused,
+  supervisorGoal,
+  supervisorStopReasonLabel,
+  type PaneSupervision,
+  type SupervisorLane,
+} from "../../lib/supervisor";
 
 function ago(atMs: number, now: number): string {
   const seconds = Math.max(0, Math.round((now - atMs) / 1000));
@@ -19,17 +26,22 @@ async function setPaused(laneKey: string, paused: boolean) {
   }
 }
 
-function BarButton({ children, onClick, ghost }: { children: React.ReactNode; onClick: () => void; ghost?: boolean }) {
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String((error as { message?: unknown })?.message ?? error);
+}
+
+function BarButton({ children, onClick, ghost, disabled }: { children: React.ReactNode; onClick: () => void; ghost?: boolean; disabled?: boolean }) {
   return (
     <button
       type="button"
+      disabled={disabled}
       onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => {
         event.stopPropagation();
         onClick();
       }}
       className={cn(
-        "inline-flex h-5 shrink-0 items-center gap-1 rounded-[5px] px-2 text-[10.5px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        "inline-flex h-5 shrink-0 items-center gap-1 rounded-[5px] px-2 text-[10.5px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50",
         ghost ? "text-muted-foreground hover:text-foreground" : "bg-card text-foreground hover:bg-black/40",
       )}
     >
@@ -40,6 +52,32 @@ function BarButton({ children, onClick, ghost }: { children: React.ReactNode; on
 
 /** Height of the bar; the pane toolbar reveals below it so neither covers the other. */
 export const SUPERVISOR_PANE_BAR_PX = 26;
+
+/** Approve or discard the supervisor's proposed next step; buttons stay disabled while the call runs. */
+function ApprovalButtons({ lane }: { lane: SupervisorLane }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const decide = async (action: "approve" | "discard") => {
+    setBusy(true);
+    setError(null);
+    try {
+      await supervisorGoal({ action, laneKey: lane.key });
+    } catch (caught) {
+      const message = errorText(caught);
+      setError(message);
+      toast.error(action === "approve" ? "Could not approve the next step" : "Could not discard the next step", { description: message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      {error ? <span data-testid="supervisor-pane-bar-error" role="alert" className="shrink-0 text-destructive" title={error}>Failed</span> : null}
+      <BarButton disabled={busy} onClick={() => void decide("approve")}><Check aria-hidden className="size-3" />Approve</BarButton>
+      <BarButton ghost disabled={busy} onClick={() => void decide("discard")}><X aria-hidden className="size-3" />Discard</BarButton>
+    </>
+  );
+}
 
 /** The bar a supervised pane carries: quiet while watching, filled while the supervisor types. */
 export function SupervisorPaneBarView({
@@ -53,6 +91,7 @@ export function SupervisorPaneBarView({
 }) {
   const lane = state.lane;
   const acting = state.kind === "acting";
+  const stopReason = lane?.goalContract?.stopReason ?? null;
   return (
     <div
       data-testid="supervisor-pane-bar"
@@ -83,6 +122,19 @@ export function SupervisorPaneBarView({
           <span className="flex shrink-0 items-center gap-1.5"><Pause aria-hidden className="size-3" />Supervisor paused</span>
           <span className="min-w-0 flex-1 truncate">Still reads this pane, sends nothing</span>
           <BarButton onClick={() => void setPaused(state.lane.key, false)}><Play aria-hidden className="size-3" />Resume</BarButton>
+        </>
+      ) : state.kind === "awaiting-approval" ? (
+        <>
+          <span className="flex shrink-0 items-center gap-1.5 text-foreground"><Eye aria-hidden className="size-3" />Next step ready</span>
+          <span className="min-w-0 flex-1 truncate font-mono" title={state.lane.goalContract?.proposal?.text ?? undefined}>
+            {state.lane.goalContract?.proposal?.text ?? ""}
+          </span>
+          <ApprovalButtons lane={state.lane} />
+        </>
+      ) : state.kind === "left-to-you" && stopReason ? (
+        <>
+          <span className="flex shrink-0 items-center gap-1.5 text-foreground"><Eye aria-hidden className="size-3" />Left to you</span>
+          <span data-testid="supervisor-stop-reason" data-stop-reason={stopReason} className="min-w-0 flex-1 truncate">{supervisorStopReasonLabel(stopReason)}</span>
         </>
       ) : state.kind === "left-to-you" ? (
         <>

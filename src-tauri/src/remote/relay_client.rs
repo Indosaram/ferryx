@@ -850,9 +850,7 @@ pub fn set_allow_insecure_relay(allow: bool) {
 
 pub fn is_insecure_relay_allowed() -> bool {
     ALLOW_INSECURE_RELAY.load(std::sync::atomic::Ordering::Relaxed)
-        || std::env::var("FERRYX_ALLOW_INSECURE_RELAY")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+        || crate::remote::security_settings::insecure_relay_env_enabled()
 }
 
 pub fn is_loopback_host(host: &str) -> bool {
