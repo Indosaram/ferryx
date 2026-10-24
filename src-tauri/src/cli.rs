@@ -4,6 +4,7 @@ use std::sync::Arc;
 pub mod agent_hook;
 pub mod billing;
 pub mod direct_trust;
+pub mod supervisor_goal;
 
 pub use billing::AccountCliError;
 pub use direct_trust::{

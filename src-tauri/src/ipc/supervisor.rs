@@ -3,7 +3,7 @@
 
 use super::error::{IpcError, IpcErrorCode};
 use crate::daemon::client::DaemonClient;
-use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
+use crate::daemon::protocol::{DaemonRequest, DaemonResponse, SupervisorGoalAction};
 use std::sync::Arc;
 
 /// A daemon that knows these requests types every failure, so an untyped error is an older daemon.
@@ -33,6 +33,14 @@ fn paused_from(response: DaemonResponse) -> Result<bool, IpcError> {
     }
 }
 
+fn goal_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
+    match response {
+        DaemonResponse::SupervisorGoalOk { snapshot } => Ok(snapshot),
+        DaemonResponse::Error { message, code, .. } => Err(failure(message, code)),
+        _ => Err(IpcError::internal("Unexpected daemon supervisor goal response")),
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_supervisor_snapshot(
     daemon_client: tauri::State<'_, Arc<DaemonClient>>,
@@ -53,6 +61,15 @@ pub async fn cmd_supervisor_set_paused(
     )
 }
 
+/// Show or steer one lane's goal contract; returns the supervisor snapshot afterwards.
+#[tauri::command]
+pub async fn cmd_supervisor_goal(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    request: SupervisorGoalAction,
+) -> Result<serde_json::Value, IpcError> {
+    goal_from(daemon_client.send_request(DaemonRequest::SupervisorGoal { request }).await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +85,20 @@ mod tests {
         };
         assert_ne!(paused_from(typed).unwrap_err().code, IpcErrorCode::DaemonUpgradeRequired);
         assert!(paused_from(DaemonResponse::SupervisorSetPausedOk { paused: true }).unwrap());
+    }
+
+    #[test]
+    fn a_goal_reply_carries_the_snapshot_and_a_conflict_stays_typed() {
+        let ok = DaemonResponse::SupervisorGoalOk { snapshot: serde_json::json!({"lanes": []}) };
+        assert_eq!(goal_from(ok).unwrap(), serde_json::json!({"lanes": []}));
+        let conflict = DaemonResponse::Error {
+            message: "lane ledger has no proposal awaiting approval".into(),
+            code: Some("REQUEST_CONFLICT".into()),
+            details: None,
+        };
+        assert_eq!(goal_from(conflict).unwrap_err().code, IpcErrorCode::RequestConflict);
+        let request: SupervisorGoalAction =
+            serde_json::from_value(serde_json::json!({"action": "approve", "laneKey": "ledger"})).unwrap();
+        assert_eq!(request, SupervisorGoalAction::Approve { lane_key: "ledger".into() });
     }
 }

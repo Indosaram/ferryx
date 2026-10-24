@@ -419,9 +419,11 @@ async fn billing_plan_limit_refuses_issue_early_and_does_not_consume_on_enroll()
     assert_eq!(status, 200, "{issued}");
     let key = issued["key"].as_str().unwrap().to_string();
 
-    // The free plan allows one machine; it is now taken.
-    let existing = identity("mach-existing", 48);
-    seed_machine(&fx, "user-a", &existing.machine_id, &existing.public_key);
+    // Every machine slot of the free plan is now taken.
+    for index in 0..crate::account::billing::entitlement::FREE_HOSTS {
+        let existing = identity(&format!("mach-existing-{index}"), 200 + index as u8);
+        seed_machine(&fx, "user-a", &existing.machine_id, &existing.public_key);
+    }
 
     let (status, body) = issue_key(&fx, &token).await;
     assert_eq!(status, 402, "{body}");

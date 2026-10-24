@@ -1,5 +1,6 @@
 import { normalizeTerminalTitle, stripLeadingActivityGlyphs } from "../../../lib/agentTitle";
 import type { NotificationEntry } from "../../../lib/notificationCenter/types";
+import { supervisorStopReasonLabel } from "../../../lib/supervisorModel";
 
 export type AttentionState = "needs-you" | "done";
 
@@ -13,6 +14,8 @@ export type AttentionRow = {
   location?: string;
   text?: string;
   at?: number;
+  /** Set on supervisor hand-offs: the fixed stop-reason or awaiting-approval label. */
+  supervisorLabel?: string;
 };
 
 export type AttentionActivity = { state?: string; detail?: string; seen?: boolean };
@@ -79,6 +82,8 @@ function recordedState(entry: NotificationEntry): AttentionState | null {
 function attentionStateOf(entry: NotificationEntry, activity: AttentionActivity | undefined): AttentionState | null {
   if (!("unread" in entry.read)) return null;
   if (activity?.state === "working") return null;
+  // A supervisor hand-off is the hub asking for the owner, whatever the pane last reported.
+  if (entry.reason === "supervisor") return "needs-you";
   const live: AttentionState | null =
     activity?.state === "waiting" ? "needs-you" : activity?.state === "done" ? "done" : null;
   // A bell is not an episode the session tracks, so the seen flag belongs to some earlier wait or completion.
@@ -124,6 +129,9 @@ export function buildAttentionRows(
     const title = displayTitle(entry.labels.terminalTitle);
     const who = entry.labels.agentLabel?.trim() || title || "Terminal";
     const question = activity?.state === "waiting" ? activity.detail?.trim() || undefined : undefined;
+    const supervisorLabel = entry.reason === "supervisor" && entry.supervisor
+      ? supervisorStopReasonLabel(entry.supervisor.stopReason, entry.supervisor.awaitingApproval) ?? undefined
+      : undefined;
     rows.push({
       id: entry.id,
       revision: entry.revision,
@@ -134,6 +142,7 @@ export function buildAttentionRows(
       location: formatAttentionLocation(entry.labels.workspaceLabel, entry.labels.worktreeLabel),
       text: question ?? (title !== who ? title : undefined),
       at: entry.lastOccurredAt,
+      ...(supervisorLabel ? { supervisorLabel } : {}),
     });
   }
   return sortAttentionRows(rows);

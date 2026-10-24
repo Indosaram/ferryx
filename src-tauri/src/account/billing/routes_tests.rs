@@ -1,5 +1,5 @@
 use super::*;
-use crate::account::billing::entitlement::GRACE_SECS;
+use crate::account::billing::entitlement::{FREE_HOSTS, GRACE_SECS};
 use crate::account::mailer::FileMailer;
 use crate::account::origin::DeploymentMode;
 use crate::account::store::{now_secs, SessionRecord};
@@ -291,6 +291,19 @@ fn seed_machine(store: &mut AccountStore, owner_user_id: &str, machine_id: &str,
             last_seen_at: 0,
         },
     );
+}
+
+/// Seeds the extra machines that put a Free owner who already has `machine-1` over the Free
+/// limit: `machine-2` through `machine-{FREE_HOSTS + 1}`.
+fn seed_free_over_limit_machines(store: &mut AccountStore, owner_user_id: &str) {
+    for index in 2..=FREE_HOSTS + 1 {
+        seed_machine(
+            store,
+            owner_user_id,
+            &format!("machine-{index}"),
+            &format!("other-public-key-{index}"),
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1425,7 +1438,7 @@ async fn checkout_is_coming_soon_by_default() {
     let (status, entitlement) = get_entitlement(&server, &client, Some(&token)).await;
     assert_eq!(status, 200, "the entitlement read stays open");
     assert_eq!(entitlement["plan"], "free");
-    assert_eq!(entitlement["machineLimit"], 1);
+    assert_eq!(entitlement["machineLimit"], FREE_HOSTS);
     assert_eq!(entitlement["paidPlansOpen"], false);
 }
 
@@ -1569,7 +1582,7 @@ async fn free_entitlement_works_without_ls_config() {
     assert_eq!(status, 200);
     assert_eq!(entitlement["plan"], "free");
     assert_eq!(entitlement["status"], "ok");
-    assert_eq!(entitlement["machineLimit"], 1);
+    assert_eq!(entitlement["machineLimit"], FREE_HOSTS);
     assert_eq!(entitlement["machinesUsed"], 1);
     assert!(entitlement["seats"].is_null());
     assert!(entitlement["manageUrl"].is_null());
@@ -1622,7 +1635,7 @@ async fn lease_refused_when_stopped() {
     seed_store(&server.data_dir, |store| {
         seed_user(store, "u1", "u1@test.local");
         seed_machine(store, "u1", "machine-1", &public_key);
-        seed_machine(store, "u1", "machine-2", "other-public-key");
+        seed_free_over_limit_machines(store, "u1");
         store.billing_states.insert(
             "u1".to_string(),
             BillingStateRecord {
@@ -1663,7 +1676,7 @@ async fn lease_expiry_is_capped_by_grace_end() {
     seed_store(&server.data_dir, |store| {
         seed_user(store, "u1", "u1@test.local");
         seed_machine(store, "u1", "machine-1", &public_key);
-        seed_machine(store, "u1", "machine-2", "other-public-key");
+        seed_free_over_limit_machines(store, "u1");
         store.billing_states.insert(
             "u1".to_string(),
             BillingStateRecord {
@@ -1702,7 +1715,7 @@ async fn lease_cap_holds_at_the_grace_boundary() {
     seed_store(&server.data_dir, |store| {
         seed_user(store, "u1", "u1@test.local");
         seed_machine(store, "u1", "machine-1", &public_key);
-        seed_machine(store, "u1", "machine-2", "other-public-key");
+        seed_free_over_limit_machines(store, "u1");
     });
 
     let set_grace = |store: &mut AccountStore, started: u64| {
@@ -1849,7 +1862,7 @@ async fn error_body_carries_details() {
     seed_store(&server.data_dir, |store| {
         seed_user(store, "u1", "u1@test.local");
         seed_machine(store, "u1", "machine-1", &public_key);
-        seed_machine(store, "u1", "machine-2", "other-public-key");
+        seed_free_over_limit_machines(store, "u1");
         store.billing_states.insert(
             "u1".to_string(),
             BillingStateRecord {
@@ -2251,7 +2264,7 @@ async fn org_remove_returns_machines_to_individual_pool() {
     assert_eq!(member_status, 200);
     assert!(member["orgId"].is_null());
     assert_eq!(member["plan"], "free");
-    assert_eq!(member["machineLimit"], 1);
+    assert_eq!(member["machineLimit"], FREE_HOSTS);
     assert_eq!(member["machinesUsed"], 1);
     assert_eq!(member["status"], "ok");
 }
@@ -2382,7 +2395,7 @@ async fn login_flow_session_serves_billing_entitlement() {
     assert_eq!(entitlement_response.status().as_u16(), 200);
     let entitlement = response_json(entitlement_response).await;
     assert_eq!(entitlement["plan"], "free");
-    assert_eq!(entitlement["machineLimit"].as_u64(), Some(1));
+    assert_eq!(entitlement["machineLimit"].as_u64(), Some(u64::from(FREE_HOSTS)));
     assert_eq!(entitlement["machinesUsed"].as_u64(), Some(0));
     assert_eq!(entitlement["status"], "ok");
     assert!(entitlement["orgId"].is_null());
@@ -3090,7 +3103,7 @@ async fn debug_clock_advance_still_valid_real_ts_returns_payment_required_stoppe
     seed_store(&server.data_dir, |store| {
         seed_user(store, "u1", "u1@test.local");
         seed_machine(store, "u1", "machine-1", &public_key);
-        seed_machine(store, "u1", "machine-2", "other-public-key");
+        seed_free_over_limit_machines(store, "u1");
         store.billing_states.insert(
             "u1".to_string(),
             BillingStateRecord {

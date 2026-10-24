@@ -6,7 +6,7 @@ export const GET: APIRoute = () => {
   const manifest = {
     name: 'Ferryx',
     short_name: 'Ferryx',
-    description: 'Parallel agentic development workspace with a native terminal engine and embedded browser tabs.',
+    description: 'Run Claude Code, Codex and any CLI agent side by side in one repo, each in its own worktree.',
     start_url: base,
     scope: base,
     display: 'standalone',

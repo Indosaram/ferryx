@@ -41,12 +41,14 @@ import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { isNotificationTargetObserved, wireActivityRecording, wireBellRecording, type RecordingListener, type RecordingTarget } from "./lib/notificationCenter/activityRecording";
 import { notificationCenterStore } from "./lib/notificationCenter/notificationCenterStore";
+import { syncSupervisorNotifications, type SupervisorPaneResolver } from "./lib/notificationCenter/supervisorRecording";
 import { notificationEntryId } from "./lib/notificationCenter/types";
+import { getSupervisorSnapshot, startSupervisorFeed, subscribeSupervisorSnapshot } from "./lib/supervisor";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
 import { isMacShortcutPlatform, resolvedShortcuts, useShortcuts } from "./lib/shortcuts";
-import { useShortcutOverrides } from "./lib/shortcutOverrides";
+import { useShortcutOverrides, useShortcutPreset } from "./lib/shortcutOverrides";
 import { initUpdateToasts } from "./lib/updateToast";
 // Wave 3a cross-platform onboarding, release notes, and getting started checklist
 import {
@@ -72,6 +74,7 @@ import { showNotificationPermissionHint } from "./lib/notificationPermissionHint
 import { getCurrentVersion } from "./lib/updater";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
+import { InsecureTransportBanner } from "./components/InsecureTransportBanner";
 import type { SectionId } from "./components/settings/types";
 import type { MachineProjectTarget, RemoteContext } from "./lib/machineNavigation";
 import {
@@ -906,6 +909,36 @@ function WorkspaceApp({
     }),
     isObserved: isNotificationObserved,
   }), [subscribeActivityNotification, isNotificationObserved]);
+
+  // Supervisor stops and awaiting approvals reach the Inbox from the event-fed snapshot. A lane is
+  // matched to the open pane whose PTY it drives, in the mounted workspace first, then parked ones.
+  useEffect(() => {
+    const resolvePane: SupervisorPaneResolver = (hubSessionId) => {
+      const candidates: WorkspaceState[] = [stateRef.current];
+      for (const [, parked] of listWorkspaceSnapshots()) candidates.push(parked);
+      for (const candidate of candidates) {
+        if (!candidate.workspaceId) continue;
+        const session = Object.values(candidate.sessions).find((value) => value.backendSessionId === hubSessionId);
+        if (!session || !hasNavigableSession(candidate, session.id)) continue;
+        const worktreePath = session.worktreePath ?? session.cwd;
+        const worktree = candidate.worktrees.find((value) => value.path === worktreePath);
+        return {
+          workspaceId: candidate.workspaceId,
+          sessionId: session.id,
+          labels: {
+            workspaceLabel: selectNotificationWorkspaceLabel(candidate),
+            worktreeLabel: worktree ? workspaceName(worktree) : undefined,
+          },
+        };
+      }
+      return null;
+    };
+    const sync = () => { syncSupervisorNotifications(getSupervisorSnapshot(), resolvePane); };
+    const unsubscribe = subscribeSupervisorSnapshot(sync);
+    void startSupervisorFeed();
+    sync();
+    return unsubscribe;
+  }, []);
 
   const handleTerminalBell = useCallback((sessionId: string, tabId: string, eventTarget: import("./state/workspaceStore").ActivityNotificationTarget | undefined, record: RecordingListener<RecordingTarget>) => {
     const targets = activityNotificationTargetsRef.current ?? [];
@@ -3794,7 +3827,8 @@ function WorkspaceApp({
     ],
   );
   const { overrides: shortcutOverrides } = useShortcutOverrides();
-  useShortcuts(shortcutHandlers, { overrides: shortcutOverrides });
+  const { preset: shortcutPreset } = useShortcutPreset();
+  useShortcuts(shortcutHandlers, { overrides: shortcutOverrides, preset: shortcutPreset });
 
   const sshHostId = activeProject.target?.kind === "ssh" ? activeProject.target.hostId : null;
   const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId
@@ -3820,7 +3854,8 @@ function WorkspaceApp({
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
       <ShortcutHints
-        enabledActions={resolvedShortcuts(shortcutOverrides).filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
+        preset={shortcutPreset}
+        enabledActions={resolvedShortcuts(shortcutOverrides, shortcutPreset).filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
         getContext={() => {
           const current = stateRef.current;
           const group = current.layout.focusedGroupId ? current.layout.tabGroups?.[current.layout.focusedGroupId] : undefined;
@@ -3899,6 +3934,7 @@ function WorkspaceApp({
       )}
 
       <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background">
+        <InsecureTransportBanner />
         <RemoteBrowserSharingIndicator
           isSharing={remoteBrowserSharingActive}
           onReclaim={handleReclaimRemoteBrowser}
@@ -4053,7 +4089,6 @@ function WorkspaceApp({
             steps={onboardingSteps}
             initialStepIndex={onboardingInitialStepIndex}
             doneSteps={onboardingDoneSteps}
-            permissionsStatus={onboardingPermissions}
             agents={resolvedAgents}
             isMac={isMacShortcutPlatform()}
             onStepCompleted={(step) => markOnboardingStepsCompleted([step])}

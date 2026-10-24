@@ -3,7 +3,7 @@ title: "Ferryx vs Crystal (Nimbalyst): Parallel Agent Worktrees"
 description: Ferryx and Nimbalyst, formerly Crystal, both run coding agents in parallel git worktrees. Compare the desktop architectures before choosing one.
 ---
 
-[Nimbalyst](https://github.com/stravu/crystal), formerly called Crystal, is the closest peer to Ferryx in concept: a desktop app that runs multiple coding agents in parallel git worktrees. Its repository describes the project as "Run multiple Codex and Claude Code AI sessions in parallel git worktrees. Test, compare approaches & manage AI-assisted development workflows in one desktop app." [Ferryx](https://github.com/Indosaram/ferryx) sits in the same space: a source-available (SUL-1.0) desktop terminal that also keeps parallel agent work in git worktrees. The overlap is real, and the differences are architectural. Those differences decide which tool fits your setup.
+[Nimbalyst](https://github.com/stravu/crystal), formerly called Crystal, is the closest peer to Ferryx in concept: a desktop app that runs multiple coding agents in parallel git worktrees. Its repository describes the project as "Run multiple Codex and Claude Code AI sessions in parallel git worktrees. Test, compare approaches & manage AI-assisted development workflows in one desktop app." [Ferryx](https://github.com/Indosaram/ferryx) sits in the same space: a source-available (Ferryx License) desktop terminal that also keeps parallel agent work in git worktrees. The overlap is real, and the differences are architectural. Those differences decide which tool fits your setup.
 
 One naming note before the details: the project was renamed from Crystal to Nimbalyst. Both names point to the same repository, so this page uses both.
 
@@ -27,7 +27,7 @@ Nimbalyst, per its repository description, runs multiple Codex and Claude Code s
 
 ## Capabilities at a glance
 
-- As of September 2026, the repository had 3,115 GitHub stars. The project is MIT licensed and its primary language is TypeScript.
+- As of September 2026, the repository had 3,115 GitHub stars. The project is MIT licensed (Ferryx, by contrast, is source-available under the Ferryx License) and its primary language is TypeScript.
 - Its core workflow, per the repository description: run multiple Codex and Claude Code AI sessions in parallel git worktrees, test and compare approaches, and manage AI-assisted development in one desktop app.
 - A rename from Crystal to Nimbalyst means both names refer to the same project.
 - As of September 2026, Ferryx is early software on calendar-versioned releases and ships as a macOS universal DMG, an x64 Windows installer, and Linux AppImage and .deb packages.

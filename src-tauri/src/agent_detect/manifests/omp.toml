@@ -4,6 +4,8 @@
 # chrome (the "π >" / "<spinner> <N>s >" status band, the "Allow tool:" dialog and
 # the glyph hint rows) and outranks the matching omo rule.
 id = "omp"
+display_name = "omp"
+homepage = "https://github.com/can1357/oh-my-pi"
 version = "2026.10.22.1"
 min_engine_version = 1
 updated_at = "2026-10-22T00:00:00Z"

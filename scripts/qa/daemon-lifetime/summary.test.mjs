@@ -220,8 +220,8 @@ test('a self-test setup failure after worktree add still hands teardown the work
 });
 
 test('release owner record: product runtime path per platform, honest absent vs continuity vs change', async () => {
-  assert.equal(releaseOwnerFile('linux', { uid: 1000 }), '/tmp/rorca-1000/owner.json');
-  assert.equal(releaseOwnerFile('mac', { uid: 501 }), '/tmp/rorca-501/owner.json');
+  assert.equal(releaseOwnerFile('linux', { uid: 1000 }), '/tmp/ferryx-1000/owner.json');
+  assert.equal(releaseOwnerFile('mac', { uid: 501 }), '/tmp/ferryx-501/owner.json');
   assert.equal(releaseOwnerFile('windows', { localAppData: 'C:\\Users\\sook\\AppData\\Local' }), 'C:\\Users\\sook\\AppData\\Local\\Ferryx\\runtime\\owner.json');
   assert.throws(() => releaseOwnerFile('windows', { localAppData: '' }), /RELEASE_OWNER_PATH/);
   assert.deepEqual(releaseContinuity(null, null), { state: 'absent', unchanged: true });

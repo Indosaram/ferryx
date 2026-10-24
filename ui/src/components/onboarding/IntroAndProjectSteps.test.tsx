@@ -11,13 +11,12 @@ describe("IntroStep", () => {
 
   it("lists one overview row per remaining wizard step, in wizard order", () => {
     render(
-      <IntroStep steps={["intro", "features", "permissions", "agents", "cli", "project"]} />
+      <IntroStep steps={["intro", "features", "agents", "cli", "project"]} />
     );
 
     const rows = screen.getAllByTestId(/^onboarding-intro-/);
     expect(rows.map((row) => row.getAttribute("data-testid"))).toEqual([
       "onboarding-intro-features",
-      "onboarding-intro-permissions",
       "onboarding-intro-agents",
       "onboarding-intro-cli",
       "onboarding-intro-project",
@@ -28,13 +27,6 @@ describe("IntroStep", () => {
     render(<IntroStep steps={["intro", "features", "agents", "project"]} />);
 
     expect(screen.queryByTestId("onboarding-intro-cli")).toBeNull();
-  });
-
-  it("omits the system access row when permissions are not part of the wizard", () => {
-    render(<IntroStep steps={["intro", "features", "agents", "project"]} />);
-
-    expect(screen.queryByTestId("onboarding-intro-permissions")).toBeNull();
-    expect(screen.getAllByTestId(/^onboarding-intro-/)).toHaveLength(3);
   });
 });
 

@@ -160,6 +160,8 @@ export type FilePreviewErrorDetails = {
   readonly displayName?: string;
   readonly byteLength?: number;
   readonly limit?: number;
+  /** macOS: the read hit EPERM under a TCC-protected folder; Full Disk Access lifts it. */
+  readonly fullDiskAccessRequired?: boolean;
 };
 
 /** Everything the modal knows about one failed request. */

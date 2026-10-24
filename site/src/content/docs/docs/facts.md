@@ -1,6 +1,6 @@
 ---
 title: Ferryx product facts
-description: "Sourced Ferryx reference facts: SUL-1.0 license, platform packages, shipped agent status manifests, managed worktree paths, and PTY daemon replay behaviour."
+description: "Sourced Ferryx reference facts: Ferryx License, platform packages, shipped agent status manifests, managed worktree paths, and PTY daemon replay behaviour."
 ---
 
 A single reference page of concrete, checkable facts about Ferryx. Every row names the file in
@@ -21,15 +21,18 @@ pseudoterminals so sessions outlive the window.
 | :--- | :--- | :--- |
 | Project name | Ferryx | `src-tauri/tauri.conf.json` (`productName`) |
 | Bundle identifier | `com.ferryx.app` | `src-tauri/tauri.conf.json` |
-| License | Sustainable Use License 1.0 (SUL-1.0), source-available; permits your own internal business purposes, non-commercial use, or personal use | [`LICENSE`](https://github.com/Indosaram/ferryx/blob/main/LICENSE) |
+| License | Ferryx License 1.0, source-available; free for individuals, education, open-source work, non-profits, and companies under 50 people and USD 5M revenue | [`LICENSE`](https://github.com/Indosaram/ferryx/blob/main/LICENSE) |
 | Current release | Calendar-versioned (`vYYYY.MM.DD.N`); see the latest published release and its notes | [Releases](https://github.com/Indosaram/ferryx/releases/latest) |
 | Source repository | `github.com/Indosaram/ferryx` | GitHub |
-| Price | Free to download | [Releases](https://github.com/Indosaram/ferryx/releases/latest) |
+| Price | Free to download; larger companies need a Team subscription for work use ([pricing](/docs/pricing/)) | [Releases](https://github.com/Indosaram/ferryx/releases/latest) |
 
-SUL-1.0 is not an OSI open-source license. It permits use and modification for your own internal
-business purposes or for non-commercial or personal use. Distribution must be free of charge
-and for non-commercial purposes, with the required notices preserved. Read the license for its
-full terms.
+The Ferryx License is not an OSI open-source license. Use and modification are free for personal
+use, education, open-source work, non-profits, and companies with fewer than 50 employees and
+contractors and less than USD 5M in annual revenue. Larger companies need a Team subscription to
+use Ferryx for work, after a transition period that ends 90 days after the Team plan opens.
+Self-hosted relays are free for everyone. Distribution must be free of charge and for
+non-commercial purposes, with the required notices preserved. Releases published before the
+change remain under the Sustainable Use License (SUL-1.0). Read the license for its full terms.
 
 ## Platforms and packages
 
@@ -63,12 +66,13 @@ Every release publishes `SHA256SUMS.txt` beside the binaries, so a download can 
 ## Coding agents
 
 Agents are ordinary commands: anything you can start in a terminal runs in a Ferryx pane, including
-Claude Code, Codex, and Gemini CLI. What is agent-specific is *status detection* — reading a pane's
+Claude Code, Codex, and Antigravity (agy). What is agent-specific is *status detection* — reading a pane's
 output to decide whether that agent is working, waiting on you, or idle.
 
-Status-detection manifests ship for eleven agents: Antigravity, Claude Code, Cline, Codex, GitHub
-Copilot CLI, Cursor, Gajae Code (gjc), Grok, Kimi, OMO, and OpenCode
-(`src-tauri/src/agent_detect/manifests/`, registered in `src-tauri/src/agent_detect/engine.rs`).
+Status-detection manifests ship for <!-- agents:count -->16<!-- /agents:count --> agents:
+<!-- agents:list -->Aider, Antigravity, Claude Code, Cline, Codex, Crush, Cursor CLI, Droid, GitHub Copilot CLI, GJC, Grok, Kimi, OmO, omp, OpenCode, and pi<!-- /agents:list -->
+(`src-tauri/src/agent_detect/manifests/`, registered in `src-tauri/src/agent_detect/engine.rs`; the list and count on this site are generated
+from those manifests by `scripts/gen-site-agents.mjs`).
 Detection drives the pane status indicator, notifications, and the macOS Dock attention badge.
 
 ## Git worktree isolation
@@ -98,7 +102,7 @@ remains alive. Stopping the daemon or rebooting its host can end live PTYs.
 | Fact | Value | Source |
 | :--- | :--- | :--- |
 | Gateway | Authenticated Axum WebSocket server | `src-tauri/src/remote/` |
-| Pairing | 6-digit PIN (also available as a QR code) | `src-tauri/src/remote/` |
+| Pairing | Account sign-in (email magic link); a 60-second 6-digit PIN remains for local gateway pairing | `src-tauri/src/remote/` |
 | Mobile terminal | Custom DOM grid, no xterm.js dependency | `ui/src/remote/` |
 | Off-LAN access | Configurable outbound relay tunnel; no inbound SSH port or public IP required | `src-tauri/src/remote/` |
 | Paired machine path | Relay first; a live session upgrades to a direct QUIC path (UDP, IPv4) when both sides trust each other, and falls back to the relay on loss | `src-tauri/src/paired_host/`, `src-tauri/src/terminal/paired_runtime.rs` |

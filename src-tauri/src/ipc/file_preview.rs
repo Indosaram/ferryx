@@ -1186,13 +1186,57 @@ fn io_failure(error: &std::io::Error, path: &Path) -> IpcError {
         std::io::ErrorKind::NotFound => FilePreviewErrorReason::MissingFile,
         _ => FilePreviewErrorReason::PermissionDenied,
     };
+    let fda_required = cfg!(target_os = "macos")
+        && full_disk_access_required(error, path, crate::ipc::file_link::home_dir().as_deref());
     preview_error(
         reason,
         format!("cannot open this file ({error})"),
         Some(json!({
             "displayName": path.file_name().map(|name| name.to_string_lossy().into_owned()),
+            "fullDiskAccessRequired": fda_required,
         })),
     )
+}
+
+/// Home-relative folders macOS guards with TCC. A read refused there with
+/// EPERM is a privacy denial that Full Disk Access lifts, not a mode-bit
+/// problem; mode-bit refusals surface as EACCES instead.
+const TCC_PROTECTED_HOME_DIRS: &[&str] = &[
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "Pictures",
+    "Movies",
+    "Music",
+    "Library/Mobile Documents",
+    "Library/Mail",
+    "Library/Messages",
+    "Library/Safari",
+    "Library/Containers",
+    "Library/Group Containers",
+    "Library/Application Support/com.apple.TCC",
+];
+
+/// True when `error` is EPERM for a path under a TCC-protected folder, so the
+/// UI can offer the Full Disk Access settings instead of a bare refusal.
+pub(crate) fn full_disk_access_required(
+    error: &std::io::Error,
+    path: &Path,
+    home: Option<&Path>,
+) -> bool {
+    error.raw_os_error() == Some(libc::EPERM) && is_tcc_protected_path(path, home)
+}
+
+pub(crate) fn is_tcc_protected_path(path: &Path, home: Option<&Path>) -> bool {
+    if path.starts_with("/Volumes") {
+        return true;
+    }
+    let Some(home) = home else {
+        return false;
+    };
+    TCC_PROTECTED_HOME_DIRS
+        .iter()
+        .any(|dir| path.starts_with(home.join(dir)))
 }
 
 /// Resolves a terminal token against the live cwd, canonicalizes when possible,
