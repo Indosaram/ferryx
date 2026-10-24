@@ -1,0 +1,82 @@
+[
+  {
+    "id": "aider",
+    "displayName": "Aider",
+    "homepage": "https://aider.chat"
+  },
+  {
+    "id": "antigravity",
+    "displayName": "Antigravity",
+    "homepage": "https://antigravity.google"
+  },
+  {
+    "id": "claude",
+    "displayName": "Claude Code",
+    "homepage": "https://www.anthropic.com/claude-code"
+  },
+  {
+    "id": "cline",
+    "displayName": "Cline",
+    "homepage": "https://cline.bot"
+  },
+  {
+    "id": "codex",
+    "displayName": "Codex",
+    "homepage": "https://github.com/openai/codex"
+  },
+  {
+    "id": "crush",
+    "displayName": "Crush",
+    "homepage": "https://github.com/charmbracelet/crush"
+  },
+  {
+    "id": "cursor",
+    "displayName": "Cursor CLI",
+    "homepage": "https://cursor.com/cli"
+  },
+  {
+    "id": "droid",
+    "displayName": "Droid",
+    "homepage": "https://factory.ai"
+  },
+  {
+    "id": "copilot",
+    "displayName": "GitHub Copilot CLI",
+    "homepage": "https://github.com/features/copilot/cli"
+  },
+  {
+    "id": "gjc",
+    "displayName": "GJC",
+    "homepage": "https://github.com/Yeachan-Heo/gajae-code"
+  },
+  {
+    "id": "grok",
+    "displayName": "Grok",
+    "homepage": "https://x.ai/build"
+  },
+  {
+    "id": "kimi",
+    "displayName": "Kimi",
+    "homepage": "https://github.com/MoonshotAI/kimi-cli"
+  },
+  {
+    "id": "omo",
+    "displayName": "OmO",
+    "homepage": "https://github.com/code-yeongyu/oh-my-openagent"
+  },
+  {
+    "id": "omp",
+    "displayName": "omp",
+    "homepage": "https://github.com/can1357/oh-my-pi"
+  },
+  {
+    "id": "opencode",
+    "displayName": "OpenCode",
+    "homepage": "https://opencode.ai"
+  },
+  {
+    "id": "pi",
+    "displayName": "pi",
+    "homepage": "https://github.com/badlogic/pi-mono"
+  }
+]

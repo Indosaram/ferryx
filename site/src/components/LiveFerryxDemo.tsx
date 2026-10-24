@@ -16,7 +16,7 @@ const DEMO_BROWSER_URL = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/docs/in
 const DEMO_AGENTS = [
   { name: "claude", available: true, enabled: true, command: "claude", args: "" },
   { name: "codex", available: true, enabled: true, command: "codex", args: "" },
-  { name: "gemini", available: true, enabled: true, command: "gemini", args: "" },
+  { name: "antigravity", available: true, enabled: true, command: "agy", args: "" },
 ];
 
 export default function LiveFerryxDemo() {

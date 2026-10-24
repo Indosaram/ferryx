@@ -2745,9 +2745,9 @@ describe("Remote UI Components", () => {
         );
       });
 
-      // Verify top workspace context trigger is present and magic link override is released
+      // Verify the phone home's Worktrees (workspace context) tab is present and magic link override is released
       expect(
-        await screen.findByRole("button", { name: /change workspace context/i })
+        await screen.findByTestId("mobile-home-tab-worktrees")
       ).not.toBeNull();
 
       // 6. User switches to saved host: must now issue workspace state request to saved origin

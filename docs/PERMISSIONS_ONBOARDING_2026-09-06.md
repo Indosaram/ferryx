@@ -1,5 +1,18 @@
 # Permissions First-Run Onboarding (2026-09-06)
 
+> **Superseded 2026-10-24 (GAP-10).** The first-run wizard no longer has a permissions
+> step. Each permission is now requested when the feature that needs it is first used:
+> - Notifications: requested the first time a notification is dispatched and macOS reports
+>   `permission-required` (`NotificationCoordinator`).
+> - Full Disk Access: when a file-preview read fails with EPERM under a TCC-protected folder
+>   (home Desktop/Documents/Downloads/iCloud/Mail/Safari/Containers, or `/Volumes`), the
+>   failure view shows an explainer with "Open System Settings" (`fullDiskAccessRequired`).
+> - Accessibility: no feature currently needs it, so it is requested only from
+>   Settings > Permissions.
+>
+> Settings > Permissions remains the place to review all three. The text below records
+> the original 2026-09-06 design.
+
 ## Outcome
 Replaced the 15-second permissions guidance toast with a deliberate first-run macOS
 onboarding modal that walks the user through granting Full Disk Access, Accessibility,

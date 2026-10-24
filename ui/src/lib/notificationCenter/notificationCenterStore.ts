@@ -3,9 +3,9 @@ import {
   type NotificationCenterPersistenceOptions,
 } from "./notificationCenterPersistence";
 import {
-  capNotificationEntries, MAX_NOTIFICATION_ENTRIES, notificationEntryId,
+  capNotificationEntries, MAX_NOTIFICATION_ENTRIES, notificationEntryId, supervisorHandoffKey,
   type ActivityOccurrence, type BellOccurrence, type InboxState,
-  type NotificationEntry, type ReadAcknowledgement,
+  type NotificationEntry, type ReadAcknowledgement, type SupervisorOccurrence,
 } from "./types";
 
 export type NotificationCenterOptions = NotificationCenterPersistenceOptions;
@@ -23,7 +23,12 @@ export function createNotificationCenterStore(options: NotificationCenterOptions
     listeners.forEach((listener) => listener());
   };
 
-  const record = (occurrence: BellOccurrence, reason: NotificationEntry["reason"], edge: string): boolean => {
+  const record = (
+    occurrence: BellOccurrence,
+    reason: NotificationEntry["reason"],
+    edge: string,
+    supervisor?: NotificationEntry["supervisor"],
+  ): boolean => {
     const id = notificationEntryId(occurrence.workspaceId, occurrence.sessionId);
     const occurrenceKey = JSON.stringify([id, occurrence.occurrenceId === undefined
       ? [edge, occurrence.occurredAt] : [occurrence.occurrenceId]]);
@@ -42,6 +47,7 @@ export function createNotificationCenterStore(options: NotificationCenterOptions
       revision: (previous?.revision ?? 0) + 1,
       occurrenceCount: (previous?.occurrenceCount ?? 0) + 1,
       read: occurrence.observed ? { seen: true, seenAt: occurrence.occurredAt } : { unread: true },
+      ...(supervisor ? { supervisor: { ...supervisor } } : {}),
     };
     publish({ version: 1, nextUpdateOrder: state.nextUpdateOrder + 1,
       entries: capNotificationEntries([entry, ...state.entries.filter((value) => value.id !== id)]),
@@ -77,6 +83,19 @@ export function createNotificationCenterStore(options: NotificationCenterOptions
     },
     /** Only bells accepted past coordinator throttle/post-completion suppression reach here. */
     recordBell: (occurrence: BellOccurrence) => record(occurrence, "bell", "bell"),
+    /**
+     * One entry per supervisor hand-off: the same (lane, goal revision, reason) seen again, by a
+     * repeated snapshot or after a reload, is a no-op even once the entry was read.
+     */
+    recordSupervisor: (occurrence: SupervisorOccurrence): boolean => {
+      const key = supervisorHandoffKey(occurrence.supervisor);
+      const existing = state.entries.find((entry) =>
+        entry.id === notificationEntryId(occurrence.workspaceId, occurrence.sessionId));
+      if (existing?.reason === "supervisor" && existing.supervisor
+        && supervisorHandoffKey(existing.supervisor) === key) return false;
+      return record({ ...occurrence, occurrenceId: `supervisor:${key}` }, "supervisor", "supervisor",
+        occurrence.supervisor);
+    },
     markEntriesRead,
     markAllRead: (seenAt = Date.now()) => {
       markEntriesRead(state.entries.map((entry) => ({ id: entry.id, expectedRevision: entry.revision })), seenAt);

@@ -19,6 +19,10 @@ Thumbs.db
 
 # Agent session runtime state
 .omo/
+.evidence/
+task-2/
+/recovery-*.md
+/PARITY.md
 
 # Local secrets (updater signing key)
 .env
@@ -35,3 +39,9 @@ ui/dist-mobile/
 mobile/src-tauri/gen/
 !/mobile/src-tauri/Cargo.lock
 mobile/src-tauri/.tauri/
+
+# Mobile release signing secrets (never commit)
+mobile/keystore.properties
+keystore.properties
+*.jks
+*.keystore

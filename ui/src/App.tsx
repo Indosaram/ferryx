@@ -41,7 +41,9 @@ import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { isNotificationTargetObserved, wireActivityRecording, wireBellRecording, type RecordingListener, type RecordingTarget } from "./lib/notificationCenter/activityRecording";
 import { notificationCenterStore } from "./lib/notificationCenter/notificationCenterStore";
+import { syncSupervisorNotifications, type SupervisorPaneResolver } from "./lib/notificationCenter/supervisorRecording";
 import { notificationEntryId } from "./lib/notificationCenter/types";
+import { getSupervisorSnapshot, startSupervisorFeed, subscribeSupervisorSnapshot } from "./lib/supervisor";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
@@ -72,6 +74,7 @@ import { showNotificationPermissionHint } from "./lib/notificationPermissionHint
 import { getCurrentVersion } from "./lib/updater";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
+import { InsecureTransportBanner } from "./components/InsecureTransportBanner";
 import type { SectionId } from "./components/settings/types";
 import type { MachineProjectTarget, RemoteContext } from "./lib/machineNavigation";
 import {
@@ -906,6 +909,36 @@ function WorkspaceApp({
     }),
     isObserved: isNotificationObserved,
   }), [subscribeActivityNotification, isNotificationObserved]);
+
+  // Supervisor stops and awaiting approvals reach the Inbox from the event-fed snapshot. A lane is
+  // matched to the open pane whose PTY it drives, in the mounted workspace first, then parked ones.
+  useEffect(() => {
+    const resolvePane: SupervisorPaneResolver = (hubSessionId) => {
+      const candidates: WorkspaceState[] = [stateRef.current];
+      for (const [, parked] of listWorkspaceSnapshots()) candidates.push(parked);
+      for (const candidate of candidates) {
+        if (!candidate.workspaceId) continue;
+        const session = Object.values(candidate.sessions).find((value) => value.backendSessionId === hubSessionId);
+        if (!session || !hasNavigableSession(candidate, session.id)) continue;
+        const worktreePath = session.worktreePath ?? session.cwd;
+        const worktree = candidate.worktrees.find((value) => value.path === worktreePath);
+        return {
+          workspaceId: candidate.workspaceId,
+          sessionId: session.id,
+          labels: {
+            workspaceLabel: selectNotificationWorkspaceLabel(candidate),
+            worktreeLabel: worktree ? workspaceName(worktree) : undefined,
+          },
+        };
+      }
+      return null;
+    };
+    const sync = () => { syncSupervisorNotifications(getSupervisorSnapshot(), resolvePane); };
+    const unsubscribe = subscribeSupervisorSnapshot(sync);
+    void startSupervisorFeed();
+    sync();
+    return unsubscribe;
+  }, []);
 
   const handleTerminalBell = useCallback((sessionId: string, tabId: string, eventTarget: import("./state/workspaceStore").ActivityNotificationTarget | undefined, record: RecordingListener<RecordingTarget>) => {
     const targets = activityNotificationTargetsRef.current ?? [];
@@ -3899,6 +3932,7 @@ function WorkspaceApp({
       )}
 
       <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background">
+        <InsecureTransportBanner />
         <RemoteBrowserSharingIndicator
           isSharing={remoteBrowserSharingActive}
           onReclaim={handleReclaimRemoteBrowser}
@@ -4053,7 +4087,6 @@ function WorkspaceApp({
             steps={onboardingSteps}
             initialStepIndex={onboardingInitialStepIndex}
             doneSteps={onboardingDoneSteps}
-            permissionsStatus={onboardingPermissions}
             agents={resolvedAgents}
             isMac={isMacShortcutPlatform()}
             onStepCompleted={(step) => markOnboardingStepsCompleted([step])}

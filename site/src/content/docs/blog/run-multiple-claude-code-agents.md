@@ -19,7 +19,7 @@ Ferryx is a desktop terminal workspace for running several CLI coding agents at 
 
 1. Open the project as a Ferryx workspace so tabs, panes, and sessions share one sidebar.
 2. Request a managed worktree for each agent that needs isolation; Ferryx creates it inside the repository root and names the branch for you.
-3. Start each agent (Claude Code, Codex, Gemini CLI, or any shell command) in its own pane with ⌘T and ⌘D splits.
+3. Start each agent (Claude Code, Codex, Antigravity (agy), or any shell command) in its own pane with ⌘T and ⌘D splits.
 4. Watch status badges and the attention counter instead of polling every pane; open a browser tab with ⌘⇧B for CI or PR checks.
 5. When an agent finishes, review its diff from that worktree and merge in a deliberate order before cleaning the branch up.
 
@@ -52,7 +52,7 @@ Not when each agent has its own worktree. Shared-checkout collisions (including 
 
 ### Which agents are supported?
 
-Anything you can run in a shell works. Ferryx additionally ships status-detection manifests for eleven named agents so panes report working, waiting, or idle.
+Anything you can run in a shell works. Ferryx additionally ships status-detection manifests for <!-- agents:count -->16<!-- /agents:count --> named agents so panes report working, waiting, or idle.
 
 ## Limits and non-goals
 
