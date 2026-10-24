@@ -6,6 +6,7 @@ pub mod contract;
 pub mod converge;
 pub mod evidence;
 pub mod prompts;
+pub mod revision;
 pub mod turns;
 pub mod types;
 
