@@ -9,7 +9,31 @@ Ferryx is a source-available desktop terminal built for engineers who run AI cod
 
 A headless Rust PTY daemon owns the pseudoterminals, so closing or reloading the GUI doesn't kill running agent processes; a ring buffer with monotonic sequence numbers replays whatever output you missed when you reconnect. Managed worktrees get git isolation: each one lives in `.orca-worktrees/wt-<slug>` on a branch named `orca/<workspace-id>/<slug>`. Native WebView browser tabs can split beside terminal panes, and an authenticated mobile remote client renders sessions in a custom DOM grid, with no xterm.js dependency. Underneath, libghostty-vt parses terminal output and WGPU renders it on a native child surface, with no Electron involved. Builds ship as a macOS universal DMG, an x64 Windows installer, and AppImage and .deb packages on Linux.
 
-Verified September 2026 against the latest release (v2026.09.18.1). These details change quickly, so check each vendor's site for the current state.
+Ferryx facts are from v2026.10.11.1; each comparison page carries its own check date. These details change quickly, so check each vendor's site for the current state.
+
+## Check your agent's own flag first
+
+If you run one agent from one vendor, you may not need a separate tool at all. As of 2026-10-24:
+
+- Claude Code creates and isolates its own worktrees with `claude --worktree <name>`, under `.claude/worktrees/<name>/` on a `worktree-<name>` branch ([code.claude.com/docs/en/worktrees](https://code.claude.com/docs/en/worktrees)).
+- Claude Code Remote Control drives a local session from a browser or phone, on Pro, Max, Team, and Enterprise plans only, with API keys not supported ([code.claude.com/docs/en/remote-control](https://code.claude.com/docs/en/remote-control)).
+- The Codex desktop app runs chats in managed worktrees under `$CODEX_HOME/worktrees` in detached HEAD, and Handoff moves a chat between Local and Worktree ([learn.chatgpt.com/docs/environments/git-worktrees](https://learn.chatgpt.com/docs/environments/git-worktrees)).
+
+[Running parallel AI coding agents](/use-cases/parallel-ai-agents/) covers what those flags leave over when you mix vendors.
+
+## At a glance
+
+| Tool | What it is | License | Facts checked |
+| :--- | :--- | :--- | :--- |
+| [Warp](/compare/warp/) | Commercial terminal, agent CLI, and cloud agent platform | Client AGPL-3.0, UI crates MIT; server closed | 2026-10-24 |
+| [Wave Terminal](/compare/wave-terminal/) | Desktop terminal with panels beside it | Apache-2.0 | September 2026 |
+| [Conductor](/compare/conductor/) | Mac app for parallel agents in worktrees, plus paid Conductor Cloud | Closed source | 2026-10-24 |
+| [Crystal (Nimbalyst)](/compare/crystal/) | Desktop app for parallel agents in git worktrees | MIT | September 2026 |
+| [cmux](/compare/cmux/) | Native macOS agent terminal on libghostty | GPL | 2026-10-24 |
+| [Orca](/compare/orca/) | Electron agent IDE with editor and diff review | MIT | 2026-10-24 |
+| [Herdr](/compare/herdr/) | Rust TUI multiplexer that runs inside your terminal | Apache-2.0 | 2026-10-24 |
+| [tmux and git worktree](/compare/tmux-git-worktree/) | The do-it-yourself pattern and the CLIs that automate it | tmux ISC; tools MIT or Apache-2.0 | September 2026 |
+| [Ghostty](/compare/ghostty/) | Terminal emulator whose parser Ferryx embeds | MIT | September 2026 |
 
 ## The comparisons
 
