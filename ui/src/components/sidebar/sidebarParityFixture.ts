@@ -81,7 +81,8 @@ export const sidebarParityFixture: SidebarParityFixture = {
     },
   },
   listingFailures: { "ssh:omarchy:relay": "Connection reset by peer" },
-  collapsedGroupIds: [],
+  // The offline paired machine is folded: its header (and "Offline") shows, its row does not.
+  collapsedGroupIds: [API_ID],
   // Custom order: the dragged sidebar-polish row and the SSH root sit above the local root.
   worktreeOrder: {
     ferryx: [

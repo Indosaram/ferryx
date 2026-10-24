@@ -257,6 +257,8 @@ describe("desktop and remote sidebar parity", () => {
     const desktopTree = serializeSidebar(trees.desktop);
     // A fixture that renders nothing would make the comparison vacuous.
     expect(desktopTree.filter((line) => line.startsWith("listitem")).length).toBeGreaterThanOrEqual(5);
+    // A remote that ignores the desktop's collapsed set must fail, so the fixture folds a group.
+    expect(desktopTree.filter((line) => line.includes("aria-expanded=false")).length).toBeGreaterThanOrEqual(1);
     expect(serializeSidebar(trees.remote)).toEqual(desktopTree);
   });
 
